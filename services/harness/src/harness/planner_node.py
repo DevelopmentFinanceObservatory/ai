@@ -2,7 +2,7 @@
 
 `harness.planner_seam.PlannerSeam` runs the planner through `ctx.run_node`.
 On the Pydantic AI planner that node is a function node named as the ADK
-planner (`planner.agent.AGENT_NAME`) that drives `planner.pydantic_agent.
+planner (`planner.settings.AGENT_NAME`) that drives `planner.pydantic_agent.
 run_planner` on `harness.planner_model.planner_model` and yields events holding
 what the ADK planner's `LlmAgent` stores for the same exchange, as far as the
 session's readers read it (`harness.planner_events`). ADK's node runner stamps each with the author the
@@ -37,9 +37,7 @@ from google.adk.flows.llm_flows import functions as adk_functions
 from google.adk.telemetry import TelemetryConfig
 from google.adk.workflow import BaseNode, node
 from google.genai import Client, types
-from planner.agent import AGENT_NAME, BRIEF_STATE_KEY
 from planner.pydantic_agent import (
-    PLANNER_PROFILE,
     PlannerAnswers,
     PlannerDeps,
     PydanticPlanner,
@@ -47,6 +45,8 @@ from planner.pydantic_agent import (
     planner_agent,
     run_planner,
 )
+from planner.session import SessionCall
+from planner.settings import AGENT_NAME
 from planner.tool_spec import ToolSpec
 
 from harness.planner_events import model_response_event, tool_answers_event
@@ -74,7 +74,7 @@ SKIP_THOUGHT_SIGNATURE = b"skip_thought_signature_validator"
 
 def pydantic_planner(specs: Sequence[ToolSpec], *, instruction: str) -> PydanticPlanner:
     """The Pydantic AI planner on `specs` and `instruction`, which the ADK planner
-    serves too, named as the ADK planner (`planner.agent.AGENT_NAME`). It has no
+    serves too, named as the ADK planner (`planner.settings.AGENT_NAME`). It has no
     model of its own, since each run names one (`planner_node`). Built once, it
     serves every run. Its spans carry message content when ADK's telemetry
     settings say the ADK planner's do (`google.adk.telemetry.TelemetryConfig`),
@@ -95,6 +95,7 @@ def planner_node(
     client: Client,
     budget: TurnBudget | None,
     prefix_cache: PrefixCache | None = None,
+    brief: str,
 ) -> BaseNode:
     """One run of the Pydantic AI planner, as the node `ctx.run_node` runs.
 
@@ -107,10 +108,11 @@ def planner_node(
         budget: The turn's budget, or None to run every call unbounded.
         prefix_cache: The process's shared cache of static prompt prefixes,
             or None to send every request whole.
+        brief: The brief the planner is shown after the turn's question.
 
     Returns:
-        A node named `planner.agent.AGENT_NAME` that runs the planner once on
-        the session's brief (`planner.agent.BRIEF_STATE_KEY`), after the
+        A node named `planner.settings.AGENT_NAME` that runs the planner once on
+        `brief`, after the
         turn's question, and yields the run's events (`harness.planner_events`).
         Each model call the run makes is counted on the invocation's counter
         (`InvocationContext.increment_llm_call_count`), with the
@@ -167,11 +169,10 @@ def planner_node(
             prefix_cache=prefix_cache,
             before_request=before_request,
             after_response=after_response,
-            profile=PLANNER_PROFILE,
         )
         deps = PlannerDeps(
             state=ctx.session.state,
-            events=ctx.session.events,
+            call_for=lambda state, call_id: SessionCall(ctx.session.events, state, call_id),
             tool_answered=run.tool_answered,
             tool_failed=tool_failed,
         )
@@ -180,7 +181,7 @@ def planner_node(
             deps,
             model=model,
             question=turn_question(ctx),
-            brief=ctx.session.state[BRIEF_STATE_KEY],
+            brief=brief,
             conversation_id=ctx.session.id,
         )
         # Closed here, in the node's task, when ADK's node runner closes the

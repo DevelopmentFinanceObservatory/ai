@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from itertools import pairwise
 from typing import Any
 
@@ -31,21 +32,18 @@ from google.genai import types
 from harness.planner_model import planner_model
 from harness.planner_node import SKIP_THOUGHT_SIGNATURE
 from orchestrator.agent import model_retry_options
-from planner.agent import (
-    AGENT_NAME,
-    BRIEF_STATE_KEY,
-    create_planner_agent,
-    planner_instruction,
-    planner_specs,
-)
+from planner.agent import BRIEF_STATE_KEY, create_planner_agent
+from planner.instruction import planner_instruction
 from planner.pydantic_agent import (
-    PLANNER_PROFILE,
     PlannerDeps,
     PlannerItem,
     PlannerResponse,
     planner_agent,
     run_planner,
 )
+from planner.session import SessionCall
+from planner.settings import AGENT_NAME
+from planner.specs import planner_specs
 from planner.tool_spec import ToolSpec
 from translator.tool import Translate
 
@@ -164,7 +162,6 @@ async def pydantic_run(
             MODEL,
             client=scripted.client,
             budget=None,
-            profile=PLANNER_PROFILE,
         ),
     )
     state: dict[str, Any] = {}
@@ -173,7 +170,7 @@ async def pydantic_run(
     for brief in briefs:
         deps = PlannerDeps(
             state=state,
-            events=events,
+            call_for=partial(SessionCall, events),
             tool_answered=lambda name, answer: None,
             tool_failed=lambda name, error: {"error": f"{name} failed"},
         )

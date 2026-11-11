@@ -75,16 +75,15 @@ from planner import source_reads as planner_source_reads
 from planner import specs
 from planner import tools as planner_tools
 from planner.agent import (
-    AGENT_NAME,
     BRIEF_STATE_KEY,
     SpecTool,
     create_planner_agent,
     end_run_when_ready,
-    planner_instruction,
     prepend_brief,
 )
 from planner.call import CallSession, elected_spec_ids, prices_chosen
 from planner.declaration import FIELD_DESCRIBED_ENUMS, SHARED_FIELDS, compact_schema
+from planner.instruction import planner_instruction
 from planner.operations import (
     AggregateOperation,
     RetrieveOperation,
@@ -198,6 +197,7 @@ from planner.records import (
     StatVarReading,
 )
 from planner.session import SessionCall, session_steps
+from planner.settings import AGENT_NAME
 from planner.source_reads import read_full_history, with_source_reads
 from planner.specs import planner_tool_specs
 from planner.tool_results import Outcome, ProblemCode, problem
@@ -14734,9 +14734,7 @@ def test_declaring_a_plan_ready_twice_changes_nothing(
 
 # The instruction the served planner carries: the translator attached, the
 # skill tools built and the question held by the harness graph's seam.
-_SERVED_INSTRUCTION = planner_agent.planner_instruction(
-    has_translator=True, has_skills=True, question_fixed=True
-)
+_SERVED_INSTRUCTION = planner_instruction(has_translator=True, has_skills=True, question_fixed=True)
 
 
 def test_the_instruction_names_every_referral_kind_the_translator_can_send() -> None:

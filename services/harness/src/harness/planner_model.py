@@ -53,9 +53,9 @@ from google.adk.models.llm_response import LlmResponse
 from google.genai import Client, errors, types
 from opentelemetry import trace
 from orchestrator.agent import model_retry_options
+from planner.pydantic_agent import NO_PARAMETERS, PLANNER_PROFILE
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.models.google import GoogleModel
-from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.providers.google import GoogleProvider
 
 from harness.prefix_cache import CACHE_GONE_CODES, PrefixCache, against_cache
@@ -93,7 +93,6 @@ def planner_model(
     prefix_cache: PrefixCache | None = None,
     before_request: BeforeRequest | None = None,
     after_response: AfterResponse | None = None,
-    profile: ModelProfile | None = None,
 ) -> GoogleModel:
     """The `GoogleModel` the Pydantic AI planner runs on.
 
@@ -107,11 +106,10 @@ def planner_model(
         before_request: Run before each request (`BeforeRequest`).
         after_response: Run on each response the model gave or a bound
             closed (`AfterResponse`).
-        profile: The model profile, which decides how requests are built.
-            None gives Gemini's own (`google_model_profile`).
 
     Returns:
-        A `GoogleModel` on `profile` whose streamed calls go through the
+        A `GoogleModel` on `PLANNER_PROFILE`, the profile `_in_adk_planner_form`
+        expects, whose streamed calls go through the
         steps above.
     """
     stream = _PlannerStream(
@@ -124,7 +122,7 @@ def planner_model(
     # `GoogleProvider` takes a `Client`, and the wrapper reads as one everywhere
     # `GoogleModel` reads it.
     provider = GoogleProvider(client=cast(Client, _Client(client, stream)))
-    return GoogleModel(model_name, provider=provider, profile=profile)
+    return GoogleModel(model_name, provider=provider, profile=PLANNER_PROFILE)
 
 
 @dataclass
@@ -368,9 +366,12 @@ def _without_client_call_ids(contents: Any) -> list[types.Content]:
     return stripped
 
 
-# The parameters schema Pydantic AI gives a declaration with no parameters
-# (`pydantic_ai.models.google._function_declaration_from_tool`).
-_NO_PARAMETERS_SCHEMA = {"type": "object", "properties": {}}
+class UnexpectedRequestFormError(ValueError):
+    """A request config `GoogleModel` built is not in a form `_in_adk_planner_form` rewrites.
+
+    Gemini's behaviour follows a request's bytes, so a form the rewrite does
+    not know is refused instead of sent as it came.
+    """
 
 
 def _in_adk_planner_form(config: Any) -> types.GenerateContentConfig:
@@ -384,15 +385,15 @@ def _in_adk_planner_form(config: Any) -> types.GenerateContentConfig:
     request in this form shares the ADK planner's cache. The request that
     creates the cache is this one, so the cache holds the same form.
 
-    Each field Pydantic AI sends otherwise is rewritten, and kept as it came
-    when it holds anything the ADK planner's form has no equal for:
+    Each field Pydantic AI sends is rewritten, and a value of any other shape
+    raises `UnexpectedRequestFormError`:
 
     - the system instruction, one user `Content` of one text part, becomes
       that text;
     - one `Tool` per function declaration becomes one `Tool` of them all, in
       order;
     - a declaration whose parameters schema is the empty object
-      (`_NO_PARAMETERS_SCHEMA`) loses it;
+      (`NO_PARAMETERS`) loses it;
     - a tool config of nothing but the `AUTO` function calling mode is
       dropped, as `AUTO` is Gemini's default with tools;
     - `response_modalities` of `TEXT` alone is dropped, as text is the
@@ -405,17 +406,15 @@ def _in_adk_planner_form(config: Any) -> types.GenerateContentConfig:
     Pydantic AI gives an unsigned replayed call in the contents.
     """
     built = types.GenerateContentConfig.model_validate(config or {})
+    _require_only_auto(built.tool_config)
+    _require_only_text(built.response_modalities)
     http_options = built.http_options or types.HttpOptions()
     return built.model_copy(
         update={
             "system_instruction": _instruction_as_text(built.system_instruction),
             "tools": _as_one_tool(built.tools),
-            "tool_config": None if _only_auto(built.tool_config) else built.tool_config,
-            "response_modalities": (
-                None
-                if built.response_modalities == [types.Modality.TEXT]
-                else built.response_modalities
-            ),
+            "tool_config": None,
+            "response_modalities": None,
             "http_options": http_options.model_copy(
                 update={"retry_options": model_retry_options()}
             ),
@@ -424,28 +423,29 @@ def _in_adk_planner_form(config: Any) -> types.GenerateContentConfig:
     )
 
 
-def _instruction_as_text(instruction: Any) -> Any:
-    """`instruction` as its text when it is one `Content` of one text part,
-    else as it is."""
-    if not isinstance(instruction, types.Content) or not instruction.parts:
-        return instruction
-    if len(instruction.parts) != 1:
-        return instruction
-    part = instruction.parts[0]
-    dumped = part.model_dump(exclude_none=True)
-    return part.text if dumped.keys() == {"text"} else instruction
+def _instruction_as_text(instruction: Any) -> str | None:
+    """The text of `instruction`, one `Content` of one text part."""
+    if isinstance(instruction, types.Content) and instruction.parts and len(instruction.parts) == 1:
+        part = instruction.parts[0]
+        if part.model_dump(exclude_none=True).keys() == {"text"}:
+            return part.text
+    raise UnexpectedRequestFormError(
+        f"the system instruction is not one text part: {instruction!r}"
+    )
 
 
-def _as_one_tool(tools: list[Any] | None) -> list[Any] | None:
+def _as_one_tool(tools: list[Any] | None) -> list[types.Tool]:
     """`tools` as one `Tool` holding every function declaration in order, each
-    less an empty parameters schema, when every tool holds function
-    declarations alone, else as they are."""
+    less an empty parameters schema. Every tool must hold function
+    declarations alone."""
     if not tools or not all(
         isinstance(tool, types.Tool)
         and tool.model_dump(exclude_none=True).keys() == {"function_declarations"}
         for tool in tools
     ):
-        return tools
+        raise UnexpectedRequestFormError(
+            f"the tools are not function declarations alone: {tools!r}"
+        )
     return [
         types.Tool(
             function_declarations=[
@@ -460,16 +460,28 @@ def _as_one_tool(tools: list[Any] | None) -> list[Any] | None:
 def _without_empty_parameters(
     declaration: types.FunctionDeclaration,
 ) -> types.FunctionDeclaration:
-    if declaration.parameters_json_schema != _NO_PARAMETERS_SCHEMA:
+    if declaration.parameters_json_schema != NO_PARAMETERS:
         return declaration
     return declaration.model_copy(update={"parameters_json_schema": None})
 
 
-def _only_auto(tool_config: types.ToolConfig | None) -> bool:
-    """Whether `tool_config` sets nothing but the `AUTO` function calling mode."""
-    return tool_config is not None and tool_config.model_dump(mode="json", exclude_none=True) == {
+def _require_only_auto(tool_config: types.ToolConfig | None) -> None:
+    """Check that `tool_config` sets nothing but the `AUTO` function calling
+    mode, which is Gemini's default with tools, so none need be sent."""
+    if tool_config is None or tool_config.model_dump(mode="json", exclude_none=True) != {
         "function_calling_config": {"mode": "AUTO"}
-    }
+    }:
+        raise UnexpectedRequestFormError(
+            f"the tool config is not the AUTO mode alone: {tool_config!r}"
+        )
+
+
+def _require_only_text(modalities: list[str] | None) -> None:
+    """Check that `modalities` is `TEXT` alone, which is the default, so none need be sent."""
+    if modalities != [types.Modality.TEXT]:
+        raise UnexpectedRequestFormError(
+            f"the response modalities are not TEXT alone: {modalities!r}"
+        )
 
 
 def _chunk(content: types.Content, *, usage: Usage | None) -> types.GenerateContentResponse:
@@ -528,6 +540,7 @@ __all__ = [
     "AfterResponse",
     "BeforeRequest",
     "StreamResumedError",
+    "UnexpectedRequestFormError",
     "Usage",
     "planner_model",
     "resumed_over_output",

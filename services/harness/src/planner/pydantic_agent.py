@@ -2,7 +2,7 @@
 
 The agent serves each `planner.tool_spec.ToolSpec` with the declaration the
 ADK planner shows for it (`function_declaration`), and a call runs the spec's
-body over a `planner.session.SessionCall` (`run_tool`), with the
+body over the `planner.call.PlannerCall` its run's `PlannerDeps` makes (`serve_tool`), with the
 model's arguments as sent. `run_planner` drives one run with `Agent.iter`
 from the user's message and the brief, as the ADK planner's `single_turn`
 run starts from the turn's question and the brief
@@ -17,7 +17,7 @@ that takes none, an explicit `AUTO` tool config and `response_modalities`.
 The planner's model (`harness.planner_model`) puts each request in the ADK
 planner's form before it is sent, so the model is sent the ADK planner's
 request for the same turn but for each framework's HTTP headers. The model
-must be built with `PLANNER_PROFILE`, which sends each declaration's schema
+is built with `PLANNER_PROFILE`, which sends each declaration's schema
 as given and adds nothing to the instruction.
 """
 
@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import base64
 import copy
-import inspect
 import logging
 import sys
 from collections.abc import AsyncGenerator, Awaitable, Callable, MutableMapping, Sequence
@@ -33,14 +32,10 @@ from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
 from google.genai import types
-from opentelemetry import trace
-from opentelemetry.semconv.attributes.error_attributes import ERROR_TYPE
-from opentelemetry.trace import Status, StatusCode
 from pydantic_ai import Agent, InstrumentationSettings, RunContext, Tool
 from pydantic_ai.capabilities import Instrumentation, ProcessHistory
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
-    BinaryContent,
     ModelMessage,
     ModelRequest,
     ModelRequestPart,
@@ -49,7 +44,6 @@ from pydantic_ai.messages import (
     ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
-    UserContent,
     UserPromptPart,
 )
 from pydantic_ai.models import Model
@@ -57,16 +51,17 @@ from pydantic_ai.models.google import GoogleModelSettings
 from pydantic_ai.profiles.google import GoogleModelProfile
 from pydantic_ai.usage import UsageLimits
 
-from planner.call import RecordingState
-from planner.session import SessionCall, SessionEvents
+from planner.call import PlannerCall, RecordingState
+from planner.plan import SessionState
 from planner.settings import AGENT_THINKING_CONFIG, without_unsigned_thoughts
-from planner.tool_spec import ToolSpec, function_declaration, run_tool
+from planner.tool_spec import ToolSpec, function_declaration, serve_tool
 
 logger = logging.getLogger(__name__)
 
 # The schema Pydantic AI declares a tool with when its declaration has none.
-# Pydantic AI always sends `parameters_json_schema`.
-_NO_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
+# Pydantic AI always sends `parameters_json_schema`, and the planner's model
+# strips this value (`harness.planner_model`).
+NO_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
 
 # The turn budget bounds a run's model calls (`harness.turn_budget`), so Pydantic
 # AI's own default cap of 50 requests is lifted.
@@ -87,9 +82,9 @@ _UNLIMITED_RETRIES = sys.maxsize
 # sent.
 _QUESTION_INSTRUCTIONS = "The user's message, which opened the turn."
 
-# The `error.type` of a tool call whose answer is an error, ADK's.
-_TOOL_ERROR = "TOOL_ERROR"
-
+# Makes the `PlannerCall` of one tool call from the state view the call's
+# response writes through and the call's id.
+type CallFor = Callable[[SessionState, str | None], PlannerCall]
 type ToolAnswered = Callable[[str, dict[str, Any]], None]
 type ToolFailed = Callable[[str, BaseException], dict[str, Any]]
 
@@ -110,15 +105,15 @@ class PlannerDeps:
     `state` is the session's state. The calls of one model response write it
     through one `RecordingState`, which `run_planner` replaces before each
     model request, so the keys a response's calls wrote are told apart from
-    the keys of the responses before it. `events` is the session's events,
-    the live list each call reads its steps from
-    (`planner.session.SessionCall`). `tool_answered` is told each tool's
+    the keys of the responses before it. `call_for` makes the `PlannerCall` a
+    tool call runs over, from that state view and the call's id, so the
+    planner reads the session through whatever stores it. `tool_answered` is told each tool's
     answer and `tool_failed` each tool that raised. `ended` says whether a
     tool ended the run.
     """
 
     state: MutableMapping[str, Any]
-    events: SessionEvents
+    call_for: CallFor
     tool_answered: ToolAnswered
     tool_failed: ToolFailed
     ended: bool = False
@@ -285,7 +280,7 @@ def _tool(spec: ToolSpec) -> Tool[PlannerDeps]:
         _tool_function(spec),
         name=spec.name,
         description=declaration.description,
-        json_schema=dict(schema) if schema is not None else _NO_PARAMETERS,
+        json_schema=dict(schema) if schema is not None else NO_PARAMETERS,
         takes_ctx=True,
     )
     tool.strict = False
@@ -295,27 +290,23 @@ def _tool(spec: ToolSpec) -> Tool[PlannerDeps]:
 def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
     """The function Pydantic AI calls for `spec`, with the model's arguments unvalidated.
 
-    It runs the spec's body (`run_tool`) over the call's `SessionCall`, whose
+    It runs the spec's body (`serve_tool`) over the call's `PlannerCall`, whose
     state is the view the response's calls write through. An answer that is
     no dict is wrapped under `result`, as ADK wraps one. A body that raises is
     answered with `tool_failed`'s answer, as the ADK planner's tool error
     callback answers it, and a cancellation propagates. An answer of the
     body's holding an `error` key, the refusal of a call missing a required
     argument (`planner.tool_spec.missing_arguments`), marks the call's span
-    failed, as the ADK planner marks its tool's (`_mark_tool_error`). Either
+    failed (`planner.tool_spec.serve_tool`). Either
     answer goes to `tool_answered` as the call finishes, and what that raises
     fails the run.
     """
 
     async def call(ctx: RunContext[PlannerDeps], **raw: Any) -> dict[str, Any]:
         deps = ctx.deps
-        planner_call = SessionCall(deps.events, deps._response_view, ctx.tool_call_id)
+        planner_call = deps.call_for(deps._response_view, ctx.tool_call_id)
         try:
-            answer = run_tool(spec, raw, call=planner_call, end_run=deps.end_run)
-            if inspect.isawaitable(answer):
-                answer = await answer
-            if isinstance(answer, dict) and answer.get("error"):
-                _mark_tool_error(trace.get_current_span())
+            answer = await serve_tool(spec, raw, call=planner_call, end_run=deps.end_run)
         except Exception as exc:
             answer = deps.tool_failed(spec.name, exc)
         response = as_function_response(answer)
@@ -324,13 +315,6 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
 
     call.__name__ = spec.name
     return call
-
-
-def _mark_tool_error(span: trace.Span) -> None:
-    """Mark `span`, a tool call's, failed with `error.type` `TOOL_ERROR`, as ADK
-    marks a tool's whose answer holds an `error` key."""
-    span.set_attribute(ERROR_TYPE, _TOOL_ERROR)
-    span.set_status(Status(StatusCode.ERROR, _TOOL_ERROR))
 
 
 async def run_planner(
@@ -365,7 +349,7 @@ async def run_planner(
     answers. Closing the iterator closes the run (`Agent.iter`) and any
     stream it holds open.
 
-    `deps` holds the session's state and events and the callbacks
+    `deps` holds the session's state, how a tool call reads it, and the callbacks
     (`PlannerDeps`). `model` is the model the run calls, or None for the
     agent's own. `conversation_id` is the conversation the run's spans name
     (`gen_ai.conversation.id`). None leaves Pydantic AI to make one up.
@@ -412,43 +396,29 @@ class UnsentQuestionPartError(ValueError):
     (`_question_prompt`)."""
 
 
-def _question_prompt(question: types.Content | str) -> str | list[UserContent]:
+def _question_prompt(question: types.Content | str) -> str | list[str]:
     """`question`'s parts as the user prompt Pydantic AI sends as one content of
     the same parts: one text part as its text, several as a list of them.
 
-    Studio sends one text part (`harness.studio`). An inline file is sent as
-    `BinaryContent`, its bytes and media type unchanged. Any other part, a
-    file by URI or a function part among them, is refused. The ADK planner
-    sends every part of the question as it is.
+    Studio sends one text part (`harness.studio`). Any other part is refused.
+    The ADK planner sends every part of the question as it is.
 
     Raises:
-        UnsentQuestionPartError: A part is neither text nor an inline file,
-            the message naming the part's fields, or is an inline file with
-            no bytes.
+        UnsentQuestionPartError: A part is not text, the message naming the
+            part's fields.
     """
     if isinstance(question, str):
         return question
-    prompt: list[UserContent] = []
+    prompt: list[str] = []
     for part in question.parts or ():
-        if part.text is not None:
-            prompt.append(part.text)
-        elif part.inline_data is not None:
-            if part.inline_data.data is None:
-                raise UnsentQuestionPartError(
-                    "the question holds an inline_data part with no bytes, so the "
-                    "Pydantic AI planner has no file to send for it"
-                )
-            media_type = part.inline_data.mime_type or "application/octet-stream"
-            prompt.append(BinaryContent(data=part.inline_data.data, media_type=media_type))
-        else:
+        if part.text is None:
             received = sorted(part.model_dump(exclude_none=True))
             raise UnsentQuestionPartError(
                 f"the question holds a part with {received}; the Pydantic AI planner "
-                "takes text and inline data (inline_data) parts only"
+                "takes text parts only"
             )
-    if len(prompt) == 1 and isinstance(prompt[0], str):
-        return prompt[0]
-    return prompt
+        prompt.append(part.text)
+    return prompt[0] if len(prompt) == 1 else prompt
 
 
 def _planner_response(response: ModelResponse) -> PlannerResponse:

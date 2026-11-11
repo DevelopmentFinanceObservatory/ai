@@ -25,9 +25,11 @@ from google.adk.agents import LlmAgent
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools.function_tool import FunctionTool
 from harness.scripted import use_compiled_proposals
-from planner.agent import AGENT_NAME, SpecTool, create_planner_agent, planner_instruction
+from planner.agent import SpecTool, create_planner_agent
 from planner.declaration import compact_schema
+from planner.instruction import planner_instruction
 from planner.plan import AskAnswer, Decline
+from planner.settings import AGENT_NAME
 from planner.specs import PROPOSE_PLAN, planner_tool_specs, skill_tool_spec
 from planner.tool_spec import (
     Parameter,

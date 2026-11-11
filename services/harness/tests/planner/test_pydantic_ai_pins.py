@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, MutableMapping, Sequence
 from typing import Any
 from unittest import mock
 
@@ -47,6 +47,7 @@ from planner.pydantic_agent import (
     run_planner,
     tool_not_found,
 )
+from planner.session import SessionCall
 from planner.tool_spec import Parameter, ToolSpec, function_declaration
 from planner.tools import EndRun
 from pydantic import BaseModel
@@ -56,6 +57,7 @@ from pydantic_ai.messages import (
     ModelRequest,
     UserPromptPart,
 )
+from pydantic_ai.models import Model
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.usage import UsageLimits
@@ -84,6 +86,11 @@ class _Filter(BaseModel):
     years: list[int] | None = None
 
 
+def _no_events(state: MutableMapping[str, Any], call_id: str | None) -> SessionCall:
+    """A tool call over a session with no events."""
+    return SessionCall([], state, call_id)
+
+
 def _tool(
     name: str = "work",
     *,
@@ -110,23 +117,18 @@ async def _run(
     replies: Sequence[Reply],
     *,
     question: str | None = QUESTION,
-    profile: Any = "planner",
+    model: Model | None = None,
     scripted: ScriptedGenai | None = None,
     yielded: list[PlannerItem] | None = None,
 ) -> tuple[list[PlannerItem], ScriptedGenai]:
     """`run_planner` over `specs` on `replies`, with every item it yielded, each
     added to `yielded` as it is yielded."""
     scripted = scripted or ScriptedGenai(replies)
-    model = planner_model(
-        MODEL,
-        client=scripted.client,
-        budget=None,
-        profile=PLANNER_PROFILE if profile == "planner" else profile,
-    )
+    model = model or planner_model(MODEL, client=scripted.client, budget=None)
     planner = planner_agent(specs, instruction=INSTRUCTION, model=model)
     deps = PlannerDeps(
         state={},
-        events=[],
+        call_for=_no_events,
         tool_answered=lambda name, answer: None,
         tool_failed=lambda name, error: {"error": f"{name} failed"},
     )
@@ -216,14 +218,11 @@ async def test_the_planner_profile_hands_the_wrapper_declarations_verbatim_in_th
 
 async def test_control_gemini_own_profile_rewrites_the_request_the_planner_profile_keeps() -> None:
     # Shows the profile keys are what the test above depends on.
-    own = GoogleModel(MODEL, provider=GoogleProvider(client=ScriptedGenai([]).client)).profile
-    with _handed() as handed:
-        _, scripted = await _run(
-            [_FILTERED], [reply(text_part("done"))], question=_MARKED_UP, profile=own
-        )
+    scripted = ScriptedGenai([reply(text_part("done"))])
+    own = GoogleModel(MODEL, provider=GoogleProvider(client=scripted.client))
+    await _run([_FILTERED], [], question=_MARKED_UP, model=own, scripted=scripted)
 
-    config = handed[0]
-    _, contents = _dumped(scripted.requests[0])
+    config, contents = _dumped(scripted.requests[0])
     declared = config["tools"][0]["function_declarations"][0]
     assert (
         declared["parameters_json_schema"] != function_declaration(_FILTERED).parameters_json_schema
@@ -538,7 +537,7 @@ async def test_every_request_reaches_the_clients_streamed_call_with_three_keywor
     # `harness.planner_model` answers the client's streamed call with a keyword-only
     # signature of exactly these three, and refuses a call that does not stream.
     scripted = ScriptedGenai([reply(call_part("bare", id="c")), reply(text_part("done"))])
-    model = planner_model(MODEL, client=scripted.client, budget=None, profile=PLANNER_PROFILE)
+    model = planner_model(MODEL, client=scripted.client, budget=None)
     streamed = model.client.aio.models.generate_content_stream
     sent: list[set[str]] = []
 
@@ -549,7 +548,7 @@ async def test_every_request_reaches_the_clients_streamed_call_with_three_keywor
     model.client.aio.models.generate_content_stream = spy  # ty: ignore[invalid-assignment]
     planner = planner_agent([_BARE], instruction=INSTRUCTION, model=model)
     deps = PlannerDeps(
-        state={}, events=[], tool_answered=lambda *_: None, tool_failed=lambda *_: {}
+        state={}, call_for=_no_events, tool_answered=lambda *_: None, tool_failed=lambda *_: {}
     )
 
     [_ async for _ in run_planner(planner, deps, question=QUESTION, brief=BRIEF)]
@@ -567,7 +566,7 @@ async def test_the_clients_call_runs_inside_the_chat_span_of_the_conversation(
     # call is made. That span has to be the generation's, which Pydantic AI opens
     # under the planner's run span.
     scripted = ScriptedGenai([reply(text_part("done"))])
-    model = planner_model(MODEL, client=scripted.client, budget=None, profile=PLANNER_PROFILE)
+    model = planner_model(MODEL, client=scripted.client, budget=None)
     streamed = model.client.aio.models.generate_content_stream
     current: list[tuple[bool, str]] = []
 
@@ -579,7 +578,7 @@ async def test_the_clients_call_runs_inside_the_chat_span_of_the_conversation(
     model.client.aio.models.generate_content_stream = spy  # ty: ignore[invalid-assignment]
     planner = planner_agent([_BARE], instruction=INSTRUCTION, model=model, name="dfo_planner")
     deps = PlannerDeps(
-        state={}, events=[], tool_answered=lambda *_: None, tool_failed=lambda *_: {}
+        state={}, call_for=_no_events, tool_answered=lambda *_: None, tool_failed=lambda *_: {}
     )
 
     [
@@ -599,10 +598,10 @@ async def test_the_clients_call_runs_inside_the_chat_span_of_the_conversation(
 async def _traced_run(specs: Sequence[ToolSpec], replies: Sequence[Reply]) -> list[PlannerItem]:
     """`run_planner` over `specs` on `replies`, its spans exported."""
     scripted = ScriptedGenai(replies)
-    model = planner_model(MODEL, client=scripted.client, budget=None, profile=PLANNER_PROFILE)
+    model = planner_model(MODEL, client=scripted.client, budget=None)
     planner = planner_agent(specs, instruction=INSTRUCTION, model=model, name="dfo_planner")
     deps = PlannerDeps(
-        state={}, events=[], tool_answered=lambda *_: None, tool_failed=lambda *_: {}
+        state={}, call_for=_no_events, tool_answered=lambda *_: None, tool_failed=lambda *_: {}
     )
     return [
         item

@@ -50,7 +50,6 @@ from harness.sentences import SeamCode, refusal_sentence
 from harness.settings import Settings
 from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
 from harness.turn_events import PLANNER_ASK
-from planner.agent import AGENT_NAME
 from planner.call import PlannerCall, elected_spec_ids
 from planner.plan import (
     DatasetRequirement,
@@ -63,7 +62,7 @@ from planner.plan import (
     save_plan,
 )
 from planner.session import SessionCall, session_steps
-from planner.settings import AgentSettings
+from planner.settings import AGENT_NAME, AgentSettings
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec

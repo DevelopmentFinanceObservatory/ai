@@ -26,6 +26,7 @@ _MODULES = sorted(
         "harness/planner_run.py",
         "planner/call.py",
         "planner/declaration.py",
+        "planner/instruction.py",
         "planner/pydantic_agent.py",
         "planner/skills.py",
         "planner/source_reads.py",

@@ -56,8 +56,8 @@ from harness.turn_budget import COMPLETION_START_TIME, TurnBudget
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
-from planner.agent import AGENT_NAME
 from planner.plan import Plan
+from planner.settings import AGENT_NAME
 from planner.specs import PROPOSE_PLAN
 from planner.tool_spec import Parameter, ToolSpec
 

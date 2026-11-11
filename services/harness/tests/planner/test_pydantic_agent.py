@@ -8,7 +8,7 @@ compares the first request each sends.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import MutableMapping, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -27,6 +27,7 @@ from planner.pydantic_agent import (
     planner_agent,
     run_planner,
 )
+from planner.session import SessionCall
 from planner.specs import PROPOSE_PLAN, planner_tool_specs
 from planner.tool_spec import Parameter, ToolSpec
 from planner.tools import ASK_ACCEPTED, EndRun, load_pending_ask
@@ -65,6 +66,11 @@ class _Run:
     def tool_failed(self, name: str, error: BaseException) -> dict[str, Any]:
         self.failed.append((name, error))
         return {"error": f"{name} failed"}
+
+
+def _no_events(state: MutableMapping[str, Any], call_id: str | None) -> SessionCall:
+    """A tool call over a session with no events."""
+    return SessionCall([], state, call_id)
 
 
 def _propose(*answers: dict[str, Any], writes: dict[str, Any] | None = None) -> ToolSpec:
@@ -128,7 +134,7 @@ def _deps(state: dict[str, Any] | None = None, run: _Run | None = None) -> Plann
     run = run or _Run()
     return PlannerDeps(
         state={} if state is None else state,
-        events=[],
+        call_for=_no_events,
         tool_answered=run.tool_answered,
         tool_failed=run.tool_failed,
     )

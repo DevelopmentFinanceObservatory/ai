@@ -18,7 +18,7 @@ for the same exchange:
 
 ADK's node runner sets the rest of each event: its id and timestamp,
 `invocation_id`, `node_info.path`, `author`, which it takes from the node's
-`Context.event_author`, so the node sets that to `planner.agent.AGENT_NAME`,
+`Context.event_author`, so the node sets that to `planner.settings.AGENT_NAME`,
 and `branch`, which it takes from the `override_branch` the node is run with
 (`harness.planner_seam`'s planner branch).
 

@@ -30,10 +30,10 @@ from harness.settings import Settings
 from harness.studio_state import ConversationState, StudioStore
 from harness.studio_translate import _RecordingExecutor, _Translator
 from harness.turn_events import PLANNER_ASK
-from planner.agent import AGENT_NAME
 from planner.call import PlannerCall
 from planner.plan import PLAN_STATE_KEY
 from planner.session import session_steps
+from planner.settings import AGENT_NAME
 from planner.skills import SKILLS_READ_STATE_KEY
 from planner.specs import PROPOSE_PLAN, planner_tool_specs, skill_tool_spec
 from planner.tool_spec import Parameter, ToolSpec

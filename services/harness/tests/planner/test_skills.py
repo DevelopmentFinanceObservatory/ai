@@ -55,7 +55,11 @@ class _RecordingSurface:
 
 def _tools(surface: _RecordingSurface, state: dict[str, Any] | None = None) -> dict[str, Any]:
     """Each tool's function, called with a tool context over `state`."""
-    tool_context = SimpleNamespace(state={} if state is None else state)
+    tool_context = SimpleNamespace(
+        state={} if state is None else state,
+        session=SimpleNamespace(events=[]),
+        function_call_id=None,
+    )
     return {
         tool.name: functools.partial(call_planner_tool, tool, tool_context=tool_context)
         for tool in [skill_tool_spec(surface)]

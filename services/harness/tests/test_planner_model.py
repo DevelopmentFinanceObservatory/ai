@@ -18,7 +18,12 @@ from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import errors, types
-from harness.planner_model import Usage, _in_adk_planner_form, planner_model
+from harness.planner_model import (
+    UnexpectedRequestFormError,
+    Usage,
+    _in_adk_planner_form,
+    planner_model,
+)
 from harness.prefix_cache import PrefixCache, PrefixCachedGemini
 from harness.sentences import SeamCode, refusal_sentence
 from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
@@ -124,7 +129,7 @@ async def _pai(model: Model) -> ModelResponse:
         ModelRequest(parts=[UserPromptPart("Total ODA to Ghana?")], instructions=INSTRUCTION)
     ]
     parameters = ModelRequestParameters(
-        function_tools=[ToolDefinition(name="lookup", parameters_json_schema=SCHEMA)]
+        function_tools=[ToolDefinition(name="lookup", parameters_json_schema=SCHEMA, strict=False)]
     )
     async with model.request_stream(messages, None, parameters) as stream:
         async for _ in stream:
@@ -502,22 +507,51 @@ def _declared(schema: dict[str, Any] | None) -> types.Tool:
     )
 
 
+def _expected_config(**overrides: Any) -> types.GenerateContentConfig:
+    """The config Pydantic AI builds on `PLANNER_PROFILE`, less `overrides`."""
+    fields: dict[str, Any] = {
+        "system_instruction": types.Content(role="user", parts=[types.Part(text="Plan.")]),
+        "tools": [_declared({"type": "object", "properties": {}})],
+        "tool_config": types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(
+                mode=types.FunctionCallingConfigMode.AUTO
+            )
+        ),
+        "response_modalities": [types.Modality.TEXT],
+    }
+    return types.GenerateContentConfig(**{**fields, **overrides})
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        pytest.param(
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            id="not-the-empty-object",
+        ),
+        pytest.param({"type": "object"}, id="without-properties"),
+    ],
+)
+def test_the_adk_form_keeps_a_parameters_schema_that_is_not_the_empty_object(
+    schema: dict[str, Any],
+) -> None:
+    rewritten = _in_adk_planner_form(_expected_config(tools=[_declared(schema)]))
+
+    assert rewritten.tools == [_declared(schema)]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
         pytest.param(
             "tools",
-            [_declared({"type": "object", "properties": {}, "additionalProperties": False})],
-            id="parameters-schema-not-the-empty-object",
-        ),
-        pytest.param(
-            "tools", [_declared({"type": "object"})], id="parameters-schema-without-properties"
-        ),
-        pytest.param(
-            "tools",
             [_declared(None), types.Tool(google_search=types.GoogleSearch())],
             id="tools-beside-a-non-function-tool",
         ),
+        pytest.param("tools", None, id="no-tools"),
+        pytest.param("tool_config", None, id="no-tool-config"),
+        pytest.param("response_modalities", None, id="no-response-modalities"),
+        pytest.param("system_instruction", None, id="no-instruction"),
         pytest.param(
             "tool_config",
             types.ToolConfig(
@@ -553,12 +587,11 @@ def _declared(schema: dict[str, Any] | None) -> types.Tool:
         ),
     ],
 )
-def test_the_adk_form_passes_through_any_value_it_does_not_expect(field: str, value: Any) -> None:
+def test_the_adk_form_refuses_any_value_it_does_not_expect(field: str, value: Any) -> None:
     """Each rewrite takes only the exact value Pydantic AI sends today; anything
-    else reaches Gemini as it came, so the cross-runner request tests fail on it
-    instead of it being rewritten unseen."""
-    config = types.GenerateContentConfig(**{field: value})
+    else is refused, since a form Gemini would read differently must not be sent
+    unseen."""
+    config = _expected_config(**{field: value})
 
-    rewritten = _in_adk_planner_form(config)
-
-    assert getattr(rewritten, field) == value
+    with pytest.raises(UnexpectedRequestFormError):
+        _in_adk_planner_form(config)
