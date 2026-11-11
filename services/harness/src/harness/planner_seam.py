@@ -1,10 +1,10 @@
 """The graph's planner seam, backed by the planner agent.
 
-An adapter over the planner, on the framework `harness.settings.Settings.
-planner_runner` names: the ADK planner (`planner.agent.create_planner_agent`)
-or the Pydantic AI planner (`harness.planner_node`), on one set of tools with
-translation attached to `propose_plan`. The planner runs as a
-dynamically-scheduled child of the graph's own node, through
+An adapter over the planner, which runs on the ADK planner
+(`planner.agent.create_planner_agent`) or the Pydantic AI planner
+(`harness.planner_node`) as `harness.settings.Settings.planner_runner` says,
+on one set of tools with translation attached to `propose_plan`. The planner
+runs as a dynamically-scheduled child of the graph's own node, through
 `Context.run_node`, and this module reads what it leaves in session state and
 translates it into `harness.graph.seams.PlannerModel`'s contract.
 
@@ -12,8 +12,8 @@ The planner's own tools settle methodology and carry it to a compiled
 workflow (`propose_plan`, whose `translation` is either the compiled outcome
 or the `Referral` translation stopped on); a translation that compiles
 declares the plan ready for the user's answer in code
-(`planner.tools.declare_ready`), and ends the planner's run. This module never
-constructs a `Plan` itself. An entry that ends without a plan ready ends on a
+(`planner.tools.declare_ready`), and ends the planner's run. This module builds no
+`Plan` itself. An entry that ends without a plan ready ends on a
 refusal whose sentence comes from `harness.sentences`.
 
 `ctx.run_node` shares one session both directions with the graph's own
@@ -32,9 +32,10 @@ plan being changed, the question, and the amendment or refusal ask that
 opened the call. ADK shows a `single_turn` run only the events on its own node
 path, so a call sees nothing an earlier call was sent or read, and an amend or
 replan needs the plan it changes and the skills already read in front of
-it. `_propose` writes the brief to `planner.agent.BRIEF_STATE_KEY` and runs
-the planner with no node input, and `planner.agent.prepend_brief` shows it
-after the turn's question on every request of the run. The entry the user's
+it. `_propose` runs the planner with no node input. The ADK planner reads the
+brief from `planner.agent.BRIEF_STATE_KEY`, where `_propose` writes it, and
+`planner.agent.prepend_brief` shows it after the turn's question on every
+request of the run. The Pydantic AI planner's node is given it. The entry the user's
 answer to a planner-side ask resumes renders it again, with the question and
 the answer added (`_answer_text`), since the planner node reruns on resume.
 
@@ -73,16 +74,13 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.workflow import BaseNode
 from google.genai import Client
 from planner.agent import (
-    AGENT_NAME,
     BRIEF_STATE_KEY,
-    AdkCall,
     create_planner_agent,
     end_run_when_ready,
-    planner_instruction,
-    planner_specs,
     refuse_vertex_ai,
 )
 from planner.call import CallSession
+from planner.instruction import planner_instruction
 from planner.operations import OperationKind
 from planner.plan import (
     AMENDMENT_ENTRY_STATE_KEY,
@@ -130,14 +128,15 @@ from planner.plan import (
 )
 from planner.pydantic_agent import PydanticPlanner
 from planner.records import Severity
-from planner.settings import AgentSettings
+from planner.session import SessionCall
+from planner.settings import AGENT_NAME, AgentSettings
 from planner.skills import (
     SKILLS_READ_STATE_KEY,
     skill_page_key,
     skills_read,
 )
 from planner.source_reads import with_source_reads
-from planner.specs import PROPOSE_PLAN
+from planner.specs import PROPOSE_PLAN, planner_specs
 from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
 from planner.tools import (
@@ -391,7 +390,7 @@ class PlannerSeam:
         # instruction, built here once.
         #
         # `translate` replaces the translation `propose_plan` runs, and `specs`
-        # the tools (`planner.agent.planner_specs` over the surface and that
+        # the tools (`planner.specs.planner_specs` over the surface and that
         # translation). `client` is the google-genai client the planner's
         # model calls go through, on either runner. None builds one from the
         # environment. On either runner a planner whose client uses Vertex AI,
@@ -403,7 +402,7 @@ class PlannerSeam:
         #
         # `model` is an ADK model, so the Pydantic AI planner refuses it. It
         # replaces the model `agent_settings` names, and takes no `client`.
-        # It runs as given, with no Vertex AI check: it calls through no
+        # It runs as given, with no Vertex AI check. It calls through no
         # client the seam builds, so a caller's model on Vertex AI is the
         # caller's to avoid.
         #
@@ -531,23 +530,22 @@ class PlannerSeam:
         # draft as the plan being changed.
         #
         # Written through `ctx.session.state`, not `ctx.state`, and so is
-        # every other write this method makes before its `finally`:
+        # every other write this method makes before its `finally`.
         # `ctx.state[key] = value` records the write in
         # `ctx.actions.state_delta`, which the framework attaches to this
-        # *node's own* event once it finishes. This write happens
-        # before `ctx.run_node` runs the planner, so it would sit in that
-        # delta until the node's event re-applies it, over whatever the
-        # planner's own tool calls wrote in between. A write to the live
-        # `Session.state` dict skips that delta: it is visible at once to the
-        # planner's tool calls (the same live dict, not a copy), but it is not
-        # durable on its own across a `Runner.run_async` boundary, a resume
-        # included. The two writes in the `finally`,
-        # `store_searched_pin_readings` and `_persist_durable`, go through
-        # `ctx.state`, since they run after `ctx.run_node` has returned and
-        # nothing the planner writes can follow them. `_persist_durable`
-        # mirrors into `ctx.state` what this method's writes and the planner's
-        # left in the live dict, so the delta this node's event carries is
-        # as new as what `ctx.run_node` produced.
+        # *node's own* event once it finishes. This write happens before
+        # `ctx.run_node` runs the planner, so it would sit in that delta until
+        # the node's event re-applies it, over whatever the planner's own tool
+        # calls wrote in between. A write to the live `Session.state` dict
+        # skips that delta. It is visible at once to the planner's tool calls
+        # (the same live dict, not a copy), but it is not durable on its own
+        # across a `Runner.run_async` boundary, a resume included. The two
+        # writes in the `finally`, `store_searched_pin_readings` and
+        # `_persist_durable`, go through `ctx.state`, since they run after
+        # `ctx.run_node` has returned and nothing the planner writes can follow
+        # them. `_persist_durable` mirrors into `ctx.state` what this method's
+        # writes and the planner's left in the live dict, so the delta this
+        # node's event carries is as new as what `ctx.run_node` produced.
         seeded = Plan.model_validate(prior_plan) if prior_plan is not None else None
         if seeded is not None and not ctx.resume_inputs:
             save_plan(cast(SessionState, ctx.session.state), seeded)
@@ -884,8 +882,9 @@ class PlannerSeam:
         `harness.graph.PlannerModel.revise`'s contract. The proposal runs
         the chain `propose_plan` runs (`submission.service.submit`), reading
         each first year it needs and compiling each input a calculation needs
-        on another basis or provider scope (`planner.source_reads.with_source_reads`), then
-        the translation, and the plan is ready when `declare_ready` says so.
+        on another basis or provider scope
+        (`planner.source_reads.with_source_reads`), then the translation, and
+        the plan is ready when `declare_ready` says so.
         A dataset requirement re-pinned to another spec_id cites the
         decisions that pin states and drops those of the one it left, which
         go with it. The proposal opens its own round count, as a planner
@@ -928,7 +927,7 @@ class PlannerSeam:
         prior = Plan.model_validate(prior_plan)
         save_plan(state, prior)
         save_plan_rounds(state, 0)
-        call = AdkCall(ctx)
+        call = SessionCall.of(ctx)
         view = _RevisionSession(call=call, inherits=dict(inherits))
         proposal = Proposal(
             evidence_requirements=list(evidence_requirements), amends_version=prior.version
@@ -954,7 +953,7 @@ class PlannerSeam:
                 closing_refusal(referral) or _unanswered(referral) or not_ready(referral),
                 words=_revision_words(load_plan(state), prior, state=state),
             )
-        answer = end_run_when_ready({**recorded, "translation": translation}, call)
+        answer = end_run_when_ready({**recorded, "translation": translation}, ctx)
         plan = load_plan(state)
         if "summary" not in answer or plan is None:
             blocked = answer.get("submission") or answer.get("translation")
@@ -999,8 +998,9 @@ class PlannerSeam:
         and no refusal of its own ends on the bound that closed one of its
         model calls (`harness.turn_budget.TurnBudget.closed`), or else on
         `SeamCode.PLAN_NOT_READY`, carrying the referral the last translation
-        answered, if any (`harness.planner_run.not_ready`). A run that ends on an accepted ask
-        answers neither: the ask is in session state for `__call__` to return.
+        answered, if any (`harness.planner_run.not_ready`). A run that ends on
+        an accepted ask answers neither: the ask is in session state for
+        `__call__` to return.
 
         `run_id` names the run the user's answer resumes, which the default
         would put on the path of the run that asked. A `single_turn` run reads
@@ -1045,12 +1045,15 @@ class PlannerSeam:
         )
         before = len(ctx.session.events)
         try:
-            # `prepend_brief` shows the brief on every request of the run, the
-            # first after a resume included, so the run takes no node input.
-            ctx.session.state[BRIEF_STATE_KEY] = message
-            planner = (
-                self._agent if self._agent is not None else self._pydantic_planner(run, budget)
-            )
+            # The run takes no node input: the brief reaches every request of
+            # the run, the first after a resume included. The ADK planner's
+            # `prepend_brief` reads it from state. The Pydantic AI planner's
+            # node is given it.
+            if self._agent is not None:
+                ctx.session.state[BRIEF_STATE_KEY] = message
+                planner = self._agent
+            else:
+                planner = self._pydantic_planner(run, budget, message)
             await ctx.run_node(planner, None, run_id=run_id, override_branch=_PLANNER_BRANCH)
         finally:
             current_discovery_time_left.reset(time_left_token)
@@ -1077,8 +1080,9 @@ class PlannerSeam:
             run.refused = closed or not_ready(run.last_referral)
         return run.submitted, plan, run.refused
 
-    def _pydantic_planner(self, run: PlannerRun, budget: TurnBudget | None) -> BaseNode:
-        """The Pydantic AI planner's node for `run`, on the seam's tools and instruction."""
+    def _pydantic_planner(self, run: PlannerRun, budget: TurnBudget | None, brief: str) -> BaseNode:
+        """The Pydantic AI planner's node for `run`, on the seam's tools and
+        instruction, shown `brief`."""
         assert self._pydantic is not None, "the seam runs the Pydantic AI planner"
         model_name, planner = self._pydantic
         return planner_node(
@@ -1088,6 +1092,7 @@ class PlannerSeam:
             client=self._genai_client,
             budget=budget,
             prefix_cache=self._prefix_cache,
+            brief=brief,
         )
 
     @cached_property
@@ -1190,9 +1195,8 @@ class PlannerSeam:
         An ask answers with the `PLANNER_ASK` call it carries, which ends the
         run on the question in place of a model turn composing it. A stop
         answers with the refusal's sentence
-        (`harness.sentences.refusal_sentence`). The
-        request's budget is kept by the model itself
-        (`harness.turn_budget.BoundedGemini`).
+        (`harness.sentences.refusal_sentence`). The request's budget is kept
+        by the model itself (`harness.turn_budget.BoundedGemini`).
         """
         del callback_context, llm_request
         run = _active_call.get()

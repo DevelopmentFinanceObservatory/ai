@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from itertools import pairwise
 from typing import Any
 
@@ -31,22 +32,18 @@ from google.genai import types
 from harness.planner_model import planner_model
 from harness.planner_node import SKIP_THOUGHT_SIGNATURE
 from orchestrator.agent import model_retry_options
-from planner.agent import (
-    AGENT_NAME,
-    BRIEF_STATE_KEY,
-    create_planner_agent,
-    planner_instruction,
-    planner_specs,
-    session_steps,
-)
+from planner.agent import BRIEF_STATE_KEY, create_planner_agent
+from planner.instruction import planner_instruction
 from planner.pydantic_agent import (
-    PLANNER_PROFILE,
     PlannerDeps,
     PlannerItem,
     PlannerResponse,
     planner_agent,
     run_planner,
 )
+from planner.session import SessionCall
+from planner.settings import AGENT_NAME
+from planner.specs import planner_specs
 from planner.tool_spec import ToolSpec
 from translator.tool import Translate
 
@@ -60,8 +57,7 @@ BRIEF = "Context for this question: the readings."
 _BRANCH = "dfo_planner"
 
 # One entry of a run's conversation: a model response's part (`types.Part`
-# dumped), a call's answer (`("answer", name, call_id, answer)`), or a blocked
-# prompt (`("blocked", reason)`).
+# dumped) or a call's answer (`("answer", name, call_id, answer)`).
 type Turn = tuple[Any, ...]
 
 
@@ -150,8 +146,9 @@ async def pydantic_run(
 ) -> PairRun:
     """The Pydantic AI planner's runs on `replies`, one per brief, over one state.
 
-    Each run after the first is handed the steps of the turn so far, read by
-    `session_steps` from the events the runs before it would store.
+    Each run's tools read the events the node would have stored by then
+    (`harness.planner_node`): the runs before it, each response of its own as
+    it arrives, and the answers of a response once its calls have all answered.
     """
     scripted = ScriptedGenai(replies)
     planner = planner_agent(
@@ -165,26 +162,23 @@ async def pydantic_run(
             MODEL,
             client=scripted.client,
             budget=None,
-            after_response=lambda closed_by, metadata: errors.append(metadata.error_code),
-            profile=PLANNER_PROFILE,
         ),
     )
-    # The error each response is, as the model reads it off the stream.
-    errors: list[str | None] = []
     state: dict[str, Any] = {}
     events = [Event(author="user", content=_user_content(QUESTION))]
     run = PairRun(requests=scripted.requests, state=state)
     for brief in briefs:
         deps = PlannerDeps(
             state=state,
-            earlier=tuple(session_steps(events)),
+            call_for=partial(SessionCall, events),
             tool_answered=lambda name, answer: None,
             tool_failed=lambda name, error: {"error": f"{name} failed"},
         )
-        responded = len(errors)
-        items = [item async for item in run_planner(planner, deps, question=QUESTION, brief=brief)]
-        run.conversations.append(_item_turns(items, errors[responded:]))
-        events += _stored(items)
+        items: list[PlannerItem] = []
+        async for item in run_planner(planner, deps, question=QUESTION, brief=brief):
+            items.append(item)
+            events += _stored(item)
+        run.conversations.append(_item_turns(items))
     return run
 
 
@@ -202,8 +196,6 @@ def _event_turns(events: Sequence[Event]) -> list[Turn]:
     for event in events:
         if event.author != AGENT_NAME:
             continue
-        if event.error_code:
-            turns.append(("blocked", event.error_code))
         for part in event.content.parts or [] if event.content else []:
             response = part.function_response
             if response is None:
@@ -213,35 +205,29 @@ def _event_turns(events: Sequence[Event]) -> list[Turn]:
     return turns
 
 
-def _item_turns(items: Sequence[PlannerItem], errors: Sequence[str | None]) -> list[Turn]:
-    """The turns of the Pydantic AI planner's `items`, each response's error
-    (`errors`, in response order) beside it. A response with no parts and no
-    error is one the ADK planner stores no event for."""
+def _item_turns(items: Sequence[PlannerItem]) -> list[Turn]:
+    """The turns of the Pydantic AI planner's `items`."""
     turns: list[Turn] = []
-    responses = iter(errors)
     for item in items:
         if isinstance(item, PlannerResponse):
-            if (error := next(responses)) is not None:
-                turns.append(("blocked", error))
             turns.extend(("part", _dumped(part)) for part in item.parts)
         else:
-            turns.append(("answer", item.name, item.call_id, item.answer))
+            turns.extend(
+                ("answer", answer.name, answer.id, answer.response) for answer in item.answers
+            )
     return turns
 
 
-def _stored(items: Sequence[PlannerItem]) -> list[Event]:
-    """The events a run's `items` stand for, as far as `session_steps` reads them."""
-    events: list[Event] = []
-    for item in items:
-        if isinstance(item, PlannerResponse):
-            if item.parts:
-                content = types.Content(role="model", parts=list(item.parts))
-                events.append(Event(author=AGENT_NAME, branch=_BRANCH, content=content))
-            continue
-        response = types.FunctionResponse(id=item.call_id, name=item.name, response=item.answer)
-        content = types.Content(role="user", parts=[types.Part(function_response=response)])
-        events.append(Event(author=AGENT_NAME, branch=_BRANCH, content=content))
-    return events
+def _stored(item: PlannerItem) -> list[Event]:
+    """The event `item` stands for, if any, as far as `session_steps` reads it."""
+    if isinstance(item, PlannerResponse):
+        if not item.parts:
+            return []
+        content = types.Content(role="model", parts=list(item.parts))
+    else:
+        parts = [types.Part(function_response=answer) for answer in item.answers]
+        content = types.Content(role="user", parts=parts)
+    return [Event(author=AGENT_NAME, branch=_BRANCH, content=content)]
 
 
 def assert_pinned_wire_differences(adk: Request, pydantic: Request) -> None:

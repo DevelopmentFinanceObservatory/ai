@@ -22,10 +22,9 @@ Four tools, each declared in `planner.specs` (`planner_tool_specs()` and
 instruction the planner serves, on one of two runners `PLANNER_RUNNER` selects
 (`pydantic_ai` by default, or `adk`): an `LlmAgent` built by
 `create_planner_agent()` on the ADK planner, or a Pydantic AI agent built by
-`planner.pydantic_agent.planner_agent()` on the Pydantic AI planner, which
-`harness.planner_node` runs as a function node that yields the ADK events an
-ADK planner run stores. `planner.pydantic_call` reads a call's steps on the
-Pydantic AI planner as `planner.agent.AdkCall` reads them on the ADK planner.
+`planner.pydantic_agent.planner_agent()` on the Pydantic AI planner, which `harness.planner_node` runs as a function node that
+yields the ADK events an ADK planner run stores. A tool call on either runner
+reads its steps from the session's events through `planner.session.SessionCall`.
 The tools:
 
 | Tool                | Behaviour                                                                                                                                                                                                                |
@@ -44,10 +43,11 @@ The planner reaches the translator directly. `create_planner_agent` takes
 `harness.planner_seam.PlannerSeam` builds and serves to either runner. The
 model cannot call it. Every `propose_plan` that records a plan runs it on that
 plan and answers with the verdict under `translation`, beside its own `ok`, so
-the model spends no generation on translation. The plan travels through session state. Omit it and
-`create_planner_agent` returns the standalone planner, whose `propose_plan`
-records the plan and stops; that is what the planner's own eval set scores
-and why that set needs no reachable tool surface.
+the model spends no generation on translation. The plan travels through
+session state. Omit it and `create_planner_agent` returns the standalone
+planner, whose `propose_plan` records the plan and stops; that is what the
+planner's own eval set scores and why that set needs no reachable tool
+surface.
 
 ## Skills
 

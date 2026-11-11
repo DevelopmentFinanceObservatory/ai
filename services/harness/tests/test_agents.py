@@ -114,7 +114,11 @@ async def test_the_planner_reads_skills_through_the_surface_translation_gets() -
     tools = {tool.name: tool for tool in agent.tools if isinstance(tool, SpecTool)}
 
     answer = await call_planner_tool(
-        tools["get_skill"], skill_id="dfo-faq", tool_context=SimpleNamespace(state={})
+        tools["get_skill"],
+        skill_id="dfo-faq",
+        tool_context=SimpleNamespace(
+            state={}, session=SimpleNamespace(events=[]), function_call_id=None
+        ),
     )
 
     assert answer == "# DFO FAQ\n"

@@ -75,17 +75,15 @@ from planner import source_reads as planner_source_reads
 from planner import specs
 from planner import tools as planner_tools
 from planner.agent import (
-    AGENT_NAME,
     BRIEF_STATE_KEY,
-    AdkCall,
     SpecTool,
     create_planner_agent,
     end_run_when_ready,
-    planner_instruction,
     prepend_brief,
 )
 from planner.call import CallSession, elected_spec_ids, prices_chosen
 from planner.declaration import FIELD_DESCRIBED_ENUMS, SHARED_FIELDS, compact_schema
+from planner.instruction import planner_instruction
 from planner.operations import (
     AggregateOperation,
     RetrieveOperation,
@@ -198,6 +196,8 @@ from planner.records import (
     SourceNameCandidate,
     StatVarReading,
 )
+from planner.session import SessionCall, session_steps
+from planner.settings import AGENT_NAME
 from planner.source_reads import read_full_history, with_source_reads
 from planner.specs import planner_tool_specs
 from planner.tool_results import Outcome, ProblemCode, problem
@@ -327,7 +327,7 @@ HANDED_BACK_KINDS = (
 
 class _FakeSession:
     """A minimal stand-in for ADK's `Session`: just `.events`, read through
-    `planner.agent.session_steps` by `planner.call.elected_spec_ids` to find
+    `planner.session.session_steps` by `planner.call.elected_spec_ids` to find
     what the user actually chose answering `ask_user_question`, and by
     `planner.call.answered_since_referral` to find whether they answered at
     all. Empty by default -- a test that needs an election on record populates
@@ -365,7 +365,7 @@ def _ask_event(candidates: list[dict[str, str]], *, call_id: str = "call-1") -> 
     carrying `candidates` in its `args` and `call_id` in its `id` -- the
     shape `planner.call.elected_spec_ids` pairs against a matching
     `_answer_event`'s `id`. A `SimpleNamespace` tree rather than a real
-    `google.adk.events.Event`: `planner.agent.session_steps` only ever reads
+    `google.adk.events.Event`: `planner.session.session_steps` only ever reads
     `.content.parts[*].function_call.{id,name,args}` and
     `.content.parts[*].function_response`, so that is all this (and
     `_answer_event`, below) build. `function_response` is set to `None`
@@ -633,7 +633,7 @@ def _declare(ctx: _FakeToolContext) -> dict[str, object]:
     """`end_run_when_ready` over the plan on record, as a proposal whose translation compiled."""
     return end_run_when_ready(
         {"outcome": Outcome.OK.value, "translation": {"outcome": "ok"}},
-        AdkCall(ctx),  # type: ignore[arg-type]
+        ctx,  # type: ignore[arg-type]
     )
 
 
@@ -986,8 +986,8 @@ async def test_no_planner_tool_writes_pending_approval(
 def test_no_planner_code_names_the_transition_that_mints_pending_approval() -> None:
     # The structural fact examples cannot reach: `Plan.with_translation` is
     # the only transition anywhere that produces `PENDING_APPROVAL`, and no
-    # code in the planner's tool modules calls it -- an AST walk rather than a substring
-    # search, since a comment or docstring may mention it and a
+    # code in the planner's tool modules calls it. The check walks the AST,
+    # since a comment or docstring may mention it and a
     # `getattr(plan, "with_" + "translation")` may not.
     #
     # `PENDING_APPROVAL` itself is named once, in `_execution_blocked`'s own
@@ -1881,7 +1881,7 @@ def test_a_sum_of_two_datasets_needs_the_users_decision(
     )
 
     result = _combination_unasked(
-        plan, CallSession(AdkCall(ctx)), previous=None, sources=_shown_readings(ctx)
+        plan, CallSession(SessionCall.of(ctx)), previous=None, sources=_shown_readings(ctx)
     )
 
     if refused:
@@ -2060,7 +2060,7 @@ def test_a_users_decision_to_combine_two_datasets_needs_their_pick(
     )
 
     result = _combination_unasked(
-        plan, CallSession(AdkCall(ctx)), previous=None, sources=_shown_readings(ctx)
+        plan, CallSession(SessionCall.of(ctx)), previous=None, sources=_shown_readings(ctx)
     )
 
     if traced:
@@ -2091,7 +2091,7 @@ def test_a_pick_to_add_two_datasets_settles_nothing_for_a_sum_over_others(
     )
 
     result = _combination_unasked(
-        plan, CallSession(AdkCall(ctx)), previous=None, sources=_shown_readings(ctx)
+        plan, CallSession(SessionCall.of(ctx)), previous=None, sources=_shown_readings(ctx)
     )
 
     assert result is not None
@@ -2120,7 +2120,7 @@ def test_a_refused_combination_ask_leaves_the_refusal_for_the_next_ask() -> None
         ]
     )
 
-    picks, declined = CallSession(AdkCall(ctx)).combination_picks()
+    picks, declined = CallSession(SessionCall.of(ctx)).combination_picks()
 
     assert picks == {("net_flows", frozenset(_AID_AND_DEBT)): COMBINE_OPTION}
     assert declined is False
@@ -2148,7 +2148,7 @@ def test_a_response_of_refused_asks_leaves_the_combination_refusal_for_the_next_
         answer,
     ]
 
-    picks, declined = CallSession(AdkCall(ctx)).combination_picks()
+    picks, declined = CallSession(SessionCall.of(ctx)).combination_picks()
 
     assert picks == {("net_flows", frozenset(_AID_AND_DEBT)): COMBINE_OPTION}
     assert declined is False
@@ -2226,7 +2226,7 @@ def test_a_side_no_pin_names_a_dataset_for_is_a_dataset_of_its_own(
     previous = None
     if route == "pick":
         refusal = _combination_unasked(
-            first, CallSession(AdkCall(ctx)), previous=None, sources=_shown_readings(ctx)
+            first, CallSession(SessionCall.of(ctx)), previous=None, sources=_shown_readings(ctx)
         )
         assert refusal is not None
         detail = refusal["detail"]
@@ -2239,7 +2239,7 @@ def test_a_side_no_pin_names_a_dataset_for_is_a_dataset_of_its_own(
         previous = first
 
     result = _combination_unasked(
-        plan, CallSession(AdkCall(ctx)), previous=previous, sources=_shown_readings(ctx)
+        plan, CallSession(SessionCall.of(ctx)), previous=previous, sources=_shown_readings(ctx)
     )
 
     assert (result is not None) is refused
@@ -2338,7 +2338,7 @@ def test_a_sum_carried_from_an_earlier_plan_keeps_its_sum_without_a_new_pick(
 
     result = _combination_unasked(
         plan,
-        CallSession(AdkCall(ctx)),
+        CallSession(SessionCall.of(ctx)),
         previous=previous_of(recorded),
         sources=_shown_readings(ctx),
     )
@@ -3128,7 +3128,7 @@ def test_an_answer_after_a_referral_counts() -> None:
     ctx.session.events.append(_referred_event(ReferralKind.UNSUPPORTED_ASK, "gdp"))
     ctx.session.events.extend(_ask_answered_events())
 
-    assert CallSession(AdkCall(ctx)).answers_since_referral().answered
+    assert CallSession(SessionCall.of(ctx)).answers_since_referral().answered
 
 
 def test_a_refused_proposal_after_the_answer_does_not_take_the_answer_back(
@@ -10822,7 +10822,7 @@ def test_donors_a_part_binds_through_a_choice_alone_count_their_own_flows() -> N
 
 
 def _searched_in_words(block: dict[str, Any], *, stated: bool = True) -> dict[str, Any]:
-    """A copy of `block` as the planner holds a search for it (`planner.source_reads.pin_by_search`):
+    """A copy of `block` as the planner holds a search for it (`pin_by_search`):
     every axis Search settled other than by default marked as the planner's. With
     `stated`, Search read its provider row in the searched words ("multilateral ODA"),
     an explicit entry from text in place of the entry from a choice it was recorded
@@ -13229,7 +13229,7 @@ def test_a_later_ask_pricing_another_window_replaces_the_measures_choice(
     held = {other: PricesChoice("current")}
     if not same_measure:
         held[_GROSS] = PricesChoice("constant")
-    assert prices_chosen(AdkCall(ctx)) == held
+    assert prices_chosen(SessionCall.of(ctx)) == held
 
 
 @pytest.mark.parametrize(
@@ -13256,7 +13256,7 @@ def test_an_answer_to_the_planners_prices_ask_sets_or_releases_the_choice(
         _ask_response("ask-prices", {"result": result}),
     ]
 
-    assert prices_chosen(AdkCall(ctx)) == held
+    assert prices_chosen(SessionCall.of(ctx)) == held
 
 
 def test_a_refused_prices_ask_leaves_the_prices_refusal_for_the_next_ask() -> None:
@@ -13273,7 +13273,7 @@ def test_a_refused_prices_ask_leaves_the_prices_refusal_for_the_next_ask() -> No
         _ask_response("ask-again", {"result": {"spec_id": "prices:current"}}),
     ]
 
-    assert prices_chosen(AdkCall(ctx)) == {_GROSS: PricesChoice("current", asked=True)}
+    assert prices_chosen(SessionCall.of(ctx)) == {_GROSS: PricesChoice("current", asked=True)}
 
 
 def test_a_response_of_refused_asks_leaves_the_prices_refusal_for_the_next_ask() -> None:
@@ -13292,7 +13292,7 @@ def test_a_response_of_refused_asks_leaves_the_prices_refusal_for_the_next_ask()
         _ask_response("ask-3", {"result": {"spec_id": "prices:current"}}),
     ]
 
-    assert prices_chosen(AdkCall(ctx)) == {_GROSS: PricesChoice("current", asked=True)}
+    assert prices_chosen(SessionCall.of(ctx)) == {_GROSS: PricesChoice("current", asked=True)}
 
 
 def test_a_refused_ask_beside_a_plan_that_clears_the_prices_refusal_leaves_it_cleared() -> None:
@@ -13312,7 +13312,7 @@ def test_a_refused_ask_beside_a_plan_that_clears_the_prices_refusal_leaves_it_cl
         _ask_response("ask-2", {"result": {"spec_id": "prices:current"}}),
     ]
 
-    assert prices_chosen(AdkCall(ctx)) == {}
+    assert prices_chosen(SessionCall.of(ctx)) == {}
 
 
 def test_a_typed_message_clears_a_pending_prices_refusal() -> None:
@@ -13329,7 +13329,7 @@ def test_a_typed_message_clears_a_pending_prices_refusal() -> None:
         _answer_event("prices:current", call_id="ask-prices"),
     ]
 
-    assert prices_chosen(AdkCall(ctx)) == {}
+    assert prices_chosen(SessionCall.of(ctx)) == {}
 
 
 @pytest.mark.parametrize("asks_user", [True, False], ids=["asked-then-landed", "restated"])
@@ -13352,7 +13352,7 @@ def test_a_landed_plan_clears_a_prices_refusal_so_later_asks_keep_their_picks(
         _clarify_answer_event(_option("o2")),
     ]
 
-    assert prices_chosen(AdkCall(ctx)) == {
+    assert prices_chosen(SessionCall.of(ctx)) == {
         _GROSS: PricesChoice("constant"),
         other: PricesChoice("constant"),
     }
@@ -14342,7 +14342,7 @@ def test_elected_spec_ids_pairs_a_response_with_the_call_that_precedes_it() -> N
     tool_context = _FakeToolContext()
     tool_context.session = session
 
-    assert elected_spec_ids(AdkCall(tool_context)) == frozenset({SPEC})
+    assert elected_spec_ids(SessionCall.of(tool_context)) == frozenset({SPEC})
 
 
 def test_a_typed_message_is_one_step_whatever_else_its_event_carries() -> None:
@@ -14360,7 +14360,7 @@ def test_a_typed_message_is_one_step_whatever_else_its_event_carries() -> None:
         ),
     )
 
-    steps = planner_agent.session_steps([typed, answer])
+    steps = session_steps([typed, answer])
 
     assert [step.kind for step in steps] == ["message", "answer"]
 
@@ -14734,9 +14734,7 @@ def test_declaring_a_plan_ready_twice_changes_nothing(
 
 # The instruction the served planner carries: the translator attached, the
 # skill tools built and the question held by the harness graph's seam.
-_SERVED_INSTRUCTION = planner_agent.planner_instruction(
-    has_translator=True, has_skills=True, question_fixed=True
-)
+_SERVED_INSTRUCTION = planner_instruction(has_translator=True, has_skills=True, question_fixed=True)
 
 
 def test_the_instruction_names_every_referral_kind_the_translator_can_send() -> None:
@@ -18239,7 +18237,7 @@ def test_prior_translator_provider_sources_remain_summable(decision, pinning_dec
     )
     assert (
         _combination_unasked(
-            plan, CallSession(AdkCall(ctx)), previous=None, sources=_shown_readings(ctx)
+            plan, CallSession(SessionCall.of(ctx)), previous=None, sources=_shown_readings(ctx)
         )
         is None
     )
@@ -18265,7 +18263,9 @@ def test_chosen_source_reference_is_bound_to_its_requirement(decision, requireme
     )
     changed = plan.model_copy(update={"evidence_requirements": (modified,)})
     assert (
-        _source_ref_unpicked(changed, load_referral(ctx.state), CallSession(AdkCall(ctx)), None)
+        _source_ref_unpicked(
+            changed, load_referral(ctx.state), CallSession(SessionCall.of(ctx)), None
+        )
         is None
     ) == (target == dataset.id)
     changed_wording = changed.model_copy(
@@ -18273,13 +18273,15 @@ def test_chosen_source_reference_is_bound_to_its_requirement(decision, requireme
     )
     assert (
         _source_ref_unpicked(
-            changed_wording, load_referral(ctx.state), CallSession(AdkCall(ctx)), None
+            changed_wording, load_referral(ctx.state), CallSession(SessionCall.of(ctx)), None
         )
         is not None
     )
     ctx.state.pop("translator:referral")
     assert (
-        _source_ref_unpicked(changed, load_referral(ctx.state), CallSession(AdkCall(ctx)), None)
+        _source_ref_unpicked(
+            changed, load_referral(ctx.state), CallSession(SessionCall.of(ctx)), None
+        )
         is not None
     )
 
@@ -18320,7 +18322,7 @@ def test_a_code_held_by_several_publishers_takes_the_picked_one_as_its_source(
         question="question", decisions=[decision()], evidence_requirements=[repaired, derived]
     )
     assert (
-        _source_ref_unpicked(plan, load_referral(ctx.state), CallSession(AdkCall(ctx)), None)
+        _source_ref_unpicked(plan, load_referral(ctx.state), CallSession(SessionCall.of(ctx)), None)
         is None
     ) == valid
 
@@ -18607,7 +18609,9 @@ def test_an_entity_node_must_be_the_one_the_user_picked_for_it(
         evidence_requirements=[dataset.model_copy(update={"entities": entities}), derived],
     )
 
-    refusal = _entity_dcid_unpicked(plan, load_referral(ctx.state), CallSession(AdkCall(ctx)), None)
+    refusal = _entity_dcid_unpicked(
+        plan, load_referral(ctx.state), CallSession(SessionCall.of(ctx)), None
+    )
 
     assert (refusal is None) == valid
     if refusal is not None:
@@ -18649,7 +18653,9 @@ def test_an_ask_in_the_proposals_own_response_is_not_an_unanswered_pick(
         ],
     )
 
-    refusal = _entity_dcid_unpicked(plan, load_referral(ctx.state), CallSession(AdkCall(ctx)), None)
+    refusal = _entity_dcid_unpicked(
+        plan, load_referral(ctx.state), CallSession(SessionCall.of(ctx)), None
+    )
 
     assert (refusal is None) is valid
 
@@ -18685,7 +18691,7 @@ def test_a_call_reads_the_session_events_once() -> None:
     included."""
     ctx: Any = _FakeToolContext()
     ctx.session.events.extend(_ask_answered_events())
-    call = AdkCall(ctx)
+    call = SessionCall.of(ctx)
 
     assert call.steps() is call.steps()
     assert [step.kind for step in call.steps()] == ["call", "answer"]
@@ -18757,10 +18763,11 @@ def test_an_ask_after_the_first_ask_of_a_response_is_refused(
 
 @pytest.mark.parametrize("author", [AGENT_NAME, "another_planner"])
 def test_an_ask_beside_an_ask_stays_refused_when_an_interrupt_holds_its_id(author: str) -> None:
-    """The graph's planner node pauses on an accepted ask with an interrupt call under the
-    ask's own id, so on a replayed invocation that event can be the latest one holding the
-    served ask's id. It is not the model's response. The ask is the response's second
-    and is refused, whatever the agent that wrote the response is named."""
+    """The graph's planner node pauses on an accepted ask with an interrupt call
+    under the ask's own id. On a replayed invocation that event can be the latest
+    one holding the served ask's id. The interrupt is a separate event from the
+    model's response. The ask is the response's second and is refused, whatever the
+    agent that wrote the response is named."""
     ctx: Any = _FakeToolContext()
     response = _model_response(
         SimpleNamespace(id="first", name=PLANNER_ASK, args={"message": "Which?"}),
@@ -18783,7 +18790,7 @@ def test_an_ask_beside_an_ask_stays_refused_when_an_interrupt_holds_its_id(autho
 
 
 def test_an_ask_after_an_answered_ask_of_an_earlier_response_is_the_first_of_its_own() -> None:
-    """The user answered the ask of an earlier run, so the next run's one ask reaches them."""
+    """The user answered an earlier run's ask, so this run's one ask reaches them."""
     ctx: Any = _FakeToolContext()
     ctx.session.events.extend(_ask_answered_events(call_id="ask-1"))
     ctx.session.events.append(
@@ -18796,8 +18803,8 @@ def test_an_ask_after_an_answered_ask_of_an_earlier_response_is_the_first_of_its
 
 
 def test_an_ask_after_an_accepted_ask_nobody_answered_is_the_first_of_its_own_response() -> None:
-    """An earlier response's ask was accepted and its answer never came. The ask of a later
-    response is the only ask of its own response, so it reaches the user."""
+    """An earlier response's ask was accepted and its answer never came. The ask of a
+    later response is the only ask of its own response, so it reaches the user."""
     ctx: Any = _FakeToolContext()
     ctx.session.events.extend(
         [
@@ -18827,7 +18834,7 @@ def test_an_ask_with_no_call_id_is_in_no_response_and_is_not_refused_beside_anot
         )
     )
     ctx.function_call_id = None
-    call = AdkCall(cast(Any, ctx))
+    call = SessionCall.of(cast(Any, ctx))
 
     assert call.response_calls() == ()
     assert _ask_beside_ask(call) is None
@@ -18906,7 +18913,7 @@ def test_an_entity_answer_on_a_history_copy_binds_its_origin(
             )
         }
     )
-    view = CallSession(AdkCall(ctx))
+    view = CallSession(SessionCall.of(ctx))
 
     refusal = _entity_dcid_unpicked(
         plan, submission_service._authored_referral(view, draft), view, draft
@@ -19004,7 +19011,7 @@ def test_a_group_restated_by_its_name_counts_as_its_candidate(
     referral = load_referral(ctx.state)
 
     refusal = _entity_dcid_unoffered(plan, referral, None) or _entity_dcid_unpicked(
-        plan, referral, CallSession(AdkCall(ctx)), None
+        plan, referral, CallSession(SessionCall.of(ctx)), None
     )
 
     assert (refusal is None) == valid
@@ -19069,7 +19076,10 @@ def test_an_entity_referral_leaves_a_kept_pin_as_it_is(
         evidence_requirements=[pinned, derived_requirement()],
     )
 
-    assert _choice_not_offered(plan, load_referral(ctx.state), CallSession(AdkCall(ctx))) is None
+    assert (
+        _choice_not_offered(plan, load_referral(ctx.state), CallSession(SessionCall.of(ctx)))
+        is None
+    )
 
 
 @pytest.mark.parametrize("modifier", [{"source_ref": "provenance/a"}, {"source_exclude": True}])

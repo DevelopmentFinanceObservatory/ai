@@ -1,0 +1,181 @@
+[
+  [
+    {
+      "event": "plan.proposed",
+      "seq": 6,
+      "interrupt_id": "interrupt_id-0",
+      "plan_version_id": "plan_version_id-1",
+      "version": 1,
+      "title": "Research plan",
+      "steps": [
+        {
+          "id": "debt",
+          "label": "Fetch external debt service paid for Kenya",
+          "description": "external debt service.",
+          "args": {
+            "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "gives_answer": false
+        },
+        {
+          "id": "totals",
+          "label": "Total external debt service paid by year",
+          "description": "The total of external debt service paid, grouped by year. Result: one figure per year, 2015-2024.",
+          "args": {
+            "aggregation": "sum",
+            "group_by": [
+              "time_period"
+            ]
+          },
+          "gives_answer": true
+        }
+      ],
+      "actions": [
+        "approve",
+        "amend",
+        "reject"
+      ],
+      "decisions": [
+        {
+          "id": "measure",
+          "question": "What to measure Kenya's dependence by.",
+          "chosen": "annual debt service",
+          "reason": "Debt service is the standard measure for near-term dependence.",
+          "resolved_by": "default",
+          "alternatives": [
+            "annual debt service",
+            "total debt stock"
+          ]
+        }
+      ],
+      "revision": "e5c12691c8df9820a0dd9093a4600848ff0fa56b67d6044d36d2eedb93c58d81",
+      "requirements": [
+        {
+          "id": "annual_debt_service",
+          "kind": "dataset",
+          "sentence": "external debt service.",
+          "decision_ids": [
+            "measure"
+          ]
+        },
+        {
+          "id": "annual_totals",
+          "kind": "aggregate",
+          "sentence": "The total of external debt service paid, grouped by year.",
+          "decision_ids": [
+            "measure"
+          ]
+        }
+      ],
+      "operations": [
+        {
+          "id": "debt",
+          "kind": "retrieve",
+          "sentence": "external debt service.",
+          "requirement_id": "annual_debt_service"
+        },
+        {
+          "id": "totals",
+          "kind": "aggregate",
+          "sentence": "The total of external debt service paid, grouped by year.",
+          "requirement_id": "annual_totals"
+        }
+      ],
+      "summary": "External debt service paid, to Kenya, from 2015 to 2024.",
+      "caveats": []
+    }
+  ],
+  [
+    {
+      "event": "plan.proposed",
+      "seq": 7,
+      "interrupt_id": "interrupt_id-0",
+      "plan_version_id": "plan_version_id-1",
+      "version": 1,
+      "title": "Research plan",
+      "steps": [
+        {
+          "id": "debt",
+          "label": "Fetch external debt service paid for Kenya",
+          "description": "external debt service.",
+          "args": {
+            "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "gives_answer": false
+        },
+        {
+          "id": "totals",
+          "label": "Total external debt service paid by year",
+          "description": "The total of external debt service paid, grouped by year. Result: one figure per year, 2015-2024.",
+          "args": {
+            "aggregation": "sum",
+            "group_by": [
+              "time_period"
+            ]
+          },
+          "gives_answer": true
+        }
+      ],
+      "actions": [
+        "approve",
+        "amend",
+        "reject"
+      ],
+      "decisions": [
+        {
+          "id": "measure",
+          "question": "What to measure Kenya's dependence by.",
+          "chosen": "annual debt service",
+          "reason": "Debt service is the standard measure for near-term dependence.",
+          "resolved_by": "default",
+          "alternatives": [
+            "annual debt service",
+            "total debt stock"
+          ]
+        }
+      ],
+      "revision": "e5c12691c8df9820a0dd9093a4600848ff0fa56b67d6044d36d2eedb93c58d81",
+      "requirements": [
+        {
+          "id": "annual_debt_service",
+          "kind": "dataset",
+          "sentence": "external debt service.",
+          "decision_ids": [
+            "measure"
+          ]
+        },
+        {
+          "id": "annual_totals",
+          "kind": "aggregate",
+          "sentence": "The total of external debt service paid, grouped by year.",
+          "decision_ids": [
+            "measure"
+          ]
+        }
+      ],
+      "operations": [
+        {
+          "id": "debt",
+          "kind": "retrieve",
+          "sentence": "external debt service.",
+          "requirement_id": "annual_debt_service"
+        },
+        {
+          "id": "totals",
+          "kind": "aggregate",
+          "sentence": "The total of external debt service paid, grouped by year.",
+          "requirement_id": "annual_totals"
+        }
+      ],
+      "summary": "External debt service paid, to Kenya, from 2015 to 2024.",
+      "switch_failed": {
+        "choice_id": "spec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:sector",
+        "option_id": "sector:120+130",
+        "code": "switch_cancelled",
+        "reason": "You stopped this change, so the plan is as it was.",
+        "retryable": true
+      },
+      "caveats": []
+    }
+  ]
+]

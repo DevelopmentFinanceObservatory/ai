@@ -1,10 +1,10 @@
-"""The planner's tool specs reach the model and their bodies as ADK's `FunctionTool` would.
+"""Planner tool specs reach the model and their bodies as ADK's `FunctionTool` would.
 
 `planner.tool_spec` builds each declaration and converts each call's
 arguments itself. These tests hold both to what ADK's `FunctionTool` makes
-from an equivalent Python signature: the declaration compared as JSON in the
-order the model receives it, and the conversion over every `propose_plan`
-call the `planner_entry` eval records plus hand cases for each rule.
+from an equivalent Python signature. The declaration is compared as JSON in the
+order the model receives it. The conversion is checked over every `propose_plan`
+call the `planner_entry` eval records, plus hand cases for each rule.
 A `SpecTool` serving a spec through an ADK run is checked as well. The request
 carries the built declarations and the instruction a tool-less agent would,
 and a refused call marks the tool's span as a `FunctionTool`'s refusal does.
@@ -25,9 +25,11 @@ from google.adk.agents import LlmAgent
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools.function_tool import FunctionTool
 from harness.scripted import use_compiled_proposals
-from planner.agent import AGENT_NAME, SpecTool, create_planner_agent, planner_instruction
+from planner.agent import SpecTool, create_planner_agent
 from planner.declaration import compact_schema
+from planner.instruction import planner_instruction
 from planner.plan import AskAnswer, Decline
+from planner.settings import AGENT_NAME
 from planner.specs import PROPOSE_PLAN, planner_tool_specs, skill_tool_spec
 from planner.tool_spec import (
     Parameter,
@@ -64,7 +66,8 @@ def _specs(*, translate: bool, surface: bool, question_fixed: bool) -> list[Tool
 
 
 def _equivalent_function(spec: ToolSpec, recorded: list[dict[str, Any]]) -> Callable[..., Any]:
-    """A function ADK's `FunctionTool` reads as `spec`: same name, docstring and signature.
+    """A function `FunctionTool` reads as `spec`. It has the same name, docstring
+    and signature.
 
     A non-compact spec's descriptions ride on `Annotated[..., Field(...)]`, as a
     hand-written tool's would. Calling it records the keyword arguments ADK
@@ -222,8 +225,8 @@ def test_the_planner_builds_on_the_developer_api_and_refuses_vertex_ai(
 
 
 async def _adk_call(spec: ToolSpec, raw: dict[str, Any]) -> tuple[str, Any]:
-    """What ADK's `FunctionTool.run_async` does with `raw` for `spec`'s equivalent
-    function: the arguments it calls the function with, or its refusal."""
+    """The arguments ADK's `FunctionTool.run_async` calls `spec`'s equivalent function
+    with, or the refusal it gives `raw` instead."""
     recorded: list[dict[str, Any]] = []
     tool = FunctionTool(_equivalent_function(spec, recorded))
     answer = await tool.run_async(args=raw, tool_context=SimpleNamespace(function_call_id="c"))
@@ -240,13 +243,16 @@ def _ours(spec: ToolSpec, raw: dict[str, Any]) -> tuple[str, Any]:
 
 
 def _typed(value: Any) -> str:
-    """`value` with every type spelled out, so `1` and `1.0`, or a model and its dict, differ."""
+    """`value` with every type spelled out.
+
+    `1` and `1.0` differ, and so do a model and its dict.
+    """
     return repr(value)
 
 
 def _recorded_proposals() -> list[dict[str, Any]]:
-    """Every `propose_plan` call the `planner_entry` tasks record: each task's
-    reference payload and its alternatives."""
+    """Every `propose_plan` call the `planner_entry` tasks record. That is each
+    task's reference payload and its alternatives."""
     payloads: list[dict[str, Any]] = []
     for path in sorted(_TASKS.glob("*.json")):
         task = json.loads(path.read_text(encoding="utf-8"))
@@ -269,7 +275,8 @@ def _as_struct(value: Any) -> Any:
 
 
 def test_the_recorded_proposals_cover_the_task_set() -> None:
-    # The task set holds at least 70 proposals. A lower count points at the glob or task shape.
+    # The task set holds at least 70 proposals. A lower count points at the glob
+    # or the task shape.
     assert len(_recorded_proposals()) >= 70
 
 

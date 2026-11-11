@@ -5,8 +5,9 @@ model reads them and holds the body a call runs. `function_declaration` builds
 the declaration the model is shown from it, and `convert_arguments` and
 `missing_arguments` prepare a call's arguments for the body. `run_tool` runs a
 call through both and then the body, over the `planner.call.PlannerCall` and
-`planner.tools.EndRun` whatever serves the tool supplies. None of them reads a
-framework.
+`planner.tools.EndRun` whatever serves the tool supplies. `serve_tool` awaits
+that result and marks the call's span failed when the answer is an error.
+None of them reads a framework.
 
 The declaration and the conversion are the ones ADK's `FunctionTool` makes
 from an equivalent Python signature (google-adk 2.13, with
@@ -25,6 +26,9 @@ from types import UnionType
 from typing import Annotated, Any, TypeIs, Union, get_args, get_origin
 
 from google.genai import types
+from opentelemetry import trace
+from opentelemetry.semconv.attributes.error_attributes import ERROR_TYPE
+from opentelemetry.trace import Status, StatusCode
 from pydantic import BaseModel, Field, TypeAdapter, create_model
 from pydantic_core import PydanticUndefined
 
@@ -193,7 +197,7 @@ def convert_arguments(spec: ToolSpec, raw: Mapping[str, Any]) -> dict[str, Any]:
 
     A key `spec` declares no parameter for is dropped. A value for a model
     parameter, an optional one, or a list of them item by item becomes that
-    model; a value or item that does not validate stays as sent, for the body
+    model. A value or item that does not validate stays as sent, for the body
     to refuse. An integral float for an `int` or `list[int]` parameter becomes
     an int. Nothing else is checked or converted.
     """
@@ -248,3 +252,28 @@ def run_tool(
         for parameter in spec.parameters
     }
     return spec.body(call, end_run, filled)
+
+
+# The `error.type` ADK records on a `FunctionTool`'s span when its answer holds
+# an `error` key.
+_TOOL_ERROR = "TOOL_ERROR"
+
+
+async def serve_tool(
+    spec: ToolSpec, raw: Mapping[str, Any], *, call: PlannerCall, end_run: EndRun
+) -> object:
+    """The awaited `run_tool` answer to a call to `spec` with the model's `raw` arguments.
+
+    An answer that is a dict holding an `error` key, such as the refusal of a
+    call missing a required argument (`missing_arguments`), marks the current
+    span, the call's, failed with `error.type` `TOOL_ERROR`, as ADK marks a
+    `FunctionTool`'s.
+    """
+    answer = run_tool(spec, raw, call=call, end_run=end_run)
+    if inspect.isawaitable(answer):
+        answer = await answer
+    if isinstance(answer, dict) and answer.get("error"):
+        span = trace.get_current_span()
+        span.set_attribute(ERROR_TYPE, _TOOL_ERROR)
+        span.set_status(Status(StatusCode.ERROR, _TOOL_ERROR))
+    return answer

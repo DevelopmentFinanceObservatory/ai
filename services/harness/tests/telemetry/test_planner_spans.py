@@ -5,8 +5,10 @@ planner over the same scripted google-genai client (`tests.test_planner_node`),
 and the planner's spans are read the way Langfuse's OTLP ingestion reads them
 (`_seen`): the observation type, name, model, session, input, output, usage,
 level and status message, the completion start time, and the attributes the
-turn budget writes. The two runners must show a reader the same thing, apart
-from these differences, each asserted exactly (`_as_adk_names_it`):
+turn budget writes. What the Pydantic AI planner shows is stored as each
+entry's expectation (`tests.planner_expectations`), and the ADK planner must
+show a reader the same thing, apart from these differences, each asserted
+exactly (`_as_adk_names_it`):
 
 - a model call's span is `chat <model>` where ADK's is `generate_content <model>`;
 - the run's span is named `dfo_planner run` where ADK's is
@@ -56,11 +58,22 @@ from harness.turn_budget import COMPLETION_START_TIME, TurnBudget
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
-from planner.agent import AGENT_NAME
 from planner.plan import Plan
+from planner.settings import AGENT_NAME
 from planner.specs import PROPOSE_PLAN
 from planner.tool_spec import Parameter, ToolSpec
 
+from ..planner_expectations import (
+    BRIEF_OPENING,
+    STORING_RUNNER,
+    as_json,
+    assert_json_equal,
+    expect,
+    expectation_name,
+    expected,
+    on_each_runner,
+    shared,
+)
 from ..scripted_genai import Reply, call_part, reply, thought_part
 from ..test_planner_node import (
     _MODEL,
@@ -216,7 +229,7 @@ def _seen(span: ReadableSpan, session: str) -> dict[str, Any]:
         "budget": {
             key: (value if key == "dfo.model.thoughts_token_count" else "timed")
             for key, value in attributes.items()
-            if key.startswith("dfo.model.") and key != "dfo.model.dropped_thoughts"
+            if key.startswith("dfo.model.")
         },
     }
 
@@ -289,6 +302,28 @@ def _as_one_message(seen: dict[str, Any]) -> dict[str, Any]:
     return {**seen, "output": [whole]}
 
 
+def _stored(seen: Sequence[dict[str, Any]], tools: str = "span_tools") -> list[dict[str, Any]]:
+    """`seen`, the Pydantic AI planner's spans, as their stored expectation holds
+    them: the system instruction of each model call, and of each turn put in a
+    call's place, stored once as `span_instruction`, and its tool definitions
+    as `tools` (`planner_expectations.shared`)."""
+    stored = []
+    for span in seen:
+        if span["type"] not in {"generation", "span"} or span["input"] is None:
+            stored.append(span)
+            continue
+        system, messages = span["input"]
+        definitions = span["tool_definitions"]
+        stored.append(
+            {
+                **span,
+                "input": [shared(system, "span_instruction"), messages],
+                "tool_definitions": None if definitions is None else shared(definitions, tools),
+            }
+        )
+    return stored
+
+
 # --- Running an entry -------------------------------------------------------------------
 
 
@@ -330,6 +365,10 @@ def _proposal(id: str, **args: Any) -> Reply:
     return reply(call_part(PROPOSE_PLAN, args, id=id, signature=_SIGNED), usage=_USAGE)
 
 
+# The name an entry's tool definitions are stored under when they are not the
+# planner's own (`span_tools`).
+_TOOLS = {"missing-argument": "span_tools_note_required"}
+
 _ENTRIES: dict[str, Callable[[Plan], _Script]] = {
     # A refused proposal, then an accepted one.
     "refused-then-accepted": lambda plan: _Script(
@@ -365,26 +404,56 @@ _ENTRIES: dict[str, Callable[[Plan], _Script]] = {
 # --- Tests ------------------------------------------------------------------------------
 
 
+@on_each_runner
 @pytest.mark.parametrize("entry", list(_ENTRIES))
 async def test_langfuse_shows_the_same_planner_on_both_runners(
-    plan: Plan, exported_spans: InMemorySpanExporter, entry: str
+    plan: Plan,
+    exported_spans: InMemorySpanExporter,
+    entry: str,
+    runner: Runner,
+    request: pytest.FixtureRequest,
 ) -> None:
-    script = _ENTRIES[entry](plan)
-    adk = await _spans("adk", script, exported_spans)
-    pydantic = await _spans("pydantic_ai", script, exported_spans)
+    shown = await _spans(runner, _ENTRIES[entry](plan), exported_spans)
 
-    put_in_place = [seen for seen in pydantic if seen["type"] == "span"]
-    assert len(put_in_place) == (1 if entry == "stopped" else 0)
-    for seen in put_in_place:
-        assert seen["usage"] == {}
-        assert seen["output"][0]["parts"][0]["content"].startswith("Stopping this turn:")
-    observed = [_as_adk_names_it(seen) for seen in pydantic if seen["type"] != "span"]
-    assert observed == [_as_one_message(seen) for seen in adk]
-    assert {seen["session"] for seen in adk if seen["type"] != "tool"} == {_THE_SESSION}
+    name = expectation_name(request, runner=runner)
+    if runner == STORING_RUNNER:
+        put_in_place = [seen for seen in shown if seen["type"] == "span"]
+        assert len(put_in_place) == (1 if entry == "stopped" else 0)
+        for seen in put_in_place:
+            assert seen["usage"] == {}
+            assert seen["output"][0]["parts"][0]["content"].startswith("Stopping this turn:")
+        expect(name, _stored(shown, _TOOLS.get(entry, "span_tools")))
+        return
+    observed = [_as_adk_names_it(seen) for seen in expected(name) if seen["type"] != "span"]
+    assert_json_equal([_as_one_message(seen) for seen in shown], as_json(observed), name=name)
+    assert {seen["session"] for seen in shown if seen["type"] != "tool"} == {_THE_SESSION}
 
 
-async def test_a_reply_streamed_in_chunks_is_one_message_on_pydantic_ai_and_one_per_chunk_on_adk(
+async def test_both_runners_show_the_same_brief(
     plan: Plan, exported_spans: InMemorySpanExporter
+) -> None:
+    """The seam's brief, which no stored expectation holds
+    (`planner_expectations.BRIEF`), is the same text in each model call's input on
+    both runners."""
+    script = _ENTRIES["refused-then-accepted"](plan)
+    shown: dict[Runner, list[str]] = {}
+    for runner in _RUNNERS:
+        shown[runner] = [
+            part["content"]
+            for seen in await _spans(runner, script, exported_spans)
+            if seen["type"] == "generation"
+            for message in seen["input"][1]
+            for part in message["parts"]
+            if str(part.get("content", "")).startswith(BRIEF_OPENING)
+        ]
+
+    assert len(shown["adk"]) == 2
+    assert shown["pydantic_ai"] == shown["adk"]
+
+
+@on_each_runner
+async def test_a_reply_streamed_in_chunks_is_one_message_on_pydantic_ai_and_one_per_chunk_on_adk(
+    plan: Plan, exported_spans: InMemorySpanExporter, runner: Runner, request: pytest.FixtureRequest
 ) -> None:
     """A reply streamed as a signed and an unsigned thought chunk, two text
     chunks, a call and a usage-only chunk. Apart from the generation's output,
@@ -398,22 +467,16 @@ async def test_a_reply_streamed_in_chunks_is_one_message_on_pydantic_ai_and_one_
         setup=_proposals(),
         budget=_budget,
     )
-    adk = await _spans("adk", script, exported_spans)
-    pydantic = await _spans("pydantic_ai", script, exported_spans)
+    shown = await _spans(runner, script, exported_spans)
 
-    (adk_call,) = [seen for seen in adk if seen["type"] == "generation"]
-    (pydantic_call,) = [_as_adk_names_it(seen) for seen in pydantic if seen["type"] == "generation"]
+    name = expectation_name(request, runner=runner)
     call = {"type": "tool_call", "id": "p1", "name": "propose_plan", "arguments": {}}
-    assert adk_call["output"] == [
-        {"role": "assistant", "parts": [part], "finish_reason": ""}
-        for part in [
-            {"type": "text", "content": "Weighing the sources"},
-            {"type": "text", "content": " and the years."},
-            {"type": "text", "content": "Proposing "},
-            {"type": "text", "content": "now."},
-            call,
-        ]
-    ]
+    if runner == STORING_RUNNER:
+        expect(name, _stored(shown))
+        pydantic = shown
+    else:
+        pydantic = expected(name)
+    (pydantic_call,) = [_as_adk_names_it(seen) for seen in pydantic if seen["type"] == "generation"]
     assert pydantic_call["output"] == [
         {
             "role": "assistant",
@@ -424,6 +487,19 @@ async def test_a_reply_streamed_in_chunks_is_one_message_on_pydantic_ai_and_one_
             ],
             "finish_reason": "stop",
         }
+    ]
+    if runner == STORING_RUNNER:
+        return
+    (adk_call,) = [seen for seen in shown if seen["type"] == "generation"]
+    assert adk_call["output"] == [
+        {"role": "assistant", "parts": [part], "finish_reason": ""}
+        for part in [
+            {"type": "text", "content": "Weighing the sources"},
+            {"type": "text", "content": " and the years."},
+            {"type": "text", "content": "Proposing "},
+            {"type": "text", "content": "now."},
+            call,
+        ]
     ]
     (merged,) = pydantic_call["output"]
     assert "".join(
@@ -437,7 +513,9 @@ async def test_a_reply_streamed_in_chunks_is_one_message_on_pydantic_ai_and_one_
     without_output = [
         {**_as_adk_names_it(seen), "output": None} for seen in pydantic if seen["type"] != "span"
     ]
-    assert without_output == [{**seen, "output": None} for seen in adk]
+    assert_json_equal(
+        [{**seen, "output": None} for seen in shown], as_json(without_output), name=name
+    )
 
 
 async def test_a_refused_call_is_marked_failed_and_usage_is_counted_once_on_both(
@@ -473,13 +551,26 @@ async def test_a_refused_call_is_marked_failed_and_usage_is_counted_once_on_both
     assert sum(_generic_usage(calls[0]).values()) == usage["total"] + 40 + 4
 
 
-async def test_a_dropped_thought_summary_stays_on_the_pydantic_ai_planners_span(
-    plan: Plan, exported_spans: InMemorySpanExporter
+@on_each_runner
+@pytest.mark.parametrize("capture", ["SPAN_ONLY", "EVENT_ONLY", "NO_CONTENT", None])
+async def test_a_dropped_thought_summary_reaches_a_span_only_with_span_content(
+    plan: Plan,
+    exported_spans: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+    capture: str | None,
+    runner: Runner,
+    request: pytest.FixtureRequest,
 ) -> None:
-    """An unsigned thought summary is left out of what the Pydantic AI planner
-    keeps of a response, so its generation's output lacks the summary the ADK
-    planner's shows. The span carries it as `dfo.model.dropped_thoughts`."""
-    thought = "I weigh the two debt sources."
+    """An unsigned thought summary, which neither planner keeps of a response,
+    is in its generation's output on both runners when message content is on
+    the spans: ADK's as a text part, Pydantic AI's as a thinking part. With
+    content kept off the spans (in events only, off, or the variable unset) no
+    span of either runner carries it."""
+    if capture is None:
+        monkeypatch.delenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT")
+    else:
+        monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", capture)
+    thought = "I weigh the two debt sources, sentinel-7f3a."
     script = _Script(
         replies=[
             reply(
@@ -492,23 +583,36 @@ async def test_a_dropped_thought_summary_stays_on_the_pydantic_ai_planners_span(
         setup=_proposals(),
         budget=_budget,
     )
-    outputs: dict[Runner, Any] = {}
-    dropped: dict[Runner, Any] = {}
-    for runner in _RUNNERS:
-        exported_spans.clear()
-        with _numbered_call_ids():
-            await _entries(runner, script)
-        (call,) = [
-            span.attributes or {}
-            for span in exported_spans.get_finished_spans()
-            if (span.attributes or {}).get("gen_ai.operation.name") in {"chat", "generate_content"}
-        ]
-        outputs[runner] = _json(call["gen_ai.output.messages"])[0]["parts"]
-        dropped[runner] = call.get("dfo.model.dropped_thoughts")
+    exported_spans.clear()
+    with _numbered_call_ids():
+        await _entries(runner, script)
+    spans = exported_spans.get_finished_spans()
+    (call,) = [
+        span.attributes or {}
+        for span in spans
+        if (span.attributes or {}).get("gen_ai.operation.name") in {"chat", "generate_content"}
+    ]
+    outputs = _json(call.get("gen_ai.output.messages"))
+    carrying = [
+        (span.name, key)
+        for span in spans
+        for key, value in (span.attributes or {}).items()
+        if "sentinel-7f3a" in str(value)
+    ]
 
-    assert outputs["adk"][0] == {"type": "text", "content": thought}
-    assert outputs["pydantic_ai"] == outputs["adk"][1:]
-    assert dropped == {"adk": None, "pydantic_ai": thought}
+    if capture != "SPAN_ONLY":
+        assert carrying == []
+        return
+    first = {
+        "adk": {"type": "text", "content": thought},
+        "pydantic_ai": {"type": "thinking", "content": thought},
+    }
+    assert outputs[0]["parts"][0] == first[runner]
+    name = expectation_name(request, runner=runner)
+    if runner == STORING_RUNNER:
+        expect(name, outputs)
+    else:
+        assert_json_equal(outputs[0]["parts"][1:], expected(name)[0]["parts"][1:], name=name)
 
 
 def _attribute(span: Any, key: str) -> Any:
@@ -542,16 +646,11 @@ async def test_the_turns_session_and_trace_name_reach_the_planners_spans_on_both
     assert {scope for scope, _ in exported["adk"]} == {"gcp.vertex.agent"}
     assert {scope for scope, _ in exported["pydantic_ai"]} == {"pydantic-ai"}
     names = {runner: sorted(span.name for _, span in spans) for runner, spans in exported.items()}
-    assert names["adk"] == [
-        "execute_tool propose_plan",
-        "execute_tool propose_plan",
-        f"generate_content {_MODEL}",
-        f"generate_content {_MODEL}",
-        f"invoke_agent {AGENT_NAME}",
-    ]
-    assert names["pydantic_ai"] == sorted(
-        name.replace("generate_content ", "chat ") for name in names["adk"]
-    )
+    tools = ["execute_tool propose_plan"] * 2
+    assert names == {
+        "adk": [*tools, *[f"generate_content {_MODEL}"] * 2, f"invoke_agent {AGENT_NAME}"],
+        "pydantic_ai": [f"chat {_MODEL}"] * 2 + [*tools, f"invoke_agent {AGENT_NAME}"],
+    }
     for spans in exported.values():
         for _, span in spans:
             assert _attribute(span, "session.id") == _SESSION, span.name

@@ -1,7 +1,7 @@
 """The resubmits the planner posts to compile a pin on another basis or as a declared
-whole (`planner.source_reads.compile_on_basis`, `planner.source_reads.compile_whole`), where what a
-resubmit posts of the part's named sets cannot be read, or reads though the rest of
-the set does not."""
+whole (`planner.source_reads.compile_on_basis`, `planner.source_reads.compile_whole`),
+where what a resubmit posts of the part's named sets cannot be read, or reads though
+the rest of the set does not."""
 
 from __future__ import annotations
 

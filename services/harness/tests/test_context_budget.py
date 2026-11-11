@@ -182,7 +182,7 @@ _REGENERATE = "just context-baseline"
 
 # The planner's system instruction: the role, the tool protocol, the closing
 # rules, the skills paragraph and the translating paragraph, assembled by
-# `planner.agent.planner_instruction`. Measured 19,875 with the skill tools and
+# `planner.instruction.planner_instruction`. Measured 19,875 with the skill tools and
 # translation attached. The margin is 1.4% and covers a hand edit of
 # model-facing wording, since these paragraphs are rewritten for model
 # behaviour a sentence at a time.
@@ -370,8 +370,8 @@ async def _recorded_round(
 def _compose_baseline(
     records: list[dict[str, Any]], declaration_digests: dict[str, str]
 ) -> dict[str, Any]:
-    """The baseline payload: every record, ordered so a diff reads by scenario, and
-    the digest of each planner variant's declarations (`_declaration_digests`)."""
+    """The baseline payload holds every record, ordered so a diff reads by scenario,
+    and the digest of each planner variant's declarations (`_declaration_digests`)."""
     return {
         "records": sorted(
             records, key=lambda item: (item["scenario"], item["agent"], item["call_index"])
@@ -422,8 +422,8 @@ def _declarations_digest(request: LlmRequest) -> str:
 
 async def _declaration_digests() -> dict[str, str]:
     """`_declarations_digest` of the first request of a planner run, for each
-    setting of `create_planner_agent` that changes a declaration: a tool
-    surface or none, the question fixed or not.
+    setting of `create_planner_agent` that changes a declaration (a tool
+    surface or none, the question fixed or not).
 
     The character counts in the records cannot see a declaration reordered or
     edited at the same length. These digests can.

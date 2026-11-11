@@ -63,10 +63,10 @@ from executor.outcomes import RefusalKind
 from executor.run import current_step_id
 from google.adk.events import Event
 from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
-from planner.agent import AGENT_NAME as PLANNER_AGENT_NAME
 from planner.phrasing import entities_phrase
 from planner.plan import PLAN_STATE_KEY, DatasetRequirement, Decision
 from planner.plan import Plan as PlannerPlan
+from planner.settings import AGENT_NAME as PLANNER_AGENT_NAME
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ToolId
@@ -1243,7 +1243,7 @@ def _planner_question(args: dict[str, Any]) -> ElicitationQuestion:
     carries as its `RequestInput`'s `payload`, are the question directly:
     `message`, `candidates`, `options`, `recommended_spec_id` and `rationale`.
     `options` are fixed choices that are no source, such as whether to add
-    two datasets (`submission.service.COMBINATION_OPTIONS`); the planner reads
+    two datasets (`submission.service.COMBINATION_OPTIONS`). The planner reads
     only a pick of one, so they take no free text."""
     candidates = args.get("candidates") or []
     fixed = args.get("options") or []

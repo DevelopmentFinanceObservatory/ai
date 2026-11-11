@@ -1,20 +1,24 @@
-"""The first request of each recorded planner entry is the same on both planners.
+"""Each request of each recorded entry equals its stored expectation, on each planner.
 
 `evals/planner_entry` holds a set of tasks, each with the plans a correct planner
 proposes for it (a reference plan and, for some tasks, alternatives) and a recording
 of the data-mcp answers its entry reads. Each case here runs one such plan through
 the eval's own entry (`entry.run_entry`: the orchestrator's tools, the graph nodes and
 `PlannerSeam`) over the recording, with a scripted google-genai client playing the
-model, once on the ADK planner and once on the Pydantic AI planner. A plan the real
+model, on each planner. A plan the real
 `propose_plan` refuses first, as the recording of a task with a
 `first_proposal_refusal` says, is followed by the planner's ask and the user's answer,
 which resumes the run.
 
-Every request the model receives has to equal the ADK planner's apart from the wire
-differences `assert_pinned_wire_differences` lists. That covers the first request of
-each entry, built from the recorded readings, skills and asks, and, for an entry with
-an ask, the request after the ask is answered. No model or network is involved, since
-the recorded answers replay from files.
+Every request the model receives on the Pydantic AI planner, and the plan the entry
+lands, equal the case's stored expectation (`tests.planner_expectations`). On the ADK
+planner, every request equals the stored one apart from the wire differences
+`assert_pinned_wire_differences` lists, and the plan equals the stored plan. That
+covers the first request of each entry, built from the recorded readings, skills and
+asks, and, for an entry with an ask, the request after the ask is answered. The
+stored requests hold the seam's brief as a marker (`planner_expectations.BRIEF`), so
+a last test compares the brief text of each request between the two planners. No
+model or network is involved, since the recorded answers replay from files.
 """
 
 from __future__ import annotations
@@ -27,9 +31,25 @@ from harness.turn_events import PLANNER_ASK
 from planner.settings import AgentSettings
 from submission.service import COMBINATION_OPTIONS, COMBINE_OPTION
 
+from ..planner_expectations import (
+    STORING_RUNNER,
+    assert_json_equal,
+    expect,
+    expectation_name,
+    expected,
+    on_each_runner,
+    shared,
+)
 from ..scripted_genai import Reply, Request, ScriptedGenai, call_part, reply
 from ..test_planner_entry_eval import entry, validate
-from ..test_planner_node import Runner, _numbered_call_ids
+from ..test_planner_node import (
+    Runner,
+    _as_stored,
+    _briefs,
+    _numbered_call_ids,
+    _request_dumped,
+    _stored_request,
+)
 from .planner_pairs import assert_pinned_wire_differences
 
 _MODEL = AgentSettings().planner_model_name
@@ -80,18 +100,48 @@ async def _requests(
     return scripted.requests, run
 
 
+@on_each_runner
 @pytest.mark.parametrize(("task", "payload"), _CASES)
 async def test_each_request_equals_the_adk_planners_apart_from_the_pinned_differences(
-    task: Any, payload: Any, monkeypatch: pytest.MonkeyPatch
+    task: Any,
+    payload: Any,
+    runner: Runner,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     entry.quiet_logs()
-    adk, adk_run = await _requests("adk", task, payload, monkeypatch)
-    pydantic, pydantic_run = await _requests("pydantic_ai", task, payload, monkeypatch)
+    sent, run = await _requests(runner, task, payload, monkeypatch)
 
-    expected = 3 if payload.refusal is not None else 1
-    assert len(adk) == len(pydantic) == expected
-    for sent_adk, sent_pydantic in zip(adk, pydantic, strict=True):
-        assert sent_adk.model == sent_pydantic.model == _MODEL
-        assert_pinned_wire_differences(sent_adk, sent_pydantic)
-    assert adk_run.probe.plan == pydantic_run.probe.plan
-    assert adk_run.probe.plan is not None
+    assert len(sent) == (3 if payload.refusal is not None else 1)
+    assert all(each.model == _MODEL for each in sent)
+    assert run.probe.plan is not None
+    assert all(len(_briefs(each)) == 1 for each in sent), "one brief a request"
+    name = expectation_name(request, runner=runner)
+    plan = run.probe.plan.model_dump(mode="json")
+    if runner == STORING_RUNNER:
+        dumped = [_request_dumped(each) for each in sent]
+        for each in dumped:
+            each["config"] = shared(each["config"], "request_config_recorded_entry")
+        expect(name, {"requests": dumped, "plan": plan})
+        return
+    stored = expected(name)
+    assert_json_equal(plan, stored["plan"], name=f"{name} plan")
+    assert len(sent) == len(stored["requests"])
+    for each, stored_request in zip(sent, stored["requests"], strict=True):
+        assert_pinned_wire_differences(_as_stored(each), _stored_request(stored_request))
+
+
+@pytest.mark.parametrize(("task", "payload"), _CASES)
+async def test_both_planners_send_the_same_brief(
+    task: Any, payload: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seam's brief, built from the recorded readings, skills and asks and held
+    by no stored expectation (`planner_expectations.BRIEF`), is the same text in
+    each request on both planners."""
+    entry.quiet_logs()
+    sent = {
+        runner: [_briefs(each) for each in (await _requests(runner, task, payload, monkeypatch))[0]]
+        for runner in ("adk", "pydantic_ai")
+    }
+
+    assert sent["pydantic_ai"] == sent["adk"]

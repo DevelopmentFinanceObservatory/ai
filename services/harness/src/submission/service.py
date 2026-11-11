@@ -25,7 +25,8 @@ rolling from their start (`planner.plan.split_of`), the pins it windows
 (`_window_pins`), and what a built plan may not record
 (`_unrecordable`). It answers the refusal that stops the chain first, or an
 `Admission` carrying the plan to record. `submit` records an admission and
-answers `ok`, which is all `propose_plan` (`planner.tools.propose`) does with its call.
+answers `ok`, which is all `propose_plan`
+(`planner.tools.propose`) does with its call.
 A `Proposer` names the tool the proposal came through, so every `action` a
 refusal carries calls a tool the model was given.
 

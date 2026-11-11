@@ -8,8 +8,7 @@ compares the first request each sends.
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import MutableMapping, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -20,22 +19,30 @@ from harness.turn_events import PLANNER_ASK
 from planner.call import PlannerCall
 from planner.pydantic_agent import (
     PLANNER_PROFILE,
+    PlannerAnswers,
     PlannerDeps,
     PlannerItem,
     PlannerResponse,
-    PlannerToolAnswer,
-    PydanticPlanner,
     UnsentQuestionPartError,
     planner_agent,
     run_planner,
 )
+from planner.session import SessionCall
 from planner.specs import PROPOSE_PLAN, planner_tool_specs
 from planner.tool_spec import Parameter, ToolSpec
 from planner.tools import ASK_ACCEPTED, EndRun, load_pending_ask
-from pydantic_ai.exceptions import ModelRetry, UnexpectedModelBehavior
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
+from ..planner_expectations import (
+    STORING_RUNNER,
+    expect,
+    expectation_name,
+    expected,
+    on_each_runner,
+    shared,
+)
+from ..planner_seam_runners import PlannerRunner as Runner
 from ..scripted_genai import (
     Reply,
     Request,
@@ -46,6 +53,7 @@ from ..scripted_genai import (
     thought_part,
     usage_metadata,
 )
+from ..test_planner_node import _as_stored, _request_dumped, _stored_request
 from .planner_pairs import BRIEF, QUESTION, adk_run, assert_pinned_wire_differences, pydantic_run
 
 _MODEL = "gemini-3.8-flash"
@@ -68,6 +76,11 @@ class _Run:
     def tool_failed(self, name: str, error: BaseException) -> dict[str, Any]:
         self.failed.append((name, error))
         return {"error": f"{name} failed"}
+
+
+def _no_events(state: MutableMapping[str, Any], call_id: str | None) -> SessionCall:
+    """A tool call over a session with no events."""
+    return SessionCall([], state, call_id)
 
 
 def _propose(*answers: dict[str, Any], writes: dict[str, Any] | None = None) -> ToolSpec:
@@ -131,7 +144,7 @@ def _deps(state: dict[str, Any] | None = None, run: _Run | None = None) -> Plann
     run = run or _Run()
     return PlannerDeps(
         state={} if state is None else state,
-        earlier=(),
+        call_for=_no_events,
         tool_answered=run.tool_answered,
         tool_failed=run.tool_failed,
     )
@@ -139,8 +152,22 @@ def _deps(state: dict[str, Any] | None = None, run: _Run | None = None) -> Plann
 
 def _kinds(items: Sequence[PlannerItem]) -> list[str]:
     return [
-        "response" if isinstance(item, PlannerResponse) else f"answer:{item.name}" for item in items
+        "response"
+        if isinstance(item, PlannerResponse)
+        else "answers:" + ",".join(answer.name or "" for answer in item.answers)
+        for item in items
     ]
+
+
+def _answers(*answers: tuple[str, str, dict[str, Any]], state: dict[str, Any]) -> PlannerAnswers:
+    """The answers of a response's calls, each given as its tool, id and answer."""
+    return PlannerAnswers(
+        answers=tuple(
+            types.FunctionResponse(id=call_id, name=name, response=answer)
+            for name, call_id, answer in answers
+        ),
+        state=state,
+    )
 
 
 async def test_an_accepted_proposal_ends_the_run_after_one_model_request() -> None:
@@ -158,11 +185,11 @@ async def test_an_accepted_proposal_ends_the_run_after_one_model_request() -> No
     )
 
     assert len(scripted.requests) == 1
-    assert _kinds(items) == ["response", f"answer:{PROPOSE_PLAN}"]
-    response, answer = items
+    assert _kinds(items) == ["response", f"answers:{PROPOSE_PLAN}"]
+    response, answers = items
     assert isinstance(response, PlannerResponse)
     assert response.parts == (signed, call)
-    assert answer == PlannerToolAnswer(PROPOSE_PLAN, "p1", _ACCEPTED, {}, ended=True)
+    assert answers == _answers((PROPOSE_PLAN, "p1", _ACCEPTED), state={})
     assert run.answered == [(PROPOSE_PLAN, _ACCEPTED)]
 
 
@@ -176,7 +203,7 @@ async def test_a_refused_proposal_goes_on_to_a_second_request_that_sees_the_refu
     )
 
     assert len(scripted.requests) == 2
-    assert _kinds(items) == ["response", f"answer:{PROPOSE_PLAN}"] * 2
+    assert _kinds(items) == ["response", f"answers:{PROPOSE_PLAN}"] * 2
     returned = scripted.requests[1].content_list[-1].parts[0].function_response
     assert (returned.id, returned.name, returned.response) == ("p1", PROPOSE_PLAN, _REFUSED)
 
@@ -192,20 +219,17 @@ async def test_an_accepted_ask_ends_the_run_and_leaves_the_pending_ask_in_state(
     )
 
     assert len(scripted.requests) == 1
-    assert _kinds(items) == ["response", f"answer:{PLANNER_ASK}"]
-    assert items[-1] == PlannerToolAnswer(
-        PLANNER_ASK,
-        "a1",
-        dict(ASK_ACCEPTED),
-        {"planner:pending_ask": state["planner:pending_ask"]},
-        ended=True,
+    assert _kinds(items) == ["response", f"answers:{PLANNER_ASK}"]
+    assert items[-1] == _answers(
+        (PLANNER_ASK, "a1", dict(ASK_ACCEPTED)),
+        state={"planner:pending_ask": state["planner:pending_ask"]},
     )
     pending = load_pending_ask(state)
     assert pending is not None
     assert (pending.call_id, pending.args["message"]) == ("a1", args["message"])
 
 
-async def test_each_answer_carries_the_state_its_own_call_wrote_and_nothing_else() -> None:
+async def test_each_responses_answers_carry_the_state_its_calls_wrote_and_nothing_else() -> None:
     state: dict[str, Any] = {"kept": "as it was"}
 
     items, _ = await _run(
@@ -218,12 +242,8 @@ async def test_each_answer_carries_the_state_its_own_call_wrote_and_nothing_else
         state=state,
     )
 
-    answers = [item for item in items if isinstance(item, PlannerToolAnswer)]
-    assert sorted((a.call_id, a.writes) for a in answers) == [
-        ("p1", {"a": 3}),
-        ("w1", {"a": 1}),
-        ("w2", {"b": 2}),
-    ]
+    answers = [item for item in items if isinstance(item, PlannerAnswers)]
+    assert [(len(a.answers), a.state) for a in answers] == [(2, {"a": 1, "b": 2}), (1, {"a": 3})]
     assert state == {"kept": "as it was", "a": 3, "b": 2}
     assert _kinds(items)[-1] == "response"
 
@@ -246,113 +266,7 @@ async def test_a_raising_tool_is_answered_through_tool_failed_and_the_run_goes_o
     assert len(scripted.requests) == 2
     returned = scripted.requests[1].content_list[-1].parts[0].function_response
     assert returned.response == {"error": "broken failed"}
-    assert _kinds(items) == ["response", "answer:broken", "response"]
-
-
-def _with_tool(agent: PydanticPlanner, function: Callable[..., Any]) -> PydanticPlanner:
-    """`agent` with `function` registered as a Pydantic AI tool of its own, as
-    the planner's tools are, to reach answers no planner tool gives. Pydantic
-    AI validates its typed arguments and lets what the function raises through."""
-    agent.agent.tool_plain(function)
-    return PydanticPlanner(agent=agent.agent, tools=(*agent.tools, function.__name__))
-
-
-async def test_a_call_pydantic_ai_answers_with_a_retry_still_gets_its_answer() -> None:
-    """A call whose arguments fail validation is answered by Pydantic AI with a
-    retry. That answer is yielded as an error, as Gemini is sent it, so every
-    answer of the response is yielded, its sibling's write with them, and
-    `tool_answered` is told it once, as it is told a tool's own answer."""
-
-    def counted(n: int) -> dict[str, Any]:
-        return {"outcome": "ok", "n": n}
-
-    scripted = ScriptedGenai(
-        [
-            reply(call_part("write_a", id="w1"), call_part("counted", {"n": "many"}, id="c1")),
-            reply(text_part("done")),
-        ]
-    )
-    agent = _with_tool(
-        planner_agent([_write("a", 1)], instruction="Plan.", model=_google_model(scripted)),
-        counted,
-    )
-
-    run = _Run()
-
-    items = [
-        item async for item in run_planner(agent, _deps(run=run), question=_QUESTION, brief=_BRIEF)
-    ]
-
-    assert _kinds(items)[0] == "response" and _kinds(items)[-1] == "response"
-    answers = {item.call_id: item for item in items[1:-1] if isinstance(item, PlannerToolAnswer)}
-    assert answers.keys() == {"w1", "c1"}
-    assert answers["w1"] == PlannerToolAnswer("write_a", "w1", {"outcome": "ok"}, {"a": 1})
-    assert answers["c1"].name == "counted"
-    assert set(answers["c1"].answer) == {"error"}
-    # Each answer is told once. A tool's own is told as it answers, before
-    # Pydantic AI reports the call, and the retry as the run yields it, so the
-    # two orders can differ: the yield order of one response's calls is
-    # Pydantic AI's, which has varied between runs of this test.
-    yielded = [item for item in items if isinstance(item, PlannerToolAnswer)]
-    assert sorted(run.answered, key=repr) == sorted(
-        ((item.name, item.answer) for item in yielded), key=repr
-    )
-    assert len(run.answered) == len(yielded) == 2
-
-
-async def test_a_call_whose_tool_answered_asks_for_a_retry_is_reported_once() -> None:
-    """A planner tool's answer `tool_answered` refuses with Pydantic AI's
-    `ModelRetry` is told once: Pydantic AI then answers the call itself with
-    the retry, which the run yields as the model is sent it, and does not tell
-    again."""
-    run = _Run()
-
-    def tool_answered(name: str, answer: dict[str, Any]) -> None:
-        run.tool_answered(name, answer)
-        if len(run.answered) == 1:
-            raise ModelRetry("answer again")
-
-    scripted = ScriptedGenai([reply(call_part("write_a", id="w1")), reply(text_part("done"))])
-    agent = planner_agent([_write("a", 1)], instruction="Plan.", model=_google_model(scripted))
-    deps = PlannerDeps(
-        state={}, earlier=(), tool_answered=tool_answered, tool_failed=run.tool_failed
-    )
-
-    items = [item async for item in run_planner(agent, deps, question=_QUESTION, brief=_BRIEF)]
-
-    assert run.answered == [("write_a", {"outcome": "ok"})]
-    (answer,) = [item for item in items if isinstance(item, PlannerToolAnswer)]
-    assert (answer.call_id, set(answer.answer)) == ("w1", {"error"})
-
-
-async def test_a_run_pydantic_ai_ends_after_a_call_answered_yields_that_answer() -> None:
-    """A call raising `UnexpectedModelBehavior` ends the run without raising, and
-    the answer of the sibling that answered before it is yielded."""
-    answered = asyncio.Event()
-    run = _Run()
-
-    def tool_answered(name: str, answer: dict[str, Any]) -> None:
-        run.tool_answered(name, answer)
-        answered.set()
-
-    async def misbehaves() -> None:
-        await answered.wait()
-        raise UnexpectedModelBehavior("the model misbehaved")
-
-    scripted = ScriptedGenai(
-        [reply(call_part("write_a", id="w1"), call_part("misbehaves", id="m1"))]
-    )
-    agent = _with_tool(
-        planner_agent([_write("a", 1)], instruction="Plan.", model=_google_model(scripted)),
-        misbehaves,
-    )
-    deps = PlannerDeps(
-        state={}, earlier=(), tool_answered=tool_answered, tool_failed=run.tool_failed
-    )
-
-    items = [item async for item in run_planner(agent, deps, question=_QUESTION, brief=_BRIEF)]
-
-    assert items[1:] == [PlannerToolAnswer("write_a", "w1", {"outcome": "ok"}, {"a": 1})]
+    assert _kinds(items) == ["response", "answers:broken", "response"]
 
 
 @pytest.mark.parametrize(
@@ -390,33 +304,41 @@ def _surface() -> ToolSurface:
     return cast(ToolSurface, SimpleNamespace())
 
 
-async def _first_requests(surface: ToolSurface | None) -> tuple[Request, Request]:
+async def _first_request(runner: Runner, surface: ToolSurface | None) -> Request:
     script = [reply(text_part("done"))]
-    (adk,) = (await adk_run(script, surface=surface, translate=_translate)).requests
-    (pydantic,) = (await pydantic_run(script, surface=surface, translate=_translate)).requests
-    return adk, pydantic
+    run = adk_run if runner == "adk" else pydantic_run
+    (request,) = (await run(script, surface=surface, translate=_translate)).requests
+    return request
 
 
+@on_each_runner
 @pytest.mark.parametrize("with_skills", [False, True], ids=["no-skill-tool", "skill-tool"])
-async def test_the_first_request_equals_the_adk_planners_apart_from_the_pinned_wire_differences(
-    with_skills: bool,
+async def test_the_first_request_is_the_same_on_both_planners_apart_from_the_pinned_wire_differences(
+    with_skills: bool, runner: Runner, request: pytest.FixtureRequest
 ) -> None:
     surface = _surface() if with_skills else None
-    adk_request, pydantic_request = await _first_requests(surface)
+    sent = await _first_request(runner, surface)
 
-    assert_pinned_wire_differences(adk_request, pydantic_request)
-    assert adk_request.content_list == [
+    name = expectation_name(request, runner=runner)
+    if runner == STORING_RUNNER:
+        dumped = _request_dumped(sent)
+        if with_skills:
+            dumped["config"] = shared(dumped["config"], "request_config_recorded_entry")
+        expect(name, dumped)
+    else:
+        assert_pinned_wire_differences(_as_stored(sent), _stored_request(expected(name)))
+    assert sent.content_list == [
         types.Content(role="user", parts=[types.Part(text=_QUESTION)]),
         types.Content(role="user", parts=[types.Part(text=_BRIEF)]),
     ]
-    (adk_tool,) = adk_request.generate_config.tools or []
-    assert [d.name for d in adk_tool.function_declarations or []] == [
+    (tool,) = sent.generate_config.tools or []
+    assert [d.name for d in tool.function_declarations or []] == [
         *(["get_skill"] if with_skills else []),
         PLANNER_ASK,
         PROPOSE_PLAN,
         "reject_plan",
     ]
-    thinking = adk_request.generate_config.thinking_config
+    thinking = sent.generate_config.thinking_config
     assert thinking is not None
     assert thinking.model_dump(mode="json", exclude_none=True) == {
         "thinking_level": "LOW",

@@ -158,8 +158,8 @@ async def _skill_results(client: Any, skill_ids: Sequence[str]) -> dict[str, dic
 
 
 # How long a first-year read may take while recording. Production allows
-# `planner.source_reads.FIRST_YEAR_READ_DEADLINE_SECONDS`; a replay answers at once, so a recording
-# keeps whatever Search answers, however long it takes.
+# `planner.source_reads.FIRST_YEAR_READ_DEADLINE_SECONDS`. A replay answers at
+# once, so a recording keeps whatever Search answers, however long it takes.
 RECORDING_READ_SECONDS = 180.0
 
 

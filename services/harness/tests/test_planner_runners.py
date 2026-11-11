@@ -6,10 +6,11 @@ resumes under the other. Each test here runs a script on a scripted
 google-genai client with every run on the ADK planner, with every run on the
 Pydantic AI planner, and, for the turns that cross, with the runs split
 between the two, each switch building a seam afresh over the same session as a
-deploy or a rollback would. The runs are compared on what the seam answers,
-the progress it reports, the requests the model received, the events the
-session stores, the steps `session_steps` reads from them and the stored
-state, as `tests.test_planner_node` compares them.
+deploy or a rollback would. Each run is checked against the stored expectation
+of its test (`tests.planner_expectations`) on what the seam answers, the
+progress it reports, the requests the model received, the events the session
+stores, the steps `session_steps` reads from them and the stored state, as
+`tests.test_planner_node` checks them.
 """
 
 from __future__ import annotations
@@ -53,7 +54,6 @@ from harness.turn_budget import TurnBudget
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from planner import agent as planner_agent_module
-from planner.agent import session_steps
 from planner.call import PlannerCall
 from planner.plan import (
     DatasetRequirement,
@@ -72,6 +72,14 @@ from translator.tool import build_translate
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .orchestrator_fakes import open_session, orchestrator_runner, plan_call
 from .planner.planner_pairs import assert_pinned_wire_differences, seam_specs
+from .planner_expectations import (
+    STORING_RUNNER,
+    expect,
+    expectation_name,
+    expected,
+    on_each_runner,
+    shared,
+)
 from .scripted_genai import Reply, Request, ScriptedGenai, call_part, live_call_reply, reply
 from .test_graph import (
     _BRIEF as _GRAPH_BRIEF,
@@ -97,20 +105,21 @@ from .test_planner_node import (
     _SSE,
     Runner,
     _ask_call,
-    _assert_same,
-    _both,
-    _dumped,
+    _assert_expected,
     _entries,
     _Entry,
+    _entry,
     _frames,
     _numbered_call_ids,
     _planned,
     _planner_events,
     _proposals,
+    _read,
     _referral,
     _Script,
     _seam,
     _serving_proposals,
+    _steps,
     _without_trailing_empty_text,
 )
 from .test_planner_seam import (
@@ -152,31 +161,35 @@ def _request_dumped(request: Request) -> tuple[dict[str, Any], list[dict[str, An
     )
 
 
-def _assert_crossed_same(crossed: _Entry, adk: _Entry, pydantic: _Entry) -> None:
-    """`crossed`, whose runs were split between the runners, lands where a turn run
-    on one runner lands, and each of its requests equals the one the runner that
-    sent it sent in a turn run on it alone."""
-    _assert_same(adk, pydantic)
-    assert crossed.outputs == adk.outputs
-    assert crossed.reports == adk.reports
+def _assert_crossed_expected(
+    request: pytest.FixtureRequest,
+    runners: Sequence[Runner],
+    crossed: _Entry,
+    alone: Mapping[Runner, _Entry],
+) -> None:
+    """The turn run on each runner alone, `alone`, and `crossed`, whose runs
+    `runners` split between the runners, equal the stored expectation of the
+    test, and each of `crossed`'s requests equals the one the runner that sent
+    it sent in the turn run on it alone. The ADK planner's requests are stored
+    nowhere whole, so that last check compares the runs with each other."""
+    named = "-then-".join(runners)
+    for runner, entry in alone.items():
+        _assert_expected(request, entry, runner=runner, crossed=named)
+    _assert_expected(request, crossed, runner=None, crossed=named)
     assert set(crossed.senders) == set(_RUNNERS), "the turn crossed from one runner to the other"
-    alone = {"adk": adk, "pydantic_ai": pydantic}
-    assert len(crossed.requests) == len(adk.requests)
-    for position, (request, sender) in enumerate(
-        zip(crossed.requests, crossed.senders, strict=True)
-    ):
-        assert _request_dumped(request) == _request_dumped(alone[sender].requests[position])
-    assert _dumped(crossed.events) == _dumped(adk.events)
-    assert list(session_steps(crossed.events)) == list(session_steps(adk.events))
-    assert crossed.state == adk.state
+    for position, (sent, sender) in enumerate(zip(crossed.requests, crossed.senders, strict=True)):
+        assert _request_dumped(sent) == _request_dumped(alone[sender].requests[position])
 
 
-async def _crossed(runners: Sequence[Runner], script: _Script) -> tuple[_Entry, _Entry, _Entry]:
-    """`script` with its runs on `runners`, then on each runner alone."""
+async def _crossed(
+    runners: Sequence[Runner], script: _Script
+) -> tuple[_Entry, dict[Runner, _Entry]]:
+    """`script` with its runs on `runners`, then on each runner alone, starting with
+    the runner whose result is stored."""
     with _numbered_call_ids():
         crossed = await _entries(runners, script)
-    adk, pydantic = await _both(script)
-    return crossed, adk, pydantic
+    alone = {runner: await _entry(runner, script) for runner in (STORING_RUNNER, "adk")}
+    return crossed, alone
 
 
 def _mixed(runs: int) -> list[tuple[Runner, ...]]:
@@ -217,29 +230,25 @@ def test_the_pydantic_ai_planner_refuses_an_adk_model() -> None:
         )
 
 
+@on_each_runner
 @pytest.mark.parametrize("named", [_MODEL, f"Gemini:{_MODEL}"])
 async def test_both_planners_call_the_gemini_model_adks_registry_resolves(
-    plan: Plan, named: str
+    plan: Plan, named: str, runner: Runner
 ) -> None:
     """A planner model name ADK's registry resolves, a class prefix included,
     names the same model in every request on both planners."""
-    sent: dict[Runner, list[str]] = {}
-    for runner in ("adk", "pydantic_ai"):
-        scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
-        surface = FixtureSurface(schemas=[])
-        seam = PlannerSeam(
-            settings=Settings(planner_runner=runner),
-            agent_settings=AgentSettings(planner_model_name=named),
-            surface=surface,
-            specs=_proposals()(
-                seam_specs(surface=surface, translate=build_translate(surface=surface))
-            ),
-            client=scripted.client,
-        )
-        await _SeamHarness().run(seam, run_config=_SSE, readings=[], **_planned(plan))
-        sent[runner] = [request.model for request in scripted.requests]
+    scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
+    surface = FixtureSurface(schemas=[])
+    seam = PlannerSeam(
+        settings=Settings(planner_runner=runner),
+        agent_settings=AgentSettings(planner_model_name=named),
+        surface=surface,
+        specs=_proposals()(seam_specs(surface=surface, translate=build_translate(surface=surface))),
+        client=scripted.client,
+    )
+    await _SeamHarness().run(seam, run_config=_SSE, readings=[], **_planned(plan))
 
-    assert sent["pydantic_ai"] == sent["adk"] == [_MODEL]
+    assert [request.model for request in scripted.requests] == [_MODEL]
 
 
 async def test_both_planners_send_one_request_form_and_share_one_prefix_cache(plan: Plan) -> None:
@@ -283,46 +292,53 @@ def _in_wire_order(config: types.GenerateContentConfig | types.CreateCachedConte
     return json.dumps(dumped)
 
 
+@on_each_runner
 @pytest.mark.parametrize("cached", [False, True], ids=["plain-request", "cache-create"])
-async def test_both_planners_send_the_same_config_in_wire_order(plan: Plan, cached: bool) -> None:
+async def test_both_planners_send_the_same_config_in_wire_order(
+    plan: Plan, cached: bool, runner: Runner, request: pytest.FixtureRequest
+) -> None:
     """A planned turn's first request, or the create of its prefix cache, holds
-    the same config on both planners, field for field and list for list in the
-    order sent, and the two key the prefix cache alike. Equal keys alone would
-    not show the order, since the key sorts."""
-    sent: dict[Runner, str] = {}
-    keys: dict[Runner, str | None] = {}
+    the stored config on both planners, field for field and list for list in the
+    order sent, and both key the prefix cache with the stored key. Equal keys
+    alone would not show the order, since the key sorts. The stored config is
+    compared as the text it dumps to, which keeps its order."""
     surface = FixtureSurface(schemas=[])
     specs = _proposals()(seam_specs(surface=surface, translate=build_translate(surface=surface)))
-    for runner in _RUNNERS:
-        caches = _Caches()
-        scripted = _with_caches(
-            ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))]),
-            caches,
+    caches = _Caches()
+    scripted = _with_caches(
+        ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))]),
+        caches,
+    )
+    seam = PlannerSeam(
+        settings=Settings(planner_runner=runner),
+        surface=surface,
+        specs=specs,
+        prefix_cache=PrefixCache() if cached else None,
+        client=scripted.client,
+    )
+    await _SeamHarness().run(seam, run_config=_SSE, readings=[], **_planned(plan))
+    (sent, *_) = scripted.requests
+    if cached:
+        (created,) = caches.created
+        in_order = _in_wire_order(created)
+        whole = types.GenerateContentConfig(
+            system_instruction=created.system_instruction,
+            tools=created.tools,
+            tool_config=created.tool_config,
         )
-        seam = PlannerSeam(
-            settings=Settings(planner_runner=runner),
-            surface=surface,
-            specs=specs,
-            prefix_cache=PrefixCache() if cached else None,
-            client=scripted.client,
-        )
-        await _SeamHarness().run(seam, run_config=_SSE, readings=[], **_planned(plan))
-        (request, *_) = scripted.requests
-        if cached:
-            (created,) = caches.created
-            sent[runner] = _in_wire_order(created)
-            whole = types.GenerateContentConfig(
-                system_instruction=created.system_instruction,
-                tools=created.tools,
-                tool_config=created.tool_config,
-            )
-            keys[runner] = prefix_key(request.model, whole)
-        else:
-            sent[runner] = _in_wire_order(request.generate_config)
-            keys[runner] = prefix_key(request.model, request.generate_config)
+        key = prefix_key(sent.model, whole)
+    else:
+        in_order = _in_wire_order(sent.generate_config)
+        key = prefix_key(sent.model, sent.generate_config)
 
-    assert sent["pydantic_ai"] == sent["adk"]
-    assert keys["adk"] is not None and keys["pydantic_ai"] == keys["adk"]
+    name = expectation_name(request, runner=runner)
+    assert key is not None
+    if runner == STORING_RUNNER:
+        held = "wire_order_cache_create_config" if cached else "wire_order_request_config"
+        expect(name, {"config": shared(json.loads(in_order), held), "key": key})
+    stored = expected(name)
+    assert json.dumps(stored["config"]) == in_order
+    assert stored["key"] == key
 
 
 def test_the_pydantic_ai_planner_refuses_a_model_that_is_not_gemini() -> None:
@@ -543,13 +559,16 @@ async def test_the_seams_observer_sees_each_answer_the_model_reads(
 @pytest.mark.parametrize("shape", [reply, live_call_reply], ids=["one-chunk", "live-shaped"])
 @pytest.mark.parametrize("runners", _mixed(2), ids="-then-".join)
 async def test_an_ask_answered_under_the_other_runner_lands_the_same_plan(
-    plan: Plan, runners: tuple[Runner, ...], shape: Callable[..., Reply]
+    plan: Plan,
+    runners: tuple[Runner, ...],
+    shape: Callable[..., Reply],
+    request: pytest.FixtureRequest,
 ) -> None:
     """A live-shaped reply (`live_call_reply`) leaves ADK's trailing empty text
     part on a model turn the ADK planner stores, which the other runner's resume
     reads as it reads its own, and the turn lands the same plan; with that part
     taken off the ADK planner's side, everything else is equal."""
-    crossed, adk, pydantic = await _crossed(
+    crossed, alone = await _crossed(
         runners,
         _Script(
             replies=[
@@ -561,20 +580,20 @@ async def test_an_ask_answered_under_the_other_runner_lands_the_same_plan(
         ),
     )
 
-    assert adk.outputs[0] is None, "the ask pauses the first run"
-    assert adk.outputs[1] is not None and "plan" in adk.outputs[1]
+    assert crossed.outputs[0] is None, "the ask pauses the first run"
+    assert crossed.outputs[1] is not None and "plan" in crossed.outputs[1]
     if shape is live_call_reply:
-        adk, taken = _without_trailing_empty_text(adk)
+        alone["adk"], taken = _without_trailing_empty_text(alone["adk"])
         crossed, _ = _without_trailing_empty_text(crossed)
         assert taken > 0
-    _assert_crossed_same(crossed, adk, pydantic)
+    _assert_crossed_expected(request, runners, crossed, alone)
 
 
 @pytest.mark.parametrize("runners", _mixed(3), ids="-then-".join)
 async def test_two_asks_answered_across_runners_land_the_same_plan(
-    plan: Plan, runners: tuple[Runner, ...]
+    plan: Plan, runners: tuple[Runner, ...], request: pytest.FixtureRequest
 ) -> None:
-    crossed, adk, pydantic = await _crossed(
+    crossed, alone = await _crossed(
         runners,
         _Script(
             replies=[
@@ -591,9 +610,9 @@ async def test_two_asks_answered_across_runners_land_the_same_plan(
         ),
     )
 
-    assert adk.outputs[:2] == [None, None], "each ask pauses its run"
-    assert adk.outputs[2] is not None and "plan" in adk.outputs[2]
-    _assert_crossed_same(crossed, adk, pydantic)
+    assert crossed.outputs[:2] == [None, None], "each ask pauses its run"
+    assert crossed.outputs[2] is not None and "plan" in crossed.outputs[2]
+    _assert_crossed_expected(request, runners, crossed, alone)
 
 
 async def _legacy_answered(runner: Runner, plan: Plan) -> _Entry:
@@ -648,30 +667,26 @@ async def _legacy_answered(runner: Runner, plan: Plan) -> _Entry:
     )
 
 
+@on_each_runner
 async def test_a_legacy_ask_answered_under_the_pydantic_ai_runner_lands_the_adk_planners_plan(
-    plan: Plan,
+    plan: Plan, runner: Runner, request: pytest.FixtureRequest
 ) -> None:
     """A turn paused on the planner's `adk_request_input` call, as the ADK planner
     paused before its node paused on its asks, holds no pending ask. Its answer
     re-enters the Pydantic AI planner in a fresh run, as it re-enters the ADK
-    planner."""
-    adk = await _legacy_answered("adk", plan)
-    pydantic = await _legacy_answered("pydantic_ai", plan)
+    planner. The paused run's requests, the ADK planner's on both, are stored
+    whole."""
+    entry = await _legacy_answered(runner, plan)
 
-    assert adk.outputs[0] is None, "the legacy ask pauses the first run"
-    assert adk.outputs[1] is not None and "plan" in adk.outputs[1]
-    assert pydantic.senders[-1] == "pydantic_ai"
-    assert pydantic.outputs == adk.outputs
-    assert pydantic.reports == adk.reports
-    for position, (adk_request, pydantic_request) in enumerate(
-        zip(adk.requests, pydantic.requests, strict=True)
-    ):
-        if pydantic.senders[position] == "adk":
-            assert _request_dumped(pydantic_request) == _request_dumped(adk_request)
-        else:
-            assert_pinned_wire_differences(adk_request, pydantic_request)
-    assert _dumped(pydantic.events) == _dumped(adk.events)
-    assert pydantic.state == adk.state
+    assert entry.outputs[0] is None, "the legacy ask pauses the first run"
+    assert entry.outputs[1] is not None and "plan" in entry.outputs[1]
+    assert entry.senders[0] == "adk" and entry.senders[-1] == runner
+    _assert_expected(
+        request,
+        entry,
+        runner=runner,
+        configs={"adk": "request_config_adk_legacy_ask", "pydantic_ai": "request_config"},
+    )
 
 
 # --- Amendments and replans ---------------------------------------------------------------
@@ -689,8 +704,11 @@ def _text(request: Request) -> str:
     )
 
 
+@on_each_runner
 @pytest.mark.parametrize("scenario", ["amendment", "ask-during-amendment"])
-async def test_an_amendment_is_the_same_on_both_planners(plan: Plan, scenario: str) -> None:
+async def test_an_amendment_is_the_same_on_both_planners(
+    plan: Plan, scenario: str, runner: Runner, request: pytest.FixtureRequest
+) -> None:
     """An amendment opens a turn of its own, so its entry is its session's first."""
     proposed = reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))
     scripts = {
@@ -702,11 +720,11 @@ async def test_an_amendment_is_the_same_on_both_planners(plan: Plan, scenario: s
         ),
     }
 
-    adk, pydantic = await _both(scripts[scenario])
+    entry = await _entry(runner, scripts[scenario])
 
-    assert adk.outputs[-1] is not None and "plan" in adk.outputs[-1], adk.outputs
-    assert all(_AMENDMENT in _text(request) for request in adk.requests)
-    _assert_same(adk, pydantic)
+    assert entry.outputs[-1] is not None and "plan" in entry.outputs[-1], entry.outputs
+    assert all(_AMENDMENT in _text(sent) for sent in entry.requests)
+    _assert_expected(request, entry, runner=runner)
 
 
 async def _replanned(runner: Runner, plan: Plan, opened_by: Mapping[str, Any]) -> _Entry:
@@ -756,30 +774,32 @@ async def _replanned(runner: Runner, plan: Plan, opened_by: Mapping[str, Any]) -
         requests=scripted.requests,
         events=stored.events,
         state=dict(stored.state),
+        senders=[runner] * len(scripted.requests),
     )
 
 
+@on_each_runner
 @pytest.mark.parametrize(
     "opened_by",
     [{"refusal": _rediscovery_refusal(_SPEC)}, {"pick": _PICKED}],
     ids=["refusal", "pick"],
 )
 async def test_a_replan_in_the_turn_it_planned_in_is_the_same_on_both_planners(
-    plan: Plan, opened_by: dict[str, Any]
+    plan: Plan, opened_by: dict[str, Any], runner: Runner, request: pytest.FixtureRequest
 ) -> None:
-    adk = await _replanned("adk", plan, opened_by)
-    pydantic = await _replanned("pydantic_ai", plan, opened_by)
+    entry = await _replanned(runner, plan, opened_by)
 
-    assert [output is not None and "plan" in output for output in adk.outputs] == [True, True]
-    assert len(adk.requests) == 2
-    _assert_same(adk, pydantic)
+    assert [output is not None and "plan" in output for output in entry.outputs] == [True, True]
+    assert len(entry.requests) == 2
+    _assert_expected(request, entry, runner=runner)
 
 
 # --- Two bounds closing in one request ----------------------------------------------------
 
 
+@on_each_runner
 async def test_a_second_bound_closing_in_the_same_request_refuses_with_the_same_code(
-    plan: Plan,
+    plan: Plan, runner: Runner, request: pytest.FixtureRequest
 ) -> None:
     """The call cap closes the first entry's second call. The request's wall
     clock then runs out before a replan the plan card's pick opens in the same
@@ -810,16 +830,13 @@ async def test_a_second_bound_closing_in_the_same_request_refuses_with_the_same_
             budget=shared,
         )
 
-    with _numbered_call_ids():
-        adk = await _entries("adk", script())
-    with _numbered_call_ids():
-        pydantic = await _entries("pydantic_ai", script())
+    entry = await _entry(runner, script())
 
-    assert [output["refused"]["code"] for output in adk.outputs if output is not None] == [
+    assert [output["refused"]["code"] for output in entry.outputs if output is not None] == [
         SeamCode.TURN_MODEL_CALLS_SPENT,
         SeamCode.TURN_WALL_TIME_SPENT,
     ]
-    _assert_same(adk, pydantic)
+    _assert_expected(request, entry, runner=runner)
 
 
 # --- Call ids and signatures on the wire --------------------------------------------------
@@ -846,14 +863,16 @@ def _refusing_asks(specs: Sequence[ToolSpec]) -> list[ToolSpec]:
     return [ask if spec.name == PLANNER_ASK else spec for spec in _proposals(referral)(specs)]
 
 
+@on_each_runner
 async def test_a_refused_ask_put_in_the_models_place_is_replayed_without_its_call_id(
-    plan: Plan,
+    plan: Plan, runner: Runner, request: pytest.FixtureRequest
 ) -> None:
     """A referral the user decides puts an ask in the model's place under an
     `adk-` call id. The ask tool refuses it, the run goes on, and the next
     request replays the ask and its answer with ADK's own call id removed and
     the placeholder signature kept, on both planners."""
-    adk, pydantic = await _both(
+    entry = await _entry(
+        runner,
         _Script(
             replies=[
                 reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED)),
@@ -861,44 +880,47 @@ async def test_a_refused_ask_put_in_the_models_place_is_replayed_without_its_cal
             ],
             runs=[_planned(plan)],
             setup=_refusing_asks,
-        )
+        ),
     )
 
-    for entry in (adk, pydantic):
-        assert len(entry.requests) == 2
-        (asked,) = [
-            part
-            for content in entry.requests[1].content_list
-            for part in content.parts or ()
-            if part.function_call is not None and part.function_call.name == PLANNER_ASK
-        ]
-        assert asked.function_call is not None and asked.function_call.id is None
-        assert asked.thought_signature == SKIP_THOUGHT_SIGNATURE
-        (answered,) = [
-            part
-            for content in entry.requests[1].content_list
-            for part in content.parts or ()
-            if part.function_response is not None and part.function_response.name == PLANNER_ASK
-        ]
-        assert answered.function_response is not None and answered.function_response.id is None
+    assert len(entry.requests) == 2
+    (asked,) = [
+        part
+        for content in entry.requests[1].content_list
+        for part in content.parts or ()
+        if part.function_call is not None and part.function_call.name == PLANNER_ASK
+    ]
+    assert asked.function_call is not None and asked.function_call.id is None
+    assert asked.thought_signature == SKIP_THOUGHT_SIGNATURE
+    (answered,) = [
+        part
+        for content in entry.requests[1].content_list
+        for part in content.parts or ()
+        if part.function_response is not None and part.function_response.name == PLANNER_ASK
+    ]
+    assert answered.function_response is not None and answered.function_response.id is None
     (stored,) = [
         call
-        for event in _planner_events(adk)
+        for event in _planner_events(entry)
         for call in event.get_function_calls()
         if call.name == PLANNER_ASK
     ]
     assert stored.id == "adk-1", "the stored ask keeps its id"
-    _assert_same(adk, pydantic)
+    _assert_expected(
+        request, entry, runner=runner, configs={"pydantic_ai": "request_config_refusing_ask"}
+    )
 
 
+@on_each_runner
 async def test_an_unsigned_first_call_is_replayed_with_the_placeholder_only_by_pydantic_ai(
-    plan: Plan,
+    plan: Plan, runner: Runner, request: pytest.FixtureRequest
 ) -> None:
     """Gemini signs the first function call of a response it thought before. One
     it sent unsigned, the ADK planner replays with no signature and the Pydantic AI
     planner with Gemini's placeholder. `assert_pinned_wire_differences` pins
     that one difference."""
-    adk, pydantic = await _both(
+    entry = await _entry(
+        runner,
         _Script(
             replies=[
                 reply(call_part(PROPOSE_PLAN, {}, id="p1")),
@@ -906,30 +928,29 @@ async def test_an_unsigned_first_call_is_replayed_with_the_placeholder_only_by_p
             ],
             runs=[_planned(plan)],
             setup=_proposals(_REFUSED),
-        )
+        ),
     )
 
-    def replayed(entry: _Entry) -> types.Part:
-        (part,) = [
-            part
-            for content in entry.requests[1].content_list
-            for part in content.parts or ()
-            if part.function_call is not None and part.function_call.id == "p1"
-        ]
-        return part
-
-    assert replayed(adk).thought_signature is None
-    assert replayed(pydantic).thought_signature == SKIP_THOUGHT_SIGNATURE
-    _assert_same(adk, pydantic)
+    (replayed,) = [
+        part
+        for content in entry.requests[1].content_list
+        for part in content.parts or ()
+        if part.function_call is not None and part.function_call.id == "p1"
+    ]
+    signatures = {"adk": None, "pydantic_ai": SKIP_THOUGHT_SIGNATURE}
+    assert replayed.thought_signature == signatures[runner]
+    _assert_expected(request, entry, runner=runner)
 
 
+@on_each_runner
 async def test_calls_without_ids_are_stored_and_replayed_alike_on_both_planners(
-    plan: Plan,
+    plan: Plan, runner: Runner, request: pytest.FixtureRequest
 ) -> None:
     """Gemini sends its function calls without ids. Both planners give each one
     an `adk-` id, store the call and its answer under it, and send the next
     request without it."""
-    adk, pydantic = await _both(
+    entry = await _entry(
+        runner,
         _Script(
             replies=[
                 reply(call_part(PROPOSE_PLAN, {}, signature=_SIGNED)),
@@ -937,19 +958,18 @@ async def test_calls_without_ids_are_stored_and_replayed_alike_on_both_planners(
             ],
             runs=[_planned(plan)],
             setup=_proposals(_REFUSED),
-        )
+        ),
     )
 
-    for entry in (adk, pydantic):
-        ids = [call.id for event in _planner_events(entry) for call in event.get_function_calls()]
-        assert ids == ["adk-1", "adk-2"]
-        assert all(
-            part.function_call.id is None
-            for content in entry.requests[1].content_list
-            for part in content.parts or ()
-            if part.function_call is not None
-        )
-    _assert_same(adk, pydantic)
+    ids = [call.id for event in _planner_events(entry) for call in event.get_function_calls()]
+    assert ids == ["adk-1", "adk-2"]
+    assert all(
+        part.function_call.id is None
+        for content in entry.requests[1].content_list
+        for part in content.parts or ()
+        if part.function_call is not None
+    )
+    _assert_expected(request, entry, runner=runner)
 
 
 # --- A Stop while a switch runs -----------------------------------------------------------
@@ -999,16 +1019,20 @@ async def _stopped_switch(
     return [proposed], frames
 
 
+@on_each_runner
 async def test_a_stop_while_a_switch_runs_offers_the_plan_unchanged_after_either_planner(
-    plan: Plan, monkeypatch: pytest.MonkeyPatch
+    plan: Plan, monkeypatch: pytest.MonkeyPatch, runner: Runner, request: pytest.FixtureRequest
 ) -> None:
     """The plan card a Pydantic AI entry drafted takes a switch and a Stop as the
     ADK planner's card does. The stream ends on the same plan re-offered under a
     fresh interrupt, carrying `switch_cancelled`."""
-    adk = await _stopped_switch("adk", plan, monkeypatch)
-    pydantic = await _stopped_switch("pydantic_ai", plan, monkeypatch)
+    streamed = await _stopped_switch(runner, plan, monkeypatch)
 
-    assert [_frames(frames) for frames in pydantic] == [_frames(frames) for frames in adk]
+    expect(
+        expectation_name(request, runner=runner),
+        [_frames(frames) for frames in streamed],
+        stores=runner == STORING_RUNNER,
+    )
 
 
 # --- A switch through the graph after an entry ---------------------------------------------
@@ -1130,9 +1154,9 @@ _RECORDED_TIME = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|\+00:00)"
 
 
 def _untimed(events: Sequence[Event]) -> Any:
-    """`events` dumped as `_dumped` dumps them, less each progress line's
+    """`events` as `_read` reads them, less each progress line's
     duration and with each time recorded in them put as `<time>`."""
-    dumped = _dumped(events)
+    dumped = _read(events)
     for event in dumped:
         event.get("custom_metadata", {}).get("progress", {}).pop("duration_ms", None)
     return _timeless({"events": dumped})["events"]
@@ -1143,27 +1167,25 @@ def _timeless(state: Mapping[str, Any]) -> Any:
     return json.loads(_RECORDED_TIME.sub("<time>", json.dumps(dict(state), default=str)))
 
 
+@on_each_runner
 async def test_a_switch_after_an_entry_revises_the_same_plan_on_both_planners(
-    real_schemas: list[ToolSchema],
+    real_schemas: list[ToolSchema], runner: Runner, request: pytest.FixtureRequest
 ) -> None:
     """The switch node's revision reads the entry's stored ask and answer
     (`PlannerSeam.revise`), so the sector decision it makes is the user's and
-    the revised plan, the turn's events and the session's state are the same
-    after an entry on either planner."""
-    adk_switched, adk_events, adk_state, copy_pin = await _switched_after_an_entry(
-        "adk", real_schemas
-    )
-    _, pydantic_events, pydantic_state, _ = await _switched_after_an_entry(
-        "pydantic_ai", real_schemas
-    )
+    the revised plan, the turn's events and the session's state are the stored
+    ones after an entry on either planner."""
+    switched, events, state, copy_pin = await _switched_after_an_entry(runner, real_schemas)
 
-    offered = _output_of(adk_switched, "switch")
+    offered = _output_of(switched, "switch")
     assert "switch_failed" not in offered, offered.get("switch_failed")
-    revised = Plan.model_validate_json(adk_state["plan"])
+    revised = Plan.model_validate_json(state["plan"])
     (dataset,) = [r for r in revised.evidence_requirements if isinstance(r, DatasetRequirement)]
     assert dataset.source_spec_id == copy_pin
     sector = next(d for d in revised.decisions if d.slot.startswith("scope_sector_"))
     assert sector.resolved_by is ResolvedBy.USER
-    assert _untimed(pydantic_events) == _untimed(adk_events)
-    assert list(session_steps(pydantic_events)) == list(session_steps(adk_events))
-    assert pydantic_state == adk_state
+    expect(
+        expectation_name(request, runner=runner),
+        {"events": _untimed(events), "steps": _steps(events), "state": state},
+        stores=runner == STORING_RUNNER,
+    )

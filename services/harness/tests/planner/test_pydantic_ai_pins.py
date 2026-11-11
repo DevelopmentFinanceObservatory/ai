@@ -1,4 +1,4 @@
-"""Pins on the Pydantic AI behaviour the planner relies on and its documentation does not promise.
+"""Pins on Pydantic AI behaviour the planner relies on, which its docs do not promise.
 
 These tests and the tests that run both planners on one script gate raising the
 `pydantic-ai-slim` pin together. The cross-runner tests (`tests/test_planner_node.py`,
@@ -10,7 +10,7 @@ behaviour the code depends on.
 
 The shipping code reaches no underscore-named Pydantic AI object. What it relies on
 is behaviour the library's guides do not state: how a request is shaped on the wire,
-which calls a run retries, what a tool reads of the run so far, how streamed chunks
+which calls a run retries, when a tool runs within the run, how streamed chunks
 merge, when a run stops, and which span is current and what Pydantic AI writes on
 it. Each test drives that behaviour through
 `planner.pydantic_agent.run_planner` or `harness.planner_model.planner_model` over a
@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, MutableMapping, Sequence
 from typing import Any
 from unittest import mock
 
@@ -39,26 +39,25 @@ from opentelemetry.trace import StatusCode
 from planner.call import PlannerCall
 from planner.pydantic_agent import (
     PLANNER_PROFILE,
+    PlannerAnswers,
     PlannerDeps,
     PlannerItem,
     PlannerResponse,
-    PlannerToolAnswer,
     planner_agent,
     run_planner,
     tool_not_found,
 )
-from planner.pydantic_call import PydanticCall
+from planner.session import SessionCall
 from planner.tool_spec import Parameter, ToolSpec, function_declaration
 from planner.tools import EndRun
 from pydantic import BaseModel
 from pydantic_ai import Agent, Tool
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
-    ModelMessage,
     ModelRequest,
-    ToolReturnPart,
     UserPromptPart,
 )
+from pydantic_ai.models import Model
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.usage import UsageLimits
@@ -87,6 +86,11 @@ class _Filter(BaseModel):
     years: list[int] | None = None
 
 
+def _no_events(state: MutableMapping[str, Any], call_id: str | None) -> SessionCall:
+    """A tool call over a session with no events."""
+    return SessionCall([], state, call_id)
+
+
 def _tool(
     name: str = "work",
     *,
@@ -113,30 +117,29 @@ async def _run(
     replies: Sequence[Reply],
     *,
     question: str | None = QUESTION,
-    profile: Any = "planner",
+    model: Model | None = None,
     scripted: ScriptedGenai | None = None,
+    yielded: list[PlannerItem] | None = None,
 ) -> tuple[list[PlannerItem], ScriptedGenai]:
-    """`run_planner` over `specs` on `replies`, with every item it yielded."""
+    """`run_planner` over `specs` on `replies`, with every item it yielded, each
+    added to `yielded` as it is yielded."""
     scripted = scripted or ScriptedGenai(replies)
-    model = planner_model(
-        MODEL,
-        client=scripted.client,
-        budget=None,
-        profile=PLANNER_PROFILE if profile == "planner" else profile,
-    )
+    model = model or planner_model(MODEL, client=scripted.client, budget=None)
     planner = planner_agent(specs, instruction=INSTRUCTION, model=model)
     deps = PlannerDeps(
         state={},
-        earlier=(),
+        call_for=_no_events,
         tool_answered=lambda name, answer: None,
         tool_failed=lambda name, error: {"error": f"{name} failed"},
     )
-    items = [item async for item in run_planner(planner, deps, question=question, brief=BRIEF)]
+    items = [] if yielded is None else yielded
+    async for item in run_planner(planner, deps, question=question, brief=BRIEF):
+        items.append(item)
     return items, scripted
 
 
-def _answers(items: Sequence[PlannerItem]) -> list[PlannerToolAnswer]:
-    return [item for item in items if isinstance(item, PlannerToolAnswer)]
+def _answers(items: Sequence[PlannerItem]) -> list[types.FunctionResponse]:
+    return [answer for item in items if isinstance(item, PlannerAnswers) for answer in item.answers]
 
 
 def _responses(items: Sequence[PlannerItem]) -> list[PlannerResponse]:
@@ -215,14 +218,11 @@ async def test_the_planner_profile_hands_the_wrapper_declarations_verbatim_in_th
 
 async def test_control_gemini_own_profile_rewrites_the_request_the_planner_profile_keeps() -> None:
     # Shows the profile keys are what the test above depends on.
-    own = GoogleModel(MODEL, provider=GoogleProvider(client=ScriptedGenai([]).client)).profile
-    with _handed() as handed:
-        _, scripted = await _run(
-            [_FILTERED], [reply(text_part("done"))], question=_MARKED_UP, profile=own
-        )
+    scripted = ScriptedGenai([reply(text_part("done"))])
+    own = GoogleModel(MODEL, provider=GoogleProvider(client=scripted.client))
+    await _run([_FILTERED], [], question=_MARKED_UP, model=own, scripted=scripted)
 
-    config = handed[0]
-    _, contents = _dumped(scripted.requests[0])
+    config, contents = _dumped(scripted.requests[0])
     declared = config["tools"][0]["function_declarations"][0]
     assert (
         declared["parameters_json_schema"] != function_declaration(_FILTERED).parameters_json_schema
@@ -277,7 +277,7 @@ async def test_a_call_with_arguments_the_schema_refuses_reaches_the_body_unvalid
 
     items, scripted = await _run([spec], [reply(stray, missing), reply(text_part("done"))])
 
-    answers = {answer.call_id: answer.answer for answer in _answers(items)}
+    answers = {answer.id: answer.response or {} for answer in _answers(items)}
     assert answers["c1"] == {"outcome": "ok"}
     assert answers["c2"].get("outcome") != "ok" and "name" in str(answers["c2"])
     assert len(scripted.requests) == 2
@@ -297,7 +297,7 @@ async def test_a_call_keeps_the_id_the_model_sent() -> None:
 
     called = [part.function_call.id for part in _responses(items)[0].parts if part.function_call]
     assert called == ["sent", "also"]
-    assert sorted(answer.call_id for answer in _answers(items)) == ["also", "sent"]
+    assert [answer.id for answer in _answers(items)] == ["sent", "also"]
 
 
 # --- Unknown tools and the retry allowance --------------------------------------------
@@ -313,7 +313,7 @@ async def test_a_call_to_an_unknown_tool_is_answered_as_the_adk_planner_answers_
     items, scripted = await _run([_BARE], _unknown_calls(3))
 
     expected = tool_not_found("nope", ["bare"])
-    assert [answer.answer for answer in _answers(items)] == [expected] * 3
+    assert [answer.response for answer in _answers(items)] == [expected] * 3
     sent = scripted.requests[-1].content_list[-1].parts or []
     assert [part.function_response.response for part in sent if part.function_response] == [
         expected
@@ -329,28 +329,6 @@ async def test_control_a_plain_agent_charges_each_unknown_call_against_its_retri
         await _stream_run(_plain_agent(scripted, retries=1))
 
 
-async def test_a_later_tool_reads_the_answer_to_an_unknown_call_in_the_run_messages() -> None:
-    # `run_steps` reads each return of the run, so the history processor's rewrite has
-    # to persist in the run's messages as well as in what the model is sent.
-    seen: list[PlannerCall] = []
-    replies = [reply(call_part("nope", id="c1")), reply(call_part("bare", id="c2"))]
-
-    await _run([_tool("bare", seen=seen)], [*replies, reply(text_part("done"))])
-
-    (call,) = seen
-    assert isinstance(call, PydanticCall)
-    returns = [
-        part
-        for message in call.messages
-        if isinstance(message, ModelRequest)
-        for part in message.parts
-        if isinstance(part, ToolReturnPart)
-    ]
-    assert [(part.tool_name, part.content) for part in returns] == [
-        ("nope", tool_not_found("nope", ["bare"]))
-    ]
-
-
 # --- Where a run stops ----------------------------------------------------------------
 
 
@@ -363,8 +341,8 @@ async def test_an_empty_response_ends_the_run_with_no_second_request() -> None:
 
 
 async def test_a_blocked_prompt_ends_the_run_and_raises_nothing() -> None:
-    # Pydantic AI hands over a blocked prompt as a response with no parts. The node
-    # reads the block reason off the stream (`harness.planner_model.ResponseMetadata`).
+    # Pydantic AI hands over a blocked prompt as a response with no parts, which the
+    # node stores no event for.
     items, scripted = await _run([_BARE], [blocked_reply(types.BlockedReason.SAFETY)])
 
     assert len(scripted.requests) == 1
@@ -388,7 +366,7 @@ async def test_a_run_ends_before_the_request_after_a_call_that_ended_it() -> Non
     )
 
     assert len(scripted.requests) == 1
-    assert [answer.ended for answer in _answers(items)] == [True]
+    assert [answer.id for answer in _answers(items)] == ["c1"]
 
 
 async def test_a_run_goes_past_the_default_cap_of_fifty_requests() -> None:
@@ -400,56 +378,43 @@ async def test_a_run_goes_past_the_default_cap_of_fifty_requests() -> None:
     assert len(scripted.requests) == 53
 
 
-# --- What a tool reads of the run -----------------------------------------------------
+# --- When a tool runs within the run --------------------------------------------------
 
 
 def _texts(content: types.Content) -> str | None:
     return (content.parts or [types.Part()])[0].text
 
 
-def _kinds(messages: Sequence[ModelMessage]) -> list[str]:
-    return [type(message).__name__ for message in messages]
+async def test_a_responses_calls_run_after_it_is_yielded_and_before_the_next_request() -> None:
+    # A planner tool reads the session's events (`planner.session.SessionCall`), which
+    # `harness.planner_node` appends to as `run_planner` yields. So each call of a
+    # response runs once the response is yielded, and no request is sent until every
+    # call has answered: Pydantic AI runs no tool while a model request streams.
+    yielded: list[PlannerItem] = []
+    seen: list[list[str]] = []
 
-
-async def test_a_tool_reads_the_run_so_far_with_the_returns_of_its_own_response_not_yet_in_it() -> (
-    None
-):
-    # `PydanticCall.messages` is `ctx.messages`: the user's message, the brief, each
-    # response so far with the returns that followed it, and the response being
-    # served with none of its own calls' returns, as ADK holds a response's
-    # function responses back until every call has finished.
-    seen: list[PlannerCall] = []
-    spec = _tool("bare", seen=seen)
+    def body(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
+        del call, end_run, arguments
+        seen.append([type(item).__name__ for item in yielded])
+        return {"outcome": "ok"}
 
     await _run(
-        [spec],
+        [ToolSpec(name="bare", description="d", parameters=(), body=body)],
         [
             reply(call_part("bare", id="a"), call_part("bare", id="b")),
             reply(call_part("bare", id="c")),
             reply(text_part("done")),
         ],
+        yielded=yielded,
     )
 
-    first, second, third = seen
-    assert isinstance(first, PydanticCall) and isinstance(second, PydanticCall)
-    assert isinstance(third, PydanticCall)
-    assert [call.call_id for call in seen] == ["a", "b", "c"]
-    assert _kinds(first.messages) == ["ModelRequest", "ModelRequest", "ModelResponse"]
-    assert _kinds(second.messages) == _kinds(first.messages)
-    assert _kinds(third.messages) == [*_kinds(first.messages), "ModelRequest", "ModelResponse"]
-    answered = [
-        part.tool_call_id for part in third.messages[3].parts if isinstance(part, ToolReturnPart)
-    ]
-    assert answered == ["a", "b"]
-    assert [part.part_kind for part in third.messages[0].parts] == ["user-prompt"]
-    assert [
-        part.content for part in third.messages[0].parts if isinstance(part, UserPromptPart)
-    ] == [QUESTION]
+    first = ["PlannerResponse"]
+    assert seen == [first, first, [*first, "PlannerAnswers", *first]]
 
 
-async def test_the_calls_of_a_response_answer_in_the_order_they_finish() -> None:
-    # `run_planner` yields each answer as its call finishes, so the events a response's
-    # calls store come in that order, as ADK's do.
+async def test_the_answers_of_a_response_come_in_call_order_whatever_order_they_finish_in() -> None:
+    # `run_planner` takes a response's answers from the tool returns Pydantic AI
+    # collects into the next request, which holds them in the order of the calls.
     async def slow(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
         await asyncio.sleep(0.05)
         return {"which": "slow"}
@@ -461,7 +426,7 @@ async def test_the_calls_of_a_response_answer_in_the_order_they_finish() -> None
         [reply(call_part("slow", id="a"), call_part("bare", id="b")), reply(text_part("done"))],
     )
 
-    assert [answer.call_id for answer in _answers(items)] == ["b", "a"]
+    assert [answer.id for answer in _answers(items)] == ["a", "b"]
 
 
 # --- Request shape across messages ----------------------------------------------------
@@ -533,8 +498,9 @@ async def test_the_first_unsigned_call_of_a_response_replays_with_the_skip_signa
 
 
 async def test_consecutive_thought_chunks_make_one_part_that_keeps_the_signature() -> None:
-    # `planner_model` drops unsigned thoughts after the merge Pydantic AI and ADK both
-    # make, so a run of thought chunks with a signature on one chunk stays whole.
+    # The planner drops unsigned thoughts from the parts this merge makes
+    # (`planner.pydantic_agent._without_unsigned_thoughts`), so a run of thought
+    # chunks with a signature on one chunk stays whole, as on the ADK planner.
     chunks = Reply(
         chunks=[
             [thought_part("a", signature=None)],
@@ -571,7 +537,7 @@ async def test_every_request_reaches_the_clients_streamed_call_with_three_keywor
     # `harness.planner_model` answers the client's streamed call with a keyword-only
     # signature of exactly these three, and refuses a call that does not stream.
     scripted = ScriptedGenai([reply(call_part("bare", id="c")), reply(text_part("done"))])
-    model = planner_model(MODEL, client=scripted.client, budget=None, profile=PLANNER_PROFILE)
+    model = planner_model(MODEL, client=scripted.client, budget=None)
     streamed = model.client.aio.models.generate_content_stream
     sent: list[set[str]] = []
 
@@ -582,7 +548,7 @@ async def test_every_request_reaches_the_clients_streamed_call_with_three_keywor
     model.client.aio.models.generate_content_stream = spy  # ty: ignore[invalid-assignment]
     planner = planner_agent([_BARE], instruction=INSTRUCTION, model=model)
     deps = PlannerDeps(
-        state={}, earlier=(), tool_answered=lambda *_: None, tool_failed=lambda *_: {}
+        state={}, call_for=_no_events, tool_answered=lambda *_: None, tool_failed=lambda *_: {}
     )
 
     [_ async for _ in run_planner(planner, deps, question=QUESTION, brief=BRIEF)]
@@ -600,7 +566,7 @@ async def test_the_clients_call_runs_inside_the_chat_span_of_the_conversation(
     # call is made. That span has to be the generation's, which Pydantic AI opens
     # under the planner's run span.
     scripted = ScriptedGenai([reply(text_part("done"))])
-    model = planner_model(MODEL, client=scripted.client, budget=None, profile=PLANNER_PROFILE)
+    model = planner_model(MODEL, client=scripted.client, budget=None)
     streamed = model.client.aio.models.generate_content_stream
     current: list[tuple[bool, str]] = []
 
@@ -612,7 +578,7 @@ async def test_the_clients_call_runs_inside_the_chat_span_of_the_conversation(
     model.client.aio.models.generate_content_stream = spy  # ty: ignore[invalid-assignment]
     planner = planner_agent([_BARE], instruction=INSTRUCTION, model=model, name="dfo_planner")
     deps = PlannerDeps(
-        state={}, earlier=(), tool_answered=lambda *_: None, tool_failed=lambda *_: {}
+        state={}, call_for=_no_events, tool_answered=lambda *_: None, tool_failed=lambda *_: {}
     )
 
     [
@@ -632,10 +598,10 @@ async def test_the_clients_call_runs_inside_the_chat_span_of_the_conversation(
 async def _traced_run(specs: Sequence[ToolSpec], replies: Sequence[Reply]) -> list[PlannerItem]:
     """`run_planner` over `specs` on `replies`, its spans exported."""
     scripted = ScriptedGenai(replies)
-    model = planner_model(MODEL, client=scripted.client, budget=None, profile=PLANNER_PROFILE)
+    model = planner_model(MODEL, client=scripted.client, budget=None)
     planner = planner_agent(specs, instruction=INSTRUCTION, model=model, name="dfo_planner")
     deps = PlannerDeps(
-        state={}, earlier=(), tool_answered=lambda *_: None, tool_failed=lambda *_: {}
+        state={}, call_for=_no_events, tool_answered=lambda *_: None, tool_failed=lambda *_: {}
     )
     return [
         item

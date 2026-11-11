@@ -11,7 +11,7 @@ gets the same treatment:
 
 - every `title`, which repeats the property or class name it sits under;
 - the `null` branch of an optional field's `anyOf`, leaving the field's own
-  schema in its place: an optional field is one `required` does not list;
+  schema in its place. An optional field is one `required` does not list;
 - a `null` or `[]` default, which the same absence from `required` says, and
   a default equal to the `const` beside it;
 - the description of a field named in `SHARED_FIELDS`, which every
@@ -28,11 +28,10 @@ Gemini reads nothing beside a `$ref`, so no `$ref` in the result has sibling
 keys. Where a field's schema is a reference with a description or default of
 its own, the field holds a copy of the definition instead, with the field's
 keys on top: its `description` replaces the definition's own and its
-`default` stays. A definition nothing refers to any more is dropped.
+`default` stays. A definition nothing refers to is dropped.
 
-The validator is untouched: `propose_plan` still validates what the model
-sends against the models themselves, so an explicit `null` is accepted as
-before.
+The validator takes no part in this. `propose_plan` validates what the model
+sends against the models themselves, so an explicit `null` is accepted.
 """
 
 from __future__ import annotations

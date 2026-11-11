@@ -1,0 +1,222 @@
+{
+  "events": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "How much aid did Ghana receive?"
+          }
+        ],
+        "role": "user"
+      },
+      "author": "user",
+      "actions": {
+        "state_delta": {},
+        "artifact_delta": {},
+        "requested_auth_configs": {},
+        "requested_tool_confirmations": {}
+      },
+      "node_info": {
+        "path": ""
+      },
+      "invocation": 0
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_call": {
+              "id": "a1",
+              "args": {
+                "message": "Which donor do you mean?"
+              },
+              "name": "ask_user_question"
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "state_delta": {}
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_response": {
+              "id": "a1",
+              "name": "ask_user_question",
+              "response": {
+                "outcome": "ok",
+                "status": "asked",
+                "message": "The question is with the user. Their answer arrives with your next brief."
+              }
+            }
+          }
+        ],
+        "role": "user"
+      },
+      "state_delta": {
+        "planner:pending_ask": {
+          "call_id": "a1",
+          "args": {
+            "message": "Which donor do you mean?",
+            "candidates": [],
+            "options": [],
+            "recommended_spec_id": null,
+            "rationale": null
+          }
+        }
+      }
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "function_call": {
+              "id": "a1",
+              "args": {
+                "interruptId": "a1",
+                "payload": {
+                  "message": "Which donor do you mean?",
+                  "candidates": [],
+                  "options": [],
+                  "recommended_spec_id": null,
+                  "rationale": null
+                },
+                "message": "Which donor do you mean?",
+                "response_schema": null
+              },
+              "name": "adk_request_input"
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "author": "seam_test_wf",
+      "actions": {
+        "state_delta": {
+          "planner:plan": null,
+          "planner:alignments": null,
+          "planner:rounds": 0,
+          "planner:pin_sources": {},
+          "planner:unsupported": [],
+          "planner:optional_declines": [
+            "no_operation_covers"
+          ],
+          "planner:terminal_declines": [
+            "no_operation_covers"
+          ],
+          "planner:reduction_refused_asks": [],
+          "translator:compile_failures": [],
+          "planner:amendment_entry": false,
+          "planner:decision_pick": null,
+          "planner:refused_spec_ids": [],
+          "planner:refused_spec_details": {},
+          "planner:skills_read": [],
+          "planner:skills_before_entry": 0,
+          "planner:pending_ask": {
+            "call_id": "a1",
+            "args": {
+              "message": "Which donor do you mean?",
+              "candidates": [],
+              "options": [],
+              "recommended_spec_id": null,
+              "rationale": null
+            }
+          },
+          "planner:asked_referral": null
+        },
+        "artifact_delta": {},
+        "requested_auth_configs": {},
+        "requested_tool_confirmations": {}
+      },
+      "node_info": {
+        "path": "seam_test_wf@1/seam_under_test@1"
+      },
+      "long_running_tool_ids": [
+        "a1"
+      ],
+      "branch": "dfo_interrupts",
+      "invocation": 0
+    }
+  ],
+  "steps": [
+    {
+      "kind": "message",
+      "call_id": null,
+      "args": null,
+      "body": {},
+      "name": null
+    },
+    {
+      "kind": "call",
+      "call_id": "a1",
+      "args": {
+        "message": "Which donor do you mean?"
+      },
+      "body": {},
+      "name": null
+    }
+  ],
+  "frames": [
+    {
+      "event": "elicitation.request",
+      "seq": 0,
+      "interrupt_id": "interrupt_id-0",
+      "questions": [
+        {
+          "id": "q1",
+          "question": "Which donor do you mean?",
+          "input": "single_select",
+          "options": [],
+          "allow_free_text": true,
+          "skippable": false,
+          "rationale": null
+        }
+      ],
+      "skippable": true
+    }
+  ],
+  "state": {
+    "planner:pending_ask": {
+      "call_id": "a1",
+      "args": {
+        "message": "Which donor do you mean?",
+        "candidates": [],
+        "options": [],
+        "recommended_spec_id": null,
+        "rationale": null
+      }
+    },
+    "planner:plan": null,
+    "planner:alignments": null,
+    "planner:rounds": 0,
+    "planner:pin_sources": {},
+    "planner:unsupported": [],
+    "planner:optional_declines": [
+      "no_operation_covers"
+    ],
+    "planner:terminal_declines": [
+      "no_operation_covers"
+    ],
+    "planner:reduction_refused_asks": [],
+    "translator:compile_failures": [],
+    "planner:amendment_entry": false,
+    "planner:decision_pick": null,
+    "planner:refused_spec_ids": [],
+    "planner:refused_spec_details": {},
+    "planner:skills_read": [],
+    "planner:skills_before_entry": 0,
+    "planner:asked_referral": null
+  }
+}
