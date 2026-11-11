@@ -8,14 +8,17 @@ against it, so the recorded requests are what each would put on the wire.
 
 The part builders (`text_part`, `call_part`, `thought_part`), `usage_metadata`,
 `reply` and `Reply` describe a response; `Reply` options make a stream stall, fail
-at open, be cut, come back empty or come back blocked.
+at open, be cut, come back empty or come back blocked. A script entry may instead
+be a function of the request it answers (`Step`), which computes the reply from
+what the model was sent, or runs code when the call arrives; `held` is one that
+waits for a test to release it.
 """
 
 from __future__ import annotations
 
 import asyncio
 import copy
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -79,6 +82,24 @@ class Reply:
     cut_after: int | None = None
     cut_with: BaseException | None = None
     prompt_feedback: types.GenerateContentResponsePromptFeedback | None = None
+
+
+# A script entry: a reply, or a function of the request it answers that returns
+# one, awaited when it returns an awaitable. The function runs in the caller's
+# context when the call arrives, after the request is recorded.
+type Step = Reply | Callable[[Request], Reply | Awaitable[Reply]]
+
+
+def held(step: Step, *, paused: asyncio.Event, release: asyncio.Event) -> Step:
+    """`step`, answered only once `release` is set: the call sets `paused` when
+    it arrives, then waits, so a test can act while the generation is held."""
+
+    async def answer(request: Request) -> Reply:
+        paused.set()
+        await release.wait()
+        return await _resolved(step, request)
+
+    return answer
 
 
 def text_part(text: str) -> types.Part:
@@ -165,6 +186,9 @@ def client_error(status: int, message: str = "scripted refusal") -> errors.Clien
 class ScriptedGenai:
     """A google-genai client that answers streamed calls from `replies`, in order.
 
+    Each entry of `replies` is a `Step`: a `Reply`, or a function of the
+    request it answers.
+
     `client` is a real `google.genai.Client` with a scripted
     `aio.models.generate_content_stream`, so everything else a model class
     reads off a client (`vertexai`, HTTP options) is present. Every other
@@ -174,7 +198,7 @@ class ScriptedGenai:
     call's model, contents and config in call order.
     """
 
-    def __init__(self, replies: Sequence[Reply]) -> None:
+    def __init__(self, replies: Sequence[Step]) -> None:
         self.replies = list(replies)
         self.requests: list[Request] = []
         self.client = Client(api_key="scripted")
@@ -193,18 +217,27 @@ class ScriptedGenai:
     async def _open(
         self, *, model: str, contents: Any, config: Any = None
     ) -> AsyncIterator[types.GenerateContentResponse]:
-        self.requests.append(
-            Request(model=model, contents=copy.deepcopy(contents), config=copy.deepcopy(config))
+        request = Request(
+            model=model, contents=copy.deepcopy(contents), config=copy.deepcopy(config)
         )
+        self.requests.append(request)
         if len(self.requests) > len(self.replies):
             raise ScriptExhaustedError(
                 f"{len(self.requests)} requests were made against "
                 f"{len(self.replies)} scripted replies"
             )
-        step = self.replies[len(self.requests) - 1]
+        step = await _resolved(self.replies[len(self.requests) - 1], request)
         if step.open_error is not None:
             raise step.open_error
         return _stream(step)
+
+
+async def _resolved(step: Step, request: Request) -> Reply:
+    """The reply `step` answers `request` with."""
+    if isinstance(step, Reply):
+        return step
+    answered = step(request)
+    return answered if isinstance(answered, Reply) else await answered
 
 
 def _refusing(call: str) -> Callable[..., Any]:

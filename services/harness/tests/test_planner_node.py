@@ -22,9 +22,9 @@ import gc
 import itertools
 import json
 import logging
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, cast
+from typing import Any, cast
 from unittest import mock
 
 import aiohttp
@@ -35,8 +35,6 @@ from google import genai
 from google.adk import Context, Event
 from google.adk.agents.invocation_context import LlmCallsLimitExceededError
 from google.adk.agents.run_config import RunConfig, StreamingMode
-from google.adk.flows.llm_flows import functions as adk_functions
-from google.adk.models import Gemini
 from google.adk.runners import Runner as AdkRunner
 from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
@@ -48,7 +46,7 @@ from harness.planner_seam import PlannerSeam
 from harness.scripted import _compiled_proposal
 from harness.sentences import SeamCode, refusal_sentence
 from harness.settings import Settings
-from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
+from harness.turn_budget import TurnBudget, current_turn_budget
 from harness.turn_events import PLANNER_ASK
 from planner.agent import AGENT_NAME, session_steps
 from planner.call import PlannerCall, elected_spec_ids
@@ -62,7 +60,6 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
 )
-from planner.settings import AgentSettings
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
@@ -77,6 +74,13 @@ from .planner.planner_pairs import (
     seam_specs,
     without_trailing_empty_text,
 )
+from .planner_seam_runners import MODEL as _MODEL
+from .planner_seam_runners import SIGNED as _SIGNED
+from .planner_seam_runners import SSE as _SSE
+from .planner_seam_runners import PlannerRunner as Runner
+from .planner_seam_runners import Tools
+from .planner_seam_runners import numbered_call_ids as _numbered_call_ids
+from .planner_seam_runners import seam_on as _seam
 from .scripted_genai import (
     Reply,
     Request,
@@ -101,32 +105,13 @@ from .test_planner_seam import (
 from .test_studio import _app, _interrupt_body, _pick, _text
 from .test_turn_records import _switchable_scope
 
-type Runner = Literal["adk", "pydantic_ai"]
-# A change to the planner's tools.
-type Tools = Callable[[Sequence[ToolSpec]], list[ToolSpec]]
-
-_MODEL = AgentSettings().planner_model_name
 _USAGE = usage_metadata(prompt=120, cached=40, candidates=9, thoughts=4)
 _QUESTION = "kenya debt"
-_SSE = RunConfig(streaming_mode=StreamingMode.SSE)
 _REFUSED = {"outcome": "refused", "code": "plan_invalid", "message": "Pin a source."}
 _SPEC = "spec_" + "c" * 32
 _SPEC_NEW = "spec_" + "d" * 32
 # Where the test's `propose_plan` records the spec_ids the user picked.
 _ELECTED_KEY = "planner:elected_spec_ids"
-# Gemini signs the first function call of a response it thought before.
-_SIGNED = b"scripted-signature"
-
-
-@contextlib.contextmanager
-def _numbered_call_ids() -> Iterator[None]:
-    """Number the ids ADK gives a call that has none from 1, so a turn put in the
-    model's place carries the same call id on both planners."""
-    counter = itertools.count(1)
-    with mock.patch.object(
-        adk_functions, "generate_client_function_call_id", lambda: f"adk-{next(counter)}"
-    ):
-        yield
 
 
 @pytest.fixture
@@ -135,40 +120,6 @@ def plan(decision: Any, requirement: Any, derived_requirement: Any) -> Plan:
 
 
 # --- The seam on each planner ------------------------------------------------------------
-
-
-def _seam(
-    runner: Runner,
-    scripted: ScriptedGenai,
-    *,
-    bounded: bool = False,
-    translate: Translate | None = None,
-    tools: Tools | None = None,
-) -> PlannerSeam:
-    """The seam on `runner`, its model calls answered by `scripted`, serving the
-    planner's tools as `tools` changes them. `bounded` keeps the ADK planner's
-    model to the turn's budget, as the served planner's is. The Pydantic AI
-    planner's model always keeps to it."""
-    surface = FixtureSurface(schemas=[])
-    translate = translate if translate is not None else build_translate(surface=surface)
-    specs = seam_specs(surface=surface, translate=translate)
-    settings = Settings(planner_runner=runner)
-    if runner == "adk":
-        model = (BoundedGemini if bounded else Gemini)(model=_MODEL, client=scripted.client)
-        return PlannerSeam(
-            settings=settings,
-            surface=surface,
-            translate=translate,
-            specs=tools(specs) if tools is not None else specs,
-            model=model,
-        )
-    return PlannerSeam(
-        settings=settings,
-        surface=surface,
-        translate=translate,
-        specs=tools(specs) if tools is not None else specs,
-        client=scripted.client,
-    )
 
 
 def _proposals(*answers: dict[str, Any], records: Plan | None = None) -> Tools:
