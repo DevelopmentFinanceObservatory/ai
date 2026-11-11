@@ -67,10 +67,7 @@ from data_mcp.skills_client import name_get_skill_in_call_lines
 from executor.classify import RECOVERABLE_SPEC_CODES
 from google.adk import Context, Event
 from google.adk.agents import LlmAgent
-from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.base_llm import BaseLlm
-from google.adk.models.google_llm import Gemini
-from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
 from google.adk.workflow import BaseNode
@@ -180,7 +177,7 @@ from harness.graph.state import (
     stored_mapping,
     stored_sequence,
 )
-from harness.planner_node import directive_turn, planner_node
+from harness.planner_node import directive_turn, planner_node, pydantic_planner
 from harness.planner_run import (
     Directive,
     PlannerRun,
@@ -190,7 +187,7 @@ from harness.planner_run import (
     not_ready,
     referral_of,
 )
-from harness.prefix_cache import PrefixCache
+from harness.prefix_cache import PrefixCache, gemini_model_name
 from harness.sentences import (
     PlanWords,
     SeamCode,
@@ -347,12 +344,6 @@ _active_call: contextvars.ContextVar[PlannerRun | None] = contextvars.ContextVar
     "planner_seam_active_call", default=None
 )
 
-# A caller's callback on each request the planner sends its model, and on each
-# response the model answers, as `LlmAgent`'s callback lists run them: one that
-# answers a response ends its list there.
-ModelRequestCallback = Callable[[CallbackContext, LlmRequest], LlmResponse | None]
-ModelResponseCallback = Callable[[CallbackContext, LlmResponse], LlmResponse | None]
-
 
 @dataclass(frozen=True)
 class _RevisionSession(CallSession):
@@ -390,9 +381,8 @@ class PlannerSeam:
         translate: Translate | None = None,
         specs: Sequence[ToolSpec] | None = None,
         model: BaseLlm | None = None,
-        before_model_callbacks: Sequence[ModelRequestCallback] = (),
-        after_model_callbacks: Sequence[ModelResponseCallback] = (),
         client: Client | None = None,
+        on_tool_answered: Callable[[str, dict[str, Any] | None], None] | None = None,
     ) -> None:
         # `settings.planner_runner` names the planner `_propose` runs: the ADK
         # planner, an `LlmAgent`, or the Pydantic AI planner
@@ -403,30 +393,39 @@ class PlannerSeam:
         # the tools (`planner.agent.planner_specs` over the surface and that
         # translation). `client` is the google-genai client the planner's
         # model calls go through, on either runner; None builds one from the
-        # environment. The ADK planner's Gemini model uses a given client as
-        # it is, HTTP options included.
+        # environment. On either runner a client on Vertex AI is refused
+        # (`planner.agent.refuse_vertex_ai`). The ADK planner's Gemini model
+        # uses a given client as it is, HTTP options and retries included; the
+        # Pydantic AI planner's model sets its retries on each request
+        # (`harness.planner_model`).
         #
-        # `model`, `before_model_callbacks` and `after_model_callbacks` are the
-        # ADK planner's, so the Pydantic AI planner refuses them. `model`
+        # `model` is an ADK model, so the Pydantic AI planner refuses it. It
         # replaces the model `agent_settings` names, and takes no `client`.
-        # `before_model_callbacks`
-        # run after the seam's own, which answer a request themselves once the
-        # entry has to stop, so they see only the requests the model is sent.
-        # `after_model_callbacks` run before the seam's own, so they see each
-        # response as the model answered it, before `drop_thought_parts`
-        # replaces one. `evals/planner_entry` runs the served planner this way.
+        #
+        # `on_tool_answered` observes, on either runner, each planner tool's
+        # name and the answer the model reads for the call
+        # (`PlannerRun.tool_answered`).
         runner = settings.planner_runner
-        if runner == "pydantic_ai" and (
-            model is not None or before_model_callbacks or after_model_callbacks
-        ):
-            raise ValueError("a model and model callbacks run on the ADK planner only")
+        if runner == "pydantic_ai" and model is not None:
+            raise ValueError("a model runs on the ADK planner only")
         if model is not None and client is not None:
             raise ValueError("a model and a client replace the same thing; give one")
-        refuse_vertex_ai()
         self._client = client
+        self._on_tool_answered = on_tool_answered
         self._model_name = (
             agent_settings if agent_settings is not None else AgentSettings()
         ).planner_model_name
+        # The ADK planner resolves the name through ADK's model registry; the
+        # Pydantic AI planner runs the Gemini model it resolves to, and no
+        # other.
+        gemini_name = gemini_model_name(self._model_name)
+        if runner == "pydantic_ai" and gemini_name is None:
+            raise ValueError(
+                f"the Pydantic AI planner runs a Gemini model only, and "
+                f"{self._model_name!r} names none; set PLANNER_RUNNER=adk to run it"
+            )
+        if runner == "pydantic_ai":
+            refuse_vertex_ai(client)
         self._prefix_cache = prefix_cache
         # The surface and translation `propose_plan` runs, kept for `revise`,
         # which records a proposal of its own with no model call.
@@ -456,23 +455,15 @@ class PlannerSeam:
         self._instruction = planner_instruction(
             has_translator=True, has_skills=True, question_fixed=True
         )
-        self._agent = (
-            self._adk_planner(
-                model=model,
-                before_model_callbacks=before_model_callbacks,
-                after_model_callbacks=after_model_callbacks,
-            )
-            if runner == "adk"
+        self._agent = self._adk_planner(model=model) if runner == "adk" else None
+        # Built once and shared by every run; each run names its own model.
+        self._pydantic = (
+            (gemini_name, pydantic_planner(self._specs, instruction=self._instruction))
+            if runner == "pydantic_ai" and gemini_name is not None
             else None
         )
 
-    def _adk_planner(
-        self,
-        *,
-        model: BaseLlm | None,
-        before_model_callbacks: Sequence[ModelRequestCallback],
-        after_model_callbacks: Sequence[ModelResponseCallback],
-    ) -> LlmAgent:
+    def _adk_planner(self, *, model: BaseLlm | None) -> LlmAgent:
         """The ADK planner on the seam's tools, with the seam's callbacks."""
         agent = create_planner_agent(
             model_name=self._model_name,
@@ -482,11 +473,10 @@ class PlannerSeam:
             reads_user_words=False,
             prefix_cache=self._prefix_cache,
             specs=self._specs,
+            client=self._client,
         )
         if model is not None:
             agent.model = model
-        elif self._client is not None:
-            agent.model = _on_client(agent.model, self._client)
         # The callbacks are assigned exactly once, here, as bound methods,
         # and read the call they belong to off `_active_call` (a
         # `ContextVar` `_propose` sets for the duration of its own
@@ -499,7 +489,6 @@ class PlannerSeam:
         # the first truthy return, so the usage callback goes first: it
         # always returns `None`, and `drop_thought_parts` still runs after it.
         agent.after_model_callback = [
-            *after_model_callbacks,
             self._after_planner_model,
             *agent.canonical_after_model_callbacks,
         ]
@@ -508,7 +497,6 @@ class PlannerSeam:
         agent.before_model_callback = [
             *agent.canonical_before_model_callbacks,
             self._before_planner_model,
-            *before_model_callbacks,
         ]
         return agent
 
@@ -1041,7 +1029,9 @@ class PlannerSeam:
         ADK release that stops honouring it. The check runs when the run
         raises as well.
         """
-        run = PlannerRun(agent=AGENT_NAME, on_progress=on_progress)
+        run = PlannerRun(
+            agent=AGENT_NAME, on_progress=on_progress, on_tool_answered=self._on_tool_answered
+        )
         token = _active_call.set(run)
         budget = current_turn_budget.get()
         time_left_token = current_discovery_time_left.set(
@@ -1083,11 +1073,12 @@ class PlannerSeam:
 
     def _pydantic_planner(self, run: PlannerRun, budget: TurnBudget | None) -> BaseNode:
         """The Pydantic AI planner's node for `run`, on the seam's tools and instruction."""
+        assert self._pydantic is not None, "the seam runs the Pydantic AI planner"
+        model_name, planner = self._pydantic
         return planner_node(
             run,
-            specs=self._specs,
-            instruction=self._instruction,
-            model_name=self._model_name,
+            planner=planner,
+            model_name=model_name,
             client=self._genai_client,
             budget=budget,
             prefix_cache=self._prefix_cache,
@@ -1314,18 +1305,6 @@ class PlannerSeam:
                 _answer_text(answered) if answered is not None else "",
             ]
         )
-
-
-def _on_client(model: str | BaseLlm, client: Client) -> Gemini:
-    """`model`, the ADK planner's Gemini model, calling through `client`.
-
-    Raises:
-        ValueError: If `model` is not a Gemini model, which alone takes a
-            google-genai client.
-    """
-    if not isinstance(model, Gemini):
-        raise ValueError(f"a client runs a Gemini planner model only, not {model!r}")
-    return model.model_copy(update={"client": client})
 
 
 def _ask_text(

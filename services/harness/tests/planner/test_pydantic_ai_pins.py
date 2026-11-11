@@ -29,12 +29,12 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from planner.call import PlannerCall
 from planner.pydantic_agent import (
+    PLANNER_PROFILE,
     PlannerDeps,
     PlannerItem,
     PlannerResponse,
     PlannerToolAnswer,
     planner_agent,
-    planner_profile,
     run_planner,
     tool_not_found,
 )
@@ -112,7 +112,7 @@ async def _run(
         MODEL,
         client=scripted.client,
         budget=None,
-        profile=planner_profile(MODEL) if profile == "planner" else profile,
+        profile=PLANNER_PROFILE if profile == "planner" else profile,
     )
     planner = planner_agent(specs, instruction=INSTRUCTION, model=model)
     deps = PlannerDeps(
@@ -204,7 +204,7 @@ async def _stream_run(agent: Agent[Any, Any], prompt: str = BRIEF, **options: An
 def _plain_agent(scripted: ScriptedGenai, **options: Any) -> Agent[Any, Any]:
     """An agent on the planner's model profile with none of the planner's other settings."""
     model = GoogleModel(
-        MODEL, provider=GoogleProvider(client=scripted.client), profile=planner_profile(MODEL)
+        MODEL, provider=GoogleProvider(client=scripted.client), profile=PLANNER_PROFILE
     )
     options.setdefault("output_type", str | None)
     return Agent(model, instructions=INSTRUCTION, **options)
@@ -318,12 +318,13 @@ async def test_an_empty_response_ends_the_run_with_no_second_request() -> None:
     assert [response.parts for response in _responses(items)] == [()]
 
 
-async def test_a_blocked_prompt_ends_the_run_and_reports_its_block_reason() -> None:
-    # The ADK planner records the block as an event with that error code.
+async def test_a_blocked_prompt_ends_the_run_and_raises_nothing() -> None:
+    # Pydantic AI hands over a blocked prompt as a response with no parts. The node
+    # reads the block reason off the stream (`harness.planner_model.ResponseMetadata`).
     items, scripted = await _run([_BARE], [blocked_reply(types.BlockedReason.SAFETY)])
 
     assert len(scripted.requests) == 1
-    assert [(r.parts, r.block_reason) for r in _responses(items)] == [((), "SAFETY")]
+    assert [r.parts for r in _responses(items)] == [()]
 
 
 async def test_a_stream_with_no_chunk_ends_the_run_and_raises_nothing() -> None:
@@ -526,9 +527,7 @@ async def test_every_request_reaches_the_clients_streamed_call_with_three_keywor
     # `harness.planner_model` answers the client's streamed call with a keyword-only
     # signature of exactly these three, and refuses a call that does not stream.
     scripted = ScriptedGenai([reply(call_part("bare", id="c")), reply(text_part("done"))])
-    model = planner_model(
-        MODEL, client=scripted.client, budget=None, profile=planner_profile(MODEL)
-    )
+    model = planner_model(MODEL, client=scripted.client, budget=None, profile=PLANNER_PROFILE)
     streamed = model.client.aio.models.generate_content_stream
     sent: list[set[str]] = []
 
@@ -557,9 +556,7 @@ async def test_the_clients_call_runs_inside_the_chat_span_of_the_conversation(
     # call is made; that has to be the generation's span, which Pydantic AI opens
     # under the planner's run span.
     scripted = ScriptedGenai([reply(text_part("done"))])
-    model = planner_model(
-        MODEL, client=scripted.client, budget=None, profile=planner_profile(MODEL)
-    )
+    model = planner_model(MODEL, client=scripted.client, budget=None, profile=PLANNER_PROFILE)
     streamed = model.client.aio.models.generate_content_stream
     current: list[tuple[bool, str]] = []
 

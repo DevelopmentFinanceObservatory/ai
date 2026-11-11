@@ -27,22 +27,26 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
 
 from common.telemetry import current_trace_id
 from google.adk import Context, Event
+from google.adk.agents.invocation_context import LlmCallsLimitExceededError
+from google.adk.agents.run_config import RunConfig
 from google.adk.flows.llm_flows import functions as adk_functions
 from google.adk.telemetry import TelemetryConfig
 from google.adk.workflow import BaseNode, node
 from google.genai import Client, types
 from planner.agent import AGENT_NAME, BRIEF_STATE_KEY, session_steps
 from planner.pydantic_agent import (
+    PLANNER_PROFILE,
+    PlannerAgent,
     PlannerDeps,
     PlannerResponse,
     PlannerToolAnswer,
     planner_agent,
-    planner_profile,
     run_planner,
 )
 from planner.tool_spec import ToolSpec
@@ -86,11 +90,25 @@ class _Recorded:
 _PUT_IN_PLACE = _Recorded()
 
 
+def pydantic_planner(specs: Sequence[ToolSpec], *, instruction: str) -> PlannerAgent:
+    """The Pydantic AI planner on `specs` and `instruction`, the ADK planner's,
+    named as the ADK planner (`planner.agent.AGENT_NAME`), with no model of its
+    own: each run names its own (`planner_node`). Built once, it serves every
+    run. Its spans carry message content when ADK's telemetry settings say
+    the ADK planner's do (`google.adk.telemetry.TelemetryConfig`), read once,
+    here."""
+    return planner_agent(
+        specs,
+        instruction=instruction,
+        name=AGENT_NAME,
+        include_content=TelemetryConfig().should_add_content_to_experimental_spans,
+    )
+
+
 def planner_node(
     run: PlannerRun,
     *,
-    specs: Sequence[ToolSpec],
-    instruction: str,
+    planner: PlannerAgent,
     model_name: str,
     client: Client,
     budget: TurnBudget | None,
@@ -101,8 +119,7 @@ def planner_node(
     Args:
         run: The run's bookkeeping, told what the run does and asked what
             replaces each request.
-        specs: The planner's tools, the ones the ADK planner serves.
-        instruction: The planner's instruction, the ADK planner's.
+        planner: The Pydantic AI planner (`pydantic_planner`).
         model_name: The Gemini model, as google-genai names it.
         client: The google-genai client the model's calls go through.
         budget: The turn's budget, or None to run every call unbounded.
@@ -113,18 +130,24 @@ def planner_node(
         A node named `planner.agent.AGENT_NAME` that runs the planner once on
         the session's brief (`planner.agent.BRIEF_STATE_KEY`), after the
         turn's question, and yields the ADK planner's events for the run.
+        The run makes at most the invocation's `RunConfig.max_llm_calls`
+        model calls, when that is above zero, and the call past it raises
+        `LlmCallsLimitExceededError`, as the ADK planner's does (`_LlmCalls`).
     """
 
     async def dfo_planner(ctx: Context, node_input: Any) -> AsyncIterator[Event]:
         del node_input
         ctx.event_author = AGENT_NAME
         recorded = _PUT_IN_PLACE
+        calls = _LlmCalls(ctx.run_config)
 
         def before_request() -> types.Content | None:
             nonlocal recorded
             turn = directive_turn(run.next_request())
             if turn is not None:
                 recorded = _PUT_IN_PLACE
+            else:
+                calls.count()
             return turn
 
         def after_response(
@@ -170,14 +193,7 @@ def planner_node(
             prefix_cache=prefix_cache,
             before_request=before_request,
             after_response=after_response,
-            profile=planner_profile(model_name),
-        )
-        agent = planner_agent(
-            specs,
-            instruction=instruction,
-            model=model,
-            name=AGENT_NAME,
-            include_content=TelemetryConfig().should_add_content_to_experimental_spans,
+            profile=PLANNER_PROFILE,
         )
         deps = PlannerDeps(
             state=ctx.session.state,
@@ -185,38 +201,43 @@ def planner_node(
             tool_answered=run.tool_answered,
             tool_failed=tool_failed,
         )
-        question = turn_question(ctx)
         response: PlannerResponse | None = None
         held: list[PlannerToolAnswer] = []
+        items = run_planner(
+            planner,
+            deps,
+            model=model,
+            question=turn_question(ctx),
+            brief=ctx.session.state[BRIEF_STATE_KEY],
+            conversation_id=ctx.session.id,
+        )
+        # Closed here, in the node's task, when ADK's node runner closes the
+        # node at a yield on a Stop, so the run's spans and context variables
+        # end in the task that opened them.
         try:
-            async for item in run_planner(
-                agent,
-                deps,
-                question=_text(question) if question is not None else None,
-                brief=ctx.session.state[BRIEF_STATE_KEY],
-                conversation_id=ctx.session.id,
-            ):
-                if isinstance(item, PlannerResponse):
-                    response, held = item, []
-                    # ADK stores no event for a response with no parts, unless
-                    # the response is an error, a blocked prompt's.
-                    if item.parts or recorded.error_code is not None:
-                        yield model_response_event(
-                            item,
-                            usage=recorded.usage,
-                            finish_reason=recorded.finish_reason,
-                            model_version=recorded.model_version,
-                            custom_metadata=recorded.custom_metadata,
-                            partial=recorded.partial,
-                            error_code=recorded.error_code,
-                            error_message=recorded.error_message,
-                        )
-                    continue
-                assert response is not None, "a call's answer follows its response"
-                held.append(item)
-                if answered_every_call(response, held):
-                    yield tool_answers_event(response, held, ended=_ended(held))
-                    held = []
+            async with aclosing(items):
+                async for item in items:
+                    if isinstance(item, PlannerResponse):
+                        response, held = item, []
+                        # ADK stores no event for a response with no parts,
+                        # unless the response is an error, a blocked prompt's.
+                        if item.parts or recorded.error_code is not None:
+                            yield model_response_event(
+                                item,
+                                usage=recorded.usage,
+                                finish_reason=recorded.finish_reason,
+                                model_version=recorded.model_version,
+                                custom_metadata=recorded.custom_metadata,
+                                partial=recorded.partial,
+                                error_code=recorded.error_code,
+                                error_message=recorded.error_message,
+                            )
+                        continue
+                    assert response is not None, "a call's answer follows its response"
+                    held.append(item)
+                    if answered_every_call(response, held):
+                        yield tool_answers_event(response, held, ended=_ended(held))
+                        held = []
         except Exception:
             # The ADK planner keeps the answers of a response's finished calls
             # when another of its calls fails. A cancellation stores nothing of
@@ -224,6 +245,11 @@ def planner_node(
             if response is not None and held:
                 yield tool_answers_event(response, held, ended=_ended(held))
             raise
+        # A run `run_planner` ends without raising on a response Pydantic AI
+        # refuses may leave calls of the last response unanswered; the answers
+        # of its finished calls are kept, as an exception keeps them.
+        if response is not None and held:
+            yield tool_answers_event(response, held, ended=_ended(held))
 
     return node(dfo_planner, name=AGENT_NAME)
 
@@ -250,14 +276,32 @@ def directive_turn(directive: Directive | None) -> types.Content | None:
     return types.Content(role="model", parts=[part])
 
 
+class _LlmCalls:
+    """The model calls one run has made, against the invocation's cap.
+
+    ADK counts an `LlmAgent`'s calls on the invocation
+    (`InvocationContext.increment_llm_call_count`) and raises
+    `LlmCallsLimitExceededError` on the call past `RunConfig.max_llm_calls`.
+    A turn put in the model's place is not a call. The invocation's count is
+    private to ADK, so this one counts the run's calls alone.
+    """
+
+    def __init__(self, config: RunConfig | None) -> None:
+        self._cap = config.max_llm_calls if config is not None else 0
+        self._made = 0
+
+    def count(self) -> None:
+        """Count one call, raising when it passes the cap."""
+        self._made += 1
+        if 0 < self._cap < self._made:
+            raise LlmCallsLimitExceededError(
+                f"Max number of llm calls limit of `{self._cap}` exceeded"
+            )
+
+
 def _ended(answers: Sequence[PlannerToolAnswer]) -> bool:
     """Whether a call of `answers` ended the run."""
     return any(answer.ended for answer in answers)
 
 
-def _text(content: types.Content) -> str:
-    """The text of `content`'s parts, joined."""
-    return "".join(part.text or "" for part in content.parts or ())
-
-
-__all__ = ["SKIP_THOUGHT_SIGNATURE", "directive_turn", "planner_node"]
+__all__ = ["SKIP_THOUGHT_SIGNATURE", "directive_turn", "planner_node", "pydantic_planner"]

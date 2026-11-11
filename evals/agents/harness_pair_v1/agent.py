@@ -13,7 +13,8 @@ this set shows whether the planner reads the `translation` its accepted
 proposal comes back with before it invites approval, and what it does when a
 requirement comes back referred.
 
-Built the way `harness.agents.create_planner_with_translator` builds it, with
+Built with `planner.agent.create_planner_agent`, as `harness.planner_seam.PlannerSeam`
+builds the served planner, with
 the canned discovery in `harness_translator_v1.discovery_stub` (this package's
 `__init__` puts `evals/agents` on the path, which `adk web` does for an agent
 folder and `adk eval` does not). The planner is built with no surface, so it

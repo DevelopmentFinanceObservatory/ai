@@ -3568,53 +3568,6 @@ async def test_the_planner_runs_on_the_model_and_translation_the_seam_is_given(
     assert answered["translation"] == {"translated_by": "the caller"}
 
 
-class _ThinkingLlm(ScriptedPlannerLlm):
-    """`ScriptedPlannerLlm`, opening each answer with a thought part."""
-
-    async def generate_content_async(self, llm_request: Any, stream: bool = False) -> Any:
-        async for response in super().generate_content_async(llm_request, stream):
-            assert response.content is not None
-            parts = [types.Part(text="weighing it", thought=True), *(response.content.parts or [])]
-            yield response.model_copy(update={"content": types.Content(role="model", parts=parts)})
-
-
-async def test_a_callers_model_callbacks_see_only_what_passes_between_planner_and_model(
-    decision: Any, requirement: Any, derived_requirement: Any
-) -> None:
-    """The first proposal restarts the plan on the amend edge and is refused as
-    `QUESTION_FIXED`, which ends the entry, so the seam answers the second request itself
-    and the caller's before-model callback never sees it. The caller's after-model
-    callback sees the thought part `drop_thought_parts` then drops."""
-    seeded = _translated_plan(decision, requirement, derived_requirement, version=3)
-    requests: list[Any] = []
-    responses: list[LlmResponse] = []
-    llm = _ThinkingLlm(
-        script=[[("propose_plan", {"starts_new_plan": True, "question": "a different question"})]]
-    )
-    seam = PlannerSeam(
-        settings=Settings(),
-        surface=FixtureSurface(schemas=[]),
-        model=llm,
-        before_model_callbacks=[lambda _context, request: requests.append(request)],
-        after_model_callbacks=[lambda _context, response: responses.append(response)],
-    )
-
-    result = await _run_seam(
-        seam,
-        question="kenya debt",
-        readings=[],
-        prior_plan=seeded.model_dump(mode="json"),
-        amendment="actually, tell me about Kenya's ODA instead",
-    )
-
-    assert result["refused"]["code"] == "question_fixed"
-    assert len(llm.captured_requests) == len(requests) == 1
-    assert [bool(part.thought) for response in responses for part in response.content.parts] == [
-        True,
-        False,
-    ]
-
-
 async def test_every_planner_generation_runs_at_the_low_thinking_config(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:

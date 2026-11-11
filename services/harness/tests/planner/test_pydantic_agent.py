@@ -8,7 +8,8 @@ compares the first request each sends.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import asyncio
+from collections.abc import Callable, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -18,17 +19,19 @@ from google.genai import types
 from harness.turn_events import PLANNER_ASK
 from planner.call import PlannerCall
 from planner.pydantic_agent import (
+    PLANNER_PROFILE,
+    PlannerAgent,
     PlannerDeps,
     PlannerItem,
     PlannerResponse,
     PlannerToolAnswer,
     planner_agent,
-    planner_profile,
     run_planner,
 )
 from planner.specs import PROPOSE_PLAN, planner_tool_specs
 from planner.tool_spec import Parameter, ToolSpec
 from planner.tools import ASK_ACCEPTED, EndRun, load_pending_ask
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
@@ -105,7 +108,7 @@ def _ask_spec() -> ToolSpec:
 
 def _google_model(scripted: ScriptedGenai) -> GoogleModel:
     return GoogleModel(
-        _MODEL, provider=GoogleProvider(client=scripted.client), profile=planner_profile(_MODEL)
+        _MODEL, provider=GoogleProvider(client=scripted.client), profile=PLANNER_PROFILE
     )
 
 
@@ -158,7 +161,6 @@ async def test_an_accepted_proposal_ends_the_run_after_one_model_request() -> No
     response, answer = items
     assert isinstance(response, PlannerResponse)
     assert response.parts == (signed, call)
-    assert (response.usage.input_tokens, response.usage.output_tokens) == (40, 5)
     assert answer == PlannerToolAnswer(PROPOSE_PLAN, "p1", _ACCEPTED, {}, ended=True)
     assert run.answered == [(PROPOSE_PLAN, _ACCEPTED)]
 
@@ -244,6 +246,73 @@ async def test_a_raising_tool_is_answered_through_tool_failed_and_the_run_goes_o
     returned = scripted.requests[1].content_list[-1].parts[0].function_response
     assert returned.response == {"error": "broken failed"}
     assert _kinds(items) == ["response", "answer:broken", "response"]
+
+
+def _with_tool(agent: PlannerAgent, function: Callable[..., Any]) -> PlannerAgent:
+    """`agent` with `function` registered as a Pydantic AI tool of its own, as
+    the planner's tools are, to reach answers no planner tool gives: Pydantic
+    AI validates its typed arguments, and lets what it raises through."""
+    agent.agent.tool_plain(function)
+    return PlannerAgent(agent=agent.agent, tools=(*agent.tools, function.__name__))
+
+
+async def test_a_call_pydantic_ai_answers_with_a_retry_still_gets_its_answer() -> None:
+    """A call whose arguments fail validation is answered by Pydantic AI with a
+    retry, not by its tool: that answer is yielded as an error, as Gemini is sent
+    it, so every answer of the response is yielded, its sibling's write with them."""
+
+    def counted(n: int) -> dict[str, Any]:
+        return {"outcome": "ok", "n": n}
+
+    scripted = ScriptedGenai(
+        [
+            reply(call_part("write_a", id="w1"), call_part("counted", {"n": "many"}, id="c1")),
+            reply(text_part("done")),
+        ]
+    )
+    agent = _with_tool(
+        planner_agent([_write("a", 1)], instruction="Plan.", model=_google_model(scripted)),
+        counted,
+    )
+
+    items = [item async for item in run_planner(agent, _deps(), question=_QUESTION, brief=_BRIEF)]
+
+    assert _kinds(items)[0] == "response" and _kinds(items)[-1] == "response"
+    answers = {item.call_id: item for item in items[1:-1] if isinstance(item, PlannerToolAnswer)}
+    assert answers.keys() == {"w1", "c1"}
+    assert answers["w1"] == PlannerToolAnswer("write_a", "w1", {"outcome": "ok"}, {"a": 1})
+    assert answers["c1"].name == "counted"
+    assert set(answers["c1"].answer) == {"error"}
+
+
+async def test_a_run_pydantic_ai_ends_after_a_call_answered_yields_that_answer() -> None:
+    """A call raising `UnexpectedModelBehavior` ends the run without raising, and
+    the answer of the sibling that answered before it is still yielded."""
+    answered = asyncio.Event()
+    run = _Run()
+
+    def tool_answered(name: str, answer: dict[str, Any]) -> None:
+        run.tool_answered(name, answer)
+        answered.set()
+
+    async def misbehaves() -> None:
+        await answered.wait()
+        raise UnexpectedModelBehavior("the model misbehaved")
+
+    scripted = ScriptedGenai(
+        [reply(call_part("write_a", id="w1"), call_part("misbehaves", id="m1"))]
+    )
+    agent = _with_tool(
+        planner_agent([_write("a", 1)], instruction="Plan.", model=_google_model(scripted)),
+        misbehaves,
+    )
+    deps = PlannerDeps(
+        state={}, earlier=(), tool_answered=tool_answered, tool_failed=run.tool_failed
+    )
+
+    items = [item async for item in run_planner(agent, deps, question=_QUESTION, brief=_BRIEF)]
+
+    assert items[1:] == [PlannerToolAnswer("write_a", "w1", {"outcome": "ok"}, {"a": 1})]
 
 
 # --- The first request equals the ADK planner's --------------------------------------

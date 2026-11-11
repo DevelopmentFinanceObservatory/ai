@@ -204,7 +204,7 @@ class _PlannerStream:
             self._respond(
                 model=model,
                 contents=_without_client_call_ids(contents),
-                config=_with_retries(config),
+                config=_with_planner_options(config),
             )
         )
 
@@ -407,13 +407,18 @@ def _without_client_call_ids(contents: Any) -> list[types.Content]:
     return stripped
 
 
-def _with_retries(config: Any) -> types.GenerateContentConfig:
-    """`config`, as `GoogleModel` built it, carrying the ADK planner's HTTP retries."""
+def _with_planner_options(config: Any) -> types.GenerateContentConfig:
+    """`config`, as `GoogleModel` built it, carrying the ADK planner's HTTP retries
+    and its `automatic_continuation`, which the ADK planner sets on explicitly
+    (`planner.agent.create_planner_agent`)."""
     built = types.GenerateContentConfig.model_validate(config or {})
     http_options = built.http_options or types.HttpOptions()
     return built.model_copy(
         update={
-            "http_options": http_options.model_copy(update={"retry_options": model_retry_options()})
+            "http_options": http_options.model_copy(
+                update={"retry_options": model_retry_options()}
+            ),
+            "automatic_continuation": True,
         }
     )
 
@@ -434,10 +439,11 @@ def _without_unsigned_thoughts(
 
     The rule reads the response as an agent holds it: ADK's stream aggregator
     and Pydantic AI's parts manager both merge consecutive text parts of one
-    kind, thought or answer, into one part that keeps the first thought
-    signature among them (`_text_runs`). A merged thought part is dropped or
-    kept whole, so a run of thought chunks with a signature on any one of them
-    stays, as on the ADK planner.
+    kind, thought or answer, into one part, signed when any part of the run
+    is (`_text_runs`). A merged thought part is dropped or kept whole, so a
+    run of thought chunks with a signature on any one of them stays, as on
+    the ADK planner. Which of several signatures the merged part keeps does
+    not decide it.
     """
     runs = _text_runs([part for chunk in chunks for part in _parts(chunk)])
     merged = [_merged(run) for run in runs]
@@ -468,7 +474,9 @@ def _text_runs(parts: list[types.Part]) -> list[list[types.Part]]:
 
 
 def _merged(run: list[types.Part]) -> types.Part:
-    """The one part an agent makes of `run`."""
+    """The one part an agent makes of `run`, as far as `without_unsigned_thoughts`
+    reads it: its text, its kind, and a thought signature when any part of the
+    run carries one."""
     if len(run) == 1:
         return run[0]
     signature = next((part.thought_signature for part in run if part.thought_signature), None)

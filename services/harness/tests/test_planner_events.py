@@ -53,18 +53,17 @@ from planner.agent import (
 from planner.call import PlannerCall
 from planner.plan import PLAN_STATE_KEY
 from planner.pydantic_agent import (
+    PLANNER_PROFILE,
     PlannerDeps,
     PlannerResponse,
     PlannerToolAnswer,
     planner_agent,
-    planner_profile,
     run_planner,
 )
 from planner.skills import SKILLS_READ_STATE_KEY
 from planner.specs import PROPOSE_PLAN, planner_tool_specs, skill_tool_spec
 from planner.tool_spec import Parameter, ToolSpec
 from planner.tools import EndRun
-from pydantic_ai.usage import RequestUsage
 
 from .scripted_genai import (
     Reply,
@@ -232,7 +231,7 @@ def _pydantic_planner(specs: Sequence[ToolSpec], scripted: ScriptedGenai) -> Bas
         client=scripted.client,
         budget=None,
         after_response=after_response,
-        profile=planner_profile(_MODEL),
+        profile=PLANNER_PROFILE,
     )
     agent = planner_agent(
         specs,
@@ -460,7 +459,7 @@ def _renamed(event: Event, old: str, new: str) -> Event:
 
 
 def _response(*parts: types.Part) -> PlannerResponse:
-    return PlannerResponse(parts=parts, usage=RequestUsage())
+    return PlannerResponse(parts=parts)
 
 
 def test_answers_are_ordered_by_call_and_their_writes_merged_as_adk_merges_them() -> None:

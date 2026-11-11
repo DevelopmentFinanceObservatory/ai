@@ -191,9 +191,9 @@ through `compiler.sources.outcome_from_envelope` and answers with
 source out of a `describe` answer. `executor.run` keeps each server's digest
 text as its step's `StepRecord.digest`, which the workflow's `plan_done`
 node hands to the agent as `step_summaries`. The planner's model reaches
-these Python functions through `FunctionTool`s
-(`harness.agents.create_planner_with_translator`). ADK's `McpTool` plays no
-part, so no `CallToolResult` dump is built for them and an
+these Python functions through the planner's tool specs (`planner.specs`),
+which `harness.planner_seam.PlannerSeam` serves on either runner. ADK's
+`McpTool` plays no part, so no `CallToolResult` dump is built for them and an
 `after_tool_callback` editing one would have nothing to edit. Where a tool
 does answer with a digest, a refusal's machine-readable detail rides the
 same call. data-mcp and analysis-mcp put the actionable recovery grammar in

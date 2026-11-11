@@ -47,7 +47,7 @@ and why that set needs no reachable tool surface.
 `compiler.surface.ToolSurface`. Given one, the planner also carries
 `get_skill` from `planner.skills`, which calls data-mcp's `get_skill` through that
 surface (a skill's first page, or one file with `path`), and its instruction
-gains the paragraph that names it. `harness.agents.create_planner_with_translator`
+gains the paragraph that names it. `harness.planner_seam.PlannerSeam`
 passes the same surface translation discovers on. Without a surface, as the
 standalone eval agents build it, the planner has no skill tool and the
 instruction says nothing about skills.

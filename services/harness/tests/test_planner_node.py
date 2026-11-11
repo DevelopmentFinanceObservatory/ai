@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import itertools
+import logging
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
@@ -25,6 +27,7 @@ from unittest import mock
 import pytest
 from compiler.surface import FixtureSurface
 from google.adk import Context, Event
+from google.adk.agents.invocation_context import LlmCallsLimitExceededError
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.flows.llm_flows import functions as adk_functions
 from google.adk.models import Gemini
@@ -32,6 +35,7 @@ from google.adk.runners import Runner as AdkRunner
 from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import types
+from harness import planner_node as planner_node_module
 from harness import planner_run
 from harness.planner_run import PlannerSeamError
 from harness.planner_seam import PlannerSeam
@@ -52,11 +56,13 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
 )
+from planner.pydantic_agent import PlannerAgent
 from planner.settings import AgentSettings
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
 from planner.tools import EndRun
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from submission.service import scope_choice_decisions
 from translator.tool import Translate, build_translate
 
@@ -336,6 +342,25 @@ async def test_a_planned_turn_is_the_same_on_both_planners(plan: Plan) -> None:
     _assert_same(adk, pydantic)
 
 
+async def test_a_question_in_two_parts_is_sent_in_two_parts_on_both_planners(plan: Plan) -> None:
+    """The turn's question goes to the model with its parts as the user sent them."""
+    question = types.Content(
+        role="user", parts=[types.Part(text="Kenya's debt"), types.Part(text="since 2010")]
+    )
+    sent: dict[Runner, list[types.Content]] = {}
+    for runner in ("adk", "pydantic_ai"):
+        scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
+        seam = _seam(runner, scripted, tools=_proposals())
+        await _SeamHarness().run(
+            seam, new_message=question, run_config=_SSE, readings=[], **_planned(plan)
+        )
+        (request,) = scripted.requests
+        sent[runner] = request.content_list
+
+    assert sent["adk"][0].parts == question.parts
+    assert sent["pydantic_ai"] == sent["adk"]
+
+
 async def test_a_refused_proposal_then_an_accepted_one_is_the_same_on_both_planners(
     plan: Plan,
 ) -> None:
@@ -576,6 +601,164 @@ async def test_a_run_that_raises_while_calls_run_keeps_the_answered_calls_on_bot
     _assert_same(adk, pydantic)
 
 
+def _counted(n: int) -> dict[str, Any]:
+    """A tool whose typed argument Pydantic AI validates."""
+    return {"outcome": "ok", "n": n}
+
+
+async def _misbehaves() -> None:
+    """A tool that ends the run as a response Pydantic AI refuses ends it, once
+    the tool beside it has answered."""
+    await asyncio.sleep(0.05)
+    raise UnexpectedModelBehavior("the model misbehaved")
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "answered"),
+    [
+        pytest.param(_counted, {"n": "many"}, {"p1", "x1"}, id="answered-with-a-retry"),
+        pytest.param(_misbehaves, {}, {"p1"}, id="ending-the-run"),
+    ],
+)
+async def test_a_call_pydantic_ai_answers_itself_still_stores_its_siblings_answer(
+    plan: Plan, tool: Callable[..., Any], arguments: dict[str, Any], answered: set[str]
+) -> None:
+    """A call Pydantic AI answers without its tool, or that ends the run, leaves
+    the answers of its response stored with the answer of `propose_plan` beside
+    it, as the ADK planner keeps a response's finished calls. No planner tool
+    reaches either path, so a Pydantic AI tool of the test's own does, on the
+    Pydantic AI planner alone."""
+    scripted = ScriptedGenai(
+        [
+            reply(
+                call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED),
+                call_part(tool.__name__, arguments, id="x1"),
+            ),
+            reply(text_part("done")),
+        ]
+    )
+    seam = _seam("pydantic_ai", scripted, tools=_proposals(_REFUSED))
+    assert seam._pydantic is not None
+    model_name, planner = seam._pydantic
+    planner.agent.tool_plain(tool)
+    seam._pydantic = (
+        model_name,
+        PlannerAgent(agent=planner.agent, tools=(*planner.tools, tool.__name__)),
+    )
+    harness = _SeamHarness()
+
+    await harness.run(seam, run_config=_SSE, readings=[], **_planned(plan))
+
+    stored = {
+        response.id
+        for event in _planner_events(await _stored(harness))
+        for response in event.get_function_responses()
+    }
+    assert stored == answered
+
+
+async def _stored(harness: _SeamHarness) -> _Entry:
+    return _Entry(outputs=[], reports=[], requests=[], events=await harness.events(), state={})
+
+
+async def _capped(runner: Runner, plan: Plan) -> _Entry:
+    """An entry whose model is refused a third call by the invocation's cap of two
+    (`RunConfig.max_llm_calls`), its first two proposals refused."""
+    scripted = ScriptedGenai(
+        [
+            reply(call_part(PROPOSE_PLAN, {}, id=f"p{n}", signature=_SIGNED), usage=_USAGE)
+            for n in (1, 2, 3)
+        ]
+    )
+    seam = _seam(runner, scripted, tools=_proposals(_REFUSED, _REFUSED))
+    harness = _SeamHarness()
+    capped = RunConfig(streaming_mode=StreamingMode.SSE, max_llm_calls=2)
+    with pytest.raises(LlmCallsLimitExceededError):
+        await harness.run(seam, run_config=capped, readings=[], **_planned(plan))
+    return _Entry(
+        outputs=[],
+        reports=[],
+        requests=scripted.requests,
+        events=await harness.events(),
+        state=dict(await harness.state()),
+    )
+
+
+async def test_a_run_past_the_invocations_model_call_cap_ends_the_same_on_both(
+    plan: Plan,
+) -> None:
+    """The call past `RunConfig.max_llm_calls` raises before it is sent, and the
+    session stores the same error event on both planners."""
+    adk = await _capped("adk", plan)
+    pydantic = await _capped("pydantic_ai", plan)
+
+    assert len(adk.requests) == 2
+    assert adk.events[-1].error_code == "LlmCallsLimitExceededError"
+    _assert_same(adk, pydantic)
+
+
+async def test_two_entries_at_once_on_one_pydantic_ai_seam_keep_to_their_own_runs(
+    plan: Plan,
+) -> None:
+    """One seam's Pydantic AI planner serves two entries running at once, each in
+    its own session: the planner is built once, each request carries its own
+    entry's question and answers, and each session stores the same events as
+    the other."""
+    barrier = asyncio.Barrier(2)
+
+    async def meets(call: PlannerCall) -> object:
+        call.state["planner:met"] = True
+        await asyncio.wait_for(barrier.wait(), timeout=5)
+        return _REFUSED
+
+    def body(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
+        if "planner:met" not in call.state:
+            return meets(call)
+        return _compiled_proposal(call, end_run, arguments)
+
+    scripted = ScriptedGenai(
+        [
+            reply(call_part(PROPOSE_PLAN, {}, id=call_id, signature=_SIGNED))
+            for call_id in ("p1", "p1", "p2", "p2")
+        ]
+    )
+    questions = ("kenya debt", "ghana aid")
+    harnesses = [_SeamHarness() for _ in questions]
+    with mock.patch.object(
+        planner_node_module, "planner_agent", wraps=planner_node_module.planner_agent
+    ) as built:
+        seam = _seam("pydantic_ai", scripted, tools=lambda specs: _serving_proposals(specs, body))
+        outputs = await asyncio.gather(
+            *(
+                harness.run(
+                    seam,
+                    new_message=types.Content(role="user", parts=[types.Part(text=question)]),
+                    run_config=_SSE,
+                    readings=[],
+                    **_planned(plan),
+                )
+                for harness, question in zip(harnesses, questions, strict=True)
+            )
+        )
+
+    assert built.call_count == 1
+    assert all(output is not None and "plan" in output for output in outputs)
+    asked = [
+        [part.text for part in request.content_list[0].parts or ()] for request in scripted.requests
+    ]
+    assert sorted(asked) == sorted([[question] for question in questions] * 2)
+    for request in scripted.requests[2:]:
+        (refusal,) = [
+            part.function_response
+            for content in request.content_list
+            for part in content.parts or ()
+            if part.function_response is not None
+        ]
+        assert refusal.id == "p1"
+    first, second = [_planner_events(await _stored(harness)) for harness in harnesses]
+    assert _dumped(first) == _dumped(second)
+
+
 # --- A Stop ------------------------------------------------------------------------------
 
 
@@ -629,6 +812,39 @@ async def test_a_stop_while_a_planner_tool_hangs_leaves_the_same_session_on_both
     assert adk.state["planner:first"] == "answered"
     assert "planner:hanging" not in adk.state
     _assert_same(adk, pydantic)
+
+
+async def test_a_stop_while_the_node_waits_on_its_event_closes_the_run_in_its_task(
+    plan: Plan, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A Stop while ADK's node runner stores the planner's response, the node
+    suspended at its yield, closes the Pydantic AI run in the node's task: its
+    spans and context variables end where they began, with nothing logged."""
+    scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
+    seam = _seam("pydantic_ai", scripted, tools=_proposals())
+    harness = _SeamHarness()
+    storing = asyncio.Event()
+    append = harness._sessions.append_event
+
+    async def append_event(session: Any, event: Event) -> Event:
+        if event.author == AGENT_NAME and event.get_function_calls():
+            storing.set()
+            await asyncio.Event().wait()
+        return await append(session, event)
+
+    with mock.patch.object(harness._sessions, "append_event", append_event):
+        running = asyncio.create_task(
+            harness.run(seam, run_config=_SSE, readings=[], **_planned(plan))
+        )
+        await asyncio.wait_for(storing.wait(), timeout=5)
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
+    gc.collect()
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert [record for record in caplog.records if record.levelno >= logging.ERROR] == []
 
 
 # --- A revision after the entry -----------------------------------------------------------

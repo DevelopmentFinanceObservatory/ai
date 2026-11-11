@@ -39,11 +39,11 @@ from planner.agent import (
     session_steps,
 )
 from planner.pydantic_agent import (
+    PLANNER_PROFILE,
     PlannerDeps,
     PlannerItem,
     PlannerResponse,
     planner_agent,
-    planner_profile,
     run_planner,
 )
 from planner.specs import planner_tool_specs, skill_tool_spec
@@ -154,9 +154,15 @@ async def pydantic_run(
             question_fixed=True,
         ),
         model=planner_model(
-            MODEL, client=scripted.client, budget=None, profile=planner_profile(MODEL)
+            MODEL,
+            client=scripted.client,
+            budget=None,
+            after_response=lambda closed_by, metadata: errors.append(metadata.error_code),
+            profile=PLANNER_PROFILE,
         ),
     )
+    # The error each response is, as the model reads it off the stream.
+    errors: list[str | None] = []
     state: dict[str, Any] = {}
     events = [Event(author="user", content=_user_content(QUESTION))]
     run = PairRun(requests=scripted.requests, state=state)
@@ -167,8 +173,9 @@ async def pydantic_run(
             tool_answered=lambda name, answer: None,
             tool_failed=lambda name, error: {"error": f"{name} failed"},
         )
+        responded = len(errors)
         items = [item async for item in run_planner(planner, deps, question=QUESTION, brief=brief)]
-        run.conversations.append(_item_turns(items))
+        run.conversations.append(_item_turns(items, errors[responded:]))
         events += _stored(items)
     return run
 
@@ -198,14 +205,16 @@ def _event_turns(events: Sequence[Event]) -> list[Turn]:
     return turns
 
 
-def _item_turns(items: Sequence[PlannerItem]) -> list[Turn]:
-    """The turns of the Pydantic AI planner's `items`. A response with no parts and
-    no block reason is one the ADK planner stores no event for."""
+def _item_turns(items: Sequence[PlannerItem], errors: Sequence[str | None]) -> list[Turn]:
+    """The turns of the Pydantic AI planner's `items`, each response's error
+    (`errors`, in response order) beside it. A response with no parts and no
+    error is one the ADK planner stores no event for."""
     turns: list[Turn] = []
+    responses = iter(errors)
     for item in items:
         if isinstance(item, PlannerResponse):
-            if item.block_reason is not None:
-                turns.append(("blocked", item.block_reason))
+            if (error := next(responses)) is not None:
+                turns.append(("blocked", error))
             turns.extend(("part", _dumped(part)) for part in item.parts)
         else:
             turns.append(("answer", item.name, item.call_id, item.answer))
@@ -235,15 +244,14 @@ def assert_pinned_wire_differences(adk: Request, pydantic: Request) -> None:
     turn that Gemini sent with no thought signature, which the ADK planner
     replays with none and Pydantic AI with Gemini's documented placeholder
     (`harness.planner_node.SKIP_THOUGHT_SIGNATURE`, `_unsigned_first_calls_signed`).
-    Every config field is equal but six: the instruction as
-    one user `Content` where the ADK planner sends text; one `Tool` per
-    declaration where the ADK planner sends one `Tool` of them all, a
-    declaration with no parameters given an empty object schema; an explicit
-    `AUTO` function calling mode where the ADK planner leaves it unset, which
-    is `AUTO`; `response_modalities` `TEXT`; `automatic_continuation` unset,
-    which google-genai reads as on, where the ADK planner sets it on; and each
-    framework's HTTP headers, with the HTTP retries the ADK planner's model
-    sets on its client carried on each request.
+    Every config field is equal but five: the instruction as one user `Content`
+    where the ADK planner sends text; one `Tool` per declaration where the ADK
+    planner sends one `Tool` of them all, a declaration with no parameters
+    given an empty object schema; an explicit `AUTO` function calling mode
+    where the ADK planner leaves it unset, which is `AUTO`;
+    `response_modalities` `TEXT`; and each framework's HTTP headers, with the
+    HTTP retries the ADK planner's model sets on its client carried on each
+    request.
     """
     adk_config, adk_contents = _request_dumped(adk)
     pydantic_config, pydantic_contents = _request_dumped(pydantic)
@@ -258,7 +266,6 @@ def assert_pinned_wire_differences(adk: Request, pydantic: Request) -> None:
         "tools",
         "tool_config",
         "response_modalities",
-        "automatic_continuation",
         "http_options",
     }
     assert pydantic_config["system_instruction"] == {
@@ -281,7 +288,6 @@ def assert_pinned_wire_differences(adk: Request, pydantic: Request) -> None:
     assert pydantic_config["response_modalities"] == ["TEXT"]
     assert "response_modalities" not in adk_config
     assert adk_config["automatic_continuation"] is True
-    assert "automatic_continuation" not in pydantic_config
     assert adk_config["http_options"].keys() == {"headers"}
     assert pydantic_config["http_options"].keys() == {"headers", "retry_options"}
     assert pydantic_config["http_options"]["retry_options"] == model_retry_options().model_dump(

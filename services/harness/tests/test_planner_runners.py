@@ -31,24 +31,28 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.tools.long_running_tool import LongRunningFunctionTool
 from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
-from google.genai import types
+from google.genai import Client, types
 from harness import planner_seam
 from harness import studio as studio_module
 from harness.graph import switch as switch_module
 from harness.planner_node import SKIP_THOUGHT_SIGNATURE
+from harness.planner_run import failed_tool_answer
 from harness.planner_seam import PlannerSeam
+from harness.scripted import _compiled_proposal
 from harness.sentences import SeamCode
 from harness.settings import Settings
 from harness.turn_budget import TurnBudget
 from harness.turn_events import PLANNER_ASK
 from planner import agent as planner_agent_module
-from planner.agent import session_steps
+from planner.agent import planner_specs, session_steps
 from planner.call import PlannerCall
 from planner.plan import Plan
+from planner.settings import AgentSettings
 from planner.specs import PROPOSE_PLAN
-from planner.tool_results import ProblemCode
+from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
 from planner.tools import EndRun
+from translator.tool import build_translate
 
 from .orchestrator_fakes import plan_call
 from .planner.planner_pairs import assert_pinned_wire_differences
@@ -75,6 +79,7 @@ from .test_planner_node import (
     _referral,
     _Script,
     _seam,
+    _serving_proposals,
 )
 from .test_planner_seam import (
     _APP,
@@ -171,24 +176,166 @@ def test_the_adk_planner_serves_the_tools_and_instruction_the_seam_built() -> No
     assert seam._agent.instruction == seam._instruction
 
 
-@pytest.mark.parametrize(
-    "adk_only",
-    [
-        {"model": Gemini(model=_MODEL)},
-        {"before_model_callbacks": [lambda context, request: None]},
-        {"after_model_callbacks": [lambda context, response: None]},
-    ],
-    ids=["model", "before", "after"],
-)
-def test_the_pydantic_ai_planner_refuses_what_only_the_adk_planner_runs(
-    adk_only: dict[str, Any],
-) -> None:
+def test_the_pydantic_ai_planner_refuses_an_adk_model() -> None:
     with pytest.raises(ValueError, match="ADK planner only"):
         PlannerSeam(
             settings=Settings(planner_runner="pydantic_ai"),
             surface=FixtureSurface(schemas=[]),
-            **adk_only,
+            model=Gemini(model=_MODEL),
         )
+
+
+@pytest.mark.parametrize("named", [_MODEL, f"Gemini:{_MODEL}"])
+async def test_both_planners_call_the_gemini_model_adks_registry_resolves(
+    plan: Plan, named: str
+) -> None:
+    """A planner model name ADK's registry resolves, a class prefix included,
+    names the same model in every request on both planners."""
+    sent: dict[Runner, list[str]] = {}
+    for runner in ("adk", "pydantic_ai"):
+        scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
+        surface = FixtureSurface(schemas=[])
+        seam = PlannerSeam(
+            settings=Settings(planner_runner=runner),
+            agent_settings=AgentSettings(planner_model_name=named),
+            surface=surface,
+            specs=_proposals()(
+                planner_specs(
+                    translate=build_translate(surface=surface),
+                    surface=surface,
+                    question_fixed=True,
+                    reads_user_words=False,
+                )
+            ),
+            client=scripted.client,
+        )
+        await _SeamHarness().run(seam, run_config=_SSE, readings=[], **_planned(plan))
+        sent[runner] = [request.model for request in scripted.requests]
+
+    assert sent["pydantic_ai"] == sent["adk"] == [_MODEL]
+
+
+def test_the_pydantic_ai_planner_refuses_a_model_that_is_not_gemini() -> None:
+    with pytest.raises(ValueError, match="Gemini model only"):
+        PlannerSeam(
+            settings=Settings(planner_runner="pydantic_ai"),
+            agent_settings=AgentSettings(planner_model_name="claude-3-5-sonnet"),
+            surface=FixtureSurface(schemas=[]),
+        )
+
+
+def _genai_client(*, vertexai: bool) -> Client:
+    """A google-genai client that uses Vertex AI or the Gemini developer API,
+    built without credentials."""
+    client = mock.create_autospec(Client, instance=True)
+    client.vertexai = vertexai
+    return client
+
+
+@pytest.mark.parametrize("runner", ["adk", "pydantic_ai"])
+@pytest.mark.parametrize(
+    ("environment", "vertexai", "refused"),
+    [
+        pytest.param({}, None, False, id="default-client-developer-api"),
+        pytest.param({"GOOGLE_GENAI_USE_VERTEXAI": "1"}, None, True, id="default-client-vertex"),
+        pytest.param({}, True, True, id="client-on-vertex"),
+        pytest.param({"GOOGLE_GENAI_USE_VERTEXAI": "1"}, False, False, id="client-decides"),
+    ],
+)
+def test_both_planners_refuse_a_client_on_vertex_ai(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: Runner,
+    environment: dict[str, str],
+    vertexai: bool | None,
+    refused: bool,
+) -> None:
+    """A given client decides by its own `vertexai`; with none, the environment
+    decides, as google-genai builds the default client."""
+    for name in ("GOOGLE_GENAI_USE_ENTERPRISE", "GOOGLE_GENAI_USE_VERTEXAI"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    client = _genai_client(vertexai=vertexai) if vertexai is not None else None
+
+    def build() -> PlannerSeam:
+        return PlannerSeam(
+            settings=Settings(planner_runner=runner),
+            surface=FixtureSurface(schemas=[]),
+            client=client,
+        )
+
+    if refused:
+        with pytest.raises(RuntimeError, match="Vertex AI"):
+            build()
+    else:
+        build()
+
+
+@pytest.mark.parametrize("runner", _RUNNERS)
+async def test_the_seams_observer_sees_each_answer_the_model_reads(
+    plan: Plan, runner: Runner
+) -> None:
+    """`on_tool_answered` is told each planner tool's name and answer once: a
+    refused proposal, an ask refused for a missing argument, a proposal whose
+    body raised and, in the next entry, an accepted one. Each is the function
+    response the session stores for the call, the one the model reads."""
+    raised = RuntimeError("broken")
+    calls = itertools.count()
+
+    def body(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
+        match next(calls):
+            case 0:
+                return _REFUSED
+            case 1:
+                raise raised
+            case _:
+                return _compiled_proposal(call, end_run, arguments)
+
+    scripted = ScriptedGenai(
+        [
+            reply(
+                call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED),
+                call_part(PLANNER_ASK, {}, id="a1"),
+            ),
+            reply(call_part(PROPOSE_PLAN, {}, id="p2", signature=_SIGNED)),
+            reply(call_part(PROPOSE_PLAN, {}, id="p3", signature=_SIGNED)),
+        ]
+    )
+    surface = FixtureSurface(schemas=[])
+    specs = planner_specs(
+        translate=build_translate(surface=surface),
+        surface=surface,
+        question_fixed=True,
+        reads_user_words=False,
+    )
+    observed: list[tuple[str, dict[str, Any] | None]] = []
+    seam = PlannerSeam(
+        settings=Settings(planner_runner=runner),
+        surface=surface,
+        specs=_serving_proposals(specs, body),
+        client=scripted.client,
+        on_tool_answered=lambda name, answer: observed.append((name, answer)),
+    )
+    stored: list[tuple[str | None, dict[str, Any] | None]] = []
+    for _ in range(2):
+        harness = _SeamHarness()
+        await harness.run(seam, run_config=_SSE, readings=[], **_planned(plan))
+        stored += [
+            (response.name, response.response)
+            for event in _planner_events(_Entry([], [], [], await harness.events(), {}))
+            for response in event.get_function_responses()
+        ]
+
+    def key(item: tuple[str | None, dict[str, Any] | None]) -> str:
+        return repr(item)
+
+    assert sorted(observed, key=key) == sorted(stored, key=key)
+    answers = dict(observed[:2])
+    assert answers[PROPOSE_PLAN] == _REFUSED
+    assert answers[PLANNER_ASK] is not None and set(answers[PLANNER_ASK]) == {"error"}
+    assert observed[2] == (PROPOSE_PLAN, failed_tool_answer(PROPOSE_PLAN, raised))
+    assert observed[3][1] is not None and observed[3][1]["outcome"] == Outcome.OK
+    assert len(observed) == 4
 
 
 # --- Turns that cross runners -------------------------------------------------------------

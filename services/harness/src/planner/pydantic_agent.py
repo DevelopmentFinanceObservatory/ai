@@ -14,9 +14,8 @@ What the model is sent equals the ADK planner's request for the same turn,
 apart from how Pydantic AI shapes a request on the wire: the system
 instruction as a `Content`, one `Tool` per declaration, an empty parameters
 schema on a tool that takes none, an explicit `AUTO` tool config,
-`response_modalities`, its own HTTP headers, and no `automatic_continuation`,
-which google-genai reads as on. The model must be built with
-`planner_profile`, which sends each declaration's schema as given and adds
+`response_modalities` and its own HTTP headers. The model must be built with
+`PLANNER_PROFILE`, which sends each declaration's schema as given and adds
 nothing to the instruction.
 """
 
@@ -27,7 +26,14 @@ import copy
 import inspect
 import logging
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable, MutableMapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    Awaitable,
+    Callable,
+    Iterator,
+    MutableMapping,
+    Sequence,
+)
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -39,6 +45,8 @@ from pydantic_ai import Agent, InstrumentationSettings, RunContext, Tool
 from pydantic_ai.capabilities import Instrumentation, ProcessHistory
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
+    ERROR_OUTCOMES,
+    BinaryContent,
     FunctionToolResultEvent,
     ModelMessage,
     ModelRequest,
@@ -48,12 +56,13 @@ from pydantic_ai.messages import (
     ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
+    UserContent,
     UserPromptPart,
 )
 from pydantic_ai.models import Model
 from pydantic_ai.models.google import GoogleModelSettings
-from pydantic_ai.profiles.google import GoogleModelProfile, google_model_profile
-from pydantic_ai.usage import RequestUsage, UsageLimits
+from pydantic_ai.profiles.google import GoogleModelProfile
+from pydantic_ai.usage import UsageLimits
 
 from planner.call import RecordingState, Step
 from planner.pydantic_call import PydanticCall, as_function_response
@@ -92,18 +101,13 @@ type ToolAnswered = Callable[[str, dict[str, Any]], None]
 type ToolFailed = Callable[[str, BaseException], dict[str, Any]]
 
 
-def planner_profile(model_name: str) -> GoogleModelProfile:
-    """Pydantic AI's profile for the Gemini `model_name`, with the declarations
-    sent as given (no JSON schema transformer) and nothing added to the
-    instruction about system messages mid-conversation (inline system prompts
-    supported)."""
-    return GoogleModelProfile(
-        {
-            **(google_model_profile(model_name) or {}),
-            "json_schema_transformer": None,
-            "supports_inline_system_prompts": True,
-        }
-    )
+# The planner's changes to Gemini's profile, which `GoogleModel(profile=...)`
+# merges over the provider's own for the model: the declarations sent as given
+# (no JSON schema transformer) and nothing added to the instruction about system
+# messages mid-conversation (inline system prompts supported).
+PLANNER_PROFILE = GoogleModelProfile(
+    json_schema_transformer=None, supports_inline_system_prompts=True
+)
 
 
 @dataclass
@@ -153,16 +157,12 @@ class PlannerResponse:
 
     `parts` are its parts as google-genai parts: each function call with its
     id, text, and each thought with `thought` set, each with its thought
-    signature. `usage` is the request's usage as Pydantic AI reads it.
-    `block_reason` is Gemini's reason for blocking the prompt, for a response
-    that is a block and holds no candidate, which the ADK planner records as
-    an event with that `error_code` and no content. A response with no parts
-    and no block reason is one the ADK planner records no event for.
+    signature. What the API reported on the response (usage, finish reason, a
+    blocked prompt) is read off the stream by the model
+    (`harness.planner_model.ResponseMetadata`), not here.
     """
 
     parts: tuple[types.Part, ...]
-    usage: RequestUsage
-    block_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -212,12 +212,14 @@ def planner_agent(
     specs: Sequence[ToolSpec],
     *,
     instruction: str,
-    model: Model,
+    model: Model | None = None,
     name: str | None = None,
     include_content: bool = True,
 ) -> PlannerAgent:
     """The planner as a Pydantic AI agent named `name` on `model`, with
-    `instruction` and one tool per spec.
+    `instruction` and one tool per spec. With no `model` each run names its
+    own (`run_planner`), so one agent serves concurrent runs, each on a model
+    of its own.
 
     Each tool is declared as `function_declaration(spec)` states it, its
     schema as it stands, and runs the spec's body over the model's arguments
@@ -367,41 +369,53 @@ async def run_planner(
     planner: PlannerAgent,
     deps: PlannerDeps,
     *,
-    question: str | None,
+    question: types.Content | str | None,
     brief: str,
+    model: Model | None = None,
     conversation_id: str | None = None,
-) -> AsyncIterator[PlannerItem]:
+) -> AsyncGenerator[PlannerItem]:
     """Run the planner once on `brief`, after the user's `question`, yielding as it goes.
 
     The run's first request holds `question`, then `brief`, as two user
     contents, or `brief` alone for a turn with no question, as the ADK
-    planner sends it (`planner.agent.prepend_brief`). Each model response is
-    yielded as a `PlannerResponse` once received, before its calls run, and
-    each call's answer as a `PlannerToolAnswer` once that call has answered,
-    a call to a tool the planner lacks included (`tool_not_found`). The run stops before its next
-    model request once a tool ended it, and ends on a response with no tool
-    call.
+    planner sends it (`planner.agent.prepend_brief`). A question given as a
+    `Content` is sent with its parts as the user sent them
+    (`_question_prompt`). Each model response is yielded as a
+    `PlannerResponse` once received, before its calls run, and
+    every call's answer as a `PlannerToolAnswer` once that call has answered,
+    whatever answered it: the call's tool, `tool_not_found` for a tool the
+    planner lacks, or Pydantic AI itself (`_sent_answer`). The run stops
+    before its next model request once a tool ended it, and ends on a
+    response with no tool call.
 
     A response Pydantic AI refuses (`UnexpectedModelBehavior`: a stream with
     no chunk, a blocked prompt) ends the run as a response with no tool call
-    ends the ADK planner's: the items yielded so far stand and nothing is
-    raised. A blocked prompt's response is yielded first, with its
-    `block_reason`. Any other exception is raised once the answers of the
-    calls that answered and were not yet yielded are, in the order the calls
-    began, as the ADK planner keeps a response's finished calls when another
-    of its calls fails. A cancellation yields nothing more.
+    ends the ADK planner's: nothing is raised. A blocked prompt's response is
+    yielded first, with no parts. Any other exception is raised. Either way
+    the answers of the calls that answered and were not yet yielded are
+    yielded first, in the order the calls began, as the ADK planner keeps a
+    response's finished calls when another of its calls fails. A cancellation
+    yields nothing more. Closing the iterator closes the run (`Agent.iter`)
+    and any stream it holds open.
 
     `deps` holds the session's state, the earlier steps and the callbacks
-    (`PlannerDeps`). `conversation_id` is the conversation the run's spans
-    name (`gen_ai.conversation.id`); None leaves Pydantic AI to make one up.
+    (`PlannerDeps`). `model` is the model the run calls, or None for the
+    agent's own. `conversation_id` is the conversation the run's spans name
+    (`gen_ai.conversation.id`); None leaves Pydantic AI to make one up.
     """
     history = (
-        [ModelRequest(parts=[UserPromptPart(question)], instructions=_QUESTION_INSTRUCTIONS)]
+        [
+            ModelRequest(
+                parts=[UserPromptPart(_question_prompt(question))],
+                instructions=_QUESTION_INSTRUCTIONS,
+            )
+        ]
         if question is not None
         else []
     )
     async with planner.agent.iter(
         brief,
+        model=model,
         message_history=history,
         deps=deps,
         usage_limits=_NO_REQUEST_LIMIT,
@@ -422,44 +436,84 @@ async def run_planner(
                         async for event in events:
                             if not isinstance(event, FunctionToolResultEvent):
                                 continue
-                            answered = _answered(deps, event, planner.tools)
-                            if answered is not None:
-                                yield answered
+                            yield _answered(deps, event, planner.tools)
         except UnexpectedModelBehavior as exc:
             logger.warning("planner run ended on a response Pydantic AI refused: %s", exc)
+            for answer in _unyielded(deps):
+                yield answer
         except Exception:
-            for call_id, call in list(deps._calls.items()):
-                if call.answer is not None:
-                    del deps._calls[call_id]
-                    yield _answer_of(call_id, call)
+            for answer in _unyielded(deps):
+                yield answer
             raise
 
 
+def _question_prompt(question: types.Content | str) -> str | list[UserContent]:
+    """`question`'s parts as the user prompt Pydantic AI sends as one content of
+    the same parts: one text part as its text, several as a list of them.
+
+    Studio sends one text part (`harness.studio`). An inline file is sent as
+    `BinaryContent`, its bytes and media type unchanged.
+
+    Raises:
+        ValueError: A part is neither text nor an inline file.
+    """
+    if isinstance(question, str):
+        return question
+    prompt: list[UserContent] = []
+    for part in question.parts or ():
+        if part.text is not None:
+            prompt.append(part.text)
+        elif part.inline_data is not None and part.inline_data.data is not None:
+            media_type = part.inline_data.mime_type or "application/octet-stream"
+            prompt.append(BinaryContent(data=part.inline_data.data, media_type=media_type))
+        else:
+            raise ValueError(f"the planner sends no {part.model_dump(exclude_none=True)} part")
+    if len(prompt) == 1 and isinstance(prompt[0], str):
+        return prompt[0]
+    return prompt
+
+
+def _unyielded(deps: PlannerDeps) -> Iterator[PlannerToolAnswer]:
+    """The answers of the calls that answered and were not yet yielded, in the
+    order the calls began, each taken out of what the run has not yielded."""
+    for call_id, call in list(deps._calls.items()):
+        if call.answer is not None:
+            del deps._calls[call_id]
+            yield _answer_of(call_id, call)
+
+
 def _planner_response(response: ModelResponse) -> PlannerResponse:
-    block_reason = (response.provider_details or {}).get("block_reason")
-    return PlannerResponse(
-        parts=response_parts(response),
-        usage=response.usage,
-        block_reason=str(block_reason) if block_reason else None,
-    )
+    return PlannerResponse(parts=response_parts(response))
 
 
 def _answered(
     deps: PlannerDeps, event: FunctionToolResultEvent, tools: Sequence[str]
-) -> PlannerToolAnswer | None:
+) -> PlannerToolAnswer:
     """The answer of the call `event` reports: a planner tool's, taken out of
-    what the run has not yielded, or `tool_not_found`'s for a tool the planner
-    lacks, which writes nothing."""
+    what the run has not yielded, `tool_not_found`'s for a tool the planner
+    lacks, which writes nothing, or, for a call Pydantic AI answered without
+    running its tool, the answer the model is sent (`_sent_answer`) with
+    whatever the call wrote."""
     name = event.part.tool_name
     if name not in tools:
         return PlannerToolAnswer(
             name=name, call_id=event.tool_call_id, answer=tool_not_found(name, tools), writes={}
         )
-    call = deps._calls.get(event.tool_call_id)
-    if call is None or call.answer is None or call.writes is None:
-        return None
-    del deps._calls[event.tool_call_id]
-    return _answer_of(event.tool_call_id, call)
+    call = deps._calls.pop(event.tool_call_id, None)
+    if call is not None and call.answer is not None and call.writes is not None:
+        return _answer_of(event.tool_call_id, call)
+    writes = deps._written(call.view) if call is not None else {}
+    ended = call.ended if call is not None else False
+    return PlannerToolAnswer(name, event.tool_call_id, _sent_answer(event.part), writes, ended)
+
+
+def _sent_answer(part: ToolReturnPart) -> dict[str, Any]:
+    """The answer Pydantic AI sends Gemini for `part`: an error outcome (a call
+    Pydantic AI answered with a retry, or one whose tool raised) under Gemini's
+    `error` key, any other as its object (`pydantic_ai.models.google`)."""
+    if part.outcome in ERROR_OUTCOMES:
+        return {"error": part.model_response_str(wrap_if_error=False)}
+    return part.model_response_object(wrap_if_error=False)
 
 
 def _answer_of(call_id: str, call: _Call) -> PlannerToolAnswer:
