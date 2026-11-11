@@ -1760,6 +1760,7 @@ def test_a_replan_names_the_asks_the_failed_run_computed() -> None:
     ids=["replan", "amendment", "replan-nothing-removed"],
 )
 async def test_the_brief_words_each_ask_the_user_removed_for_its_entry(
+    planner_runner: PlannerRunner,
     decision: Any,
     requirement: Any,
     derived_requirement: Any,
@@ -1788,6 +1789,7 @@ async def test_the_brief_words_each_ask_the_user_removed_for_its_entry(
     replan = entry != "amendment"
 
     text, _ = await _first_request_with_readings(
+        planner_runner,
         _turn_readings(),
         plan=plan,
         stored={ASKS_STATE_KEY: asks},
@@ -1842,6 +1844,7 @@ def _turn_readings() -> list[dict[str, Any]]:
 
 
 async def _first_request_with_readings(
+    planner_runner: PlannerRunner,
     readings: list[dict[str, Any]],
     *,
     plan: Plan,
@@ -1852,9 +1855,8 @@ async def _first_request_with_readings(
     """Run one fresh orchestrator entry over `readings`, with `stored` (the
     blocks and warnings `search` keeps) already in session state, answering
     `refusal` or the user's `amendment`."""
-    seam = _seam(compiled_proposals=True)
-    llm = ScriptedPlannerLlm(script=[_DECLARE])
-    seam._agent.model = llm
+    scripted = ScriptedGenai([_calls(*_DECLARE)])
+    seam = _runner_seam(planner_runner, scripted, compiled_proposals=True)
     harness = _SeamHarness(stored)
     await harness.run(
         seam,
@@ -1864,15 +1866,15 @@ async def _first_request_with_readings(
         refusal=refusal,
         amendment=amendment,
     )
-    return _prompt_text(llm.captured_requests[0]), await harness.state()
+    return _prompt_text(scripted.requests[0]), await harness.state()
 
 
 async def test_the_orchestrator_planner_first_request_carries_every_search_reading(
-    decision: Any, requirement: Any, derived_requirement: Any
+    planner_runner: PlannerRunner, decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     plan = _translated_plan(decision, requirement, derived_requirement)
 
-    text, state = await _first_request_with_readings(_turn_readings(), plan=plan)
+    text, state = await _first_request_with_readings(planner_runner, _turn_readings(), plan=plan)
 
     for shown in (
         f'"aid" definite {SPEC}',
@@ -1912,6 +1914,7 @@ _REFUSED_BEFORE = datetime(2000, 1, 1, tzinfo=UTC)
     ],
 )
 async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
+    planner_runner: PlannerRunner,
     decision: Any,
     requirement: Any,
     derived_requirement: Any,
@@ -1946,6 +1949,7 @@ async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
     readings[0]["observed_at"] = _SEARCHED_AT.isoformat()
 
     text, state = await _first_request_with_readings(
+        planner_runner,
         readings,
         plan=plan,
         stored=stored,
@@ -1989,7 +1993,12 @@ async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
     ],
 )
 async def test_a_refusal_payload_is_held_with_its_code_until_a_later_search_lifts_it(
-    code: str, also: str | None, observed: str, between: str | None, kept: bool
+    planner_runner: PlannerRunner,
+    code: str,
+    also: str | None,
+    observed: str,
+    between: str | None,
+    kept: bool,
 ) -> None:
     """A replan answers the executor refusing `SPEC` for `code`, which is held
     as a bare spec_id with its code and the entry's time beside it. A later
@@ -2001,9 +2010,9 @@ async def test_a_refusal_payload_is_held_with_its_code_until_a_later_search_lift
     (`between`), `SPEC` is held from the second refusal; a resume of the
     replan keeps the first refusal's time. A wave that also stops on `SPEC`
     for another code (`also`) holds it for good when either code is."""
-    seam = _seam()
-    llm = ScriptedPlannerLlm(script=["still nothing"] * 10)
-    seam._agent.model = llm
+    runs = 3 if between is not None else 2
+    scripted = ScriptedGenai([_says("still nothing")] * runs)
+    seam = _runner_seam(planner_runner, scripted)
     harness = _SeamHarness()
     refusal = _rediscovery_refusal(SPEC, code)
     if also is not None:
@@ -2027,14 +2036,14 @@ async def test_a_refusal_payload_is_held_with_its_code_until_a_later_search_lift
         )
     readings = _turn_readings()
     readings[0]["observed_at"] = (before if observed == "before" else after).isoformat()
-    calls = len(llm.captured_requests)
+    calls = len(scripted.requests)
     await harness.run(
         seam, question="aid to guatemala", readings=readings, amendment="only since 2015"
     )
 
     state = await harness.state()
     assert (SPEC in pin_sources(state)) is kept
-    assert ("Do not propose" in _prompt_text(llm.captured_requests[calls])) is not kept
+    assert ("Do not propose" in _prompt_text(scripted.requests[calls])) is not kept
 
 
 # A spec Search offered as another count of `SPEC`'s reading.
@@ -2074,7 +2083,7 @@ def _avoided(brief: str) -> str:
 
 @pytest.mark.parametrize("siblings", ["none", "unfetched", "fetched"])
 async def test_every_spec_refused_since_the_first_draft_is_named_and_unpinnable(
-    siblings: str,
+    planner_runner: PlannerRunner, siblings: str
 ) -> None:
     """Two replans and an amendment after one first draft, the replans
     refusing `SPEC` and then `SPEC_C`. Every call renders the same readings,
@@ -2082,9 +2091,8 @@ async def test_every_spec_refused_since_the_first_draft_is_named_and_unpinnable(
     refusal on, each call's brief names every spec refused so far in one
     sentence and leaves them out of the pin sources. The next first-draft
     entry starts clean."""
-    seam = _seam()
-    llm = ScriptedPlannerLlm(script=["still nothing"] * 10)
-    seam._agent.model = llm
+    scripted = ScriptedGenai([_says("still nothing")] * 5)
+    seam = _runner_seam(planner_runner, scripted)
     readings = _offering_readings(siblings)
     calls: list[dict[str, Any]] = [
         {},
@@ -2099,10 +2107,10 @@ async def test_every_spec_refused_since_the_first_draft_is_named_and_unpinnable(
     async def _node(ctx: Context, node_input: Any) -> Any:
         del node_input
         for call in calls:
-            before = len(llm.captured_requests)
+            before = len(scripted.requests)
             await seam(ctx=ctx, question="aid to guatemala", readings=readings, **call)
             pinnable.append(list(pin_sources(cast(SessionState, ctx.session.state))))
-            briefs.append(_brief_follows_the_question(llm.captured_requests[before]))
+            briefs.append(_brief_follows_the_question(scripted.requests[before]))
 
     wf = Workflow(
         name="seam_test_wf",
@@ -2112,7 +2120,9 @@ async def test_every_spec_refused_since_the_first_draft_is_named_and_unpinnable(
     runner = Runner(node=wf, app_name=_APP, session_service=sessions)
     session = await sessions.create_session(app_name=_APP, user_id=_USER)
     content = types.Content(role="user", parts=[types.Part(text="probe")])
-    async for _ in runner.run_async(user_id=_USER, session_id=session.id, new_message=content):
+    async for _ in runner.run_async(
+        user_id=_USER, session_id=session.id, new_message=content, run_config=SSE
+    ):
         pass
 
     shown = [SPEC, SPEC_B, SPEC_C, *([_SIBLING] if siblings == "fetched" else [])]
@@ -2137,7 +2147,7 @@ async def test_every_spec_refused_since_the_first_draft_is_named_and_unpinnable(
 
 @pytest.mark.parametrize("siblings", ["unfetched", "fetched"])
 async def test_a_replan_admits_a_pin_of_another_count_the_refused_reading_offered(
-    decision: Any, requirement: Any, siblings: str
+    planner_runner: PlannerRunner, decision: Any, requirement: Any, siblings: str
 ) -> None:
     """A replan after the executor refused France's gross disbursements to
     Kenya pins the net count Search offered beside them. Admission records
@@ -2172,20 +2182,23 @@ async def test_a_replan_admits_a_pin_of_another_count_the_refused_reading_offere
         ],
     }
     repinned = dataset.model_copy(update={"source_spec_id": net}).model_dump(mode="json")
-    seam = _seam()
-    drafting = ScriptedPlannerLlm(script=[[("propose_plan", first_draft)]])
-    replanning = ScriptedPlannerLlm(
-        script=[[("propose_plan", {"evidence_requirements": [repinned], "amends_version": 1})]]
+    scripted = ScriptedGenai(
+        [
+            _calls(("propose_plan", first_draft)),
+            _says("done"),
+            _calls(("propose_plan", {"evidence_requirements": [repinned], "amends_version": 1})),
+            _says("done"),
+        ]
     )
+    seam = _runner_seam(planner_runner, scripted)
     after: dict[str, Any] = {}
 
     async def _node(ctx: Context, node_input: Any) -> Any:
         del node_input
-        seam._agent.model = drafting
         await seam(ctx=ctx, question="aid", readings=dumped)
         first = load_plan(ctx.state)
         assert first is not None
-        seam._agent.model = replanning
+        after["replanned_from"] = len(scripted.requests)
         await seam(
             ctx=ctx,
             question="aid",
@@ -2206,25 +2219,23 @@ async def test_a_replan_admits_a_pin_of_another_count_the_refused_reading_offere
         app_name=_APP, user_id=_USER, state={ORCHESTRATOR_SPECS_KEY: {gross: block}}
     )
     content = types.Content(role="user", parts=[types.Part(text="probe")])
-    async for _ in runner.run_async(user_id=_USER, session_id=session.id, new_message=content):
+    async for _ in runner.run_async(
+        user_id=_USER, session_id=session.id, new_message=content, run_config=SSE
+    ):
         pass
 
-    (answered,) = [
-        part.function_response.response
-        for content in replanning.captured_requests[-1].contents
-        for part in content.parts or []
-        if part.function_response and part.function_response.name == "propose_plan"
-    ]
+    replanning = scripted.requests[after["replanned_from"] :]
+    (answered,) = _answers(replanning[-1], "propose_plan")
     assert (answered["outcome"], answered["status"], answered["version"]) == ("ok", "draft", 2)
     assert after["pinnable"] == ([net] if siblings == "fetched" else [])
     plan = after["plan"]
     assert plan is not None
     assert [r.source_spec_id for r in plan.evidence_requirements] == [net]  # type: ignore[union-attr]
-    assert gross in _avoided(_brief_follows_the_question(replanning.captured_requests[0]))
+    assert gross in _avoided(_brief_follows_the_question(replanning[0]))
 
 
 async def test_the_shown_ids_are_exactly_the_ids_the_readings_text_names(
-    decision: Any, requirement: Any, derived_requirement: Any
+    planner_runner: PlannerRunner, decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """A hundred readings overflow the budget, so the oldest are dropped and their ids go unshown."""
     plan = _translated_plan(decision, requirement, derived_requirement)
@@ -2238,7 +2249,7 @@ async def test_the_shown_ids_are_exactly_the_ids_the_readings_text_names(
         for number in range(100)
     ]
 
-    text, state = await _first_request_with_readings(readings, plan=plan)
+    text, state = await _first_request_with_readings(planner_runner, readings, plan=plan)
 
     shown = list(pin_sources(state))
     named = [r["spec_id"] for r in readings if r["spec_id"] in text]
@@ -2248,11 +2259,11 @@ async def test_the_shown_ids_are_exactly_the_ids_the_readings_text_names(
 
 
 async def test_an_orchestrator_turn_with_no_search_says_so(
-    decision: Any, requirement: Any, derived_requirement: Any
+    planner_runner: PlannerRunner, decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     plan = _translated_plan(decision, requirement, derived_requirement)
 
-    text, state = await _first_request_with_readings([], plan=plan)
+    text, state = await _first_request_with_readings(planner_runner, [], plan=plan)
 
     assert "(no search has run in this conversation)" in text
     assert pin_sources(state) == {}
@@ -2309,6 +2320,7 @@ def _aid_reading(
     ],
 )
 async def test_a_later_turn_renders_and_pins_an_earlier_turns_reading(
+    planner_runner: PlannerRunner,
     decision: Any,
     requirement: Any,
     derived_requirement: Any,
@@ -2324,7 +2336,10 @@ async def test_a_later_turn_renders_and_pins_an_earlier_turns_reading(
     prior = _prior_ledger(([reading], {**stored, SPEC_B: {"x": 1}}))
 
     text, state = await _first_request_with_readings(
-        prior["readings"], plan=plan, stored={ORCHESTRATOR_PRIOR_LEDGER_KEY: prior}
+        planner_runner,
+        prior["readings"],
+        plan=plan,
+        stored={ORCHESTRATOR_PRIOR_LEDGER_KEY: prior},
     )
 
     assert f'"aid" definite {SPEC}' in text
@@ -2338,7 +2353,7 @@ async def test_a_later_turn_renders_and_pins_an_earlier_turns_reading(
 
 
 async def test_the_newest_reading_of_a_spec_id_wins_across_turns(
-    decision: Any, requirement: Any, derived_requirement: Any
+    planner_runner: PlannerRunner, decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """A spec_id turn 1 and this turn both read renders once, as this turn
     read it, and pins from this turn's block; turn 2's `latest` reading of
@@ -2352,6 +2367,7 @@ async def test_the_newest_reading_of_a_spec_id_wins_across_turns(
     current = [_aid_reading(sentence="turn three").model_dump(mode="json")]
 
     text, state = await _first_request_with_readings(
+        planner_runner,
         [*prior["readings"], *current],
         plan=plan,
         stored={ORCHESTRATOR_PRIOR_LEDGER_KEY: prior, ORCHESTRATOR_SPECS_KEY: {SPEC: {"turn": 3}}},
@@ -2367,7 +2383,7 @@ async def test_the_newest_reading_of_a_spec_id_wins_across_turns(
 
 
 async def test_the_cross_turn_ledger_cuts_the_oldest_readings_and_counts_them(
-    decision: Any, requirement: Any, derived_requirement: Any
+    planner_runner: PlannerRunner, decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """Earlier turns' readings past the budget are dropped oldest first with a
     count, and this turn's reading stays shown and pinnable."""
@@ -2382,7 +2398,10 @@ async def test_the_cross_turn_ledger_cuts_the_oldest_readings_and_counts_them(
     current = [_aid_reading().model_dump(mode="json")]
 
     text, state = await _first_request_with_readings(
-        [*prior["readings"], *current], plan=plan, stored={ORCHESTRATOR_PRIOR_LEDGER_KEY: prior}
+        planner_runner,
+        [*prior["readings"], *current],
+        plan=plan,
+        stored={ORCHESTRATOR_PRIOR_LEDGER_KEY: prior},
     )
 
     assert "earlier readings not shown" in text
@@ -2579,27 +2598,20 @@ def test_the_plan_section_shows_the_plan_the_model_wrote(decision: Any) -> None:
 
 
 async def test_the_brief_seeded_with_a_split_plan_shows_the_plan_the_model_wrote(
-    decision: Any,
+    planner_runner: PlannerRunner, decision: Any
 ) -> None:
     """The graph hands the seam the stored plan, copies and all. The brief the
     planner reads names `debt` and its source, and neither the copy nor the
     copy's pin."""
     stored = stored_split_plan(decision)
-    seam = _seam()
-    llm = ScriptedPlannerLlm(script=["still nothing"] * 4)
-    seam._agent.model = llm
+    scripted = ScriptedGenai([_says("still nothing")])
+    seam = _runner_seam(planner_runner, scripted)
 
     await _run_seam(
         seam, question=stored.question, readings=[], prior_plan=stored.model_dump(mode="json")
     )
 
-    brief = "\n".join(
-        part.text
-        for content in llm.captured_requests[0].contents
-        if content.role == "user"
-        for part in content.parts or []
-        if part.text is not None
-    )
+    brief = _prompt_text(scripted.requests[0])
     assert f"- evidence: debt from {SPEC_DEBT} (step debt)" in brief
     assert "debt_history" not in brief
     assert SPEC_DEBT_HISTORY not in brief
@@ -2685,7 +2697,7 @@ _FRANCE_KENYA = json.loads(
 
 
 async def test_an_amend_call_shows_the_other_count_and_the_plan_pins_it(
-    decision: Any, requirement: Any
+    planner_runner: PlannerRunner, decision: Any, requirement: Any
 ) -> None:
     """ "Use net disbursements" arrives on an amend call, whose brief names the net
     sibling's spec_id beside the gross reading, so the model pins it and the
@@ -2711,21 +2723,27 @@ async def test_an_amend_call_shows_the_other_count_and_the_plan_pins_it(
         repinned = dataset.model_copy(update={"source_spec_id": pin}).model_dump(mode="json")
         return [("propose_plan", {"evidence_requirements": [repinned], "amends_version": 1})]
 
-    seam = _seam()
-    llm = ScriptedPlannerLlm(script=[[("propose_plan", first_draft)]])
-    amending_llm = ScriptedPlannerLlm(script=[_pin_the_net_count])
+    scripted = ScriptedGenai(
+        [
+            _calls(("propose_plan", first_draft)),
+            _says("done"),
+            _computed(_pin_the_net_count),
+            _says("done"),
+        ]
+    )
+    seam = _runner_seam(planner_runner, scripted)
     plans: list[Plan | None] = []
+    amended_from: list[int] = []
 
     # Both entries run in one node, as the graph's planner node re-enters the
     # seam over the `amend` edge in the same session. No translation
     # compiles, so each ends with no plan ready, leaving its draft on record.
     async def _node(ctx: Context, node_input: Any) -> Any:
         del node_input
-        seam._agent.model = llm
         await seam(ctx=ctx, question="aid", readings=readings)
         first = load_plan(ctx.state)
         assert first is not None
-        seam._agent.model = amending_llm
+        amended_from.append(len(scripted.requests))
         await seam(
             ctx=ctx,
             question="aid",
@@ -2745,12 +2763,14 @@ async def test_an_amend_call_shows_the_other_count_and_the_plan_pins_it(
         app_name=_APP, user_id=_USER, state={ORCHESTRATOR_SPECS_KEY: {gross: block}}
     )
     content = types.Content(role="user", parts=[types.Part(text="probe")])
-    async for _ in runner.run_async(user_id=_USER, session_id=session.id, new_message=content):
+    async for _ in runner.run_async(
+        user_id=_USER, session_id=session.id, new_message=content, run_config=SSE
+    ):
         pass
 
     net = block["resolved"]["alternative_measures"][0]["definition"]["spec_id"]
     assert f"other counts: net disbursements [{net}]" in _prompt_text(
-        amending_llm.captured_requests[0]
+        scripted.requests[amended_from[0]]
     )
     (plan,) = plans
     assert plan is not None and plan.version == 2
@@ -3657,8 +3677,14 @@ async def test_every_planner_generation_runs_at_the_low_thinking_config(
     )
 
 
+def _skill_surface(responses: dict[str, ToolCallResult]) -> FixtureSurface:
+    """A surface answering `get_skill` from `responses`, and a call with a `path`
+    from the `get_skill_path` response."""
+    return _SkillPagesSurface(schemas=[], responses=responses)
+
+
 async def test_a_later_entry_sees_the_brief_and_none_of_the_earlier_entrys_calls(
-    decision: Any, requirement: Any, derived_requirement: Any
+    planner_runner: PlannerRunner, decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """Two entries of one turn, each its own `run_node` child as the graph's
     planner node runs them: the later entry's first request holds the turn's
@@ -3666,22 +3692,25 @@ async def test_a_later_entry_sees_the_brief_and_none_of_the_earlier_entrys_calls
     entry's tool calls, since a `single_turn` run reads only its own node path.
     The skill the earlier entry read is in the later brief instead, starred on
     the Skills named line."""
-    seam = _translator_seam(
-        responses={
-            "search": _NO_DATA_SEARCH_RESPONSE,
-            "get_skill": ToolCallResult(is_error=False, text="# DFO FAQ"),
-        }
-    )
-    draft = _gdp_plan(decision, requirement, derived_requirement)
-    planner_llm = ScriptedPlannerLlm(
-        script=[
-            [("get_skill", {"skill_id": "dfo-faq"})],
-            _propose_again_step(),
-            "stop",
-            "noted",
+    scripted = ScriptedGenai(
+        [
+            _calls(("get_skill", {"skill_id": "dfo-faq"})),
+            _computed(_propose_again_step()),
+            _says("stop"),
+            _says("noted"),
         ]
     )
-    seam._agent.model = planner_llm
+    seam = _runner_seam(
+        planner_runner,
+        scripted,
+        surface=_skill_surface(
+            {
+                "search": _NO_DATA_SEARCH_RESPONSE,
+                "get_skill": ToolCallResult(is_error=False, text="# DFO FAQ"),
+            }
+        ),
+    )
+    draft = _gdp_plan(decision, requirement, derived_requirement)
     plan_json = draft.model_dump(mode="json")
     entries: list[dict[str, Any]] = [{}, {"amendment": "only since 2015"}]
     readings = _skill_readings("dfo-faq")
@@ -3709,18 +3738,20 @@ async def test_a_later_entry_sees_the_brief_and_none_of_the_earlier_entrys_calls
     runner = Runner(node=wf, app_name=_APP, session_service=sessions)
     session = await sessions.create_session(app_name=_APP, user_id=_USER)
     content = types.Content(role="user", parts=[types.Part(text="probe")])
-    async for _ in runner.run_async(user_id=_USER, session_id=session.id, new_message=content):
+    async for _ in runner.run_async(
+        user_id=_USER, session_id=session.id, new_message=content, run_config=SSE
+    ):
         pass
 
-    # `captured_requests[0..2]` are the first entry: `get_skill`,
+    # `scripted.requests[0..2]` are the first entry: `get_skill`,
     # `propose_plan`, and the closing text. `[3]` is the later entry's first
     # generation.
-    earlier = _call_and_response_names(planner_llm.captured_requests[2])
+    earlier = _call_and_response_names(scripted.requests[2])
     assert {"FC:get_skill", "FR:get_skill", "FC:propose_plan", "FR:propose_plan"} <= set(earlier)
-    first_brief = _brief_follows_the_question(planner_llm.captured_requests[0])
+    first_brief = _brief_follows_the_question(scripted.requests[0])
     assert _skills_named(first_brief) == "dfo-faq"
     assert _SKILL_PAGE not in first_brief
-    later = planner_llm.captured_requests[3]
+    later = scripted.requests[3]
     brief = _brief_follows_the_question(later)
     assert "only since 2015" in brief
     assert _skills_named(brief) == "dfo-faq*"
@@ -3753,25 +3784,43 @@ def _skill_seam() -> PlannerSeam:
     )
 
 
-async def test_a_first_draft_carries_no_skill_an_earlier_plan_read() -> None:
+def _skill_page_surface() -> FixtureSurface:
+    """A surface whose `get_skill` answers one page for a skill and one for a file."""
+    return _skill_surface(
+        {
+            "get_skill": ToolCallResult(is_error=False, text=_SKILL_PAGE),
+            "get_skill_path": ToolCallResult(is_error=False, text="# Methods"),
+        }
+    )
+
+
+async def test_a_first_draft_carries_no_skill_an_earlier_plan_read(
+    planner_runner: PlannerRunner,
+) -> None:
     """A first draft starts a new plan, so the skills the last plan's entries
     read leave the brief with it, while an amend of that last plan still
     carried them."""
-    seam = _skill_seam()
-    llm = ScriptedPlannerLlm(script=[[("get_skill", {"skill_id": "dfo-faq"})], "stop"])
-    seam._agent.model = llm
+    scripted = ScriptedGenai(
+        [
+            _calls(("get_skill", {"skill_id": "dfo-faq"})),
+            _says("stop"),
+            _says("done"),
+            _says("done"),
+        ]
+    )
+    seam = _runner_seam(planner_runner, scripted, surface=_skill_page_surface())
     harness = _SeamHarness()
     entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
 
     await harness.run(seam, **entry)
-    amending = len(llm.captured_requests)
+    amending = len(scripted.requests)
     await harness.run(seam, amendment="only since 2015", **entry)
-    drafting = len(llm.captured_requests)
+    drafting = len(scripted.requests)
     await harness.run(seam, **entry)
 
-    amend = _brief_follows_the_question(llm.captured_requests[amending])
+    amend = _brief_follows_the_question(scripted.requests[amending])
     assert _skills_named(amend) == "dfo-faq*" and _SKILL_PAGE in amend
-    draft = _brief_follows_the_question(llm.captured_requests[drafting])
+    draft = _brief_follows_the_question(scripted.requests[drafting])
     assert _skills_named(draft) == "dfo-faq"
     assert _SKILL_PAGE not in draft
 
@@ -3786,7 +3835,9 @@ _OLD_FILE_PAGE = (
 )
 
 
-async def test_a_page_stored_with_the_old_tools_call_lines_is_shown_naming_get_skill() -> None:
+async def test_a_page_stored_with_the_old_tools_call_lines_is_shown_naming_get_skill(
+    planner_runner: PlannerRunner,
+) -> None:
     """Pages stored before the planner held one skill tool print `get_skill_file(`
     call lines; the brief names `get_skill` in each, and leaves prose alone."""
     pages = [
@@ -3798,9 +3849,8 @@ async def test_a_page_stored_with_the_old_tools_call_lines_is_shown_naming_get_s
         skill_page_key(pages[0]): _OLD_FIRST_PAGE,
         skill_page_key(pages[1]): _OLD_FILE_PAGE,
     }
-    seam = _skill_seam()
-    llm = ScriptedPlannerLlm(script=["stop"])
-    seam._agent.model = llm
+    scripted = ScriptedGenai([_says("stop")])
+    seam = _runner_seam(planner_runner, scripted, surface=_skill_page_surface())
     harness = _SeamHarness(state)
 
     await harness.run(
@@ -3810,7 +3860,7 @@ async def test_a_page_stored_with_the_old_tools_call_lines_is_shown_naming_get_s
         amendment="only since 2015",
     )
 
-    brief = _brief_follows_the_question(llm.captured_requests[0])
+    brief = _brief_follows_the_question(scripted.requests[0])
     assert 'get_skill(skill_id="dfo-faq", path=\u2026)' in brief
     assert (
         'get_skill(skill_id="dfo-faq", path="methods.md", offset=31844, digest="sha256:a")' in brief
@@ -3827,24 +3877,30 @@ async def test_a_page_stored_in_the_current_form_is_shown_as_stored() -> None:
     assert f"\n{text}\n" in section
 
 
-async def test_each_skill_page_text_is_stored_once_across_the_plans_events() -> None:
+async def test_each_skill_page_text_is_stored_once_across_the_plans_events(
+    planner_runner: PlannerRunner,
+) -> None:
     """A read stores its own page's text and a short index, so a later read's
     state delta carries no earlier page and each text appears in one event,
     however many reads and entries follow."""
     first, second = "# FAQ " + "a" * 400, "# Methods " + "b" * 400
-    seam = _translator_seam(
-        responses={
-            "get_skill": ToolCallResult(is_error=False, text=first),
-            "get_skill_path": ToolCallResult(is_error=False, text=second),
-        }
-    )
-    seam._agent.model = ScriptedPlannerLlm(
-        script=[
-            [("get_skill", {"skill_id": "dfo-faq"})],
-            [("get_skill", {"skill_id": "dfo-faq", "path": "methods.md"})],
-            "stop",
-            "stop",
+    scripted = ScriptedGenai(
+        [
+            _calls(("get_skill", {"skill_id": "dfo-faq"})),
+            _calls(("get_skill", {"skill_id": "dfo-faq", "path": "methods.md"})),
+            _says("stop"),
+            _says("stop"),
         ]
+    )
+    seam = _runner_seam(
+        planner_runner,
+        scripted,
+        surface=_skill_surface(
+            {
+                "get_skill": ToolCallResult(is_error=False, text=first),
+                "get_skill_path": ToolCallResult(is_error=False, text=second),
+            }
+        ),
     )
     harness = _SeamHarness()
     entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
@@ -4983,7 +5039,9 @@ async def test_a_sixth_amendment_turn_still_records_its_own_version(
     assert version == 6
 
 
-async def test_a_second_calls_brief_extends_the_first_byte_for_byte() -> None:
+async def test_a_second_calls_brief_extends_the_first_byte_for_byte(
+    planner_runner: PlannerRunner,
+) -> None:
     """Two calls in one node, the shape the graph's `amend` and `replan` edges
     take inside one `Runner.run_async`. Each call's requests carry its own
     brief once, after the turn's question. The second brief opens with the
@@ -4996,9 +5054,8 @@ async def test_a_second_calls_brief_extends_the_first_byte_for_byte() -> None:
     canvas_digest = {"blocks": ["a block"]}
     conversation_digest = {"turns": ["an earlier turn"]}
 
-    seam = _seam()
-    first_llm = ScriptedPlannerLlm(script=["still nothing"] * 4)
-    second_llm = ScriptedPlannerLlm(script=["still nothing"] * 4)
+    scripted = ScriptedGenai([_says("still nothing"), _says("still nothing")])
+    seam = _runner_seam(planner_runner, scripted)
 
     expected_first_message = seam._message(
         question=question,
@@ -5012,7 +5069,6 @@ async def test_a_second_calls_brief_extends_the_first_byte_for_byte() -> None:
 
     async def _node(ctx: Context, node_input: Any) -> Any:
         del node_input
-        seam._agent.model = first_llm
         await seam(
             ctx=ctx,
             question=question,
@@ -5020,7 +5076,6 @@ async def test_a_second_calls_brief_extends_the_first_byte_for_byte() -> None:
             canvas_digest=canvas_digest,
             conversation_digest=conversation_digest,
         )
-        seam._agent.model = second_llm
         await seam(
             ctx=ctx,
             question=question,
@@ -5036,11 +5091,13 @@ async def test_a_second_calls_brief_extends_the_first_byte_for_byte() -> None:
     runner = Runner(node=wf, app_name=_APP, session_service=sessions)
     session = await sessions.create_session(app_name=_APP, user_id=_USER)
     content = types.Content(role="user", parts=[types.Part(text="probe")])
-    async for event in runner.run_async(user_id=_USER, session_id=session.id, new_message=content):
+    async for event in runner.run_async(
+        user_id=_USER, session_id=session.id, new_message=content, run_config=SSE
+    ):
         assert isinstance(event, Event)
 
-    assert _brief_follows_the_question(first_llm.captured_requests[0]) == expected_first_message
-    second = _brief_follows_the_question(second_llm.captured_requests[0])
+    assert _brief_follows_the_question(scripted.requests[0]) == expected_first_message
+    second = _brief_follows_the_question(scripted.requests[1])
     assert second == expected_first_message + planner_seam._ask_text(
         amendment="only since 2015", refusal=None, pick=None
     )
@@ -5652,13 +5709,12 @@ _AID_BLOCK = {"spec_id": _AID_SPEC, "definition": {"identity": _AID_2020_2024}, 
 
 
 async def _run_the_planner(
-    reads: _DefinitionReads, script: list[Any]
-) -> tuple[ScriptedPlannerLlm, SessionState]:
+    planner_runner: PlannerRunner, reads: _DefinitionReads, script: list[Step]
+) -> tuple[ScriptedGenai, SessionState]:
     """One first-turn entry showing the planner the dataset Search answered over
     2020-2024, as a search reading whose block the turn's state holds."""
-    seam = PlannerSeam(settings=Settings(), surface=reads)
-    llm = ScriptedPlannerLlm(script=script)
-    seam._agent.model = llm
+    scripted = ScriptedGenai(script)
+    seam = seam_on(planner_runner, scripted, surface=reads)
     reading = SearchReading.model_validate(
         {
             "text": "education aid over the last five years",
@@ -5670,13 +5726,15 @@ async def _run_the_planner(
     )
     harness = _SeamHarness({ORCHESTRATOR_SPECS_KEY: {_AID_SPEC: _AID_BLOCK}})
     await harness.run(seam, question=_LAST_FIVE_YEARS, readings=[reading.model_dump(mode="json")])
-    return llm, await harness.state()
+    return scripted, await harness.state()
 
 
 async def _propose_the_last_five_years(
-    reads: _DefinitionReads,
-) -> tuple[ScriptedPlannerLlm, SessionState]:
-    return await _run_the_planner(reads, [[("propose_plan", _last_five_years_plan())]])
+    planner_runner: PlannerRunner, reads: _DefinitionReads
+) -> tuple[ScriptedGenai, SessionState]:
+    return await _run_the_planner(
+        planner_runner, reads, [_calls(("propose_plan", _last_five_years_plan())), _says("done")]
+    )
 
 
 def _the_last_three_years(request: Any) -> list[tuple[str, dict[str, Any]]]:
@@ -5691,7 +5749,9 @@ def _the_last_three_years(request: Any) -> list[tuple[str, dict[str, Any]]]:
     return [("propose_plan", amended)]
 
 
-async def test_a_last_five_years_plan_reads_the_first_year_once_and_pins_from_it() -> None:
+async def test_a_last_five_years_plan_reads_the_first_year_once_and_pins_from_it(
+    planner_runner: PlannerRunner,
+) -> None:
     """Search answered over 2020-2024, which states no earlier year. The model's
     `propose_plan` call is recorded all the same: the dataset is resolved once
     over no window for its first year, 1995, and the pin moves to the dataset
@@ -5700,8 +5760,14 @@ async def test_a_last_five_years_plan_reads_the_first_year_once_and_pins_from_it
     does the second proposal of the turn."""
     reads = _DefinitionReads(_held_since_1995)
 
-    llm, state = await _run_the_planner(
-        reads, [[("propose_plan", _last_five_years_plan())], _the_last_three_years]
+    scripted, state = await _run_the_planner(
+        planner_runner,
+        reads,
+        [
+            _calls(("propose_plan", _last_five_years_plan())),
+            _computed(_the_last_three_years),
+            _says("done"),
+        ],
     )
 
     assert reads.first_year_reads == [
@@ -5709,7 +5775,7 @@ async def test_a_last_five_years_plan_reads_the_first_year_once_and_pins_from_it
     ]
     assert full_histories(state) == {_AID_SPEC: FullHistory(first_year=1995, rows=870)}
     plan = load_plan(state)
-    assert plan is not None, llm.captured_requests[-1].contents[-1]
+    assert plan is not None, _contents(scripted.requests[-1])[-1]
     assert plan.version == 2
     opened, _ = windowed_identity(_AID_2020_2024, {"kind": "range", "start_year": 1995})
     dataset, growth, newest = plan.evidence_requirements
@@ -5722,7 +5788,9 @@ async def test_a_last_five_years_plan_reads_the_first_year_once_and_pins_from_it
     assert rolls_from_its_start(newest)
 
 
-async def test_a_plan_of_fixed_years_over_a_windowed_reading_reads_nothing() -> None:
+async def test_a_plan_of_fixed_years_over_a_windowed_reading_reads_nothing(
+    planner_runner: PlannerRunner,
+) -> None:
     """The reading is over 2020-2024 and the plan states those years as fixed,
     so no first year is needed and none is read."""
     reads = _DefinitionReads(_held_since_1995)
@@ -5731,7 +5799,9 @@ async def test_a_plan_of_fixed_years_over_a_windowed_reading_reads_nothing() -> 
     del dataset["period_end_open"], growth["rolling"]
     fixed["evidence_requirements"] = [dataset, growth]
 
-    _, state = await _run_the_planner(reads, [[("propose_plan", fixed)]])
+    _, state = await _run_the_planner(
+        planner_runner, reads, [_calls(("propose_plan", fixed)), _says("done")]
+    )
 
     assert reads.first_year_reads == []
     assert full_histories(state) == {}
@@ -5761,20 +5831,15 @@ def _no_first_year() -> ToolCallResult:
     ids=["read-did-not-complete", "read-cannot-complete-on-a-retry", "answer-states-no-first-year"],
 )
 async def test_a_first_year_that_cannot_be_read_refuses_saying_the_read_failed(
-    answer: Callable[[], ToolCallResult], code: str
+    planner_runner: PlannerRunner, answer: Callable[[], ToolCallResult], code: str
 ) -> None:
     reads = _DefinitionReads(answer)
 
-    llm, state = await _propose_the_last_five_years(reads)
+    scripted, state = await _propose_the_last_five_years(planner_runner, reads)
 
     assert len(reads.calls) == 1
     assert load_plan(state) is None
-    (refusal,) = [
-        part.function_response.response
-        for content in llm.captured_requests[-1].contents
-        for part in content.parts or []
-        if part.function_response is not None
-    ]
+    (refusal,) = _answers(scripted.requests[-1], "propose_plan")
     assert refusal["code"] == code
     assert refusal["detail"] == {
         "issue": "rolling_needs_open_period",
@@ -5789,11 +5854,10 @@ _ACROSS_YEARS_RULE = "An ask marked (across years) asks for one figure, or one r
 
 @pytest.mark.parametrize("across_years", [[], [0, 1]], ids=["none", "marked"])
 async def test_the_brief_marks_each_ask_with_the_parties_it_breaks_down_by(
-    across_years: list[int],
+    planner_runner: PlannerRunner, across_years: list[int]
 ) -> None:
-    seam = _seam()
-    llm = ScriptedPlannerLlm(script=["Planned."])
-    seam._agent.model = llm
+    scripted = ScriptedGenai([_says("Planned.")])
+    seam = _runner_seam(planner_runner, scripted)
     asks = ["the total", "Debt service by creditor"]
     harness = _SeamHarness(
         state={
@@ -5805,7 +5869,7 @@ async def test_the_brief_marks_each_ask_with_the_parties_it_breaks_down_by(
 
     await harness.run(seam, question="debt service by creditor", readings=[])
 
-    prompt = _prompt_text(llm.captured_requests[0])
+    prompt = _prompt_text(scripted.requests[0])
     if across_years:
         assert (
             "0. the total (across years)\n1. Debt service by creditor (by creditor) (across years)\n"
