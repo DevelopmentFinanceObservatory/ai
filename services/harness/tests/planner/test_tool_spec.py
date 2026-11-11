@@ -121,11 +121,9 @@ def _adk_declaration(spec: ToolSpec) -> str:
 
 
 def _compiled_proposal_spec() -> ToolSpec:
-    agent = create_planner_agent(model_name="m")
-    use_compiled_proposals(agent)
-    (tool,) = [tool for tool in agent.tools if getattr(tool, "name", None) == PROPOSE_PLAN]
-    assert isinstance(tool, SpecTool)
-    return tool.spec
+    specs = use_compiled_proposals(_specs(translate=False, surface=False, question_fixed=False))
+    (spec,) = [spec for spec in specs if spec.name == PROPOSE_PLAN]
+    return spec
 
 
 @pytest.mark.parametrize(("translate", "surface", "question_fixed"), _VARIANTS)
