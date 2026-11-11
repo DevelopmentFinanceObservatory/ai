@@ -105,9 +105,10 @@ async def test_both_planners_log_the_same_first_planner_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The log holds a planner request in one form whichever planner sent it: the
-    system instruction as text (the Pydantic AI planner sends it as a `Content`)
-    and the contents. A first request holds no model turn, so no wire difference
-    between the planners reaches it."""
+    system instruction as text and the contents. Both planners send the ADK
+    planner's form (`harness.planner_model._in_adk_planner_form`), and a first
+    request holds no model turn, so no difference between the planners reaches
+    it."""
     scripted = _load("orchestrator_scripted")
     run = _load("run")
     (case,) = run.load_cases(

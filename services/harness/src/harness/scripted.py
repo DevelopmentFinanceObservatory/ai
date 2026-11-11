@@ -285,8 +285,8 @@ class ModelRequest:
 
     @property
     def system_text(self) -> str:
-        """The system instruction's text, whether it was sent as a string, as the
-        ADK planner sends it, or as a `Content`, as the Pydantic AI planner does."""
+        """The system instruction's text, in whichever shape it was sent. Both
+        planners send a string (`harness.planner_model._in_adk_planner_form`)."""
         return instruction_text(self.config.system_instruction)
 
 

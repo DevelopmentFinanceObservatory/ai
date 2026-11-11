@@ -705,10 +705,11 @@ GAVE_UP = "gave_up"
 class ModelRequest:
     """One request the planner's model client is sent, in google-genai's types.
 
-    Each runner builds its own shape. The ADK planner sends the system instruction as
-    a string and every declaration in one `Tool`, and the Pydantic AI planner sends the
-    instruction as a `Content` and one `Tool` per declaration. `system_text` and
-    `declarations` read both alike.
+    Both runners send the system instruction as a string and every declaration in
+    one `Tool`, the Pydantic AI planner's request put in the ADK planner's form
+    before it reaches the client (`harness.planner_model._in_adk_planner_form`).
+    `system_text` and `declarations` read any shape google-genai takes, so an
+    edit reads a request the same way whichever form it arrives in.
     """
 
     model: str
@@ -737,10 +738,9 @@ class ModelRequest:
 # The system instruction, tools and tool config travel where the request sends them:
 # on the request itself, or, on a request sent against the prefix cache
 # (`harness.prefix_cache`), on that cache's create, which the edit is handed as a
-# request with no contents. Each runner shapes its request its own way
-# (`ModelRequest`), so an edit that treats the runners alike reads the instruction
-# through `ModelRequest.system_text` and finds a declaration through
-# `ModelRequest.declarations`.
+# request with no contents. Both runners send their requests in one form
+# (`ModelRequest`); an edit reads the instruction through `ModelRequest.system_text`
+# and finds a declaration through `ModelRequest.declarations`.
 RequestEdit = Callable[[ModelRequest], None]
 
 

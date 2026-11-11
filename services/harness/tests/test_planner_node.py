@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import gc
 import itertools
 import logging
@@ -67,7 +68,11 @@ from submission.service import scope_choice_decisions
 from translator.tool import Translate, build_translate
 
 from .orchestrator_fakes import plan_call, stream, studio_client, turn_body
-from .planner.planner_pairs import assert_pinned_wire_differences, seam_specs
+from .planner.planner_pairs import (
+    assert_pinned_wire_differences,
+    seam_specs,
+    without_trailing_empty_text,
+)
 from .scripted_genai import (
     Reply,
     Request,
@@ -75,6 +80,7 @@ from .scripted_genai import (
     blocked_reply,
     call_part,
     empty_reply,
+    live_call_reply,
     reply,
     text_part,
     thought_part,
@@ -479,6 +485,79 @@ async def test_a_refused_proposal_then_an_accepted_one_is_the_same_on_both_plann
     assert adk.outputs[0] is not None and "plan" in adk.outputs[0]
     assert len(adk.requests) == 2
     _assert_same(adk, pydantic)
+
+
+def _without_trailing_empty_text(entry: _Entry) -> tuple[_Entry, int]:
+    """`entry` with the empty text part after each function call that ends a
+    model turn taken off its requests and its stored events
+    (`without_trailing_empty_text`), and how many parts were taken."""
+    taken = 0
+
+    def content(original: types.Content) -> types.Content:
+        nonlocal taken
+        kept = without_trailing_empty_text(original)
+        taken += kept is not original
+        return kept
+
+    requests = [
+        Request(
+            model=request.model,
+            contents=[content(c) for c in request.content_list],
+            config=request.config,
+        )
+        for request in entry.requests
+    ]
+    events = [
+        event.model_copy(update={"content": content(event.content)})
+        if event.content is not None
+        else event
+        for event in entry.events
+    ]
+    return dataclasses.replace(entry, requests=requests, events=events), taken
+
+
+def _assert_same_but_adks_trailing_empty_text(adk: _Entry, pydantic: _Entry) -> None:
+    """The ADK planner's requests and stored events hold an empty text part after
+    each function call that ends a model turn, the Pydantic AI planner's hold the
+    call alone (`planner_pairs.assert_pinned_wire_differences`), and with that part
+    taken off the ADK side the two are equal. Studio's frames are equal as stored."""
+    # Imported here: `tests.test_planner_events` imports this module.
+    from .test_planner_events import _frames as _event_frames  # noqa: PLC0415
+
+    stripped, taken = _without_trailing_empty_text(adk)
+    _, on_pydantic = _without_trailing_empty_text(pydantic)
+
+    assert taken > 0 and on_pydantic == 0
+    _assert_same(stripped, pydantic)
+    assert _event_frames(pydantic.events) == _event_frames(adk.events)
+
+
+async def test_a_live_shaped_call_reply_differs_only_by_adks_trailing_empty_text(
+    plan: Plan,
+) -> None:
+    """Replies streamed as live Gemini streams a function call (`live_call_reply`):
+    the refused proposal's model turn is replayed and stored with ADK's trailing
+    empty text part on the ADK planner and without it on the Pydantic AI planner,
+    and nothing else differs."""
+    adk, pydantic = await _both(
+        _Script(
+            replies=[
+                live_call_reply(
+                    call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED), usage=_USAGE
+                ),
+                live_call_reply(
+                    call_part(PROPOSE_PLAN, {}, id="p2", signature=_SIGNED), usage=_USAGE
+                ),
+            ],
+            runs=[_planned(plan)],
+            setup=_proposals(_REFUSED),
+        )
+    )
+
+    assert adk.outputs[0] is not None and "plan" in adk.outputs[0]
+    (replayed,) = [c for c in adk.requests[1].content_list if c.role == "model"]
+    assert replayed.parts is not None and replayed.parts[-1] == types.Part(text="")
+    _assert_same_but_adks_trailing_empty_text(adk, pydantic)
 
 
 async def test_an_ask_and_its_answer_are_the_same_on_both_planners(plan: Plan) -> None:

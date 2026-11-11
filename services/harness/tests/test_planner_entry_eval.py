@@ -649,9 +649,10 @@ def _propose_plan_description(request: Any) -> str | None:
 async def test_a_request_reads_the_same_instruction_and_declarations_on_either_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ADK planner sends its instruction as a string and every declaration in one
-    `Tool`. The Pydantic AI planner sends a `Content` and one `Tool` per declaration.
-    `ModelRequest` reads both alike."""
+    """Both runners send the instruction as a string and every declaration in one
+    `Tool`, the Pydantic AI planner's request put in the ADK planner's form before
+    the eval's probe sees it (`harness.planner_model._in_adk_planner_form`), so
+    `ModelRequest` reads the same instruction and declarations from each."""
     entry.quiet_logs()
     task = _task(_PLAIN)
     first: dict[str, Any] = {}
@@ -664,17 +665,12 @@ async def test_a_request_reads_the_same_instruction_and_declarations_on_either_r
         first[runner] = run.probe.requests[0]
     adk, pydantic_ai = first["adk"], first["pydantic_ai"]
 
-    assert isinstance(adk.config.system_instruction, str)
-    assert isinstance(pydantic_ai.config.system_instruction, types.Content)
-    assert len(adk.config.tools) == 1 < len(pydantic_ai.config.tools)
+    for request in (adk, pydantic_ai):
+        assert isinstance(request.config.system_instruction, str)
+        assert len(request.config.tools or []) == 1
     assert adk.system_text and pydantic_ai.system_text == adk.system_text
     assert "propose_plan" in adk.declarations
-    # A tool with no parameters is declared with an empty schema on the Pydantic AI
-    # planner alone (`tests/planner/planner_pairs.py`), so the names and descriptions
-    # are compared.
-    assert {
-        name: declaration.description for name, declaration in pydantic_ai.declarations.items()
-    } == {name: declaration.description for name, declaration in adk.declarations.items()}
+    assert pydantic_ai.declarations == adk.declarations
 
 
 @pytest.mark.usefixtures("planner_runner")
