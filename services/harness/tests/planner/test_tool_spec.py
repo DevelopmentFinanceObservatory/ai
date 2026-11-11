@@ -6,10 +6,8 @@ from an equivalent Python signature: the declaration compared as JSON in the
 order the model receives it, and the conversion over every `propose_plan`
 call the `planner_entry` eval records plus hand cases for each rule.
 `SpecTool` serving a spec through an ADK run is checked too: the request
-carries the built declarations and the instruction a tool-less agent would.
-
-These tests read ADK's own generator and call path, so they go when the ADK
-planner path goes.
+carries the built declarations and the instruction a tool-less agent would,
+and a refused call marks the tool's span as a `FunctionTool`'s refusal does.
 """
 
 from __future__ import annotations
@@ -105,8 +103,8 @@ def _equivalent_function(spec: ToolSpec, recorded: list[dict[str, Any]]) -> Call
 def _adk_declaration(spec: ToolSpec) -> str:
     """ADK's declaration of `spec`'s equivalent function, as the model receives it.
 
-    A compact spec is then given its descriptions and compacted, the step a
-    planner tool took on top of ADK's own declaration before specs.
+    A compact spec is then given its descriptions over each parameter's
+    schema and compacted (`compact_schema`).
     """
     declaration = FunctionTool(_equivalent_function(spec, []))._get_declaration()
     assert declaration is not None
@@ -184,6 +182,14 @@ async def test_an_adk_run_carries_the_built_declarations_and_the_planner_instruc
     expected = reference.captured_requests[0].config.system_instruction
     assert request.config.system_instruction == expected
     assert expected.startswith(instruction)
+
+
+def test_the_planner_refuses_to_build_for_vertex_ai(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The declarations are the Gemini developer API's form, which Vertex AI rejects."""
+    monkeypatch.setenv("GOOGLE_GENAI_USE_ENTERPRISE", "true")
+
+    with pytest.raises(RuntimeError, match="Vertex AI"):
+        create_planner_agent(model_name="m")
 
 
 # --- Conversion ----------------------------------------------------------------------
@@ -327,3 +333,42 @@ def test_a_body_receives_every_omitted_parameter_at_its_default() -> None:
     assert received["answers"] == []
     assert received["count"] == 0
     assert received["answer"] == AskAnswer.model_validate(_ANSWER)
+
+
+# --- Telemetry -----------------------------------------------------------------------
+
+
+async def _tool_span_failure(
+    tool: Any, scripted_llm: type[Any], run_to_completion: Any, exported_spans: Any
+) -> tuple[object, object, object]:
+    """The `error.type`, status code and status description of `tool`'s span when the
+    model calls it with no arguments."""
+    agent = LlmAgent(name="a", model=scripted_llm(tool_name=tool.name, tool_args={}), tools=[tool])
+    await run_to_completion(agent=agent, session_service=InMemorySessionService(), app_name="a")
+    (span,) = [
+        span
+        for span in exported_spans.get_finished_spans()
+        if span.name == f"execute_tool {tool.name}"
+    ]
+    exported_spans.clear()
+    return (
+        (span.attributes or {}).get("error.type"),
+        span.status.status_code,
+        (span.status.description),
+    )
+
+
+async def test_a_call_missing_an_argument_marks_its_span_as_adk_marks_a_function_tools(
+    scripted_llm: type[Any], run_to_completion: Any, exported_spans: Any
+) -> None:
+    (ask,) = [spec for spec in planner_tool_specs() if spec.name == "ask_user_question"]
+
+    served = await _tool_span_failure(
+        SpecTool(ask), scripted_llm, run_to_completion, exported_spans
+    )
+    adk = await _tool_span_failure(
+        FunctionTool(_equivalent_function(ask, [])), scripted_llm, run_to_completion, exported_spans
+    )
+
+    assert adk[0] == "TOOL_ERROR"
+    assert served == adk

@@ -58,6 +58,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_response,
 )
 from google.genai import _api_client, errors, types
+from harness.graph.planning import planner_ask_interrupt
 from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_SEARCHES_KEY, store_search
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import card_questions, plan_words, shown_decisions
@@ -71,8 +72,10 @@ from harness.turn_events import PLANNER_ASK
 from harness.turn_records import RecordedIdentity, SearchReading, _periods
 from planner import agent as planner_agent
 from planner import source_reads as planner_source_reads
+from planner import specs
 from planner import tools as planner_tools
 from planner.agent import (
+    AGENT_NAME,
     BRIEF_STATE_KEY,
     AdkCall,
     SpecTool,
@@ -656,7 +659,7 @@ def _tool_args(
     return by_tool[tool_name]
 
 
-def test_build_planner_tools_registers_the_three_planner_tools() -> None:
+def test_planner_tool_specs_declares_the_three_planner_tools() -> None:
     tools = _tools_by_name()
 
     assert set(tools) == set(SIMPLE_TOOLS)
@@ -14621,6 +14624,28 @@ def test_a_plan_tool_refuses_an_argument_it_does_not_describe() -> None:
         planner_tool_declaration(tool)
 
 
+@pytest.mark.parametrize(
+    "descriptions",
+    [
+        pytest.param(
+            {k: v for k, v in specs._PROPOSE_PLAN_ARGUMENTS.items() if k != "removed_asks"},
+            id="parameter-undescribed",
+        ),
+        pytest.param(
+            specs._PROPOSE_PLAN_ARGUMENTS | {"dropped_argument": "Gone."},
+            id="description-names-no-parameter",
+        ),
+    ],
+)
+def test_propose_plan_refuses_to_build_unless_each_argument_is_described_once(
+    monkeypatch: pytest.MonkeyPatch, descriptions: dict[str, str]
+) -> None:
+    monkeypatch.setattr(specs, "_PROPOSE_PLAN_ARGUMENTS", descriptions)
+
+    with pytest.raises(ValueError, match="describe each argument exactly once"):
+        planner_tool_specs()
+
+
 async def _requested_propose_plan_declaration() -> dict[str, Any]:
     """The `propose_plan` declaration a planner's request carries, as JSON."""
     agent = create_planner_agent(model_name="gemini-test")
@@ -18663,11 +18688,13 @@ def test_a_call_reads_the_session_events_once() -> None:
 
 
 def _model_response(*calls: Any) -> Any:
-    """A fake session event holding one model response's `calls`, as ADK writes them together."""
+    """A fake session event holding one model response's `calls`, as ADK writes them
+    together under the planner agent's name."""
     return SimpleNamespace(
+        author=AGENT_NAME,
         content=SimpleNamespace(
             parts=[SimpleNamespace(function_call=call, function_response=None) for call in calls]
-        )
+        ),
     )
 
 
@@ -18724,6 +18751,30 @@ def test_an_ask_after_the_first_ask_of_a_response_is_refused(
     assert second["code"] == ProblemCode.INVALID_ARGUMENTS.value
     asked = load_pending_ask(ctx.state)
     assert (asked.call_id if asked else None) == ("first" if first_accepted else None)
+
+
+def test_an_ask_beside_an_ask_stays_refused_when_an_interrupt_holds_its_id() -> None:
+    """The graph's planner node pauses on an accepted ask with an interrupt call under the
+    ask's own id, so on a replayed invocation that event can be the latest one holding the
+    served ask's id. It is not the model's response: the ask is still the response's second
+    and is refused."""
+    ctx: Any = _FakeToolContext()
+    ctx.session.events.extend(
+        [
+            _model_response(
+                SimpleNamespace(id="first", name=PLANNER_ASK, args={"message": "Which?"}),
+                SimpleNamespace(id="second", name=PLANNER_ASK, args={"message": "Which years?"}),
+            ),
+            planner_ask_interrupt({"call_id": "second", "args": {"message": "Which years?"}}),
+        ]
+    )
+    ctx.function_call_id = "second"
+
+    second = call_planner_tool(
+        _tools_by_name()[PLANNER_ASK], tool_context=ctx, message="Which years?"
+    )
+
+    assert second["code"] == ProblemCode.INVALID_ARGUMENTS.value
 
 
 def test_an_ask_after_an_answered_ask_of_an_earlier_response_is_the_first_of_its_own() -> None:

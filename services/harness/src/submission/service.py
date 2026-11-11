@@ -25,7 +25,7 @@ rolling from their start (`planner.plan.split_of`), the pins it windows
 (`_window_pins`), and what a built plan may not record
 (`_unrecordable`). It answers the refusal that stops the chain first, or an
 `Admission` carrying the plan to record. `submit` records an admission and
-answers `ok`, which is all `planner.agent.propose_plan` does with its call.
+answers `ok`, which is all `propose_plan` (`planner.tools.propose`) does with its call.
 A `Proposer` names the tool the proposal came through, so every `action` a
 refusal carries calls a tool the model was given.
 
@@ -400,7 +400,7 @@ class Proposer:
         return Action(call=self.call, arguments=arguments or None, needs=needs)
 
 
-# `planner.agent.propose_plan`'s proposer.
+# The proposer of `propose_plan`, which `planner.specs` declares.
 PROPOSE_PLAN = Proposer(call="propose_plan")
 
 
@@ -3526,7 +3526,7 @@ def _first_year_refusal(
     names no dataset whose years can be read
     (`OpenPeriodFault.NO_SOURCE_ON_RECORD`). Otherwise the first year is
     unknown before the dataset was read over no window (`refused` as it
-    is, which `planner.agent.propose_plan_reading` answers by reading it),
+    is, which `planner.source_reads.with_source_reads` answers by reading it),
     `FIRST_YEAR_READ_FAILED` when that read's answer stated none (`read`
     holds the pin with `None`), and `RollingIssue.FRAME_TOO_LARGE` when the
     history is past the rows one frame may hold

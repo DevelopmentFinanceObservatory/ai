@@ -59,8 +59,12 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
+from google.adk.utils.variant_utils import GoogleLLMVariant, get_google_llm_variant
 from google.genai import types
 from harness.turn_events import PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME, after_turn_question
+from opentelemetry import trace
+from opentelemetry.semconv.attributes.error_attributes import ERROR_TYPE
+from opentelemetry.trace import Status, StatusCode
 from orchestrator.agent import _retrying
 from translator.tool import Translate
 
@@ -535,14 +539,12 @@ class AdkCall:
         return self._steps
 
     def response_calls(self) -> Sequence[ResponseCall]:
-        """The calls of the session event that holds the call's own, the latest such event."""
+        """The calls of the planner model's response that holds the call's own
+        (`_response_holding`)."""
         if self.call_id is None:
             return ()
-        for event in reversed(self.tool_context.session.events):
-            calls = _function_calls(event)
-            if any(call.id == self.call_id for call in calls):
-                return tuple(ResponseCall(call.name, call.id) for call in calls)
-        return ()
+        calls = _response_holding(self.tool_context.session.events, self.call_id)
+        return tuple(ResponseCall(call.name, call.id) for call in calls)
 
 
 def _function_calls(event: Any) -> list[Any]:
@@ -550,6 +552,24 @@ def _function_calls(event: Any) -> list[Any]:
     if not (event.content and event.content.parts):
         return []
     return [part.function_call for part in event.content.parts if part.function_call]
+
+
+def _response_holding(events: Sequence[Event], call_id: str) -> list[Any]:
+    """The function calls of the latest planner model response in `events` that
+    holds a call with `call_id`, in order, or none.
+
+    A model response is an event the planner agent authors (`AGENT_NAME`).
+    The graph's planner node pauses on an accepted ask with an interrupt call
+    under the ask's own id, in an event the node authors, so a later event
+    can hold the id without being the response that made the call.
+    """
+    for event in reversed(events):
+        if getattr(event, "author", None) != AGENT_NAME:
+            continue
+        calls = _function_calls(event)
+        if any(call.id == call_id for call in calls):
+            return calls
+    return []
 
 
 def _in_flight_calls(events: Sequence[Event], serving: str | None) -> frozenset[str]:
@@ -571,11 +591,10 @@ def _in_flight_calls(events: Sequence[Event], serving: str | None) -> frozenset[
         for part in (event.content.parts if event.content and event.content.parts else ())
         if part.function_response is not None
     }
-    for event in reversed(events):
-        calls = _function_calls(event)
-        if any(call.id == serving and call.name != PLANNER_ASK for call in calls):
-            return frozenset(call.id for call in calls if call.id and call.id not in answered)
-    return frozenset()
+    calls = _response_holding(events, serving)
+    if not any(call.id == serving and call.name != PLANNER_ASK for call in calls):
+        return frozenset()
+    return frozenset(call.id for call in calls if call.id and call.id not in answered)
 
 
 def _session_steps(events: Sequence[Event], *, serving: str | None = None) -> Iterator[Step]:
@@ -680,18 +699,38 @@ def _user_message(event: Any) -> bool:
     )
 
 
+# The `error.type` ADK records on a `FunctionTool`'s span when its answer holds
+# an `error` key.
+_TOOL_ERROR = "TOOL_ERROR"
+
+
 class SpecTool(BaseTool):
     """A `planner.tool_spec.ToolSpec` served to an ADK `LlmAgent`.
 
     The model is shown `function_declaration(spec)`, and a call runs the
     spec's body over the call's `AdkCall` (`run_tool`), ending the run through
-    `skip_summarization`. Both go through `BaseTool`'s public methods:
-    `process_llm_request` adds the declaration to the request's one
-    `types.Tool` of function declarations, creating it when the request has
-    none, and registers the tool under its name.
+    `skip_summarization`. `_get_declaration` is the hook `BaseTool` reads the
+    declaration through: its `process_llm_request` adds it to the request's
+    one `types.Tool` of function declarations, creating it when the request
+    has none, and registers the tool under its name.
+
+    The declaration is the Gemini developer API's form. Vertex AI rejects its
+    optional `anyOf` schemas, which ADK rewrites for Vertex AI alone, so a
+    `SpecTool` refuses to be built when ADK's Google variant
+    (`get_google_llm_variant`) is Vertex AI.
+
+    Raises:
+        RuntimeError: ADK is configured for Vertex AI.
     """
 
     def __init__(self, spec: ToolSpec) -> None:
+        if get_google_llm_variant() is GoogleLLMVariant.VERTEX_AI:
+            raise RuntimeError(
+                f"The planner tool {spec.name!r} declares its arguments for the Gemini "
+                "developer API, and Vertex AI rejects that form. Unset "
+                "GOOGLE_GENAI_USE_VERTEXAI and GOOGLE_GENAI_USE_ENTERPRISE and run on "
+                "GOOGLE_API_KEY."
+            )
         super().__init__(name=spec.name, description=spec.description)
         self.spec = spec
 
@@ -701,27 +740,10 @@ class SpecTool(BaseTool):
         return function_declaration(self.spec)
 
     @override
-    async def process_llm_request(
-        self, *, tool_context: ToolContext, llm_request: LlmRequest
-    ) -> None:
-        del tool_context
-        declaration = self.declaration.model_copy(deep=True)
-        config = llm_request.config
-        if config.tools is None:
-            config.tools = []
-        holder = next(
-            (
-                tool
-                for tool in config.tools
-                if isinstance(tool, types.Tool) and tool.function_declarations
-            ),
-            None,
-        )
-        if holder is None or holder.function_declarations is None:
-            config.tools.append(types.Tool(function_declarations=[declaration]))
-        else:
-            holder.function_declarations.append(declaration)
-        llm_request.tools_dict[self.name] = self
+    def _get_declaration(self) -> types.FunctionDeclaration:
+        # A copy: the request holds what this returns, and later request
+        # processing may edit it in place.
+        return self.declaration.model_copy(deep=True)
 
     def invoke(self, args: dict[str, Any], tool_context: ToolContext) -> object:
         """The spec's answer to a call with `args`, an awaitable when its body is async."""
@@ -729,8 +751,21 @@ class SpecTool(BaseTool):
 
     @override
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
+        """The spec's answer to a call with `args`.
+
+        An answer holding an `error` key, the refusal of a call missing a
+        required argument (`planner.tool_spec.missing_arguments`), marks the
+        tool's span, which ADK makes current while the tool runs, failed with
+        `error.type` `TOOL_ERROR`, as ADK marks a `FunctionTool`'s.
+        """
         answer = self.invoke(args, tool_context)
-        return await answer if inspect.isawaitable(answer) else answer
+        if inspect.isawaitable(answer):
+            answer = await answer
+        if isinstance(answer, dict) and answer.get("error"):
+            span = trace.get_current_span()
+            span.set_attribute(ERROR_TYPE, _TOOL_ERROR)
+            span.set_status(Status(StatusCode.ERROR, _TOOL_ERROR))
+        return answer
 
 
 # The brief for the planner's current run, which `prepend_brief` shows the model.
@@ -806,6 +841,10 @@ def create_planner_agent(
 
     Returns:
         The configured `LlmAgent`.
+
+    Raises:
+        RuntimeError: ADK is configured for Vertex AI, where the planner's
+            declarations would be rejected (`SpecTool`).
     """
     return LlmAgent(
         name=AGENT_NAME,

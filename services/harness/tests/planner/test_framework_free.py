@@ -6,8 +6,6 @@ over a `PlannerCall`, `planner/source_reads.py` the reads they make and
 `planner/skills.py` the skill reads. `planner/specs.py` declares each tool as a
 `planner/tool_spec.py` `ToolSpec`, whose declaration `planner/declaration.py`
 compacts; `planner/agent.py` serves the specs to ADK.
-`planner/call.py`, `submission/service.py` and `submission/prices_choice.py`
-still load ADK transitively, through `harness.graph` and `harness.turn_events`.
 """
 
 from __future__ import annotations

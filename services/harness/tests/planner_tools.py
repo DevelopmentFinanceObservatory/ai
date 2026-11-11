@@ -7,27 +7,28 @@ from typing import Any
 from google.adk.tools.base_tool import BaseTool
 from google.genai import types
 from planner.agent import SpecTool
-from planner.tool_spec import ToolSpec, function_declaration
+from planner.tool_spec import ToolSpec
 
 
 def call_planner_tool(tool: ToolSpec | SpecTool, /, *, tool_context: Any, **arguments: Any) -> Any:
     """Return what the planner tool answers `arguments` with (a coroutine when its body is async).
 
     The call goes through `SpecTool.invoke`, as a served call does: the
-    arguments are converted and checked before the body runs.
+    arguments are converted and checked before the body runs. Every keyword
+    must name one of the spec's parameters, so a misspelt one fails here
+    rather than being dropped by the conversion.
     """
     served = tool if isinstance(tool, SpecTool) else SpecTool(tool)
+    unknown = set(arguments) - {parameter.name for parameter in served.spec.parameters}
+    assert not unknown, f"{served.spec.name} has no parameter {sorted(unknown)}"
     return served.invoke(arguments, tool_context)
 
 
 def planner_tool_declaration(tool: ToolSpec | BaseTool) -> types.FunctionDeclaration | None:
     """Return the function declaration the model is shown for the tool.
 
-    A tool that is not a planner spec, such as the orchestrator's
-    `FunctionTool`s, is read through ADK's own declaration.
+    A spec is read as `SpecTool` serves it, and every ADK tool, the
+    orchestrator's `FunctionTool`s included, through ADK's own declaration.
     """
-    if isinstance(tool, SpecTool):
-        return function_declaration(tool.spec)
-    if isinstance(tool, ToolSpec):
-        return function_declaration(tool)
-    return tool._get_declaration()
+    served = SpecTool(tool) if isinstance(tool, ToolSpec) else tool
+    return served._get_declaration()

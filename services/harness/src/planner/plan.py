@@ -230,7 +230,7 @@ SEEDS_STATE_KEY = "seeds"
 
 # The session-state slot holding a `WindowedPin` for every pin of a dataset
 # whose identity a search in the conversation recorded
-# (`recorded_identity`), that the plan `planner.agent.propose_plan` last
+# (`recorded_identity`), that the plan `propose_plan` (`planner.tools.propose`) last
 # recorded moves to that identity over a dataset requirement's own period.
 # `translator.discovery.discover_source` takes such a requirement's source
 # from Search's answer for the copy's identity, with no `search` call. Each
@@ -267,19 +267,19 @@ SCOPE_UNREAD_BLOCK_KEY = "_scope_unread"
 ALIGNED_PIN_WARNINGS_STATE_KEY = "planner:aligned_pin_warnings"
 
 # The session-state slot holding an `AlignedInput` for every dataset
-# requirement of the plan `planner.agent.propose_plan` last recorded that
+# requirement of the plan `propose_plan` (`planner.tools.propose`) last recorded that
 # admission pinned to a compiled pin (`AlignedPin`) in place of the pin it
 # states. Unset until a plan holds one.
 ALIGNMENTS_STATE_KEY = "planner:alignments"
 
 # The session-state slot holding a `PinVerdict` for every pinned dataset
-# requirement of the plan `planner.agent.propose_plan` last recorded: whether
+# requirement of the plan `propose_plan` (`planner.tools.propose`) last recorded: whether
 # admission judged its pin to answer a narrower question than the one asked
 # (`submission.service._pin_verdicts`), which the translator reads in place
 # of judging it again. Unset until a plan is recorded with them.
 PIN_VERDICTS_STATE_KEY = "planner:pin_verdicts"
 
-# The session-state slot holding what `planner.agent.propose_plan` read about
+# The session-state slot holding what `propose_plan` (`planner.tools.propose`) read about
 # every year a pinned dataset holds, by the pin's spec_id, as its first year and
 # its rows, or null when Search's answer over no window stated no first year.
 # One read answers every requirement and every later proposal of the turn that
@@ -292,7 +292,7 @@ FULL_HISTORIES_STATE_KEY = "planner:full_histories"
 # `plan_start` node writes it beside the brief on every plan call, and the
 # `plan` tool refuses a call that lists none
 # (`harness.orchestrator_tools._asks_refusal`). `harness.planner_seam` lists the asks in the
-# planner's first message, and `planner.agent.propose_plan` copies them onto
+# planner's first message, and `propose_plan` (`planner.tools.propose`) copies them onto
 # every plan it records, so `Plan` refuses one that does not account for each
 # exactly once. Unset, a plan carries no asks and no ask is accounted for.
 ASKS_STATE_KEY = "orchestrator:asks"
@@ -1835,7 +1835,7 @@ class UnsupportedPlanError(ValueError):
     """A plan rule refused a calculation the system cannot carry out.
 
     Distinct from a malformed draft: no reshaping of the plan states the
-    calculation, so `planner.agent.propose_plan` answers with the
+    calculation, so `propose_plan` (`planner.tools.propose`) answers with the
     `unsupported` outcome and requires a `Decline` naming `operation`.
     """
 
@@ -1967,7 +1967,7 @@ class FirstYear(StrictModel):
 class AsksUnaccountedError(ValueError):
     """A plan leaves an ask the brief lists unaccounted for, or answers or declines one twice.
 
-    `planner.agent.propose_plan` answers it with a typed problem naming the
+    `propose_plan` (`planner.tools.propose`) answers it with a typed problem naming the
     asks, so the model adds the missing `answered` or `declined` entry
     rather than reshaping requirements.
     """
@@ -2056,7 +2056,7 @@ class WholeIsItsMemberError(ValueError):
     `party` the party the ask totals across, `denominator_id` the dataset
     requirement its denominator reads, and `named` the entities that
     requirement names alone on that side, each of which the numerator names
-    too (`check_wholes_span_their_totals`). `planner.agent.propose_plan`
+    too (`check_wholes_span_their_totals`). `propose_plan` (`planner.tools.propose`)
     answers it with a typed problem naming the ways out.
     """
 
@@ -2089,7 +2089,7 @@ class AskRoleDroppedError(ValueError):
     `dropped` holds each such ask's dropped parties (`roles_not_kept`) and
     `together` every party of each of those asks that breaks down by both
     parties of a flow, which one output keeps at once, each in the word its
-    `AskBreakdown.by` holds. `planner.agent.propose_plan` answers
+    `AskBreakdown.by` holds. `propose_plan` (`planner.tools.propose`) answers
     it with a typed problem naming each ask and party, so the model keeps
     the party or declines that part.
     """

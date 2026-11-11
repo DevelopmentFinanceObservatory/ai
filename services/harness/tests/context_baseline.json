@@ -306,5 +306,15 @@
         ]
       }
     }
-  ]
+  ],
+  "declaration_digests": {
+    "translate=False,surface=False,question_fixed=False": "f429955c7367d0fd3a5134ea4da3ef6e09bac22a9b0ea11ce89cfb35a399431a",
+    "translate=False,surface=False,question_fixed=True": "90c78444d240a828cc0a341efeb6beedae6122a68955485f8f08661e68747f8b",
+    "translate=False,surface=True,question_fixed=False": "ddb574a6bada0a72b3ef4b56073b08b7afc45e80b016f5276dca28894502d752",
+    "translate=False,surface=True,question_fixed=True": "5459ca281bff6523280ce27bf8e8782677d67ab4e0cd66babd7422ae188370e0",
+    "translate=True,surface=False,question_fixed=False": "f429955c7367d0fd3a5134ea4da3ef6e09bac22a9b0ea11ce89cfb35a399431a",
+    "translate=True,surface=False,question_fixed=True": "90c78444d240a828cc0a341efeb6beedae6122a68955485f8f08661e68747f8b",
+    "translate=True,surface=True,question_fixed=False": "ddb574a6bada0a72b3ef4b56073b08b7afc45e80b016f5276dca28894502d752",
+    "translate=True,surface=True,question_fixed=True": "5459ca281bff6523280ce27bf8e8782677d67ab4e0cd66babd7422ae188370e0"
+  }
 }

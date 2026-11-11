@@ -2570,7 +2570,7 @@ async def _recorded_source(
     """The source of the dataset `requirement` pins, read from Search's answer for its identity on record.
 
     The identity is the copy over the requirement's period that
-    `planner.agent.propose_plan` pinned (`planner.plan.windowed_pins`), or
+    `propose_plan` (`planner.tools.propose`) pinned (`planner.plan.windowed_pins`), or
     the one on record for the pin itself (`planner.plan.identity_on_record`:
     a search in the conversation, this session's discovery, or the block of
     the pin the planner was shown) when its window is that period, or

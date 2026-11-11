@@ -1617,7 +1617,7 @@ async def test_a_turn_closed_mid_draft_cancels_the_seam_and_writes_no_state_afte
 class _AskingSeam:
     """A `PlannerModel` that reports two progress rounds, then answers that the
     planner's run ended on a question for the user, as `PlannerSeam` does once
-    `planner.agent.ask_user_question` accepted one."""
+    `ask_user_question` (`planner.tools.ask_user`) accepted one."""
 
     async def __call__(self, *, on_progress: Any = None, **_kwargs: Any) -> dict[str, Any]:
         if on_progress is not None:

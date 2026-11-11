@@ -29,13 +29,13 @@ from planner.plan import (
     EvidenceRequirement,
 )
 from planner.skills import DFO_FAQ_SKILL_ID, read_skill_page
+from planner.source_reads import with_source_reads
 from planner.tool_spec import REQUIRED, Parameter, ToolSpec
 from planner.tools import (
     EndRun,
     ask_user,
     propose,
     propose_and_translate,
-    propose_with_reads,
     reject,
 )
 
@@ -231,6 +231,27 @@ _PROPOSE_PARAMETERS = (
 )
 
 
+def _described(
+    parameters: tuple[Parameter, ...], descriptions: dict[str, str]
+) -> tuple[Parameter, ...]:
+    """`parameters`, each carrying its text from `descriptions`.
+
+    Raises:
+        ValueError: A parameter has no description, or a description names no
+            parameter.
+    """
+    names = [parameter.name for parameter in parameters]
+    if set(names) != set(descriptions):
+        raise ValueError(
+            f"parameters {sorted(set(names) - set(descriptions))} have no description and "
+            f"descriptions {sorted(set(descriptions) - set(names))} name no parameter; "
+            "describe each argument exactly once"
+        )
+    return tuple(
+        Parameter(p.name, p.annotation, p.default, descriptions[p.name]) for p in parameters
+    )
+
+
 def _ask_user_question(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
     return ask_user(call, end_run, **arguments)
 
@@ -270,6 +291,10 @@ def planner_tool_specs(
     `reads_user_words` is passed to `submission.service.admit` the same way.
     It says whether the planner reads the user's own words in every entry, so
     `propose_plan`'s `across_years` may name a step in any of them.
+
+    Raises:
+        ValueError: `propose_plan`'s parameters and their descriptions differ
+            (`_described`).
     """
 
     def draft(call: PlannerCall, arguments: dict[str, Any]) -> dict[str, object]:
@@ -289,7 +314,9 @@ def planner_tool_specs(
     ) -> object:
         del end_run
         assert surface is not None
-        return await propose_with_reads(call, lambda: draft(call, arguments), surface=surface)
+        return await with_source_reads(
+            lambda: draft(call, arguments), state=call.state, surface=surface
+        )
 
     async def propose_plan_translating(
         call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]
@@ -299,7 +326,8 @@ def planner_tool_specs(
             call,
             end_run,
             arguments=arguments,
-            draft=lambda: draft(call, arguments),
+            question_fixed=question_fixed,
+            reads_user_words=reads_user_words,
             translate=translate,
             surface=surface,
         )
@@ -322,10 +350,7 @@ def planner_tool_specs(
         ToolSpec(
             name=PROPOSE_PLAN,
             description=_PROPOSE_PLAN_DOC,
-            parameters=tuple(
-                Parameter(p.name, p.annotation, p.default, descriptions.get(p.name))
-                for p in _PROPOSE_PARAMETERS
-            ),
+            parameters=_described(_PROPOSE_PARAMETERS, descriptions),
             body=body,
             compact=True,
         ),

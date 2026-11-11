@@ -16,8 +16,9 @@ tests live in `services/harness/tests/planner/`.
 
 ## What it does
 
-Four tools, built by `build_planner_tools()` and wired into an `LlmAgent` by
-`create_planner_agent()`:
+Four tools, each declared in `planner.specs` (`planner_tool_specs()` and
+`skill_tool_spec()`) with its body in `planner.tools` or `planner.skills`, and
+served to an `LlmAgent` by `create_planner_agent()`:
 
 | Tool                | Behaviour                                                                                                                                                                                                                |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -27,8 +28,8 @@ Four tools, built by `build_planner_tools()` and wired into an `LlmAgent` by
 
 A `propose_plan` whose translation compiles declares the plan ready for the
 user's answer in code (`declare_ready`) and adds the approval summary to its
-answer under `summary`. `end_run_when_ready` ends the planner's run on that
-answer, so no model call follows.
+answer under `summary`. `planner.tools.ready_and_end` ends the planner's run
+on that answer, so no model call follows.
 
 The planner reaches the translator directly. `create_planner_agent` takes
 `translator.tool`'s `build_translate` function as `translate`, which

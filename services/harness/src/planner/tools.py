@@ -1,6 +1,6 @@
 """The planner's tool bodies, over a `planner.call.PlannerCall` and no agent framework.
 
-`ask_user`, `propose` (with `propose_with_reads` and `propose_and_translate`)
+`ask_user`, `propose` (with `propose_and_translate`)
 and `reject` are what the planner's `ask_user_question`, `propose_plan` and
 `reject_plan` do. Each reads its call's session state and steps through the
 `PlannerCall` it is given, and a tool that ends the planner's run does so
@@ -466,31 +466,21 @@ def propose(
     )
 
 
-async def propose_with_reads(
-    call: PlannerCall, draft: Callable[[], dict[str, object]], *, surface: ToolSurface
-) -> dict[str, object]:
-    """`draft`, making each source read it refuses for want of (`with_source_reads`).
-
-    A refusal records nothing, so the proposal is made again once the
-    read is held: a dataset's first year, or a calculation's input
-    compiled on the basis its other inputs share.
-    """
-    return await with_source_reads(draft, state=call.state, surface=surface)
-
-
 async def propose_and_translate(
     call: PlannerCall,
     end_run: EndRun,
     *,
     arguments: Mapping[str, Any],
-    draft: Callable[[], dict[str, object]],
+    question_fixed: bool,
+    reads_user_words: bool,
     translate: Translate,
     surface: ToolSurface | None,
 ) -> dict[str, object]:
-    """`draft`, the proposal `arguments` state, translating the plan it records.
+    """`propose` the plan `arguments` state, translating the plan it records.
 
-    Translation runs once, on the version the proposal recorded, after
-    any first-year reads (`propose_with_reads`, when there is a `surface`). The
+    With a `surface`, each source read the proposal is refused for want of
+    is made and the proposal made again (`with_source_reads`). Translation
+    runs once, on the version the proposal recorded, after those reads. The
     proposal's own `outcome` stays `ok` whatever the verdict, since the version
     is recorded either way, and a verdict of `ok` declares the plan ready
     (`ready_and_end`). A proposal that records nothing translates nothing. A
@@ -508,7 +498,20 @@ async def propose_and_translate(
             translation=await translate(call),
         )
         return ready_and_end(answer, call, end_run)
-    result = draft() if surface is None else await propose_with_reads(call, draft, surface=surface)
+
+    def draft() -> dict[str, object]:
+        return propose(
+            call,
+            Proposal(**arguments),
+            question_fixed=question_fixed,
+            reads_user_words=reads_user_words,
+        )
+
+    result = (
+        draft()
+        if surface is None
+        else await with_source_reads(draft, state=call.state, surface=surface)
+    )
     if result.get("outcome") != Outcome.OK.value:
         return result
     return ready_and_end({**result, "translation": await translate(call)}, call, end_run)

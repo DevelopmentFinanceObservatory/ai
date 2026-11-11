@@ -4842,7 +4842,7 @@ async def test_a_refused_loop_leaves_the_last_recorded_version_on_record(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """The fifth `propose_plan` call's own refusal writes nothing
-    (`planner.agent.propose_plan` returns its `problem(...)` before ever
+    (`planner.tools.propose` returns its `problem(...)` before ever
     calling `save_plan`), so whatever the fourth call actually recorded
     stays exactly as it was -- proven here directly against session state
     rather than inferred from the refusal text.

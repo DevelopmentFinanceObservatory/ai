@@ -119,10 +119,11 @@ def function_declaration(spec: ToolSpec) -> types.FunctionDeclaration:
     The parameters' schema is pydantic's schema of a model named
     `<name>Params` whose fields are the parameters, as ADK builds a function
     tool's, rewritten by `compact_schema` when `spec.compact` is set. A tool
-    with no parameters declares no schema. ADK's declaration on the Gemini
-    developer API, which the harness runs on, carries no response schema, and
-    ADK's rewrite of optional `anyOf` schemas applies to Vertex AI only, so
-    neither appears here.
+    with no parameters declares no schema. This is ADK's declaration on the
+    Gemini developer API, which the harness runs on: it carries no response
+    schema and keeps optional `anyOf` schemas as pydantic writes them. Vertex
+    AI rejects that form, and `planner.agent.SpecTool` refuses to serve a spec
+    when ADK is configured for Vertex AI.
 
     Raises:
         ValueError: `spec` is compact and some parameter has no description.
