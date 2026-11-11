@@ -6,8 +6,10 @@ closed a model call (`PlannerRun.model_answered`). Before each model request
 it says whether the run asks the user, stops, or leaves the request to the
 model (`PlannerRun.next_request`). The answer is a `Directive`: `Ask` with the
 `PLANNER_ASK` call's arguments, or `Stop` with the refusal the run ends on.
-`harness.planner_seam` drives one through the planner `LlmAgent`'s callbacks
-and builds the model turn each directive stands for.
+`harness.planner_seam` drives one through the ADK planner's callbacks and
+`harness.planner_node` through the Pydantic AI planner's model hooks, and
+`harness.planner_node.directive_turn` builds the model turn each directive
+stands for.
 """
 
 from __future__ import annotations

@@ -102,19 +102,19 @@ def planner_profile(model_name: str) -> GoogleModelProfile:
 
 @dataclass
 class _Call:
-    """One tool call of the run: its tool, the view it writes through, and its
-    answer once it has one."""
+    """One tool call of the run: its tool, the view it writes through, its
+    answer once it has one, and whether it ended the run."""
 
     name: str
     view: RecordingState
     answer: dict[str, Any] | None = None
     writes: dict[str, Any] | None = None
+    ended: bool = False
 
 
 @dataclass
 class PlannerDeps:
-    """One run's dependencies, which every tool call of the run reads, and what
-    the run has not yet yielded.
+    """One run's dependencies, which every tool call of the run reads.
 
     `state` is the session's state. Each call writes it through a
     `RecordingState` of its own, so the keys one call wrote are told apart
@@ -135,24 +135,6 @@ class PlannerDeps:
         """The run's `planner.tools.EndRun`: no model request follows the current calls."""
         self.ended = True
 
-    def unyielded_writes(self) -> list[PlannerCallWrites]:
-        """The writes of every call the run has not yielded an answer for, in the
-        order the calls began.
-
-        A run whose iteration is cancelled or raises while calls are running
-        yields nothing more, so this is where the state those calls wrote,
-        finished or still in flight, is read. Each call's writes are as they
-        stand now, or as they stood when it answered.
-        """
-        return [
-            PlannerCallWrites(
-                name=call.name,
-                call_id=call_id,
-                writes=call.writes if call.writes is not None else self._written(call.view),
-            )
-            for call_id, call in self._calls.items()
-        ]
-
     def _written(self, view: RecordingState) -> dict[str, Any]:
         """The keys written through `view`, with a copy of their values. A key
         deleted since holds no value and is left out."""
@@ -166,10 +148,7 @@ class PlannerResponse:
     `parts` are its parts as google-genai parts: each function call with its
     id, text, and each thought with `thought` set, each with its thought
     signature. `usage` is the request's usage as Pydantic AI reads it.
-    `finish_reason` is the finish reason Gemini reported on the response, as
-    google-genai names it, or `None` when it reported none. `model_version` is
-    the model that answered: the version Gemini reported, or the model the
-    request named when Gemini reported none. `block_reason` is Gemini's reason for blocking the prompt, for a response
+    `block_reason` is Gemini's reason for blocking the prompt, for a response
     that is a block and holds no candidate, which the ADK planner records as
     an event with that `error_code` and no content. A response with no parts
     and no block reason is one the ADK planner records no event for.
@@ -177,8 +156,6 @@ class PlannerResponse:
 
     parts: tuple[types.Part, ...]
     usage: RequestUsage
-    finish_reason: types.FinishReason | None = None
-    model_version: str | None = None
     block_reason: str | None = None
 
 
@@ -187,24 +164,16 @@ class PlannerToolAnswer:
     """One call's answer, as soon as the call has answered.
 
     `writes` is every state key the call wrote, with its value when it
-    answered. The answers of one response come in the order their calls
-    finish.
+    answered, and `ended` whether the call ended the run
+    (`planner.tools.EndRun`). The answers of one response come in the order
+    their calls finish.
     """
 
     name: str
     call_id: str
     answer: dict[str, Any]
     writes: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class PlannerCallWrites:
-    """The state keys a call wrote, with their values, for a call whose answer
-    the run has not yielded (`PlannerDeps.unyielded_writes`)."""
-
-    name: str
-    call_id: str
-    writes: dict[str, Any]
+    ended: bool = False
 
 
 type PlannerItem = PlannerResponse | PlannerToolAnswer
@@ -317,7 +286,8 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
     under `result`, as ADK wraps one. A body that raises is answered with
     `tool_failed`'s answer, as the ADK planner's tool error callback answers
     it, and a cancellation propagates. Either answer goes to `tool_answered`
-    and is kept, with the call's writes, for the run to yield.
+    and, unless that raises, is kept with the call's writes for the run to
+    yield.
     """
 
     async def call(ctx: RunContext[PlannerDeps], **raw: Any) -> dict[str, Any]:
@@ -325,6 +295,11 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
         record = _Call(name=spec.name, view=RecordingState(deps.state))
         if ctx.tool_call_id is not None:
             deps._calls[ctx.tool_call_id] = record
+
+        def end_run() -> None:
+            record.ended = True
+            deps.end_run()
+
         planner_call = PydanticCall(
             state=record.view,
             call_id=ctx.tool_call_id,
@@ -332,15 +307,15 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
             messages=tuple(ctx.messages),
         )
         try:
-            answer = run_tool(spec, raw, call=planner_call, end_run=deps.end_run)
+            answer = run_tool(spec, raw, call=planner_call, end_run=end_run)
             if inspect.isawaitable(answer):
                 answer = await answer
         except Exception as exc:
             answer = deps.tool_failed(spec.name, exc)
         response = as_function_response(answer)
-        record.writes = deps._written(record.view)
-        record.answer = response
+        writes = deps._written(record.view)
         deps.tool_answered(spec.name, response)
+        record.writes, record.answer = writes, response
         return response
 
     call.__name__ = spec.name
@@ -348,15 +323,16 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
 
 
 async def run_planner(
-    planner: PlannerAgent, deps: PlannerDeps, *, question: str, brief: str
+    planner: PlannerAgent, deps: PlannerDeps, *, question: str | None, brief: str
 ) -> AsyncIterator[PlannerItem]:
     """Run the planner once on `brief`, after the user's `question`, yielding as it goes.
 
     The run's first request holds `question`, then `brief`, as two user
-    contents. Each model response is yielded as a `PlannerResponse` once
-    received, before its calls run, and each call's answer as a
-    `PlannerToolAnswer` once that call has answered, a call to a tool the
-    planner lacks included (`tool_not_found`). The run stops before its next
+    contents, or `brief` alone for a turn with no question, as the ADK
+    planner sends it (`planner.agent.prepend_brief`). Each model response is
+    yielded as a `PlannerResponse` once received, before its calls run, and
+    each call's answer as a `PlannerToolAnswer` once that call has answered,
+    a call to a tool the planner lacks included (`tool_not_found`). The run stops before its next
     model request once a tool ended it, and ends on a response with no tool
     call.
 
@@ -364,13 +340,19 @@ async def run_planner(
     no chunk, a blocked prompt) ends the run as a response with no tool call
     ends the ADK planner's: the items yielded so far stand and nothing is
     raised. A blocked prompt's response is yielded first, with its
-    `block_reason`.
+    `block_reason`. Any other exception is raised once the answers of the
+    calls that answered and were not yet yielded are, in the order the calls
+    began, as the ADK planner keeps a response's finished calls when another
+    of its calls fails. A cancellation yields nothing more.
 
     `deps` holds the session's state, the earlier steps and the callbacks
-    (`PlannerDeps`). A run whose iteration stops early leaves the writes of
-    the calls it did not yield in `deps.unyielded_writes()`.
+    (`PlannerDeps`).
     """
-    history = [ModelRequest(parts=[UserPromptPart(question)], instructions=_QUESTION_INSTRUCTIONS)]
+    history = (
+        [ModelRequest(parts=[UserPromptPart(question)], instructions=_QUESTION_INSTRUCTIONS)]
+        if question is not None
+        else []
+    )
     async with planner.agent.iter(
         brief, message_history=history, deps=deps, usage_limits=_NO_REQUEST_LIMIT
     ) as run:
@@ -394,17 +376,19 @@ async def run_planner(
                                 yield answered
         except UnexpectedModelBehavior as exc:
             logger.warning("planner run ended on a response Pydantic AI refused: %s", exc)
+        except Exception:
+            for call_id, call in list(deps._calls.items()):
+                if call.answer is not None:
+                    del deps._calls[call_id]
+                    yield _answer_of(call_id, call)
+            raise
 
 
 def _planner_response(response: ModelResponse) -> PlannerResponse:
-    details = response.provider_details or {}
-    finish_reason = details.get("finish_reason")
-    block_reason = details.get("block_reason")
+    block_reason = (response.provider_details or {}).get("block_reason")
     return PlannerResponse(
         parts=response_parts(response),
         usage=response.usage,
-        finish_reason=types.FinishReason(finish_reason) if finish_reason else None,
-        model_version=response.model_name,
         block_reason=str(block_reason) if block_reason else None,
     )
 
@@ -424,9 +408,13 @@ def _answered(
     if call is None or call.answer is None or call.writes is None:
         return None
     del deps._calls[event.tool_call_id]
-    return PlannerToolAnswer(
-        name=call.name, call_id=event.tool_call_id, answer=call.answer, writes=call.writes
-    )
+    return _answer_of(event.tool_call_id, call)
+
+
+def _answer_of(call_id: str, call: _Call) -> PlannerToolAnswer:
+    """The answer of `call`, which has answered."""
+    assert call.answer is not None and call.writes is not None
+    return PlannerToolAnswer(call.name, call_id, call.answer, call.writes, call.ended)
 
 
 def response_parts(response: ModelResponse) -> tuple[types.Part, ...]:

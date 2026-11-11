@@ -61,15 +61,20 @@ def model_response_event(
     finish_reason: types.FinishReason | None,
     model_version: str | None = None,
     custom_metadata: Mapping[str, Any] | None = None,
+    partial: bool | None = False,
+    error_code: str | None = None,
+    error_message: str | None = None,
 ) -> Event:
     """The event the ADK planner stores for the model response `response`.
 
     Its content is the response's parts as the model role's, each function
-    call with its id. A response with a call names no long-running call,
-    since no planner tool is one. A response with no call is the run's
-    output, its text less any thought, as ADK takes a finished agent turn's.
-    A finished response whose parts hold nothing to act on (only thoughts or
-    blank text) carries ADK's no-content error, as a streamed run records it.
+    call with its id, or none for a response with no parts. A response with
+    a call names no long-running call, since no planner tool is one. A
+    response with parts and no call is the run's output, its text less any
+    thought, as ADK takes a finished agent turn's. A finished response whose
+    parts hold nothing to act on (only thoughts or blank text), and that is
+    no error of its own, carries ADK's no-content error, as a streamed run
+    records it.
 
     Args:
         response: The model response, its unsigned thoughts already dropped
@@ -79,21 +84,31 @@ def model_response_event(
         model_version: The model version the API reported, if it reported one.
         custom_metadata: What a closing turn carries
             (`harness.turn_budget.CLOSED_BY_KEY`), or None.
+        partial: False for a response the model streamed, which ADK stores
+            as the aggregate of its stream, and None for a model turn put in
+            the model's place, which ADK stores as the turn was given.
+        error_code: The error the API reported the response as: a finish
+            reason other than `STOP`, or a blocked prompt's reason.
+        error_message: The message the API gave with that error.
     """
     parts = [part.model_copy(deep=True) for part in response.parts]
     calls = [part.function_call for part in parts if part.function_call is not None]
     event = Event(
-        content=types.Content(role="model", parts=parts),
-        partial=False,
+        content=types.Content(role="model", parts=parts) if parts else None,
+        partial=partial,
         finish_reason=finish_reason,
         usage_metadata=usage.model_copy(deep=True) if usage is not None else None,
         model_version=model_version,
         custom_metadata=dict(custom_metadata) if custom_metadata is not None else None,
+        error_code=error_code,
+        error_message=error_message,
     )
     if calls:
         event.long_running_tool_ids = set()
         return event
-    if finish_reason == types.FinishReason.STOP and parts and not _actionable(parts):
+    if not parts:
+        return event
+    if error_code is None and finish_reason == types.FinishReason.STOP and not _actionable(parts):
         event.error_code = NO_CONTENT_ERROR_CODE
         event.error_message = NO_CONTENT_ERROR_MESSAGE
     event.output = "".join(part.text for part in parts if part.text and not part.thought)

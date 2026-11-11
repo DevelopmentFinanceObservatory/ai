@@ -1,0 +1,250 @@
+"""The Pydantic AI planner as a workflow node (`planner_node`).
+
+`harness.planner_seam.PlannerSeam` runs the planner through `ctx.run_node`.
+On the Pydantic AI planner that node is a function node named as the ADK
+planner (`planner.agent.AGENT_NAME`) that drives `planner.pydantic_agent.
+run_planner` on `harness.planner_model.planner_model` and yields the events the
+ADK planner's `LlmAgent` stores for the same exchange
+(`harness.planner_events`). ADK's node runner stamps each with the author the
+node sets, the branch of the seam's `override_branch`, the invocation and the
+node's path, so the session the run leaves reads as the ADK planner's to
+`planner.agent.session_steps`, `harness.studio_translate` and the seam.
+
+The node reports to the seam's `harness.planner_run.PlannerRun` as the ADK
+planner's callbacks do: each tool's answer, each tool that raised, a call the
+turn budget closed (`PlannerRun.model_answered`), and before each request
+whether the run asks or stops instead (`PlannerRun.next_request`). A directive
+is answered with the model turn `directive_turn` builds, which the ADK planner's
+callbacks answer it with too.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
+from typing import Any
+
+from common.telemetry import current_trace_id
+from google.adk import Context, Event
+from google.adk.flows.llm_flows import functions as adk_functions
+from google.adk.workflow import BaseNode, node
+from google.genai import Client, types
+from planner.agent import AGENT_NAME, BRIEF_STATE_KEY, session_steps
+from planner.pydantic_agent import (
+    PlannerDeps,
+    PlannerResponse,
+    PlannerToolAnswer,
+    planner_agent,
+    planner_profile,
+    run_planner,
+)
+from planner.tool_spec import ToolSpec
+
+from harness.planner_events import answered_every_call, model_response_event, tool_answers_event
+from harness.planner_model import ResponseMetadata, Usage, planner_model
+from harness.planner_run import Ask, Directive, PlannerRun, Stop
+from harness.prefix_cache import PrefixCache
+from harness.sentences import SeamCode, refusal_sentence
+from harness.turn_budget import CLOSED_BY_KEY, TurnBudget
+from harness.turn_events import PLANNER_ASK, _turn_question
+from harness.usage import log_usage
+
+logger = logging.getLogger(__name__)
+
+# Gemini requires a `thought_signature` on a generation's first `functionCall`
+# part and answers a request replaying one without it with a 400. This is
+# the documented placeholder that makes the API skip validation for a call
+# injected outside a model turn.
+SKIP_THOUGHT_SIGNATURE = b"skip_thought_signature_validator"
+
+
+@dataclass(frozen=True)
+class _Recorded:
+    """What the ADK planner's event records beside a response's parts: the
+    metadata of the response it stores, and whether that response is the
+    aggregate of a stream (`partial` False) or a turn put in the model's place
+    (`partial` None)."""
+
+    usage: Usage | None = None
+    finish_reason: types.FinishReason | None = None
+    model_version: str | None = None
+    custom_metadata: dict[str, Any] | None = None
+    partial: bool | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+# A model turn put in place of a request or of a closed call's response: ADK
+# stores the callback's response, which carries nothing but its content.
+_PUT_IN_PLACE = _Recorded()
+
+
+def planner_node(
+    run: PlannerRun,
+    *,
+    specs: Sequence[ToolSpec],
+    instruction: str,
+    model_name: str,
+    client: Client,
+    budget: TurnBudget | None,
+    prefix_cache: PrefixCache | None = None,
+) -> BaseNode:
+    """One run of the Pydantic AI planner, as the node `ctx.run_node` runs.
+
+    Args:
+        run: The run's bookkeeping, told what the run does and asked what
+            replaces each request.
+        specs: The planner's tools, the ones the ADK planner serves.
+        instruction: The planner's instruction, the ADK planner's.
+        model_name: The Gemini model, as google-genai names it.
+        client: The google-genai client the model's calls go through.
+        budget: The turn's budget, or None to run every call unbounded.
+        prefix_cache: The process's shared cache of static prompt prefixes,
+            or None to send every request whole.
+
+    Returns:
+        A node named `planner.agent.AGENT_NAME` that runs the planner once on
+        the session's brief (`planner.agent.BRIEF_STATE_KEY`), after the
+        turn's question, and yields the ADK planner's events for the run.
+    """
+
+    async def dfo_planner(ctx: Context, node_input: Any) -> AsyncIterator[Event]:
+        del node_input
+        ctx.event_author = AGENT_NAME
+        recorded = _PUT_IN_PLACE
+
+        def before_request() -> types.Content | None:
+            nonlocal recorded
+            turn = directive_turn(run.next_request())
+            if turn is not None:
+                recorded = _PUT_IN_PLACE
+            return turn
+
+        def after_response(
+            closed_by: SeamCode | None, metadata: ResponseMetadata
+        ) -> types.Content | None:
+            nonlocal recorded
+            if closed_by is None:
+                if metadata.usage is not None:
+                    log_usage(AGENT_NAME, metadata.usage)
+                recorded = _Recorded(
+                    usage=metadata.usage,
+                    finish_reason=metadata.finish_reason,
+                    model_version=metadata.model_version,
+                    partial=False,
+                    error_code=metadata.error_code,
+                    error_message=metadata.error_message,
+                )
+                return None
+            turn = directive_turn(run.model_answered(closed_by))
+            recorded = (
+                _PUT_IN_PLACE
+                if turn is not None
+                else _Recorded(custom_metadata={CLOSED_BY_KEY: closed_by.value})
+            )
+            return turn
+
+        def tool_failed(name: str, error: BaseException) -> dict[str, Any]:
+            logger.error(
+                "planner tool %s raised %s session=%s invocation=%s trace_id=%s",
+                name,
+                type(error).__name__,
+                ctx.session.id,
+                ctx.invocation_id,
+                current_trace_id(),
+                exc_info=error,
+            )
+            return run.tool_failed(name, error)
+
+        model = planner_model(
+            model_name,
+            client=client,
+            budget=budget,
+            prefix_cache=prefix_cache,
+            before_request=before_request,
+            after_response=after_response,
+            profile=planner_profile(model_name),
+        )
+        agent = planner_agent(specs, instruction=instruction, model=model)
+        deps = PlannerDeps(
+            state=ctx.session.state,
+            earlier=tuple(session_steps(ctx.session.events)),
+            tool_answered=run.tool_answered,
+            tool_failed=tool_failed,
+        )
+        question = _turn_question(ctx)
+        response: PlannerResponse | None = None
+        held: list[PlannerToolAnswer] = []
+        try:
+            async for item in run_planner(
+                agent,
+                deps,
+                question=_text(question) if question is not None else None,
+                brief=ctx.session.state[BRIEF_STATE_KEY],
+            ):
+                if isinstance(item, PlannerResponse):
+                    response, held = item, []
+                    # ADK stores no event for a response with no parts, unless
+                    # the response is an error, a blocked prompt's.
+                    if item.parts or recorded.error_code is not None:
+                        yield model_response_event(
+                            item,
+                            usage=recorded.usage,
+                            finish_reason=recorded.finish_reason,
+                            model_version=recorded.model_version,
+                            custom_metadata=recorded.custom_metadata,
+                            partial=recorded.partial,
+                            error_code=recorded.error_code,
+                            error_message=recorded.error_message,
+                        )
+                    continue
+                assert response is not None, "a call's answer follows its response"
+                held.append(item)
+                if answered_every_call(response, held):
+                    yield tool_answers_event(response, held, ended=_ended(held))
+                    held = []
+        except Exception:
+            # The ADK planner keeps the answers of a response's finished calls
+            # when another of its calls fails. A cancellation stores nothing of
+            # the response, so it is not caught and the held answers go.
+            if response is not None and held:
+                yield tool_answers_event(response, held, ended=_ended(held))
+            raise
+
+    return node(dfo_planner, name=AGENT_NAME)
+
+
+def directive_turn(directive: Directive | None) -> types.Content | None:
+    """The model turn `directive` stands for, or `None` to keep the model's own.
+
+    An ask is one `PLANNER_ASK` call with the ask's arguments, under a call id
+    of the form ADK gives a call the model sent without one
+    (`google.adk.flows.llm_flows.functions.generate_client_function_call_id`),
+    so the resume pairs the user's answer with it the way it pairs one with a
+    model-issued ask (`planner.call.elected_spec_ids`). A stop is the sentence
+    of the refusal the run ends on (`harness.sentences.refusal_sentence`).
+    """
+    match directive:
+        case Ask(args=args):
+            call_id = adk_functions.generate_client_function_call_id()
+            call = types.FunctionCall(id=call_id, name=PLANNER_ASK, args=args)
+            part = types.Part(function_call=call, thought_signature=SKIP_THOUGHT_SIGNATURE)
+        case Stop(refusal=refusal):
+            part = types.Part(text=f"Stopping this turn: {refusal_sentence(refusal)}")
+        case None:
+            return None
+    return types.Content(role="model", parts=[part])
+
+
+def _ended(answers: Sequence[PlannerToolAnswer]) -> bool:
+    """Whether a call of `answers` ended the run."""
+    return any(answer.ended for answer in answers)
+
+
+def _text(content: types.Content) -> str:
+    """The text of `content`'s parts, joined."""
+    return "".join(part.text or "" for part in content.parts or ())
+
+
+__all__ = ["SKIP_THOUGHT_SIGNATURE", "directive_turn", "planner_node"]

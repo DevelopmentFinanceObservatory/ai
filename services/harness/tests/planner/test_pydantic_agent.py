@@ -8,9 +8,7 @@ compares the first request each sends.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -18,10 +16,8 @@ import pytest
 from compiler.surface import ToolSurface
 from google.genai import types
 from harness.turn_events import PLANNER_ASK
-from orchestrator.agent import model_retry_options
 from planner.call import PlannerCall
 from planner.pydantic_agent import (
-    PlannerCallWrites,
     PlannerDeps,
     PlannerItem,
     PlannerResponse,
@@ -46,7 +42,7 @@ from ..scripted_genai import (
     thought_part,
     usage_metadata,
 )
-from .planner_pairs import BRIEF, QUESTION, adk_run, pydantic_run
+from .planner_pairs import BRIEF, QUESTION, adk_run, assert_pinned_wire_differences, pydantic_run
 
 _MODEL = "gemini-3.8-flash"
 _QUESTION = QUESTION
@@ -119,31 +115,12 @@ async def _run(
     *,
     state: dict[str, Any] | None = None,
     run: _Run | None = None,
-    model_version: str | None = None,
 ) -> tuple[list[PlannerItem], ScriptedGenai]:
     scripted = ScriptedGenai(replies)
-    if model_version is not None:
-        _reporting_version(scripted, model_version)
     agent = planner_agent(specs, instruction="Plan.", model=_google_model(scripted))
     deps = _deps(state, run)
     items = [item async for item in run_planner(agent, deps, question=_QUESTION, brief=_BRIEF)]
     return items, scripted
-
-
-def _reporting_version(scripted: ScriptedGenai, version: str) -> None:
-    """Make every chunk `scripted` streams report `version` as its model version."""
-    opened = scripted.client.aio.models.generate_content_stream
-
-    async def open_stream(**request: Any) -> AsyncIterator[types.GenerateContentResponse]:
-        stream = await opened(**request)
-
-        async def versioned() -> AsyncIterator[types.GenerateContentResponse]:
-            async for chunk in stream:
-                yield chunk.model_copy(update={"model_version": version})
-
-        return versioned()
-
-    scripted.client.aio.models.generate_content_stream = open_stream  # type: ignore[method-assign]
 
 
 def _deps(state: dict[str, Any] | None = None, run: _Run | None = None) -> PlannerDeps:
@@ -170,16 +147,10 @@ async def test_an_accepted_proposal_ends_the_run_after_one_model_request() -> No
     items, scripted = await _run(
         [_propose(_ACCEPTED)],
         [
-            reply(
-                signed,
-                call,
-                usage=usage_metadata(prompt=40, candidates=5),
-                finish_reason=types.FinishReason.MAX_TOKENS,
-            ),
+            reply(signed, call, usage=usage_metadata(prompt=40, candidates=5)),
             reply(text_part("x")),
         ],
         run=run,
-        model_version="gemini-3.8-flash-001",
     )
 
     assert len(scripted.requests) == 1
@@ -188,11 +159,7 @@ async def test_an_accepted_proposal_ends_the_run_after_one_model_request() -> No
     assert isinstance(response, PlannerResponse)
     assert response.parts == (signed, call)
     assert (response.usage.input_tokens, response.usage.output_tokens) == (40, 5)
-    assert (response.finish_reason, response.model_version) == (
-        types.FinishReason.MAX_TOKENS,
-        "gemini-3.8-flash-001",
-    )
-    assert answer == PlannerToolAnswer(PROPOSE_PLAN, "p1", _ACCEPTED, {})
+    assert answer == PlannerToolAnswer(PROPOSE_PLAN, "p1", _ACCEPTED, {}, ended=True)
     assert run.answered == [(PROPOSE_PLAN, _ACCEPTED)]
 
 
@@ -224,7 +191,11 @@ async def test_an_accepted_ask_ends_the_run_and_leaves_the_pending_ask_in_state(
     assert len(scripted.requests) == 1
     assert _kinds(items) == ["response", f"answer:{PLANNER_ASK}"]
     assert items[-1] == PlannerToolAnswer(
-        PLANNER_ASK, "a1", dict(ASK_ACCEPTED), {"planner:pending_ask": state["planner:pending_ask"]}
+        PLANNER_ASK,
+        "a1",
+        dict(ASK_ACCEPTED),
+        {"planner:pending_ask": state["planner:pending_ask"]},
+        ended=True,
     )
     pending = load_pending_ask(state)
     assert pending is not None
@@ -252,43 +223,6 @@ async def test_each_answer_carries_the_state_its_own_call_wrote_and_nothing_else
     ]
     assert state == {"kept": "as it was", "a": 3, "b": 2}
     assert _kinds(items)[-1] == "response"
-
-
-async def test_a_cancelled_run_has_yielded_the_finished_call_and_holds_the_running_ones_writes() -> (
-    None
-):
-    async def stuck(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
-        del end_run, arguments
-        call.state["stuck"] = "started"
-        await asyncio.Event().wait()
-        return {"outcome": "ok"}
-
-    scripted = ScriptedGenai(
-        [reply(call_part("write_a", id="w1"), call_part("stuck", id="s1")), reply(text_part("x"))]
-    )
-    agent = planner_agent(
-        [_write("a", 1), ToolSpec(name="stuck", description="Hangs.", parameters=(), body=stuck)],
-        instruction="Plan.",
-        model=_google_model(scripted),
-    )
-    deps = _deps()
-    items: list[PlannerItem] = []
-    answered = asyncio.Event()
-
-    async def consume() -> None:
-        async for item in run_planner(agent, deps, question=_QUESTION, brief=_BRIEF):
-            items.append(item)
-            if isinstance(item, PlannerToolAnswer):
-                answered.set()
-
-    task = asyncio.create_task(consume())
-    await asyncio.wait_for(answered.wait(), timeout=5)
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
-
-    assert items[-1] == PlannerToolAnswer("write_a", "w1", {"outcome": "ok"}, {"a": 1})
-    assert deps.unyielded_writes() == [PlannerCallWrites("stuck", "s1", {"stuck": "started"})]
 
 
 async def test_a_raising_tool_is_answered_through_tool_failed_and_the_run_goes_on() -> None:
@@ -332,78 +266,28 @@ async def _first_requests(surface: ToolSurface | None) -> tuple[Request, Request
     return adk, pydantic
 
 
-def _dumped(request: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    config = request.generate_config.model_dump(mode="json", exclude_none=True)
-    contents = [
-        content.model_dump(mode="json", exclude_none=True) for content in request.content_list
-    ]
-    return config, contents
-
-
 @pytest.mark.parametrize("with_skills", [False, True], ids=["no-skill-tool", "skill-tool"])
 async def test_the_first_request_equals_the_adk_planners_apart_from_the_pinned_wire_differences(
     with_skills: bool,
 ) -> None:
     surface = _surface() if with_skills else None
     adk_request, pydantic_request = await _first_requests(surface)
-    adk, adk_contents = _dumped(adk_request)
-    pydantic, pydantic_contents = _dumped(pydantic_request)
 
-    assert (
-        pydantic_contents
-        == adk_contents
-        == [
-            {"role": "user", "parts": [{"text": _QUESTION}]},
-            {"role": "user", "parts": [{"text": _BRIEF}]},
-        ]
-    )
-    differing = {key for key in adk.keys() | pydantic.keys() if adk.get(key) != pydantic.get(key)}
-    assert differing == {
-        "system_instruction",
-        "tools",
-        "tool_config",
-        "response_modalities",
-        "automatic_continuation",
-        "http_options",
-    }
-    # The instruction as one user `Content` where the ADK planner sends text.
-    assert pydantic["system_instruction"] == {
-        "role": "user",
-        "parts": [{"text": adk["system_instruction"]}],
-    }
-    # One `Tool` per declaration where the ADK planner sends one `Tool` of them all, and
-    # `reject_plan`, which takes nothing, declared with an empty object schema.
-    (adk_tool,) = adk["tools"]
-    declared = adk_tool["function_declarations"]
-    assert [d["name"] for d in declared] == [
+    assert_pinned_wire_differences(adk_request, pydantic_request)
+    assert adk_request.content_list == [
+        types.Content(role="user", parts=[types.Part(text=_QUESTION)]),
+        types.Content(role="user", parts=[types.Part(text=_BRIEF)]),
+    ]
+    (adk_tool,) = adk_request.generate_config.tools or []
+    assert [d.name for d in adk_tool.function_declarations or []] == [
         *(["get_skill"] if with_skills else []),
         PLANNER_ASK,
         PROPOSE_PLAN,
         "reject_plan",
     ]
-    assert pydantic["tools"] == [
-        {
-            "function_declarations": [
-                declaration
-                if "parameters_json_schema" in declaration
-                else {**declaration, "parameters_json_schema": {"type": "object", "properties": {}}}
-            ]
-        }
-        for declaration in declared
-    ]
-    # An explicit `AUTO` where the ADK planner leaves the mode unset, which is `AUTO`.
-    assert pydantic["tool_config"] == {"function_calling_config": {"mode": "AUTO"}}
-    assert "tool_config" not in adk
-    assert pydantic["response_modalities"] == ["TEXT"]
-    assert "response_modalities" not in adk
-    # Unset, which google-genai reads as on, where the ADK planner sets it on.
-    assert adk["automatic_continuation"] is True
-    assert "automatic_continuation" not in pydantic
-    # Each framework's own client headers, and the HTTP retries, which the ADK planner's
-    # model sets on its client and the Pydantic AI planner's on each request.
-    assert adk["http_options"].keys() == {"headers"}
-    assert pydantic["http_options"].keys() == {"headers", "retry_options"}
-    assert pydantic["http_options"]["retry_options"] == model_retry_options().model_dump(
-        mode="json", exclude_none=True
-    )
-    assert adk["thinking_config"] == {"thinking_level": "LOW", "include_thoughts": True}
+    thinking = adk_request.generate_config.thinking_config
+    assert thinking is not None
+    assert thinking.model_dump(mode="json", exclude_none=True) == {
+        "thinking_level": "LOW",
+        "include_thoughts": True,
+    }

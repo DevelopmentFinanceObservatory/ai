@@ -38,6 +38,7 @@ from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk import Context, Event
+from google.adk.agents.run_config import RunConfig
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
@@ -342,11 +343,13 @@ class _SeamHarness:
         resume_inputs: dict[str, Any] | None = None,
         new_message: types.Content | None = None,
         stoppable: bool = False,
+        run_config: RunConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any] | None:
         """Run `seam` once in this harness's session, under the switch's
         `_unless_stopped` when `stoppable`, as the planner node runs a pick's
-        replan."""
+        replan, and with `run_config`, Studio's streaming one for a model that
+        streams."""
 
         async def _node(ctx: Context, node_input: Any) -> AsyncIterator[Any]:
             del node_input
@@ -380,7 +383,7 @@ class _SeamHarness:
         content = new_message or types.Content(role="user", parts=[types.Part(text="probe")])
         output: Any = None
         async for event in runner.run_async(
-            user_id=_USER, session_id=self._session_id, new_message=content
+            user_id=_USER, session_id=self._session_id, new_message=content, run_config=run_config
         ):
             assert isinstance(event, Event)
             if event.output is not None:

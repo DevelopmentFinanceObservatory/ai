@@ -68,7 +68,7 @@ def drop_thought_parts(
     which read the same events. A part carrying `thought_signature` is kept
     regardless of `thought`: Gemini requires that signature on a later
     request's function-call or final text part and answers one without it
-    with a 400 (see `harness.planner_seam._SKIP_THOUGHT_SIGNATURE`).
+    with a 400 (see `harness.planner_node.SKIP_THOUGHT_SIGNATURE`).
     `_nl_planning._remove_thought_from_request` only strips `thought` for a
     non-`BuiltInPlanner`, so this callback is what keeps a thought part out
     of replay for the `BuiltInPlanner` the planner runs.

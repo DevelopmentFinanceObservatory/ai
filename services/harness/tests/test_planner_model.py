@@ -18,7 +18,7 @@ from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import errors, types
-from harness.planner_model import planner_model
+from harness.planner_model import ResponseMetadata, planner_model
 from harness.prefix_cache import PrefixCache, PrefixCachedGemini
 from harness.sentences import SeamCode, refusal_sentence
 from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
@@ -171,15 +171,13 @@ class _After:
     """An `after_response` hook that records its calls and answers with `replace`."""
 
     def __init__(self, replace: types.Content | None = None) -> None:
-        self.calls: list[
-            tuple[SeamCode | None, types.GenerateContentResponseUsageMetadata | None]
-        ] = []
+        self.calls: list[tuple[SeamCode | None, ResponseMetadata]] = []
         self._replace = replace
 
     def __call__(
-        self, closed_by: SeamCode | None, usage: types.GenerateContentResponseUsageMetadata | None
+        self, closed_by: SeamCode | None, metadata: ResponseMetadata
     ) -> types.Content | None:
-        self.calls.append((closed_by, usage))
+        self.calls.append((closed_by, metadata))
         return self._replace
 
 
@@ -208,7 +206,7 @@ async def test_a_cut_after_a_function_call_chunk_delivers_only_the_closing_sente
     assert pai_budget.closed == adk_budget.closed
     assert pai_budget.closed is not None
     assert pai_budget.closed["code"] == SeamCode.TURN_MODEL_TIME_SPENT
-    assert after.calls == [(SeamCode.TURN_MODEL_TIME_SPENT, None)]
+    assert after.calls == [(SeamCode.TURN_MODEL_TIME_SPENT, ResponseMetadata())]
 
 
 async def test_a_first_chunk_stall_is_resent_once_and_the_second_answer_delivered() -> None:
@@ -350,9 +348,20 @@ async def test_before_request_answers_with_no_request_and_no_budget_spent() -> N
     assert (budget.model_calls, budget.closed, after.calls) == (0, None, [])
 
 
-async def test_after_response_sees_the_usage_and_its_turn_replaces_the_response() -> None:
+async def test_after_response_sees_what_the_api_reported_and_its_turn_replaces_the_response() -> (
+    None
+):
     usage = usage_metadata(prompt=40, cached=30, candidates=5)
-    scripted = ScriptedGenai([reply(call_part("lookup", {"key": "gh"}), usage=usage)])
+    scripted = ScriptedGenai(
+        [
+            reply(
+                call_part("lookup", {"key": "gh"}),
+                usage=usage,
+                finish_reason=types.FinishReason.MAX_TOKENS,
+            )
+        ]
+    )
+    _reporting_version(scripted, "gemini-3.8-flash-001")
     replacement = types.Content(role="model", parts=[text_part("Asked instead.")])
     after = _After(replace=replacement)
 
@@ -360,10 +369,36 @@ async def test_after_response_sees_the_usage_and_its_turn_replaces_the_response(
         planner_model(MODEL, client=scripted.client, budget=_budget(), after_response=after)
     )
 
-    assert after.calls == [(None, usage)]
+    assert after.calls == [
+        (
+            None,
+            ResponseMetadata(
+                usage=usage,
+                finish_reason=types.FinishReason.MAX_TOKENS,
+                model_version="gemini-3.8-flash-001",
+                error_code="MAX_TOKENS",
+            ),
+        )
+    ]
     assert [type(part) for part in response.parts] == [TextPart]
     assert _pai_text(response) == "Asked instead."
     assert response.usage.input_tokens == 40
+
+
+def _reporting_version(scripted: ScriptedGenai, version: str) -> None:
+    """Make every chunk `scripted` streams report `version` as its model version."""
+    opened = scripted.client.aio.models.generate_content_stream
+
+    async def open_stream(**request: Any) -> AsyncIterator[types.GenerateContentResponse]:
+        stream = await opened(**request)
+
+        async def versioned() -> AsyncIterator[types.GenerateContentResponse]:
+            async for chunk in stream:
+                yield chunk.model_copy(update={"model_version": version})
+
+        return versioned()
+
+    scripted.client.aio.models.generate_content_stream = open_stream  # type: ignore[method-assign]
 
 
 async def test_every_request_carries_the_adk_planners_retries() -> None:

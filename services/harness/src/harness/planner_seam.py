@@ -55,7 +55,8 @@ from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, NamedTuple, cast
+from functools import cached_property
+from typing import Any, Literal, NamedTuple, cast
 
 from common.telemetry import current_trace_id
 from compiler.compile import CompileIssueCode
@@ -68,8 +69,9 @@ from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
-from google.genai import types
-from planner.agent import BRIEF_STATE_KEY, AdkCall, end_run_when_ready
+from google.adk.workflow import BaseNode
+from google.genai import Client
+from planner.agent import BRIEF_STATE_KEY, AdkCall, SpecTool, end_run_when_ready
 from planner.call import CallSession
 from planner.operations import OperationKind
 from planner.plan import (
@@ -164,12 +166,11 @@ from harness.graph.state import (
     stored_mapping,
     stored_sequence,
 )
+from harness.planner_node import directive_turn, planner_node
 from harness.planner_run import (
-    Ask,
     Directive,
     PlannerRun,
     PlannerSeamError,
-    Stop,
     closing_refusal,
     failed_tool_answer,
     not_ready,
@@ -183,7 +184,7 @@ from harness.sentences import (
     refusal_sentence,
 )
 from harness.settings import Settings
-from harness.turn_budget import CLOSED_BY_KEY, current_turn_budget
+from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, current_turn_budget
 from harness.turn_events import PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.turn_records import (
     SETTLED_STATUSES,
@@ -286,12 +287,6 @@ _PLAN_SOURCE_SENTENCE_CAP = 160
 # out whole, since a cut spec_id pins nothing.
 _PLAN_MEASURE_CHOICE_CAP = 240
 
-# Gemini requires a `thought_signature` on a generation's first `functionCall`
-# part and answers a request replaying one without it with a 400. This is
-# the documented placeholder that makes the API skip validation for a call
-# injected outside a model turn.
-_SKIP_THOUGHT_SIGNATURE = b"skip_thought_signature_validator"
-
 # The run-time refusal codes that mean no operation computes what the refused
 # step was asked to, each with the `unsupported` answer it stands for. A replan
 # entry over one starts with that answer recorded (`_earned_by_refusal`), so a
@@ -382,7 +377,22 @@ class PlannerSeam:
         model: BaseLlm | None = None,
         before_model_callbacks: Sequence[ModelRequestCallback] = (),
         after_model_callbacks: Sequence[ModelResponseCallback] = (),
+        runner: Literal["adk", "pydantic_ai"] = "adk",
+        client: Client | None = None,
     ) -> None:
+        # `runner` names the planner `_propose` runs: the ADK planner, or the
+        # Pydantic AI planner (`harness.planner_node`) on the tools and
+        # instruction the ADK planner is built with, through `client`, or a
+        # client built from the environment when None. The model callbacks
+        # are the ADK planner's, so the Pydantic AI planner takes none.
+        if runner == "pydantic_ai" and (before_model_callbacks or after_model_callbacks):
+            raise ValueError("model callbacks run on the ADK planner only")
+        self._runner = runner
+        self._client = client
+        self._model_name = (
+            agent_settings if agent_settings is not None else AgentSettings()
+        ).planner_model_name
+        self._prefix_cache = prefix_cache
         # `translate` replaces the translation `propose_plan` runs, and `model`
         # the model `agent_settings` names. `before_model_callbacks` run after
         # the seam's own, which answer a request themselves once the entry
@@ -984,7 +994,8 @@ class PlannerSeam:
             # `prepend_brief` shows the brief on every request of the run, the
             # first after a resume included, so the run takes no node input.
             ctx.session.state[BRIEF_STATE_KEY] = message
-            await ctx.run_node(self._agent, None, run_id=run_id, override_branch=_PLANNER_BRANCH)
+            planner = self._agent if self._runner == "adk" else self._pydantic_planner(run, budget)
+            await ctx.run_node(planner, None, run_id=run_id, override_branch=_PLANNER_BRANCH)
         finally:
             current_discovery_time_left.reset(time_left_token)
             _active_call.reset(token)
@@ -1009,6 +1020,32 @@ class PlannerSeam:
             closed = budget.closed if budget is not None else None
             run.refused = closed or not_ready(run.last_referral)
         return run.submitted, plan, run.refused
+
+    def _pydantic_planner(self, run: PlannerRun, budget: TurnBudget | None) -> BaseNode:
+        """The Pydantic AI planner's node for `run`, on the ADK planner's tools and instruction."""
+        specs = []
+        for tool in self._agent.tools:
+            if not isinstance(tool, SpecTool):
+                raise TypeError(f"the Pydantic AI planner serves tool specs only, not {tool!r}")
+            specs.append(tool.spec)
+        instruction = self._agent.instruction
+        if not isinstance(instruction, str):
+            raise TypeError("the Pydantic AI planner takes the ADK planner's instruction as text")
+        return planner_node(
+            run,
+            specs=specs,
+            instruction=instruction,
+            model_name=self._model_name,
+            client=self._genai_client,
+            budget=budget,
+            prefix_cache=self._prefix_cache,
+        )
+
+    @cached_property
+    def _genai_client(self) -> Client:
+        """The client the Pydantic AI planner's calls go through: the one given, or
+        one built from the environment, as ADK's `Gemini` builds its own."""
+        return self._client if self._client is not None else Client()
 
     # -- the seam's own callbacks, assigned once in __init__ ----------------
     #
@@ -1074,10 +1111,10 @@ class PlannerSeam:
         closed (`harness.turn_budget.CLOSED_BY_KEY`) to `PlannerRun.model_answered`,
         which may answer it with a question to the user.
 
-        That question is a model turn with one `PLANNER_ASK` call
-        (`_ask_response`). `populate_client_function_call_id` gives the call
-        an id, so the resume pairs with the user's answer the way a
-        model-issued ask does (`planner.call.elected_spec_ids`).
+        That question is a model turn with one `PLANNER_ASK` call under a
+        call id of ADK's form (`harness.planner_node.directive_turn`), so the
+        resume pairs with the user's answer the way a model-issued ask does
+        (`planner.call.elected_spec_ids`).
 
         Answers `None` for every other response, so `drop_thought_parts`,
         listed after this callback, still runs on it.
@@ -1413,17 +1450,6 @@ def _unanswered(referral: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _stop_response(refused: Mapping[str, Any]) -> LlmResponse:
-    """The terminal text `_before_planner_model` substitutes for a generation,
-    stating the refusal the run ends on in its user sentence."""
-    return LlmResponse(
-        content=types.Content(
-            role="model",
-            parts=[types.Part(text=f"Stopping this turn: {refusal_sentence(refused)}")],
-        )
-    )
-
-
 def _refusal_text(refusal: Mapping[str, Any]) -> str:
     """`refusal`, a failed run's replan payload, as JSON the planner reads, with every kind of error in it.
 
@@ -1690,34 +1716,10 @@ def _check_branches(events: Sequence[Event], *, planner: str) -> None:
 
 
 def _directive_response(directive: Directive | None) -> LlmResponse | None:
-    """The model turn `directive` stands for, or `None` to keep the model's own."""
-    match directive:
-        case Ask(args=args):
-            return _ask_response(args)
-        case Stop(refusal=refusal):
-            return _stop_response(refusal)
-        case None:
-            return None
-
-
-def _ask_response(args: dict[str, Any]) -> LlmResponse:
-    """A model turn that is one `PLANNER_ASK` call with `args`.
-
-    `populate_client_function_call_id` gives the call an id, so the resume
-    pairs with the user's answer the way a model-issued ask does
-    (`planner.call.elected_spec_ids`).
-    """
-    return LlmResponse(
-        content=types.Content(
-            role="model",
-            parts=[
-                types.Part(
-                    function_call=types.FunctionCall(name=PLANNER_ASK, args=args),
-                    thought_signature=_SKIP_THOUGHT_SIGNATURE,
-                )
-            ],
-        )
-    )
+    """The response holding the model turn `directive` stands for (`directive_turn`),
+    or `None` to keep the model's own."""
+    turn = directive_turn(directive)
+    return LlmResponse(content=turn) if turn is not None else None
 
 
 def _readings_ledger(

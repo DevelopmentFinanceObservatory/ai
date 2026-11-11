@@ -29,6 +29,7 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.workflow import START, Workflow, node
 from google.genai import types
 from harness.planner_model import planner_model
+from orchestrator.agent import model_retry_options
 from planner.agent import (
     AGENT_NAME,
     BRIEF_STATE_KEY,
@@ -223,3 +224,69 @@ def _stored(items: Sequence[PlannerItem]) -> list[Event]:
         content = types.Content(role="user", parts=[types.Part(function_response=response)])
         events.append(Event(author=AGENT_NAME, branch=_BRANCH, content=content))
     return events
+
+
+def assert_pinned_wire_differences(adk: Request, pydantic: Request) -> None:
+    """Assert that the Pydantic AI planner's request equals the ADK planner's for
+    the same turn apart from how each framework shapes a request on the wire.
+
+    The contents are equal, and every config field but six: the instruction as
+    one user `Content` where the ADK planner sends text; one `Tool` per
+    declaration where the ADK planner sends one `Tool` of them all, a
+    declaration with no parameters given an empty object schema; an explicit
+    `AUTO` function calling mode where the ADK planner leaves it unset, which
+    is `AUTO`; `response_modalities` `TEXT`; `automatic_continuation` unset,
+    which google-genai reads as on, where the ADK planner sets it on; and each
+    framework's HTTP headers, with the HTTP retries the ADK planner's model
+    sets on its client carried on each request.
+    """
+    adk_config, adk_contents = _request_dumped(adk)
+    pydantic_config, pydantic_contents = _request_dumped(pydantic)
+    assert pydantic_contents == adk_contents
+    differing = {
+        key
+        for key in adk_config.keys() | pydantic_config.keys()
+        if adk_config.get(key) != pydantic_config.get(key)
+    }
+    assert differing == {
+        "system_instruction",
+        "tools",
+        "tool_config",
+        "response_modalities",
+        "automatic_continuation",
+        "http_options",
+    }
+    assert pydantic_config["system_instruction"] == {
+        "role": "user",
+        "parts": [{"text": adk_config["system_instruction"]}],
+    }
+    (adk_tool,) = adk_config["tools"]
+    assert pydantic_config["tools"] == [
+        {
+            "function_declarations": [
+                declaration
+                if "parameters_json_schema" in declaration
+                else {**declaration, "parameters_json_schema": {"type": "object", "properties": {}}}
+            ]
+        }
+        for declaration in adk_tool["function_declarations"]
+    ]
+    assert pydantic_config["tool_config"] == {"function_calling_config": {"mode": "AUTO"}}
+    assert "tool_config" not in adk_config
+    assert pydantic_config["response_modalities"] == ["TEXT"]
+    assert "response_modalities" not in adk_config
+    assert adk_config["automatic_continuation"] is True
+    assert "automatic_continuation" not in pydantic_config
+    assert adk_config["http_options"].keys() == {"headers"}
+    assert pydantic_config["http_options"].keys() == {"headers", "retry_options"}
+    assert pydantic_config["http_options"]["retry_options"] == model_retry_options().model_dump(
+        mode="json", exclude_none=True
+    )
+
+
+def _request_dumped(request: Request) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    config = request.generate_config.model_dump(mode="json", exclude_none=True)
+    contents = [
+        content.model_dump(mode="json", exclude_none=True) for content in request.content_list
+    ]
+    return config, contents

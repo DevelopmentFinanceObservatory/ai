@@ -36,7 +36,7 @@ from harness.planner_events import (
     model_response_event,
     tool_answers_event,
 )
-from harness.planner_model import Usage, planner_model
+from harness.planner_model import ResponseMetadata, planner_model
 from harness.scripted_plan import scripted_plan
 from harness.sentences import SeamCode
 from harness.studio_state import ConversationState, StudioStore
@@ -221,11 +221,11 @@ def _failed(name: str, error: BaseException) -> dict[str, Any]:
 def _pydantic_planner(specs: Sequence[ToolSpec], scripted: ScriptedGenai) -> BaseNode:
     """The planner node over `run_planner`: each response's event as it arrives, and
     one event for a response's answers once every call of it has answered."""
-    usages: list[Usage | None] = []
+    reported: list[ResponseMetadata] = []
 
-    def after_response(closed_by: SeamCode | None, usage: Usage | None) -> None:
+    def after_response(closed_by: SeamCode | None, metadata: ResponseMetadata) -> None:
         assert closed_by is None
-        usages.append(usage)
+        reported.append(metadata)
 
     model = planner_model(
         _MODEL,
@@ -255,8 +255,12 @@ def _pydantic_planner(specs: Sequence[ToolSpec], scripted: ScriptedGenai) -> Bas
         async for item in run_planner(agent, deps, question=_QUESTION, brief=brief):
             if isinstance(item, PlannerResponse):
                 response, answers = item, []
+                metadata = reported.pop(0)
                 yield model_response_event(
-                    item, usage=usages.pop(0), finish_reason=_finish_reason(item)
+                    item,
+                    usage=metadata.usage,
+                    finish_reason=metadata.finish_reason,
+                    model_version=metadata.model_version,
                 )
                 continue
             assert response is not None
@@ -265,13 +269,6 @@ def _pydantic_planner(specs: Sequence[ToolSpec], scripted: ScriptedGenai) -> Bas
                 yield tool_answers_event(response, answers, ended=deps.ended)
 
     return node(dfo_planner, name=AGENT_NAME)
-
-
-def _finish_reason(response: PlannerResponse) -> types.FinishReason | None:
-    del response
-    # The finish reason the scripted reply sent, which the node takes from the raw
-    # response. Every reply here finishes with `STOP`.
-    return types.FinishReason.STOP
 
 
 async def _both(
