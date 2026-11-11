@@ -103,6 +103,7 @@ from .scripted_genai import (
     call_part,
     empty_reply,
     live_call_reply,
+    malformed_call_reply,
     reply,
     text_part,
     thought_part,
@@ -987,6 +988,43 @@ async def test_a_response_that_errs_or_holds_nothing_is_stored_the_same_on_both(
         entry.outputs[0] is not None
         and entry.outputs[0]["refused"]["code"] == SeamCode.PLAN_NOT_READY
     )
+    _assert_expected(request, entry, runner=runner)
+
+
+@on_each_runner
+async def test_a_function_call_gemini_could_not_parse_ends_the_run_with_no_plan(
+    plan: Plan, runner: Runner, request: pytest.FixtureRequest
+) -> None:
+    """A reply streamed as live Gemini streams a function call it could not
+    parse (`malformed_call_reply`) ends the run on `SeamCode.PLAN_NOT_READY`
+    with no further model call. The response is stored as its signed empty text
+    part. ADK's stream aggregator also keeps the first chunk's unsigned empty
+    text part, and with that part taken off the ADK planner's stored response
+    both planners equal the stored expectation."""
+    entry = await _entry(
+        runner,
+        _Script(
+            replies=[malformed_call_reply(usage=_USAGE)],
+            runs=[_planned(plan)],
+            setup=_proposals(),
+        ),
+    )
+
+    assert (
+        entry.outputs[0] is not None
+        and entry.outputs[0]["refused"]["code"] == SeamCode.PLAN_NOT_READY
+    )
+    assert len(entry.requests) == 1
+    if runner == "adk":
+        (response,) = [e for e in entry.events if e.content and e.content.role == "model"]
+        unsigned, signed = response.content.parts or []
+        assert unsigned == types.Part(text="")
+        kept = response.model_copy(
+            update={"content": response.content.model_copy(update={"parts": [signed]})}
+        )
+        entry = dataclasses.replace(
+            entry, events=[kept if e is response else e for e in entry.events]
+        )
     _assert_expected(request, entry, runner=runner)
 
 

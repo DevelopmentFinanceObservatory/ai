@@ -162,6 +162,22 @@ def live_call_reply(
     return Reply(chunks=[calls, [types.Part(text="")]], usage=usage)
 
 
+def malformed_call_reply(
+    usage: types.GenerateContentResponseUsageMetadata | None = None,
+) -> Reply:
+    """A reply as live Gemini streams a function call it could not parse: two
+    chunks of one empty text part each, the second signed and carrying the
+    `MALFORMED_FUNCTION_CALL` finish reason."""
+    return Reply(
+        chunks=[
+            [types.Part(text="")],
+            [types.Part(text="", thought_signature=b"scripted-signature")],
+        ],
+        usage=usage,
+        finish_reason=types.FinishReason.MALFORMED_FUNCTION_CALL,
+    )
+
+
 def empty_reply() -> Reply:
     """A reply whose one candidate carries no parts."""
     return Reply(chunks=[[]])
