@@ -1,4 +1,5 @@
-"""The planner's call record, specs, bodies, run, submission chain and translator import no ADK.
+"""The planner's call record, specs, bodies, run, submission chain and
+translator import no ADK.
 
 Each module's source is parsed. The check reads each module's own imports, so a
 module can load ADK through a module it imports. `planner/tools.py` holds the

@@ -131,9 +131,10 @@ class PlannerRun:
     def tool_answered(self, name: str, answer: dict[str, Any] | None) -> None:
         """Record what tool `name` answered: progress, then what the answer settles.
 
-        A terminal refusal (`_is_terminal_refusal`) ends the turn, a `translation` is the
-        verdict on the plan the call recorded, and `summary` says the call declared that plan
-        ready (`planner.tools.declare_ready`).
+        A terminal refusal (`_is_terminal_refusal`) ends the turn, a
+        `translation` is the verdict on the plan the call recorded, and
+        `summary` says the call declared that plan ready
+        (`planner.tools.declare_ready`).
 
         Raises:
             PlannerSeamError: On the answer past `_MAX_EVENTS` in one run.
@@ -162,7 +163,7 @@ class PlannerRun:
             # the seam's own planner always uses, see
             # `harness.planner_seam.PlannerSeam.__init__`). The cap bounds the
             # proposals within one entry into the planner, since
-            # `PlannerSeam.__call__` resets the count on each entry; a restart
+            # `PlannerSeam.__call__` resets the count on each entry. A restart
             # is refused however fresh that budget is. `NOTHING_TO_PLAN`
             # declines every ask, and `PRICES_UNSERVED` needs a search the
             # planner cannot make (`submission.prices_choice`). Stop the
@@ -236,13 +237,13 @@ class PlannerRun:
         for the referral it answered and whether it ends the entry.
 
         `last_referral` is written from every translation that carries an
-        `outcome`, referral or not: translation runs the whole plan, so each
+        `outcome`, referral or not. Translation runs the whole plan, so each
         outcome-bearing verdict states what is open across it right now, and
-        replaces whatever the last one recorded. `ok` means every
-        requirement compiled, which clears a referral the same way. A response
-        with no `outcome` settles nothing and is left alone.
-        An entry that ends with no plan ready carries `last_referral`
-        whichever way it landed (`not_ready`).
+        replaces whatever the last one recorded. `ok` means every requirement
+        compiled, which clears a referral the same way. A response with no
+        `outcome` settles nothing and is left alone. An entry that ends with no
+        plan ready carries `last_referral` whichever way it landed
+        (`not_ready`).
 
         An internal, repeated, budget-spent or never-issued failure, or a
         transient one with no discovery time left (`closing_refusal`), ends
@@ -284,11 +285,11 @@ def not_ready(referral: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 def referral_of(response: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The referral a translation answers with, or `None` for any
-    other answer. It is the one check `_stalled_referral` and
-    `PlannerRun`'s own `last_referral` bookkeeping both need, kept
-    here so the two never drift apart. A referral is the one answer that
-    names a `kind`, and `ok` and a problem name none.
+    """The referral a translation answers with, or `None` for any other answer.
+
+    `_stalled_referral` and `PlannerRun`'s `last_referral` bookkeeping both need
+    this check, kept in one function so the two cannot drift apart. A referral
+    is the one answer that names a `kind`, and `ok` and a problem name none.
     """
     if not isinstance(response, dict) or "kind" not in response:
         return None
@@ -305,11 +306,11 @@ def closing_refusal(referral: dict[str, Any] | None) -> dict[str, Any] | None:
     wall-clock bound left no time to make, ends it as that bound spent.
     Any other `transient` referral once no discovery time is left
     (`planner.plan.discovery_time_left`) ends it as the data service
-    unavailable: the call was made and did not answer, and no discovery
-    can run again in this request. Each of these
-    carries the requirement the referral is about and its reason. One
-    marked `repeated` ends it with what it is about, and the compile issue
-    a `requirement_needs_repair` one names as its `constraint`.
+    unavailable. The call was made and did not answer, and no discovery
+    can run again in this request. Each of these carries the requirement
+    the referral is about and its reason. One marked `repeated` ends it
+    with what it is about, and the compile issue a
+    `requirement_needs_repair` one names as its `constraint`.
     """
     if referral is None:
         return None
@@ -357,19 +358,17 @@ def _is_terminal_refusal(tool_response: dict[str, Any] | None) -> bool:
 
 
 def _stalled_referral(response: dict[str, Any] | None, counts: dict[StallKey, int]) -> bool:
-    """Count one referral by its kind, its requirement, the compile
-    issue it names as its `constraint` and the entities its
-    `ambiguous_entities` leave unsettled, and answer whether that exact
-    referral has now come back a second time, which stops the run. Two
-    different repairs on one requirement count apart, so a planner that
-    fixes one compile issue per round keeps going, and an
-    `entity_name_ambiguous` referral covering fewer entities counts
-    apart, so a planner that settles one end of "aid from Congo to Congo"
-    per round keeps going too. A third repetition
-    would carry nothing a model could act on that the second one did not
-    already say. A referral marked `repeated` ends the entry instead
-    (`closing_refusal`). A transient referral is never counted: the same
-    plan is worth proposing again.
+    """Count one referral by its kind, its requirement, the compile issue it
+    names as its `constraint` and the entities its `ambiguous_entities` leave
+    unsettled, and answer whether that exact referral has now come back a
+    second time, which stops the run. Two different repairs on one requirement
+    count apart, so a planner that fixes one compile issue per round keeps
+    going, and an `entity_name_ambiguous` referral covering fewer entities
+    counts apart, so a planner that settles one end of "aid from Congo to
+    Congo" per round keeps going too. A third repetition would carry nothing a
+    model could act on that the second one did not already say. A referral
+    marked `repeated` ends the entry instead (`closing_refusal`). A transient
+    referral is never counted. The same plan is worth proposing again.
     """
     referral = referral_of(response)
     if referral is None or referral.get("outcome") == Outcome.TRANSIENT.value:
@@ -392,9 +391,9 @@ def _referral_detail(referral: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _pinnable_candidates(referral: dict[str, Any] | None) -> list[dict[str, str]]:
-    """The `spec_id`-bearing candidates a referral names, shaped as
-    `ask_user_question`'s own `candidates` argument (`planner.specs`)
-    (`{"spec_id": ..., "label": ...}`, `label` the candidate's `sentence`).
+    """The `spec_id`-bearing candidates a referral names, shaped as the
+    `candidates` argument of `ask_user_question` (`planner.specs`), each
+    `{"spec_id": ..., "label": ...}` with `label` the candidate's `sentence`.
 
     A `no_data` referral's candidates (`translator.discovery.compact_source
     (selectable=False)`) carry no `spec_id`, since they describe what search
@@ -427,13 +426,13 @@ def _pinnable_candidates(referral: dict[str, Any] | None) -> list[dict[str, str]
 def _clarifying_question_args(
     candidates: list[dict[str, str]], *, lead: str, question: str = _WHICH_MEANT
 ) -> dict[str, Any]:
-    """The `PLANNER_ASK` call args that put a referral's pinnable
-    candidates to the user: the shape `ask_user_question` declares (`planner.specs`), built
-    here from the candidates with no model call composing it. `lead` says why
-    the user is asked and `question` what they are asked. It recommends no
-    candidate, since nothing has weighed them. The message reaches the user, so
-    it names no requirement id, referral kind or spec_id; each candidate's
-    label says what it is.
+    """The `PLANNER_ASK` call args that put a referral's pinnable candidates to
+    the user, in the shape `ask_user_question` declares (`planner.specs`),
+    built here from the candidates with no model call composing it. `lead`
+    says why the user is asked and `question` what they are asked. The call
+    recommends no candidate, since nothing has weighed them. The message
+    reaches the user, so it names no requirement id, referral kind or
+    spec_id. Each candidate's label says what it is.
     """
     return {"message": f"{lead} {question}", "candidates": candidates}
 
@@ -445,7 +444,7 @@ def _user_decided_ask(referral: Mapping[str, Any] | None) -> dict[str, Any] | No
     A referral of a kind in `translator.referral.USER_DECIDES` carrying
     pinnable candidates (`_pinnable_candidates`) leaves the pick to the user,
     so the seam asks it, led by the referral's sentence
-    (`harness.sentences.referral_sentence`); one marked `source_mismatch`
+    (`harness.sentences.referral_sentence`). One marked `source_mismatch`
     asks which other source to use instead. One with no candidates leaves
     the planner to say what cannot be done and ask what to change.
     """

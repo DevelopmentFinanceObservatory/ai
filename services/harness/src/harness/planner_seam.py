@@ -469,23 +469,22 @@ class PlannerSeam:
         # draft as the plan being changed.
         #
         # Written through `ctx.session.state`, not `ctx.state`, and so is
-        # every other write this method makes before its `finally`:
+        # every other write this method makes before its `finally`.
         # `ctx.state[key] = value` records the write in
         # `ctx.actions.state_delta`, which the framework attaches to this
-        # *node's own* event once it finishes. This write happens
-        # before `ctx.run_node` runs the planner, so it would sit in that
-        # delta until the node's event re-applies it, over whatever the
-        # planner's own tool calls wrote in between. A write to the live
-        # `Session.state` dict skips that delta: it is visible at once to the
-        # planner's tool calls (the same live dict, not a copy), but it is not
-        # durable on its own across a `Runner.run_async` boundary, a resume
-        # included. The two writes in the `finally`,
-        # `store_searched_pin_readings` and `_persist_durable`, go through
-        # `ctx.state`, since they run after `ctx.run_node` has returned and
-        # nothing the planner writes can follow them. `_persist_durable`
-        # mirrors into `ctx.state` what this method's writes and the planner's
-        # left in the live dict, so the delta this node's event carries is
-        # as new as what `ctx.run_node` produced.
+        # *node's own* event once it finishes. This write happens before
+        # `ctx.run_node` runs the planner, so it would sit in that delta until
+        # the node's event re-applies it, over whatever the planner's own tool
+        # calls wrote in between. A write to the live `Session.state` dict
+        # skips that delta. It is visible at once to the planner's tool calls
+        # (the same live dict, not a copy), but it is not durable on its own
+        # across a `Runner.run_async` boundary, a resume included. The two
+        # writes in the `finally`, `store_searched_pin_readings` and
+        # `_persist_durable`, go through `ctx.state`, since they run after
+        # `ctx.run_node` has returned and nothing the planner writes can follow
+        # them. `_persist_durable` mirrors into `ctx.state` what this method's
+        # writes and the planner's left in the live dict, so the delta this
+        # node's event carries is as new as what `ctx.run_node` produced.
         seeded = Plan.model_validate(prior_plan) if prior_plan is not None else None
         if seeded is not None and not ctx.resume_inputs:
             save_plan(cast(SessionState, ctx.session.state), seeded)
@@ -938,8 +937,9 @@ class PlannerSeam:
         and no refusal of its own ends on the bound that closed one of its
         model calls (`harness.turn_budget.TurnBudget.closed`), or else on
         `SeamCode.PLAN_NOT_READY`, carrying the referral the last translation
-        answered, if any (`harness.planner_run.not_ready`). A run that ends on an accepted ask
-        answers neither: the ask is in session state for `__call__` to return.
+        answered, if any (`harness.planner_run.not_ready`). A run that ends on
+        an accepted ask answers neither: the ask is in session state for
+        `__call__` to return.
 
         `run_id` names the run the user's answer resumes, which the default
         would put on the path of the run that asked. A `single_turn` run reads
@@ -1102,9 +1102,8 @@ class PlannerSeam:
         An ask answers with the `PLANNER_ASK` call it carries, which ends the
         run on the question in place of a model turn composing it. A stop
         answers with the refusal's sentence
-        (`harness.sentences.refusal_sentence`). The
-        request's budget is kept by the model itself
-        (`harness.turn_budget.BoundedGemini`).
+        (`harness.sentences.refusal_sentence`). The request's budget is kept
+        by the model itself (`harness.turn_budget.BoundedGemini`).
         """
         del callback_context, llm_request
         run = _active_call.get()
