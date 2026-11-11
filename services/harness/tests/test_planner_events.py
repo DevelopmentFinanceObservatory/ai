@@ -1,65 +1,45 @@
 """The events a Pydantic AI planner run stores equal the ADK planner's.
 
 Each conversation runs twice on the same script of a scripted google-genai
-client. The ADK planner runs as `harness.planner_seam.PlannerSeam` runs it:
-`create_planner_agent` on `Gemini`, through a workflow node's `ctx.run_node`
-on the planner's branch. The Pydantic AI planner runs `run_planner` on
-`planner_model`, inside a node of the same name and branch that yields the
-events `harness.planner_events` builds. Both serve the same tools: the real
+client, through `harness.planner_seam.PlannerSeam` as `tests.test_planner_node`
+runs it: once on the ADK planner and once on the Pydantic AI planner, whose
+seam runs `harness.planner_node`. Both serve the same tools: the real
 `ask_user_question` and `get_skill`, and a `propose_plan` whose answers the
 script sets. The stored sessions are then compared: their events field by
 field apart from ids and timestamps, what `session_steps` and Studio's
-translator read from them, and their state.
+translator read from them, and their state. The builders of
+`harness.planner_events` are also tested on their own.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
 import pytest
 from compiler.surface import ProgressCallback, ToolCallResult, ToolSurface
-from google.adk import Context
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.events import Event
-from google.adk.models import Gemini
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService, Session
-from google.adk.workflow import START, BaseNode, Workflow, node
+from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from harness.planner_events import (
     NO_CONTENT_ERROR_CODE,
     answered_every_call,
-    model_response_event,
     tool_answers_event,
 )
-from harness.planner_model import ResponseMetadata, planner_model
+from harness.planner_seam import PlannerSeam
 from harness.scripted_plan import scripted_plan
-from harness.sentences import SeamCode
+from harness.settings import Settings
 from harness.studio_state import ConversationState, StudioStore
 from harness.studio_translate import _RecordingExecutor, _Translator
 from harness.turn_events import PLANNER_ASK
-from planner.agent import (
-    AGENT_NAME,
-    BRIEF_STATE_KEY,
-    SpecTool,
-    create_planner_agent,
-    planner_instruction,
-    session_steps,
-)
+from planner.agent import AGENT_NAME, session_steps
 from planner.call import PlannerCall
 from planner.plan import PLAN_STATE_KEY
-from planner.pydantic_agent import (
-    PLANNER_PROFILE,
-    PlannerDeps,
-    PlannerResponse,
-    PlannerToolAnswer,
-    planner_agent,
-    run_planner,
-)
+from planner.pydantic_agent import PlannerResponse, PlannerToolAnswer
 from planner.skills import SKILLS_READ_STATE_KEY
 from planner.specs import PROPOSE_PLAN, planner_tool_specs, skill_tool_spec
 from planner.tool_spec import Parameter, ToolSpec
@@ -74,11 +54,10 @@ from .scripted_genai import (
     thought_part,
     usage_metadata,
 )
+from .test_planner_node import _frames as _numbered_frames
+from .test_planner_seam import _SeamHarness
 
-_MODEL = "gemini-3.8-flash"
-_BRANCH = "dfo_planner"
 _QUESTION = "How much aid did Ghana receive?"
-_BRIEF = "Context for this question: the readings."
 _USAGE = usage_metadata(prompt=120, cached=40, candidates=9, thoughts=4)
 _ACCEPTED = {"outcome": "ok", "status": "ready", "summary": "Aid to Ghana."}
 _REFUSED = {"outcome": "refused", "code": "plan_invalid", "message": "Pin a source."}
@@ -91,9 +70,13 @@ _PLAN_JSON = scripted_plan(_QUESTION, spec_id=None).model_dump_json()
 
 @dataclass
 class _Skills:
-    """A tool surface serving `get_skill`: each page's text, after its delay."""
+    """A tool surface serving `get_skill`: each page's text, after its delay. It
+    lists no tools, so a translation the seam runs finds no schema."""
 
     delays: Mapping[str, float]
+
+    async def list_tools(self) -> list[Any]:
+        return []
 
     async def call_tool(
         self, *, tool: Any, arguments: Mapping[str, object], on_progress: Any = None
@@ -154,120 +137,33 @@ def _specs(surface: ToolSurface, *proposals: dict[str, Any], stuck: bool = False
 
 @dataclass
 class _Stored:
-    """The session a planner run left, as the session service stores it."""
+    """The session an entry left, as the session service stores it."""
 
-    session: Session
-
-    @property
-    def events(self) -> list[Event]:
-        return self.session.events
-
-    @property
-    def state(self) -> dict[str, Any]:
-        return self.session.state
+    events: list[Event]
+    state: dict[str, Any]
 
 
-async def _conversation(planner: BaseNode, *, stop: bool = False) -> _Stored:
-    """Run a turn whose planner node runs `planner` on the planner's branch, and read
-    the stored session. With `stop`, the turn is cancelled once a tool hangs."""
-
-    async def _planner_node(ctx: Context, node_input: Any) -> None:
-        del node_input
-        ctx.state[BRIEF_STATE_KEY] = _BRIEF
-        await ctx.run_node(planner, None, override_branch=_BRANCH)
-
-    workflow = Workflow(
-        name="turn", edges=[(START, node(_planner_node, name="planner", rerun_on_resume=True))]
+async def _conversation(seam: PlannerSeam, *, stop: bool = False) -> _Stored:
+    """Run one planner entry of `seam` in a session of its own, and read the
+    stored session. With `stop`, the entry is cancelled once a tool hangs."""
+    harness = _SeamHarness()
+    entry = harness.run(
+        seam,
+        new_message=types.Content(role="user", parts=[types.Part(text=_QUESTION)]),
+        run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+        question=_QUESTION,
+        readings=[],
     )
-    sessions = InMemorySessionService()
-    session = await sessions.create_session(app_name="app", user_id="user")
-    runner = Runner(node=workflow, app_name="app", session_service=sessions)
-
-    async def turn() -> None:
-        async for _ in runner.run_async(
-            user_id="user",
-            session_id=session.id,
-            new_message=types.Content(role="user", parts=[types.Part(text=_QUESTION)]),
-            run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-        ):
-            pass
-
     if stop:
         _STUCK.clear()
-        running = asyncio.create_task(turn())
+        running = asyncio.create_task(entry)
         await asyncio.wait_for(_STUCK.wait(), timeout=5)
         running.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await running
     else:
-        await turn()
-    stored = await sessions.get_session(app_name="app", user_id="user", session_id=session.id)
-    assert stored is not None
-    return _Stored(stored)
-
-
-def _adk_planner(specs: Sequence[ToolSpec], scripted: ScriptedGenai) -> BaseNode:
-    agent = create_planner_agent(model_name=_MODEL, question_fixed=True, reads_user_words=False)
-    agent.model = Gemini(model=_MODEL, client=scripted.client)
-    agent.tools = [SpecTool(spec) for spec in specs]
-    return agent
-
-
-def _failed(name: str, error: BaseException) -> dict[str, Any]:
-    raise AssertionError(f"{name} raised {error!r}")
-
-
-def _pydantic_planner(specs: Sequence[ToolSpec], scripted: ScriptedGenai) -> BaseNode:
-    """The planner node over `run_planner`: each response's event as it arrives, and
-    one event for a response's answers once every call of it has answered."""
-    reported: list[ResponseMetadata] = []
-
-    def after_response(closed_by: SeamCode | None, metadata: ResponseMetadata) -> None:
-        assert closed_by is None
-        reported.append(metadata)
-
-    model = planner_model(
-        _MODEL,
-        client=scripted.client,
-        budget=None,
-        after_response=after_response,
-        profile=PLANNER_PROFILE,
-    )
-    agent = planner_agent(
-        specs,
-        instruction=planner_instruction(has_translator=False, has_skills=True, question_fixed=True),
-        model=model,
-    )
-
-    async def dfo_planner(ctx: Context, node_input: Any) -> AsyncIterator[Event]:
-        del node_input
-        ctx.event_author = AGENT_NAME
-        deps = PlannerDeps(
-            state=ctx.session.state,
-            earlier=tuple(session_steps(ctx.session.events)),
-            tool_answered=lambda name, answer: None,
-            tool_failed=_failed,
-        )
-        response: PlannerResponse | None = None
-        answers: list[PlannerToolAnswer] = []
-        brief = ctx.session.state[BRIEF_STATE_KEY]
-        async for item in run_planner(agent, deps, question=_QUESTION, brief=brief):
-            if isinstance(item, PlannerResponse):
-                response, answers = item, []
-                metadata = reported.pop(0)
-                yield model_response_event(
-                    item,
-                    usage=metadata.usage,
-                    finish_reason=metadata.finish_reason,
-                    model_version=metadata.model_version,
-                )
-                continue
-            assert response is not None
-            answers.append(item)
-            if answered_every_call(response, answers):
-                yield tool_answers_event(response, answers, ended=deps.ended)
-
-    return node(dfo_planner, name=AGENT_NAME)
+        await entry
+    return _Stored(events=await harness.events(), state=dict(await harness.state()))
 
 
 async def _both(
@@ -276,11 +172,19 @@ async def _both(
     delays: Mapping[str, float] | None = None,
     stop: bool = False,
 ) -> tuple[_Stored, _Stored]:
+    """The entry on `replies` through `PlannerSeam` on the ADK planner and on the
+    Pydantic AI planner (`harness.planner_node`), each serving `_specs`."""
     stored = []
-    for planner in (_adk_planner, _pydantic_planner):
+    for runner in ("adk", "pydantic_ai"):
         scripted = ScriptedGenai(replies)
-        specs = _specs(cast(ToolSurface, _Skills(delays or {})), *proposals, stuck=stop)
-        stored.append(await _conversation(planner(specs, scripted), stop=stop))
+        surface = cast(ToolSurface, _Skills(delays or {}))
+        seam = PlannerSeam(
+            settings=Settings(planner_runner=runner),
+            surface=surface,
+            specs=_specs(surface, *proposals, stuck=stop),
+            client=scripted.client,
+        )
+        stored.append(await _conversation(seam, stop=stop))
     adk, pydantic = stored
     return adk, pydantic
 
@@ -300,16 +204,15 @@ def _dumped(events: Sequence[Event]) -> list[dict[str, Any]]:
 
 
 def _frames(events: Sequence[Event]) -> list[dict[str, Any]]:
-    """The frames Studio's translator makes of `events`, less each line's duration."""
+    """The frames Studio's translator makes of `events`, less each line's
+    duration, each id Studio draws numbered (`tests.test_planner_node._frames`)."""
     translator = _Translator(
         conversation=ConversationState(conversation_id="c1"),
         recorder=_RecordingExecutor(_no_executor, store=StudioStore(InMemorySessionService())),
     )
-    return [
-        frame.model_dump(mode="json", exclude={"duration_ms"})
-        for event in events
-        for frame in translator.translate(event)
-    ]
+    return _numbered_frames(
+        [frame.model_dump(mode="json") for event in events for frame in translator.translate(event)]
+    )
 
 
 async def _no_executor(

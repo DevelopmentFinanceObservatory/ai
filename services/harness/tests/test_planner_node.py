@@ -44,7 +44,7 @@ from harness.sentences import SeamCode, refusal_sentence
 from harness.settings import Settings
 from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
 from harness.turn_events import PLANNER_ASK
-from planner.agent import AGENT_NAME, planner_specs, session_steps
+from planner.agent import AGENT_NAME, session_steps
 from planner.call import PlannerCall, elected_spec_ids
 from planner.plan import (
     DatasetRequirement,
@@ -67,7 +67,7 @@ from submission.service import scope_choice_decisions
 from translator.tool import Translate, build_translate
 
 from .orchestrator_fakes import plan_call, stream, studio_client, turn_body
-from .planner.planner_pairs import assert_pinned_wire_differences
+from .planner.planner_pairs import assert_pinned_wire_differences, seam_specs
 from .scripted_genai import (
     Reply,
     Request,
@@ -77,6 +77,7 @@ from .scripted_genai import (
     empty_reply,
     reply,
     text_part,
+    thought_part,
     usage_metadata,
 )
 from .test_planner_seam import (
@@ -140,9 +141,7 @@ def _seam(
     planner's model always keeps to it."""
     surface = FixtureSurface(schemas=[])
     translate = translate if translate is not None else build_translate(surface=surface)
-    specs = planner_specs(
-        translate=translate, surface=surface, question_fixed=True, reads_user_words=False
-    )
+    specs = seam_specs(surface=surface, translate=translate)
     settings = Settings(planner_runner=runner)
     if runner == "adk":
         model = (BoundedGemini if bounded else Gemini)(model=_MODEL, client=scripted.client)
@@ -339,6 +338,80 @@ async def test_a_planned_turn_is_the_same_on_both_planners(plan: Plan) -> None:
 
     assert adk.outputs[0] is not None and "plan" in adk.outputs[0]
     assert len(_planner_events(adk)) == 2
+    _assert_same(adk, pydantic)
+
+
+# Replies streamed over several chunks, as Gemini streams every call.
+_STREAMED = {
+    "thought-then-signed-call": Reply(
+        chunks=[
+            [thought_part("Weighing the debt sources.", signature=None)],
+            [call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED)],
+            [],
+        ],
+        usage=_USAGE,
+    ),
+    "text-over-three-chunks": Reply(
+        chunks=[
+            [text_part("I will ")],
+            [text_part("propose ")],
+            [text_part("the plan.")],
+            [call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED)],
+        ],
+        usage=_USAGE,
+    ),
+    "thoughts-text-and-call": Reply(
+        chunks=[
+            [thought_part("Weighing the sources", signature=_SIGNED)],
+            [thought_part(" and the years.", signature=None)],
+            [text_part("Proposing ")],
+            [text_part("now.")],
+            [call_part(PROPOSE_PLAN, {}, id="p1")],
+            [],
+        ],
+        usage=_USAGE,
+    ),
+}
+
+
+@pytest.mark.parametrize("streamed", list(_STREAMED))
+async def test_a_reply_streamed_in_chunks_is_the_same_on_both_planners(
+    plan: Plan, streamed: str
+) -> None:
+    """A reply split over several chunks is stored and replayed as one
+    response on both planners: ADK's stream aggregator and Pydantic AI's parts
+    manager merge the chunks alike."""
+    adk, pydantic = await _both(
+        _Script(
+            replies=[_STREAMED[streamed]],
+            runs=[_planned(plan)],
+            setup=_proposals(),
+        )
+    )
+
+    assert adk.outputs[0] is not None and "plan" in adk.outputs[0]
+    (response,) = [event for event in _planner_events(adk) if event.get_function_calls()]
+    assert not response.partial and response.usage_metadata is not None
+    _assert_same(adk, pydantic)
+
+
+async def test_a_refused_proposal_streamed_in_chunks_is_replayed_the_same_on_both(
+    plan: Plan,
+) -> None:
+    """The request after a reply streamed over several chunks replays that reply
+    as one model turn on both planners."""
+    adk, pydantic = await _both(
+        _Script(
+            replies=[
+                _STREAMED["thoughts-text-and-call"],
+                reply(call_part(PROPOSE_PLAN, {}, id="p2", signature=_SIGNED), usage=_USAGE),
+            ],
+            runs=[_planned(plan)],
+            setup=_proposals(_REFUSED),
+        )
+    )
+
+    assert len(adk.requests) == 2
     _assert_same(adk, pydantic)
 
 
@@ -606,44 +679,62 @@ def _counted(n: int) -> dict[str, Any]:
     return {"outcome": "ok", "n": n}
 
 
-async def _misbehaves() -> None:
+def _misbehaving(proposed: asyncio.Event) -> Callable[[], Any]:
     """A tool that ends the run as a response Pydantic AI refuses ends it, once
-    the tool beside it has answered."""
-    await asyncio.sleep(0.05)
-    raise UnexpectedModelBehavior("the model misbehaved")
+    `propose_plan` beside it has answered (`proposed`)."""
+
+    async def _misbehaves() -> None:
+        await proposed.wait()
+        raise UnexpectedModelBehavior("the model misbehaved")
+
+    return _misbehaves
 
 
 @pytest.mark.parametrize(
-    ("tool", "arguments", "answered"),
+    ("tool", "name", "arguments", "answered"),
     [
-        pytest.param(_counted, {"n": "many"}, {"p1", "x1"}, id="answered-with-a-retry"),
-        pytest.param(_misbehaves, {}, {"p1"}, id="ending-the-run"),
+        pytest.param(
+            lambda _: _counted, "_counted", {"n": "many"}, {"p1", "x1"}, id="answered-with-a-retry"
+        ),
+        pytest.param(_misbehaving, "_misbehaves", {}, {"p1"}, id="ending-the-run"),
     ],
 )
 async def test_a_call_pydantic_ai_answers_itself_still_stores_its_siblings_answer(
-    plan: Plan, tool: Callable[..., Any], arguments: dict[str, Any], answered: set[str]
+    plan: Plan,
+    tool: Callable[[asyncio.Event], Callable[..., Any]],
+    name: str,
+    arguments: dict[str, Any],
+    answered: set[str],
 ) -> None:
     """A call Pydantic AI answers without its tool, or that ends the run, leaves
     the answers of its response stored with the answer of `propose_plan` beside
     it, as the ADK planner keeps a response's finished calls. No planner tool
     reaches either path, so a Pydantic AI tool of the test's own does, on the
     Pydantic AI planner alone."""
+    proposed = asyncio.Event()
+    extra = tool(proposed)
+
+    def proposes(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
+        del call, end_run, arguments
+        proposed.set()
+        return _REFUSED
+
     scripted = ScriptedGenai(
         [
             reply(
                 call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED),
-                call_part(tool.__name__, arguments, id="x1"),
+                call_part(name, arguments, id="x1"),
             ),
             reply(text_part("done")),
         ]
     )
-    seam = _seam("pydantic_ai", scripted, tools=_proposals(_REFUSED))
+    seam = _seam("pydantic_ai", scripted, tools=lambda specs: _serving_proposals(specs, proposes))
     assert seam._pydantic is not None
     model_name, planner = seam._pydantic
-    planner.agent.tool_plain(tool)
+    planner.agent.tool_plain(extra)
     seam._pydantic = (
         model_name,
-        PlannerAgent(agent=planner.agent, tools=(*planner.tools, tool.__name__)),
+        PlannerAgent(agent=planner.agent, tools=(*planner.tools, name)),
     )
     harness = _SeamHarness()
 
@@ -997,10 +1088,20 @@ async def _studio(
     return streamed
 
 
+@pytest.mark.parametrize(
+    "replied",
+    [
+        pytest.param(
+            reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED), usage=_USAGE),
+            id="one-chunk",
+        ),
+        *(pytest.param(streamed, id=name) for name, streamed in _STREAMED.items()),
+    ],
+)
 async def test_a_planned_studio_turn_streams_the_same_frames_on_both_planners(
-    plan: Plan,
+    plan: Plan, replied: Reply
 ) -> None:
-    replies = [reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED), usage=_USAGE)]
+    replies = [replied]
 
     adk = await _studio("adk", plan, replies)
     pydantic = await _studio("pydantic_ai", plan, replies)

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +24,11 @@ from google.genai import Client, errors, types
 
 class ScriptExhaustedError(RuntimeError):
     """A request arrived after every scripted reply had been used."""
+
+
+class UnscriptedCallError(RuntimeError):
+    """A model or cache call reached the scripted client that it does not script,
+    which would otherwise go to the network."""
 
 
 class StreamCutError(RuntimeError):
@@ -153,14 +158,27 @@ class ScriptedGenai:
 
     `client` is a real `google.genai.Client` whose
     `aio.models.generate_content_stream` is replaced, so everything else a model
-    class reads off a client (`vertexai`, HTTP options) is present. `requests`
-    holds a copy of each call's model, contents and config in call order.
+    class reads off a client (`vertexai`, HTTP options) is present. Every other
+    call of its `models`, `aio.models`, `caches` and `aio.caches` raises
+    `UnscriptedCallError` naming the call, so no test reaches the network; a test
+    that scripts one of them assigns over it. `requests` holds a copy of each
+    call's model, contents and config in call order.
     """
 
     def __init__(self, replies: Sequence[Reply]) -> None:
         self.replies = list(replies)
         self.requests: list[Request] = []
         self.client = Client(api_key="scripted")
+        namespaces = {
+            "models": self.client.models,
+            "aio.models": self.client.aio.models,
+            "caches": self.client.caches,
+            "aio.caches": self.client.aio.caches,
+        }
+        for path, namespace in namespaces.items():
+            for name in dir(namespace):
+                if not name.startswith("_") and callable(getattr(namespace, name)):
+                    setattr(namespace, name, _refusing(f"{path}.{name}"))
         self.client.aio.models.generate_content_stream = self._open  # type: ignore[method-assign]
 
     async def _open(
@@ -178,6 +196,18 @@ class ScriptedGenai:
         if step.open_error is not None:
             raise step.open_error
         return _stream(step)
+
+
+def _refusing(call: str) -> Callable[..., Any]:
+    """A stand-in for the client's `call` that refuses it."""
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise UnscriptedCallError(
+            f"{call} was called; ScriptedGenai scripts aio.models.generate_content_stream only"
+        )
+
+    return refuse
 
 
 async def _stream(step: Reply) -> AsyncIterator[types.GenerateContentResponse]:

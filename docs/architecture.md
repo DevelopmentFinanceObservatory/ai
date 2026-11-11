@@ -29,13 +29,18 @@ runs and datasets a turn opens with, answers no call: it waits in session
 state and `orchestrator.agent.prepend_digests` shows it after the user's
 message on every request.
 
-**`services/harness/src/planner`** is the Planner Agent: an ADK agent that
+**`services/harness/src/planner`** is the Planner Agent: the agent that
 drafts a methodological plan for a question, recording each decision it makes,
 the alternatives it considered, and the evidence an acceptable answer rests on.
 It holds the plan at the user's approval, ships inside `harness` as a sibling
 top-level module, and knows nothing about execution. The DFO Studio runs the
 modules described below, adapted for its workflow by
-`harness.planner_seam.PlannerSeam`.
+`harness.planner_seam.PlannerSeam`. The seam runs the planner on one of two
+runners, which `PLANNER_RUNNER` selects: the ADK planner, an `LlmAgent`, or the
+Pydantic AI planner, the function node `harness.planner_node`, which yields the
+ADK events an ADK planner run stores. Both serve the one set of tool specs and
+the one instruction the seam builds, and `tests/test_planner_node.py` and
+`tests/test_planner_runners.py` in `services/harness` hold the two equal.
 
 The plan-approve-execute workflow spans four top-level modules beside it,
 `planner`, `translator`, `compiler` and `executor`. The planner settles
@@ -52,8 +57,8 @@ requirement (an aggregate, a growth, a comparison, and so on), alongside the
 dataset requirements that feed them, and the planner's tools answer with a
 typed result carrying a stable code, rather than an unstructured error string,
 so a caller can branch on what stopped a call without parsing its message.
-`harness.agents` attaches the translator to the planner's `propose_plan`: an
-accepted proposal runs translation on the plan it recorded, the plan passes
+`harness.planner_seam.PlannerSeam` attaches the translator to the planner's
+`propose_plan` on either runner: an accepted proposal runs translation on the plan it recorded, the plan passes
 through session state, and the proposal's answer carries a `translation`
 verdict, `{"outcome": "ok"}` for a compiled plan or the referral translation
 stopped on.

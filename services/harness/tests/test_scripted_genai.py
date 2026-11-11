@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -19,6 +20,7 @@ from .scripted_genai import (
     ScriptedGenai,
     ScriptExhaustedError,
     StreamCutError,
+    UnscriptedCallError,
     blocked_reply,
     call_part,
     client_error,
@@ -180,3 +182,35 @@ async def test_an_exhausted_script_raises_naming_the_request_count() -> None:
 
     with pytest.raises(ScriptExhaustedError, match="2 requests"):
         await _drain(scripted)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        "aio.models.generate_content",
+        "models.generate_content",
+        "models.generate_content_stream",
+        "aio.models.count_tokens",
+        "models.count_tokens",
+        "aio.caches.create",
+        "aio.caches.get",
+        "aio.caches.update",
+        "aio.caches.delete",
+        "aio.caches.list",
+        "caches.create",
+        "caches.get",
+        "caches.update",
+        "caches.delete",
+        "caches.list",
+    ],
+)
+def test_a_call_the_client_does_not_script_is_refused_by_name(call: str) -> None:
+    scripted = ScriptedGenai([reply(text_part("Accra"))])
+    *path, name = call.split(".")
+    namespace: Any = scripted.client
+    for attribute in path:
+        namespace = getattr(namespace, attribute)
+
+    with pytest.raises(UnscriptedCallError, match=rf"^{re.escape(call)} was called"):
+        getattr(namespace, name)(model="gemini-test", contents="hi")
+    assert scripted.requests == []

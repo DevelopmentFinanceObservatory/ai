@@ -16,13 +16,19 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
+import re
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 from unittest import mock
 
 import pytest
-from compiler.surface import FixtureSurface
+from analysis_mcp.server import mcp as analysis_mcp
+from compiler.surface import FixtureSurface, McpSurface, ToolSchema
+from data_mcp.definition_store import InMemoryDefinitionStore
+from data_mcp.definition_writes import windowed_identity
+from data_mcp.server import mcp as data_mcp
 from google.adk import Context, Event
 from google.adk.agents import LlmAgent
 from google.adk.models import Gemini
@@ -35,6 +41,7 @@ from google.genai import Client, types
 from harness import planner_seam
 from harness import studio as studio_module
 from harness.graph import switch as switch_module
+from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_SEARCHES_KEY
 from harness.planner_node import SKIP_THOUGHT_SIGNATURE
 from harness.planner_run import failed_tool_answer
 from harness.planner_seam import PlannerSeam
@@ -43,10 +50,17 @@ from harness.sentences import SeamCode
 from harness.settings import Settings
 from harness.turn_budget import TurnBudget
 from harness.turn_events import PLANNER_ASK
+from harness.turn_records import SearchReading
 from planner import agent as planner_agent_module
-from planner.agent import planner_specs, session_steps
+from planner.agent import session_steps
 from planner.call import PlannerCall
-from planner.plan import Plan
+from planner.plan import (
+    DatasetRequirement,
+    Plan,
+    ResolvedBy,
+    load_plan,
+    save_plan,
+)
 from planner.settings import AgentSettings
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
@@ -54,9 +68,24 @@ from planner.tool_spec import ToolSpec
 from planner.tools import EndRun
 from translator.tool import build_translate
 
-from .orchestrator_fakes import plan_call
-from .planner.planner_pairs import assert_pinned_wire_differences
+from .data_mcp_definitions import DataMcpDefinitions, SearchStub
+from .orchestrator_fakes import open_session, orchestrator_runner, plan_call
+from .planner.planner_pairs import assert_pinned_wire_differences, seam_specs
 from .scripted_genai import Request, ScriptedGenai, call_part, reply
+from .test_graph import (
+    _BRIEF as _GRAPH_BRIEF,
+)
+from .test_graph import (
+    _PLAN_WINDOW,
+    ScriptedExecutor,
+    _hashed_scope,
+    _output_of,
+    _pending_interrupt,
+    _row_id,
+    _scoped_plan,
+    _session_state,
+    _switched_answer,
+)
 from .test_planner_node import (
     _MODEL,
     _QUESTION,
@@ -200,12 +229,7 @@ async def test_both_planners_call_the_gemini_model_adks_registry_resolves(
             agent_settings=AgentSettings(planner_model_name=named),
             surface=surface,
             specs=_proposals()(
-                planner_specs(
-                    translate=build_translate(surface=surface),
-                    surface=surface,
-                    question_fixed=True,
-                    reads_user_words=False,
-                )
+                seam_specs(surface=surface, translate=build_translate(surface=surface))
             ),
             client=scripted.client,
         )
@@ -302,12 +326,7 @@ async def test_the_seams_observer_sees_each_answer_the_model_reads(
         ]
     )
     surface = FixtureSurface(schemas=[])
-    specs = planner_specs(
-        translate=build_translate(surface=surface),
-        surface=surface,
-        question_fixed=True,
-        reads_user_words=False,
-    )
+    specs = seam_specs(surface=surface, translate=build_translate(surface=surface))
     observed: list[tuple[str, dict[str, Any] | None]] = []
     seam = PlannerSeam(
         settings=Settings(planner_runner=runner),
@@ -801,3 +820,161 @@ async def test_a_stop_while_a_switch_runs_offers_the_plan_unchanged_after_either
     pydantic = await _stopped_switch("pydantic_ai", plan, monkeypatch)
 
     assert [_frames(frames) for frames in pydantic] == [_frames(frames) for frames in adk]
+
+
+# --- A switch through the graph after an entry ---------------------------------------------
+
+
+@pytest.fixture
+async def real_schemas() -> list[ToolSchema]:
+    """The real servers' tool schemas (`tests.test_graph.real_schemas`)."""
+    return await McpSurface(
+        sources={"data-mcp": data_mcp, "analysis-mcp": analysis_mcp}
+    ).list_tools()
+
+
+async def _graph_turn(
+    graph: AdkRunner, interrupt_id: str | None = None, answer: dict[str, Any] | None = None
+) -> list[Event]:
+    """One turn of `graph`'s session under Studio's streaming run config: the
+    brief that opens it, or `answer` to the pause `interrupt_id`."""
+    if interrupt_id is None:
+        await open_session(graph)
+        message = types.UserContent(_GRAPH_BRIEF)
+    else:
+        part = create_request_input_response(interrupt_id, {"result": answer})
+        message = types.Content(role="user", parts=[part])
+    return [
+        event
+        async for event in graph.run_async(
+            user_id="u", session_id="s", new_message=message, run_config=_SSE
+        )
+    ]
+
+
+async def _switched_after_an_entry(
+    runner: Runner, schemas: list[ToolSchema]
+) -> tuple[list[Event], list[Event], Any, str]:
+    """A turn whose planner, on `runner`, asks which source the user means, is
+    answered with the scope's pin, and drafts the plan pinning it; the plan card
+    then takes a sector switch through the graph's real `switch` node, which
+    re-pins the plan through `PlannerSeam.revise` with no model call. Returns the
+    switch's events, the session as stored, its state with each time it records
+    put as `<time>`, and the pin the revised plan reads: the copy, over the
+    plan's years, of the one Search answered the switch with."""
+    scope = _hashed_scope()
+    pin = scope["compiled"]["spec_id"]
+    scoped = _scoped_plan(pin, scope, schemas=schemas)
+    # The plan answers the brief's one ask, as the switch's revision checks.
+    plan = Plan.model_validate(
+        {
+            **scoped.model_dump(),
+            "asks": [_GRAPH_BRIEF],
+            "answered": [{"ask": 0, "outputs": ["totals"]}],
+        }
+    )
+    _, envelope = _switched_answer(scope)
+    # Admission copies the pin Search answered over the years the plan reads.
+    copy_pin, _ = windowed_identity(
+        envelope["parts"][0]["spec"]["definition"]["identity"], _PLAN_WINDOW
+    )
+
+    async def translate(call: PlannerCall) -> dict[str, object]:
+        draft = load_plan(call.state)
+        assert draft is not None
+        assert plan.translation is not None and plan.workflow is not None
+        save_plan(
+            call.state,
+            draft.with_translation(translation=plan.translation, workflow=plan.workflow),
+        )
+        return {"outcome": "ok"}
+
+    scripted = ScriptedGenai(
+        [
+            reply(_ask_call("a1", candidates=[{"spec_id": pin, "label": "health aid"}])),
+            reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED)),
+        ]
+    )
+    surface = FixtureSurface(schemas=[])
+    seam = PlannerSeam(
+        settings=Settings(planner_runner=runner),
+        surface=surface,
+        translate=translate,
+        specs=_proposals(records=plan)(seam_specs(surface=surface, translate=translate)),
+        client=scripted.client,
+    )
+    graph, _ = orchestrator_runner(
+        plan_call(_GRAPH_BRIEF),
+        planner=seam,
+        executor=ScriptedExecutor(),
+        definition_surface=DataMcpDefinitions(
+            InMemoryDefinitionStore(), search=SearchStub(answer={scope["id"]: envelope})
+        ),
+    )
+    with _numbered_call_ids():
+        asked = await _graph_turn(graph)
+        ask = _pending_interrupt(asked)
+        assert ask is not None and ask != APPROVE_INTERRUPT, "the planner's ask pauses the turn"
+        carded = await _graph_turn(graph, ask, {"spec_id": pin})
+        assert _pending_interrupt(carded) == APPROVE_INTERRUPT
+        reading = SearchReading.from_part(
+            {"variable": "health aid", "status": "definite", "spec_id": pin, "scope": scope}
+        )
+        _session_state(graph)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
+        switched = await _graph_turn(
+            graph,
+            APPROVE_INTERRUPT,
+            {
+                "approved": None,
+                "switch": {"choice_id": _row_id(plan, "sector"), "option_id": "sector:120+130"},
+            },
+        )
+    stored = await graph.session_service.get_session(
+        app_name=graph.app_name, user_id="u", session_id="s"
+    )
+    assert stored is not None
+    return switched, stored.events, _timeless(stored.state), copy_pin
+
+
+# An ISO time a turn records as it runs (a reading's `observed_at`, a resolve's time).
+_RECORDED_TIME = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|\+00:00)")
+
+
+def _untimed(events: Sequence[Event]) -> Any:
+    """`events` dumped as `_dumped` dumps them, less each progress line's
+    duration and with each time recorded in them put as `<time>`."""
+    dumped = _dumped(events)
+    for event in dumped:
+        event.get("custom_metadata", {}).get("progress", {}).pop("duration_ms", None)
+    return _timeless({"events": dumped})["events"]
+
+
+def _timeless(state: Mapping[str, Any]) -> Any:
+    """`state` as JSON, each time recorded in it put as `<time>`."""
+    return json.loads(_RECORDED_TIME.sub("<time>", json.dumps(dict(state), default=str)))
+
+
+async def test_a_switch_after_an_entry_revises_the_same_plan_on_both_planners(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The switch node's revision reads the entry's stored ask and answer
+    (`PlannerSeam.revise`), so the sector decision it makes is the user's and
+    the revised plan, the turn's events and the session's state are the same
+    after an entry on either planner."""
+    adk_switched, adk_events, adk_state, copy_pin = await _switched_after_an_entry(
+        "adk", real_schemas
+    )
+    _, pydantic_events, pydantic_state, _ = await _switched_after_an_entry(
+        "pydantic_ai", real_schemas
+    )
+
+    offered = _output_of(adk_switched, "switch")
+    assert "switch_failed" not in offered, offered.get("switch_failed")
+    revised = Plan.model_validate_json(adk_state["plan"])
+    (dataset,) = [r for r in revised.evidence_requirements if isinstance(r, DatasetRequirement)]
+    assert dataset.source_spec_id == copy_pin
+    sector = next(d for d in revised.decisions if d.slot.startswith("scope_sector_"))
+    assert sector.resolved_by is ResolvedBy.USER
+    assert _untimed(pydantic_events) == _untimed(adk_events)
+    assert list(session_steps(pydantic_events)) == list(session_steps(adk_events))
+    assert pydantic_state == adk_state

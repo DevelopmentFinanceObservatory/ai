@@ -21,6 +21,11 @@ from these differences, each asserted exactly (`_as_adk_names_it`):
 - ADK writes each streamed response of a call as an output message of its
   own, ending on the whole response, which is the one message Pydantic AI
   writes (`_as_one_message`);
+- on a reply streamed over several chunks, ADK writes one output message per
+  chunk, a thought as plain text, with an empty finish reason on each and no
+  whole response, where Pydantic AI writes one merged message, its thought
+  typed as thinking, finishing on `stop`
+  (`test_a_reply_streamed_in_chunks_is_one_message_on_pydantic_ai_and_one_per_chunk_on_adk`);
 - a call the turn budget closed, with no model call behind it, ends its
   output on a `stop` finish reason where ADK's has none, and gets a
   completion start time from Pydantic AI's time to first chunk;
@@ -61,6 +66,7 @@ from ..test_planner_node import (
     _MODEL,
     _REFUSED,
     _SIGNED,
+    _STREAMED,
     _USAGE,
     Runner,
     _entries,
@@ -375,6 +381,63 @@ async def test_langfuse_shows_the_same_planner_on_both_runners(
     observed = [_as_adk_names_it(seen) for seen in pydantic if seen["type"] != "span"]
     assert observed == [_as_one_message(seen) for seen in adk]
     assert {seen["session"] for seen in adk if seen["type"] != "tool"} == {_THE_SESSION}
+
+
+async def test_a_reply_streamed_in_chunks_is_one_message_on_pydantic_ai_and_one_per_chunk_on_adk(
+    plan: Plan, exported_spans: InMemorySpanExporter
+) -> None:
+    """A reply streamed as a signed and an unsigned thought chunk, two text
+    chunks, a call and a usage-only chunk. Apart from the generation's output,
+    a reader sees the same spans on both runners. The output differs in shape
+    only: ADK writes each chunk with parts as a message of its own, the thought
+    as plain text, and Pydantic AI one merged message; read in order, both say
+    the same words and make the same call."""
+    script = _Script(
+        replies=[_STREAMED["thoughts-text-and-call"]],
+        runs=[_planned(plan)],
+        setup=_proposals(),
+        budget=_budget,
+    )
+    adk = await _spans("adk", script, exported_spans)
+    pydantic = await _spans("pydantic_ai", script, exported_spans)
+
+    (adk_call,) = [seen for seen in adk if seen["type"] == "generation"]
+    (pydantic_call,) = [_as_adk_names_it(seen) for seen in pydantic if seen["type"] == "generation"]
+    call = {"type": "tool_call", "id": "p1", "name": "propose_plan", "arguments": {}}
+    assert adk_call["output"] == [
+        {"role": "assistant", "parts": [part], "finish_reason": ""}
+        for part in [
+            {"type": "text", "content": "Weighing the sources"},
+            {"type": "text", "content": " and the years."},
+            {"type": "text", "content": "Proposing "},
+            {"type": "text", "content": "now."},
+            call,
+        ]
+    ]
+    assert pydantic_call["output"] == [
+        {
+            "role": "assistant",
+            "parts": [
+                {"type": "thinking", "content": "Weighing the sources and the years."},
+                {"type": "text", "content": "Proposing now."},
+                call,
+            ],
+            "finish_reason": "stop",
+        }
+    ]
+    (merged,) = pydantic_call["output"]
+    assert "".join(
+        part["content"]
+        for message in adk_call["output"]
+        for part in message["parts"]
+        if "content" in part
+    ) == "".join(part["content"] for part in merged["parts"] if "content" in part)
+    for key in ("usage", "model", "session", "level"):
+        assert pydantic_call[key] == adk_call[key], key
+    without_output = [
+        {**_as_adk_names_it(seen), "output": None} for seen in pydantic if seen["type"] != "span"
+    ]
+    assert without_output == [{**seen, "output": None} for seen in adk]
 
 
 async def test_a_refused_call_is_marked_failed_and_usage_is_counted_once_on_both(

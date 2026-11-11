@@ -17,8 +17,15 @@ tests live in `services/harness/tests/planner/`.
 ## What it does
 
 Four tools, each declared in `planner.specs` (`planner_tool_specs()` and
-`skill_tool_spec()`) with its body in `planner.tools` or `planner.skills`, and
-served to an `LlmAgent` by `create_planner_agent()`:
+`skill_tool_spec()`) with its body in `planner.tools` or `planner.skills`.
+`harness.planner_seam.PlannerSeam` builds the one set of specs and the one
+instruction the planner serves, on one of two runners `PLANNER_RUNNER` selects:
+an `LlmAgent` built by `create_planner_agent()` on the ADK planner, or a
+Pydantic AI agent built by `planner.pydantic_agent.planner_agent()` on the
+Pydantic AI planner, which `harness.planner_node` runs as a function node that
+yields the ADK events an ADK planner run stores. `planner.pydantic_call` reads
+a call's steps on the Pydantic AI planner as `planner.agent.AdkCall` reads
+them on the ADK planner. The tools:
 
 | Tool                | Behaviour                                                                                                                                                                                                                |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -33,8 +40,9 @@ on that answer, so no model call follows.
 
 The planner reaches the translator directly. `create_planner_agent` takes
 `translator.tool`'s `build_translate` function as `translate`, which
-`harness.agents` builds. The model cannot call it: every `propose_plan` that
-records a plan runs it on that plan and answers with the verdict under
+`harness.planner_seam.PlannerSeam` builds and serves to either runner. The
+model cannot call it: every `propose_plan` that records a plan runs it on that
+plan and answers with the verdict under
 `translation`, beside its own `ok`, so the model spends no generation on
 translation. The plan travels through session state. Omit it and
 `create_planner_agent` returns the standalone planner, whose `propose_plan`

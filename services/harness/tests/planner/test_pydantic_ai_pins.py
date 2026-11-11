@@ -1,14 +1,18 @@
 """Pins on the Pydantic AI behaviour the planner relies on and its documentation does not promise.
 
-These tests are the gate for raising the `pydantic-ai-slim` pin: a release that
-passes all of them leaves the Pydantic AI planner sending the requests, ending its
-runs and recording its steps as the ADK planner does; a failure names the behaviour
-that moved and the code that depended on it.
+These tests and the tests that run both planners on one script gate raising the
+`pydantic-ai-slim` pin together. The cross-runner tests (`tests/test_planner_node.py`,
+`tests/test_planner_runners.py`, `tests/test_planner_events.py`,
+`tests/planner/test_recorded_requests.py` and `tests/telemetry/test_planner_spans.py`)
+show that the Pydantic AI planner still sends the requests, stores the events and
+exports the spans the ADK planner does; a failure here names the Pydantic AI
+behaviour that moved and the code that depended on it.
 
 The shipping code reaches no underscore-named Pydantic AI object. What it relies on
 is behaviour the library's guides do not state: how a request is shaped on the wire,
 which calls a run retries, what a tool reads of the run so far, how streamed chunks
-merge, and when a run stops. Each test drives that behaviour through
+merge, when a run stops, and which span is current and what Pydantic AI writes on
+it. Each test drives that behaviour through
 `planner.pydantic_agent.run_planner` or `harness.planner_model.planner_model` over a
 scripted google-genai client (`ScriptedGenai`), so nothing reaches the network. A
 test marked as a control runs Pydantic AI without the planner's setting and shows the
@@ -18,6 +22,7 @@ behaviour the setting exists to change.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Sequence
 from typing import Any
 
@@ -27,6 +32,7 @@ from harness.planner_model import planner_model
 from harness.planner_node import SKIP_THOUGHT_SIGNATURE
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 from planner.call import PlannerCall
 from planner.pydantic_agent import (
     PLANNER_PROFILE,
@@ -64,6 +70,7 @@ from ..scripted_genai import (
     reply,
     text_part,
     thought_part,
+    usage_metadata,
 )
 
 MODEL = "gemini-3.8-flash"
@@ -244,16 +251,18 @@ async def test_a_call_with_arguments_the_schema_refuses_reaches_the_body_unvalid
 # --- A tool's call ids ----------------------------------------------------------------
 
 
-async def test_a_call_keeps_the_id_the_model_sent_and_a_call_sent_none_is_given_one() -> None:
-    # Answers are paired with calls by id, and a stored step names its call.
+async def test_a_call_keeps_the_id_the_model_sent() -> None:
+    # Answers are paired with calls by id, and a stored step names its call. An id
+    # the model did not send is given in ADK's form by `harness.planner_model`
+    # before Pydantic AI reads the response; `tests.test_planner_runners` holds that.
     items, _ = await _run(
-        [_BARE], [reply(call_part("bare", id="sent"), call_part("bare")), reply(text_part("ok"))]
+        [_BARE],
+        [reply(call_part("bare", id="sent"), call_part("bare", id="also")), reply(text_part("ok"))],
     )
 
     called = [part.function_call.id for part in _responses(items)[0].parts if part.function_call]
-    assert called[0] == "sent"
-    assert called[1]
-    assert {answer.call_id for answer in _answers(items)} == set(called)
+    assert called == ["sent", "also"]
+    assert sorted(answer.call_id for answer in _answers(items)) == ["also", "sent"]
 
 
 # --- Unknown tools and the retry allowance --------------------------------------------
@@ -583,3 +592,83 @@ async def test_the_clients_call_runs_inside_the_chat_span_of_the_conversation(
     assert (spans["chat"].attributes or {})["gen_ai.conversation.id"] == "conv"
     assert spans["chat"].parent is not None
     assert spans["chat"].parent.span_id == spans["invoke_agent"].context.span_id
+
+
+async def _traced_run(specs: Sequence[ToolSpec], replies: Sequence[Reply]) -> list[PlannerItem]:
+    """`run_planner` over `specs` on `replies`, its spans exported."""
+    scripted = ScriptedGenai(replies)
+    model = planner_model(MODEL, client=scripted.client, budget=None, profile=PLANNER_PROFILE)
+    planner = planner_agent(specs, instruction=INSTRUCTION, model=model, name="dfo_planner")
+    deps = PlannerDeps(
+        state={}, earlier=(), tool_answered=lambda *_: None, tool_failed=lambda *_: {}
+    )
+    return [
+        item
+        async for item in run_planner(
+            planner, deps, question=QUESTION, brief=BRIEF, conversation_id="conv"
+        )
+    ]
+
+
+async def test_a_tools_body_runs_with_its_execute_tool_span_current(
+    exported_spans: InMemorySpanExporter,
+) -> None:
+    # `planner.pydantic_agent` marks a refused call's span failed through the span
+    # current while the tool function runs; that has to be the call's own span.
+    current: list[str] = []
+
+    def body(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
+        del call, end_run, arguments
+        current.append(getattr(trace.get_current_span(), "name", ""))
+        return {"outcome": "ok"}
+
+    spec = ToolSpec(name="work", description="Tool work.", parameters=(), body=body)
+
+    await _traced_run([spec], [reply(call_part("work", id="c1")), reply(text_part("done"))])
+
+    assert current == ["execute_tool work"]
+    (span,) = [s for s in exported_spans.get_finished_spans() if s.name == "execute_tool work"]
+    assert (span.attributes or {})["gen_ai.tool.call.id"] == "c1"
+
+
+async def test_a_refused_calls_failed_mark_stands_and_no_span_is_marked_ok(
+    exported_spans: InMemorySpanExporter,
+) -> None:
+    # `planner.pydantic_agent` marks a refused call's span ERROR while it runs; a
+    # status of OK set after it would override it, so Pydantic AI must set none.
+    spec = _tool("needs", parameters=(Parameter("name", str),))
+
+    await _traced_run([spec], [reply(call_part("needs", id="c1")), reply(text_part("done"))])
+
+    spans = exported_spans.get_finished_spans()
+    (refused,) = [span for span in spans if span.name == "execute_tool needs"]
+    assert (refused.status.status_code, refused.status.description) == (
+        StatusCode.ERROR,
+        "TOOL_ERROR",
+    )
+    assert (refused.attributes or {})["error.type"] == "TOOL_ERROR"
+    assert [span.name for span in spans if span.status.status_code is StatusCode.OK] == []
+
+
+async def test_the_usage_the_model_records_on_its_span_is_left_as_it_is(
+    exported_spans: InMemorySpanExporter,
+) -> None:
+    # `harness.planner_model` writes the thought tokens under ADK's attribute and
+    # the usage Langfuse reads ahead of the rest while the call runs; Pydantic AI
+    # writes its own usage when the span ends and must leave those two alone.
+    usage = usage_metadata(prompt=120, cached=40, candidates=9, thoughts=4)
+
+    await _traced_run([_BARE], [reply(text_part("done"), usage=usage)])
+
+    (chat,) = [
+        span.attributes or {}
+        for span in exported_spans.get_finished_spans()
+        if span.name.startswith("chat ")
+    ]
+    assert chat["gen_ai.usage.reasoning.output_tokens"] == 4
+    assert json.loads(str(chat["langfuse.observation.usage_details"])) == {
+        "input": 80,
+        "output": 9,
+        "input_cached_tokens": 40,
+        "output_reasoning_tokens": 4,
+    }

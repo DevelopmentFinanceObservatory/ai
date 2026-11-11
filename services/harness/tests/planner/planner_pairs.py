@@ -36,6 +36,7 @@ from planner.agent import (
     BRIEF_STATE_KEY,
     create_planner_agent,
     planner_instruction,
+    planner_specs,
     session_steps,
 )
 from planner.pydantic_agent import (
@@ -46,7 +47,7 @@ from planner.pydantic_agent import (
     planner_agent,
     run_planner,
 )
-from planner.specs import planner_tool_specs, skill_tool_spec
+from planner.tool_spec import ToolSpec
 from translator.tool import Translate
 
 from ..scripted_genai import Reply, Request, ScriptedGenai
@@ -62,6 +63,15 @@ _BRANCH = "dfo_planner"
 # dumped), a call's answer (`("answer", name, call_id, answer)`), or a blocked
 # prompt (`("blocked", reason)`).
 type Turn = tuple[Any, ...]
+
+
+def seam_specs(*, surface: ToolSurface | None, translate: Translate | None) -> list[ToolSpec]:
+    """The planner's tools as `harness.planner_seam.PlannerSeam` builds them over
+    `surface` and `translate`, for a test that changes them before handing them
+    to the seam as `specs`."""
+    return planner_specs(
+        translate=translate, surface=surface, question_fixed=True, reads_user_words=False
+    )
 
 
 @dataclass
@@ -89,6 +99,7 @@ async def adk_run(
         surface=surface,
         question_fixed=True,
         reads_user_words=False,
+        specs=seam_specs(surface=surface, translate=translate),
     )
     agent.model = Gemini(model=MODEL, client=scripted.client)
     marks: list[int] = []
@@ -143,11 +154,8 @@ async def pydantic_run(
     `session_steps` from the events the runs before it would store.
     """
     scripted = ScriptedGenai(replies)
-    specs = planner_tool_specs(
-        translate=translate, question_fixed=True, reads_user_words=False, surface=surface
-    )
     planner = planner_agent(
-        [*([skill_tool_spec(surface)] if surface is not None else []), *specs],
+        seam_specs(surface=surface, translate=translate),
         instruction=planner_instruction(
             has_translator=translate is not None,
             has_skills=surface is not None,

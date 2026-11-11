@@ -165,7 +165,7 @@ _CASES = {
         ],
         "a2",
     ),
-    "a call with no id": (
+    "a read made while no call is served": (
         [_QUESTION, _LIVE, _response((PLANNER_ASK, _ASK, "a1"), ("propose_plan", {}, "p1"))],
         None,
     ),

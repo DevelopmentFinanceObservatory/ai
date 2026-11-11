@@ -430,46 +430,79 @@ _ANSWER = text_part("Accra")
 
 
 @pytest.mark.parametrize(
-    "parts",
+    ("parts", "kept"),
     [
-        pytest.param([_SIGNED, _UNSIGNED, _ANSWER], id="signed-and-unsigned"),
-        pytest.param([_UNSIGNED, _ANSWER], id="unsigned"),
-        pytest.param([_UNSIGNED], id="only-unsigned"),
-        pytest.param([_SIGNED, _ANSWER], id="none-to-drop"),
+        pytest.param([_SIGNED, _UNSIGNED, _ANSWER], [_SIGNED, _ANSWER], id="signed-and-unsigned"),
+        pytest.param([_UNSIGNED, _ANSWER], [_ANSWER], id="unsigned"),
+        pytest.param([_UNSIGNED], [_UNSIGNED], id="only-unsigned"),
+        pytest.param([_SIGNED, _ANSWER], [_SIGNED, _ANSWER], id="none-to-drop"),
     ],
 )
 def test_the_thought_rule_and_the_adk_callback_keep_the_same_parts(
-    parts: list[types.Part],
+    parts: list[types.Part], kept: list[types.Part]
 ) -> None:
+    """Every unsigned thought summary is dropped, a signed thought kept, and a
+    response made only of unsigned thoughts kept whole."""
     response = LlmResponse(content=types.Content(role="model", parts=parts))
 
     dropped = drop_thought_parts(None, response)  # type: ignore[arg-type]
-    kept = without_unsigned_thoughts(parts)
+    ruled = without_unsigned_thoughts(parts)
 
     adk_parts = parts if dropped is None or dropped.content is None else dropped.content.parts
-    assert (parts if kept is None else kept) == adk_parts
+    assert (parts if ruled is None else ruled) == kept
+    assert adk_parts == kept
 
 
 _MORE = thought_part("and more", signature=None)
 
 
 @pytest.mark.parametrize(
-    "chunks",
+    ("chunks", "thoughts", "text", "calls"),
     [
-        pytest.param([[_SIGNED], [_UNSIGNED], [_ANSWER]], id="signed-then-unsigned-chunk"),
-        pytest.param([[_UNSIGNED], [_SIGNED], [_ANSWER]], id="unsigned-then-signed-chunk"),
-        pytest.param([[_UNSIGNED], [_MORE], [_ANSWER]], id="unsigned-run"),
-        pytest.param([[_UNSIGNED], [_ANSWER], [_SIGNED]], id="split-by-text"),
+        pytest.param(
+            [[_SIGNED], [_UNSIGNED], [_ANSWER]],
+            [("weighed the sourcesthinking aloud", True)],
+            "Accra",
+            [],
+            id="signed-then-unsigned-chunk",
+        ),
+        pytest.param(
+            [[_UNSIGNED], [_SIGNED], [_ANSWER]],
+            [("thinking aloudweighed the sources", True)],
+            "Accra",
+            [],
+            id="unsigned-then-signed-chunk",
+        ),
+        pytest.param([[_UNSIGNED], [_MORE], [_ANSWER]], [], "Accra", [], id="unsigned-run"),
+        pytest.param(
+            [[_UNSIGNED], [_ANSWER], [_SIGNED]],
+            [("weighed the sources", True)],
+            "Accra",
+            [],
+            id="split-by-text",
+        ),
         pytest.param(
             [[_UNSIGNED], [call_part("lookup", {"key": "gh"}, signature=b"call")]],
+            [],
+            "",
+            ["lookup"],
             id="before-a-call",
         ),
-        pytest.param([[_UNSIGNED], [_MORE]], id="only-unsigned"),
+        pytest.param(
+            [[_UNSIGNED], [_MORE]], [("thinking aloudand more", False)], "", [], id="only-unsigned"
+        ),
     ],
 )
 async def test_a_response_reaches_the_agent_with_the_thoughts_the_adk_planner_keeps(
     chunks: list[list[types.Part]],
+    thoughts: list[tuple[str, bool]],
+    text: str,
+    calls: list[str],
 ) -> None:
+    """Consecutive thought chunks merge into one part, signed when any chunk of
+    them is; the rule then drops each unsigned one unless nothing else is left.
+    Both planners keep `thoughts` (each part's text and whether it is signed),
+    `text` and `calls`."""
     script = [Reply(chunks=chunks)]
     pai_scripted, adk_scripted = ScriptedGenai(script), ScriptedGenai(script)
 
@@ -485,8 +518,10 @@ async def test_a_response_reaches_the_agent_with_the_thoughts_the_adk_planner_ke
         (part.content, bool(part.provider_details))
         for part in response.parts
         if isinstance(part, ThinkingPart)
-    ] == [(part.text, bool(part.thought_signature)) for part in adk_parts if part.thought]
-    assert _pai_text(response) == _adk_text(adk_parts)
-    assert [part.tool_name for part in response.parts if isinstance(part, ToolCallPart)] == [
-        part.function_call.name for part in adk_parts if part.function_call
-    ]
+    ] == thoughts
+    assert [(part.text, bool(part.thought_signature)) for part in adk_parts if part.thought] == (
+        thoughts
+    )
+    assert _pai_text(response) == _adk_text(adk_parts) == text
+    assert [part.tool_name for part in response.parts if isinstance(part, ToolCallPart)] == calls
+    assert [part.function_call.name for part in adk_parts if part.function_call] == calls
