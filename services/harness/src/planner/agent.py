@@ -42,6 +42,7 @@ from __future__ import annotations
 import functools
 import inspect
 import logging
+import os
 from collections.abc import (
     Iterable,
     Iterator,
@@ -54,11 +55,11 @@ from compiler.surface import ToolSurface
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.events import Event
+from google.adk.models import Gemini
 from google.adk.models.llm_request import LlmRequest
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
-from google.adk.utils.variant_utils import GoogleLLMVariant, get_google_llm_variant
 from google.genai import types
 from harness.turn_events import PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME, after_turn_question
 from opentelemetry import trace
@@ -703,21 +704,38 @@ def _user_message(event: Any) -> bool:
 _TOOL_ERROR = "TOOL_ERROR"
 
 
+def _env_flag(name: str) -> bool | None:
+    """The environment variable `name` as google-genai reads a flag: `true` or `1`
+    in any case is true, any other value false, and an unset variable `None`."""
+    value = os.environ.get(name)
+    return None if value is None else value.lower() in ("true", "1")
+
+
 def refuse_vertex_ai() -> None:
-    """Refuse to build the planner when ADK's Google variant is Vertex AI.
+    """Refuse to build the planner when its model's google-genai client would use Vertex AI.
 
     The planner's declarations are the Gemini developer API's form
     (`planner.tool_spec.function_declaration`). Vertex AI rejects their
     optional `anyOf` schemas, which ADK rewrites only for its own function
-    tools. `create_planner_agent` calls this once.
+    tools. `create_planner_agent` calls this once, when the planner's model
+    is ADK's `Gemini`; any other model calls through no google-genai client.
+
+    The harness builds its Gemini models with no client options, so their
+    `google.genai.Client` takes `vertexai` from the environment, as
+    google-genai resolves it: `GOOGLE_GENAI_USE_ENTERPRISE` when set,
+    otherwise `GOOGLE_GENAI_USE_VERTEXAI`, each true when `true` or `1`. The
+    rule is read here without building a client, since building one without
+    an API key or credentials raises.
 
     Raises:
-        RuntimeError: ADK's Google variant (`get_google_llm_variant`) is
-            Vertex AI.
+        RuntimeError: That resolution gives Vertex AI.
     """
-    if get_google_llm_variant() is GoogleLLMVariant.VERTEX_AI:
+    enterprise = _env_flag("GOOGLE_GENAI_USE_ENTERPRISE")
+    vertexai = enterprise if enterprise is not None else _env_flag("GOOGLE_GENAI_USE_VERTEXAI")
+    if vertexai:
         raise RuntimeError(
-            "ADK's Google variant is Vertex AI, which rejects the planner's tool "
+            "GOOGLE_GENAI_USE_ENTERPRISE, or GOOGLE_GENAI_USE_VERTEXAI when it is unset, "
+            "points google-genai at Vertex AI, which rejects the planner's tool "
             "declarations. Unset GOOGLE_GENAI_USE_ENTERPRISE and GOOGLE_GENAI_USE_VERTEXAI "
             "and run the planner on a Gemini developer API key (GOOGLE_API_KEY)."
         )
@@ -850,12 +868,15 @@ def create_planner_agent(
         The configured `LlmAgent`.
 
     Raises:
-        RuntimeError: ADK's Google variant is Vertex AI (`refuse_vertex_ai`).
+        RuntimeError: The model is ADK's `Gemini` and its google-genai client
+            would use Vertex AI (`refuse_vertex_ai`).
     """
-    refuse_vertex_ai()
+    model = _retrying(model_name, prefix_cache=prefix_cache)
+    if isinstance(model, Gemini):
+        refuse_vertex_ai()
     return LlmAgent(
         name=AGENT_NAME,
-        model=_retrying(model_name, prefix_cache=prefix_cache),
+        model=model,
         instruction=planner_instruction(
             has_translator=translate is not None,
             has_skills=surface is not None,
