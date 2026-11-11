@@ -5,7 +5,6 @@
   "question": "Which donors gave Kenya more than 200 million US dollars of ODA in 2022?",
   "searches": [
     {
-      "query": "Which donors gave Kenya more than 200 million US dollars of ODA in 2022?",
       "parts": [
         {
           "variable": "official development assistance",

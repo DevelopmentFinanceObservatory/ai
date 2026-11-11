@@ -1083,7 +1083,7 @@ async def test_an_answer_no_call_waits_on_is_refused_and_not_read_as_a_seed(answ
 
 async def test_a_tool_that_raises_answers_the_agent_with_its_class_and_the_turn_goes_on(caplog):
     runner, model = orchestrator_runner(
-        call("search", query="Kenya's GDP?", parts=[{"variable": "GDP"}]),
+        call("search", parts=[{"variable": "GDP"}]),
         types.Part.from_text(text="Search failed, so I cannot give Kenya's GDP."),
         resolver=_breaking_resolver,
     )
@@ -1178,7 +1178,7 @@ async def test_a_searched_and_approved_turn_copies_no_large_container_it_reads(
 
     monkeypatch.setattr(State, "_take_snapshot", spy)
     runner, _ = orchestrator_runner(
-        search_call("Kenya debt service", "debt service"),
+        search_call("debt service"),
         call(
             "plan",
             brief="Kenya's debt service since 2015",
@@ -2632,7 +2632,7 @@ async def test_a_plain_text_turn_streams_the_agents_answer_over_the_studio_route
 async def test_a_search_fetch_and_chart_turn_lands_a_card_over_the_studio_routes():
     search = CannedSearch(definite_envelope())
     app, model = orchestrator_app(
-        search_call("life expectancy in Kenya", "life expectancy"),
+        search_call("life expectancy"),
         fetch_call(),
         make_charts_call(chart(frame_for())),
         types.Part.from_text(text="Life expectancy in Kenya rose to 62 years."),
@@ -2642,7 +2642,9 @@ async def test_a_search_fetch_and_chart_turn_lands_a_card_over_the_studio_routes
     async with studio_client(app) as client:
         frames = await stream(client, "/api/studio/turn", turn_body("Life expectancy in Kenya?"))
 
-    assert [c["question"] for c in search.calls] == ["life expectancy in Kenya"]
+    assert [(c["question"], c["parts"]) for c in search.calls] == [
+        (None, [{"variable": "life expectancy"}])
+    ]
     tools = [f.get("tool") for f in frames if f["event"] == "activity.step"]
     assert {"search", "fetch", "make_charts", "write_component"} <= set(tools)
     created = [f for f in frames if f["event"] == "component.created"]

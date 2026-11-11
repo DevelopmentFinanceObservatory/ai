@@ -366,7 +366,7 @@ def _card(
         for index in range(charts)
     ]
     return (
-        search_call("kenya oda 2023", "aid to Kenya"),
+        search_call("aid to Kenya"),
         fetch_call(SPEC_A),
         make_charts_call(*drawn),
         _text("Here is the card."),
@@ -594,7 +594,7 @@ async def test_a_wrong_shared_secret_is_401() -> None:
 async def test_a_definite_turn_streams_steps_text_and_done() -> None:
     executor = ScriptedExecutor(_card_results()[:2], strict=True)
     app = _app(
-        search_call("kenya oda 2023", "aid to Kenya"),
+        search_call("aid to Kenya"),
         fetch_call(SPEC_A),
         _text("Kenya received aid."),
         resolver=_search(),
@@ -1099,7 +1099,7 @@ async def test_a_turn_paused_for_approval_exports_as_one_trace(
                 return await super().__call__(tool=tool, args=args)
 
     app = _app(
-        search_call("q with forks", "aid to Kenya"),
+        search_call("aid to Kenya"),
         *_plan("q with forks", *_charts_the_plan()),
         resolver=ProbingSearch(definite_envelope(spec_id=SPEC_A)),
         executor=ProbingExecutor(),
@@ -2288,9 +2288,9 @@ async def test_a_search_after_the_answer_reads_the_message_the_answer_refined() 
     question first, and after the resume the question with the answer."""
     search = CannedSearch(definite_envelope(spec_id=SPEC_A), definite_envelope(spec_id=SPEC_A))
     app = _app(
-        search_call("ambiguous q", "aid"),
+        search_call("aid"),
         *_ask("reading A", "reading B"),
-        search_call("aid, reading B", "aid"),
+        search_call("aid"),
         _text("You meant reading B."),
         resolver=search,
     )
@@ -2361,7 +2361,7 @@ async def test_the_turn_record_keeps_a_picked_count_under_its_spec_id() -> None:
     """A pick whose option carries a spec_id is recorded as `label (spec_id)`,
     so a later turn can tell which series the user settled."""
     app = _app(
-        search_call("kenya oda 2023", "aid to Kenya"),
+        search_call("aid to Kenya"),
         call(
             "ask_user",
             questions=[
@@ -5344,7 +5344,7 @@ async def test_a_switch_leaves_its_label_out_of_the_words_later_searches_send() 
     )
     search = _search()
     app = _app(
-        *_plan("q with forks", search_call("aid", "aid"), _text("Done.")),
+        *_plan("q with forks", search_call("aid"), _text("Done.")),
         resolver=search,
         tool_surface=ScriptedSurface(),
     )
@@ -5432,7 +5432,7 @@ def _chip_app(
         else SearchStub(answer={scope["id"]: _switched_answer(scope)[1]})
     )
     app = _app(
-        search_call("health aid to Africa", "health aid"),
+        search_call("health aid"),
         *(fetch_call(scope["compiled"]["spec_id"], **fetched) for fetched in fetches),
         _text("Health aid to Africa was this much."),
         *script,
@@ -5612,7 +5612,7 @@ async def test_a_chip_applies_only_on_the_answer_it_was_offered_with() -> None:
     Search is asked nothing. The newer answer's own chip still applies."""
     pin = _hashed_scope()["compiled"]["spec_id"]
     app, scope, search = _chip_app(
-        search_call("health aid to Africa", "health aid"),
+        search_call("health aid"),
         fetch_call(pin),
         _text("Health aid to Ghana was this much."),
         _text("Now with population."),

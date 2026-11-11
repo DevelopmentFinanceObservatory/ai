@@ -105,18 +105,19 @@ search once more with the place as you read it, before any other retry. A
 part refused as role_not_resolved goes again first with `role` set on every
 name, from the side the user or an earlier turn gave it.
 
-When search finds nothing for a part, refuses it, or leaves out something
-the user asked for in it, search once more for that part alone: `as_text`
-set, the part alone in `parts`, and `query` set to the user's own words for
-it. Rephrase only to fill in what an earlier turn supplied ("that" becomes
-the measure it meant). Use what that search returns. When it says it
+When a part's result carries `retry_with_text`, search once more for that
+part alone: `text` set to the user's own words for it, and the part alone in
+`parts`. Rephrase only to fill in what an earlier turn supplied ("that"
+becomes the measure it meant). Use what that search returns. When it says it
 defaulted, dropped or changed part of the question, tell the user so in
 their terms. When it answers more broadly than the user asked, say that the
-user's limit was not applied.
+user's limit was not applied. A part with no `retry_with_text` is not
+searched again with `text`.
 
-When that search still finds nothing, tell the user in a sentence what
-search returned for that part. Ask with ask_user how to go on, offering the
-closest measures search named and answering without that part as options.
+When a part still has nothing after the searches above, tell the user in a
+sentence what search returned for that part. Ask with ask_user how to go on,
+offering the closest measures search named and answering without that part
+as options.
 
 Load a skill a result names when its description bears on the question.
 

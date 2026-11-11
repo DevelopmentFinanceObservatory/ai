@@ -5,7 +5,6 @@
   "question": "By how many US dollars did Zambia's external debt stock increase between 2012 and 2020?",
   "searches": [
     {
-      "query": "By how many US dollars did Zambia's external debt stock increase between 2012 and 2020?",
       "parts": [
         {
           "variable": "external debt stock",

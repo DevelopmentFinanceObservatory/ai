@@ -5,7 +5,6 @@
   "question": "Show the population of Nigeria, Ethiopia and Egypt for every year from 2000 to 2023.",
   "searches": [
     {
-      "query": "Show the population of Nigeria, Ethiopia and Egypt for every year from 2000 to 2023.",
       "parts": [
         {
           "variable": "population",

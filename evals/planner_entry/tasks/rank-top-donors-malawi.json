@@ -5,7 +5,6 @@
   "question": "Which donors give the most to Malawi?",
   "searches": [
     {
-      "query": "Which donors give the most to Malawi?",
       "parts": [
         {
           "variable": "official development assistance",

@@ -76,14 +76,13 @@ class RecordingResolver:
     async def __call__(
         self,
         *,
-        question: str,
+        question: str | None,
         parts: list[dict[str, Any]],
         raw_text: bool = False,
         context: SearchContext | None = None,
     ) -> dict[str, Any]:
-        arguments: dict[str, Any] = (
-            {"raw_query": question} if raw_text else {"parts": parts, "raw_query": question}
-        )
+        # A raw-text search sends its words alone, and a parsed search sends its parts alone.
+        arguments: dict[str, Any] = {"raw_query": question} if raw_text else {"parts": parts}
         meta = search_context_meta(context)
         result = await self._client.call_tool(
             "search",
@@ -97,7 +96,8 @@ class RecordingResolver:
             raise ResolverError(f"search refused: {refusal}", refusal=refusal)
         envelope = (result.meta or {}).get(SEARCH_ENVELOPE_META_KEY)
         if not isinstance(envelope, dict):
-            raise RuntimeError(f"search answered no envelope for {question!r}")
+            asked = repr(question) if raw_text else f"parts {parts!r}"
+            raise RuntimeError(f"search answered no envelope for {asked}")
         self.calls.append(
             {
                 "question": question,

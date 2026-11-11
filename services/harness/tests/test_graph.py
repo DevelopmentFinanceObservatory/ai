@@ -4858,7 +4858,7 @@ async def _chip_turn(
     ).model_dump(mode="json")
     executor = executor or _RecordingExecutor()
     runner, model = orchestrator_runner(
-        call("search", query="health aid", parts=[{"variable": "health aid"}]),
+        call("search", parts=[{"variable": "health aid"}]),
         executor=executor,
         definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
     )

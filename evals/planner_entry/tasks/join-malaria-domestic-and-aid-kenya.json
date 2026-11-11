@@ -5,7 +5,6 @@
   "question": "Compare Kenya's domestic spending on malaria with ODA to Kenya for malaria over time",
   "searches": [
     {
-      "query": "Compare Kenya's domestic spending on malaria with ODA to Kenya for malaria over time",
       "parts": [
         {
           "entities": [
@@ -27,7 +26,6 @@
       ]
     },
     {
-      "query": "malaria control aid to Kenya",
       "parts": [
         {
           "variable": "malaria control",

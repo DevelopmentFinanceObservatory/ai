@@ -5,7 +5,6 @@
   "question": "give me the total (bilateral and imputed multilateral) aid france gave guatemala between 2010 and the latest",
   "searches": [
     {
-      "query": "give me the total (bilateral and imputed multilateral) aid france gave guatemala between 2010 and the latest",
       "parts": [
         {
           "variable": "total bilateral and imputed multilateral aid",
@@ -24,7 +23,6 @@
       ]
     },
     {
-      "query": "bilateral ODA and imputed multilateral ODA from France to Guatemala 2010 to 2024",
       "parts": [
         {
           "entities": [
@@ -57,7 +55,6 @@
       ]
     },
     {
-      "query": "official development assistance from France to Guatemala 2010 to 2024",
       "parts": [
         {
           "variable": "official development assistance",

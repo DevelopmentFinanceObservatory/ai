@@ -75,7 +75,7 @@ from compiler.sources import (
 )
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.get_data_tool import Breakdown, GetDataScope
-from data_mcp.search_tool import SearchContext, SearchPart
+from data_mcp.search_tool import MAX_RAW_QUERY_CHARS, SearchContext, SearchPart
 from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar import FrameError
 from dfo_frame_grammar.grammar import TimeGrain
@@ -1196,25 +1196,6 @@ def _invalid_arguments(
     }
 
 
-_SUPPLIERS_ATTRIBUTE = "missing_argument_suppliers"
-
-
-def _supplies_missing(
-    argument: str, supplier: Callable[[dict[str, Any]], Any | None]
-) -> Callable[[FunctionType], FunctionType]:
-    """Decorator marking `argument` of a tool as one `OrchestratorTool` may
-    fill when a call omits it. `supplier` receives the call's arguments and
-    returns the value, or None to leave the call refused as missing the
-    argument. The mark rides on the function, so it survives
-    `_validated_arguments`, and the declaration ADK builds is unchanged."""
-
-    def mark(tool: FunctionType) -> FunctionType:
-        vars(tool).setdefault(_SUPPLIERS_ATTRIBUTE, {})[argument] = supplier
-        return tool
-
-    return mark
-
-
 class OrchestratorTool(FunctionTool):
     """An orchestrator tool as ADK runs it, with a call that lacks a required
     argument answered by `_invalid_arguments`.
@@ -1225,9 +1206,8 @@ class OrchestratorTool(FunctionTool):
     with `correct_and_retry`, one `{"loc": <name>, "type": "missing"}` entry
     per missing argument, counted against `BUDGETS["invalid_arguments"]`.
     The required arguments are the function's parameters without a default,
-    other than `tool_context`, which ADK supplies. A tool marked with
-    `_supplies_missing` has its call run with the supplied value instead,
-    when the supplier returns one. The declaration is `FunctionTool`'s own.
+    other than `tool_context`, which ADK supplies. The declaration is
+    `FunctionTool`'s own.
     """
 
     def __init__(self, func: Callable[..., Any]) -> None:
@@ -1240,16 +1220,9 @@ class OrchestratorTool(FunctionTool):
             not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
             and name != "tool_context"
         )
-        self.suppliers: Mapping[str, Callable[[dict[str, Any]], Any | None]] = vars(self.func).get(
-            _SUPPLIERS_ATTRIBUTE, {}
-        )
 
     @override
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
-        for name, supplier in self.suppliers.items():
-            if name not in args and (value := supplier(args)) is not None:
-                logger.info("orchestrator %s: supplied missing %s", self.name, name)
-                args = args | {name: value}
         if missing := [name for name in self.required_arguments if name not in args]:
             logger.warning("orchestrator %s: missing %s", self.name, ", ".join(missing))
             return _invalid_arguments(
@@ -1260,22 +1233,95 @@ class OrchestratorTool(FunctionTool):
         return await super().run_async(args=args, tool_context=tool_context)
 
 
-# The service's limit on a raw query (`data_mcp.search_tool`); a longer one is refused.
-MAX_RAW_QUERY_CHARS = 2000
+# `search`'s refusals of a call that sends nothing to search, `text` beside
+# more than one part, or `text` over the search service's limit on words it reads.
+_NOTHING_TO_SEARCH = "parts: Field required; send parts, or text"
+_TEXT_WITH_PARTS = (
+    "parts: with text, send at most one part; send the parts alone, or text with the one part "
+    "whose result carries retry_with_text"
+)
+_TEXT_TOO_LONG = f"text: String should have at most {MAX_RAW_QUERY_CHARS} characters"
+
+# The parts a `text` search ran for this turn, each as `_part_key` reads it,
+# and `_TEXT_SEARCH_RAN` once any `text` search has run.
+_TEXT_SEARCHED_KEY = "orchestrator:text_searched"
+_TEXT_SEARCH_RAN = "*"
+# A parsed search's part reading that a search with the user's words may
+# answer carries this sentence as `retry_with_text`: a part Search refused for
+# a phrase it could not apply, a measure it could not resolve, or a place it
+# could not place once the place was corrected (`_RETRY_REASONS`). Search
+# states a reason only on a part it found no data for, so the reason alone
+# decides. Every other reason, and a part that states none, offers no such
+# search.
+RETRY_WITH_TEXT = (
+    "Search once more for this part alone: `text` set to the user's own words for it, and "
+    "this part alone in `parts`."
+)
+_RETRY_REASONS = frozenset({"qualifier_not_bound", "variable_not_resolved", "entity_not_resolved"})
 
 
-def _user_message_as_query(args: dict[str, Any]) -> str | None:
-    """The turn's user message, clipped to `MAX_RAW_QUERY_CHARS`, as the raw
-    query of a `search` call that sent `parts` and no `query`, or None.
+def _words(text: str) -> str:
+    """`text` in lower case with each run of whitespace one space."""
+    return " ".join(text.lower().split())
 
-    With `parts` the service resolves from them and only echoes the raw
-    query, so the user's own words stand in for the omitted ones. A call
-    that sets `as_text` has the service read the query itself, so it must
-    send one."""
-    message = (current_user_message.get() or "").strip()
-    if not args.get("parts") or args.get("as_text") or not message:
-        return None
-    return message[:MAX_RAW_QUERY_CHARS]
+
+def _normalised(value: Any) -> Any:
+    """`value`, a JSON value, with every string in it as `_words` reads it."""
+    if isinstance(value, str):
+        return _words(value)
+    if isinstance(value, list):
+        return [_normalised(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _normalised(item) for key, item in value.items()}
+    return value
+
+
+def _part_key(part: SearchPart) -> str:
+    """`part` as `_TEXT_SEARCHED_KEY` holds it. That is the whole part as sent,
+    every string as `_words` reads it, as canonical JSON, with its entities in
+    the order of their own canonical JSON. Two parts that differ in any field
+    other than wording, case and the order of their entities are two keys."""
+    dumped = _normalised(part.model_dump(mode="json", exclude_none=True))
+    if "entities" in dumped:
+        dumped["entities"] = sorted(
+            dumped["entities"], key=lambda entity: json.dumps(entity, sort_keys=True)
+        )
+    return json.dumps(dumped, sort_keys=True)
+
+
+def _record_text_searched(state: SessionState, parts: Sequence[SearchPart]) -> None:
+    """Record in the turn's `_TEXT_SEARCHED_KEY` that a `text` search ran, and
+    for `parts`, the one part it was sent with or none."""
+    searched = list(state.get(_TEXT_SEARCHED_KEY) or [])
+    added = [_part_key(part) for part in parts]
+    if _TEXT_SEARCH_RAN not in searched:
+        added.append(_TEXT_SEARCH_RAN)
+    state[_TEXT_SEARCHED_KEY] = [*searched, *added]
+
+
+def _offer_text_retries(
+    state: SessionState,
+    parts: Sequence[SearchPart],
+    readings: Sequence[dict[str, Any]],
+    *,
+    tied: bool,
+) -> None:
+    """Add `retry_with_text` to each of a parsed search's `readings` a search
+    with the user's words may answer.
+
+    When the readings are `tied` to the `parts` sent, by position, a reading
+    whose part a `text` search already ran for this turn is offered none.
+    When they are not, no reading is offered one once any `text` search has
+    run this turn."""
+    searched = set(state.get(_TEXT_SEARCHED_KEY) or ())
+    if not tied and _TEXT_SEARCH_RAN in searched:
+        return
+    keys = [_part_key(part) for part in parts] if tied else None
+    for index, reading in enumerate(readings):
+        if reading.get("reason") in _RETRY_REASONS and (
+            keys is None or keys[index] not in searched
+        ):
+            reading["retry_with_text"] = RETRY_WITH_TEXT
 
 
 def _validated_arguments(
@@ -1821,14 +1867,16 @@ class Resolver(Protocol):
     """Stands in for data-mcp `search`: the question and its search parts ->
     the search digest (`harness.tool_contracts.resolver_digest`).
 
-    `context` is the conversation a parsed search is made in
+    A parsed search sends its parts and `question=None`. A raw-text search
+    (`raw_text=True`) sends the words Search reads as `question` and no
+    parts. `context` is the conversation a parsed search is made in
     (`_search_context`); a raw-text search is sent none.
     """
 
     async def __call__(
         self,
         *,
-        question: str,
+        question: str | None,
         parts: list[dict[str, Any]],
         raw_text: bool = False,
         context: SearchContext | None = None,
@@ -1903,21 +1951,19 @@ def build_orchestrator_tools(
             lock = chart_locks[tool_context.invocation_id] = asyncio.Lock()
         return lock
 
-    @_supplies_missing("query", _user_message_as_query)
     async def search(
-        query: str,
         tool_context: ToolContext,
         parts: list[SearchPart] | None = None,
-        as_text: bool = False,
+        text: str | None = None,
     ) -> dict[str, Any]:
         """Search DFO's data for every measured thing a question asks for.
 
-        `query` is the question in the user's words. A follow-up that leans
-        on earlier turns ("the same for Ghana", "show those over time") is
-        sent as one self-contained question naming the measure, places and
-        period. `parts` is one entry per measured variable in it, each with
+        `parts` is one entry per measured variable in the question, each with
         the entities, time, unit or sources the question gives for that
-        variable, as spoken. If Search reports an ambiguous source, ask the
+        variable, as spoken. A follow-up that leans on earlier turns ("the
+        same for Ghana", "show those over time") fills its parts from them:
+        what the follow-up changes comes from it, and the rest (measure,
+        places, period, roles and operations) from the turn it leans on. If Search reports an ambiguous source, ask the
         user which candidate they mean, then set that source entry's `ref`
         to the chosen candidate's reference, keeping its text and exclusion.
         A publisher's indicator code that the user or a skill gives
@@ -1981,11 +2027,13 @@ def build_orchestrator_tools(
         place into one answer. A total over several categories ("health
         and education aid") stays one part.
 
-        Set `as_text` to have Search read `query` itself, as written, with
-        the one part it asks about in `parts`, so the answer can be held
-        against what that part asked. Send one part's question at a time
-        this way: Search gives every part of the text the places and years
-        it reads, and the sources it names or excludes, so `query` keeps
+        `text` has Search read words itself, as written. Send it alone when
+        the question names no measure to put in a part. Send it with one part
+        in `parts` to search that part once more, when the part's result
+        carries `retry_with_text`. Search reads `text` and nothing in the
+        part, so the part stays as it was sent. Send one part's question at a
+        time this way: Search gives every part of the text the places and
+        years it reads, and the sources it names or excludes, so `text` keeps
         the user's words for the part's sources.
 
         Returns the result's `kind`: a `resolution` reads each part
@@ -1999,7 +2047,7 @@ def build_orchestrator_tools(
         `reason` code saying why; a part refused because search could not
         apply a phrase of it adds those phrases as `unbound_qualifiers` and,
         as `flagged_match`, the sentence of the match it found without
-        them, which answers a broader question), what
+        them, which answers a broader question), a part worth one more search with the user's words says so in `retry_with_text`, what
         it resolved to in words, its
         warnings, its `departures` from what was asked when search states
         any, its `group_readings` when it reads a named group as the
@@ -2016,27 +2064,35 @@ def build_orchestrator_tools(
         description, loaded with get_skill, and `more_skills`, how many
         more the result names.
         """
-        if as_text and parts and len(parts) > 1:
+        if text is not None and not text.strip():
+            text = None
+        if text is None and not parts:
+            logger.warning("orchestrator search: neither parts nor text")
+            return _invalid_arguments(
+                tool_context, "search", [({"loc": "parts", "type": "missing"}, _NOTHING_TO_SEARCH)]
+            )
+        if text is not None and parts and len(parts) > 1:
+            logger.warning("orchestrator search: text with %d parts", len(parts))
+            return _invalid_arguments(
+                tool_context, "search", [({"loc": "parts", "type": "too_long"}, _TEXT_WITH_PARTS)]
+            )
+        if text is not None and len(text) > MAX_RAW_QUERY_CHARS:
+            logger.warning("orchestrator search: text of %d characters", len(text))
             return _invalid_arguments(
                 tool_context,
                 "search",
-                [
-                    (
-                        {"loc": "parts", "type": "too_long"},
-                        "parts: with as_text, send at most one part; retry each part separately",
-                    )
-                ],
+                [({"loc": "text", "type": "string_too_long"}, _TEXT_TOO_LONG)],
             )
         spent = _spend(tool_context, "search")
         if spent:
             return spent
         parts = parts or []
         try:
-            if as_text or not parts:
-                digest = await resolver(question=query, parts=[], raw_text=True)
+            if text is not None:
+                digest = await resolver(question=text, parts=[], raw_text=True)
             else:
                 digest = await resolver(
-                    question=query,
+                    question=None,
                     parts=[part.model_dump(exclude_none=True) for part in parts],
                     context=_search_context(tool_context.state),
                 )
@@ -2056,6 +2112,10 @@ def build_orchestrator_tools(
             held_open=[_open_roles(part) for part in parts] if tied else [],
             share_sides=[_share_sides(part) for part in parts] if tied else [],
         )
+        if text is not None:
+            _record_text_searched(tool_context.state, parts)
+        else:
+            _offer_text_retries(tool_context.state, parts, readings, tied=tied)
         found: dict[str, Any] = {"kind": digest.get("kind") or "resolution", "parts": readings}
         if not readings:
             found["status"] = digest.get("status")

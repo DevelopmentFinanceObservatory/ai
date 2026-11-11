@@ -56,7 +56,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Self, cast
 
 from compiler.surface import ToolCallResult, ToolId, ToolSchema, ToolSurfaceUnavailableError
 from data_mcp import resolution
@@ -104,7 +104,7 @@ from planner.settings import AGENT_NAME as PLANNER_AGENT
 from planner.source_reads import read_full_history
 from planner.tool_results import ProblemCode
 from planner.tools import load_pending_ask
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from submission.service import first_year_reads
 from translator.discovery import DefinitionNotResolvedError, graph_describe, graph_resolve
 from translator.tool import Translate, build_translate
@@ -146,9 +146,14 @@ class _Strict(BaseModel):
 class Search(_Strict):
     """One `search` call the orchestrator made, with the arguments it sent."""
 
-    query: str
     parts: list[dict[str, Any]] = []
-    as_text: bool = False
+    text: str | None = None
+
+    @model_validator(mode="after")
+    def _says_what_it_searched(self) -> Self:
+        if not self.parts and not self.text:
+            raise ValueError("a search sends `parts`, `text`, or both")
+        return self
 
 
 class Neighbour(_Strict):
@@ -546,7 +551,8 @@ class RecordedResolver:
 
     A call whose arguments differ from the recorded call's is refused
     (`RecordingMismatchError`), so a task edited after recording cannot replay stale
-    answers.
+    answers. The question is compared only for a raw-text search, as a parsed
+    search is read from its parts and context alone.
     """
 
     def __init__(self, calls: Sequence[Mapping[str, Any]]) -> None:
@@ -555,20 +561,21 @@ class RecordedResolver:
     async def __call__(
         self,
         *,
-        question: str,
+        question: str | None,
         parts: list[dict[str, Any]],
         raw_text: bool = False,
         context: SearchContext | None = None,
     ) -> dict[str, Any]:
         if not self._calls:
-            raise RecordingMismatchError(f"no recorded search left for {question!r}")
+            raise RecordingMismatchError(f"no recorded search left for {question or parts!r}")
         call = self._calls.pop(0)
         asked = {
-            "question": question,
             "parts": parts,
             "raw_text": raw_text,
             "context": search_context_meta(context),
         }
+        if raw_text:
+            asked["question"] = question
         recorded = {key: call.get(key) for key in asked}
         if asked != recorded:
             raise RecordingMismatchError(f"search {asked} was recorded as {recorded}")
@@ -650,13 +657,12 @@ async def orchestrator_state(task: Task, resolver: Resolver) -> dict[str, Any]:
     context = SimpleNamespace(state={}, actions=EventActions())
     for search in task.searches:
         found = await tools["search"](
-            query=search.query,
-            tool_context=context,
-            parts=search.parts or None,
-            as_text=search.as_text,
+            tool_context=context, parts=search.parts or None, text=search.text
         )
         if "error" in found:
-            raise TaskStateError(f"{task.id}: search {search.query!r}: {found['error']}")
+            raise TaskStateError(
+                f"{task.id}: search {search.parts or search.text!r}: {found['error']}"
+            )
     handed = tools["plan"](brief=task.brief, asks=list(task.asks), tool_context=context)
     if handed.get(HANDED_OFF) != "plan":
         raise TaskStateError(f"{task.id}: plan answered {handed}")
@@ -1149,7 +1155,9 @@ def inputs_digest(task: Task, recording: Mapping[str, Any]) -> str:
     """A digest of what a run of `task` shows the planner: the question, the searches,
     the brief and asks, and the recorded search envelopes and tool answers. Runs pair
     only where their digests agree. An ask not marked `across_years` digests without
-    that field, so a baseline stored before asks carried the mark still pairs on it."""
+    that field, so a baseline stored before asks carried the mark still pairs on it. The
+    searches are digested as `Search` models, so a baseline stored before they took `parts`
+    and `text` pairs with no task."""
     asks = [
         ask
         if isinstance(ask, str)

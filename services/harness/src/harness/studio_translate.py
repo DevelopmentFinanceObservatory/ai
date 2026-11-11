@@ -2183,10 +2183,8 @@ class _Translator:
                 continue
             measure = self._measure(args.get("spec_id")) if name == "fetch" else None
             label = _tool_call_label(name, args, measure)
-            query = args.get("query") if name == "search" else None
-            frame = self._step(
-                None, label, StepStatus.RUNNING, tool=name, detail=str(query) if query else None
-            )
+            searched = _searched_for(args) if name == "search" else None
+            frame = self._step(None, label, StepStatus.RUNNING, tool=name, detail=searched)
             self._open_calls[call.id or frame.step_id] = (
                 frame.step_id,
                 label,
@@ -2368,7 +2366,7 @@ class _Translator:
     ) -> tuple[StepStatus, str | None]:
         """A call that returned no error or refusal: its status and detail."""
         if name == "search":
-            return StepStatus.COMPLETE, _search_detail(args.get("query"), answer)
+            return StepStatus.COMPLETE, _search_detail(_searched_for(args), answer)
         if name == "fetch":
             return StepStatus.COMPLETE, _facts(answer.get("summary"), answer.get("period_note"))
         if name == "make_charts":
@@ -2631,8 +2629,44 @@ def _is_canvas_listing(name: str, args: dict[str, Any]) -> bool:
     return name == "recall" and args.get("part") == "canvas" and not args.get("component_id")
 
 
-def _search_detail(query: Any, answer: dict[str, Any]) -> str | None:
-    """A search's result in words: the query, what it found (a definite
+def _searched_for(args: dict[str, Any]) -> str | None:
+    """What a `search` call looked for: the `text` it sent, otherwise each
+    part's `variable` with its entities' texts in brackets when it has any
+    ("ODA (Kenya), ODA (Uganda)"), each rendering once, joined by ", ". It is None
+    when the call names neither.
+
+    The arguments are the model's, read before any validation, so a value of
+    the wrong shape counts as absent."""
+    text = args.get("text")
+    if isinstance(text, str) and text.strip():
+        return text
+    parts = args.get("parts")
+    if not isinstance(parts, list):
+        return None
+    rendered = [
+        _searched_part(variable, part.get("entities"))
+        for part in parts
+        if isinstance(part, Mapping)
+        and isinstance(variable := part.get("variable"), str)
+        and variable.strip()
+    ]
+    return ", ".join(dict.fromkeys(rendered)) or None
+
+
+def _searched_part(variable: str, entities: object) -> str:
+    """`variable` with the texts of `entities` that are mappings with a text in brackets."""
+    texts = [
+        entity_text
+        for entity in (entities if isinstance(entities, list) else ())
+        if isinstance(entity, Mapping)
+        and isinstance(entity_text := entity.get("text"), str)
+        and entity_text.strip()
+    ]
+    return f"{variable} ({', '.join(texts)})" if texts else variable
+
+
+def _search_detail(searched: str | None, answer: dict[str, Any]) -> str | None:
+    """A search's result in words: what it looked for, what it found (a definite
     part by the measure it resolved to), and what it did not find with the
     reason Search gave."""
     found: list[str] = []
@@ -2657,7 +2691,7 @@ def _search_detail(query: Any, answer: dict[str, Any]) -> str | None:
     if not answer.get("parts") and answer.get("kind") not in (None, "resolution"):
         outcome.append(str(answer["kind"]))
     words = "; ".join(outcome)
-    text = " · ".join(str(piece) for piece in (query, words) if piece)
+    text = " · ".join(str(piece) for piece in (searched, words) if piece)
     return text[:_STEP_DETAIL_CAP] or None
 
 

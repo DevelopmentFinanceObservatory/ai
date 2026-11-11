@@ -497,7 +497,7 @@ Notes on specific fields:
   hand-back that carries no plan shows a `failed` "No plan could be
   made", then "Reading why no plan was made"; the closing message
   then says what could not be calculated. No model thought text is sent.
-- The agent shows one step per tool call: "Searching for data" (detail: the query, then what it found, named by the reading each measure resolved to, and what it did not find),
+- The agent shows one step per tool call: "Searching for data" (detail: the user's words when the agent searched with `text`, otherwise the measures it asked for, then what it found, named by the reading each measure resolved to, and what it did not find),
   "Fetching <measure>" (detail: the retrieval's summary), "Making N
   charts", and one step per card written ("Line chart: <title>"). The
   calls a fetch makes on its own behalf (retrieving and checking the

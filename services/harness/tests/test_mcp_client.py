@@ -238,11 +238,26 @@ async def test_empty_parts_list_refuses_before_the_search_call(
     assert excinfo.value.refusal.get("code") == "no_search_parts"
 
 
-async def test_a_raw_text_search_sends_the_question_without_parts(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("call", "arguments"),
+    [
+        (
+            {"question": "ODA to Kenya from all official donors", "parts": [], "raw_text": True},
+            {"raw_query": "ODA to Kenya from all official donors"},
+        ),
+        (
+            {"question": None, "parts": [{"variable": "ODA"}]},
+            {"parts": [{"variable": "ODA"}]},
+        ),
+    ],
+    ids=["raw-text", "parsed"],
+)
+async def test_a_search_sends_its_words_or_its_parts_alone(
+    monkeypatch: pytest.MonkeyPatch, call: dict[str, Any], arguments: dict[str, Any]
 ) -> None:
     """`raw_text` sends `search` the question alone, so data-mcp reads it
-    through Search's raw-text door instead of refusing for missing parts."""
+    through Search's raw-text door instead of refusing for missing parts; a
+    parsed search with no question sends its parts and no raw query."""
     sent: list[dict[str, Any]] = []
 
     async def call_held(clients: Any, client: Any, tool: str, arguments: dict[str, Any], **_: Any):
@@ -260,9 +275,9 @@ async def test_a_raw_text_search_sends_the_question_without_parts(
     monkeypatch.setattr(resolver, "_clients", SimpleNamespace(get=get, release=release))
 
     with pytest.raises(ResolverError):
-        await resolver(question="ODA to Kenya from all official donors", parts=[], raw_text=True)
+        await resolver(**call)
 
-    assert sent == [{"tool": "search", "raw_query": "ODA to Kenya from all official donors"}]
+    assert sent == [{"tool": "search", **arguments}]
 
 
 async def test_a_parsed_search_carries_its_context_through_data_mcp_to_search(
@@ -305,9 +320,7 @@ async def test_a_parsed_search_carries_its_context_through_data_mcp_to_search(
 
             resolver = McpResolver(settings=Settings())
             monkeypatch.setattr(resolver, "_clients", SimpleNamespace(get=get, release=release))
-            digest = await resolver(
-                question="aid from France to Kenya", parts=[{"variable": "aid"}], context=context
-            )
+            digest = await resolver(question=None, parts=[{"variable": "aid"}], context=context)
     finally:
         client_holder.set_client(None)
 

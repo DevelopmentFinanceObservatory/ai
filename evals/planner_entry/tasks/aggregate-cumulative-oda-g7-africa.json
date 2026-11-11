@@ -5,7 +5,6 @@
   "question": "Total aid from G7 to Africa since 1965",
   "searches": [
     {
-      "query": "Total aid from G7 to Africa since 1965",
       "parts": [
         {
           "entities": [
@@ -24,7 +23,6 @@
       ]
     },
     {
-      "query": "Total aid gross disbursements in constant prices from G7 to Africa since 1965",
       "parts": [
         {
           "unit": "constant US dollars",

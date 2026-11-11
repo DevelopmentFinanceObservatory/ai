@@ -5,7 +5,6 @@
   "question": "By what percentage did ODA from the United Kingdom to Kenya change between 2015 and 2022?",
   "searches": [
     {
-      "query": "By what percentage did ODA from the United Kingdom to Kenya change between 2015 and 2022?",
       "parts": [
         {
           "variable": "official development assistance",
