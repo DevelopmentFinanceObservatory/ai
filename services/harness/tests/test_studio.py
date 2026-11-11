@@ -78,6 +78,7 @@ from harness.graph.state import (
 from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.plan_display import decision_option_id
+from harness.planner_seam import PlannerSeam
 from harness.provenance import ProvenanceStore
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.sentences import FAILURE_CLASS, SeamCode, refusal_sentence
@@ -166,10 +167,9 @@ from .orchestrator_fakes import (
     turn_body,
 )
 from .resolved_revision import resolved_revision
+from .scripted_genai import ScriptedGenai, call_part, reply, text_part
 from .sqlite_session import sqlite_session_service
 from .test_graph import _hashed_scope, _switched_answer
-from .test_planner_seam import ScriptedPlannerLlm
-from .test_planner_seam import _seam as _planner_seam
 
 SPEC_A = "spec_" + "a" * 32
 REF_A = {"spec_id": SPEC_A, "content_version": "cv_" + "1" * 32}
@@ -2245,7 +2245,6 @@ async def test_the_planner_s_ask_elicits_and_its_answer_resumes_the_planner() ->
     """The planner's own ask, through a real `PlannerSeam`, pauses the turn
     on its question. Studio's answer runs the planner again with the pick in
     its brief, the resumed stream asks nothing again, and the turn ends."""
-    seam = _planner_seam()
     asked = {
         "message": "Which source did you mean?",
         "candidates": [
@@ -2253,8 +2252,10 @@ async def test_the_planner_s_ask_elicits_and_its_answer_resumes_the_planner() ->
             {"spec_id": "spec_b", "label": "reading B"},
         ],
     }
-    llm = ScriptedPlannerLlm(script=[[(PLANNER_ASK, asked)], "done"])
-    seam._agent.model = llm
+    llm = ScriptedGenai(
+        [reply(call_part(PLANNER_ASK, asked, id="call-1")), reply(text_part("done"))]
+    )
+    seam = PlannerSeam(settings=Settings(), surface=FixtureSurface(schemas=[]), client=llm.client)
     app = _app(*_plan(), _text("No plan came of it."), planner=seam)
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
@@ -2273,11 +2274,9 @@ async def test_the_planner_s_ask_elicits_and_its_answer_resumes_the_planner() ->
 
     assert "elicitation.request" not in _events(second)
     assert _events(second)[-1] == "done"
-    assert len(llm.captured_requests) == 2
+    assert len(llm.requests) == 2
     brief = "".join(
-        part.text or ""
-        for content in llm.captured_requests[-1].contents
-        for part in content.parts or []
+        part.text or "" for content in llm.requests[-1].content_list for part in content.parts or []
     )
     assert "They picked 'reading B', id `spec_b`." in brief
 

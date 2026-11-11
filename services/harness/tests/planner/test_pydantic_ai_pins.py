@@ -1,12 +1,10 @@
 """Pins on Pydantic AI behaviour the planner relies on, which its docs do not promise.
 
-These tests and the tests that run both planners on one script gate raising the
-`pydantic-ai-slim` pin together. The cross-runner tests (`tests/test_planner_node.py`,
-`tests/test_planner_runners.py`, `tests/test_planner_events.py`,
+These tests and the tests of the planner's requests, events and spans
+(`tests/test_planner_node.py`, `tests/test_planner_events.py`,
 `tests/planner/test_recorded_requests.py` and `tests/telemetry/test_planner_spans.py`)
-show that the Pydantic AI planner sends the requests, stores the events and
-exports the spans the ADK planner does. A failure here names the Pydantic AI
-behaviour the code depends on.
+gate raising the `pydantic-ai-slim` pin together. A failure here names the
+Pydantic AI behaviour the code depends on.
 
 The shipping code reaches no underscore-named Pydantic AI object. What it relies on
 is behaviour the library's guides do not state: how a request is shaped on the wire,
@@ -190,9 +188,9 @@ async def test_the_planner_profile_hands_the_wrapper_declarations_verbatim_in_th
     None
 ):
     # A rewritten schema, a `VALIDATED` tool mode or an instruction with an added
-    # sentence about `<system>` would each make the request differ from the ADK
-    # planner's. The shapes below are the ones `_in_adk_planner_form` rewrites
-    # into the ADK planner's: one `Tool` per declaration, the empty object schema
+    # sentence about `<system>` would each make the request differ from the form
+    # the planner sends. The shapes below are the ones `_in_adk_planner_form` rewrites
+    # into that form: one `Tool` per declaration, the empty object schema
     # of a declaration with no parameters, the `AUTO` mode, `TEXT` output and the
     # instruction as one user content of one text part. A change to any of them
     # leaves the rewrite unapplied.
@@ -288,8 +286,8 @@ async def test_a_call_with_arguments_the_schema_refuses_reaches_the_body_unvalid
 
 async def test_a_call_keeps_the_id_the_model_sent() -> None:
     # Answers are paired with calls by id, and a stored step names its call. An id
-    # the model did not send is given in ADK's form by `harness.planner_model`
-    # before Pydantic AI reads the response, and `tests.test_planner_runners` covers that.
+    # the model did not send is given by `harness.planner_model` before Pydantic AI
+    # reads the response.
     items, _ = await _run(
         [_BARE],
         [reply(call_part("bare", id="sent"), call_part("bare", id="also")), reply(text_part("ok"))],
@@ -434,7 +432,7 @@ async def test_the_answers_of_a_response_come_in_call_order_whatever_order_they_
 
 async def test_the_users_message_and_the_brief_reach_the_model_as_two_contents() -> None:
     # Pydantic AI merges consecutive requests into one content unless their
-    # `instructions` differ, and the ADK planner sends two.
+    # `instructions` differ, and the planner sends two.
     _, scripted = await _run([_BARE], [reply(text_part("done"))])
     _, alone = await _run([_BARE], [reply(text_part("done"))], question=None)
 
@@ -500,7 +498,7 @@ async def test_the_first_unsigned_call_of_a_response_replays_with_the_skip_signa
 async def test_consecutive_thought_chunks_make_one_part_that_keeps_the_signature() -> None:
     # The planner drops unsigned thoughts from the parts this merge makes
     # (`planner.pydantic_agent._without_unsigned_thoughts`), so a run of thought
-    # chunks with a signature on one chunk stays whole, as on the ADK planner.
+    # chunks with a signature on one chunk stays whole.
     chunks = Reply(
         chunks=[
             [thought_part("a", signature=None)],
@@ -519,7 +517,7 @@ async def test_consecutive_thought_chunks_make_one_part_that_keeps_the_signature
 
 
 async def test_an_unsigned_thought_summary_is_left_out_of_the_next_request() -> None:
-    # The ADK planner's session keeps no unsigned thought summary, so the next request
+    # The session keeps no unsigned thought summary, so the next request
     # carries none (`planner.settings.without_unsigned_thoughts`).
     unsigned = reply(thought_part("musing", signature=None), call_part("bare", id="c"))
 

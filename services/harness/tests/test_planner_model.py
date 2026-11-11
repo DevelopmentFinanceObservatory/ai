@@ -29,7 +29,7 @@ from harness.sentences import SeamCode, refusal_sentence
 from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
 from orchestrator.agent import _retrying, model_retry_options
 from planner.pydantic_agent import _without_unsigned_thoughts
-from planner.settings import drop_thought_parts, without_unsigned_thoughts
+from planner.settings import without_unsigned_thoughts
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
@@ -405,19 +405,14 @@ _ANSWER = text_part("Accra")
         pytest.param([_SIGNED, _ANSWER], [_SIGNED, _ANSWER], id="none-to-drop"),
     ],
 )
-def test_the_thought_rule_and_the_adk_callback_keep_the_same_parts(
+def test_the_thought_rule_keeps_the_signed_parts_and_the_answer(
     parts: list[types.Part], kept: list[types.Part]
 ) -> None:
     """Every unsigned thought summary is dropped, a signed thought kept, and a
     response made only of unsigned thoughts kept whole."""
-    response = LlmResponse(content=types.Content(role="model", parts=parts))
-
-    dropped = drop_thought_parts(None, response)  # type: ignore[arg-type]
     ruled = without_unsigned_thoughts(parts)
 
-    adk_parts = parts if dropped is None or dropped.content is None else dropped.content.parts
     assert (parts if ruled is None else ruled) == kept
-    assert adk_parts == kept
 
 
 _MORE = thought_part("and more", signature=None)
@@ -460,7 +455,7 @@ _MORE = thought_part("and more", signature=None)
         ),
     ],
 )
-async def test_a_response_reaches_the_agent_with_the_thoughts_the_adk_planner_keeps(
+async def test_a_response_reaches_the_agent_with_the_thoughts_the_rule_keeps(
     chunks: list[list[types.Part]],
     thoughts: list[tuple[str, bool]],
     text: str,
@@ -468,32 +463,21 @@ async def test_a_response_reaches_the_agent_with_the_thoughts_the_adk_planner_ke
 ) -> None:
     """Consecutive thought chunks merge into one part, signed when any chunk of
     them is. The rule then drops each merged unsigned one unless nothing else is
-    left. Both planners keep `thoughts` (each part's text and whether it is
+    left. The planner keeps `thoughts` (each part's text and whether it is
     signed), `text` and `calls`."""
-    script = [Reply(chunks=chunks)]
-    pai_scripted, adk_scripted = ScriptedGenai(script), ScriptedGenai(script)
+    scripted = ScriptedGenai([Reply(chunks=chunks)])
 
     response = _without_unsigned_thoughts(
-        await _pai(planner_model(MODEL, client=pai_scripted.client, budget=_budget()))
+        await _pai(planner_model(MODEL, client=scripted.client, budget=_budget()))
     )
-    adk = await _adk(BoundedGemini(model=MODEL, client=adk_scripted.client), _budget())
-    final = adk[-1]
-    assert not final.partial
-    kept = drop_thought_parts(None, final) or final  # type: ignore[arg-type]
-    assert kept.content is not None
-    adk_parts = list(kept.content.parts or [])
 
     assert [
         (part.content, bool(part.provider_details))
         for part in response.parts
         if isinstance(part, ThinkingPart)
     ] == thoughts
-    assert [(part.text, bool(part.thought_signature)) for part in adk_parts if part.thought] == (
-        thoughts
-    )
-    assert _pai_text(response) == _adk_text(adk_parts) == text
+    assert _pai_text(response) == text
     assert [part.tool_name for part in response.parts if isinstance(part, ToolCallPart)] == calls
-    assert [part.function_call.name for part in adk_parts if part.function_call] == calls
 
 
 # --- The request in the ADK planner's form --------------------------------------------

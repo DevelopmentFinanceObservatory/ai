@@ -21,9 +21,9 @@ from compiler.surface import (
     ToolCallResult,
     ToolSurfaceUnavailableError,
 )
-from planner.agent import SpecTool, create_planner_agent
+from planner.instruction import planner_instruction
 from planner.skills import SKILLS_READ_STATE_KEY, skill_page_key
-from planner.specs import skill_tool_spec
+from planner.specs import planner_specs, skill_tool_spec
 from planner.workflow import ToolId
 
 from ..planner_tools import call_planner_tool, planner_tool_declaration
@@ -69,27 +69,23 @@ def _tools(surface: _RecordingSurface, state: dict[str, Any] | None = None) -> d
 _SKILL_TEXT = "---\nname: oda-concepts\n---\n\n# ODA concepts\n"
 
 
-def _get_skill_declaration(agent: Any) -> Any:
-    get_skill = next(
-        tool for tool in agent.tools if isinstance(tool, SpecTool) and tool.name == "get_skill"
-    )
+def _get_skill_declaration(surface: _RecordingSurface) -> Any:
+    get_skill = next(spec for spec in planner_specs(surface=surface) if spec.name == "get_skill")
     declaration = planner_tool_declaration(get_skill)
     assert declaration is not None
     return declaration
 
 
 def test_a_planner_built_with_a_surface_carries_one_skill_tool_and_names_dfo_faq() -> None:
-    agent = create_planner_agent(
-        model_name="m", surface=_RecordingSurface(ToolCallResult(is_error=False))
-    )
+    surface = _RecordingSurface(ToolCallResult(is_error=False))
 
-    names = {tool.name for tool in agent.tools if isinstance(tool, SpecTool)}
+    names = {spec.name for spec in planner_specs(surface=surface)}
     assert "get_skill" in names
     assert "get_skill_file" not in names
-    instruction = str(agent.instruction)
+    instruction = planner_instruction(has_translator=False, has_skills=True)
     assert "`get_skill`" in instruction
     assert "get_skill_file" not in instruction
-    declaration = _get_skill_declaration(agent)
+    declaration = _get_skill_declaration(surface)
     assert "`dfo-faq`" in json.dumps(declaration.parameters_json_schema)
 
 
@@ -99,21 +95,15 @@ SKILL_DESCRIPTION_CEILING = 200
 
 
 def test_the_skill_tools_description_stays_short() -> None:
-    agent = create_planner_agent(
-        model_name="m", surface=_RecordingSurface(ToolCallResult(is_error=False))
-    )
-
-    declaration = _get_skill_declaration(agent)
+    declaration = _get_skill_declaration(_RecordingSurface(ToolCallResult(is_error=False)))
 
     assert len(declaration.description) <= SKILL_DESCRIPTION_CEILING
 
 
 def test_a_planner_built_without_a_surface_has_no_skill_tools_and_no_skill_paragraph() -> None:
-    agent = create_planner_agent(model_name="m")
-
-    names = {tool.name for tool in agent.tools if isinstance(tool, SpecTool)}
+    names = {spec.name for spec in planner_specs()}
     assert names.isdisjoint({"get_skill", "get_skill_file"})
-    instruction = str(agent.instruction)
+    instruction = planner_instruction(has_translator=False)
     assert "get_skill" not in instruction
     assert "dfo-faq" not in instruction
 

@@ -23,7 +23,6 @@ _FIELDS = (
     "MCP_LIST_TIMEOUT_S",
     "MCP_INIT_TIMEOUT_S",
     "EXECUTOR_MAX_CONCURRENT_STEPS",
-    "PLANNER_RUNNER",
 )
 
 
@@ -52,7 +51,6 @@ def test_defaults_without_env() -> None:
     assert settings.mcp_list_timeout_s == 15.0
     assert settings.mcp_init_timeout_s == 10.0
     assert settings.executor_max_concurrent_steps == 4
-    assert settings.planner_runner == "pydantic_ai"
 
 
 def test_mcp_timeouts_read_from_env(monkeypatch) -> None:
@@ -360,21 +358,6 @@ def test_an_unknown_orchestrator_thinking_level_is_refused(monkeypatch, value) -
     monkeypatch.setenv("ORCHESTRATOR_THINKING_LEVEL", value)
 
     with pytest.raises(ValueError, match="orchestrator_thinking_level"):
-        Settings()
-
-
-@pytest.mark.parametrize("value", ["adk", "pydantic_ai"])
-def test_the_planner_runner_reads_from_env(monkeypatch, value) -> None:
-    monkeypatch.setenv("PLANNER_RUNNER", value)
-
-    assert Settings().planner_runner == value
-
-
-@pytest.mark.parametrize("value", ["pydantic-ai", "PYDANTIC_AI", "langgraph", ""])
-def test_an_unknown_planner_runner_is_refused(monkeypatch, value) -> None:
-    monkeypatch.setenv("PLANNER_RUNNER", value)
-
-    with pytest.raises(ValueError, match="planner_runner"):
         Settings()
 
 

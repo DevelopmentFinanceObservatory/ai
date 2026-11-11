@@ -52,8 +52,8 @@ words. It is the seam's own input, a full brief carrying the search readings,
 the canvas and conversation digests, the plan being changed and the question.
 
 Every planner call renders that full brief, and every request of the call
-carries it as the content after the turn's question (`planner.agent.
-prepend_brief`).
+carries it as the content after the turn's question
+(`planner.pydantic_agent.run_planner`).
 
 `GeminiContextCacheManager._find_count_of_contents_to_cache` caches every
 content before the last run of user contents, which puts the brief inside the

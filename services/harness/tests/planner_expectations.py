@@ -1,11 +1,8 @@
-"""Stored expectations for the tests that run one planner script on each planner runner.
+"""Stored expectations for the tests that run one planner script and check what it produced.
 
-Each such test runs on the Pydantic AI planner and on the ADK planner, and checks
-what the run produced against one JSON file, `fixtures/planner_runs/<name>.json`,
-named for the test module, the test and its parameters but not the runner
-(`expectation_name`). The Pydantic AI planner's result is the file whole. The
-ADK planner's equals the same file, its requests apart from the differences
-`tests.planner.planner_pairs.assert_pinned_wire_differences` pins.
+Each such test runs the Pydantic AI planner and checks what the run produced
+against one JSON file, `fixtures/planner_runs/<name>.json`, named for the test
+module, the test and its parameters (`expectation_name`).
 
 A value many files would repeat whole, such as a request's config with the
 planner's instruction and tool declarations, is stored once as
@@ -19,13 +16,15 @@ stored as `BRIEF`, and a package version in a request's HTTP headers as
 `<version>` (`versionless_headers`).
 
 Rewrite the files after a change that moves what the planner produces, then run
-the same tests again without the variable to check both runners against them:
+the same tests again without the variable to check them:
 
     rm -rf services/harness/tests/fixtures/planner_runs && PLANNER_EXPECTATIONS=write \\
         uv run --package harness pytest services/harness/tests/test_planner_node.py \\
         services/harness/tests/test_planner_runners.py \\
         services/harness/tests/test_planner_events.py \\
         services/harness/tests/planner/test_recorded_requests.py \\
+        services/harness/tests/planner/test_pydantic_agent.py \\
+        services/harness/tests/planner/test_pydantic_endings.py \\
         services/harness/tests/telemetry/test_planner_spans.py
 
 A write run fails each test whose file it wrote or changed, so it cannot pass
@@ -45,23 +44,12 @@ from typing import Any
 import pytest
 from harness.planner_seam import _READINGS_CONTEXT
 
-from .planner_seam_runners import PlannerRunner
-
 PLANNER_RUNS = Path(__file__).parent / "fixtures" / "planner_runs"
 _SHARED = PLANNER_RUNS / "shared"
 _WRITING = os.environ.get("PLANNER_EXPECTATIONS") == "write"
 
-# A test runs the runners in this order. The Pydantic AI planner runs first, so a
-# write run writes its file before the ADK planner's run reads it.
-EXPECTATION_RUNNERS: tuple[PlannerRunner, ...] = ("pydantic_ai", "adk")
-# The runner whose result is the stored expectation.
-STORING_RUNNER: PlannerRunner = "pydantic_ai"
-# Put on a test as its outermost `parametrize`, so the runner's id ends the test's
-# ids, where `expectation_name` takes it off.
-on_each_runner = pytest.mark.parametrize("runner", EXPECTATION_RUNNERS)
-
 # What a stored value holds in place of the seam's brief, the text the planner is
-# shown after the turn's question (`planner.agent.prepend_brief`), which opens
+# shown after the turn's question (`planner.pydantic_agent.run_planner`), which opens
 # with `BRIEF_OPENING`.
 BRIEF = "<brief>"
 BRIEF_OPENING = _READINGS_CONTEXT.partition(".")[0] + "."
@@ -74,19 +62,15 @@ _PRODUCED: dict[str, Any] = {}
 _CHANGED: list[Path] = []
 
 
-def expectation_name(request: pytest.FixtureRequest, *, runner: str) -> str:
+def expectation_name(request: pytest.FixtureRequest) -> str:
     """`<module>/<test>` for an unparametrised test, `<module>/<test>/<ids>` for a
-    parametrised one, its ids less `runner`, the id of the parameter naming the
-    runner or runners, which has to open or end them."""
+    parametrised one."""
     node = request.node
     name = f"{request.module.__name__.rsplit('.', 1)[-1]}/{node.originalname}"
-    ids = node.callspec.id
-    if ids == runner:
+    callspec = getattr(node, "callspec", None)
+    if callspec is None:
         return name
-    for rest in (ids.removesuffix(f"-{runner}"), ids.removeprefix(f"{runner}-")):
-        if rest != ids:
-            return f"{name}/{''.join(c if c.isalnum() or c in '._-' else '_' for c in rest)}"
-    raise ValueError(f"the runner's id {runner!r} neither opens nor ends {ids!r}")
+    return f"{name}/{''.join(c if c.isalnum() or c in '._-' else '_' for c in callspec.id)}"
 
 
 def as_json(value: Any) -> Any:
@@ -195,17 +179,15 @@ def assert_json_equal(produced: Any, stored: Any, *, name: str) -> None:
     pytest.fail("\n".join(diff) or f"{name}: a shared value is named differently", pytrace=False)
 
 
-def expect(name: str, value: Any, *, stores: bool = True) -> None:
+def expect(name: str, value: Any) -> None:
     """Assert that `value` equals the stored expectation `name`.
 
-    With `PLANNER_EXPECTATIONS=write` and `stores`, write `value` as the file
-    instead, and fail when that, or a `shared` value written for it, changed a
-    file. A call that does not store compares in a write run too, against the
-    file as the run left it.
+    With `PLANNER_EXPECTATIONS=write`, write `value` as the file instead, and fail
+    when that, or a `shared` value written for it, changed a file.
     """
     produced = as_json(value)
     path = PLANNER_RUNS / f"{name}.json"
-    if _WRITING and stores:
+    if _WRITING:
         changed = [*_CHANGED]
         _CHANGED.clear()
         text = _dumped(produced)

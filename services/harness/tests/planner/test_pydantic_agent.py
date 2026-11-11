@@ -2,8 +2,8 @@
 
 The run tests drive `run_planner` over small tool specs whose bodies say
 what each call does, so each test reads the run loop alone. The request test
-builds the ADK planner and the Pydantic AI planner for the same turn and
-compares the first request each sends.
+runs the planner on `planner_pairs.pydantic_run` and checks the first request
+it sends against its stored expectation.
 """
 
 from __future__ import annotations
@@ -34,15 +34,7 @@ from planner.tools import ASK_ACCEPTED, EndRun, load_pending_ask
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
-from ..planner_expectations import (
-    STORING_RUNNER,
-    expect,
-    expectation_name,
-    expected,
-    on_each_runner,
-    shared,
-)
-from ..planner_seam_runners import PlannerRunner as Runner
+from ..planner_expectations import expect, expectation_name, shared
 from ..scripted_genai import (
     Reply,
     Request,
@@ -53,8 +45,8 @@ from ..scripted_genai import (
     thought_part,
     usage_metadata,
 )
-from ..test_planner_node import _as_stored, _request_dumped, _stored_request
-from .planner_pairs import BRIEF, QUESTION, adk_run, assert_pinned_wire_differences, pydantic_run
+from ..test_planner_node import _request_dumped
+from .planner_pairs import BRIEF, QUESTION, pydantic_run
 
 _MODEL = "gemini-3.8-flash"
 _QUESTION = QUESTION
@@ -291,7 +283,7 @@ async def test_a_question_part_the_planner_cannot_send_is_refused_before_any_req
     assert scripted.requests == []
 
 
-# --- The first request equals the ADK planner's --------------------------------------
+# --- The first request --------------------------------------
 
 
 async def _translate(call: PlannerCall) -> dict[str, Any]:
@@ -304,29 +296,22 @@ def _surface() -> ToolSurface:
     return cast(ToolSurface, SimpleNamespace())
 
 
-async def _first_request(runner: Runner, surface: ToolSurface | None) -> Request:
+async def _first_request(surface: ToolSurface | None) -> Request:
     script = [reply(text_part("done"))]
-    run = adk_run if runner == "adk" else pydantic_run
-    (request,) = (await run(script, surface=surface, translate=_translate)).requests
+    (request,) = (await pydantic_run(script, surface=surface, translate=_translate)).requests
     return request
 
 
-@on_each_runner
 @pytest.mark.parametrize("with_skills", [False, True], ids=["no-skill-tool", "skill-tool"])
-async def test_the_first_request_is_the_same_on_both_planners_apart_from_the_pinned_wire_differences(
-    with_skills: bool, runner: Runner, request: pytest.FixtureRequest
+async def test_the_first_request_holds_the_question_the_brief_and_the_tool_declarations(
+    with_skills: bool, request: pytest.FixtureRequest
 ) -> None:
-    surface = _surface() if with_skills else None
-    sent = await _first_request(runner, surface)
+    sent = await _first_request(_surface() if with_skills else None)
 
-    name = expectation_name(request, runner=runner)
-    if runner == STORING_RUNNER:
-        dumped = _request_dumped(sent)
-        if with_skills:
-            dumped["config"] = shared(dumped["config"], "request_config_recorded_entry")
-        expect(name, dumped)
-    else:
-        assert_pinned_wire_differences(_as_stored(sent), _stored_request(expected(name)))
+    dumped = _request_dumped(sent)
+    if with_skills:
+        dumped["config"] = shared(dumped["config"], "request_config_recorded_entry")
+    expect(expectation_name(request), dumped)
     assert sent.content_list == [
         types.Content(role="user", parts=[types.Part(text=_QUESTION)]),
         types.Content(role="user", parts=[types.Part(text=_BRIEF)]),

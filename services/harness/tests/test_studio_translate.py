@@ -10,6 +10,7 @@ mark `recommended`) needs no real event to exercise.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import ssl
@@ -23,6 +24,7 @@ import httpx2
 import pytest
 from aiohttp.client_reqrep import ConnectionKey
 from compiler.surface import (
+    FixtureSurface,
     ProgressCallback,
     ToolCallResult,
     ToolSchema,
@@ -49,11 +51,12 @@ from harness.graph.planning import planner_ask_interrupt
 from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_PRIOR_LEDGER_KEY, STEP_PROGRESS_KEY
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import decision_choice_id, decision_option_id
-from harness.planner_seam import PlannerSeamError
+from harness.planner_seam import PlannerSeam, PlannerSeamError
 from harness.scope_choices import PartScope, carried_entries
 from harness.scripted_plan import scripted_plan
 from harness.seeds import SEED_STEP_TOOL
 from harness.sentences import DECLINE_REASONS, DROPPED_REASON, failure_sentence
+from harness.settings import Settings
 from harness.studio_state import (
     ConversationState,
     StudioStore,
@@ -117,8 +120,9 @@ from translator.referral import (
 
 from .failure_text import classed_sentence, is_user_sentence
 from .resolved_revision import resolved_revision
+from .scripted_genai import Reply, Request, ScriptedGenai, call_part, reply, text_part
+from .scripted_genai import held as held_until
 from .test_plan_display import _donor_rank_plan, _fixing_measure, _recorded_payload, _recorded_plan
-from .test_planner_seam import ScriptedPlannerLlm, _seam
 from .test_turn_records import (
     _EXAMPLE_LINE,
     _example_part,
@@ -2012,14 +2016,15 @@ async def test_a_planner_call_becomes_its_line_while_the_draft_is_still_running(
     call. The runner hands the translator the call and its response while
     the draft is still waiting, so their lines reach the wire before the
     draft ends."""
-    seam = _seam()
     paused = asyncio.Event()
     release = asyncio.Event()
-    seam._agent.model = ScriptedPlannerLlm(
-        script=[[("propose_plan", {"question": "kenya debt"})]],
-        pause_at=1,
-        paused=paused,
-        release=release,
+    seam = _scripted_seam(
+        ScriptedGenai(
+            [
+                _replied([("propose_plan", {"question": "kenya debt"})]),
+                held_until(reply(text_part("done")), paused=paused, release=release),
+            ]
+        )
     )
 
     async def planner(ctx: Context, node_input: Any) -> Any:
@@ -2100,6 +2105,23 @@ _SOURCE_ASK = {
 }
 
 
+def _scripted_seam(scripted: ScriptedGenai) -> PlannerSeam:
+    """The seam over an empty fixture surface, its model calls answered by `scripted`."""
+    return PlannerSeam(
+        settings=Settings(), surface=FixtureSurface(schemas=[]), client=scripted.client
+    )
+
+
+# Call ids for `_replied`, unique across the module's scripts.
+_CALL_IDS = itertools.count(1)
+
+
+def _replied(calls: Sequence[tuple[str, dict[str, Any]]]) -> Reply:
+    """A model response of one function call per `(tool, args)` pair, each with
+    a call id of its own."""
+    return reply(*(call_part(name, args, id=f"call-{next(_CALL_IDS)}") for name, args in calls))
+
+
 async def _asked_through_the_seam(
     ask: dict[str, Any] | None,
     state: dict[str, Any],
@@ -2109,7 +2131,7 @@ async def _asked_through_the_seam(
     returned: list[Any] | None = None,
     answer: dict[str, Any] | None = None,
     sessions: list[Session] | None = None,
-) -> tuple[_Translator, list[Any], ScriptedPlannerLlm]:
+) -> tuple[_Translator, list[Any], ScriptedGenai]:
     """`ask`, with the calls `beside` it, as the planner's first model
     response in a real `PlannerSeam` run, and each of `then` as a later
     response, every event through the translator, then the segment's end.
@@ -2121,10 +2143,9 @@ async def _asked_through_the_seam(
     through a translator of its own over the same conversation, and the
     frames of both segments come back with the second translator.
     `sessions`, given, gets the session the run left."""
-    seam = _seam()
     calls = [*([(PLANNER_ASK, ask)] if ask is not None else []), *beside]
-    llm = ScriptedPlannerLlm(script=[calls, *then, "done"])
-    seam._agent.model = llm
+    llm = ScriptedGenai([*(_replied(step) for step in (calls, *then)), reply(text_part("done"))])
+    seam = _scripted_seam(llm)
 
     async def planner(ctx: Context, node_input: Any) -> AsyncIterator[Any]:
         del node_input
@@ -2192,9 +2213,9 @@ async def test_an_ask_the_planner_s_tool_refuses_asks_nothing_and_the_run_goes_o
 
     assert [f.event for f in frames if f.event == "elicitation.request"] == []
     assert translator.paused is False
-    assert len(llm.captured_requests) == 2
+    assert len(llm.requests) == 2
     assert len(returned) == 1
-    assert [a["code"] for a in _ask_answers(llm.captured_requests[1])] == [
+    assert [a["code"] for a in _ask_answers(llm.requests[1])] == [
         ProblemCode.INVALID_ARGUMENTS.value
     ]
 
@@ -2205,7 +2226,7 @@ async def test_an_ask_the_planner_s_tool_accepts_pauses_on_its_question() -> Non
     returned: list[Any] = []
     translator, frames, llm = await _asked_through_the_seam(_SOURCE_ASK, {}, returned=returned)
 
-    assert len(llm.captured_requests) == 1
+    assert len(llm.requests) == 1
     assert returned == []
     assert translator.paused is True
     assert frames[-1].event == "elicitation.request"
@@ -2232,9 +2253,11 @@ async def test_an_answer_resumes_the_planner_with_the_user_s_pick_and_asks_nothi
         _SOURCE_ASK, {}, answer=_PICKED_B, returned=returned, sessions=sessions
     )
 
-    assert len(llm.captured_requests) == 2
-    resumed = llm.captured_requests[1]
-    brief = "".join(part.text or "" for content in resumed.contents for part in content.parts or [])
+    assert len(llm.requests) == 2
+    resumed = llm.requests[1]
+    brief = "".join(
+        part.text or "" for content in resumed.content_list for part in content.parts or []
+    )
     assert _SOURCE_ASK["message"] in brief
     assert "They picked 'reading B', id `spec_b`." in brief
     assert _ask_answers(resumed) == []
@@ -2251,14 +2274,14 @@ async def test_an_answer_resumes_the_planner_with_the_user_s_pick_and_asks_nothi
 
 
 async def test_an_ask_made_beside_another_call_loses_none_of_that_call_s_activity() -> None:
-    """ADK answers `propose_plan`, made beside an ask the tool accepts, and
+    """The planner answers `propose_plan`, made beside an ask the tool accepts, and
     the planner's run stops paused on the ask. Studio shows `propose_plan`'s
     lines as it does with no ask beside it, then asks the question."""
     proposal = [("propose_plan", {"question": "uk oda"})]
     translator, frames, llm = await _asked_through_the_seam(_SOURCE_ASK, {}, beside=proposal)
     _, alone, _ = await _asked_through_the_seam(None, {}, beside=proposal)
 
-    assert len(llm.captured_requests) == 1
+    assert len(llm.requests) == 1
     assert translator.paused is True
     assert frames[-1].event == "elicitation.request"
     assert frames[-1].questions == [_planner_question(_SOURCE_ASK)]
@@ -2271,11 +2294,11 @@ async def test_an_ask_made_beside_another_call_loses_none_of_that_call_s_activit
 _FREE_TEXT_ASK = {"message": "Which years should the series cover?"}
 
 
-def _ask_answers(request: Any) -> list[dict[str, Any]]:
+def _ask_answers(request: Request) -> list[dict[str, Any]]:
     """The answers to the planner's asks a model request carries, in order."""
     return [
         part.function_response.response or {}
-        for content in request.contents
+        for content in request.content_list
         for part in content.parts or []
         if part.function_response is not None and part.function_response.name == PLANNER_ASK
     ]
@@ -2293,7 +2316,7 @@ async def test_a_second_ask_in_the_same_response_is_refused() -> None:
         _SOURCE_ASK, {}, beside=sibling, answer=_PICKED_B, returned=returned, sessions=sessions
     )
 
-    assert len(llm.captured_requests) == 2
+    assert len(llm.requests) == 2
     (session,) = sessions
     answers = [
         response.response or {}
@@ -2319,7 +2342,7 @@ async def test_an_ask_after_a_refused_ask_pauses_on_its_question() -> None:
         _AUTHORED_OPTIONS_ASK, {}, then=[[(PLANNER_ASK, _FREE_TEXT_ASK)]]
     )
 
-    assert len(llm.captured_requests) == 2
+    assert len(llm.requests) == 2
     assert translator.paused is True
     (asked,) = [f for f in frames if f.event == "elicitation.request"]
     assert asked.questions == [_planner_question(_FREE_TEXT_ASK)]
