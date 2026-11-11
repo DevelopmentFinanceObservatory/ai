@@ -184,8 +184,8 @@ def _assert_crossed_expected(
 async def _crossed(
     runners: Sequence[Runner], script: _Script
 ) -> tuple[_Entry, dict[Runner, _Entry]]:
-    """`script` with its runs on `runners`, then on each runner alone, the runner
-    whose result is stored first."""
+    """`script` with its runs on `runners`, then on each runner alone, starting with
+    the runner whose result is stored."""
     with _numbered_call_ids():
         crossed = await _entries(runners, script)
     alone = {runner: await _entry(runner, script) for runner in (STORING_RUNNER, "adk")}

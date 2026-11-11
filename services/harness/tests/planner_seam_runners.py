@@ -30,7 +30,7 @@ from .planner.planner_pairs import seam_specs
 from .scripted_genai import ScriptedGenai
 
 type PlannerRunner = Literal["adk", "pydantic_ai"]
-# A change to the planner's tools.
+# Maps the planner's tool specs to the specs it serves.
 type Tools = Callable[[Sequence[ToolSpec]], Sequence[ToolSpec]]
 
 PLANNER_RUNNERS: tuple[PlannerRunner, ...] = ("adk", "pydantic_ai")

@@ -1,7 +1,7 @@
 """Tests for `harness.planner_seam` -- the adapter over `planner.agent`
 with translation attached to its `propose_plan`.
 
-Model-free: a scripted google-genai client (`tests.scripted_genai.ScriptedGenai`)
+Model-free. A scripted google-genai client (`tests.scripted_genai.ScriptedGenai`)
 answers the planner's model calls, and a test given the `planner_runner`
 fixture runs on each planner runner (`tests.planner_seam_runners.seam_on`) from
 one script. The rest script the ADK planner's model with `ScriptedPlannerLlm`. Most
@@ -366,7 +366,7 @@ def _seam(
 
 @pytest.fixture(params=PLANNER_RUNNERS)
 def planner_runner(request: pytest.FixtureRequest) -> PlannerRunner:
-    """The planner runner a test's seam runs on (`harness.settings.Settings.planner_runner`)."""
+    """The planner runner a test's seam runs on (`Settings.planner_runner`)."""
     return request.param
 
 
@@ -3690,8 +3690,8 @@ async def test_every_planner_generation_runs_at_the_low_thinking_config(
 
 
 def _skill_surface(responses: dict[str, ToolCallResult]) -> FixtureSurface:
-    """A surface answering `get_skill` from `responses`, and a call with a `path`
-    from the `get_skill_path` response."""
+    """A surface that answers `get_skill` from `responses`. A call with a `path`
+    gets the `get_skill_path` response instead."""
     return _SkillPagesSurface(schemas=[], responses=responses)
 
 
@@ -5237,7 +5237,7 @@ async def test_the_round_budget_is_not_reset_on_a_resume_of_the_same_turn(
     # each later one amends the version the call before it durably recorded,
     # through `_amend_step` -- `test_a_sixth_amendment_turn_still_records_
     # its_own_version`'s same pattern), then an ask that pauses mid-turn.
-    # The resumed entry's two calls follow them.
+    # The two calls of the resumed entry come last.
     step = _computed(_amend_step(proposal, start_version=1))
     resumed_step = _computed(_amend_step(proposal, start_version=3))
     scripted = ScriptedGenai(
@@ -5463,7 +5463,7 @@ async def _budget_closes_after(
     """One entry whose planner proposes once for each of `translations`, each
     proposal recorded and translated as it names, and whose next call the
     request's budget closes, `spend` having spent it during the last proposal's
-    generation. Answers the entry's output and the session's events."""
+    generation. Returns the entry's output and the session's events."""
     budget = _request_budget()
     left = list(translations)
 

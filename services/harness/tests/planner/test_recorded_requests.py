@@ -1,4 +1,4 @@
-"""Each request of each recorded planner entry equals its stored expectation on both planners.
+"""Each request of each recorded entry equals its stored expectation, on each planner.
 
 `evals/planner_entry` holds a set of tasks, each with the plans a correct planner
 proposes for it (a reference plan and, for some tasks, alternatives) and a recording
@@ -11,8 +11,8 @@ model, on each planner. A plan the real
 which resumes the run.
 
 Every request the model receives on the Pydantic AI planner, and the plan the entry
-lands, equal the case's stored expectation (`tests.planner_expectations`); on the ADK
-planner every request equals the stored one apart from the wire differences
+lands, equal the case's stored expectation (`tests.planner_expectations`). On the ADK
+planner, every request equals the stored one apart from the wire differences
 `assert_pinned_wire_differences` lists, and the plan equals the stored plan. That
 covers the first request of each entry, built from the recorded readings, skills and
 asks, and, for an entry with an ask, the request after the ask is answered. The

@@ -3,7 +3,7 @@
 Each such test runs on the Pydantic AI planner and on the ADK planner, and checks
 what the run produced against one JSON file, `fixtures/planner_runs/<name>.json`,
 named for the test module, the test and its parameters but not the runner
-(`expectation_name`). The Pydantic AI planner's result is the file whole; the
+(`expectation_name`). The Pydantic AI planner's result is the file whole. The
 ADK planner's equals the same file, its requests apart from the differences
 `tests.planner.planner_pairs.assert_pinned_wire_differences` pins.
 
@@ -29,7 +29,7 @@ the same tests again without the variable to check both runners against them:
         services/harness/tests/telemetry/test_planner_spans.py
 
 A write run fails each test whose file it wrote or changed, so it cannot pass
-while an expectation moved.
+while an expectation changed.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ PLANNER_RUNS = Path(__file__).parent / "fixtures" / "planner_runs"
 _SHARED = PLANNER_RUNS / "shared"
 _WRITING = os.environ.get("PLANNER_EXPECTATIONS") == "write"
 
-# The runners in the order a test runs on them: the Pydantic AI planner first, so a
+# A test runs the runners in this order. The Pydantic AI planner runs first, so a
 # write run writes its file before the ADK planner's run reads it.
 EXPECTATION_RUNNERS: tuple[PlannerRunner, ...] = ("pydantic_ai", "adk")
 # The runner whose result is the stored expectation.

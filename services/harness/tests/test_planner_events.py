@@ -1,4 +1,4 @@
-"""The events each planner runner stores equal the stored expectation of the conversation.
+"""The events each planner runner stores equal the conversation's stored expectation.
 
 Each conversation runs on one script of a scripted google-genai client, through
 `harness.planner_seam.PlannerSeam` as `tests.test_planner_node` runs it, once
@@ -107,7 +107,7 @@ def _propose(*answers: dict[str, Any]) -> ToolSpec:
 
 
 def _stuck(started: asyncio.Event) -> ToolSpec:
-    """A tool that writes to state, sets `started` and then never answers."""
+    """A tool that writes to state, sets `started` and then waits forever."""
 
     async def body(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
         del end_run, arguments

@@ -387,14 +387,14 @@ def _assert_expected(
     the test `request` runs (`expectation_name`), whose runner parameter's id is
     `runner`'s or, for runs that crossed runners, `crossed`.
 
-    The expectation is the entry on the Pydantic AI planner, each request's
-    config stored once (`planner_expectations.shared`) under the name `configs`
-    gives the runner that sent it (`request_config` for the Pydantic AI
-    planner's by default). An entry on the ADK
-    planner, or one whose runs crossed runners (`runner` `None`), equals it
-    whole but for its requests: each sent by the runner that sent the stored
-    one equals it, and each the ADK planner sent in place of the Pydantic AI
-    planner's equals it apart from the pinned wire differences.
+    The expectation is the entry on the Pydantic AI planner. Each request's
+    config is stored once (`planner_expectations.shared`) under the name that
+    `configs` gives the runner that sent it (`request_config` for the Pydantic
+    AI planner by default). An entry on the ADK planner, or one whose runs
+    crossed runners (`runner` `None`), equals the expectation in everything but
+    its requests. A request sent by the same runner as the stored request equals
+    it. A request the ADK planner sent in place of the stored Pydantic AI request
+    equals it apart from the pinned wire differences.
     """
     name = expectation_name(request, runner=crossed or str(runner))
     view = {**_view(entry), **(also or {})}
@@ -699,9 +699,9 @@ async def test_an_ask_and_its_answer_are_the_same_on_both_planners(
 
 
 async def test_both_planners_send_the_same_brief(plan: Plan) -> None:
-    """The seam's brief, which no stored expectation holds (`planner_expectations.BRIEF`),
-    is the same text in each request on both planners, the request after the
-    user's answer included."""
+    """The seam's brief, which no stored expectation holds
+    (`planner_expectations.BRIEF`), is the same text in each request on both planners,
+    the request after the user's answer included."""
     script = _Script(
         replies=[
             reply(_ask_call("a1"), usage=_USAGE),

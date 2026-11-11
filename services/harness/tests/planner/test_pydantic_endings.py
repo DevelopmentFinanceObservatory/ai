@@ -4,8 +4,8 @@ and its later requests carry what the ADK planner's carry.
 Each such test runs one planner on a script (`planner_pairs`), on each planner in
 turn, and checks what the run sent and left against a stored expectation
 (`tests.planner_expectations`): the requests made, what the model reads, and the
-conversation the run leaves. The Pydantic AI planner's result is the stored file;
-the ADK planner's equals it.
+conversation the run leaves. The Pydantic AI planner's result is the stored file.
+The ADK planner's equals it.
 """
 
 from __future__ import annotations

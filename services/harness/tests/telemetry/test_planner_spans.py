@@ -432,8 +432,9 @@ async def test_langfuse_shows_the_same_planner_on_both_runners(
 async def test_both_runners_show_the_same_brief(
     plan: Plan, exported_spans: InMemorySpanExporter
 ) -> None:
-    """The seam's brief, which no stored expectation holds (`planner_expectations.BRIEF`),
-    is the same text in each model call's input on both runners."""
+    """The seam's brief, which no stored expectation holds
+    (`planner_expectations.BRIEF`), is the same text in each model call's input on
+    both runners."""
     script = _ENTRIES["refused-then-accepted"](plan)
     shown: dict[Runner, list[str]] = {}
     for runner in _RUNNERS:

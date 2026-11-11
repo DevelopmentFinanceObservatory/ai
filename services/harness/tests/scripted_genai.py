@@ -9,8 +9,8 @@ against it, so the recorded requests are what each would put on the wire.
 The part builders (`text_part`, `call_part`, `thought_part`), `usage_metadata`,
 `reply` and `Reply` describe a response; `Reply` options make a stream stall, fail
 at open, be cut, come back empty or come back blocked. A script entry may instead
-be a function of the request it answers (`Step`), which computes the reply from
-what the model was sent, or runs code when the call arrives; `held` is one that
+be a function of the request it answers (`Step`). The function computes the reply from
+what the model was sent, or runs code when the call arrives. `held` is one that
 waits for a test to release it.
 """
 
@@ -84,9 +84,9 @@ class Reply:
     prompt_feedback: types.GenerateContentResponsePromptFeedback | None = None
 
 
-# A script entry: a reply, or a function of the request it answers that returns
-# one, awaited when it returns an awaitable. The function runs in the caller's
-# context when the call arrives, after the request is recorded.
+# A script entry is a reply, or a function of the request it answers that returns
+# one. The function is awaited when it returns an awaitable. It runs in the
+# caller's context when the call arrives, after the request is recorded.
 type Step = Reply | Callable[[Request], Reply | Awaitable[Reply]]
 
 
@@ -165,8 +165,8 @@ def live_call_reply(
 def malformed_call_reply(
     usage: types.GenerateContentResponseUsageMetadata | None = None,
 ) -> Reply:
-    """A reply as live Gemini streams a function call it could not parse: two
-    chunks of one empty text part each, the second signed and carrying the
+    """A reply as live Gemini streams a function call it could not parse. The reply
+    is two chunks of one empty text part each, the second signed and carrying the
     `MALFORMED_FUNCTION_CALL` finish reason."""
     return Reply(
         chunks=[
@@ -202,7 +202,7 @@ def client_error(status: int, message: str = "scripted refusal") -> errors.Clien
 class ScriptedGenai:
     """A google-genai client that answers streamed calls from `replies`, in order.
 
-    Each entry of `replies` is a `Step`: a `Reply`, or a function of the
+    Each entry of `replies` is a `Step`, either a `Reply` or a function of the
     request it answers.
 
     `client` is a real `google.genai.Client` with a scripted
