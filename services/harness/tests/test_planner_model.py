@@ -1,7 +1,7 @@
-"""Tests for `harness.planner_model`, the Pydantic AI planner's Gemini model.
+"""Tests for `harness.planner_model`, the planner's Gemini model.
 
-Each behaviour runs on the same script through the Pydantic AI planner's model
-and through the ADK planner's model stack (`BoundedGemini` or
+The budget and cache behaviours run on the same script through the planner's
+model and through the orchestrator's model stack (`BoundedGemini` or
 `PrefixCachedGemini` over the scripted client), and both must end the same
 way. Bounds are fractions of a second, so a cut fires at once.
 """
@@ -137,8 +137,8 @@ async def _pai(model: Model) -> ModelResponse:
     return stream.get()
 
 
-async def _adk(model: BaseLlm, budget: TurnBudget | None) -> list[LlmResponse]:
-    """The ADK planner's model's responses, partial and final, to the same request."""
+async def _orchestrator_run(model: BaseLlm, budget: TurnBudget | None) -> list[LlmResponse]:
+    """The orchestrator's model's responses, partial and final, to the same request."""
     request = LlmRequest(
         model=MODEL,
         contents=[types.Content(role="user", parts=[text_part("Total ODA to Ghana?")])],
@@ -157,8 +157,9 @@ async def _adk(model: BaseLlm, budget: TurnBudget | None) -> list[LlmResponse]:
         return [response async for response in model.generate_content_async(request, stream=True)]
 
 
-def _adk_final(responses: list[LlmResponse]) -> list[types.Part]:
-    """The parts of the ADK model's last final response, the one its agent reads."""
+def _final(responses: list[LlmResponse]) -> list[types.Part]:
+    """The parts of the orchestrator's model's last final response, the one its
+    agent reads."""
     final = [response for response in responses if not response.partial]
     content = final[-1].content
     assert content is not None
@@ -169,7 +170,7 @@ def _pai_text(response: ModelResponse) -> str:
     return "".join(part.content for part in response.parts if isinstance(part, TextPart))
 
 
-def _adk_text(parts: list[types.Part]) -> str:
+def _text(parts: list[types.Part]) -> str:
     return "".join(part.text or "" for part in parts if not part.thought)
 
 
@@ -188,26 +189,28 @@ class _After:
 async def test_a_cut_after_a_function_call_chunk_delivers_only_the_closing_sentence() -> None:
     script = [Reply(chunks=[[call_part("lookup", {"key": "gh"})], [text_part("late")]])]
     pai_scripted = _HangingGenai(script, hang_after=1)
-    adk_scripted = _HangingGenai(script, hang_after=1)
+    orchestrator_scripted = _HangingGenai(script, hang_after=1)
     pai_budget = _budget(model_time_s=0.05)
-    adk_budget = _budget(model_time_s=0.05)
+    orchestrator_budget = _budget(model_time_s=0.05)
     after = _After()
 
     response = await _pai(
         planner_model(MODEL, client=pai_scripted.client, budget=pai_budget, after_response=after)
     )
-    adk = await _adk(BoundedGemini(model=MODEL, client=adk_scripted.client), adk_budget)
+    orchestrator = await _orchestrator_run(
+        BoundedGemini(model=MODEL, client=orchestrator_scripted.client), orchestrator_budget
+    )
 
     sentence = refusal_sentence({"code": SeamCode.TURN_MODEL_TIME_SPENT})
     assert not any(isinstance(part, ToolCallPart) for part in response.parts)
     assert not any(
         part.function_call
-        for r in adk
+        for r in orchestrator
         if not r.partial and r.content
         for part in r.content.parts or []
     )
-    assert _pai_text(response) == _adk_text(_adk_final(adk)) == sentence
-    assert pai_budget.closed == adk_budget.closed
+    assert _pai_text(response) == _text(_final(orchestrator)) == sentence
+    assert pai_budget.closed == orchestrator_budget.closed
     assert pai_budget.closed is not None
     assert pai_budget.closed["code"] == SeamCode.TURN_MODEL_TIME_SPENT
     assert after.calls == [(SeamCode.TURN_MODEL_TIME_SPENT, None)]
@@ -218,17 +221,17 @@ async def test_a_first_chunk_stall_is_resent_once_and_the_second_answer_delivere
         Reply(chunks=[[text_part("stalled")]], stall_s=5.0),
         reply(text_part("Accra")),
     ]
-    pai_scripted, adk_scripted = ScriptedGenai(script), ScriptedGenai(script)
+    pai_scripted, orchestrator_scripted = ScriptedGenai(script), ScriptedGenai(script)
 
     response = await _pai(
         planner_model(MODEL, client=pai_scripted.client, budget=_budget(first_chunk_s=0.05))
     )
-    adk = await _adk(
-        BoundedGemini(model=MODEL, client=adk_scripted.client), _budget(first_chunk_s=0.05)
+    orchestrator = await _orchestrator_run(
+        BoundedGemini(model=MODEL, client=orchestrator_scripted.client), _budget(first_chunk_s=0.05)
     )
 
-    assert len(pai_scripted.requests) == len(adk_scripted.requests) == 2
-    assert _pai_text(response) == _adk_text(_adk_final(adk)) == "Accra"
+    assert len(pai_scripted.requests) == len(orchestrator_scripted.requests) == 2
+    assert _pai_text(response) == _text(_final(orchestrator)) == "Accra"
 
 
 @pytest.mark.parametrize(
@@ -249,15 +252,17 @@ async def test_each_bound_closes_the_call_with_the_same_code_on_both_models(
 ) -> None:
     # Each stream stalls past every bound. The first stall spends the resend.
     script = [Reply(chunks=[[text_part("x")]], stall_s=5.0)] * 2
-    pai_scripted, adk_scripted = ScriptedGenai(script), ScriptedGenai(script)
-    pai_budget, adk_budget = _budget(**budget), _budget(**budget)
+    pai_scripted, orchestrator_scripted = ScriptedGenai(script), ScriptedGenai(script)
+    pai_budget, orchestrator_budget = _budget(**budget), _budget(**budget)
 
     response = await _pai(planner_model(MODEL, client=pai_scripted.client, budget=pai_budget))
-    adk = await _adk(BoundedGemini(model=MODEL, client=adk_scripted.client), adk_budget)
+    orchestrator = await _orchestrator_run(
+        BoundedGemini(model=MODEL, client=orchestrator_scripted.client), orchestrator_budget
+    )
 
-    assert len(pai_scripted.requests) == len(adk_scripted.requests) == sent
-    assert pai_budget.closed == adk_budget.closed == {"code": code, "detail": {}}
-    assert _pai_text(response) == _adk_text(_adk_final(adk)) == refusal_sentence({"code": code})
+    assert len(pai_scripted.requests) == len(orchestrator_scripted.requests) == sent
+    assert pai_budget.closed == orchestrator_budget.closed == {"code": code, "detail": {}}
+    assert _pai_text(response) == _text(_final(orchestrator)) == refusal_sentence({"code": code})
 
 
 def _cache_fields(config: types.GenerateContentConfig) -> tuple[Any, ...]:
@@ -270,25 +275,33 @@ def _cache_fields(config: types.GenerateContentConfig) -> tuple[Any, ...]:
 
 
 async def test_a_cached_request_names_the_cache_and_omits_what_it_holds() -> None:
-    pai_caches, adk_caches = _Caches(), _Caches()
+    pai_caches, orchestrator_caches = _Caches(), _Caches()
     pai_scripted = _with_caches(ScriptedGenai([reply(text_part("Accra"))]), pai_caches)
-    adk_scripted = _with_caches(ScriptedGenai([reply(text_part("Accra"))]), adk_caches)
+    orchestrator_scripted = _with_caches(
+        ScriptedGenai([reply(text_part("Accra"))]), orchestrator_caches
+    )
 
     await _pai(
         planner_model(
             MODEL, client=pai_scripted.client, budget=_budget(), prefix_cache=PrefixCache()
         )
     )
-    await _adk(
-        PrefixCachedGemini(model=MODEL, client=adk_scripted.client, prefix_cache=PrefixCache()),
+    await _orchestrator_run(
+        PrefixCachedGemini(
+            model=MODEL, client=orchestrator_scripted.client, prefix_cache=PrefixCache()
+        ),
         _budget(),
     )
 
     pai_config = pai_scripted.requests[0].generate_config
-    adk_config = adk_scripted.requests[0].generate_config
-    assert _cache_fields(pai_config) == _cache_fields(adk_config) == (CACHE_NAME, True, True, True)
+    orchestrator_config = orchestrator_scripted.requests[0].generate_config
+    assert (
+        _cache_fields(pai_config)
+        == _cache_fields(orchestrator_config)
+        == (CACHE_NAME, True, True, True)
+    )
     # The cache holds the instruction and the tool the request leaves out.
-    for caches in (pai_caches, adk_caches):
+    for caches in (pai_caches, orchestrator_caches):
         (created,) = caches.created
         assert created.system_instruction is not None
         assert [
@@ -306,29 +319,31 @@ async def test_a_cache_refused_at_open_is_forgotten_and_the_request_resent_whole
     ]
     # The cache cannot be made again, so the resend goes uncached.
     failure = errors.ServerError(503, {"error": {"code": 503, "message": "unavailable"}})
-    pai_caches, adk_caches = _Caches([failure]), _Caches([failure])
+    pai_caches, orchestrator_caches = _Caches([failure]), _Caches([failure])
     pai_scripted = _with_caches(ScriptedGenai(script), pai_caches)
-    adk_scripted = _with_caches(ScriptedGenai(script), adk_caches)
+    orchestrator_scripted = _with_caches(ScriptedGenai(script), orchestrator_caches)
 
     response = await _pai(
         planner_model(
             MODEL, client=pai_scripted.client, budget=_budget(), prefix_cache=PrefixCache()
         )
     )
-    adk = await _adk(
-        PrefixCachedGemini(model=MODEL, client=adk_scripted.client, prefix_cache=PrefixCache()),
+    orchestrator = await _orchestrator_run(
+        PrefixCachedGemini(
+            model=MODEL, client=orchestrator_scripted.client, prefix_cache=PrefixCache()
+        ),
         _budget(),
     )
 
-    for scripted in (pai_scripted, adk_scripted):
+    for scripted in (pai_scripted, orchestrator_scripted):
         first, resent = (request.generate_config for request in scripted.requests)
         assert first.cached_content == CACHE_NAME
         assert resent.cached_content is None
         assert resent.system_instruction is not None
         assert resent.tools is not None
     # Forgetting the entry is what sent the lookup back to `create`.
-    assert pai_caches._failures == adk_caches._failures == []
-    assert _pai_text(response) == _adk_text(_adk_final(adk)) == "Accra"
+    assert pai_caches._failures == orchestrator_caches._failures == []
+    assert _pai_text(response) == _text(_final(orchestrator)) == "Accra"
 
 
 async def test_before_request_answers_with_no_request_and_no_budget_spent() -> None:
@@ -368,16 +383,16 @@ async def test_after_response_sees_the_reported_usage_and_its_turn_replaces_the_
     assert response.usage.input_tokens == 40
 
 
-async def test_every_request_carries_the_adk_planners_retries() -> None:
+async def test_every_request_carries_the_orchestrators_retries() -> None:
     scripted = ScriptedGenai([reply(text_part("Accra"))])
 
     await _pai(planner_model(MODEL, client=scripted.client, budget=_budget()))
 
     http_options = scripted.requests[0].generate_config.http_options
     assert http_options is not None
-    adk_model = _retrying(MODEL)
-    assert isinstance(adk_model, BoundedGemini)
-    assert http_options.retry_options == adk_model.retry_options == model_retry_options()
+    orchestrator_model = _retrying(MODEL)
+    assert isinstance(orchestrator_model, BoundedGemini)
+    assert http_options.retry_options == orchestrator_model.retry_options == model_retry_options()
 
 
 async def test_a_non_streamed_request_refuses() -> None:
@@ -480,7 +495,7 @@ async def test_a_response_reaches_the_agent_with_the_thoughts_the_rule_keeps(
     assert [part.tool_name for part in response.parts if isinstance(part, ToolCallPart)] == calls
 
 
-# --- The request in the ADK planner's form --------------------------------------------
+# --- The request in its canonical form ------------------------------------------------
 
 
 def _declared(schema: dict[str, Any] | None) -> types.Tool:
@@ -516,7 +531,7 @@ def _expected_config(**overrides: Any) -> types.GenerateContentConfig:
         pytest.param({"type": "object"}, id="without-properties"),
     ],
 )
-def test_the_adk_form_keeps_a_parameters_schema_that_is_not_the_empty_object(
+def test_the_canonical_form_keeps_a_parameters_schema_that_is_not_the_empty_object(
     schema: dict[str, Any],
 ) -> None:
     rewritten = _in_canonical_form(_expected_config(tools=[_declared(schema)]))
@@ -571,7 +586,7 @@ def test_the_adk_form_keeps_a_parameters_schema_that_is_not_the_empty_object(
         ),
     ],
 )
-def test_the_adk_form_refuses_any_value_it_does_not_expect(field: str, value: Any) -> None:
+def test_the_canonical_form_refuses_any_value_it_does_not_expect(field: str, value: Any) -> None:
     """Each rewrite takes only the exact value Pydantic AI sends today; anything
     else is refused, since a form Gemini would read differently must not be sent
     unseen."""

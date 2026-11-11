@@ -42,9 +42,6 @@
       ]
     }
   ],
-  "senders": [
-    "pydantic_ai"
-  ],
   "events": [
     {
       "content": {

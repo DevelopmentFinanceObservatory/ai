@@ -1,10 +1,8 @@
-"""`PlannerSeam` on either planner runner, its model calls answered by a `ScriptedGenai`.
+"""`PlannerSeam` with its model calls answered by a `ScriptedGenai`.
 
-`seam_on` builds the seam on `"adk"` (ADK's `LlmAgent` on a `Gemini` over the
-scripted client) or on `"pydantic_ai"` (`harness.planner_node` over the same
-client), so one script drives either. `SSE` is Studio's streaming run config,
-which a seam on the scripted client runs under: `ScriptedGenai` scripts the
-streamed call only.
+`scripted_planner` builds the seam's planner (`harness.planner_node`) over the
+scripted client. `SSE` is Studio's streaming run config, which a seam on the
+scripted client runs under: `ScriptedGenai` scripts the streamed call only.
 """
 
 from __future__ import annotations
@@ -12,7 +10,6 @@ from __future__ import annotations
 import contextlib
 import itertools
 from collections.abc import Callable, Iterator, Sequence
-from typing import Literal
 from unittest import mock
 
 from compiler.surface import FixtureSurface, ToolSurface
@@ -27,11 +24,9 @@ from translator.tool import Translate, build_translate
 from .planner.planner_pairs import seam_specs
 from .scripted_genai import ScriptedGenai
 
-type PlannerRunner = Literal["adk", "pydantic_ai"]
 # Maps the planner's tool specs to the specs it serves.
 type Tools = Callable[[Sequence[ToolSpec]], Sequence[ToolSpec]]
 
-PLANNER_RUNNERS: tuple[PlannerRunner, ...] = ("adk", "pydantic_ai")
 MODEL = AgentSettings().planner_model_name
 SSE = RunConfig(streaming_mode=StreamingMode.SSE)
 # Gemini signs the first function call of a response it thought before.
@@ -41,7 +36,7 @@ SIGNED = b"scripted-signature"
 @contextlib.contextmanager
 def numbered_call_ids() -> Iterator[None]:
     """Number the ids ADK gives a call that has none from 1, so a turn put in the
-    model's place carries the same call id on both planners."""
+    model's place carries the same call id every time a test runs."""
     counter = itertools.count(1)
     with mock.patch.object(
         adk_functions, "generate_client_function_call_id", lambda: f"adk-{next(counter)}"
@@ -49,20 +44,16 @@ def numbered_call_ids() -> Iterator[None]:
         yield
 
 
-def seam_on(
-    runner: PlannerRunner,
+def scripted_planner(
     scripted: ScriptedGenai,
     *,
     surface: ToolSurface | None = None,
-    bounded: bool = False,
     translate: Translate | None = None,
     tools: Tools | None = None,
 ) -> PlannerSeam:
     """The seam over `surface` (an empty `FixtureSurface` by default), its model
     calls answered by `scripted`, serving the planner's tools as `tools` changes
-    them. `runner` and `bounded` are not read: the planner's model always keeps
-    to the turn's budget."""
-    del runner, bounded
+    them."""
     surface = surface if surface is not None else FixtureSurface(schemas=[])
     translate = translate if translate is not None else build_translate(surface=surface)
     specs = seam_specs(surface=surface, translate=translate)

@@ -1,4 +1,5 @@
-"""`PlannerSeam`'s planner on a scripted google-genai client: its model, its requests and its sessions.
+"""`PlannerSeam`'s planner on a scripted google-genai client: its model, its
+requests and its sessions over turns that amend, replan and switch.
 
 Each test runs a script on a scripted google-genai client through the seam. An
 entry is checked against the stored expectation of its test
@@ -65,6 +66,7 @@ from .orchestrator_fakes import open_session, orchestrator_runner, plan_call
 from .planner.planner_pairs import seam_specs
 from .planner_expectations import expect, expectation_name, expected, shared
 from .scripted_genai import Request, ScriptedGenai, call_part, reply
+from .scripted_planner import scripted_planner
 from .test_graph import (
     _BRIEF as _GRAPH_BRIEF,
 )
@@ -99,7 +101,6 @@ from .test_planner_node import (
     _read,
     _referral,
     _Script,
-    _seam,
     _serving_proposals,
     _steps,
 )
@@ -240,7 +241,7 @@ async def test_a_planned_turns_config_is_sent_in_wire_order(
     assert stored["key"] == key
 
 
-def test_the_pydantic_ai_planner_refuses_a_model_that_is_not_gemini() -> None:
+def test_the_planner_refuses_a_model_that_is_not_gemini() -> None:
     with pytest.raises(ValueError, match="Gemini model only"):
         PlannerSeam(
             settings=Settings(),
@@ -460,7 +461,7 @@ async def _replanned(plan: Plan, opened_by: Mapping[str, Any]) -> _Entry:
             reply(call_part(PROPOSE_PLAN, {}, id="p2", signature=_SIGNED)),
         ]
     )
-    seam = _seam(scripted, tools=_proposals())
+    seam = scripted_planner(scripted, tools=_proposals())
     reports: list[dict[str, Any]] = []
     outputs: list[dict[str, Any] | None] = []
 
@@ -696,7 +697,7 @@ async def _stopped_switch(
     monkeypatch.setattr(switch_module, "_switched_plan", revising)
     monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.2)
     scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
-    seam = _seam(scripted, tools=_proposals(records=plan))
+    seam = scripted_planner(scripted, tools=_proposals(records=plan))
     app = _app(plan_call(_QUESTION), planner=seam)
     stop = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
     async with _client(app) as client:

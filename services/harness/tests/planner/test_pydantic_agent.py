@@ -292,7 +292,7 @@ async def _translate(call: PlannerCall) -> dict[str, Any]:
 
 
 def _surface() -> ToolSurface:
-    # Neither planner calls a tool before its first request, so nothing reads it.
+    # The planner calls no tool before its first request, so nothing reads it.
     return cast(ToolSurface, SimpleNamespace())
 
 

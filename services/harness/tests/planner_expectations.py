@@ -20,7 +20,7 @@ the same tests again without the variable to check them:
 
     rm -rf services/harness/tests/fixtures/planner_runs && PLANNER_EXPECTATIONS=write \\
         uv run --package harness pytest services/harness/tests/test_planner_node.py \\
-        services/harness/tests/test_planner_runners.py \\
+        services/harness/tests/test_planner_turns.py \\
         services/harness/tests/test_planner_events.py \\
         services/harness/tests/planner/test_recorded_requests.py \\
         services/harness/tests/planner/test_pydantic_agent.py \\

@@ -206,6 +206,12 @@
       "tools": [
         "propose_plan"
       ]
+    },
+    {
+      "agent": "dfo_planner",
+      "tools": [
+        "propose_plan"
+      ]
     }
   ],
   "requests": [
@@ -232,10 +238,58 @@
           "role": "user"
         }
       ]
+    },
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "probe"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "function_call": {
+                "args": {},
+                "name": "propose_plan"
+              },
+              "thought_signature": "c2NyaXB0ZWQtc2lnbmF0dXJl"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "function_response": {
+                "name": "propose_plan",
+                "response": {
+                  "outcome": "refused",
+                  "code": "plan_invalid",
+                  "message": "Pin a source."
+                }
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ]
     }
-  ],
-  "senders": [
-    "pydantic_ai"
   ],
   "events": [
     {
@@ -269,7 +323,7 @@
         "parts": [
           {
             "function_call": {
-              "id": "p1",
+              "id": "adk-1",
               "args": {},
               "name": "propose_plan"
             },
@@ -290,7 +344,68 @@
         "parts": [
           {
             "function_response": {
-              "id": "p1",
+              "id": "adk-1",
+              "name": "propose_plan",
+              "response": {
+                "outcome": "refused",
+                "code": "plan_invalid",
+                "message": "Pin a source."
+              }
+            }
+          }
+        ],
+        "role": "user"
+      },
+      "state_delta": {
+        "planner:elected_spec_ids": [],
+        "planner:read": {
+          "steps": [
+            [
+              "message",
+              null
+            ]
+          ],
+          "response_calls": [
+            [
+              "propose_plan",
+              "adk-1"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_call": {
+              "id": "adk-2",
+              "args": {},
+              "name": "propose_plan"
+            },
+            "thought_signature": "c2NyaXB0ZWQtc2lnbmF0dXJl"
+          }
+        ],
+        "role": "model"
+      },
+      "state_delta": {}
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_response": {
+              "id": "adk-2",
               "name": "propose_plan",
               "response": {
                 "outcome": "ok",
@@ -319,12 +434,16 @@
             [
               "message",
               null
+            ],
+            [
+              "response",
+              null
             ]
           ],
           "response_calls": [
             [
               "propose_plan",
-              "p1"
+              "adk-2"
             ]
           ]
         }
@@ -342,7 +461,7 @@
           "planner:terminal_declines": [],
           "planner:reduction_refused_asks": [],
           "translator:compile_failures": [],
-          "planner:amendment_entry": true,
+          "planner:amendment_entry": false,
           "planner:decision_pick": null,
           "planner:skills_before_entry": 0,
           "planner:pending_ask": null,
@@ -574,6 +693,17 @@
       "call_id": null,
       "args": null,
       "body": {
+        "outcome": "refused",
+        "code": "plan_invalid",
+        "message": "Pin a source."
+      },
+      "name": "propose_plan"
+    },
+    {
+      "kind": "response",
+      "call_id": null,
+      "args": null,
+      "body": {
         "outcome": "ok",
         "status": "pending_approval",
         "version": 1,
@@ -598,12 +728,16 @@
         [
           "message",
           null
+        ],
+        [
+          "response",
+          null
         ]
       ],
       "response_calls": [
         [
           "propose_plan",
-          "p1"
+          "adk-2"
         ]
       ]
     },
@@ -615,7 +749,7 @@
     "planner:terminal_declines": [],
     "planner:reduction_refused_asks": [],
     "translator:compile_failures": [],
-    "planner:amendment_entry": true,
+    "planner:amendment_entry": false,
     "planner:decision_pick": null,
     "planner:skills_before_entry": 0,
     "planner:pending_ask": null,

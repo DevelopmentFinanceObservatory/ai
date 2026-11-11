@@ -1,11 +1,12 @@
 """`PlannerSeam` on the Pydantic AI planner produces the stored expectation of its entry.
 
 Each entry runs on one script of a scripted google-genai client, through the
-workflow node `tests.test_planner_seam._SeamHarness` drives, in a session of its own, under Studio's streaming run config, and is
-checked against the entry's stored expectation (`tests.planner_expectations`)
-on what the seam answers, the progress it reports, the requests the model
-received, the events the session stores, the steps `session_steps` reads from
-them, and the stored state. The Studio tests run a whole turn through
+workflow node `tests.test_planner_seam._SeamHarness` drives, in a session of its
+own, under Studio's streaming run config, and is checked against the entry's
+stored expectation (`tests.planner_expectations`) on what the seam answers, the
+progress it reports, the requests the model received, the events the session
+stores, the steps `session_steps` reads from them, and the stored state. The
+Studio tests run a whole turn through
 `/api/studio/turn` and check the frames it streams.
 """
 
@@ -20,7 +21,6 @@ import json
 import logging
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from functools import partial
 from typing import Any, cast
 from unittest import mock
 
@@ -74,11 +74,6 @@ from .planner_expectations import (
     shared,
     versionless_headers,
 )
-from .planner_seam_runners import MODEL as _MODEL
-from .planner_seam_runners import SIGNED as _SIGNED
-from .planner_seam_runners import SSE as _SSE
-from .planner_seam_runners import Tools, seam_on
-from .planner_seam_runners import numbered_call_ids as _numbered_call_ids
 from .scripted_genai import (
     Reply,
     Request,
@@ -93,6 +88,11 @@ from .scripted_genai import (
     thought_part,
     usage_metadata,
 )
+from .scripted_planner import MODEL as _MODEL
+from .scripted_planner import SIGNED as _SIGNED
+from .scripted_planner import SSE as _SSE
+from .scripted_planner import Tools, scripted_planner
+from .scripted_planner import numbered_call_ids as _numbered_call_ids
 from .test_planner_seam import (
     _APP,
     _USER,
@@ -120,9 +120,7 @@ def plan(decision: Any, requirement: Any, derived_requirement: Any) -> Plan:
     return _translated_plan(decision, requirement, derived_requirement)
 
 
-# --- The seam ----------------------------------------------------------------------------
-
-_seam = partial(seam_on, "pydantic_ai")
+# --- The planner's tools and runs -------------------------------------------------------
 
 
 def _proposals(*answers: dict[str, Any], records: Plan | None = None) -> Tools:
@@ -193,9 +191,8 @@ async def _entry(
     """Run `script`'s runs in one session on one seam, ADK's call ids numbered
     (`_numbered_call_ids`)."""
     scripted = ScriptedGenai(script.replies)
-    seam = _seam(
+    seam = scripted_planner(
         scripted,
-        bounded=script.budget is not None,
         translate=script.translate,
         tools=script.setup,
     )
@@ -307,8 +304,6 @@ def _view(entry: _Entry) -> dict[str, Any]:
         "outputs": entry.outputs,
         "reports": entry.reports,
         "requests": [_request_dumped(request) for request in entry.requests],
-        # Each stored expectation lists `pydantic_ai` as the sender of every request.
-        "senders": ["pydantic_ai"] * len(entry.requests),
         "events": _read(entry.events),
         "steps": _steps(entry.events),
         "state": entry.state,
@@ -444,7 +439,7 @@ async def test_a_question_in_two_parts_is_sent_in_two_parts(
         role="user", parts=[types.Part(text="Kenya's debt"), types.Part(text="since 2010")]
     )
     scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
-    seam = _seam(scripted, tools=_proposals())
+    seam = scripted_planner(scripted, tools=_proposals())
     await _SeamHarness().run(
         seam, new_message=question, run_config=_SSE, readings=[], **_planned(plan)
     )
@@ -467,7 +462,7 @@ async def test_a_question_part_the_planner_cannot_send_ends_the_entry_refused(
         ],
     )
     scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
-    seam = _seam(scripted, tools=_proposals())
+    seam = scripted_planner(scripted, tools=_proposals())
 
     output = await _SeamHarness().run(
         seam,
@@ -833,7 +828,7 @@ async def _raising(plan: Plan) -> _Entry:
     scripted = ScriptedGenai(
         [reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED), _ask_call("a1"))]
     )
-    seam = _seam(scripted, tools=_proposals(_REFUSED))
+    seam = scripted_planner(scripted, tools=_proposals(_REFUSED))
     harness = _SeamHarness()
     with (
         _numbered_call_ids(),
@@ -892,7 +887,7 @@ async def _capped(plan: Plan, *, spent: int) -> _Entry:
             for n in (1, 2, 3, 4)
         ]
     )
-    seam = _seam(scripted, tools=_proposals(_REFUSED, _REFUSED, _REFUSED))
+    seam = scripted_planner(scripted, tools=_proposals(_REFUSED, _REFUSED, _REFUSED))
     harness = _SeamHarness()
     capped = RunConfig(streaming_mode=StreamingMode.SSE, max_llm_calls=3)
     with pytest.raises(LlmCallsLimitExceededError):
@@ -955,7 +950,7 @@ async def test_two_entries_at_once_on_one_pydantic_ai_seam_keep_to_their_own_run
     with mock.patch.object(
         planner_node_module, "planner_agent", wraps=planner_node_module.planner_agent
     ) as built:
-        seam = _seam(scripted, tools=lambda specs: _serving_proposals(specs, body))
+        seam = scripted_planner(scripted, tools=lambda specs: _serving_proposals(specs, body))
         outputs = await asyncio.gather(
             *(
                 harness.run(
@@ -1015,7 +1010,7 @@ async def _stopped(plan: Plan) -> _Entry:
             reply(call_part(PROPOSE_PLAN, {}, id="p2", signature=_SIGNED), _ask_call("a1")),
         ]
     )
-    seam = _seam(scripted, tools=lambda specs: _serving_proposals(specs, body))
+    seam = scripted_planner(scripted, tools=lambda specs: _serving_proposals(specs, body))
     harness = _SeamHarness()
     running = asyncio.create_task(harness.run(seam, run_config=_SSE, readings=[], **_planned(plan)))
     await asyncio.wait_for(started.wait(), timeout=5)
@@ -1048,7 +1043,7 @@ async def test_a_stop_while_the_node_waits_on_its_event_closes_the_run_in_its_ta
     suspended at its yield, closes the Pydantic AI run in the node's task. Its
     spans and context variables end where they began, with nothing logged."""
     scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
-    seam = _seam(scripted, tools=_proposals())
+    seam = scripted_planner(scripted, tools=_proposals())
     harness = _SeamHarness()
     storing = asyncio.Event()
     append = harness._sessions.append_event
@@ -1206,7 +1201,7 @@ async def _studio(
     """The frames of a Studio turn whose orchestrator hands the question to the
     planner, and of the answer that resumes it when `answer` is given."""
     scripted = ScriptedGenai(replies)
-    seam = _seam(scripted, tools=_proposals(records=plan))
+    seam = scripted_planner(scripted, tools=_proposals(records=plan))
     app = _app(plan_call(_QUESTION), _text("Planned."), planner=seam)
     async with studio_client(app) as client:
         with _numbered_call_ids():
