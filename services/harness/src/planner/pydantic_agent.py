@@ -32,8 +32,11 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from google.genai import types
-from pydantic_ai import Agent, RunContext, Tool
-from pydantic_ai.capabilities import ProcessHistory
+from opentelemetry import trace
+from opentelemetry.semconv.attributes.error_attributes import ERROR_TYPE
+from opentelemetry.trace import Status, StatusCode
+from pydantic_ai import Agent, InstrumentationSettings, RunContext, Tool
+from pydantic_ai.capabilities import Instrumentation, ProcessHistory
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
     FunctionToolResultEvent,
@@ -81,6 +84,9 @@ _UNLIMITED_RETRIES = sys.maxsize
 # Only the latest request's instructions reach the model, so the model never
 # reads this text.
 _QUESTION_INSTRUCTIONS = "The user's message, which opened the turn."
+
+# The `error.type` of a tool call whose answer is an error, ADK's.
+_TOOL_ERROR = "TOOL_ERROR"
 
 type ToolAnswered = Callable[[str, dict[str, Any]], None]
 type ToolFailed = Callable[[str, BaseException], dict[str, Any]]
@@ -202,8 +208,16 @@ def tool_not_found(name: str, tools: Sequence[str]) -> dict[str, str]:
     }
 
 
-def planner_agent(specs: Sequence[ToolSpec], *, instruction: str, model: Model) -> PlannerAgent:
-    """The planner as a Pydantic AI agent on `model`, with `instruction` and one tool per spec.
+def planner_agent(
+    specs: Sequence[ToolSpec],
+    *,
+    instruction: str,
+    model: Model,
+    name: str | None = None,
+    include_content: bool = True,
+) -> PlannerAgent:
+    """The planner as a Pydantic AI agent named `name` on `model`, with
+    `instruction` and one tool per spec.
 
     Each tool is declared as `function_declaration(spec)` states it, its
     schema as it stands, and runs the spec's body over the model's arguments
@@ -216,6 +230,13 @@ def planner_agent(specs: Sequence[ToolSpec], *, instruction: str, model: Model) 
     A call to a tool the planner lacks is answered with `tool_not_found`, as
     the ADK planner answers it, and the run goes on however many such calls
     the model makes (`_UNLIMITED_RETRIES`).
+
+    The agent traces through the global tracer provider: a span per run
+    (`invoke_agent <name>`), per model call (`chat <model>`) and per tool call
+    (`execute_tool <tool>`), with the OpenTelemetry GenAI attributes. With
+    `include_content` the spans carry the model's messages, the instruction
+    and each call's arguments and answer. The request parameters are left
+    off: the tool declarations are on each model call's span already.
     """
     tools = tuple(spec.name for spec in specs)
     agent = Agent(
@@ -228,7 +249,15 @@ def planner_agent(specs: Sequence[ToolSpec], *, instruction: str, model: Model) 
             google_thinking_config=AGENT_THINKING_CONFIG.model_dump(mode="json", exclude_none=True)
         ),
         retries={"tools": _UNLIMITED_RETRIES},
-        capabilities=[ProcessHistory(_answering_unknown_tools(tools))],
+        capabilities=[
+            ProcessHistory(_answering_unknown_tools(tools)),
+            Instrumentation(
+                InstrumentationSettings(
+                    include_content=include_content, include_model_request_parameters=False
+                )
+            ),
+        ],
+        name=name,
     )
     return PlannerAgent(agent=agent, tools=tools)
 
@@ -285,9 +314,12 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
     state is a view of the call's own. An answer that is no dict is wrapped
     under `result`, as ADK wraps one. A body that raises is answered with
     `tool_failed`'s answer, as the ADK planner's tool error callback answers
-    it, and a cancellation propagates. Either answer goes to `tool_answered`
-    and, unless that raises, is kept with the call's writes for the run to
-    yield.
+    it, and a cancellation propagates. An answer of the body's holding an
+    `error` key, the refusal of a call missing a required argument
+    (`planner.tool_spec.missing_arguments`), marks the call's span failed, as
+    the ADK planner marks its tool's (`_mark_tool_error`). Either answer goes
+    to `tool_answered` and, unless that raises, is kept with the call's writes
+    for the run to yield.
     """
 
     async def call(ctx: RunContext[PlannerDeps], **raw: Any) -> dict[str, Any]:
@@ -310,6 +342,8 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
             answer = run_tool(spec, raw, call=planner_call, end_run=end_run)
             if inspect.isawaitable(answer):
                 answer = await answer
+            if isinstance(answer, dict) and answer.get("error"):
+                _mark_tool_error(trace.get_current_span())
         except Exception as exc:
             answer = deps.tool_failed(spec.name, exc)
         response = as_function_response(answer)
@@ -322,8 +356,20 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
     return call
 
 
+def _mark_tool_error(span: trace.Span) -> None:
+    """Mark `span`, a tool call's, failed with `error.type` `TOOL_ERROR`, as ADK
+    marks a tool's whose answer holds an `error` key."""
+    span.set_attribute(ERROR_TYPE, _TOOL_ERROR)
+    span.set_status(Status(StatusCode.ERROR, _TOOL_ERROR))
+
+
 async def run_planner(
-    planner: PlannerAgent, deps: PlannerDeps, *, question: str | None, brief: str
+    planner: PlannerAgent,
+    deps: PlannerDeps,
+    *,
+    question: str | None,
+    brief: str,
+    conversation_id: str | None = None,
 ) -> AsyncIterator[PlannerItem]:
     """Run the planner once on `brief`, after the user's `question`, yielding as it goes.
 
@@ -346,7 +392,8 @@ async def run_planner(
     of its calls fails. A cancellation yields nothing more.
 
     `deps` holds the session's state, the earlier steps and the callbacks
-    (`PlannerDeps`).
+    (`PlannerDeps`). `conversation_id` is the conversation the run's spans
+    name (`gen_ai.conversation.id`); None leaves Pydantic AI to make one up.
     """
     history = (
         [ModelRequest(parts=[UserPromptPart(question)], instructions=_QUESTION_INSTRUCTIONS)]
@@ -354,7 +401,11 @@ async def run_planner(
         else []
     )
     async with planner.agent.iter(
-        brief, message_history=history, deps=deps, usage_limits=_NO_REQUEST_LIMIT
+        brief,
+        message_history=history,
+        deps=deps,
+        usage_limits=_NO_REQUEST_LIMIT,
+        conversation_id=conversation_id,
     ) as run:
         try:
             async for node in run:

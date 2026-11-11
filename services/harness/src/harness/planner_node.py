@@ -10,6 +10,11 @@ node sets, the branch of the seam's `override_branch`, the invocation and the
 node's path, so the session the run leaves reads as the ADK planner's to
 `planner.agent.session_steps`, `harness.studio_translate` and the seam.
 
+The run traces as the ADK planner's does: its agent is named `AGENT_NAME`, its
+spans name the session as their conversation, and they carry message content
+when ADK's would (`google.adk.telemetry.TelemetryConfig`, which reads
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`).
+
 The node reports to the seam's `harness.planner_run.PlannerRun` as the ADK
 planner's callbacks do: each tool's answer, each tool that raised, a call the
 turn budget closed (`PlannerRun.model_answered`), and before each request
@@ -28,6 +33,7 @@ from typing import Any
 from common.telemetry import current_trace_id
 from google.adk import Context, Event
 from google.adk.flows.llm_flows import functions as adk_functions
+from google.adk.telemetry import TelemetryConfig
 from google.adk.workflow import BaseNode, node
 from google.genai import Client, types
 from planner.agent import AGENT_NAME, BRIEF_STATE_KEY, session_steps
@@ -166,7 +172,13 @@ def planner_node(
             after_response=after_response,
             profile=planner_profile(model_name),
         )
-        agent = planner_agent(specs, instruction=instruction, model=model)
+        agent = planner_agent(
+            specs,
+            instruction=instruction,
+            model=model,
+            name=AGENT_NAME,
+            include_content=TelemetryConfig().should_add_content_to_experimental_spans,
+        )
         deps = PlannerDeps(
             state=ctx.session.state,
             earlier=tuple(session_steps(ctx.session.events)),
@@ -182,6 +194,7 @@ def planner_node(
                 deps,
                 question=_text(question) if question is not None else None,
                 brief=ctx.session.state[BRIEF_STATE_KEY],
+                conversation_id=ctx.session.id,
             ):
                 if isinstance(item, PlannerResponse):
                     response, held = item, []

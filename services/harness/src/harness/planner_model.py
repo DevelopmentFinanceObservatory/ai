@@ -32,10 +32,21 @@ under such an id, and each request is sent less those ids, as the ADK planner
 sends it (`_without_client_call_ids`). Every
 request streams. A non-streamed call refuses, since it would bypass all of the
 above.
+
+Each call's span, Pydantic AI's `chat <model>`, is current while the call runs
+and carries what Langfuse reads of the ADK planner's `generate_content` span
+that Pydantic AI leaves out (`_record_usage`): the reasoning tokens, and the
+usage Langfuse derives from the ADK planner's span, set outright so that the
+usage details Pydantic AI adds are not summed into the call's total. A turn put
+in place of a request is no model call and the ADK planner opens no span for
+it, so its span is marked a plain span for Langfuse. The thought summaries
+step 6 drops go on the span as `dfo.model.dropped_thoughts`, since the ADK
+planner's span shows them in its output.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import aclosing
@@ -45,6 +56,7 @@ from typing import Any, cast
 from google.adk.flows.llm_flows import functions as adk_functions
 from google.adk.models.llm_response import LlmResponse
 from google.genai import Client, errors, types
+from opentelemetry import trace
 from orchestrator.agent import model_retry_options
 from planner.settings import without_unsigned_thoughts
 from pydantic_ai.models.google import GoogleModel
@@ -58,6 +70,15 @@ from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded_by
 logger = logging.getLogger(__name__)
 
 type Usage = types.GenerateContentResponseUsageMetadata
+
+# Langfuse's `LangfuseOtelSpanAttributes.OBSERVATION_TYPE` and
+# `OBSERVATION_USAGE_DETAILS`: the observation type Langfuse gives a span, ahead
+# of the one it infers from the span's GenAI attributes, and the usage it reads
+# ahead of every `gen_ai.usage.*` attribute.
+_OBSERVATION_TYPE = "langfuse.observation.type"
+_USAGE_DETAILS = "langfuse.observation.usage_details"
+# The OpenTelemetry GenAI attribute ADK records a call's thought tokens under.
+_REASONING_TOKENS = "gen_ai.usage.reasoning.output_tokens"
 
 # A model turn to answer the next request with in place of the model, or None to send it.
 type BeforeRequest = Callable[[], types.Content | None]
@@ -190,12 +211,16 @@ class _PlannerStream:
     async def _respond(
         self, *, model: str, contents: Any, config: types.GenerateContentConfig
     ) -> AsyncGenerator[types.GenerateContentResponse]:
+        span = trace.get_current_span()
         if self.before_request is not None and (turn := self.before_request()) is not None:
+            if span.is_recording():
+                span.set_attribute(_OBSERVATION_TYPE, "span")
             yield _chunk(turn, usage=None)
             return
         answer = await self._send(model=model, contents=contents, config=config)
         metadata = answer.metadata
         usage = metadata.usage
+        _record_usage(span, usage)
         replaced = (
             self.after_response(answer.closed_by, metadata)
             if self.after_response is not None
@@ -206,7 +231,9 @@ class _PlannerStream:
         elif answer.closing is not None:
             yield _chunk(answer.closing, usage=usage)
         else:
-            for chunk in _without_unsigned_thoughts(answer.chunks):
+            kept = _without_unsigned_thoughts(answer.chunks)
+            _record_dropped_thoughts(span, answer.chunks, kept)
+            for chunk in kept:
                 yield chunk
 
     async def _send(
@@ -311,6 +338,57 @@ def _id_less_calls(chunk: types.GenerateContentResponse) -> list[types.FunctionC
         for part in _parts(chunk)
         if part.function_call is not None and not part.function_call.id
     ]
+
+
+def _record_usage(span: trace.Span, usage: Usage | None) -> None:
+    """Put `usage`, one call's, on `span` as Langfuse reads it from the ADK
+    planner's `generate_content` span.
+
+    ADK records a call's input (prompt and tool-use tokens), output (candidate
+    and thought tokens), cached and thought tokens, each only when Gemini
+    reported it, and nothing when it reported neither input nor output.
+    Langfuse takes the cached tokens out of the input and the thought tokens
+    out of the output. Pydantic AI records the thought tokens only as a
+    `gen_ai.usage.details.*` attribute, and Langfuse adds each of those to the
+    call's total, so the thought tokens go on under ADK's attribute and the
+    usage Langfuse derives goes on as its usage details, which it reads ahead
+    of the rest.
+    """
+    if usage is None or not span.is_recording():
+        return
+    prompt, tool = usage.prompt_token_count, usage.tool_use_prompt_token_count
+    candidates, thoughts = usage.candidates_token_count, usage.thoughts_token_count
+    cached = usage.cached_content_token_count
+    details: dict[str, int] = {}
+    if prompt is not None or tool is not None:
+        details["input"] = max((prompt or 0) + (tool or 0) - (cached or 0), 0)
+    if candidates is not None or thoughts is not None:
+        details["output"] = candidates or 0
+    if not details:
+        return
+    if cached is not None:
+        details["input_cached_tokens"] = cached
+    if thoughts is not None:
+        details["output_reasoning_tokens"] = thoughts
+        span.set_attribute(_REASONING_TOKENS, thoughts)
+    span.set_attribute(_USAGE_DETAILS, json.dumps(details))
+
+
+def _record_dropped_thoughts(
+    span: trace.Span,
+    chunks: list[types.GenerateContentResponse],
+    kept: list[types.GenerateContentResponse],
+) -> None:
+    """Put the text of the thought summaries `chunks` held and `kept` does not
+    on `span`, as `dfo.model.dropped_thoughts`."""
+    if kept is chunks or not span.is_recording():
+        return
+    left = {id(part) for chunk in kept for part in _parts(chunk)}
+    dropped = "".join(
+        part.text or "" for chunk in chunks for part in _parts(chunk) if id(part) not in left
+    )
+    if dropped:
+        span.set_attribute("dfo.model.dropped_thoughts", dropped)
 
 
 def _without_client_call_ids(contents: Any) -> list[types.Content]:

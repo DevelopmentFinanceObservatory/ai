@@ -26,11 +26,13 @@ the last referral names sources to choose from, and otherwise the run ends on
 it and the entry refuses with the code on `TurnBudget.closed`.
 
 A user's stop or a client disconnect cancels the call. The cancellation
-propagates and closes the stream, and the call is not retried. The `generate_content`
-span ADK opens around the call is marked as an error when the call is
-cancelled or cut. It also carries `langfuse.observation.completion_start_time`
-at the first chunk and the gaps between chunks (`dfo.model.chunk_gaps_s`), so
-an idle rule can be sized from the traces.
+propagates and closes the stream, and the call is not retried. The span current
+around the call (ADK's `generate_content`, or Pydantic AI's `chat` on the
+Pydantic AI planner's model, `harness.planner_model`) is marked as an error
+when the call is cancelled or cut. It also carries
+`langfuse.observation.completion_start_time` at the first chunk and the gaps
+between chunks (`dfo.model.chunk_gaps_s`), so an idle rule can be sized from
+the traces.
 
 With no budget set (an eval runner, a test driving an agent directly) a call
 runs unbounded, as ADK's `Gemini` does.
