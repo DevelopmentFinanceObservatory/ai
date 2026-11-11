@@ -528,7 +528,8 @@ async def test_the_adapter_returns_a_plan_a_graph_node_can_validate(
     )
 
     # The node's own validation (`Plan.model_validate(drafted["plan"])` in
-    # `harness.graph.planning`'s `planner` node), repeated here as the contract this adapter owes it.
+    # `harness.graph.planning`'s `planner` node), repeated here as the contract
+    # this adapter owes it.
     validated = Plan.model_validate(drafted["plan"])
     assert validated.version == plan.version
     assert validated.status is PlanStatus.PENDING_APPROVAL
@@ -4951,7 +4952,8 @@ async def test_a_turn_that_loops_past_the_round_cap_is_refused_not_raised(
     *within* one turn, since the model can call it more than once inside a
     single `_propose`/`ctx.run_node` call and nothing but the round cap counts
     that. This scripts five `propose_plan` calls in one continuous planner
-    turn (one `__call__`, one `_propose`, and no second turn), so the fifth is the one that goes past the cap. The adapter returns a
+    turn (one `__call__`, one `_propose`, and no second turn), so the fifth is
+    the one that goes past the cap. The adapter returns a
     refusal and does not raise `PlannerAdapterError`: raising it would end the
     turn through `_stream_fatal`'s `close_turn(error=...)`, which `begin_turn`
     documents as abandoning the paused session and its plan, so the last

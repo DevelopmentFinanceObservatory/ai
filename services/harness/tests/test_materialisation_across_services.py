@@ -193,7 +193,7 @@ async def test_a_frame_data_mcp_registers_resolves_through_a_mounted_analysis_mc
 
     The bare signed-URL GET is the one hop nothing in `data_mcp.get_data_tool`
     threads a test transport into (see `frame_materialisation.materialise_and_register`'s
-    own `transport` parameter, a hook only `data_mcp`'s own suite exercises directly);
+    own `transport` parameter, which only `data_mcp`'s own suite exercises directly);
     patched here at `_fetch_artifact_bytes`, the same function `data-mcp`'s own
     `test_get_data_tool.py::test_successful_get_data_call_registers_a_frame_end_to_end`
     uses to prove the tool-to-store wiring without opening a real socket.

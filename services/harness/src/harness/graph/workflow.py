@@ -52,8 +52,8 @@ class PlannerEntry:
 
 
 def planner_entry(planner: PlannerModel) -> PlannerEntry:
-    """The `route`, `plan_start` and `planner` nodes, `planner` drafting with
-    `planner`."""
+    """The `route`, `plan_start` and `planner` nodes, the `planner` node drafting
+    with the `planner` argument."""
     route_n = node(route, name="route")
     plan_start_n = node(plan_start, name="plan_start")
     # `rerun_on_resume=True`: a real `PlannerModel`

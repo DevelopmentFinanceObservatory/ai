@@ -332,7 +332,8 @@ class _RevisionSession(CallSession):
 
 
 class PlannerAdapter:
-    """`harness.graph.interfaces.PlannerModel`, implemented by `src/planner` and the translation it runs."""
+    """`harness.graph.interfaces.PlannerModel`, implemented by `src/planner` and
+    the translation it runs."""
 
     def __init__(
         self,

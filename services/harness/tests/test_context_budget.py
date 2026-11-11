@@ -227,7 +227,8 @@ SKILL_PAGE_CEILING = 40_800
 # A two-requirement plan is the wrong end of the range to size this from: the
 # adapter's own docstring probe records the realistic upper end at nine
 # requirements, and the section that dominates it is the prior plan, re-sent on
-# every amend and replan call. `test_the_planner_brief_holds_a_nine_requirement_plan_under_its_ceiling`
+# every amend and replan call.
+# `test_the_planner_brief_holds_a_nine_requirement_plan_under_its_ceiling`
 # measures that upper end, with readings at their whole budget: 11,131 chars for
 # a draft plan and 12,627 for a compiled one (the plan section alone is
 # 8,723 -> 6,942 raw-to-digest for the draft, 22,609 -> 8,438 for the compiled

@@ -131,8 +131,8 @@ RELAY_BUCKET = "text(fenced-relay)"
 RELAY_BUCKET_PREFIX = RELAY_BUCKET + ":"
 
 # The planner brief, bucketed on the opening words of `harness.planner_adapter.
-# _READINGS_CONTEXT`: the one part of a planner request this adapter assembles itself, not ADK relaying or
-# a tool answering. Spelled out, not imported from `planner_adapter`, for the same
+# _READINGS_CONTEXT`: the one part of a planner request this adapter assembles
+# itself, not ADK relaying or a tool answering. Spelled out, not imported from `planner_adapter`, for the same
 # reason `RELAY_MARKER` is: importing it would hide the fact that the text
 # moved, which is the thing this bucket exists to measure. It is the one input
 # on the planner path that varies with the plan, the readings and the digests.

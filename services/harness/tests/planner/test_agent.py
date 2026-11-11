@@ -14636,7 +14636,7 @@ def test_declaring_a_plan_ready_twice_changes_nothing(
 
 
 # The instruction the served planner carries: the translator attached, the
-# skill tools built and the question held by the harness graph.
+# skill tools built and the question held by the planner adapter.
 _SERVED_INSTRUCTION = planner_instruction(has_translator=True, has_skills=True, question_fixed=True)
 
 

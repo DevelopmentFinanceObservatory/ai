@@ -3116,7 +3116,7 @@ async def test_successful_get_data_call_registers_a_frame_end_to_end(
     fetches, parses, and registers a frame for a real `get_data` call. The bare
     signed-URL GET is the one hop `get_data_tool.py` never threads a test transport
     into (see `frame_materialisation.materialise_and_register`'s own `transport`
-    parameter, an interface `test_frame_materialisation.py` exercises directly); patched here
+    parameter, which `test_frame_materialisation.py` exercises directly); patched here
     at `_fetch_artifact_bytes` so this test proves the tool-to-store wiring without
     opening a real socket.
     """

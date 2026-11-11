@@ -4311,7 +4311,8 @@ _MODEL_AUTHORED = {"question", "answer_mode", "decisions", "evidence_requirement
 
 
 def _serialised_chars(value: Any) -> int:
-    """Characters of `value` as compact JSON with non-ASCII left as written, as the adapter renders it."""
+    """Characters of `value` as compact JSON with non-ASCII left as written, as
+    the adapter renders it."""
     return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False))
 
 
