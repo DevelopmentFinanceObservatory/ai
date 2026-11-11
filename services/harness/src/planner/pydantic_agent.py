@@ -388,7 +388,11 @@ async def run_planner(
                     response = stream.response
                 yield _planner_response(response)
         except UnexpectedModelBehavior as exc:
-            logger.warning("planner run ended on a response Pydantic AI refused: %s", exc)
+            # The exception's text can hold the response (its `body`, a refusal, a part's
+            # repr), so only its class is logged.
+            logger.warning(
+                "planner run ended on a response Pydantic AI refused: %s", type(exc).__name__
+            )
 
 
 class UnsentQuestionPartError(ValueError):

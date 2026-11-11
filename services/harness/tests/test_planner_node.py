@@ -688,6 +688,46 @@ async def test_a_call_reads_its_response_in_the_session_and_no_answer_of_its_sib
     assert seen == [[(["p1", "p2"], [])]] * 2
 
 
+async def test_two_calls_writing_one_key_store_the_value_the_last_to_finish_left_on_pydantic_ai(
+    plan: Plan,
+) -> None:
+    """The stored answers of a response hold the session's value of each key its
+    calls wrote once they have all answered, so the call that finishes last decides
+    a key two calls wrote, whatever their order in the response. The answers are
+    stored in call order. The ADK planner merges per-call writes in call order, so
+    the two runners can differ for such a response."""
+    started: list[str] = []
+
+    def tools(specs: Sequence[ToolSpec]) -> list[ToolSpec]:
+        async def body(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
+            # The first call in call order is the last to finish.
+            started.append("call")
+            first = len(started) == 1
+            if first:
+                await asyncio.sleep(0.05)
+            call.state["test:scalar"] = "first" if first else "second"
+            call.state["test:dict"] = {"writer": "first" if first else "second"}
+            return _REFUSED
+
+        return _serving_proposals(specs, body)
+
+    replies = [
+        reply(call_part(PROPOSE_PLAN, {}, id="p1"), call_part(PROPOSE_PLAN, {}, id="p2")),
+        reply(text_part("Done.")),
+    ]
+    with _numbered_call_ids():
+        entry = await _entries(
+            "pydantic_ai", _Script(replies=replies, runs=[_planned(plan)], setup=tools)
+        )
+
+    (answers,) = [e for e in _planner_events(entry) if e.get_function_responses()]
+    assert [r.id for r in answers.get_function_responses()] == ["p1", "p2"]
+    live = {"test:scalar": "first", "test:dict": {"writer": "first"}}
+    delta = {k: v for k, v in (answers.actions.state_delta or {}).items() if k.startswith("test:")}
+    assert delta == live
+    assert {k: v for k, v in entry.state.items() if k.startswith("test:")} == live
+
+
 # --- Turns put in the model's place ------------------------------------------------------
 
 

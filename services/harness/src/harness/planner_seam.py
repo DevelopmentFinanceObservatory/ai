@@ -390,7 +390,7 @@ class PlannerSeam:
         # instruction, built here once.
         #
         # `translate` replaces the translation `propose_plan` runs, and `specs`
-        # the tools (`planner.agent.planner_specs` over the surface and that
+        # the tools (`planner.specs.planner_specs` over the surface and that
         # translation). `client` is the google-genai client the planner's
         # model calls go through, on either runner. None builds one from the
         # environment. On either runner a planner whose client uses Vertex AI,
