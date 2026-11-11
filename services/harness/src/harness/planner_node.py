@@ -43,10 +43,10 @@ from google.genai import Client, types
 from planner.agent import AGENT_NAME, BRIEF_STATE_KEY, session_steps
 from planner.pydantic_agent import (
     PLANNER_PROFILE,
-    PlannerAgent,
     PlannerDeps,
     PlannerResponse,
     PlannerToolAnswer,
+    PydanticPlanner,
     UnsentQuestionPartError,
     planner_agent,
     run_planner,
@@ -91,7 +91,7 @@ class _Recorded:
 _PUT_IN_PLACE = _Recorded()
 
 
-def pydantic_planner(specs: Sequence[ToolSpec], *, instruction: str) -> PlannerAgent:
+def pydantic_planner(specs: Sequence[ToolSpec], *, instruction: str) -> PydanticPlanner:
     """The Pydantic AI planner on `specs` and `instruction`, which the ADK planner
     serves too, named as the ADK planner (`planner.agent.AGENT_NAME`). It has no
     model of its own, since each run names one (`planner_node`). Built once, it
@@ -109,7 +109,7 @@ def pydantic_planner(specs: Sequence[ToolSpec], *, instruction: str) -> PlannerA
 def planner_node(
     run: PlannerRun,
     *,
-    planner: PlannerAgent,
+    planner: PydanticPlanner,
     model_name: str,
     client: Client,
     budget: TurnBudget | None,

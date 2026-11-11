@@ -20,11 +20,11 @@ from harness.turn_events import PLANNER_ASK
 from planner.call import PlannerCall
 from planner.pydantic_agent import (
     PLANNER_PROFILE,
-    PlannerAgent,
     PlannerDeps,
     PlannerItem,
     PlannerResponse,
     PlannerToolAnswer,
+    PydanticPlanner,
     planner_agent,
     run_planner,
 )
@@ -248,12 +248,12 @@ async def test_a_raising_tool_is_answered_through_tool_failed_and_the_run_goes_o
     assert _kinds(items) == ["response", "answer:broken", "response"]
 
 
-def _with_tool(agent: PlannerAgent, function: Callable[..., Any]) -> PlannerAgent:
+def _with_tool(agent: PydanticPlanner, function: Callable[..., Any]) -> PydanticPlanner:
     """`agent` with `function` registered as a Pydantic AI tool of its own, as
     the planner's tools are, to reach answers no planner tool gives. Pydantic
     AI validates its typed arguments and lets what the function raises through."""
     agent.agent.tool_plain(function)
-    return PlannerAgent(agent=agent.agent, tools=(*agent.tools, function.__name__))
+    return PydanticPlanner(agent=agent.agent, tools=(*agent.tools, function.__name__))
 
 
 async def test_a_call_pydantic_ai_answers_with_a_retry_still_gets_its_answer() -> None:

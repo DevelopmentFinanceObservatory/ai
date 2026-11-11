@@ -56,7 +56,7 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
 )
-from planner.pydantic_agent import PlannerAgent
+from planner.pydantic_agent import PydanticPlanner
 from planner.settings import AgentSettings
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
@@ -762,7 +762,7 @@ async def test_a_call_pydantic_ai_answers_itself_still_stores_its_siblings_answe
     planner.agent.tool_plain(extra)
     seam._pydantic = (
         model_name,
-        PlannerAgent(agent=planner.agent, tools=(*planner.tools, name)),
+        PydanticPlanner(agent=planner.agent, tools=(*planner.tools, name)),
     )
     harness = _SeamHarness()
 

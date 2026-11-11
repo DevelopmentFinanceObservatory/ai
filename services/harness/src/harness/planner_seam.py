@@ -128,7 +128,7 @@ from planner.plan import (
     warning_codes,
     windowed_pins,
 )
-from planner.pydantic_agent import PlannerAgent
+from planner.pydantic_agent import PydanticPlanner
 from planner.records import Severity
 from planner.settings import AgentSettings
 from planner.skills import (
@@ -449,7 +449,7 @@ class PlannerSeam:
             has_translator=True, has_skills=True, question_fixed=True
         )
         self._agent: LlmAgent | None = None
-        self._pydantic: tuple[str, PlannerAgent] | None = None
+        self._pydantic: tuple[str, PydanticPlanner] | None = None
         if runner == "adk":
             self._agent = self._adk_planner(model=model)
             return

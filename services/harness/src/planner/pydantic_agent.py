@@ -187,7 +187,7 @@ type PlannerItem = PlannerResponse | PlannerToolAnswer
 
 
 @dataclass(frozen=True)
-class PlannerAgent:
+class PydanticPlanner:
     """The Pydantic AI planner (`planner_agent`): the agent and its tools' names,
     in the order they are declared."""
 
@@ -216,7 +216,7 @@ def planner_agent(
     model: Model | None = None,
     name: str | None = None,
     include_content: bool = True,
-) -> PlannerAgent:
+) -> PydanticPlanner:
     """The planner as a Pydantic AI agent named `name` on `model`, with
     `instruction` and one tool per spec. With no `model` each run names its
     own (`run_planner`), so one agent serves concurrent runs, each on a model
@@ -262,7 +262,7 @@ def planner_agent(
         ],
         name=name,
     )
-    return PlannerAgent(agent=agent, tools=tools)
+    return PydanticPlanner(agent=agent, tools=tools)
 
 
 def _answering_unknown_tools(
@@ -367,7 +367,7 @@ def _mark_tool_error(span: trace.Span) -> None:
 
 
 async def run_planner(
-    planner: PlannerAgent,
+    planner: PydanticPlanner,
     deps: PlannerDeps,
     *,
     question: types.Content | str | None,
