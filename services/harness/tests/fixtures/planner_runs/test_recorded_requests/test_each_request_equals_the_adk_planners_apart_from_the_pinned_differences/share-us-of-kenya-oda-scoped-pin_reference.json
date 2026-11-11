@@ -1,0 +1,193 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "What share of ODA to Kenya did the United States provide in 2022?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "What share of gross ODA disbursements to Kenya did the United States provide in 2022? The user chose gross disbursements (spec_cab592cba40ca753825cc796a8b8a39b).",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "source_spec_cab592cba40ca753825cc796a8b8a39b",
+        "description": "How the flow is counted.",
+        "options": [
+          "gross disbursements",
+          "net disbursements"
+        ],
+        "chosen": "gross disbursements",
+        "resolved_by": "planner_default",
+        "rationale": "Search elected gross disbursements for this source.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_cab592cba40ca753825cc796a8b8a39b",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "united_states",
+        "decision_ids": [
+          "source_spec_cab592cba40ca753825cc796a8b8a39b"
+        ],
+        "measure": "gross ODA disbursements from the United States",
+        "entities": [
+          {
+            "name": "United States",
+            "role": "donor"
+          },
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2022,
+          "end": 2022
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_cab592cba40ca753825cc796a8b8a39b",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "dataset",
+        "id": "all_oda",
+        "decision_ids": [],
+        "measure": "gross ODA disbursements",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "across": [
+          "donor"
+        ],
+        "period": {
+          "start": 2022,
+          "end": 2022
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": null,
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "aggregate",
+        "id": "all_by_year",
+        "decision_ids": [],
+        "input_id": "all_oda",
+        "reduction": "sum",
+        "group_by": [
+          "period"
+        ]
+      },
+      {
+        "kind": "share_of",
+        "id": "share",
+        "decision_ids": [],
+        "numerator": {
+          "input_id": "united_states",
+          "entity": null
+        },
+        "denominator": {
+          "input_id": "all_by_year",
+          "entity": null
+        },
+        "axis": null,
+        "denominator_scope": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "The share of total gross ODA to Kenya provided by the United States in 2022"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "share"
+        ]
+      }
+    ],
+    "ask_breakdowns": [
+      {
+        "ask": 0,
+        "by": [],
+        "over": [
+          "donor"
+        ]
+      }
+    ],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

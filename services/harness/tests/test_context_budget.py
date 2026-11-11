@@ -168,7 +168,7 @@ from .context_probe import (
 from .context_probe import (
     record_chars as _record_chars,
 )
-from .test_planner_seam import _NO_DATA_SEARCH_RESPONSE, _gdp_plan, _SeamHarness
+from .test_planner_seam import _NO_DATA_SEARCH_RESPONSE, _adk_settings, _gdp_plan, _SeamHarness
 
 # The root conftest.py chdirs every test into a tmp_path, so this must be absolute.
 _BASELINE_PATH = Path(__file__).resolve().parent / "context_baseline.json"
@@ -260,10 +260,13 @@ def _seam() -> PlannerSeam:
     """The seam the recorded round runs on, over a canned data-mcp surface.
 
     Built here, not reused from `test_planner_seam`, whose own
-    `_translator_seam` is private to the scenarios it serves.
+    `_translator_seam` is private to the scenarios it serves. It runs the ADK
+    planner: the budget measures the `LlmRequest` ADK assembles, and the
+    Pydantic AI planner shapes its instruction and declarations differently on
+    the wire (`assert_pinned_wire_differences` in `tests/planner/planner_pairs.py`).
     """
     return PlannerSeam(
-        settings=Settings(),
+        settings=_adk_settings(),
         surface=FixtureSurface(
             schemas=[],
             responses={"search": _NO_DATA_SEARCH_RESPONSE, "get_skill": _skill_page()},

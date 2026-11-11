@@ -1,0 +1,147 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Total aid from G7 to Africa since 1965"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Total gross disbursements of official development assistance in constant 2024 US dollars from G7 to Africa from 1965 to 2024",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "source_spec_845c457b3bab756a9a3e765e3cf8e8be",
+        "description": "How the flow is counted.",
+        "options": [
+          "gross disbursements",
+          "net disbursements"
+        ],
+        "chosen": "gross disbursements",
+        "resolved_by": "user",
+        "rationale": "The user's question named gross disbursements.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_845c457b3bab756a9a3e765e3cf8e8be",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "decision_ids": [
+          "source_spec_845c457b3bab756a9a3e765e3cf8e8be"
+        ],
+        "measure": "gross disbursements of ODA",
+        "entities": [
+          {
+            "name": "G7",
+            "role": "donor"
+          },
+          {
+            "name": "Africa",
+            "role": "recipient"
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 1965,
+          "end": 2024
+        },
+        "period_end_open": true,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_845c457b3bab756a9a3e765e3cf8e8be",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "aggregate",
+        "id": "cumulative",
+        "decision_ids": [],
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "entity"
+        ]
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "Total cumulative gross disbursements of ODA from G7 to Africa between 1965 and 2024",
+      "Annual gross disbursements of ODA from G7 to Africa from 1965 to 2024"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "cumulative"
+        ]
+      },
+      {
+        "ask": 1,
+        "outputs": [
+          "oda"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [
+      0
+    ],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

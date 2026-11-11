@@ -1,0 +1,219 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "What share of all ODA to Ethiopia came from Germany in each year from 2015 to 2022?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "What share of all ODA to Ethiopia came from Germany in each year from 2015 to 2022?",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "source_spec_7260efcbb3415bb4165b132109c153eb",
+        "description": "How the flow is counted.",
+        "options": [
+          "gross disbursements",
+          "net disbursements"
+        ],
+        "chosen": "gross disbursements",
+        "resolved_by": "planner_default",
+        "rationale": "Search elected gross disbursements for this source.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_7260efcbb3415bb4165b132109c153eb",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      },
+      {
+        "slot": "source_spec_8dc3f3185c6b30b0e957c63c46dc0623",
+        "description": "How the flow is counted.",
+        "options": [
+          "gross disbursements",
+          "net disbursements"
+        ],
+        "chosen": "gross disbursements",
+        "resolved_by": "planner_default",
+        "rationale": "Search elected gross disbursements for this source.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_8dc3f3185c6b30b0e957c63c46dc0623",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "germany",
+        "decision_ids": [
+          "source_spec_7260efcbb3415bb4165b132109c153eb"
+        ],
+        "measure": "ODA from Germany",
+        "entities": [
+          {
+            "name": "Germany",
+            "role": "donor"
+          },
+          {
+            "name": "Ethiopia",
+            "role": "recipient"
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_7260efcbb3415bb4165b132109c153eb",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "dataset",
+        "id": "all_oda",
+        "decision_ids": [
+          "source_spec_8dc3f3185c6b30b0e957c63c46dc0623"
+        ],
+        "measure": "all ODA",
+        "entities": [
+          {
+            "name": "Ethiopia",
+            "role": "recipient"
+          }
+        ],
+        "across": [
+          "donor"
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_8dc3f3185c6b30b0e957c63c46dc0623",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "aggregate",
+        "id": "all_by_year",
+        "decision_ids": [],
+        "input_id": "all_oda",
+        "reduction": "sum",
+        "group_by": [
+          "period"
+        ]
+      },
+      {
+        "kind": "share_of",
+        "id": "share",
+        "decision_ids": [],
+        "numerator": {
+          "input_id": "germany",
+          "entity": null
+        },
+        "denominator": {
+          "input_id": "all_by_year",
+          "entity": null
+        },
+        "axis": null,
+        "denominator_scope": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "Germany's share of all ODA to Ethiopia, each year 2015 to 2022"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "share"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

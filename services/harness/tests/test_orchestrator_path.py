@@ -2076,8 +2076,9 @@ async def test_a_hand_back_is_still_in_view_after_a_later_pause():
 
 
 async def test_a_second_plan_call_runs_a_planner_that_never_sees_the_first_hand_back():
+    # The ADK planner, whose model the test scripts.
     seam = PlannerSeam(
-        settings=Settings(),
+        settings=Settings(planner_runner="adk"),
         surface=FixtureSurface(schemas=[]),
     )
     planner_llm = RecordingLlm(script=[], agent_name="planner", scenario="replan")

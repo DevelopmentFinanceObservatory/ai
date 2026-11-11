@@ -1,0 +1,189 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "What was Japan's total ODA to Indonesia in each year from 2015 to 2021, counting both its bilateral aid and its imputed share of multilateral aid?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "What was Japan's total ODA to Indonesia in each year from 2015 to 2021, counting both its bilateral aid and its imputed share of multilateral aid?",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "combine",
+        "description": "Whether bilateral and imputed multilateral ODA are added into one total.",
+        "options": [
+          "add them",
+          "show them separately"
+        ],
+        "chosen": "add them",
+        "resolved_by": "planner_default",
+        "rationale": "Both are OECD DAC2a tables, which the oda-dac2a skill says add up: a donor's imputed multilateral ODA is not in its bilateral flows.",
+        "fixes": null
+      },
+      {
+        "slot": "source_spec_1586dded7ed3ac3f2e79ae41497c5c2d",
+        "description": "How the flow is counted.",
+        "options": [
+          "gross disbursements",
+          "net disbursements"
+        ],
+        "chosen": "gross disbursements",
+        "resolved_by": "planner_default",
+        "rationale": "Search elected gross disbursements for this source.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_1586dded7ed3ac3f2e79ae41497c5c2d",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "bilateral",
+        "decision_ids": [
+          "source_spec_1586dded7ed3ac3f2e79ae41497c5c2d"
+        ],
+        "measure": "bilateral ODA",
+        "entities": [
+          {
+            "name": "Japan",
+            "role": "donor"
+          },
+          {
+            "name": "Indonesia",
+            "role": "recipient"
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2015,
+          "end": 2021
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_1586dded7ed3ac3f2e79ae41497c5c2d",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "dataset",
+        "id": "imputed",
+        "decision_ids": [],
+        "measure": "imputed multilateral ODA",
+        "entities": [
+          {
+            "name": "Japan",
+            "role": "donor"
+          },
+          {
+            "name": "Indonesia",
+            "role": "recipient"
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2015,
+          "end": 2021
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_1b72d4480643f7711ee5186f06e75ea4",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "sum_of",
+        "id": "total",
+        "decision_ids": [
+          "combine"
+        ],
+        "left": {
+          "input_id": "bilateral",
+          "entity": null
+        },
+        "right": {
+          "input_id": "imputed",
+          "entity": null
+        }
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "Japan's total ODA to Indonesia counting bilateral and imputed multilateral aid, each year 2015 to 2021"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "total"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

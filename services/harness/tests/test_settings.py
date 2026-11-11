@@ -52,7 +52,7 @@ def test_defaults_without_env() -> None:
     assert settings.mcp_list_timeout_s == 15.0
     assert settings.mcp_init_timeout_s == 10.0
     assert settings.executor_max_concurrent_steps == 4
-    assert settings.planner_runner == "adk"
+    assert settings.planner_runner == "pydantic_ai"
 
 
 def test_mcp_timeouts_read_from_env(monkeypatch) -> None:

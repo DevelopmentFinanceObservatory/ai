@@ -1,0 +1,677 @@
+{
+  "outputs": [
+    {
+      "plan": {
+        "question": "kenya debt",
+        "answer_mode": "series",
+        "decisions": [
+          {
+            "slot": "measure",
+            "description": "What to measure Kenya's dependence by.",
+            "options": [
+              "annual debt service",
+              "total debt stock"
+            ],
+            "chosen": "annual debt service",
+            "resolved_by": "planner_default",
+            "rationale": "Debt service is the standard measure for near-term dependence.",
+            "fixes": null
+          }
+        ],
+        "evidence_requirements": [
+          {
+            "kind": "dataset",
+            "id": "annual_debt_service",
+            "decision_ids": [
+              "measure"
+            ],
+            "measure": "external debt service paid",
+            "entities": [
+              {
+                "name": "Kenya",
+                "role": "debtor"
+              }
+            ],
+            "across": [],
+            "period": {
+              "start": 2015,
+              "end": 2024
+            },
+            "period_end_open": false,
+            "frequency": "annual",
+            "unit": {
+              "currency": "USD",
+              "prices": "current",
+              "base_year": null
+            },
+            "source": null,
+            "source_ref": null,
+            "source_exclude": false,
+            "source_code": null,
+            "source_spec_id": null,
+            "coverage": {
+              "on_missing": "report_gaps"
+            },
+            "stat_vars": null,
+            "breakdown": null
+          },
+          {
+            "kind": "aggregate",
+            "id": "annual_totals",
+            "decision_ids": [
+              "measure"
+            ],
+            "input_id": "annual_debt_service",
+            "reduction": "sum",
+            "group_by": [
+              "period"
+            ]
+          }
+        ],
+        "declined": [],
+        "asks": [],
+        "answered": [],
+        "ask_breakdowns": [],
+        "asks_across_years": [],
+        "period_licences": [],
+        "rolling_copies": [],
+        "first_years": [],
+        "translation": {
+          "operations": [
+            {
+              "kind": "retrieve",
+              "id": "debt",
+              "requirement_id": "annual_debt_service",
+              "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "kind": "aggregate",
+              "id": "totals",
+              "requirement_id": "annual_totals",
+              "input": "debt",
+              "reduction": "sum",
+              "group_by": [
+                "period"
+              ]
+            }
+          ],
+          "terminal": [
+            "totals"
+          ]
+        },
+        "workflow": {
+          "steps": [
+            {
+              "id": "debt",
+              "operation_id": "debt",
+              "tool": {
+                "server": "data-mcp",
+                "name": "get_data"
+              },
+              "args": {
+                "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "bindings": {},
+              "implementation_version": null,
+              "input_schema_hash": "hash",
+              "output_schema_hash": null,
+              "expected_role_keys": []
+            },
+            {
+              "id": "totals",
+              "operation_id": "totals",
+              "tool": {
+                "server": "analysis-mcp",
+                "name": "aggregate"
+              },
+              "args": {
+                "aggregation": "sum",
+                "group_by": [
+                  "time_period"
+                ]
+              },
+              "bindings": {
+                "frame_ref": {
+                  "from_step": "debt",
+                  "output": "frame_ref"
+                }
+              },
+              "implementation_version": null,
+              "input_schema_hash": "hash",
+              "output_schema_hash": null,
+              "expected_role_keys": []
+            }
+          ],
+          "sources": [
+            {
+              "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "sentence": "external debt service",
+              "searched_as": null,
+              "confidence": null,
+              "has_data": true,
+              "measure_label": null,
+              "stat_var_member_count": null,
+              "stat_var_member_count_exact": null,
+              "served_count": null,
+              "shape_member_count": null,
+              "shape_member_digest": null,
+              "entities": [],
+              "groups": [],
+              "open_entity_axes": null,
+              "unit_ref": null,
+              "unit_label": null,
+              "unit_per_series": null,
+              "provenance_ref": null,
+              "provenance_label": null,
+              "provenance_account": null,
+              "resolved_sources": [],
+              "coverage_kind": null,
+              "coverage_window": null,
+              "identity": null,
+              "definition": null,
+              "open_axes": [],
+              "slot_codes": null,
+              "stat_var_reading": null,
+              "stat_var_reading_set_by": null
+            }
+          ],
+          "evidence_bindings": [
+            {
+              "requirement_id": "annual_debt_service",
+              "step_id": "debt",
+              "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ],
+          "terminal_steps": [
+            "totals"
+          ],
+          "warnings": []
+        },
+        "version": 1,
+        "previous_version": null,
+        "status": "pending_approval",
+        "approved_revision": null,
+        "approved_at": null
+      },
+      "summary": {
+        "version": 1,
+        "revision": "e5c12691c8df9820a0dd9093a4600848ff0fa56b67d6044d36d2eedb93c58d81",
+        "warnings": []
+      }
+    }
+  ],
+  "reports": [
+    {
+      "agent": "dfo_planner",
+      "tools": [
+        "ask_user_question"
+      ]
+    },
+    {
+      "agent": "dfo_planner",
+      "tools": [
+        "propose_plan"
+      ]
+    }
+  ],
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "probe"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "senders": [
+    "pydantic_ai"
+  ],
+  "events": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "probe"
+          }
+        ],
+        "role": "user"
+      },
+      "author": "user",
+      "actions": {
+        "state_delta": {},
+        "artifact_delta": {},
+        "requested_auth_configs": {},
+        "requested_tool_confirmations": {}
+      },
+      "node_info": {
+        "path": ""
+      },
+      "invocation": 0
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_call": {
+              "id": "a1",
+              "args": {
+                "message": "Which source did you mean?"
+              },
+              "name": "ask_user_question"
+            },
+            "thought_signature": "c2NyaXB0ZWQtc2lnbmF0dXJl"
+          },
+          {
+            "function_call": {
+              "id": "p1",
+              "args": {},
+              "name": "propose_plan"
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "state_delta": {}
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_response": {
+              "id": "a1",
+              "name": "ask_user_question",
+              "response": {
+                "outcome": "ok",
+                "status": "asked",
+                "message": "The question is with the user. Their answer arrives with your next brief."
+              }
+            }
+          },
+          {
+            "function_response": {
+              "id": "p1",
+              "name": "propose_plan",
+              "response": {
+                "outcome": "ok",
+                "status": "pending_approval",
+                "version": 1,
+                "previous_version": null,
+                "question": "kenya debt",
+                "translation": {
+                  "outcome": "ok"
+                },
+                "summary": {
+                  "version": 1,
+                  "revision": "e5c12691c8df9820a0dd9093a4600848ff0fa56b67d6044d36d2eedb93c58d81",
+                  "warnings": []
+                }
+              }
+            }
+          }
+        ],
+        "role": "user"
+      },
+      "state_delta": {
+        "planner:pending_ask": {
+          "call_id": "a1",
+          "args": {
+            "message": "Which source did you mean?",
+            "candidates": [],
+            "options": [],
+            "recommended_spec_id": null,
+            "rationale": null
+          }
+        },
+        "planner:elected_spec_ids": [],
+        "planner:read": {
+          "steps": [
+            [
+              "message",
+              null
+            ]
+          ],
+          "response_calls": [
+            [
+              "ask_user_question",
+              "a1"
+            ],
+            [
+              "propose_plan",
+              "p1"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "author": "seam_test_wf",
+      "actions": {
+        "state_delta": {
+          "planner:plan": "{\"question\":\"kenya debt\",\"answer_mode\":\"series\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to measure Kenya's dependence by.\",\"options\":[\"annual debt service\",\"total debt stock\"],\"chosen\":\"annual debt service\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is the standard measure for near-term dependence.\",\"fixes\":null}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"}],\"across\":[],\"period\":{\"start\":2015,\"end\":2024},\"period_end_open\":false,\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_ref\":null,\"source_exclude\":false,\"source_code\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"},\"stat_vars\":null,\"breakdown\":null},{\"kind\":\"aggregate\",\"id\":\"annual_totals\",\"decision_ids\":[\"measure\"],\"input_id\":\"annual_debt_service\",\"reduction\":\"sum\",\"group_by\":[\"period\"]}],\"declined\":[],\"asks\":[],\"answered\":[],\"ask_breakdowns\":[],\"asks_across_years\":[],\"period_licences\":[],\"rolling_copies\":[],\"first_years\":[],\"translation\":{\"operations\":[{\"kind\":\"retrieve\",\"id\":\"debt\",\"requirement_id\":\"annual_debt_service\",\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"kind\":\"aggregate\",\"id\":\"totals\",\"requirement_id\":\"annual_totals\",\"input\":\"debt\",\"reduction\":\"sum\",\"group_by\":[\"period\"]}],\"terminal\":[\"totals\"]},\"workflow\":{\"steps\":[{\"id\":\"debt\",\"operation_id\":\"debt\",\"tool\":{\"server\":\"data-mcp\",\"name\":\"get_data\"},\"args\":{\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"bindings\":{},\"implementation_version\":null,\"input_schema_hash\":\"hash\",\"output_schema_hash\":null,\"expected_role_keys\":[]},{\"id\":\"totals\",\"operation_id\":\"totals\",\"tool\":{\"server\":\"analysis-mcp\",\"name\":\"aggregate\"},\"args\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"bindings\":{\"frame_ref\":{\"from_step\":\"debt\",\"output\":\"frame_ref\"}},\"implementation_version\":null,\"input_schema_hash\":\"hash\",\"output_schema_hash\":null,\"expected_role_keys\":[]}],\"sources\":[{\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sentence\":\"external debt service\",\"searched_as\":null,\"confidence\":null,\"has_data\":true,\"measure_label\":null,\"stat_var_member_count\":null,\"stat_var_member_count_exact\":null,\"served_count\":null,\"shape_member_count\":null,\"shape_member_digest\":null,\"entities\":[],\"groups\":[],\"open_entity_axes\":null,\"unit_ref\":null,\"unit_label\":null,\"unit_per_series\":null,\"provenance_ref\":null,\"provenance_label\":null,\"provenance_account\":null,\"resolved_sources\":[],\"coverage_kind\":null,\"coverage_window\":null,\"identity\":null,\"definition\":null,\"open_axes\":[],\"slot_codes\":null,\"stat_var_reading\":null,\"stat_var_reading_set_by\":null}],\"evidence_bindings\":[{\"requirement_id\":\"annual_debt_service\",\"step_id\":\"debt\",\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}],\"terminal_steps\":[\"totals\"],\"warnings\":[]},\"version\":1,\"previous_version\":null,\"status\":\"pending_approval\",\"approved_revision\":null,\"approved_at\":null}",
+          "planner:rounds": 0,
+          "planner:pin_sources": {},
+          "planner:unsupported": [],
+          "planner:optional_declines": [],
+          "planner:terminal_declines": [],
+          "planner:reduction_refused_asks": [],
+          "translator:compile_failures": [],
+          "planner:amendment_entry": false,
+          "planner:decision_pick": null,
+          "planner:skills_before_entry": 0,
+          "planner:pending_ask": null,
+          "planner:asked_referral": null
+        },
+        "artifact_delta": {},
+        "requested_auth_configs": {},
+        "requested_tool_confirmations": {}
+      },
+      "output": {
+        "plan": {
+          "question": "kenya debt",
+          "answer_mode": "series",
+          "decisions": [
+            {
+              "slot": "measure",
+              "description": "What to measure Kenya's dependence by.",
+              "options": [
+                "annual debt service",
+                "total debt stock"
+              ],
+              "chosen": "annual debt service",
+              "resolved_by": "planner_default",
+              "rationale": "Debt service is the standard measure for near-term dependence.",
+              "fixes": null
+            }
+          ],
+          "evidence_requirements": [
+            {
+              "kind": "dataset",
+              "id": "annual_debt_service",
+              "decision_ids": [
+                "measure"
+              ],
+              "measure": "external debt service paid",
+              "entities": [
+                {
+                  "name": "Kenya",
+                  "role": "debtor"
+                }
+              ],
+              "across": [],
+              "period": {
+                "start": 2015,
+                "end": 2024
+              },
+              "period_end_open": false,
+              "frequency": "annual",
+              "unit": {
+                "currency": "USD",
+                "prices": "current",
+                "base_year": null
+              },
+              "source": null,
+              "source_ref": null,
+              "source_exclude": false,
+              "source_code": null,
+              "source_spec_id": null,
+              "coverage": {
+                "on_missing": "report_gaps"
+              },
+              "stat_vars": null,
+              "breakdown": null
+            },
+            {
+              "kind": "aggregate",
+              "id": "annual_totals",
+              "decision_ids": [
+                "measure"
+              ],
+              "input_id": "annual_debt_service",
+              "reduction": "sum",
+              "group_by": [
+                "period"
+              ]
+            }
+          ],
+          "declined": [],
+          "asks": [],
+          "answered": [],
+          "ask_breakdowns": [],
+          "asks_across_years": [],
+          "period_licences": [],
+          "rolling_copies": [],
+          "first_years": [],
+          "translation": {
+            "operations": [
+              {
+                "kind": "retrieve",
+                "id": "debt",
+                "requirement_id": "annual_debt_service",
+                "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              {
+                "kind": "aggregate",
+                "id": "totals",
+                "requirement_id": "annual_totals",
+                "input": "debt",
+                "reduction": "sum",
+                "group_by": [
+                  "period"
+                ]
+              }
+            ],
+            "terminal": [
+              "totals"
+            ]
+          },
+          "workflow": {
+            "steps": [
+              {
+                "id": "debt",
+                "operation_id": "debt",
+                "tool": {
+                  "server": "data-mcp",
+                  "name": "get_data"
+                },
+                "args": {
+                  "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "bindings": {},
+                "implementation_version": null,
+                "input_schema_hash": "hash",
+                "output_schema_hash": null,
+                "expected_role_keys": []
+              },
+              {
+                "id": "totals",
+                "operation_id": "totals",
+                "tool": {
+                  "server": "analysis-mcp",
+                  "name": "aggregate"
+                },
+                "args": {
+                  "aggregation": "sum",
+                  "group_by": [
+                    "time_period"
+                  ]
+                },
+                "bindings": {
+                  "frame_ref": {
+                    "from_step": "debt",
+                    "output": "frame_ref"
+                  }
+                },
+                "implementation_version": null,
+                "input_schema_hash": "hash",
+                "output_schema_hash": null,
+                "expected_role_keys": []
+              }
+            ],
+            "sources": [
+              {
+                "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "sentence": "external debt service",
+                "searched_as": null,
+                "confidence": null,
+                "has_data": true,
+                "measure_label": null,
+                "stat_var_member_count": null,
+                "stat_var_member_count_exact": null,
+                "served_count": null,
+                "shape_member_count": null,
+                "shape_member_digest": null,
+                "entities": [],
+                "groups": [],
+                "open_entity_axes": null,
+                "unit_ref": null,
+                "unit_label": null,
+                "unit_per_series": null,
+                "provenance_ref": null,
+                "provenance_label": null,
+                "provenance_account": null,
+                "resolved_sources": [],
+                "coverage_kind": null,
+                "coverage_window": null,
+                "identity": null,
+                "definition": null,
+                "open_axes": [],
+                "slot_codes": null,
+                "stat_var_reading": null,
+                "stat_var_reading_set_by": null
+              }
+            ],
+            "evidence_bindings": [
+              {
+                "requirement_id": "annual_debt_service",
+                "step_id": "debt",
+                "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "terminal_steps": [
+              "totals"
+            ],
+            "warnings": []
+          },
+          "version": 1,
+          "previous_version": null,
+          "status": "pending_approval",
+          "approved_revision": null,
+          "approved_at": null
+        },
+        "summary": {
+          "version": 1,
+          "revision": "e5c12691c8df9820a0dd9093a4600848ff0fa56b67d6044d36d2eedb93c58d81",
+          "warnings": []
+        }
+      },
+      "node_info": {
+        "path": "seam_test_wf@1/seam_under_test@1",
+        "output_for": [
+          "seam_test_wf@1/seam_under_test@1",
+          "seam_test_wf@1"
+        ]
+      },
+      "invocation": 0
+    }
+  ],
+  "steps": [
+    {
+      "kind": "message",
+      "call_id": null,
+      "args": null,
+      "body": {},
+      "name": null
+    },
+    {
+      "kind": "call",
+      "call_id": "a1",
+      "args": {
+        "message": "Which source did you mean?"
+      },
+      "body": {},
+      "name": null
+    },
+    {
+      "kind": "response",
+      "call_id": null,
+      "args": null,
+      "body": {
+        "outcome": "ok",
+        "status": "pending_approval",
+        "version": 1,
+        "previous_version": null,
+        "question": "kenya debt",
+        "translation": {
+          "outcome": "ok"
+        },
+        "summary": {
+          "version": 1,
+          "revision": "e5c12691c8df9820a0dd9093a4600848ff0fa56b67d6044d36d2eedb93c58d81",
+          "warnings": []
+        }
+      },
+      "name": "propose_plan"
+    }
+  ],
+  "state": {
+    "planner:pending_ask": null,
+    "planner:elected_spec_ids": [],
+    "planner:read": {
+      "steps": [
+        [
+          "message",
+          null
+        ]
+      ],
+      "response_calls": [
+        [
+          "ask_user_question",
+          "a1"
+        ],
+        [
+          "propose_plan",
+          "p1"
+        ]
+      ]
+    },
+    "planner:plan": "{\"question\":\"kenya debt\",\"answer_mode\":\"series\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to measure Kenya's dependence by.\",\"options\":[\"annual debt service\",\"total debt stock\"],\"chosen\":\"annual debt service\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is the standard measure for near-term dependence.\",\"fixes\":null}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"}],\"across\":[],\"period\":{\"start\":2015,\"end\":2024},\"period_end_open\":false,\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_ref\":null,\"source_exclude\":false,\"source_code\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"},\"stat_vars\":null,\"breakdown\":null},{\"kind\":\"aggregate\",\"id\":\"annual_totals\",\"decision_ids\":[\"measure\"],\"input_id\":\"annual_debt_service\",\"reduction\":\"sum\",\"group_by\":[\"period\"]}],\"declined\":[],\"asks\":[],\"answered\":[],\"ask_breakdowns\":[],\"asks_across_years\":[],\"period_licences\":[],\"rolling_copies\":[],\"first_years\":[],\"translation\":{\"operations\":[{\"kind\":\"retrieve\",\"id\":\"debt\",\"requirement_id\":\"annual_debt_service\",\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"kind\":\"aggregate\",\"id\":\"totals\",\"requirement_id\":\"annual_totals\",\"input\":\"debt\",\"reduction\":\"sum\",\"group_by\":[\"period\"]}],\"terminal\":[\"totals\"]},\"workflow\":{\"steps\":[{\"id\":\"debt\",\"operation_id\":\"debt\",\"tool\":{\"server\":\"data-mcp\",\"name\":\"get_data\"},\"args\":{\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"bindings\":{},\"implementation_version\":null,\"input_schema_hash\":\"hash\",\"output_schema_hash\":null,\"expected_role_keys\":[]},{\"id\":\"totals\",\"operation_id\":\"totals\",\"tool\":{\"server\":\"analysis-mcp\",\"name\":\"aggregate\"},\"args\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"bindings\":{\"frame_ref\":{\"from_step\":\"debt\",\"output\":\"frame_ref\"}},\"implementation_version\":null,\"input_schema_hash\":\"hash\",\"output_schema_hash\":null,\"expected_role_keys\":[]}],\"sources\":[{\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sentence\":\"external debt service\",\"searched_as\":null,\"confidence\":null,\"has_data\":true,\"measure_label\":null,\"stat_var_member_count\":null,\"stat_var_member_count_exact\":null,\"served_count\":null,\"shape_member_count\":null,\"shape_member_digest\":null,\"entities\":[],\"groups\":[],\"open_entity_axes\":null,\"unit_ref\":null,\"unit_label\":null,\"unit_per_series\":null,\"provenance_ref\":null,\"provenance_label\":null,\"provenance_account\":null,\"resolved_sources\":[],\"coverage_kind\":null,\"coverage_window\":null,\"identity\":null,\"definition\":null,\"open_axes\":[],\"slot_codes\":null,\"stat_var_reading\":null,\"stat_var_reading_set_by\":null}],\"evidence_bindings\":[{\"requirement_id\":\"annual_debt_service\",\"step_id\":\"debt\",\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}],\"terminal_steps\":[\"totals\"],\"warnings\":[]},\"version\":1,\"previous_version\":null,\"status\":\"pending_approval\",\"approved_revision\":null,\"approved_at\":null}",
+    "planner:rounds": 0,
+    "planner:pin_sources": {},
+    "planner:unsupported": [],
+    "planner:optional_declines": [],
+    "planner:terminal_declines": [],
+    "planner:reduction_refused_asks": [],
+    "translator:compile_failures": [],
+    "planner:amendment_entry": false,
+    "planner:decision_pick": null,
+    "planner:skills_before_entry": 0,
+    "planner:asked_referral": null
+  }
+}

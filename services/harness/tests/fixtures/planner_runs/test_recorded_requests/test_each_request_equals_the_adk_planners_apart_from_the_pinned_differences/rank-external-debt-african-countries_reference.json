@@ -1,0 +1,161 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Compare external debt across every African country, all at once, 2020 to 2024"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Compare external debt across every African country, all at once, 2020 to 2024",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "every_african_country",
+        "description": "Which countries the 2024 ranking compares.",
+        "options": [
+          "every African country with data",
+          "a named list of countries"
+        ],
+        "chosen": "every African country with data",
+        "resolved_by": "planner_default",
+        "rationale": "The question asks for every African country, so every member is ranked.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": null,
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": "population",
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "debt",
+        "decision_ids": [],
+        "measure": "external debt",
+        "entities": [
+          {
+            "name": "Africa",
+            "role": "debtor",
+            "members": true
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2020,
+          "end": 2024
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_c028a8f36889c5d8d693a0a43c37c9be",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "filter",
+        "id": "debt_2024",
+        "decision_ids": [],
+        "input_id": "debt",
+        "predicates": [
+          {
+            "kind": "period_threshold",
+            "op": "eq",
+            "year": 2024,
+            "rolling": null
+          }
+        ]
+      },
+      {
+        "kind": "rank",
+        "id": "ranking_2024",
+        "decision_ids": [
+          "every_african_country"
+        ],
+        "input_id": "debt_2024",
+        "direction": "highest_first",
+        "among": "population",
+        "axis": null,
+        "reduction": null,
+        "window_start": null,
+        "window_end": null,
+        "per_period": false,
+        "limit": null,
+        "rolling": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "Comparison of external debt stocks across African countries from 2020 to 2024",
+      "Ranking of African countries by external debt in 2024"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "debt"
+        ]
+      },
+      {
+        "ask": 1,
+        "outputs": [
+          "ranking_2024"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

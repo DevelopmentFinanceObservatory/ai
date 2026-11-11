@@ -33,7 +33,6 @@ from harness.graph.state import (
 )
 from harness.planner_seam import PlannerSeam
 from harness.scope_choices import planner_axes
-from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.turn_records import PlanRecord, SearchReading, basis_line, loose_match_notes
 from planner.plan import (
@@ -79,7 +78,7 @@ from .test_graph import (
     _Seam,
     _start,
 )
-from .test_planner_seam import ScriptedPlannerLlm, _SeamHarness
+from .test_planner_seam import ScriptedPlannerLlm, _adk_settings, _SeamHarness
 
 _FRANCE = _french_dac1(_US_MULTILATERAL)
 _MULTILATERAL = _US_MULTILATERAL["spec_id"]
@@ -155,7 +154,7 @@ async def _turn_one(
             ORCHESTRATOR_SPECS_KEY: {_TOTAL: _US_TOTAL, _FRANCE["spec_id"]: _FRANCE},
         }
     )
-    seam = PlannerSeam(settings=Settings(), surface=surface)
+    seam = PlannerSeam(settings=_adk_settings(), surface=surface)
     seam._agent.model = ScriptedPlannerLlm(
         script=[
             [
@@ -322,7 +321,7 @@ async def test_a_turn_two_direct_pin_of_a_turn_one_compile_reads_no_planner_mark
     surface = cast(ToolSurface, _multilateral_compiles())
 
     turn_two = _SeamHarness({ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
-    seam = PlannerSeam(settings=Settings(), surface=surface)
+    seam = PlannerSeam(settings=_adk_settings(), surface=surface)
     share = "What share of US ODA goes to multilaterals?"
     seam._agent.model = ScriptedPlannerLlm(
         script=[
@@ -374,7 +373,7 @@ async def test_a_turn_two_restatement_of_the_comparison_moves_the_total_again(
     copies = {_over_period(block, year): block for block in (_US_MULTILATERAL, _FRANCE)}
     surface = _multilateral_compiles(copies, translates=True)
     turn_two = _SeamHarness({ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
-    seam = PlannerSeam(settings=Settings(), surface=cast(ToolSurface, surface))
+    seam = PlannerSeam(settings=_adk_settings(), surface=cast(ToolSurface, surface))
     question = "And in 2020?"
     seam._agent.model = ScriptedPlannerLlm(
         script=[

@@ -1,0 +1,174 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "who are the top donors to Guatemala"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "who are the top donors to Guatemala",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "top_n",
+        "description": "How many donors the ranking keeps.",
+        "options": [
+          "5",
+          "10"
+        ],
+        "chosen": "10",
+        "resolved_by": "planner_default",
+        "rationale": "The question names no number; ten is the usual list of top donors.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": null,
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": 10
+        }
+      },
+      {
+        "slot": "every_donor",
+        "description": "Which donors the ranking compares.",
+        "options": [
+          "every donor",
+          "a named list of donors"
+        ],
+        "chosen": "every donor",
+        "resolved_by": "planner_default",
+        "rationale": "The question names no list, so every donor is ranked.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": null,
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": "population",
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "decision_ids": [],
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Guatemala",
+            "role": "recipient"
+          }
+        ],
+        "across": [
+          "donor"
+        ],
+        "period": {
+          "start": 1960,
+          "end": 2024
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": null,
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "rank",
+        "id": "top_donors",
+        "decision_ids": [
+          "top_n",
+          "every_donor"
+        ],
+        "input_id": "oda",
+        "direction": "highest_first",
+        "among": "population",
+        "axis": "donor",
+        "reduction": "sum",
+        "window_start": 2024,
+        "window_end": 2024,
+        "per_period": false,
+        "limit": 10,
+        "rolling": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "The top donors to Guatemala"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "top_donors"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "How many people did Nigeria's population grow by between 2000 and 2023?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "How many people did Nigeria's population grow by between 2000 and 2023?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "population",
+        "decision_ids": [],
+        "measure": "population",
+        "entities": [
+          {
+            "name": "Nigeria",
+            "role": null
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2000,
+          "end": 2023
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_573db2c09fc973ba56a7688cb21d6e7b",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "growth",
+        "id": "increase",
+        "decision_ids": [],
+        "input_id": "population",
+        "window_start": 2000,
+        "window_end": 2023,
+        "change": "absolute",
+        "rolling": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "The increase in Nigeria's population, in people, 2000 to 2023"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "increase"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

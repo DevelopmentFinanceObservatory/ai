@@ -19,10 +19,10 @@ tests live in `services/harness/tests/planner/`.
 Four tools, each declared in `planner.specs` (`planner_tool_specs()` and
 `skill_tool_spec()`) with its body in `planner.tools` or `planner.skills`.
 `harness.planner_seam.PlannerSeam` builds the one set of specs and the one
-instruction the planner serves, on one of two runners `PLANNER_RUNNER` selects:
-an `LlmAgent` built by `create_planner_agent()` on the ADK planner, or a
-Pydantic AI agent built by `planner.pydantic_agent.planner_agent()` on the
-Pydantic AI planner, which `harness.planner_node` runs as a function node that
+instruction the planner serves, on one of two runners `PLANNER_RUNNER` selects
+(`pydantic_ai` by default, or `adk`): an `LlmAgent` built by
+`create_planner_agent()` on the ADK planner, or a Pydantic AI agent built by
+`planner.pydantic_agent.planner_agent()` on the Pydantic AI planner, which `harness.planner_node` runs as a function node that
 yields the ADK events an ADK planner run stores. A tool call on either runner
 reads its steps from the session's events through `planner.session.SessionCall`.
 The tools:

@@ -1,0 +1,150 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Which 10 countries had the highest GDP in 2022?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Which 10 countries had the highest GDP in 2022?",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "every_country",
+        "description": "Which countries the ranking compares.",
+        "options": [
+          "every country with data",
+          "a named list of countries"
+        ],
+        "chosen": "every country with data",
+        "resolved_by": "planner_default",
+        "rationale": "The question names no list, so every member is ranked.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": null,
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": "population",
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "gdp",
+        "decision_ids": [],
+        "measure": "GDP",
+        "entities": [],
+        "across": [
+          "country"
+        ],
+        "period": {
+          "start": 2022,
+          "end": 2022
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": null,
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "filter",
+        "id": "countries",
+        "decision_ids": [],
+        "input_id": "gdp",
+        "predicates": [
+          {
+            "kind": "place_level",
+            "level": "Country",
+            "role": null,
+            "strict": false
+          }
+        ]
+      },
+      {
+        "kind": "rank",
+        "id": "top",
+        "decision_ids": [
+          "every_country"
+        ],
+        "input_id": "countries",
+        "direction": "highest_first",
+        "among": "population",
+        "axis": null,
+        "reduction": null,
+        "window_start": null,
+        "window_end": null,
+        "per_period": false,
+        "limit": 10,
+        "rolling": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "The 10 countries with the highest GDP in 2022"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "top"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

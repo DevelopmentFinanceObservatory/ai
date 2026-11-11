@@ -1,0 +1,178 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Which five African countries received the least ODA in 2021?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Which five African countries received the least ODA in 2021?",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "every_african_country",
+        "description": "Which countries the ranking compares.",
+        "options": [
+          "every African country with data",
+          "a named list of African countries"
+        ],
+        "chosen": "every African country with data",
+        "resolved_by": "planner_default",
+        "rationale": "The question asks about African countries without naming any, so every one is ranked.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": null,
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": "population",
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      },
+      {
+        "slot": "source_spec_55d8689f3c2e76ecf93572f4c30a127b",
+        "description": "How the flow is counted.",
+        "options": [
+          "gross disbursements",
+          "net disbursements"
+        ],
+        "chosen": "gross disbursements",
+        "resolved_by": "planner_default",
+        "rationale": "Search elected gross disbursements for this source.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_55d8689f3c2e76ecf93572f4c30a127b",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "decision_ids": [
+          "source_spec_55d8689f3c2e76ecf93572f4c30a127b"
+        ],
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Africa",
+            "role": "recipient",
+            "members": true
+          },
+          {
+            "name": "official donors (DAC)",
+            "role": "donor"
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2021,
+          "end": 2021
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_55d8689f3c2e76ecf93572f4c30a127b",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "rank",
+        "id": "bottom_five",
+        "decision_ids": [
+          "every_african_country"
+        ],
+        "input_id": "oda",
+        "direction": "lowest_first",
+        "among": "population",
+        "axis": "recipient",
+        "reduction": "sum",
+        "window_start": null,
+        "window_end": null,
+        "per_period": false,
+        "limit": 5,
+        "rolling": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "The five African countries that received the least ODA in 2021"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "bottom_five"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

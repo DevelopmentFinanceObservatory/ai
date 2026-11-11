@@ -1,0 +1,148 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "In which year did aid to Kenya peak?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "In which year did the official development assistance Kenya received from all donors reach its highest, and how much was it? The user named no span of years, so every year on record counts.",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "source_spec_46a134ead075d5e04b03ca9b0a1e8f29",
+        "description": "How the flow is counted.",
+        "options": [
+          "gross disbursements",
+          "net disbursements"
+        ],
+        "chosen": "gross disbursements",
+        "resolved_by": "planner_default",
+        "rationale": "Search elected gross disbursements for this source.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_46a134ead075d5e04b03ca9b0a1e8f29",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "decision_ids": [
+          "source_spec_46a134ead075d5e04b03ca9b0a1e8f29"
+        ],
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          },
+          {
+            "name": "official donors (DAC)",
+            "role": "donor"
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 1960,
+          "end": 2025
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_46a134ead075d5e04b03ca9b0a1e8f29",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "aggregate",
+        "id": "peak",
+        "decision_ids": [],
+        "input_id": "oda",
+        "reduction": "max",
+        "group_by": [
+          "entity"
+        ]
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "The year aid to Kenya peaked, and the amount that year"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "peak"
+        ]
+      }
+    ],
+    "ask_breakdowns": [
+      {
+        "ask": 0,
+        "by": [],
+        "over": [
+          "donor"
+        ]
+      }
+    ],
+    "asks_across_years": [
+      0
+    ],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

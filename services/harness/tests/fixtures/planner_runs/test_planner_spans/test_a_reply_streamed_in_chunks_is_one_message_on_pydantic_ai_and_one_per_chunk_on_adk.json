@@ -1,0 +1,142 @@
+[
+  {
+    "type": "agent",
+    "name": "dfo_planner run",
+    "model": null,
+    "session": "<the session>",
+    "agent": "dfo_planner",
+    "input": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "type": "text",
+            "content": "probe"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "parts": [
+          {
+            "type": "text",
+            "content": "<brief>"
+          }
+        ]
+      }
+    ],
+    "output": null,
+    "usage": {},
+    "level": null,
+    "status_message": null,
+    "error_type": null,
+    "completion_start": null,
+    "tool_definitions": null,
+    "budget": {}
+  },
+  {
+    "type": "generation",
+    "name": "chat gemini-3.8-flash",
+    "model": "gemini-3.8-flash",
+    "session": "<the session>",
+    "agent": "dfo_planner",
+    "input": [
+      {
+        "shared": "span_instruction"
+      },
+      [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "probe"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "<brief>"
+            }
+          ]
+        }
+      ]
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "parts": [
+          {
+            "type": "thinking",
+            "content": "Weighing the sources and the years."
+          },
+          {
+            "type": "text",
+            "content": "Proposing now."
+          },
+          {
+            "type": "tool_call",
+            "id": "p1",
+            "name": "propose_plan",
+            "arguments": {}
+          }
+        ],
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "input": 80,
+      "output": 9,
+      "input_cached_tokens": 40,
+      "output_reasoning_tokens": 4,
+      "total": 133
+    },
+    "level": null,
+    "status_message": null,
+    "error_type": null,
+    "completion_start": "set",
+    "tool_definitions": {
+      "shared": "span_tools"
+    },
+    "budget": {
+      "dfo.model.first_chunk_s": "timed",
+      "dfo.model.first_thought_s": "timed",
+      "dfo.model.first_text_s": "timed",
+      "dfo.model.chunk_gaps_s": "timed",
+      "dfo.model.thoughts_token_count": 4
+    }
+  },
+  {
+    "type": "tool",
+    "name": "propose_plan",
+    "model": null,
+    "session": "<the session>",
+    "agent": "dfo_planner",
+    "input": {},
+    "output": {
+      "outcome": "ok",
+      "status": "pending_approval",
+      "version": 1,
+      "previous_version": null,
+      "question": "kenya debt",
+      "translation": {
+        "outcome": "ok"
+      },
+      "summary": {
+        "version": 1,
+        "revision": "e5c12691c8df9820a0dd9093a4600848ff0fa56b67d6044d36d2eedb93c58d81",
+        "warnings": []
+      }
+    },
+    "usage": {},
+    "level": null,
+    "status_message": null,
+    "error_type": null,
+    "completion_start": null,
+    "tool_definitions": null,
+    "budget": {}
+  }
+]

@@ -34,6 +34,15 @@ from planner.tools import ASK_ACCEPTED, EndRun, load_pending_ask
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
+from ..planner_expectations import (
+    STORING_RUNNER,
+    expect,
+    expectation_name,
+    expected,
+    on_each_runner,
+    shared,
+)
+from ..planner_seam_runners import PlannerRunner as Runner
 from ..scripted_genai import (
     Reply,
     Request,
@@ -44,6 +53,7 @@ from ..scripted_genai import (
     thought_part,
     usage_metadata,
 )
+from ..test_planner_node import _as_stored, _request_dumped, _stored_request
 from .planner_pairs import BRIEF, QUESTION, adk_run, assert_pinned_wire_differences, pydantic_run
 
 _MODEL = "gemini-3.8-flash"
@@ -294,33 +304,41 @@ def _surface() -> ToolSurface:
     return cast(ToolSurface, SimpleNamespace())
 
 
-async def _first_requests(surface: ToolSurface | None) -> tuple[Request, Request]:
+async def _first_request(runner: Runner, surface: ToolSurface | None) -> Request:
     script = [reply(text_part("done"))]
-    (adk,) = (await adk_run(script, surface=surface, translate=_translate)).requests
-    (pydantic,) = (await pydantic_run(script, surface=surface, translate=_translate)).requests
-    return adk, pydantic
+    run = adk_run if runner == "adk" else pydantic_run
+    (request,) = (await run(script, surface=surface, translate=_translate)).requests
+    return request
 
 
+@on_each_runner
 @pytest.mark.parametrize("with_skills", [False, True], ids=["no-skill-tool", "skill-tool"])
-async def test_the_first_request_equals_the_adk_planners_apart_from_the_pinned_wire_differences(
-    with_skills: bool,
+async def test_the_first_request_is_the_same_on_both_planners_apart_from_the_pinned_wire_differences(
+    with_skills: bool, runner: Runner, request: pytest.FixtureRequest
 ) -> None:
     surface = _surface() if with_skills else None
-    adk_request, pydantic_request = await _first_requests(surface)
+    sent = await _first_request(runner, surface)
 
-    assert_pinned_wire_differences(adk_request, pydantic_request)
-    assert adk_request.content_list == [
+    name = expectation_name(request, runner=runner)
+    if runner == STORING_RUNNER:
+        dumped = _request_dumped(sent)
+        if with_skills:
+            dumped["config"] = shared(dumped["config"], "request_config_recorded_entry")
+        expect(name, dumped)
+    else:
+        assert_pinned_wire_differences(_as_stored(sent), _stored_request(expected(name)))
+    assert sent.content_list == [
         types.Content(role="user", parts=[types.Part(text=_QUESTION)]),
         types.Content(role="user", parts=[types.Part(text=_BRIEF)]),
     ]
-    (adk_tool,) = adk_request.generate_config.tools or []
-    assert [d.name for d in adk_tool.function_declarations or []] == [
+    (tool,) = sent.generate_config.tools or []
+    assert [d.name for d in tool.function_declarations or []] == [
         *(["get_skill"] if with_skills else []),
         PLANNER_ASK,
         PROPOSE_PLAN,
         "reject_plan",
     ]
-    thinking = adk_request.generate_config.thinking_config
+    thinking = sent.generate_config.thinking_config
     assert thinking is not None
     assert thinking.model_dump(mode="json", exclude_none=True) == {
         "thinking_level": "LOW",

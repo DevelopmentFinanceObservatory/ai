@@ -1,0 +1,176 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Show Zambia's ODA received and its external debt service in one table for each year from 2015 to 2022."
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Show Zambia's ODA received and its external debt service in one table for each year from 2015 to 2022.",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "source_spec_43878ebe498f66cecae7c1697d24abaa",
+        "description": "How the flow is counted.",
+        "options": [
+          "gross disbursements",
+          "net disbursements"
+        ],
+        "chosen": "gross disbursements",
+        "resolved_by": "planner_default",
+        "rationale": "Search elected gross disbursements for this source.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_43878ebe498f66cecae7c1697d24abaa",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "decision_ids": [
+          "source_spec_43878ebe498f66cecae7c1697d24abaa"
+        ],
+        "measure": "ODA received",
+        "entities": [
+          {
+            "name": "Zambia",
+            "role": "recipient"
+          },
+          {
+            "name": "official donors (DAC)",
+            "role": "donor"
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_43878ebe498f66cecae7c1697d24abaa",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "aggregate",
+        "id": "oda_total",
+        "decision_ids": [],
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "dataset",
+        "id": "debt_service",
+        "decision_ids": [],
+        "measure": "external debt service",
+        "entities": [
+          {
+            "name": "Zambia",
+            "role": "debtor"
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_23cca17b0de08940477d7e335d225896",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "join",
+        "id": "table",
+        "decision_ids": [],
+        "left_id": "oda_total",
+        "right_id": "debt_service"
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "One table of Zambia's ODA received and external debt service, each year 2015 to 2022"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "table"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}
