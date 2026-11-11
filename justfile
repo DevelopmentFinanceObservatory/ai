@@ -320,47 +320,6 @@ sync:
 # Never run in CI: these drive the real agent through the real model, so they
 # need a live credential. See evals/README.md.
 #
-# `google-adk[eval]`'s extras (pandas, tabulate, the judge-model plumbing)
-# aren't any service's dependency, so `uv run --with` pulls them in
-# ephemerally. The agent folders import `planner`, `translator` and `compiler`,
-# which `just sync` installs into the shared .venv -- run that first if the
-# import fails.
-
-PLANNER_AGENT    := "evals/agents/harness_planner_v2"
-PLANNER_SET      := "harness-planner-v2"
-PAIR_AGENT       := "evals/agents/harness_pair_v1"
-PAIR_SET         := "harness-pair-v1"
-EVAL_ADK         := 'uv run --with "google-adk[eval]"'
-
-# --config_file_path is not optional. Omitted, the CLI silently substitutes
-# ADK's hardcoded defaults instead of test_config.json's criteria.
-#
-# Score harness-planner-v2 from the CLI
-eval-planner: _check-env
-    {{EVAL_ADK}} adk eval {{PLANNER_AGENT}} {{PLANNER_SET}} \
-        --config_file_path {{PLANNER_AGENT}}/test_config.json \
-        --print_detailed_results
-
-# Score harness-pair-v1 -- the planner with its translate tool -- from the CLI
-eval-pair: _check-env
-    {{EVAL_ADK}} adk eval {{PAIR_AGENT}} {{PAIR_SET}} \
-        --config_file_path {{PAIR_AGENT}}/test_config.json \
-        --print_detailed_results
-
-# The UI takes the agents dir, not one agent folder, and finds eval sets by
-# scanning each agent folder for *.evalset.json.
-#
-# Its "Run evaluation" dialog cannot grade these eval sets: it offers only
-# tool_trajectory_avg_score and response_match_score, sends no match_type (so
-# trajectory matching falls back to EXACT), and cannot reach the rubric metrics.
-# A healthy agent scores ~0 through it. Score with the `eval-*` recipes above.
-#
-# Browse cases, tool traces, and past run results in the ADK web UI
-eval-web: _check-env
-    @echo "Eval UI → http://127.0.0.1:8000 (pick an agent, then the Eval tab)"
-    @echo "For reading runs. Score from the CLI -- not the Run evaluation dialog."
-    {{EVAL_ADK}} adk web evals/agents
-
 # The real workflow and planner seam run with scripted models, and every model
 # request is recorded and checked. Cases marked xfail hold a known gap (see
 # evals/studio/README.md). CI runs the same battery via

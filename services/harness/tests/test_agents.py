@@ -2,8 +2,7 @@
 
 Construction, plus one run through a real `Runner` for the rules ADK only
 enforces at run time. Whether the planner's model acts on the `translation`
-verdict `propose_plan` returns is a semantic judgement, which is what
-`harness-pair-v1` scores.
+verdict `propose_plan` returns is a semantic judgement, which no test here covers.
 """
 
 from __future__ import annotations

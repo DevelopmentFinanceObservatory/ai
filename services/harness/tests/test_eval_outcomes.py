@@ -37,18 +37,6 @@ the `action` the tools themselves recommend, and asserts that action names
 the referral kind and target the case expects, then calls `return_to_planner`
 with exactly that action to reach the outcome and check it the same way as a
 mapping case.
-
-`harness-pair-v1.evalset.json` states the `translation` a `propose_plan`
-answers the planner with, so its cases run the translation itself
-(`build_translate`) on the seeded plan, or, for the one case with none, on the plan its rubric
-describes.
-
-`harness-planner-v2.evalset.json` seeds no plan -- the live planner drafts
-its own -- and states its expectations on `propose_plan` and `reject_plan`
-instead. Those are driven the same way, through the real planner tools on a
-fake `ToolContext`, with the decisions and requirements of a seeded translator
-case standing in for what the model would draft: an accepted draft, version 2
-on a second proposal of the same question, a recorded rejection.
 """
 
 from __future__ import annotations
@@ -104,8 +92,6 @@ from .planner_tools import call_planner_tool  # noqa: E402
 from .translator.conftest import FakeCall  # noqa: E402
 
 _TRANSLATOR_DIR = REPO_ROOT / "evals" / "agents" / "harness_translator_v1"
-_PAIR_DIR = REPO_ROOT / "evals" / "agents" / "harness_pair_v1"
-_PLANNER_DIR = REPO_ROOT / "evals" / "agents" / "harness_planner_v2"
 
 
 def _cases(path: Path) -> dict[str, dict[str, Any]]:
@@ -114,8 +100,6 @@ def _cases(path: Path) -> dict[str, dict[str, Any]]:
 
 
 _TRANSLATOR_CASES = _cases(_TRANSLATOR_DIR / "harness-translator-v1.evalset.json")
-_PAIR_CASES = _cases(_PAIR_DIR / "harness-pair-v1.evalset.json")
-_PLANNER_CASES = _cases(_PLANNER_DIR / "harness-planner-v2.evalset.json")
 
 
 class FakeToolContext:
@@ -486,71 +470,6 @@ async def test_the_several_sources_referral_is_reachable() -> None:
     assert matches_subset(_expected_response(case)["response"], referred)
 
 
-async def test_the_pair_sets_translated_case_expected_outcome_is_reachable() -> None:
-    # `translates-before-inviting-approval` seeds no plan -- the live planner
-    # drafts its own -- so this translates the plan the case's own
-    # `pair-states-evidence-requirements` rubric describes: a dataset
-    # requirement naming Kenya with a period starting in 2015, fed by a
-    # calculation, each citing the decision that fixed it. It is the same
-    # shape as harness-translator-v1's own annual-total case.
-    case = _PAIR_CASES["translates-before-inviting-approval"]
-    plan = _plan_from(_TRANSLATOR_CASES["maps-an-annual-total-onto-aggregate"])
-
-    answer = await _translate(_context_holding(plan))
-
-    assert matches_subset(_expected_response(case)["response"], answer), answer
-
-
-async def test_the_pair_sets_unmeetable_case_expected_outcome_is_reachable() -> None:
-    case = _PAIR_CASES["takes-an-unmeetable-requirement-back-to-the-user"]
-
-    answer = await _translate(_context_holding(_plan_from(case)))
-
-    assert matches_subset(_expected_response(case)["response"], answer), answer
-
-
-def test_the_planner_sets_expected_outcomes_are_reachable() -> None:
-    # The planner set seeds no plan, so the decisions and requirements of a
-    # seeded translator case stand in for what the model drafts. One
-    # proposal is the first turn of every case; a second of the same
-    # question is the amend turn, which the case pins at version 2; a
-    # rejection is the reject turn.
-    plan = _plan_from(_TRANSLATOR_CASES["maps-an-annual-total-onto-aggregate"])
-    tools = {tool.name: tool for tool in planner_tool_specs()}
-    context = FakeToolContext()
-
-    def propose(amends_version: int | None = None) -> dict[str, Any]:
-        # A fresh context would be the first draft, but one context makes the
-        # second call a patch of the first (the amend turn), so that call has
-        # to state the version it patches -- the version the call before it
-        # answered with. A patch that restates the plan's own decisions and
-        # requirements by key leaves the plan exactly as the case seeded it.
-        return call_planner_tool(
-            tools["propose_plan"],
-            question=plan.question,
-            answer_mode=plan.answer_mode,
-            decisions=drafts(plan.decisions),
-            evidence_requirements=list(plan.evidence_requirements),
-            tool_context=context,
-            amends_version=amends_version,
-        )
-
-    first = propose()
-    amended = propose(amends_version=first["version"])
-    rejected = call_planner_tool(tools["reject_plan"], tool_context=context)
-
-    def expected(case_id: str, turn: int) -> dict[str, Any]:
-        return _expected_response(_PLANNER_CASES[case_id], turn)["response"]
-
-    assert first["outcome"] == "ok", first
-    assert matches_subset(expected("two-dataset-comparison", 0), first)
-    assert matches_subset(expected("amended-mid-execution-reversions", 0), first)
-    assert matches_subset(expected("amended-mid-execution-reversions", 1), amended)
-    assert matches_subset(expected("rejected-plan-blocks-execution", 0), first)
-    assert matches_subset(expected("rejected-plan-blocks-execution", 1), rejected)
-    assert matches_subset(expected("adversarial-execute-before-approval", 0), first)
-
-
 @pytest.mark.parametrize("case_id", sorted(_TRANSLATOR_CASES))
 def test_a_seeded_plan_is_one_propose_plan_records(case_id: str) -> None:
     # A seeded plan reaches the translator without passing `propose_plan`,
@@ -580,7 +499,7 @@ def test_plan_status_is_draft_for_every_seeded_case() -> None:
     # drive `discover_source`/`propose_operations` against has to be a
     # draft, or `current_draft` refuses it before any of the assertions
     # above get to run.
-    for case in {**_TRANSLATOR_CASES, **_PAIR_CASES}.values():
+    for case in _TRANSLATOR_CASES.values():
         seeded = case.get("session_input", {}).get("state", {}).get("planner:plan")
         if seeded is not None:
             assert Plan.model_validate_json(seeded).status is PlanStatus.DRAFT
