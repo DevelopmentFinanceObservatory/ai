@@ -2,8 +2,8 @@
 
 The text is built from fixed paragraphs, and `planner_instruction` chooses the
 ones the planner it is for carries: with or without a translator, a skill
-tool, and a turn question fixed by the harness. Both runners show the model the
-same instruction (`planner.agent.create_planner_agent`, `planner.pydantic_agent.planner_agent`).
+tool, and a turn question fixed by the harness. `planner.pydantic_agent.planner_agent`
+serves it to the model.
 """
 
 from __future__ import annotations

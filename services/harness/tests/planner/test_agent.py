@@ -55,18 +55,21 @@ from harness.graph.planning import planner_ask_interrupt
 from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_SEARCHES_KEY, store_search
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import card_questions, plan_words, shown_decisions
-from harness.planner_seam import _PLANNER_BRANCH, PlannerSeam, _reading_pin_sources
+from harness.planner_seam import (
+    _PLANNER_BRANCH,
+    PlannerSeam,
+    _reading_pin_sources,
+    end_run_when_ready,
+)
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.sentences import PlanWords, refusal_reason, refusal_sentence
 from harness.studio_state import _turn_identities
 from harness.tool_contracts import reading_facts
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import RecordedIdentity, SearchReading, _periods
-from planner import agent as planner_agent
 from planner import source_reads as planner_source_reads
 from planner import specs
 from planner import tools as planner_tools
-from planner.agent import end_run_when_ready
 from planner.call import CallSession, elected_spec_ids, prices_chosen
 from planner.declaration import FIELD_DESCRIBED_ENUMS, SHARED_FIELDS, compact_schema
 from planner.instruction import planner_instruction
@@ -330,9 +333,9 @@ class _FakeToolContext:
     `.state` (a plain, mutable mapping), `.session` (`.events` only),
     `.actions` (where `end_run_when_ready` ends the run), and the call's
     `.invocation_id`, `.branch` and `.function_call_id` (where `_ask_beside_ask`
-    finds the call among the session's events) are all `planner.agent`'s
-    tool functions use: none of them gates on a confirmation any more, so
-    none needs `.tool_confirmation`. A tool body that tried to read it would
+    finds the call among the session's events) are all the planner's tool
+    functions use: none of them gates on a confirmation, so none needs
+    `.tool_confirmation`. A tool body that tried to read it would
     raise `AttributeError` against this stand-in, which is exactly the
     regression the tests under "Submitting" rely on.
     """
@@ -981,10 +984,7 @@ def test_no_planner_code_names_the_transition_that_mints_pending_approval() -> N
     # its module docstring) -- a comparison, not a mint, so only a mention
     # outside a `Compare` counts against the invariant.
     tree = ast.parse(
-        "\n".join(
-            inspect.getsource(module)
-            for module in (planner_agent, planner_tools, planner_source_reads)
-        )
+        "\n".join(inspect.getsource(module) for module in (planner_tools, planner_source_reads))
     )
     parents: dict[ast.AST, ast.AST] = {
         child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)

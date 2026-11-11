@@ -217,7 +217,7 @@ SPEC_SEARCHED_STATE_KEY = "planner:spec_searched_at"
 # planner was shown this entry, keyed by spec_id in the order it was shown
 # (`pin_sources`). `harness.planner_seam` writes it from the search
 # readings its first message renders, one entry per spec_id they name.
-# `propose_plan` (`planner.agent`) reads a settled entry's measure choice and
+# `propose_plan` (`planner.tools`) reads a settled entry's measure choice and
 # the identity its block carries, and `translator.discovery.discover_source`
 # builds a pinned requirement's source from an entry with no `search` call.
 PIN_SOURCES_STATE_KEY = "planner:pin_sources"
@@ -4871,8 +4871,8 @@ class Plan(StrictModel):
     def reject(self) -> Plan:
         """Return a new `Plan` marked `REJECTED`.
 
-        Nothing in this plan may run afterwards. `planner.agent`'s
-        `declare_ready` checks the status and refuses. The planner's own tools
+        Nothing in this plan may run afterwards. `planner.tools.declare_ready`
+        checks the status and refuses. The planner's own tools
         stay callable, so the user can ask for a revision.
 
         Raises:

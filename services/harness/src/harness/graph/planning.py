@@ -162,8 +162,9 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         the `await` returns, a pause on the planner's ask included, which
         this node yields after them. A pick's replan is the one exception:
         Stop has to reach it while it runs, so `_unless_stopped` runs it as
-        a task. A task copies the context it starts in, so the seam's
-        `_active_call` and `ctx.run_node` read the same values there.
+        a task. A task copies the context it starts in, so the context
+        variables the seam sets and `ctx.run_node` reads hold the same values
+        there.
         """
         raw = ctx.state.get("plan")
         question = ctx.state.get(ORCHESTRATOR_BRIEF_KEY, "")

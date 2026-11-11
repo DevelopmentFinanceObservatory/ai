@@ -18,10 +18,8 @@ from unittest import mock
 from compiler.surface import FixtureSurface, ToolSurface
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.flows.llm_flows import functions as adk_functions
-from google.adk.models import Gemini
 from harness.planner_seam import PlannerSeam
 from harness.settings import Settings
-from harness.turn_budget import BoundedGemini
 from planner.settings import AgentSettings
 from planner.tool_spec import ToolSpec
 from translator.tool import Translate, build_translate
@@ -60,23 +58,17 @@ def seam_on(
     translate: Translate | None = None,
     tools: Tools | None = None,
 ) -> PlannerSeam:
-    """The seam on `runner` over `surface` (an empty `FixtureSurface` by default),
-    its model calls answered by `scripted`, serving the planner's tools as
-    `tools` changes them. `bounded` keeps the ADK planner's model to the turn's
-    budget, as the served planner's is. The Pydantic AI planner's model always
-    keeps to it."""
+    """The seam over `surface` (an empty `FixtureSurface` by default), its model
+    calls answered by `scripted`, serving the planner's tools as `tools` changes
+    them. `runner` and `bounded` are not read: the planner's model always keeps
+    to the turn's budget."""
+    del runner, bounded
     surface = surface if surface is not None else FixtureSurface(schemas=[])
     translate = translate if translate is not None else build_translate(surface=surface)
     specs = seam_specs(surface=surface, translate=translate)
-    settings = Settings(planner_runner=runner)
     served = tools(specs) if tools is not None else specs
-    if runner == "adk":
-        model = (BoundedGemini if bounded else Gemini)(model=MODEL, client=scripted.client)
-        return PlannerSeam(
-            settings=settings, surface=surface, translate=translate, specs=served, model=model
-        )
     return PlannerSeam(
-        settings=settings,
+        settings=Settings(),
         surface=surface,
         translate=translate,
         specs=served,

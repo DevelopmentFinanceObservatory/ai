@@ -5,9 +5,8 @@ a model or an upstream would answer:
 
 - the orchestrator agent's model answers from a script of tool calls and
   text, one entry per model call, across every turn of a case;
-- the planner is the real `harness.planner_seam.PlannerSeam`, on the
-  planner `Settings.planner_runner` names, its model calls answered by a
-  scripted google-genai client (`harness.scripted.scripted_client`). Its
+- the planner is the real `harness.planner_seam.PlannerSeam`, its model
+  calls answered by a scripted google-genai client (`harness.scripted.scripted_client`). Its
   model either proposes the canned plan `harness.scripted_plan` builds,
   through a `propose_plan` that declares the plan on record ready
   (`harness.scripted.use_compiled_proposals`), so the seam renders its real

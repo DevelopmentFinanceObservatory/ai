@@ -390,7 +390,7 @@ def create_app(
     # MCP to the mounts below over loopback; the agents build their genai
     # clients lazily, so construction here stays keyless. A missing
     # GOOGLE_API_KEY fails the first turn, visibly, as a stream-fatal error
-    # frame. The planner node is `planner.agent`'s planner with
+    # frame. The planner node is the planner with
     # `translator.tool.build_translate`'s translation attached to
     # `propose_plan`, behind `harness.planner_seam.PlannerSeam`.
     # The server allows exactly the origins listed in STUDIO_CORS_ORIGINS (a

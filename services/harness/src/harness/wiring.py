@@ -26,7 +26,7 @@ def build_planner(
     surface: ToolSurface,
     prefix_cache: PrefixCache | None = None,
 ) -> PlannerSeam:
-    """The planner seam: `planner.agent`'s planner with the translation from
+    """The planner seam: the planner with the translation from
     `translator.tool.build_translate` attached to `propose_plan`, adapted by
     `harness.planner_seam.PlannerSeam`. `surface` is the tool surface the
     translation discovers on, the compiler checks against, and the planner's

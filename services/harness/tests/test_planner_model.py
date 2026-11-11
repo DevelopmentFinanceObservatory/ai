@@ -21,7 +21,7 @@ from google.genai import errors, types
 from harness.planner_model import (
     UnexpectedRequestFormError,
     Usage,
-    _in_adk_planner_form,
+    _in_canonical_form,
     planner_model,
 )
 from harness.prefix_cache import PrefixCache, PrefixCachedGemini
@@ -519,7 +519,7 @@ def _expected_config(**overrides: Any) -> types.GenerateContentConfig:
 def test_the_adk_form_keeps_a_parameters_schema_that_is_not_the_empty_object(
     schema: dict[str, Any],
 ) -> None:
-    rewritten = _in_adk_planner_form(_expected_config(tools=[_declared(schema)]))
+    rewritten = _in_canonical_form(_expected_config(tools=[_declared(schema)]))
 
     assert rewritten.tools == [_declared(schema)]
 
@@ -578,4 +578,4 @@ def test_the_adk_form_refuses_any_value_it_does_not_expect(field: str, value: An
     config = _expected_config(**{field: value})
 
     with pytest.raises(UnexpectedRequestFormError):
-        _in_adk_planner_form(config)
+        _in_canonical_form(config)

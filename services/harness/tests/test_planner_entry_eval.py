@@ -519,7 +519,6 @@ def test_a_refusal_the_entry_ended_on_wins_over_an_ask_left_on_record(
         error=None,
         timed_out=False,
         wall_s=0.0,
-        planner_runner="pydantic_ai",
     )
 
     assert entry.stop_reason(run) == stop
@@ -621,7 +620,7 @@ async def test_a_request_sends_the_instruction_as_a_string_and_every_declaration
 ):
     """The planner's request reaches the eval's probe with the instruction as a
     string and every declaration in one `Tool`
-    (`harness.planner_model._in_adk_planner_form`), so `ModelRequest` reads the
+    (`harness.planner_model._in_canonical_form`), so `ModelRequest` reads the
     instruction and every declaration from it."""
     entry.quiet_logs()
     task = _task(_PLAIN)

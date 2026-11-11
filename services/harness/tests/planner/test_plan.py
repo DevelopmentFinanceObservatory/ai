@@ -5349,7 +5349,7 @@ def test_a_cut_question_is_a_valid_plan_question(
 
 
 def _rolling_error(exc: ValidationError) -> RollingPlanError:
-    """The `RollingPlanError` behind `exc`, as `planner.agent` reads it."""
+    """The `RollingPlanError` behind `exc`, as `submission.service` reads it."""
     (cause,) = [
         error["ctx"]["error"]
         for error in exc.errors()

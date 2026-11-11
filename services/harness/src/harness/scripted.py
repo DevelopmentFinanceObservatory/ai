@@ -7,8 +7,8 @@ plan's steps) and `scripted_publish_result` (the completion gate's
 publisher). Every frame is the one Kenyan life-expectancy series.
 
 A real planner runs on a scripted model through `scripted_client`, a
-google-genai client whose streamed calls answer from a script. The ADK
-planner's `Gemini` and the Pydantic AI planner both take that client.
+google-genai client whose streamed calls answer from a script, which
+`harness.planner_seam.PlannerSeam` takes as its `client`.
 `use_compiled_proposals` gives the planner's tools a `propose_plan` that
 declares the plan already on record ready, for a script that drives no
 translation.
@@ -286,8 +286,8 @@ class ModelRequest:
 
     @property
     def system_text(self) -> str:
-        """The system instruction's text, in whichever shape it was sent. Both
-        planners send a string (`harness.planner_model._in_adk_planner_form`)."""
+        """The system instruction's text, in whichever shape it was sent. The
+        planner sends a string (`harness.planner_model._in_canonical_form`)."""
         return instruction_text(self.config.system_instruction)
 
 
@@ -322,10 +322,9 @@ def scripted_client(answer: ScriptedAnswer) -> Client:
 
     The answer streams as one chunk, a model turn of that one part finished with
     `STOP` and no usage. Everything else a model class reads off a client is a
-    real `Client`'s. The ADK planner's model takes it as `Gemini(client=...)`
-    and the Pydantic AI planner as `harness.planner_seam.PlannerSeam`'s
-    `client`, so one script drives either planner over the requests each puts
-    on the wire.
+    real `Client`'s, so the planner takes it as `harness.planner_seam.PlannerSeam`'s
+    `client`, and an ADK model as `Gemini(client=...)`, each driven by one
+    script over the requests it puts on the wire.
     """
     client = Client(api_key="scripted")
 

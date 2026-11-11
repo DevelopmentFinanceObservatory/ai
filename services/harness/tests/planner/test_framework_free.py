@@ -1,15 +1,16 @@
-"""The planner's call record, specs, bodies, run, submission chain and
-translator import no ADK.
+"""Every planner module but its session reader, a planner run's bookkeeping,
+the submission chain and the translator import no ADK.
 
 Each module's source is parsed. The check reads each module's own imports, so a
 module can load ADK through a module it imports. `planner/tools.py` holds the
 planner's tool bodies over a `PlannerCall`, `planner/source_reads.py` the reads
 they make and `planner/skills.py` the skill reads. `planner/specs.py` declares
 each tool as a `planner/tool_spec.py` `ToolSpec`, whose declaration
-`planner/declaration.py` compacts. `planner/agent.py` serves the specs to ADK,
-and `planner/pydantic_agent.py` to Pydantic AI. `harness/planner_run.py` holds a
-planner run's bookkeeping, which `harness/planner_seam.py` drives from ADK's
-callbacks.
+`planner/declaration.py` compacts, and `planner/pydantic_agent.py` serves the
+specs to Pydantic AI. `planner/session.py` reads an ADK session for a tool
+call (`SessionCall`), and is the one planner module left out.
+`harness/planner_run.py` holds a planner run's bookkeeping, which
+`harness/planner_node.py` drives from the planner's model hooks.
 """
 
 from __future__ import annotations
@@ -24,15 +25,11 @@ _SRC = Path(__file__).parents[2] / "src"
 _MODULES = sorted(
     [
         "harness/planner_run.py",
-        "planner/call.py",
-        "planner/declaration.py",
-        "planner/instruction.py",
-        "planner/pydantic_agent.py",
-        "planner/skills.py",
-        "planner/source_reads.py",
-        "planner/specs.py",
-        "planner/tool_spec.py",
-        "planner/tools.py",
+        *(
+            path.relative_to(_SRC).as_posix()
+            for path in (_SRC / "planner").glob("*.py")
+            if path.name != "session.py"
+        ),
         *(path.relative_to(_SRC).as_posix() for path in (_SRC / "submission").glob("*.py")),
         *(path.relative_to(_SRC).as_posix() for path in (_SRC / "translator").glob("*.py")),
     ]

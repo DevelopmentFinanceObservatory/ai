@@ -19,8 +19,8 @@ from typing import Annotated, Any
 
 import pytest
 from google.adk.tools.function_tool import FunctionTool
+from harness.planner_model import refuse_vertex_ai
 from harness.scripted import use_compiled_proposals
-from planner.agent import refuse_vertex_ai
 from planner.declaration import compact_schema
 from planner.plan import AskAnswer, Decline
 from planner.specs import PROPOSE_PLAN, planner_tool_specs, skill_tool_spec
@@ -169,9 +169,9 @@ def test_the_planner_runs_on_the_developer_api_and_refuses_vertex_ai(
 
     if refused:
         with pytest.raises(RuntimeError):
-            refuse_vertex_ai(model_name, runner="pydantic_ai")
+            refuse_vertex_ai(model_name)
     else:
-        refuse_vertex_ai(model_name, runner="pydantic_ai")
+        refuse_vertex_ai(model_name)
 
 
 # --- Conversion ----------------------------------------------------------------------

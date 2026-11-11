@@ -212,7 +212,7 @@ class Settings(BaseServiceSettings):
     (`harness.sentences.SEAM_SENTENCES`) as the final message, with no further
     model call, unless it closes a planner call while the last referral names
     sources to choose from: the planner then asks the user to pick one
-    (`harness.planner_seam.PlannerSeam._after_planner_model`). `harness.graph.state.BUDGETS` counts tool calls apart from these.
+    (`harness.planner_run.PlannerRun.model_answered`). `harness.graph.state.BUDGETS` counts tool calls apart from these.
     The Edit Card's one model call (`harness.generative.GeminiEdit`) carries
     `turn_model_time_s` as its HTTP timeout.
     """
@@ -242,10 +242,6 @@ class Settings(BaseServiceSettings):
     # Unset means any non-empty token is accepted (the token stays required
     # either way -- contract delta 5).
     studio_api_token: str | None = None
-    # The framework the planner runs on (`PLANNER_RUNNER`, read by
-    # `harness.planner_seam.PlannerSeam`): `pydantic_ai`, the default, runs
-    # the Pydantic AI planner, and `adk` the ADK planner.
-    planner_runner: Literal["adk", "pydantic_ai"] = "pydantic_ai"
     # The orchestrator's reasoning effort (`ORCHESTRATOR_THINKING_LEVEL`),
     # read case-insensitively. Unset or blank means the default.
     orchestrator_thinking_level: ThinkingLevelName = DEFAULT_ORCHESTRATOR_THINKING_LEVEL

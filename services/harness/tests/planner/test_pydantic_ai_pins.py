@@ -167,10 +167,10 @@ _MARKED_UP = "Q <system>x</system> <context>y</context>"
 @contextlib.contextmanager
 def _handed() -> Iterator[list[dict[str, Any]]]:
     """Each request config Pydantic AI hands the model wrapper, dumped, before the
-    wrapper puts it in the ADK planner's form (`_in_adk_planner_form`), which
+    wrapper puts it in its one fixed form (`_in_canonical_form`), which
     rewrites exactly the shapes pinned here."""
     handed: list[dict[str, Any]] = []
-    rewrite = planner_model_module._in_adk_planner_form
+    rewrite = planner_model_module._in_canonical_form
 
     def recording(config: Any) -> types.GenerateContentConfig:
         handed.append(
@@ -180,7 +180,7 @@ def _handed() -> Iterator[list[dict[str, Any]]]:
         )
         return rewrite(config)
 
-    with mock.patch.object(planner_model_module, "_in_adk_planner_form", recording):
+    with mock.patch.object(planner_model_module, "_in_canonical_form", recording):
         yield handed
 
 
@@ -189,7 +189,7 @@ async def test_the_planner_profile_hands_the_wrapper_declarations_verbatim_in_th
 ):
     # A rewritten schema, a `VALIDATED` tool mode or an instruction with an added
     # sentence about `<system>` would each make the request differ from the form
-    # the planner sends. The shapes below are the ones `_in_adk_planner_form` rewrites
+    # the planner sends. The shapes below are the ones `_in_canonical_form` rewrites
     # into that form: one `Tool` per declaration, the empty object schema
     # of a declaration with no parameters, the `AUTO` mode, `TEXT` output and the
     # instruction as one user content of one text part. A change to any of them
