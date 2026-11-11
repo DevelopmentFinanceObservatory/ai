@@ -2003,15 +2003,16 @@ def _amendment_version_invalid(
             f"A plan is already recorded (version {existing.version}), so this call has "
             "to say which it is: pass "
             f"`amends_version={existing.version}` to patch that plan, or "
-            "`starts_new_plan=true` to begin a plan of its own for a different question. "
-            "A patch states only what changes; everything it does not mention is carried "
-            "forward.",
+            "`starts_new_plan=true` if the user's reply asks a different question, which "
+            "ends the turn and records no plan for it. A patch states only what changes; "
+            "everything it does not mention is carried forward.",
         )
     if amends_version != existing.version:
         return _invalid_plan(
             f"This call amends version {amends_version}, but version {existing.version} is "
             f"the one recorded. Pass `amends_version={existing.version}`, or "
-            "`starts_new_plan=true` to begin a plan of its own for a different question.",
+            "`starts_new_plan=true` if the user's reply asks a different question, which "
+            "ends the turn and records no plan for it.",
         )
     return None
 
