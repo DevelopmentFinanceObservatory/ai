@@ -380,7 +380,7 @@ async def test_a_dropped_thought_summary_reaches_a_span_only_with_span_content(
     capture: str | None,
     request: pytest.FixtureRequest,
 ) -> None:
-    """An unsigned thought summary, which the planner keeps of no response, is in
+    """An unsigned thought summary, which the planner keeps from no response, is in
     its generation's output as a thinking part when message content is on the
     spans. With content kept off the spans (in events only, off, or the variable
     unset) no span carries it."""

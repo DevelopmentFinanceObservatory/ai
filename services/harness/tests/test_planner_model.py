@@ -411,7 +411,7 @@ async def test_a_503_is_retried_by_google_genai_before_the_planner_sees_it(
 ) -> None:
     # The fault goes in under google-genai's retry loop, so the attempts counted
     # are the ones the SDK makes. A client built without retry options makes
-    # one, so the retries are the ones each request carries.
+    # one attempt, so the retries are the ones each request carries.
     sent: list[dict[str, Any]] = []
 
     async def answer(

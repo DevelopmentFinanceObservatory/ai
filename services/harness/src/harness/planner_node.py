@@ -114,8 +114,8 @@ def planner_node(
         the invocation's counter (`InvocationContext.increment_llm_call_count`),
         with the orchestrator's and every other planner run's. A turn put in
         the model's place is not counted, as ADK counts no response a callback
-        gives. ADK raises
-        `LlmCallsLimitExceededError` on the call past `RunConfig.max_llm_calls`.
+        gives. ADK raises `LlmCallsLimitExceededError` on the call past
+        `RunConfig.max_llm_calls`.
         A question holding a part this planner does not send
         (`planner.pydantic_agent.UnsentQuestionPartError`) ends the run before
         any request on an `internal_error` refusal (`run.refused`). The seam

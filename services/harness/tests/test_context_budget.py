@@ -210,7 +210,7 @@ PLANNER_CONTENTS_CEILING = 1_220
 # The `get_skill` answer in the planner's `contents`, bucketed as
 # `functionResponse:get_skill`: one full page of a skill file
 # (`data_mcp.skills_client.PAGE_CHARS`, 32,000 chars) plus the closing line
-# naming the next call, as the planner's request serialises it. Measured 32,676 on a page of
+# naming the next call, as the request serialises it. Measured 32,676 on a page of
 # short Markdown lines, where escaping each line break adds a char. This bounds
 # one call. Nothing caps how many skill pages one planner entry reads besides
 # the seam's event limit and entry deadline.
@@ -1760,7 +1760,7 @@ BOUNDED_CONTEXT_CONTENTS_CEILING = (
 def test_the_bounded_production_context_stays_under_its_derived_ceilings(
     records: list[dict[str, Any]],
 ) -> None:
-    """A brief carrying every bounded input at its maximum, as the planner's request carries it.
+    """A brief carrying every bounded input at its maximum, as the planner sends it.
 
     The brief is held to `BOUNDED_CONTEXT_BRIEF_CEILING`, and the planner's
     whole `contents` to the ceiling that adds the realistic history to it. The
@@ -1801,7 +1801,8 @@ def test_the_bounded_context_ceilings_fail_when_the_brief_grows() -> None:
 
 
 def test_the_propose_plan_declaration_carries_the_plan_limits(measured: Any) -> None:
-    """The declaration the planner sends the model states every limit, in `maxLength` and `maxItems`.
+    """The declaration the planner sends the model states every limit, in
+    `maxLength` and `maxItems`.
 
     The limits live on the schema alone, and no field description restates
     one, so the model reads them from here. The declaration is read off the

@@ -4,7 +4,7 @@ Fabricated `Invocation`s, model-free: this pins the metric's own matching
 logic (subset comparison, `sources` in any order, exclusivity between a
 proposal and a referral and between a rejection and a proposal that
 declared its plan ready, "last response with the stated outcome wins") independently
-of whether the eval sets that configure it are internally consistent;
+of whether the eval sets that configure it are internally consistent.
 `test_eval_outcomes.py` proves each case's expected outcome is reachable.
 
 `evals/agents` is not on `sys.path` for a normal `pytest` run -- `adk eval`
@@ -436,7 +436,7 @@ def test_a_blocked_declaration_alongside_the_expected_rejection_does_not_hedge()
 
 def test_a_response_for_a_tool_the_metric_does_not_score_states_no_expectation() -> None:
     # A `tool_responses` entry naming `discover_source` is not an expectation
-    # this metric can grade: the turn scores `None`.
+    # this metric can grade. The turn scores `None`.
     expected = [
         _invocation(
             genai_types.FunctionResponse(name="discover_source", response={"outcome": "ok"})

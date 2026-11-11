@@ -1,4 +1,4 @@
-"""The events the Pydantic AI planner stores equal the conversation's stored expectation.
+"""The events the planner stores equal the conversation's stored expectation.
 
 Each conversation runs on one script of a scripted google-genai client, through
 `harness.planner_seam.PlannerSeam` as `tests.test_planner_node` runs it. The

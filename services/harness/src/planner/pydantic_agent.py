@@ -67,8 +67,8 @@ _NO_REQUEST_LIMIT = UsageLimits(request_limit=None)
 # Pydantic AI charges a call to a tool the planner lacks against the tool retry
 # budget and ends the run once it is spent. The planner answers every such call
 # (`tool_not_found`) and goes on, so the budget is lifted and the turn budget's
-# call cap ends a run that keeps making them. The planner's own tools take their arguments
-# unvalidated, so none asks for a retry.
+# call cap ends a run that keeps making them. The planner's own tools take
+# their arguments unvalidated, so none asks for a retry.
 _UNLIMITED_RETRIES = sys.maxsize
 
 # Carried by the request holding the user's message. Pydantic AI merges
@@ -239,12 +239,12 @@ def planner_agent(
 def _as_replayed(
     tools: Sequence[str],
 ) -> Callable[[list[ModelMessage]], Awaitable[list[ModelMessage]]]:
-    """A history processor that puts the run's messages in the form the
-    planner replays them: each call to a tool not in `tools` answered with
+    """A history processor that puts the run's messages in the form the session
+    keeps them: each call to a tool not in `tools` answered with
     `tool_not_found`, in place of the retry Pydantic AI answers it with, and
-    each response less its unsigned thought summaries (`_without_unsigned_thoughts`).
-    It runs before every model request, and Pydantic AI keeps what it returns
-    as the run's messages."""
+    each response less its unsigned thought summaries
+    (`_without_unsigned_thoughts`). It runs before every model request, and
+    Pydantic AI keeps what it returns as the run's messages."""
 
     async def process(messages: list[ModelMessage]) -> list[ModelMessage]:
         return [
@@ -289,8 +289,8 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
     It runs the spec's body (`serve_tool`) over the call's `PlannerCall`, whose
     state is the view the response's calls write through. An answer that is
     no dict is wrapped under `result`, as ADK wraps one. A body that raises is
-    answered with `tool_failed`'s answer, and a cancellation propagates. An answer of the
-    body's holding an `error` key, the refusal of a call missing a required
+    answered with `tool_failed`'s answer, and a cancellation propagates. An
+    answer of the body's holding an `error` key, the refusal of a call missing a required
     argument (`planner.tool_spec.missing_arguments`), marks the call's span
     failed (`planner.tool_spec.serve_tool`). Either answer goes to
     `tool_answered` as the call finishes, and what that raises fails the run.
@@ -323,8 +323,8 @@ async def run_planner(
     """Run the planner once on the user's `question` and `brief`, yielding as it goes.
 
     The run's first request holds `question`, then `brief`, as two user
-    contents, or `brief` alone for a turn with no question. A question given as a
-    `Content` is sent with its parts as the user sent them
+    contents, or `brief` alone for a turn with no question. A question given as
+    a `Content` is sent with its parts as the user sent them
     (`_question_prompt`). Each model response is yielded as a
     `PlannerResponse` once received, before its calls run. Once every call
     has answered, their answers are yielded as one `PlannerAnswers`, before
@@ -336,11 +336,10 @@ async def run_planner(
 
     A response Pydantic AI refuses (`UnexpectedModelBehavior`, as for a stream
     with no chunk or a blocked prompt) ends the run, as a response with no tool
-    call does, and raises nothing. A blocked prompt's
-    response is yielded first, with no parts. Any other exception is raised. A
-    run that ends either way while a response's calls run yields none of their
-    answers. Closing the iterator closes the run (`Agent.iter`) and any
-    stream it holds open.
+    call does, and raises nothing. A blocked prompt's response is yielded
+    first, with no parts. Any other exception is raised. A run that ends either
+    way while a response's calls run yields none of their answers. Closing the
+    iterator closes the run (`Agent.iter`) and any stream it holds open.
 
     `deps` holds the session's state, how a tool call reads it, and the callbacks
     (`PlannerDeps`). `model` is the model the run calls, or None for the

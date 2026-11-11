@@ -2,8 +2,8 @@
 
 The text is built from fixed paragraphs, and `planner_instruction` chooses the
 ones the planner it is for carries: with or without a translator, a skill
-tool, and a turn question fixed by the harness. `planner.pydantic_agent.planner_agent`
-serves it to the model.
+tool, and a turn question fixed by the harness.
+`planner.pydantic_agent.planner_agent` serves it to the model.
 """
 
 from __future__ import annotations
@@ -229,10 +229,10 @@ _PLANNING = (
 
 # What each `propose_plan` call states about which plan it means. Held apart
 # from `_PLANNING` because it is the one paragraph `question_fixed` rewrites:
-# standalone and `harness_pair_v1` keep `_VERSIONING_FREE`, where a restart is
-# a normal way to begin a second plan; `harness.planner_seam` builds with
-# `question_fixed=True`, where the orchestrator's brief fixes the turn's
-# question. What each argument does is on the argument.
+# `question_fixed=False` selects `_VERSIONING_FREE`, where a restart is a
+# normal way to begin a second plan; `harness.planner_seam.PlannerSeam`
+# passes `question_fixed=True`, where the orchestrator's brief fixes the
+# turn's question. What each argument does is on the argument.
 _VERSIONING_FREE = (
     "Call `propose_plan` once with the complete first draft, and again "
     "whenever the user asks for a change. Once a plan is recorded, decide "
@@ -266,8 +266,8 @@ _SKILLS = (
 
 # What to do once a plan is recorded, when a translator is attached to carry it
 # out and `propose_plan` answers with its verdict under `translation`. Held
-# apart because the planner is also built standalone -- its own eval set scores
-# it that way -- and its `propose_plan` answers with no translation to read.
+# apart because `PlannerSeam` passes `has_translator=True`; with `False` the
+# agent's `propose_plan` answers with no translation to read.
 _TRANSLATING = (
     "`source_name_ambiguous` means Search could not choose which "
     "publisher or table a source wording names. The user is asked which "
@@ -396,11 +396,11 @@ def planner_instruction(
     lacks, sends the model after something that is not there.
 
     `question_fixed` selects which paragraph explains `starts_new_plan`:
-    `_VERSIONING_FREE` where a restart begins a second plan of its own
-    (standalone, and `harness_pair_v1`'s multi-turn session), or
-    `_VERSIONING_FIXED`, where `harness.planner_seam` holds the turn's
-    question and a restart is how the model tells it the user asked a
-    different one. False, the default, selects `_VERSIONING_FREE`.
+    `_VERSIONING_FREE` where a restart begins a second plan of its own, or
+    `_VERSIONING_FIXED`, where the turn's question is held and a restart is
+    how the model tells it the user asked a different one.
+    `harness.planner_seam.PlannerSeam` passes True. False, the default,
+    selects `_VERSIONING_FREE`.
     """
     return (
         _PLANNING

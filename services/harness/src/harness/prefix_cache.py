@@ -11,7 +11,8 @@ request as before.
 
 `harness.server.create_app` builds one `PrefixCache` per process and hands it
 to the planner and the orchestrator model constructors
-(`harness.planner_model.planner_model`, `orchestrator.agent.create_orchestrator_agent`).
+(`harness.planner_model.planner_model`,
+`orchestrator.agent.create_orchestrator_agent`).
 Each Cloud Run instance creates its own cache per prefix, once per
 `CACHE_TTL_S`. A changed prompt or model is a new key, and the old cache
 expires on its TTL.

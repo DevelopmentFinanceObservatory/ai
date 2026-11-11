@@ -212,7 +212,8 @@ class Settings(BaseServiceSettings):
     (`harness.sentences.SEAM_SENTENCES`) as the final message, with no further
     model call, unless it closes a planner call while the last referral names
     sources to choose from: the planner then asks the user to pick one
-    (`harness.planner_run.PlannerRun.model_answered`). `harness.graph.state.BUDGETS` counts tool calls apart from these.
+    (`harness.planner_run.PlannerRun.model_answered`).
+    `harness.graph.state.BUDGETS` counts tool calls apart from these.
     The Edit Card's one model call (`harness.generative.GeminiEdit`) carries
     `turn_model_time_s` as its HTTP timeout.
     """

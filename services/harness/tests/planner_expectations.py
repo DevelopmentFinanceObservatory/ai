@@ -1,6 +1,6 @@
-"""Stored expectations for the tests that run one planner script and check what it produced.
+"""Stored expectations for the tests that run one planner script and check its output.
 
-Each such test runs the Pydantic AI planner and checks what the run produced
+Each test runs the Pydantic AI planner and checks what the run produced
 against one JSON file, `fixtures/planner_runs/<name>.json`, named for the test
 module, the test and its parameters (`expectation_name`).
 
@@ -182,8 +182,8 @@ def assert_json_equal(produced: Any, stored: Any, *, name: str) -> None:
 def expect(name: str, value: Any) -> None:
     """Assert that `value` equals the stored expectation `name`.
 
-    With `PLANNER_EXPECTATIONS=write`, write `value` as the file instead, and fail
-    when that, or a `shared` value written for it, changed a file.
+    With `PLANNER_EXPECTATIONS=write`, write `value` to the file, and fail when
+    that, or a `shared` value written for it, changed a file.
     """
     produced = as_json(value)
     path = PLANNER_RUNS / f"{name}.json"

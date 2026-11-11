@@ -487,7 +487,7 @@ def user_spoke_since_recorded(call: PlannerCall, version: int) -> bool:
     (`_transient_retry` answers a bare retry so) and moves no mark. After the mark, the user
     speaks with an ask's response they answered (`_is_answer`: a pick, free text),
     an amendment of the approval card (`_is_amendment`), or a message of their own
-    (a `message` step), as the ADK eval runner sends a case's later messages into one session. A
+    (a `message` step). A
     refusal, a skip, a referral and the planner seam's own messages are not.
 
     `harness.studio_state.ConversationState.session_id` opens a new ADK

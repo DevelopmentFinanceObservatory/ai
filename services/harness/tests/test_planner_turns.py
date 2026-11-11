@@ -61,7 +61,7 @@ from planner.settings import AgentSettings
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
-from planner.tools import EndRun
+from planner.tools import PENDING_ASK_STATE_KEY, EndRun
 from translator.tool import build_translate
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
@@ -494,6 +494,8 @@ async def test_a_session_the_adk_planner_paused_on_an_ask_resumes_to_the_plan(
         "response_calls": [[PROPOSE_PLAN, "p1"]],
     }
     assert state[_ELECTED_KEY] == elected
+    # The planner-ask recording holds the ask it paused on; the answer clears it.
+    assert state.get(PENDING_ASK_STATE_KEY) is None
     (request,) = scripted.requests
     brief = _brief_follows_the_question(request)
     assert _ASKED["message"] in brief

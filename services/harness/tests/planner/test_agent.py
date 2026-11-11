@@ -14806,9 +14806,9 @@ def test_planner_instruction_carries_no_sentinel_range() -> None:
 
 
 def test_only_a_planner_with_a_translator_is_told_to_read_a_translation() -> None:
-    # The standalone planner is what this package's own eval set scores, and
-    # its `propose_plan` answers with no `translation`. Neither instruction
-    # names a `translate` tool: translation is no tool of its own.
+    # `harness.planner_seam.PlannerSeam` passes `has_translator=True`. Without
+    # a translator `propose_plan` answers with no `translation`. Neither
+    # instruction names a `translate` tool: translation is no tool of its own.
     standalone = planner_instruction(has_translator=False)
     paired = planner_instruction(has_translator=True)
 

@@ -184,8 +184,8 @@ OUTCOME_OF: Mapping[ReferralKind, Outcome] = {
 # The kinds that hand a requirement back because what it asks for cannot be done
 # or names a source that could be several, so what to change is the user's to
 # choose. `planner.tools.declare_ready` holds a plan over one of these until
-# the user has answered, and `harness.planner_seam` asks the user itself when one carries
-# candidates to pick from.
+# the user has answered, and `harness.planner_seam` asks the user itself when
+# one carries candidates to pick from.
 USER_DECIDES = frozenset(
     {
         ReferralKind.REQUIREMENT_UNMEETABLE,

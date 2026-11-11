@@ -16,8 +16,8 @@ each of the task's payloads makes. `run_entry` replays them through production c
   holds those spec blocks as `harness.studio` holds a turn's
   (`planner.plan.current_recorded_identity`), and hand the brief to the real
   `PlannerSeam`, which renders the planner's first message from that state and runs
-  the planner, with production's instruction, tools and callbacks, each request under the
-  `TurnBudget` a served request gets (`harness.turn_budget`).
+  the planner, with production's instruction and tools, each request
+  under the `TurnBudget` a served request gets (`harness.turn_budget`).
 
 Two edges are replaced. The planner's `get_skill` reads the recording through
 `RecordedSurface`. The seam's translate step is the eval's own,
@@ -705,9 +705,9 @@ class ModelRequest:
     """One request the planner's model client is sent, in google-genai's types.
 
     The planner sends the system instruction as a string and every declaration in
-    one `Tool` (`harness.planner_model`).
-    `system_text` and `declarations` read any shape google-genai takes, so an
-    edit reads a request the same way whichever form it arrives in.
+    one `Tool` (`harness.planner_model`). `system_text` and `declarations` read
+    any shape google-genai takes, so an edit reads a request the same way
+    whichever form it arrives in.
     """
 
     model: str
@@ -761,8 +761,9 @@ class Probe:
     model client was sent, each model call, with its tokens and latency once the whole
     answer arrived, and what `translator` answered for the plan when one is set.
 
-    The planner reaches the model only through the client `client` returns, so a turn the seam or the turn budget answers in the model's place is no
-    call. A call stays open from its first send until a whole answer arrives or the
+    The planner reaches the model only through the client `client` returns, so a
+    turn the seam or the turn budget answers in the model's place is no call. A
+    call stays open from its first send until a whole answer arrives or the
     entry's next request starts (`next_request`). A send while one is open is that call
     sent again (a first-chunk resend, or a resend after the prefix cache was found
     gone, at open or while its stream was read), so it is one call, timed from its
@@ -984,8 +985,8 @@ def live_client() -> Client:
 def build_seam(
     *, probe: Probe, surface: RecordedSurface, prefix_cache: PrefixCache | None, client: Client
 ) -> PlannerSeam:
-    """The seam `harness.wiring.build_planner` builds, with the probe's translate step and the
-    planner's model calls going through `client`.
+    """The seam `harness.wiring.build_planner` builds, with the probe's translate
+    step and the planner's model calls going through `client`.
 
     The planner, its instruction, its tools and the planner node the seam runs it in
     (`harness.planner_node`) are production's own.

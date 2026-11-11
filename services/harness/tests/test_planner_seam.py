@@ -1,4 +1,4 @@
-"""Tests for `harness.planner_seam` -- the adapter over the Pydantic AI planner
+"""Tests for `harness.planner_seam`, the adapter over the planner
 (`harness.planner_node`) with translation attached to its `propose_plan`.
 
 Model-free. A scripted google-genai client (`tests.scripted_genai.ScriptedGenai`)
@@ -1262,11 +1262,10 @@ async def test_an_entry_that_raises_after_an_accepted_ask_leaves_no_ask_waiting(
 
 
 async def _pause_on_a_legacy_ask(harness: _SeamHarness, question: dict[str, Any]) -> None:
-    """Leave `harness`'s session paused as a turn paused before the planner node
-    paused on its planner's asks: on the planner's own long-running
+    """Leave `harness`'s session paused on a long-running
     `REQUEST_INPUT_FUNCTION_CALL_NAME` call asking `question`, with no pending
-    ask recorded. No planner builds that call, so the pause stands in for the
-    seam and the call is appended to the stored session."""
+    ask recorded. No planner builds that call, so this helper stands in for the
+    seam and appends the call to the stored session."""
     call_id = "legacy-ask"
     call = types.FunctionCall(id=call_id, name=REQUEST_INPUT_FUNCTION_CALL_NAME, args=question)
 
@@ -1286,10 +1285,9 @@ async def _pause_on_a_legacy_ask(harness: _SeamHarness, question: dict[str, Any]
 
 
 async def test_an_answer_to_a_pause_from_before_the_node_level_ask_re_enters_the_planner() -> None:
-    """A turn paused on the planner's long-running `REQUEST_INPUT_FUNCTION_CALL_NAME` call,
-    as the planner asked before its node paused on its asks, holds no pending
-    ask. The answer re-enters the planner in a fresh run with the question and
-    the pick in its brief, as a node-level ask's does."""
+    """A turn paused on a long-running `REQUEST_INPUT_FUNCTION_CALL_NAME` call
+    holds no pending ask. The answer re-enters the planner in a fresh run with
+    the question and the pick in its brief, as a node-level ask's does."""
     question = {
         "message": "Which source did you mean?",
         "candidates": [{"spec_id": SPEC, "label": "a candidate"}],
@@ -1505,7 +1503,7 @@ async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
 ) -> None:
     """ADK hands a node its input only on a live run, so a planner-side ask's
     resume would send the model no brief if the brief travelled as node
-    input. The seam gives the brief to the planner's node instead
+    input. The seam gives the brief to the planner's node
     (`harness.planner_node.planner_node`), which puts it after the turn's
     question on every request: the first request after the answer,
     which runs the planner again with the user's pick in its brief, and the

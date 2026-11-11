@@ -2106,7 +2106,7 @@ _SOURCE_ASK = {
 
 
 def _scripted_seam(scripted: ScriptedGenai) -> PlannerSeam:
-    """The seam over an empty fixture surface, its model calls answered by `scripted`."""
+    """The seam over an empty fixture surface, its model answered by `scripted`."""
     return PlannerSeam(
         settings=Settings(), surface=FixtureSurface(schemas=[]), client=scripted.client
     )

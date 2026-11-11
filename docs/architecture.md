@@ -242,12 +242,7 @@ response ends, so queued spans export while the request still has CPU.
 `POST /api/studio/cancel` calls it when it ends a paused turn's span, since no
 stream runs then.
 
-**Evals.** Evaluation runs on ADK's own eval framework. `evals/` holds one
-folder per eval set (the agent wiring, the cases, and the criteria they're
-scored against) and isn't run in CI. Each service's `tests/` directory holds
-the actual CI gates. This split exists because an eval set drives the real
-agent through the real model, so it needs a live model credential, and the
-rubric-scored cases need a judge model on top of that.
+**Evals.** `evals/` holds the planner's eval (`planner_entry`, which runs the planner one entry at a time against recorded data-mcp answers), the studio's eval (`studio`, which drives the studio's HTTP surface), the translator's fixtures (`agents/harness_translator_v1`) and the rolling-anchor counts (`rolling_anchor`). Runs that drive a real model need a live credential, and the judged cases need a judge model on top of that, so they are not run in CI. Each service's `tests/` directory holds the CI gates, which use no model, and `evals/README.md` says which part of each eval set CI runs.
 
 ## What a tool result carries
 

@@ -517,7 +517,7 @@ async def test_consecutive_thought_chunks_make_one_part_that_keeps_the_signature
 
 
 async def test_an_unsigned_thought_summary_is_left_out_of_the_next_request() -> None:
-    # The session keeps no unsigned thought summary, so the next request
+    # The planner's session keeps no unsigned thought summary, so the next request
     # carries none (`planner.settings.without_unsigned_thoughts`).
     unsigned = reply(thought_part("musing", signature=None), call_part("bare", id="c"))
 

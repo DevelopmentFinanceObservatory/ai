@@ -1,6 +1,6 @@
 """The Pydantic AI planner's endings, and the requests that follow a tool answer.
 
-Each such test runs the planner on a script (`planner_pairs`) and checks what the
+Each test runs the planner on a script (`planner_pairs`) and checks what the
 run sent and left against a stored expectation (`tests.planner_expectations`):
 the requests made, what the model reads, and the conversation the run leaves.
 """

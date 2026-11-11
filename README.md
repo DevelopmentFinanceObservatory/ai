@@ -14,7 +14,7 @@ services/harness/           Agent loop on Google ADK and FastAPI, streamed over 
 services/data-mcp/          Data discovery, minting, materialisation, and graph entity description
 services/analysis-mcp/      Deterministic computation across seven analytical verbs
 services/presentation-mcp/  Canvas component authoring and frame view tools
-evals/                      ADK eval sets, run by hand against a live model
+evals/                      Planner, studio and translator evals; live-model runs are by hand
 docs/                       Architecture notes, the studio interface, and the MCP user guide
 deploy/                     Dockerfile and deploy notes
 ```

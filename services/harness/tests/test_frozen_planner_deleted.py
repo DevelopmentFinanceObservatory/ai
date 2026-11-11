@@ -10,10 +10,10 @@ the current seam. Banning `PlannerAgent`/`PlannerAgentError` by name is
 strictly stronger than banning the old path was: it catches the frozen
 adapter reintroduced under any module, not only the one it used to live at.
 
-`planner.agent` built the planner as an ADK `LlmAgent`
-(`create_planner_agent`), served its tools to ADK (`SpecTool`) and showed the
-brief through a model callback (`prepend_brief`). The module and each of those
-names are banned too, so the planner runs on Pydantic AI alone
+The guard also bans the `planner.agent` module and the names
+`create_planner_agent`, `SpecTool` and `prepend_brief`. Each belonged to the ADK
+planner: the `LlmAgent` builder, the tool wrapper ADK ran, and the model
+callback that showed the brief. The planner runs on Pydantic AI alone
 (`planner.pydantic_agent`).
 
 This walks every module under `services/harness/src` and asserts none of

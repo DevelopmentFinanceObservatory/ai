@@ -2,9 +2,10 @@
 
 An adapter over the planner, a Pydantic AI agent run as a workflow node
 (`harness.planner_node`), on one set of tools with translation attached to
-`propose_plan`. The planner runs as a dynamically-scheduled child of the graph's own node, through
-`Context.run_node`, and this module reads what it leaves in session state and
-translates it into `harness.graph.seams.PlannerModel`'s contract.
+`propose_plan`. The planner runs as a dynamically-scheduled child of the
+graph's own node, through `Context.run_node`, and this module reads what it
+leaves in session state and translates it into
+`harness.graph.seams.PlannerModel`'s contract.
 
 The planner's own tools settle methodology and carry it to a compiled
 workflow (`propose_plan`, whose `translation` is either the compiled outcome
@@ -27,10 +28,12 @@ kept in step.
 Every call renders the full brief: the search readings, the skill pages an
 earlier call for the same plan read, the canvas and conversation digests, the
 plan being changed, the question, and the amendment or refusal ask that
-opened the call. ADK shows a `single_turn` run only the events on its own node
-path, so a call sees nothing an earlier call was sent or read, and an amend or
-replan needs the plan it changes and the skills already read in front of
-it. `_propose` runs the planner with no node input and gives its node the
+opened the call. The planner node sends the model only the turn's question
+(`harness.turn_events.turn_question`) and that brief, and its tools read the
+session's events through `planner.session.SessionCall.of` and `session_steps`
+for what the user was asked and answered. A call sees nothing an earlier
+call was sent or read, so an amend or replan needs the plan it changes and
+the skills already read in front of it. `_propose` runs the planner with no node input and gives its node the
 brief, which the run shows after the turn's question. The entry the user's
 answer to a planner-side ask resumes renders it again, with the question and
 the answer added (`_answer_text`), since the planner node reruns on resume.
@@ -238,9 +241,9 @@ _NO_READINGS = RenderedReadings("", ())
 
 # How many of the skill pages the planner read for this plan
 # (`planner.skills.SKILLS_READ_STATE_KEY`) it read before the current entry.
-# A `single_turn` run sees only its own calls, so those pages render in the
-# brief (`_skills_section`); a page read in this run is in the run's own
-# history already. Set on every entry and on its resume by the user's answer,
+# The planner node sends the model no earlier call's history, so those pages
+# render in the brief (`_skills_section`); a page read in this run is in the
+# run's own history already. Set on every entry and on its resume by the user's answer,
 # which runs the planner again, and a first draft clears the pages themselves.
 _SKILLS_BEFORE_ENTRY_STATE_KEY = "planner:skills_before_entry"
 # The last translation's referral the planner's run saw before it ended on an
@@ -349,8 +352,9 @@ class PlannerSeam:
         # model calls go through. None builds one from the environment on the
         # first run. A planner whose client uses Vertex AI, the given one or
         # the one the environment selects, or whose model's name is a Vertex
-        # AI resource path, is refused (`harness.planner_model.refuse_vertex_ai`). The planner's model sets
-        # its retries on each request (`harness.planner_model`).
+        # AI resource path, is refused (`harness.planner_model.refuse_vertex_ai`).
+        # The planner's model sets its retries on each request
+        # (`harness.planner_model`).
         #
         # `on_tool_answered` observes each planner tool's name and the answer
         # the model reads for the call (`PlannerRun.tool_answered`).
@@ -892,10 +896,10 @@ class PlannerSeam:
         `__call__` to return.
 
         `run_id` names the run the user's answer resumes, which the default
-        would put on the path of the run that asked. A `single_turn` run reads
-        the events on its own node path, so the resumed run would read the
-        asking run's calls beside a brief that restates what it needs of them
-        (`_answer_text`, `_skills_section`, `_plan_context`).
+        would put on the path of the run that asked. The resumed run sends the
+        model the turn's question and a brief that restates what it needs of
+        the asking run's calls (`_answer_text`, `_skills_section`,
+        `_plan_context`), with none of those calls' own history.
 
         A discovery call inside the run may take what is left of the
         request's wall-clock bound (`planner.plan.discovery_time_left`); with

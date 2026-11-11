@@ -1,7 +1,7 @@
 """Tests for the planner the seam builds with translation attached, and `harness.agents`.
 
-Each planner test reads the planner from the model's side: the first request a
-scripted google-genai client (`ScriptedGenai`) receives from it. Whether the
+Each planner test reads the planner from the model's side, through the first request
+that a scripted google-genai client (`ScriptedGenai`) receives from it. Whether the
 planner's model acts on the `translation` verdict `propose_plan` returns is a
 semantic judgement, which no test here covers.
 """
@@ -50,8 +50,8 @@ def _seam(
 async def _first_request(
     seam: PlannerSeam, scripted: ScriptedGenai, harness: _SeamHarness | None = None
 ) -> Request:
-    """The first request the planner `seam` serves sends its model, answered
-    with text, which ends the entry."""
+    """The first request the planner `seam` makes of its model, answered with
+    text, which ends the entry."""
     scripted.replies.append(reply(text_part("No plan.")))
     await (harness or _SeamHarness()).run(seam, question="kenya debt", readings=[])
     return scripted.requests[0]

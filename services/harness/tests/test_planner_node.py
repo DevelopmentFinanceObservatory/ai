@@ -1,4 +1,4 @@
-"""`PlannerSeam` on the Pydantic AI planner produces the stored expectation of its entry.
+"""`PlannerSeam` on the Pydantic AI planner produces each entry's stored expectation.
 
 Each entry runs on one script of a scripted google-genai client, through the
 workflow node `tests.test_planner_seam._SeamHarness` drives, in a session of its
@@ -6,7 +6,7 @@ own, under Studio's streaming run config, and is checked against the entry's
 stored expectation (`tests.planner_expectations`) on what the seam answers, the
 progress it reports, the requests the model received, the events the session
 stores, the steps `session_steps` reads from them, and the stored state. The
-Studio tests run a whole turn through
+The Studio tests run a whole turn through
 `/api/studio/turn` and check the frames it streams.
 """
 
@@ -121,7 +121,7 @@ def plan(decision: Any, requirement: Any, derived_requirement: Any) -> Plan:
     return _translated_plan(decision, requirement, derived_requirement)
 
 
-# --- The planner's tools and runs -------------------------------------------------------
+# --- The planner's tools and runs -------------------------------------------------
 
 
 def _proposals(*answers: dict[str, Any], records: Plan | None = None) -> Tools:
@@ -875,7 +875,7 @@ async def test_a_run_that_raises_while_calls_run_stores_none_of_the_responses_an
 ) -> None:
     """A run that raises while a response's calls run fails the turn. The planner
     stores the response and none of its answers, though the call that finished
-    before its sibling's raised had answered."""
+    before its sibling raised had answered."""
     entry = await _raising(plan)
 
     events = _planner_events(entry)
@@ -1057,7 +1057,7 @@ async def test_a_stop_while_a_planner_tool_hangs_stores_the_answered_call_and_no
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The Stop's cancellation reaches the hanging tool as a cancellation: the
+    """The Stop's cancellation reaches the hanging tool as a cancellation. The
     run logs no tool failure and records no refusal."""
     runs: list[PlannerRun] = []
 
