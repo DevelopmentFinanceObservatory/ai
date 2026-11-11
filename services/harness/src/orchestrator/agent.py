@@ -381,6 +381,13 @@ def _without_adk_identity(name: str) -> Callable[[CallbackContext, LlmRequest], 
     return drop
 
 
+def model_retry_options(*, attempts: int = 3, max_delay: float = 2.0) -> types.HttpRetryOptions:
+    """The HTTP retries a Gemini model call makes: up to `attempts` attempts on a
+    transient error (408, 429, 5xx), the first wait one second, no wait longer
+    than `max_delay` seconds."""
+    return types.HttpRetryOptions(attempts=attempts, initial_delay=1.0, max_delay=max_delay)
+
+
 def _retrying(
     model_name: str,
     *,
@@ -388,15 +395,13 @@ def _retrying(
     attempts: int = 3,
     max_delay: float = 2.0,
 ) -> str | Gemini:
-    """`model_name` with retries when ADK resolves it to Gemini: ADK's Gemini
-    makes one attempt unless told otherwise, so a transient 503 or 429 would
-    fail the turn. Every call keeps to the request's budget
-    (`harness.turn_budget.BoundedGemini`). On `prefix_cache`, each call reads
-    the system instruction and tools from the shared cache. Any other model
-    name is returned as it is, for ADK to resolve."""
-    retry_options = types.HttpRetryOptions(
-        attempts=attempts, initial_delay=1.0, max_delay=max_delay
-    )
+    """`model_name` with retries (`model_retry_options`) when ADK resolves it
+    to Gemini: ADK's Gemini makes one attempt unless told otherwise, so a
+    transient 503 or 429 would fail the turn. Every call keeps to the
+    request's budget (`harness.turn_budget.BoundedGemini`). On `prefix_cache`,
+    each call reads the system instruction and tools from the shared cache.
+    Any other model name is returned as it is, for ADK to resolve."""
+    retry_options = model_retry_options(attempts=attempts, max_delay=max_delay)
     if prefix_cache is not None:
         return prefix_cache.model_for(model_name, retry_options=retry_options)
     gemini = gemini_model_name(model_name)

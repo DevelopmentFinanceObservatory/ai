@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from common.settings import BaseServiceSettings
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_response import LlmResponse
@@ -76,12 +78,28 @@ def drop_thought_parts(
     that still needs the response has to list that one first, see
     `harness.planner_seam.PlannerSeam.__init__`. Returns `None` (response
     unchanged) when no part is dropped, and also when every part would be
-    dropped, rather than returning a response with an empty `parts` list.
+    dropped, rather than returning a response with an empty `parts` list
+    (`without_unsigned_thoughts`).
     """
     content = llm_response.content
     if content is None or not content.parts:
         return None
-    parts = [part for part in content.parts if not part.thought or part.thought_signature]
-    if not parts or len(parts) == len(content.parts):
+    parts = without_unsigned_thoughts(content.parts)
+    if parts is None:
         return None
     return llm_response.model_copy(update={"content": content.model_copy(update={"parts": parts})})
+
+
+def without_unsigned_thoughts(parts: Sequence[types.Part]) -> list[types.Part] | None:
+    """`parts`, one model response's, less every thought-summary part that
+    carries no thought signature, or None when that would drop no part or
+    every part.
+
+    A part with a `thought_signature` is kept whether or not it is a thought,
+    since Gemini requires the signature on a later request. A response made
+    only of unsigned thoughts is kept whole, so no response is left empty.
+    """
+    kept = [part for part in parts if not part.thought or part.thought_signature]
+    if not kept or len(kept) == len(parts):
+        return None
+    return kept

@@ -168,15 +168,27 @@ class BoundedGemini(Gemini):
                 yield response
 
 
-async def bounded(
+def bounded(
     request: Callable[[], AsyncGenerator[LlmResponse]], *, stream: bool
 ) -> AsyncGenerator[LlmResponse]:
-    """The responses of one model call, `request()`, kept to the current `TurnBudget`.
+    """The responses of one model call, `request()`, kept to the current `TurnBudget`
+    (`bounded_by`)."""
+    return bounded_by(current_turn_budget.get(), request, stream=stream)
+
+
+async def bounded_by(
+    budget: TurnBudget | None,
+    request: Callable[[], AsyncGenerator[LlmResponse]],
+    *,
+    stream: bool,
+) -> AsyncGenerator[LlmResponse]:
+    """The responses of one model call, `request()`, kept to `budget`.
 
     `request` opens the call afresh each time it is invoked, so a first-chunk
-    retry sends it again. With no budget set the call runs unbounded.
+    retry sends it again. With no budget the call runs unbounded. A call a
+    bound closes ends on the responses `_closing` builds, the last of which
+    carries the bound's code under `CLOSED_BY_KEY`.
     """
-    budget = current_turn_budget.get()
     if budget is None:
         async with aclosing(request()) as responses:
             async for response in responses:
@@ -355,6 +367,7 @@ __all__ = [
     "BoundedGemini",
     "TurnBudget",
     "bounded",
+    "bounded_by",
     "current_turn_budget",
     "start_turn_budget",
 ]
