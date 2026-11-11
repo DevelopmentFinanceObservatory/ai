@@ -130,6 +130,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from planner.operations import GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
+    PLAN_STATE_KEY,
     SEEDS_STATE_KEY,
     DatasetRequirement,
     Decision,
@@ -142,6 +143,7 @@ from planner.plan import (
 from planner.plan import Plan as PlannerPlan
 from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
+from translator.referral import REFERRAL_STATE_KEY, Referral, ReferralKind
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .failure_text import classed_sentence, is_user_sentence
@@ -7349,6 +7351,39 @@ async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block() -> 
         "warnings": {spec_id: []},
         "spec_ids": [spec_id],
     }
+
+
+async def test_a_referral_an_earlier_turn_left_pending_is_not_in_the_next_turns_session() -> None:
+    """Each turn opens a fresh session, so a plan and a pending referral the
+    user decides, left in turn one's session, are not in turn two's."""
+    session_service = _new_session_service()
+    store = StudioStore(session_service, app_name=AGENT_NAME)
+    app = _app(session_service=session_service, store=store)
+    conversation = await store.create(PRINCIPAL, CONVERSATION)
+    conversation.turn_index = 1
+    conversation.turn_recorded = True
+    conversation.turns = [{"user": "q1", "assistant": "a1"}]
+    await store.save(PRINCIPAL, CONVERSATION)
+    referral = Referral(kind=ReferralKind.REQUIREMENT_UNMEETABLE, reason="r", requirement_id="oda")
+    await session_service.create_session(
+        app_name=AGENT_NAME,
+        user_id=PRINCIPAL,
+        session_id=f"{CONVERSATION}#t1",
+        state={
+            PLAN_STATE_KEY: PlannerPlan(question="q1").model_dump_json(),
+            REFERRAL_STATE_KEY: referral.model_dump_json(),
+        },
+    )
+
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body())
+
+    session = await session_service.get_session(
+        app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t2"
+    )
+    assert session is not None
+    assert session.state.get(REFERRAL_STATE_KEY) is None
+    assert session.state.get(PLAN_STATE_KEY) is None
 
 
 def test_the_turn_keeps_the_plan_records_readings_and_spec_blocks_its_events_write() -> None:

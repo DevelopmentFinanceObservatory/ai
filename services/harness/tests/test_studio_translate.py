@@ -88,7 +88,7 @@ from harness.wire import (
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR
 from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
-from planner.agent import _session_steps
+from planner.agent import session_steps
 from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
@@ -2244,7 +2244,7 @@ async def test_an_answer_resumes_the_planner_with_the_user_s_pick_and_asks_nothi
     (session,) = sessions
     asks = [
         (step.kind, step.args, dict(step.body))
-        for step in _session_steps(session.events)
+        for step in session_steps(session.events)
         if step.kind in ("call", "answer")
     ]
     assert asks == [("call", _SOURCE_ASK, {}), ("answer", _SOURCE_ASK, {"result": _PICKED_B})]
