@@ -678,7 +678,7 @@ class PlanRecorded(Exception):  # noqa: N818 -- a stop signal, not a fault
 
 class _DropPlanRecorded(logging.Filter):
     """Drops the planner's error log for the eval's own stop, which it reads as a tool
-    failure: the seam's on the ADK planner, the node's on the Pydantic AI planner."""
+    failure. The seam logs it on the ADK planner and the node on the Pydantic AI planner."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         return not (record.exc_info and isinstance(record.exc_info[1], PlanRecorded))
@@ -704,8 +704,8 @@ GAVE_UP = "gave_up"
 class ModelRequest:
     """One request the planner's model client is sent, in google-genai's types.
 
-    Each runner builds its own shape: the ADK planner sends the system instruction as
-    a string and every declaration in one `Tool`, the Pydantic AI planner sends the
+    Each runner builds its own shape. The ADK planner sends the system instruction as
+    a string and every declaration in one `Tool`, and the Pydantic AI planner sends the
     instruction as a `Content` and one `Tool` per declaration. `system_text` and
     `declarations` read both alike.
     """
@@ -776,11 +776,11 @@ class Probe:
     model client was sent, each model call, with its tokens and latency once the whole
     answer arrived, and what `translator` answered for the plan when one is set.
 
-    The planner's model reaches the model only through the client `client` returns, on
-    either runner, so a turn the seam or the turn budget answers in the model's place
-    is no call. A call stays open from its first send until a whole answer arrives or
-    the entry's next request starts (`next_request`): a send while one is open is that
-    call sent again (a first-chunk resend, or a resend after the prefix cache was found
+    The planner reaches the model only through the client `client` returns, on either
+    runner, so a turn the seam or the turn budget answers in the model's place is no
+    call. A call stays open from its first send until a whole answer arrives or the
+    entry's next request starts (`next_request`). A send while one is open is that call
+    sent again (a first-chunk resend, or a resend after the prefix cache was found
     gone, at open or while its stream was read), so it is one call, timed from its
     first send. A call whose answer never arrived keeps its usage unknown."""
 
@@ -826,7 +826,7 @@ class Probe:
         return _ProbedClient(client, _ProbedModels(client.aio.models, self, edits), edits)
 
     def next_request(self) -> None:
-        """Start a request of the entry: no call stays open across two requests."""
+        """Start a request of the entry. No call stays open across two requests."""
         self._answering = False
 
     def _sent(self, request: ModelRequest) -> None:
@@ -957,7 +957,7 @@ class _ProbedClient(Client):
     """`client` with `_ProbedAsyncClient` as its `aio`.
 
     A `Client`, since ADK's `Gemini` takes nothing else, built without
-    `Client.__init__`: every other attribute is `client`'s own, and the wrapped client
+    `Client.__init__`. Every other attribute is `client`'s own, and the wrapped client
     stays open when this one is collected.
     """
 
@@ -1059,10 +1059,11 @@ async def run_entry(
     `Settings().planner_runner` names.
 
     The planner's model calls go through `client`, a live client (`live_client`) when
-    None; `edits` change each request it is sent (`RequestEdit`), and the probe notes
-    each one and its answer. The entry ends at the first plan `propose_plan` records, at an ask of the user, or
-    wherever the seam ends it (a bound of its request's budget, its round budget, a
-    correction it gave up on), or after `timeout_s`. The planner streams, as a studio
+    None. `edits` change each request it is sent (`RequestEdit`), and the probe notes
+    each one and its answer. The entry ends at the first plan `propose_plan` records,
+    at an ask of the user, or wherever the seam ends it (a bound of its request's
+    budget, its round budget, a correction it gave up on), or after `timeout_s`. The
+    planner streams, as a studio
     turn runs it. `answers` are the user's replies to the entry's asks, in order; each
     resumes the paused entry, as the studio's interrupt route does, in a request of its
     own with a fresh budget. A live run passes none, so an ask ends it. With

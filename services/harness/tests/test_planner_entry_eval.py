@@ -8,7 +8,7 @@ seam's brief or the orchestrator's search storage that leaves a reference plan
 refused, a plan whose translation no longer compiles, or a recording that no longer
 replays or lacks a first-year read or a call the translation makes, fails here rather
 than in a paid run. No model, no network. The
-full-set test takes about 20 s on each planner runner: it runs one scripted entry for
+full-set test takes about 20 s on each planner runner. It runs one scripted entry for
 each of the tasks' plans, and one more per task for the datasets its seam shows the
 planner. Each test that runs an entry runs it on both runners (`planner_runner`).
 
@@ -638,7 +638,7 @@ async def test_a_scripted_entry_records_the_same_on_either_runner_but_its_timing
 
 
 def _describe_propose_plan(request: Any) -> None:
-    """An arm's edit: `propose_plan`'s declaration described as `edited`."""
+    """An edit that describes `propose_plan`'s declaration as `edited`."""
     request.declarations["propose_plan"].description = "edited"
 
 
@@ -650,7 +650,7 @@ async def test_a_request_reads_the_same_instruction_and_declarations_on_either_r
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The ADK planner sends its instruction as a string and every declaration in one
-    `Tool`; the Pydantic AI planner sends a `Content` and one `Tool` per declaration.
+    `Tool`. The Pydantic AI planner sends a `Content` and one `Tool` per declaration.
     `ModelRequest` reads both alike."""
     entry.quiet_logs()
     task = _task(_PLAIN)
@@ -703,8 +703,8 @@ async def test_an_arms_edit_reaches_the_model_and_the_probe_notes_each_request_s
 
 async def test_an_arms_edit_reaches_the_prefix_caches_create() -> None:
     """A request sent against the prefix cache carries no instruction or tools, so the
-    edit is made where they travel, on the cache's create; the rest of the create is
-    sent as it was."""
+    edit is made where they travel, on the cache's create. The rest of the create is
+    sent unedited."""
     created: list[Any] = []
 
     async def create(*, model: str, config: Any) -> Any:

@@ -78,7 +78,7 @@ def drop_thought_parts(
     that still needs the response has to list that one first, see
     `harness.planner_seam.PlannerSeam.__init__`. Returns `None` (response
     unchanged) when no part is dropped, and also when every part would be
-    dropped, rather than returning a response with an empty `parts` list
+    dropped, so no response is returned with an empty `parts` list
     (`without_unsigned_thoughts`).
     """
     content = llm_response.content

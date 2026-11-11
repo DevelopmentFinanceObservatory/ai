@@ -1,4 +1,4 @@
-"""Tests for `harness.planner_model`: the Pydantic AI planner's Gemini model.
+"""Tests for `harness.planner_model`, the Pydantic AI planner's Gemini model.
 
 Each behaviour runs on the same script through the Pydantic AI planner's model
 and through the ADK planner's model stack (`BoundedGemini` or
@@ -243,7 +243,7 @@ async def test_a_first_chunk_stall_is_resent_once_and_the_second_answer_delivere
 async def test_each_bound_closes_the_call_with_the_same_code_on_both_models(
     budget: dict[str, Any], code: SeamCode, sent: int
 ) -> None:
-    # Each stream stalls past every bound; the first stall spends the resend.
+    # Each stream stalls past every bound. The first stall spends the resend.
     script = [Reply(chunks=[[text_part("x")]], stall_s=5.0)] * 2
     pai_scripted, adk_scripted = ScriptedGenai(script), ScriptedGenai(script)
     pai_budget, adk_budget = _budget(**budget), _budget(**budget)
@@ -500,7 +500,7 @@ async def test_a_response_reaches_the_agent_with_the_thoughts_the_adk_planner_ke
     calls: list[str],
 ) -> None:
     """Consecutive thought chunks merge into one part, signed when any chunk of
-    them is; the rule then drops each unsigned one unless nothing else is left.
+    them is. The rule then drops each unsigned one unless nothing else is left.
     Both planners keep `thoughts` (each part's text and whether it is signed),
     `text` and `calls`."""
     script = [Reply(chunks=chunks)]

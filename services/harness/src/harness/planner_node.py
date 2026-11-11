@@ -71,10 +71,9 @@ SKIP_THOUGHT_SIGNATURE = b"skip_thought_signature_validator"
 
 @dataclass(frozen=True)
 class _Recorded:
-    """What the ADK planner's event records beside a response's parts: the
-    metadata of the response it stores, and whether that response is the
-    aggregate of a stream (`partial` False) or a turn put in the model's place
-    (`partial` None)."""
+    """The metadata the ADK planner's event records beside a response's parts, and
+    whether that response is the aggregate of a stream (`partial` False) or a turn
+    put in the model's place (`partial` None)."""
 
     usage: Usage | None = None
     finish_reason: types.FinishReason | None = None
@@ -85,18 +84,18 @@ class _Recorded:
     error_message: str | None = None
 
 
-# A model turn put in place of a request or of a closed call's response: ADK
-# stores the callback's response, which carries nothing but its content.
+# A model turn put in place of a request or of a closed call's response. ADK
+# stores the callback's response, which carries only its content.
 _PUT_IN_PLACE = _Recorded()
 
 
 def pydantic_planner(specs: Sequence[ToolSpec], *, instruction: str) -> PlannerAgent:
-    """The Pydantic AI planner on `specs` and `instruction`, the ADK planner's,
-    named as the ADK planner (`planner.agent.AGENT_NAME`), with no model of its
-    own: each run names its own (`planner_node`). Built once, it serves every
-    run. Its spans carry message content when ADK's telemetry settings say
-    the ADK planner's do (`google.adk.telemetry.TelemetryConfig`), read once,
-    here."""
+    """The Pydantic AI planner on `specs` and `instruction`, which the ADK planner
+    serves too, named as the ADK planner (`planner.agent.AGENT_NAME`). It has no
+    model of its own, since each run names one (`planner_node`). Built once, it
+    serves every run. Its spans carry message content when ADK's telemetry
+    settings say the ADK planner's do (`google.adk.telemetry.TelemetryConfig`),
+    read once, here."""
     return planner_agent(
         specs,
         instruction=instruction,
@@ -246,7 +245,7 @@ def planner_node(
                 yield tool_answers_event(response, held, ended=_ended(held))
             raise
         # A run `run_planner` ends without raising on a response Pydantic AI
-        # refuses may leave calls of the last response unanswered; the answers
+        # refuses may leave calls of the last response unanswered. The answers
         # of its finished calls are kept, as an exception keeps them.
         if response is not None and held:
             yield tool_answers_event(response, held, ended=_ended(held))

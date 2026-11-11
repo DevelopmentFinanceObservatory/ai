@@ -2,7 +2,7 @@
 against, and the planner reads skills through (`build_tool_surface`).
 
 `harness.planner_seam.PlannerSeam` builds the planner on it with translation
-attached to `propose_plan`, so the planner and translation meet there:
+attached to `propose_plan`, so the planner and translation meet there.
 `planner.agent` takes a translation to run and the surface it reads skills
 through, `translator.tool` takes the same surface to discover on and compile
 against, and neither imports `harness`.

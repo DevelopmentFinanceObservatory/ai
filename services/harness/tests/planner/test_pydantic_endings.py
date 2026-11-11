@@ -44,7 +44,7 @@ async def test_a_call_to_a_missing_tool_is_answered_as_the_adk_planner_answers_i
     adk = await adk_run(script)
     pydantic = await pydantic_run(script)
 
-    # Every call is answered and the run goes on: one request per call, then the last.
+    # Every call is answered and the run goes on, with one request per call and then the last.
     assert len(adk.requests) == len(pydantic.requests) == calls + 1
     assert pydantic.conversations == adk.conversations
     answer = tool_not_found("lookup_data", _TOOLS)

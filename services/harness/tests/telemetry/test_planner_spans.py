@@ -389,8 +389,8 @@ async def test_a_reply_streamed_in_chunks_is_one_message_on_pydantic_ai_and_one_
     """A reply streamed as a signed and an unsigned thought chunk, two text
     chunks, a call and a usage-only chunk. Apart from the generation's output,
     a reader sees the same spans on both runners. The output differs in shape
-    only: ADK writes each chunk with parts as a message of its own, the thought
-    as plain text, and Pydantic AI one merged message; read in order, both say
+    only. ADK writes each chunk with parts as a message of its own, the thought
+    as plain text, and Pydantic AI one merged message. Read in order, both say
     the same words and make the same call."""
     script = _Script(
         replies=[_STREAMED["thoughts-text-and-call"]],
@@ -444,7 +444,7 @@ async def test_a_refused_call_is_marked_failed_and_usage_is_counted_once_on_both
     plan: Plan, exported_spans: InMemorySpanExporter
 ) -> None:
     """The values behind the comparison above, for the entry with a refused
-    call: the refusal marks the call's span failed, and each generation's usage
+    call. The refusal marks the call's span failed, and each generation's usage
     is Gemini's, split as Langfuse splits it. Read from the `gen_ai.usage.*`
     attributes alone, the Pydantic AI planner's total would count the cached
     and thought tokens twice."""
@@ -478,7 +478,7 @@ async def test_a_dropped_thought_summary_stays_on_the_pydantic_ai_planners_span(
 ) -> None:
     """An unsigned thought summary is left out of what the Pydantic AI planner
     keeps of a response, so its generation's output lacks the summary the ADK
-    planner's shows; the span carries it as `dfo.model.dropped_thoughts`."""
+    planner's shows. The span carries it as `dfo.model.dropped_thoughts`."""
     thought = "I weigh the two debt sources."
     script = _Script(
         replies=[

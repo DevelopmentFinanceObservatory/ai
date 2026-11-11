@@ -24,10 +24,10 @@ model version and usage are the ones the API reported, which the node reads
 off the raw google-genai response.
 
 A run stopped while a response's calls are running leaves no event for that
-response, as the ADK planner leaves none: ADK cancels the calls and appends
+response, as the ADK planner leaves none. ADK cancels the calls and appends
 nothing for them, so the state the response's calls wrote, answered or not,
-is not stored. A run whose calls end on an error that is not a cancellation
-stores the answers of the calls that answered, as ADK keeps them: the node
+is not stored. A run whose calls end on an error other than a cancellation
+stores the answers of the calls that answered, as ADK keeps them. The node
 yields `tool_answers_event` over those answers alone.
 """
 
@@ -87,8 +87,8 @@ def model_response_event(
         partial: False for a response the model streamed, which ADK stores
             as the aggregate of its stream, and None for a model turn put in
             the model's place, which ADK stores as the turn was given.
-        error_code: The error the API reported the response as: a finish
-            reason other than `STOP`, or a blocked prompt's reason.
+        error_code: The error the API reported the response as, a finish
+            reason other than `STOP` or a blocked prompt's reason.
         error_message: The message the API gave with that error.
     """
     parts = [part.model_copy(deep=True) for part in response.parts]

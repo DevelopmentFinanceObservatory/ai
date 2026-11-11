@@ -248,9 +248,9 @@ def assert_pinned_wire_differences(adk: Request, pydantic: Request) -> None:
     """Assert that the Pydantic AI planner's request equals the ADK planner's for
     the same turn apart from how each framework shapes a request on the wire.
 
-    The contents are equal but for one part: the first function call of a model
-    turn that Gemini sent with no thought signature, which the ADK planner
-    replays with none and Pydantic AI with Gemini's documented placeholder
+    The contents are equal but for the first function call of a model turn that
+    Gemini sent with no thought signature, which the ADK planner replays with
+    none and Pydantic AI with Gemini's documented placeholder
     (`harness.planner_node.SKIP_THOUGHT_SIGNATURE`, `_unsigned_first_calls_signed`).
     Every config field is equal but five: the instruction as one user `Content`
     where the ADK planner sends text; one `Tool` per declaration where the ADK

@@ -27,8 +27,7 @@ class ScriptExhaustedError(RuntimeError):
 
 
 class UnscriptedCallError(RuntimeError):
-    """A model or cache call reached the scripted client that it does not script,
-    which would otherwise go to the network."""
+    """A call the scripted client does not script, which would otherwise reach the network."""
 
 
 class StreamCutError(RuntimeError):
@@ -156,11 +155,11 @@ def client_error(status: int, message: str = "scripted refusal") -> errors.Clien
 class ScriptedGenai:
     """A google-genai client that answers streamed calls from `replies`, in order.
 
-    `client` is a real `google.genai.Client` whose
-    `aio.models.generate_content_stream` is replaced, so everything else a model
-    class reads off a client (`vertexai`, HTTP options) is present. Every other
+    `client` is a real `google.genai.Client` with a scripted
+    `aio.models.generate_content_stream`, so everything else a model class
+    reads off a client (`vertexai`, HTTP options) is present. Every other
     call of its `models`, `aio.models`, `caches` and `aio.caches` raises
-    `UnscriptedCallError` naming the call, so no test reaches the network; a test
+    `UnscriptedCallError` naming the call, so no test reaches the network. A test
     that scripts one of them assigns over it. `requests` holds a copy of each
     call's model, contents and config in call order.
     """
@@ -223,7 +222,7 @@ async def _stream(step: Reply) -> AsyncIterator[types.GenerateContentResponse]:
 
 
 def _chunk(step: Reply, parts: list[types.Part], *, final: bool) -> types.GenerateContentResponse:
-    # A copy per chunk: ADK writes its own call ids into the parts it is handed.
+    # Each chunk gets a copy because ADK writes its own call ids into the parts it is handed.
     parts = copy.deepcopy(parts)
     if step.prompt_feedback is not None:
         return types.GenerateContentResponse(prompt_feedback=step.prompt_feedback)

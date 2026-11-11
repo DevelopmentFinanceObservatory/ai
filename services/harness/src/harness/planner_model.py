@@ -29,14 +29,13 @@ whose streamed call is wrapped. Each call the planner makes, in order:
 A function call the model sent without an id reaches the planner with one of
 the form ADK gives it (`_with_client_call_ids`), so both planners store it
 under such an id, and each request is sent less those ids, as the ADK planner
-sends it (`_without_client_call_ids`). Every
-request streams. A non-streamed call refuses, since it would bypass all of the
-above.
+sends it (`_without_client_call_ids`). Every request streams. A non-streamed
+call refuses, since it would bypass all of the above.
 
 Each call's span, Pydantic AI's `chat <model>`, is current while the call runs
 and carries what Langfuse reads of the ADK planner's `generate_content` span
-that Pydantic AI leaves out (`_record_usage`): the reasoning tokens, and the
-usage Langfuse derives from the ADK planner's span, set outright so that the
+that Pydantic AI leaves out (`_record_usage`). That is the reasoning tokens and
+the usage Langfuse derives from the ADK planner's span, set outright so that the
 usage details Pydantic AI adds are not summed into the call's total. A turn put
 in place of a request is no model call and the ADK planner opens no span for
 it, so its span is marked a plain span for Langfuse. The thought summaries
@@ -71,10 +70,10 @@ logger = logging.getLogger(__name__)
 
 type Usage = types.GenerateContentResponseUsageMetadata
 
-# Langfuse's `LangfuseOtelSpanAttributes.OBSERVATION_TYPE` and
-# `OBSERVATION_USAGE_DETAILS`: the observation type Langfuse gives a span, ahead
-# of the one it infers from the span's GenAI attributes, and the usage it reads
-# ahead of every `gen_ai.usage.*` attribute.
+# Langfuse's `LangfuseOtelSpanAttributes.OBSERVATION_TYPE` is the observation
+# type Langfuse gives a span, ahead of the one it infers from the span's GenAI
+# attributes. `OBSERVATION_USAGE_DETAILS` is the usage it reads ahead of every
+# `gen_ai.usage.*` attribute.
 _OBSERVATION_TYPE = "langfuse.observation.type"
 _USAGE_DETAILS = "langfuse.observation.usage_details"
 # The OpenTelemetry GenAI attribute ADK records a call's thought tokens under.
@@ -90,7 +89,7 @@ class ResponseMetadata:
     aggregator reads it for the response it stores: the last usage and the
     last finish reason any chunk carried, the last chunk's model version, and
     the error the response is. A finish reason other than `STOP` is the error,
-    with the last chunk's finish message; a last chunk with no candidate and a
+    with the last chunk's finish message. A last chunk with no candidate and a
     blocked prompt is the block, with its message. Each is None when the API
     reported none."""
 
@@ -122,15 +121,15 @@ def planner_model(
     Args:
         model_name: The Gemini model, as google-genai names it.
         client: The google-genai client the model's calls go through. It is
-            left unchanged; the model calls a wrapper over its streamed call.
+            left unchanged. The model calls a wrapper over its streamed call.
         budget: The turn's budget, or None to run every call unbounded.
         prefix_cache: The process's shared cache of static prompt prefixes,
             or None to send every request whole.
         before_request: Run before each request (`BeforeRequest`).
         after_response: Run on each response the model gave or a bound
             closed (`AfterResponse`).
-        profile: The model profile, which decides how requests are built;
-            None for Gemini's own (`google_model_profile`).
+        profile: The model profile, which decides how requests are built.
+            None gives Gemini's own (`google_model_profile`).
 
     Returns:
         A `GoogleModel` on `profile` whose streamed calls go through the
@@ -143,7 +142,7 @@ def planner_model(
         before_request=before_request,
         after_response=after_response,
     )
-    # `GoogleProvider` takes a `Client`; the wrapper reads as one everywhere
+    # `GoogleProvider` takes a `Client`, and the wrapper reads as one everywhere
     # `GoogleModel` reads it.
     provider = GoogleProvider(client=cast(Client, _Client(client, stream)))
     return GoogleModel(model_name, provider=provider, profile=profile)

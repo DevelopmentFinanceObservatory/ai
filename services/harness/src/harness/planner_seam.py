@@ -384,18 +384,18 @@ class PlannerSeam:
         client: Client | None = None,
         on_tool_answered: Callable[[str, dict[str, Any] | None], None] | None = None,
     ) -> None:
-        # `settings.planner_runner` names the planner `_propose` runs: the ADK
-        # planner, an `LlmAgent`, or the Pydantic AI planner
-        # (`harness.planner_node`), which builds no `LlmAgent`. Both serve the
-        # same tools and instruction, built here once.
+        # `settings.planner_runner` names the planner `_propose` runs. The ADK
+        # planner is an `LlmAgent`. The Pydantic AI planner
+        # (`harness.planner_node`) builds none. Both serve the same tools and
+        # instruction, built here once.
         #
         # `translate` replaces the translation `propose_plan` runs, and `specs`
         # the tools (`planner.agent.planner_specs` over the surface and that
         # translation). `client` is the google-genai client the planner's
-        # model calls go through, on either runner; None builds one from the
+        # model calls go through, on either runner. None builds one from the
         # environment. On either runner a client on Vertex AI is refused
         # (`planner.agent.refuse_vertex_ai`). The ADK planner's Gemini model
-        # uses a given client as it is, HTTP options and retries included; the
+        # uses a given client as it is, HTTP options and retries included. The
         # Pydantic AI planner's model sets its retries on each request
         # (`harness.planner_model`).
         #
@@ -415,9 +415,8 @@ class PlannerSeam:
         self._model_name = (
             agent_settings if agent_settings is not None else AgentSettings()
         ).planner_model_name
-        # The ADK planner resolves the name through ADK's model registry; the
-        # Pydantic AI planner runs the Gemini model it resolves to, and no
-        # other.
+        # The ADK planner resolves the name through ADK's model registry. The
+        # Pydantic AI planner runs only the Gemini model the name resolves to.
         gemini_name = gemini_model_name(self._model_name)
         if runner == "pydantic_ai" and gemini_name is None:
             raise ValueError(
@@ -435,8 +434,8 @@ class PlannerSeam:
         )
         # The orchestrator states the plan's question in its brief
         # (`harness.graph.state.ORCHESTRATOR_BRIEF_KEY`) before the planner
-        # ever runs, so this seam's planner never restarts a plan for another
-        # question: `starts_new_plan` is refused with `QUESTION_FIXED`, handled
+        # ever runs, so this seam's planner restarts no plan for another
+        # question. `starts_new_plan` is refused with `QUESTION_FIXED`, handled
         # below as `BUDGET_EXHAUSTED` is. The orchestrator reads the user's
         # words and marks its asks (across years). The planner reads them only
         # in an entry the user's amendment opens, which `save_amendment_entry`
@@ -456,7 +455,7 @@ class PlannerSeam:
             has_translator=True, has_skills=True, question_fixed=True
         )
         self._agent = self._adk_planner(model=model) if runner == "adk" else None
-        # Built once and shared by every run; each run names its own model.
+        # Built once and shared by every run, each of which names its own model.
         self._pydantic = (
             (gemini_name, pydantic_planner(self._specs, instruction=self._instruction))
             if runner == "pydantic_ai" and gemini_name is not None
@@ -1086,8 +1085,8 @@ class PlannerSeam:
 
     @cached_property
     def _genai_client(self) -> Client:
-        """The client the Pydantic AI planner's calls go through: the one given, or
-        one built from the environment, as ADK's `Gemini` builds its own."""
+        """The client the Pydantic AI planner's calls go through. It is the one given,
+        or one built from the environment as ADK's `Gemini` builds its own."""
         return self._client if self._client is not None else Client()
 
     # -- the seam's own callbacks, assigned once in __init__ ----------------

@@ -13,8 +13,8 @@ which resumes the run.
 Every request the model receives has to equal the ADK planner's apart from the wire
 differences `assert_pinned_wire_differences` lists. That covers the first request of
 each entry, built from the recorded readings, skills and asks, and, for an entry with
-an ask, the request after the ask is answered. No model and no network: the recorded
-answers replay from files.
+an ask, the request after the ask is answered. No model or network is involved, since
+the recorded answers replay from files.
 """
 
 from __future__ import annotations

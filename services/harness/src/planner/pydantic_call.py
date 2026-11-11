@@ -34,8 +34,8 @@ class PydanticCall:
     `state` is the view over the session's state the call writes through.
     `call_id` is the id of the tool call being served, `None` outside one.
     `earlier` is the steps of the session before the live run, and `messages`
-    the live run's messages as they stood when the call began: the calls of
-    the response being served are in them, and none of their returns is,
+    the live run's messages as they stood when the call began. The calls of
+    the response being served are in them and none of their returns is,
     since Pydantic AI adds a response's returns once all its calls have
     finished, as ADK appends their responses.
     """
@@ -66,11 +66,11 @@ def run_steps(messages: Sequence[ModelMessage], *, serving: str | None = None) -
     events for the same exchange. Each `PLANNER_ASK` call is a `call` step,
     unless its return is the tool's refusal (`_never_reached`), and each
     return of any other tool is a `response` step. An ask's own return is
-    `ASK_ACCEPTED` or its refusal, neither of which is the user's answer; the
+    `ASK_ACCEPTED` or its refusal, and neither is the user's answer. The
     answer arrives in a later run's brief, so a live run holds no `answer`
-    step. The user's message and the brief are the seam's input, not the
-    user typing into the session, and give no step: the user's message is a
-    step of the session the earlier steps are read from.
+    step. The user's message and the brief are the seam's input and give no
+    step. The user's message is a step of the session the earlier steps are
+    read from.
 
     `serving` is the id of the tool call being served. When it is no ask, the
     calls of its own response that no return answers yet give no step, as
@@ -119,8 +119,8 @@ def as_function_response(value: object) -> dict[str, Any]:
 
 
 def _never_reached(body: Mapping[str, Any]) -> bool:
-    """Whether an ask's return is its tool's refusal: neither an answer (no
-    `result`) nor the accepted ask (`ASK_ACCEPTED`, an `ok` answer)."""
+    """Whether an ask's return is its tool's refusal, which is neither an answer
+    (no `result`) nor the accepted ask (`ASK_ACCEPTED`, an `ok` answer)."""
     return "result" not in body and body.get("outcome") != Outcome.OK.value
 
 

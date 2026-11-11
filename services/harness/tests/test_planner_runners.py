@@ -2,7 +2,7 @@
 
 `Settings.planner_runner` selects the planner `PlannerSeam` runs. Both planners
 store the same session events, so a turn paused on an ask under one runner
-resumes under the other: each test here runs a script on a scripted
+resumes under the other. Each test here runs a script on a scripted
 google-genai client with every run on the ADK planner, with every run on the
 Pydantic AI planner, and, for the turns that cross, with the runs split
 between the two, each switch building a seam afresh over the same session as a
@@ -273,7 +273,7 @@ def test_both_planners_refuse_a_client_on_vertex_ai(
     vertexai: bool | None,
     refused: bool,
 ) -> None:
-    """A given client decides by its own `vertexai`; with none, the environment
+    """A given client decides by its own `vertexai`. With none, the environment
     decides, as google-genai builds the default client."""
     for name in ("GOOGLE_GENAI_USE_ENTERPRISE", "GOOGLE_GENAI_USE_VERTEXAI"):
         monkeypatch.delenv(name, raising=False)
@@ -523,7 +523,7 @@ async def test_an_amendment_is_the_same_on_both_planners(plan: Plan, scenario: s
 async def _replanned(runner: Runner, plan: Plan, opened_by: Mapping[str, Any]) -> _Entry:
     """A first entry and a replan `opened_by` its refusal or pick, run in one
     invocation of one session, as the graph's planner node runs a replan in the
-    turn it planned in: the replan's run has a node path of its own and follows
+    turn it planned in. The replan's run has a node path of its own and follows
     no other user message."""
     scripted = ScriptedGenai(
         [
@@ -547,7 +547,7 @@ async def _replanned(runner: Runner, plan: Plan, opened_by: Mapping[str, Any]) -
     workflow = Workflow(
         name="replan_wf", edges=[(START, node(entries, name="entries", rerun_on_resume=True))]
     )
-    # The refusal's time is recorded with it (`_record_refusal`); one clock for
+    # The refusal's time is recorded with it (`_record_refusal`). One clock serves
     # both runners.
     clock = mock.Mock(wraps=datetime)
     clock.now.return_value = datetime(2026, 11, 11, tzinfo=UTC)
@@ -707,7 +707,7 @@ async def test_an_unsigned_first_call_is_replayed_with_the_placeholder_only_by_p
 ) -> None:
     """Gemini signs the first function call of a response it thought before. One
     it sent unsigned, the ADK planner replays with no signature and the Pydantic AI
-    planner with Gemini's placeholder; `assert_pinned_wire_differences` pins
+    planner with Gemini's placeholder. `assert_pinned_wire_differences` pins
     that one difference."""
     adk, pydantic = await _both(
         _Script(
@@ -814,7 +814,7 @@ async def test_a_stop_while_a_switch_runs_offers_the_plan_unchanged_after_either
     plan: Plan, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The plan card a Pydantic AI entry drafted takes a switch and a Stop as the
-    ADK planner's card does: the stream ends on the same plan re-offered under a
+    ADK planner's card does. The stream ends on the same plan re-offered under a
     fresh interrupt, carrying `switch_cancelled`."""
     adk = await _stopped_switch("adk", plan, monkeypatch)
     pydantic = await _stopped_switch("pydantic_ai", plan, monkeypatch)
@@ -860,7 +860,7 @@ async def _switched_after_an_entry(
     then takes a sector switch through the graph's real `switch` node, which
     re-pins the plan through `PlannerSeam.revise` with no model call. Returns the
     switch's events, the session as stored, its state with each time it records
-    put as `<time>`, and the pin the revised plan reads: the copy, over the
+    put as `<time>`, and the pin the revised plan reads, which is the copy, over the
     plan's years, of the one Search answered the switch with."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]

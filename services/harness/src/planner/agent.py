@@ -719,13 +719,14 @@ def refuse_vertex_ai(client: Client | None = None) -> None:
     (`planner.tool_spec.function_declaration`). Vertex AI rejects their
     optional `anyOf` schemas, which ADK rewrites only for its own function
     tools. `create_planner_agent` calls this once, when the planner's model
-    is ADK's `Gemini`, with the client that model calls through; any other
-    model calls through no google-genai client. `harness.planner_seam.
-    PlannerSeam` calls it for the Pydantic AI planner's client.
+    is ADK's `Gemini`, with the client that model calls through. Any other
+    model calls through no google-genai client.
+    `harness.planner_seam.PlannerSeam` calls it for the Pydantic AI planner's
+    client.
 
     Args:
-        client: The client the model calls through, decided by its `vertexai`;
-            None for the client the harness builds with no options, whose
+        client: The client the model calls through, decided by its `vertexai`.
+            None gives the client the harness builds with no options, whose
             `vertexai` google-genai takes from the environment:
             `GOOGLE_GENAI_USE_ENTERPRISE` when set, otherwise
             `GOOGLE_GENAI_USE_VERTEXAI`, each true when `true` or `1`. That rule
@@ -895,10 +896,10 @@ def create_planner_agent(
             Gemini model retries a transient error (408, 429, 5xx) up to
             three attempts, as the orchestrator's does
             (`orchestrator.agent._retrying`).
-        specs: The tools the agent serves; None for `planner_specs` over the
+        specs: The tools the agent serves. None gives `planner_specs` over the
             arguments above.
         client: The google-genai client a Gemini model calls through, used as
-            it is, HTTP options included; None for one ADK builds from the
+            it is, HTTP options included. None gives one ADK builds from the
             environment.
 
     Returns:

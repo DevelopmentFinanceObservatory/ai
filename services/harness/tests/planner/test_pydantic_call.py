@@ -43,10 +43,10 @@ def _returns(*answers: tuple[str, str, dict[str, Any]]) -> tuple[str, Any]:
     return ("returns", answers)
 
 
-# Where the live run starts: what precedes it is the session's earlier events.
+# Where the live run starts. What precedes it is the session's earlier events.
 _LIVE = ("live", None)
 
-# The question the turn opens with; the session's first event.
+# The question the turn opens with, which is the session's first event.
 _QUESTION = ("question", "aid to Ghana")
 
 

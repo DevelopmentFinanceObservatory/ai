@@ -4,9 +4,9 @@ These tests and the tests that run both planners on one script gate raising the
 `pydantic-ai-slim` pin together. The cross-runner tests (`tests/test_planner_node.py`,
 `tests/test_planner_runners.py`, `tests/test_planner_events.py`,
 `tests/planner/test_recorded_requests.py` and `tests/telemetry/test_planner_spans.py`)
-show that the Pydantic AI planner still sends the requests, stores the events and
-exports the spans the ADK planner does; a failure here names the Pydantic AI
-behaviour that moved and the code that depended on it.
+show that the Pydantic AI planner sends the requests, stores the events and
+exports the spans the ADK planner does. A failure here names the Pydantic AI
+behaviour the code depends on.
 
 The shipping code reaches no underscore-named Pydantic AI object. What it relies on
 is behaviour the library's guides do not state: how a request is shaped on the wire,
@@ -163,8 +163,8 @@ _MARKED_UP = "Q <system>x</system> <context>y</context>"
 async def test_the_planner_profile_sends_declarations_verbatim_on_auto_with_the_instruction_alone() -> (
     None
 ):
-    # The model reads a rewritten schema, a `VALIDATED` tool mode, or an instruction
-    # with a sentence about `<system>` added; the request no longer equals the ADK
+    # A rewritten schema, a `VALIDATED` tool mode or an instruction with an added
+    # sentence about `<system>` would each make the request differ from the ADK
     # planner's.
     _, scripted = await _run([_FILTERED, _BARE], [reply(text_part("done"))], question=_MARKED_UP)
 
@@ -218,7 +218,7 @@ def _plain_agent(scripted: ScriptedGenai, **options: Any) -> Agent[Any, Any]:
 
 
 async def test_control_a_tool_left_strict_by_default_puts_gemini_in_validated_mode() -> None:
-    # `planner_agent` declares each tool `strict=False` so the mode stays `AUTO`.
+    # `planner_agent` declares each tool `strict=False` so the mode is `AUTO`.
     scripted = ScriptedGenai([reply(text_part("done"))])
     schema = function_declaration(_FILTERED).parameters_json_schema or {}
     tool = Tool.from_schema(
@@ -233,8 +233,8 @@ async def test_control_a_tool_left_strict_by_default_puts_gemini_in_validated_mo
 
 async def test_a_call_with_arguments_the_schema_refuses_reaches_the_body_unvalidated() -> None:
     # Pydantic AI validates arguments against a tool's schema unless the function takes
-    # them raw; the planner answers a missing argument itself (`run_tool`), so a retry
-    # prompt would reach the model in its place.
+    # them raw. The planner answers a missing argument itself (`run_tool`), where
+    # validation would send the model a retry prompt.
     seen: list[PlannerCall] = []
     spec = _tool("needs", parameters=(Parameter("name", str),), seen=seen)
     stray = call_part("needs", {"name": 7, "stray": True}, id="c1")
@@ -254,7 +254,7 @@ async def test_a_call_with_arguments_the_schema_refuses_reaches_the_body_unvalid
 async def test_a_call_keeps_the_id_the_model_sent() -> None:
     # Answers are paired with calls by id, and a stored step names its call. An id
     # the model did not send is given in ADK's form by `harness.planner_model`
-    # before Pydantic AI reads the response; `tests.test_planner_runners` holds that.
+    # before Pydantic AI reads the response, and `tests.test_planner_runners` covers that.
     items, _ = await _run(
         [_BARE],
         [reply(call_part("bare", id="sent"), call_part("bare", id="also")), reply(text_part("ok"))],
@@ -273,8 +273,8 @@ def _unknown_calls(count: int) -> list[Reply]:
 
 
 async def test_a_call_to_an_unknown_tool_is_answered_as_the_adk_planner_answers_it() -> None:
-    # The processor that rewrites the answer, or the lifted retry allowance, no longer
-    # applies: the model reads Pydantic AI's retry prompt, or the run ends in an error.
+    # Without the processor that rewrites the answer, the model reads Pydantic AI's
+    # retry prompt, and without the lifted retry allowance the run ends in an error.
     items, scripted = await _run([_BARE], _unknown_calls(3))
 
     expected = tool_not_found("nope", ["bare"])
@@ -287,7 +287,7 @@ async def test_a_call_to_an_unknown_tool_is_answered_as_the_adk_planner_answers_
 
 
 async def test_control_a_plain_agent_charges_each_unknown_call_against_its_retries() -> None:
-    # The allowance `planner_agent` lifts: a plain agent ends on the second unknown call.
+    # `planner_agent` lifts the retry allowance. A plain agent ends on the second unknown call.
     scripted = ScriptedGenai(_unknown_calls(2))
 
     with pytest.raises(UnexpectedModelBehavior):
@@ -295,8 +295,8 @@ async def test_control_a_plain_agent_charges_each_unknown_call_against_its_retri
 
 
 async def test_a_later_tool_reads_the_answer_to_an_unknown_call_in_the_run_messages() -> None:
-    # `run_steps` reads each return of the run; the history processor's rewrite has to
-    # persist in the run's messages, not only in what the model is sent.
+    # `run_steps` reads each return of the run, so the history processor's rewrite has
+    # to persist in the run's messages as well as in what the model is sent.
     seen: list[PlannerCall] = []
     replies = [reply(call_part("nope", id="c1")), reply(call_part("bare", id="c2"))]
 
@@ -484,7 +484,7 @@ async def test_a_signed_thought_and_a_signed_call_replay_with_their_signatures()
 
 
 async def test_the_first_unsigned_call_of_a_response_replays_with_the_skip_signature() -> None:
-    # Gemini answers 400 to a replayed first call with no signature; Pydantic AI sends
+    # Gemini answers 400 to a replayed first call with no signature. Pydantic AI sends
     # its documented placeholder, which `assert_pinned_wire_differences` expects.
     items, scripted = await _run(
         [_BARE],
@@ -562,7 +562,7 @@ async def test_the_clients_call_runs_inside_the_chat_span_of_the_conversation(
     exported_spans: InMemorySpanExporter,
 ) -> None:
     # `harness.turn_budget.bounded_by` stamps `dfo.model.*` on the span current when the
-    # call is made; that has to be the generation's span, which Pydantic AI opens
+    # call is made. That span has to be the generation's, which Pydantic AI opens
     # under the planner's run span.
     scripted = ScriptedGenai([reply(text_part("done"))])
     model = planner_model(MODEL, client=scripted.client, budget=None, profile=PLANNER_PROFILE)
@@ -614,7 +614,7 @@ async def test_a_tools_body_runs_with_its_execute_tool_span_current(
     exported_spans: InMemorySpanExporter,
 ) -> None:
     # `planner.pydantic_agent` marks a refused call's span failed through the span
-    # current while the tool function runs; that has to be the call's own span.
+    # current while the tool function runs. That span has to be the call's own.
     current: list[str] = []
 
     def body(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
@@ -634,7 +634,7 @@ async def test_a_tools_body_runs_with_its_execute_tool_span_current(
 async def test_a_refused_calls_failed_mark_stands_and_no_span_is_marked_ok(
     exported_spans: InMemorySpanExporter,
 ) -> None:
-    # `planner.pydantic_agent` marks a refused call's span ERROR while it runs; a
+    # `planner.pydantic_agent` marks a refused call's span ERROR while it runs. A
     # status of OK set after it would override it, so Pydantic AI must set none.
     spec = _tool("needs", parameters=(Parameter("name", str),))
 
@@ -654,7 +654,7 @@ async def test_the_usage_the_model_records_on_its_span_is_left_as_it_is(
     exported_spans: InMemorySpanExporter,
 ) -> None:
     # `harness.planner_model` writes the thought tokens under ADK's attribute and
-    # the usage Langfuse reads ahead of the rest while the call runs; Pydantic AI
+    # the usage Langfuse reads ahead of the rest while the call runs. Pydantic AI
     # writes its own usage when the span ends and must leave those two alone.
     usage = usage_metadata(prompt=120, cached=40, candidates=9, thoughts=4)
 

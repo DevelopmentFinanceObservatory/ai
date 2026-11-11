@@ -319,7 +319,7 @@ async def test_parallel_writes_to_one_list_store_the_value_the_last_call_left() 
 
 async def test_a_stop_while_calls_run_stores_nothing_of_their_response() -> None:
     """A Stop while one call of a response hangs stores neither that call's writes
-    nor those of the call beside it that answered, as ADK stores neither; the
+    nor those of the call beside it that answered, as ADK stores neither. The
     response before it keeps its answers and writes."""
     adk, pydantic = await _both(
         [
@@ -377,7 +377,7 @@ def test_answers_are_ordered_by_call_and_their_writes_merged_as_adk_merges_them(
     event = tool_answers_event(response, answers, ended=False)
 
     assert [r.id for r in event.get_function_responses()] == ["a1", "p1"]
-    # In call order a scalar is replaced and two dicts merge; the dict two calls
+    # In call order a scalar is replaced and two dicts merge. The dict two calls
     # wrote then merges in the value of the call that answered last.
     assert event.actions.state_delta == {"n": 2, "d": {"x": 1, "y": 2}}
     assert event.actions.skip_summarization is None

@@ -41,10 +41,9 @@ on that answer, so no model call follows.
 The planner reaches the translator directly. `create_planner_agent` takes
 `translator.tool`'s `build_translate` function as `translate`, which
 `harness.planner_seam.PlannerSeam` builds and serves to either runner. The
-model cannot call it: every `propose_plan` that records a plan runs it on that
-plan and answers with the verdict under
-`translation`, beside its own `ok`, so the model spends no generation on
-translation. The plan travels through session state. Omit it and
+model cannot call it. Every `propose_plan` that records a plan runs it on that
+plan and answers with the verdict under `translation`, beside its own `ok`, so
+the model spends no generation on translation. The plan travels through session state. Omit it and
 `create_planner_agent` returns the standalone planner, whose `propose_plan`
 records the plan and stops; that is what the planner's own eval set scores
 and why that set needs no reachable tool surface.

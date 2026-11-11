@@ -250,16 +250,16 @@ async def test_a_raising_tool_is_answered_through_tool_failed_and_the_run_goes_o
 
 def _with_tool(agent: PlannerAgent, function: Callable[..., Any]) -> PlannerAgent:
     """`agent` with `function` registered as a Pydantic AI tool of its own, as
-    the planner's tools are, to reach answers no planner tool gives: Pydantic
-    AI validates its typed arguments, and lets what it raises through."""
+    the planner's tools are, to reach answers no planner tool gives. Pydantic
+    AI validates its typed arguments and lets what the function raises through."""
     agent.agent.tool_plain(function)
     return PlannerAgent(agent=agent.agent, tools=(*agent.tools, function.__name__))
 
 
 async def test_a_call_pydantic_ai_answers_with_a_retry_still_gets_its_answer() -> None:
     """A call whose arguments fail validation is answered by Pydantic AI with a
-    retry, not by its tool: that answer is yielded as an error, as Gemini is sent
-    it, so every answer of the response is yielded, its sibling's write with them."""
+    retry. That answer is yielded as an error, as Gemini is sent it, so every
+    answer of the response is yielded, its sibling's write with them."""
 
     def counted(n: int) -> dict[str, Any]:
         return {"outcome": "ok", "n": n}
@@ -287,7 +287,7 @@ async def test_a_call_pydantic_ai_answers_with_a_retry_still_gets_its_answer() -
 
 async def test_a_run_pydantic_ai_ends_after_a_call_answered_yields_that_answer() -> None:
     """A call raising `UnexpectedModelBehavior` ends the run without raising, and
-    the answer of the sibling that answered before it is still yielded."""
+    the answer of the sibling that answered before it is yielded."""
     answered = asyncio.Event()
     run = _Run()
 

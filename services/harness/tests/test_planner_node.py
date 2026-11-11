@@ -137,7 +137,7 @@ def _seam(
 ) -> PlannerSeam:
     """The seam on `runner`, its model calls answered by `scripted`, serving the
     planner's tools as `tools` changes them. `bounded` keeps the ADK planner's
-    model to the turn's budget, as the served planner's is; the Pydantic AI
+    model to the turn's budget, as the served planner's is. The Pydantic AI
     planner's model always keeps to it."""
     surface = FixtureSurface(schemas=[])
     translate = translate if translate is not None else build_translate(surface=surface)
@@ -625,7 +625,7 @@ async def test_a_response_that_errs_or_holds_nothing_is_stored_the_same_on_both(
 ) -> None:
     """A response cut at its token limit stores its finish reason as its error, a
     blocked prompt stores an event of its block reason and no content, and an
-    empty response stores nothing; each ends the run with no plan."""
+    empty response stores nothing. Each ends the run with no plan."""
     adk, pydantic = await _both(
         _Script(replies=[response], runs=[_planned(plan)], setup=_proposals())
     )
@@ -663,7 +663,7 @@ async def test_a_run_that_raises_while_calls_run_keeps_the_answered_calls_on_bot
     plan: Plan,
 ) -> None:
     """The ADK planner keeps the answer of the call that finished when its sibling's
-    raises; the Pydantic AI planner yields the answer it held."""
+    raises. The Pydantic AI planner yields the answer it held."""
     adk = await _raising("adk", plan)
     pydantic = await _raising("pydantic_ai", plan)
 
@@ -792,7 +792,7 @@ async def test_two_entries_at_once_on_one_pydantic_ai_seam_keep_to_their_own_run
     plan: Plan,
 ) -> None:
     """One seam's Pydantic AI planner serves two entries running at once, each in
-    its own session: the planner is built once, each request carries its own
+    its own session. The planner is built once, each request carries its own
     entry's question and answers, and each session stores the same events as
     the other."""
     barrier = asyncio.Barrier(2)
@@ -909,7 +909,7 @@ async def test_a_stop_while_the_node_waits_on_its_event_closes_the_run_in_its_ta
     plan: Plan, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A Stop while ADK's node runner stores the planner's response, the node
-    suspended at its yield, closes the Pydantic AI run in the node's task: its
+    suspended at its yield, closes the Pydantic AI run in the node's task. Its
     spans and context variables end where they began, with nothing logged."""
     scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
     seam = _seam("pydantic_ai", scripted, tools=_proposals())

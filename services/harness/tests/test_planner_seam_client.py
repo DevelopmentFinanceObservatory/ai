@@ -2,7 +2,7 @@
 
 The planner entry eval (`evals/planner_entry`) passes the seam a client on either
 runner and reads every model call off it, so the ADK planner's Gemini model has to call
-through that client with the budget and prefix-cache model the seam built kept, and the
+through that client and stay the budget or prefix-cache model the seam built, and the
 seam has to refuse what would leave the client unused.
 """
 
