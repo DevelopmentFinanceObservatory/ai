@@ -13,7 +13,7 @@ those readers. `planner.agent.AdkCall` is the call ADK serves a tool with.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, NamedTuple, Protocol
@@ -120,6 +120,37 @@ class PlannerCall(Protocol):
         """The calls of the model response that holds the call being served, in order,
         or none when the call has no id or no response holds it."""
         ...
+
+
+class RecordingState:
+    """A view over a state mapping that reads and writes through to it and
+    records each key written through the view, in first-write order.
+
+    The view is a `planner.plan.SessionState`. Writes made to the mapping by
+    anything but the view are unrecorded.
+    """
+
+    def __init__(self, state: MutableMapping[str, Any]) -> None:
+        self._state = state
+        self._written: dict[str, None] = {}
+
+    @property
+    def written(self) -> tuple[str, ...]:
+        """Every key written through the view, in first-write order."""
+        return tuple(self._written)
+
+    def get(self, key: str, default: Any = None, /) -> Any:
+        return self._state.get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._state[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._state[key] = value
+        self._written[key] = None
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._state
 
 
 def candidate_ids(candidates: Any) -> frozenset[str]:
