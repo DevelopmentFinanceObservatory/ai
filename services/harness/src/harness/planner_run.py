@@ -144,9 +144,9 @@ class PlannerRun:
         `summary` says the call declared that plan ready
         (`planner.tools.declare_ready`).
 
-        The run's `on_tool_answered` observer is told the name and answer first,
-        before any of that, on every answer within `_MAX_EVENTS`: a tool's own,
-        a refusal of its arguments, and `tool_failed`'s for a tool that raised.
+        The run's `on_tool_answered` observer is told the name and answer before
+        any of that, on every answer within `_MAX_EVENTS`: a tool's own, a
+        refusal of its arguments, and `tool_failed`'s for a tool that raised.
         What it raises propagates, as what `on_progress` raises does.
 
         Raises:

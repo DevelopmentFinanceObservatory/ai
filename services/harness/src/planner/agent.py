@@ -127,7 +127,7 @@ def refuse_vertex_ai(
 
     The rule is read here without building a client, since building one
     without an API key or credentials raises. On the Pydantic AI planner a
-    `projects/...` name is refused whatever the client: it is a Vertex AI
+    `projects/...` name is refused whatever the client. It is a Vertex AI
     resource path, and that planner runs on the developer API, which serves
     no model by that name.
 
@@ -286,8 +286,8 @@ def create_planner_agent(
         client: The google-genai client a Gemini model calls through, used as
             it is, HTTP options included. None gives one ADK builds from the
             environment.
-        model: A model that replaces the one `model_name` names, used as given:
-            it calls through no client built here, so it is not checked for
+        model: A model that replaces the one `model_name` names, used as given.
+            It calls through no client built here, so it is not checked for
             Vertex AI, and takes no `client`.
 
     Returns:

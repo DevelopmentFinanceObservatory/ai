@@ -448,7 +448,7 @@ def _planner_seam(
 ) -> PlannerSeam:
     """The real seam on the planner `settings` names, over `surface`, its model
     calls answered by `answer`, its tools the ones the seam builds for itself
-    (`planner.agent.planner_specs` over `surface` and its translation) as
+    (`planner.specs.planner_specs` over `surface` and its translation) as
     `tools` changes them, and each tool's answer told to `on_tool_answered`."""
     translate = build_translate(surface=surface)
     specs = planner_specs(

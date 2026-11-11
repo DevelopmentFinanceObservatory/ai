@@ -214,10 +214,10 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
     A prices refusal that sends the planner to the user (`detail.part`,
     `submission.prices_choice`) binds the planner's next ask offering
     `PRICES_OPTIONS` that reached the user (a refused ask leaves no step,
-    `planner.session.session_steps`) to its part, and the user's pick there sets the part's
-    prices, marked `asked` so the planner does not ask it again
-    (`submission.prices_choice`). The user's own words there release the
-    part's choice, as they do on the orchestrator's question, and a skip
+    `planner.session.session_steps`) to its part, and the user's pick there
+    sets the part's prices, marked `asked` so the planner does not ask it
+    again (`submission.prices_choice`). The user's own words there release
+    the part's choice, as they do on the orchestrator's question, and a skip
     keeps it, marking a constant choice `asked`. A switch of the part's
     prices row on the plan card (`_prices_switched`) is a new answer for the
     part, marked `asked` too, while its replan is under way or once the plan

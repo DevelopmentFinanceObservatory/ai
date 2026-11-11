@@ -735,9 +735,10 @@ def _gone() -> errors.ClientError:
 
 
 async def _sent_stream(send: str) -> Any:
-    """The chunks one send streams: `answer` one with usage; `cut` one without, then
-    one its reader never takes; `stall` none before its reader gives up; `read_gone`
-    the prefix cache found gone once read."""
+    """The chunks one send streams. `answer` streams two chunks, each with usage. `cut`
+    streams one without usage, then one its reader never takes. `stall` streams
+    none before its reader gives up. `read_gone` raises the cache-gone error on the
+    first read."""
     if send == "read_gone":
         raise _gone()
     if send == "stall":
@@ -750,7 +751,8 @@ async def _probed_calls(sends: list[str]) -> tuple[list[bool], int]:
     """What a `Probe` makes of `sends`, read as the planner's model reads its client: a
     stall cut by the first-chunk bound, a call cut by a bound after one chunk, a cache
     found gone (`open_gone` at open, `read_gone` while read), and `next_request` for
-    the entry's next request. Each call, whether its usage is known, and the sends."""
+    the entry's next request. It returns whether each call's usage is known, and the
+    number of requests sent."""
     probe = entry.Probe()
     client = Client(api_key="scripted")
     sent = iter(send for send in sends if send != "next_request")

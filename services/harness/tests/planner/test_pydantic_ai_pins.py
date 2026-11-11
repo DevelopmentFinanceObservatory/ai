@@ -1,4 +1,4 @@
-"""Pins on the Pydantic AI behaviour the planner relies on and its documentation does not promise.
+"""Pins on Pydantic AI behaviour the planner relies on, which its docs do not promise.
 
 These tests and the tests that run both planners on one script gate raising the
 `pydantic-ai-slim` pin together. The cross-runner tests (`tests/test_planner_node.py`,

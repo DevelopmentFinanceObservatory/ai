@@ -96,8 +96,8 @@ async def test_scripted_cases_report_as_marked(
         if r["status"] not in ("PASS", "XFAIL")
     }
     assert passed and failures == {}
-    # The cases ran on the planner `runner` names. Only the Pydantic AI planner
-    # runs as `planner_node`.
+    # `runner` picks the planner. Only the Pydantic AI planner runs as
+    # `planner_node`.
     assert bool(nodes) is (runner == "pydantic_ai")
 
 

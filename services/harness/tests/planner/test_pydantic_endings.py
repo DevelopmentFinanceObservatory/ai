@@ -8,9 +8,11 @@ leaves.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
+from google.genai import types
 from harness.turn_events import PLANNER_ASK
 from planner.pydantic_agent import tool_not_found
 from planner.specs import PROPOSE_PLAN
@@ -62,6 +64,21 @@ _ENDINGS = {
     "a stream with no chunk": Reply(chunks=[]),
     "a blocked prompt": blocked_reply(),
 }
+
+
+async def test_the_warning_for_a_refused_response_carries_no_model_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sentinel = "SENTINEL-thought-text-7f3a"
+    filtered = reply(thought_part(sentinel), finish_reason=types.FinishReason.SAFETY)
+
+    with caplog.at_level(logging.WARNING, logger="planner.pydantic_agent"):
+        await pydantic_run([filtered])
+
+    warnings = [r for r in caplog.records if r.name == "planner.pydantic_agent"]
+    assert len(warnings) == 1
+    assert "ContentFilterError" in warnings[0].getMessage()
+    assert all(sentinel not in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.parametrize("ending", _ENDINGS.values(), ids=_ENDINGS.keys())

@@ -1,10 +1,10 @@
 """The graph's planner seam, backed by the planner agent.
 
-An adapter over the planner, on the framework `harness.settings.Settings.
-planner_runner` names: the ADK planner (`planner.agent.create_planner_agent`)
-or the Pydantic AI planner (`harness.planner_node`), on one set of tools with
-translation attached to `propose_plan`. The planner runs as a
-dynamically-scheduled child of the graph's own node, through
+An adapter over the planner, which runs on the ADK planner
+(`planner.agent.create_planner_agent`) or the Pydantic AI planner
+(`harness.planner_node`) as `harness.settings.Settings.planner_runner` says,
+on one set of tools with translation attached to `propose_plan`. The planner
+runs as a dynamically-scheduled child of the graph's own node, through
 `Context.run_node`, and this module reads what it leaves in session state and
 translates it into `harness.graph.seams.PlannerModel`'s contract.
 
@@ -35,7 +35,7 @@ replan needs the plan it changes and the skills already read in front of
 it. `_propose` runs the planner with no node input. The ADK planner reads the
 brief from `planner.agent.BRIEF_STATE_KEY`, where `_propose` writes it, and
 `planner.agent.prepend_brief` shows it after the turn's question on every
-request of the run; the Pydantic AI planner's node is given it. The entry the user's
+request of the run. The Pydantic AI planner's node is given it. The entry the user's
 answer to a planner-side ask resumes renders it again, with the question and
 the answer added (`_answer_text`), since the planner node reruns on resume.
 
@@ -390,7 +390,7 @@ class PlannerSeam:
         # instruction, built here once.
         #
         # `translate` replaces the translation `propose_plan` runs, and `specs`
-        # the tools (`planner.agent.planner_specs` over the surface and that
+        # the tools (`planner.specs.planner_specs` over the surface and that
         # translation). `client` is the google-genai client the planner's
         # model calls go through, on either runner. None builds one from the
         # environment. On either runner a planner whose client uses Vertex AI,
@@ -402,7 +402,7 @@ class PlannerSeam:
         #
         # `model` is an ADK model, so the Pydantic AI planner refuses it. It
         # replaces the model `agent_settings` names, and takes no `client`.
-        # It runs as given, with no Vertex AI check: it calls through no
+        # It runs as given, with no Vertex AI check. It calls through no
         # client the seam builds, so a caller's model on Vertex AI is the
         # caller's to avoid.
         #
@@ -1047,7 +1047,7 @@ class PlannerSeam:
         try:
             # The run takes no node input: the brief reaches every request of
             # the run, the first after a resume included. The ADK planner's
-            # `prepend_brief` reads it from state; the Pydantic AI planner's
+            # `prepend_brief` reads it from state. The Pydantic AI planner's
             # node is given it.
             if self._agent is not None:
                 ctx.session.state[BRIEF_STATE_KEY] = message
@@ -1081,8 +1081,8 @@ class PlannerSeam:
         return run.submitted, plan, run.refused
 
     def _pydantic_planner(self, run: PlannerRun, budget: TurnBudget | None, brief: str) -> BaseNode:
-        """The Pydantic AI planner's node for `run`, on the seam's tools and instruction,
-        shown `brief`."""
+        """The Pydantic AI planner's node for `run`, on the seam's tools and
+        instruction, shown `brief`."""
         assert self._pydantic is not None, "the seam runs the Pydantic AI planner"
         model_name, planner = self._pydantic
         return planner_node(

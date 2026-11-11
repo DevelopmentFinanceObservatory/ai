@@ -36,8 +36,8 @@ from planner.pydantic_agent import PlannerAnswers, PlannerResponse
 
 
 def model_response_event(response: PlannerResponse) -> Event:
-    """The event the ADK planner stores for the model response `response`: its
-    parts as the model role's content, each function call with its id.
+    """The event the ADK planner stores for the model response `response`, holding
+    its parts as the model role's content, each function call with its id.
 
     Those are the parts Pydantic AI kept, so an empty text chunk Gemini streams
     after a function call is not among them, where ADK's stream aggregator

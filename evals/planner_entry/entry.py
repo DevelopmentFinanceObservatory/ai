@@ -739,7 +739,7 @@ class ModelRequest:
 # on the request itself, or, on a request sent against the prefix cache
 # (`harness.prefix_cache`), on that cache's create, which the edit is handed as a
 # request with no contents. Both runners send their requests in one form
-# (`ModelRequest`); an edit reads the instruction through `ModelRequest.system_text`
+# (`ModelRequest`). An edit reads the instruction through `ModelRequest.system_text`
 # and finds a declaration through `ModelRequest.declarations`.
 RequestEdit = Callable[[ModelRequest], None]
 
@@ -1050,12 +1050,12 @@ async def run_entry(
     each one and its answer. The entry ends at the first plan `propose_plan` records,
     at an ask of the user, or wherever the seam ends it (a bound of its request's
     budget, its round budget, a correction it gave up on), or after `timeout_s`. The
-    planner streams, as a studio
-    turn runs it. `answers` are the user's replies to the entry's asks, in order; each
-    resumes the paused entry, as the studio's interrupt route does, in a request of its
-    own with a fresh budget. A live run passes none, so an ask ends it. With
-    `translation`, production's translation runs on the recorded plan over those calls,
-    and `probe.translation` holds its answer.
+    planner streams, as a studio turn runs it. `answers` are the user's replies to
+    the entry's asks, in order. Each resumes the paused entry, as the studio's
+    interrupt route does, in a request of its own with a fresh budget. A live run
+    passes none, so an ask ends it. With `translation`, production's translation
+    runs on the recorded plan over those calls, and `probe.translation` holds its
+    answer.
     """
     probe = Probe()
     if translation is not None:
@@ -1353,8 +1353,8 @@ def entry_record(
 
     `experiment` identifies the treatment the run had (`run.experiment`), so a resumed
     run directory never mixes two, and `planner_runner` names the runner it ran on.
-    `period_reductions` and `period_reduction` say
-    what the accepted plan does with its years.
+    `period_reductions` and `period_reduction` say what the accepted plan does with
+    its years.
     """
     calls = tool_calls(run.events)
     proposed = proposals(calls, recorded=run.probe.plan_call)

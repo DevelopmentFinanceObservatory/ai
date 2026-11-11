@@ -262,7 +262,7 @@ _TOOL_ERROR = "TOOL_ERROR"
 async def serve_tool(
     spec: ToolSpec, raw: Mapping[str, Any], *, call: PlannerCall, end_run: EndRun
 ) -> object:
-    """The answer to a call to `spec` with the model's `raw` arguments (`run_tool`), awaited.
+    """The awaited `run_tool` answer to a call to `spec` with the model's `raw` arguments.
 
     An answer that is a dict holding an `error` key, such as the refusal of a
     call missing a required argument (`missing_arguments`), marks the current

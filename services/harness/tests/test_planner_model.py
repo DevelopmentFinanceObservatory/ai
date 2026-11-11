@@ -60,7 +60,7 @@ CACHE_NAME = "cachedContents/c1"
 
 class _HangingGenai(ScriptedGenai):
     """A `ScriptedGenai` whose streams wait for ever after `hang_after` chunks,
-    as a model does that stops sending mid-answer."""
+    as a model does when it stops sending mid-answer."""
 
     def __init__(self, replies: Sequence[Reply], *, hang_after: int) -> None:
         super().__init__(replies)
