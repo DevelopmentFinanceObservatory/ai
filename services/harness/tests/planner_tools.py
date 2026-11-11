@@ -11,7 +11,7 @@ from planner.tool_spec import ToolSpec
 
 
 def call_planner_tool(tool: ToolSpec | SpecTool, /, *, tool_context: Any, **arguments: Any) -> Any:
-    """Return what the planner tool answers `arguments` with (a coroutine when its body is async).
+    """Return the tool's answer to `arguments`, a coroutine when the body is async.
 
     The call goes through `SpecTool.invoke`, as a served call does. The
     arguments are converted and checked before the body runs. Every keyword

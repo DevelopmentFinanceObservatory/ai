@@ -2,7 +2,7 @@
 
 `planner_tool_specs` builds `ask_user_question`, `propose_plan` and
 `reject_plan`, and `skill_tool_spec` builds `get_skill`. Each spec's body runs
-`planner.tools`' or `planner.skills`' code over the call it is given; the
+`planner.tools`' or `planner.skills`' code over the call it is given. The
 description and parameters are what the model reads. `planner.agent` serves
 the specs to ADK.
 """

@@ -205,9 +205,10 @@ REFUSED_SPECS_STATE_KEY = "planner:refused_spec_ids"
 REFUSAL_DETAILS_STATE_KEY = "planner:refused_spec_details"
 # The time of the latest Search call made that settled on each spec_id, by
 # spec_id: the search for an input the planner pinned no dataset for
-# (`planner.source_reads.pin_by_search`) and each compile (`planner.source_reads.
-# compile_on_basis`, `compile_whole`). An answer served again keeps the time
-# of the call that made it (`translator.discovery.answered_once_at`), so it
+# (`planner.source_reads.pin_by_search`) and each compile
+# (`planner.source_reads.compile_on_basis`, `compile_whole`). An answer served
+# again keeps the time of the call that made it
+# (`translator.discovery.answered_once_at`), so it
 # moves nothing (`record_spec_searched`). Kept beside the pins, whose stored
 # shape it leaves as it was.
 SPEC_SEARCHED_STATE_KEY = "planner:spec_searched_at"
@@ -241,7 +242,8 @@ WINDOWED_PINS_STATE_KEY = "planner:windowed_pins"
 # The session-state slot holding each pin compiled to put a calculation's
 # inputs on one measure basis or provider scope, or a declared whole over its
 # part (`AlignedPin`), which `submission.service._aligned_bases` reads and
-# `planner.source_reads.with_source_reads` writes (`submission.service.save_aligned_pin`).
+# `planner.source_reads.with_source_reads` writes
+# (`submission.service.save_aligned_pin`).
 ALIGNED_PINS_STATE_KEY = "planner:aligned_pins"
 
 # The session-state slot holding the spec block of each source a referral
@@ -273,15 +275,17 @@ ALIGNED_PIN_WARNINGS_STATE_KEY = "planner:aligned_pin_warnings"
 ALIGNMENTS_STATE_KEY = "planner:alignments"
 
 # The session-state slot holding a `PinVerdict` for every pinned dataset
-# requirement of the plan `propose_plan` (`planner.tools.propose`) last recorded: whether
-# admission judged its pin to answer a narrower question than the one asked
+# requirement of the plan `propose_plan` (`planner.tools.propose`) last
+# recorded: whether admission judged its pin to answer a narrower question
+# than the one asked
 # (`submission.service._pin_verdicts`), which the translator reads in place
 # of judging it again. Unset until a plan is recorded with them.
 PIN_VERDICTS_STATE_KEY = "planner:pin_verdicts"
 
-# The session-state slot holding what `propose_plan` (`planner.tools.propose`) read about
-# every year a pinned dataset holds, by the pin's spec_id, as its first year and
-# its rows, or null when Search's answer over no window stated no first year.
+# The session-state slot holding what `propose_plan` (`planner.tools.propose`)
+# read about every year a pinned dataset holds, by the pin's spec_id, as its
+# first year and its rows, or null when Search's answer over no window stated
+# no first year.
 # One read answers every requirement and every later proposal of the turn that
 # pins the dataset. Unset until a start that follows the newest data needs one.
 FULL_HISTORIES_STATE_KEY = "planner:full_histories"
@@ -1834,7 +1838,7 @@ MAX_DECLINES = len(UnsupportedOperation) * (MAX_PLAN_ASKS + 1)
 class UnsupportedPlanError(ValueError):
     """A plan rule refused a calculation the system cannot carry out.
 
-    Distinct from a malformed draft: no reshaping of the plan states the
+    Distinct from a malformed draft. No reshaping of the plan states the
     calculation, so `propose_plan` (`planner.tools.propose`) answers with the
     `unsupported` outcome and requires a `Decline` naming `operation`.
     """
@@ -2056,8 +2060,9 @@ class WholeIsItsMemberError(ValueError):
     `party` the party the ask totals across, `denominator_id` the dataset
     requirement its denominator reads, and `named` the entities that
     requirement names alone on that side, each of which the numerator names
-    too (`check_wholes_span_their_totals`). `propose_plan` (`planner.tools.propose`)
-    answers it with a typed problem naming the ways out.
+    too (`check_wholes_span_their_totals`). `propose_plan`
+    (`planner.tools.propose`) answers it with a typed problem naming the ways
+    out.
     """
 
     def __init__(
@@ -6280,10 +6285,10 @@ def identity_or_refusal(
     each source the translator offered. Otherwise it is the one `pin`'s
     block in `shown` carries, when data-mcp would take it
     (`shown_definition`). A pin compiled in code is on record through that
-    block alone: a scope choice switched on the plan card
+    block alone. A scope choice switched on the plan card
     (`harness.graph.switch`) or an input put on its calculation's basis
-    (`planner.source_reads.compile_on_basis`, `planner.source_reads.compile_whole`) is
-    held in `held_sources` and in no search record.
+    (`planner.source_reads.compile_on_basis`, `planner.source_reads.compile_whole`)
+    is held in `held_sources` and in no search record.
 
     The reason is `None` with a definition, and when none is on record
     because no search recorded one and `pin`'s block, if any, carries none.

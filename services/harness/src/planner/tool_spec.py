@@ -193,7 +193,7 @@ def convert_arguments(spec: ToolSpec, raw: Mapping[str, Any]) -> dict[str, Any]:
 
     A key `spec` declares no parameter for is dropped. A value for a model
     parameter, an optional one, or a list of them item by item becomes that
-    model; a value or item that does not validate stays as sent, for the body
+    model. A value or item that does not validate stays as sent, for the body
     to refuse. An integral float for an `int` or `list[int]` parameter becomes
     an int. Nothing else is checked or converted.
     """

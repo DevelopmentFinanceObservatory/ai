@@ -15,11 +15,11 @@ answers `_approval_summary(plan)` (the version and revision that tie the
 answer to one content hash, and the compiler's warnings, the one thing on it a
 caller cannot read off the plan record) under `summary`. `ready_and_end` ends
 the run on an answer carrying `summary`. Declaring a plan ready approves
-nothing: whatever runs the planner withholds execution until the user's
+nothing. Whatever runs the planner withholds execution until the user's
 answer arrives, which for the served path is the harness's own graph.
 
 An ask the planner makes (`ask_user`) is recorded under
-`PENDING_ASK_STATE_KEY` and answers `ASK_ACCEPTED`; the graph's planner node
+`PENDING_ASK_STATE_KEY` and answers `ASK_ACCEPTED`. The graph's planner node
 puts it to the user once the run ends.
 """
 
@@ -100,15 +100,17 @@ def _approval_summary(plan: Plan) -> dict[str, object]:
 def _execution_blocked(plan: Plan, call: PlannerCall) -> dict[str, object] | None:
     """Return the problem that stops `declare_ready` on `plan`, or `None` to let it proceed.
 
-    Checked in order: a rejected plan; a pending referral, which the planner settles by
-    proposing again, after asking the user where the referral is of a kind in `USER_DECIDES`
-    (the refusal's `action` names `PLANNER_ASK` until they answer, `propose_plan`
-    otherwise); a plan not yet translated and compiled; and, last, an allowlist on `plan.status`
-    itself. Only `PENDING_APPROVAL` may be declared ready, so a plan already `APPROVED`,
-    `EXECUTING`, `COMPLETED` or `FAILED` is refused too, even though none of those carries a
-    message of its own above. A plan seeded back from a failed run (see `harness.graph`) still
-    carries a workflow and the version it failed at, so it would otherwise pass every check
-    above and reach the user as though it were still approvable.
+    Checked in order: a rejected plan; a pending referral, which the planner
+    settles by proposing again, after asking the user where the referral is of
+    a kind in `USER_DECIDES` (the refusal's `action` names `PLANNER_ASK` until
+    the user answers, `propose_plan` otherwise); a plan not yet translated and
+    compiled; and, last, an allowlist
+    on `plan.status` itself. Only `PENDING_APPROVAL` may be declared ready, so a
+    plan already `APPROVED`, `EXECUTING`, `COMPLETED` or `FAILED` is refused
+    too, even though none of those carries a message of its own above. A plan
+    seeded back from a failed run (see `harness.graph`) still carries a workflow
+    and the version it failed at, so it would otherwise pass every check above
+    and reach the user as though it were still approvable.
     """
     if plan.status is PlanStatus.REJECTED:
         return problem(
@@ -129,8 +131,8 @@ def _execution_blocked(plan: Plan, call: PlannerCall) -> dict[str, object] | Non
             action=Action(call=PLANNER_ASK) if asks_user else PROPOSE_PLAN_PROPOSER.action(),
         )
     if plan.status is PlanStatus.DRAFT or plan.workflow is None:
-        # A draft states the methodology; what runs arrives with
-        # translation, so approving one would approve nothing to run.
+        # A draft states the methodology. What runs arrives with translation,
+        # so approving one would approve nothing to run.
         return problem(
             ProblemCode.WORKFLOW_MISSING,
             "This plan has not compiled into a workflow, so nothing can execute yet. "
@@ -155,15 +157,17 @@ def declare_ready(
     answer: dict[str, object],
     call: PlannerCall,
 ) -> dict[str, object]:
-    """Declare the plan on record ready for the user's answer, when `answer`'s translation compiled.
+    """Declare the plan on record ready when `answer`'s translation compiled.
 
-    `answer` is an accepted `propose_plan` answer carrying its `translation`. A verdict other
-    than `ok` leaves it unchanged. Past `_execution_blocked`, it gains `summary`
-    (`_approval_summary`), and the run ends there (`ready_and_end`). The harness asks the
-    user, so no model call follows to restate the plan the user already sees. A plan the gate
-    blocks gains the gate's problem under `submission` instead, its `action` naming
-    `propose_plan`, and the run goes on. Approves nothing. Whatever runs this agent gates on the
-    user's answer, keyed on the summary's revision.
+    `answer` is an accepted `propose_plan` answer carrying its `translation`.
+    A verdict other than `ok` leaves it unchanged. Past `_execution_blocked`,
+    it gains `summary` (`_approval_summary`), and the run ends there
+    (`ready_and_end`). The harness asks the user, so no model call follows to
+    restate the plan the user already sees. A plan the gate blocks gains the
+    gate's problem under `submission` instead, its `action` naming
+    `propose_plan`, and the run goes on. Declaring a plan ready approves
+    nothing. Whatever runs this agent gates on the user's answer, keyed on the
+    summary's revision.
     """
     translation = answer.get("translation")
     if not isinstance(translation, dict) or translation.get("outcome") != Outcome.OK.value:
@@ -218,10 +222,10 @@ def _transient_retry(arguments: Mapping[str, Any], state: SessionState) -> Plan 
 
 
 def ask_refusal(args: Mapping[str, Any]) -> dict[str, object] | None:
-    """The refusal the planner's ask earns on its arguments alone, or `None` for one that pauses.
+    """The refusal an ask earns on its arguments alone, or `None` for one that pauses.
 
     ADK hands the model's arguments over unchecked. A refusal answers the
-    call at once, so the run goes on and Studio asks nothing; an ask this
+    call at once, so the run goes on and Studio asks nothing. An ask this
     accepts ends the planner's run, and the graph's planner node pauses on
     it with these arguments as its `RequestInput`'s `payload`, from which
     Studio builds its question (`harness.studio_translate._planner_question`).
@@ -266,7 +270,8 @@ def ask_refusal(args: Mapping[str, Any]) -> dict[str, object] | None:
 
 
 def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[str, object] | None:
-    """The refusal for an ask offering anything but one reading's picks under an entity referral, or `None`.
+    """The refusal for an ask under an entity referral whose candidates are not one
+    reading's picks, or `None`.
 
     While an `entity_name_ambiguous` referral is pending, an ask that offers
     candidates offers those of one reading in its `ambiguous_entities`, each
@@ -334,18 +339,17 @@ def _ask_check(args: Mapping[str, Any], state: SessionState) -> dict[str, object
 
 
 def _ask_beside_ask(call: PlannerCall) -> dict[str, object] | None:
-    """The refusal for an ask that is not the first ask of its model response, or `None`.
+    """The refusal for an ask beside an earlier ask in its model response, or `None`.
 
     The user answers one question at a time. The calls of one response run
     concurrently, and an accepted ask ends the run before the model is
     called again, so the only way two asks can wait together is two in one
     response. The first ask in the response's call list is the only one that
-    may reach the user; every later one is refused, whatever became of the
-    first. Deciding from the call list rather than from the earlier asks'
-    outcomes gives the same answer under any order the response's calls run
-    in.
+    may reach the user. Every later one is refused, whatever became of the
+    first. Deciding from the call list alone gives the same answer under any
+    order the response's calls run in.
 
-    `PlannerCall.response_calls` gives the response's call list; `steps` cannot,
+    `PlannerCall.response_calls` gives the response's call list. `steps` cannot,
     since an accepted ask of an earlier response that no answer followed stands
     next to this response's asks there.
     """
@@ -428,7 +432,7 @@ def ask_user(
     recommended_spec_id: str | None,
     rationale: str | None,
 ) -> dict[str, object]:
-    """The planner's ask: record it as pending and end the run, or refuse it.
+    """Record the planner's ask as pending and end the run, or refuse it.
 
     An accepted ask ends the run (`end_run`) once the calls made beside it
     have answered, as a plan declared ready does (`ready_and_end`).
@@ -479,8 +483,8 @@ async def propose_reading_sources(
     reads_user_words: bool,
     surface: ToolSurface | None,
 ) -> dict[str, object]:
-    """`propose`, and with a `surface`, each source read the proposal is refused
-    for want of made and the proposal made again (`with_source_reads`)."""
+    """`propose`. With a `surface`, the source reads a refusal asks for are made,
+    and the proposal is made again (`with_source_reads`)."""
 
     def draft() -> dict[str, object]:
         return propose(

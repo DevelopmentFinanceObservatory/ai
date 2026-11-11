@@ -705,27 +705,30 @@ _TOOL_ERROR = "TOOL_ERROR"
 
 
 def _env_flag(name: str) -> bool | None:
-    """The environment variable `name` as google-genai reads a flag: `true` or `1`
-    in any case is true, any other value false, and an unset variable `None`."""
+    """The environment variable `name` read as google-genai reads a flag.
+
+    `true` or `1`, in any case, is true. Any other value is false, and an unset
+    variable gives `None`.
+    """
     value = os.environ.get(name)
     return None if value is None else value.lower() in ("true", "1")
 
 
 def refuse_vertex_ai() -> None:
-    """Refuse to build the planner when its model's google-genai client would use Vertex AI.
+    """Refuse to build the planner when its model's client would use Vertex AI.
 
     The planner's declarations are the Gemini developer API's form
     (`planner.tool_spec.function_declaration`). Vertex AI rejects their
     optional `anyOf` schemas, which ADK rewrites only for its own function
     tools. `create_planner_agent` calls this once, when the planner's model
-    is ADK's `Gemini`; any other model calls through no google-genai client.
+    is ADK's `Gemini`. Any other model calls through no google-genai client.
 
     The harness builds its Gemini models with no client options, so their
     `google.genai.Client` takes `vertexai` from the environment, as
-    google-genai resolves it: `GOOGLE_GENAI_USE_ENTERPRISE` when set,
-    otherwise `GOOGLE_GENAI_USE_VERTEXAI`, each true when `true` or `1`. The
-    rule is read here without building a client, since building one without
-    an API key or credentials raises.
+    google-genai resolves it. `GOOGLE_GENAI_USE_ENTERPRISE` applies when set,
+    and otherwise `GOOGLE_GENAI_USE_VERTEXAI`, each true when `true` or `1`. The
+    rule is read here without building a client, since building one without an
+    API key or credentials raises.
 
     Raises:
         RuntimeError: That resolution gives Vertex AI.
@@ -771,7 +774,7 @@ class SpecTool(BaseTool):
         return self.declaration.model_copy(deep=True)
 
     def invoke(self, args: dict[str, Any], tool_context: ToolContext) -> object:
-        """The spec's answer to a call with `args`, an awaitable when its body is async."""
+        """The spec's answer to a call with `args`, awaitable when its body is async."""
         return run_tool(self.spec, args, call=AdkCall(tool_context), end_run=_end_run(tool_context))
 
     @override

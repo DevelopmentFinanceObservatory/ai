@@ -10,8 +10,8 @@ The planner's own tools settle methodology and carry it to a compiled
 workflow (`propose_plan`, whose `translation` is either the compiled outcome
 or the `Referral` translation stopped on); a translation that compiles
 declares the plan ready for the user's answer in code
-(`planner.tools.declare_ready`), and ends the planner's run. This module never
-constructs a `Plan` itself. An entry that ends without a plan ready ends on a
+(`planner.tools.declare_ready`), and ends the planner's run. This module builds no
+`Plan` itself. An entry that ends without a plan ready ends on a
 refusal whose sentence comes from `harness.sentences`.
 
 `ctx.run_node` shares one session both directions with the graph's own
@@ -910,8 +910,9 @@ class PlannerSeam:
         `harness.graph.PlannerModel.revise`'s contract. The proposal runs
         the chain `propose_plan` runs (`submission.service.submit`), reading
         each first year it needs and compiling each input a calculation needs
-        on another basis or provider scope (`planner.source_reads.with_source_reads`), then
-        the translation, and the plan is ready when `declare_ready` says so.
+        on another basis or provider scope
+        (`planner.source_reads.with_source_reads`), then the translation, and
+        the plan is ready when `declare_ready` says so.
         A dataset requirement re-pinned to another spec_id cites the
         decisions that pin states and drops those of the one it left, which
         go with it. The proposal opens its own round count, as a planner
@@ -2021,9 +2022,9 @@ def _check_branches(events: Sequence[Event], *, planner: str) -> None:
 
 
 def _pinnable_candidates(referral: dict[str, Any] | None) -> list[dict[str, str]]:
-    """The `spec_id`-bearing candidates a referral names, shaped as
-    `ask_user_question`'s own `candidates` argument (`planner.specs`)
-    (`{"spec_id": ..., "label": ...}`, `label` the candidate's `sentence`).
+    """The `spec_id`-bearing candidates a referral names, shaped as the
+    `candidates` argument of `ask_user_question` (`planner.specs`):
+    `{"spec_id": ..., "label": ...}`, with `label` the candidate's `sentence`.
 
     A `no_data` referral's candidates (`translator.discovery.compact_source
     (selectable=False)`) carry no `spec_id`, since they describe what search
@@ -2068,8 +2069,9 @@ def _clarifying_question_args(
     candidates: list[dict[str, str]], *, lead: str, question: str = _WHICH_MEANT
 ) -> dict[str, Any]:
     """The `PLANNER_ASK` call args that put a referral's pinnable
-    candidates to the user: the shape `ask_user_question` declares (`planner.specs`), built
-    here from the candidates with no model call composing it. `lead` says why
+    candidates to the user, in the shape `ask_user_question` declares
+    (`planner.specs`). It is built here from the candidates, with no model call
+    composing it. `lead` says why
     the user is asked and `question` what they are asked. It recommends no
     candidate, since nothing has weighed them. The message reaches the user, so
     it names no requirement id, referral kind or spec_id; each candidate's

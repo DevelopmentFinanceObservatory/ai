@@ -368,7 +368,8 @@ class RollingPlanError(ValueError):
 
     `issue` names the rule, `requirement_ids` the requirements to change, and
     `fault` the part of `RollingIssue.NEEDS_OPEN_PERIOD` that holds, so
-    `propose_plan` (`planner.tools.propose`) answers with a code a caller can branch on.
+    `propose_plan` (`planner.tools.propose`) answers with a code a caller can
+    branch on.
     `spec_id` is the pinned dataset whose first year is missing, under
     `OpenPeriodFault.FIRST_YEAR_UNKNOWN` and `FIRST_YEAR_READ_FAILED`.
     """

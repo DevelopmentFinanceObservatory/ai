@@ -133,14 +133,13 @@ Before the first real deploy, infra needs to set up, per environment:
   including its runtime service account, scaling config, env vars, and
   secrets. This repo's workflows only ever update the `--image` on the
   service that already exists.
-- Model credentials on that service. The harness runs on the Gemini
-  developer API key, `GOOGLE_API_KEY`, which google-adk reads straight from
-  the process environment, so it must be wired into the service definition as a secret. The harness
-  refuses to build the planner when its Gemini model would call Vertex AI,
-  which rejects the planner's tool declarations. google-genai decides that
-  from `GOOGLE_GENAI_USE_ENTERPRISE` when it is set, true for `true` or `1` in
-  any case, and otherwise from the deprecated `GOOGLE_GENAI_USE_VERTEXAI`, read
-  the same way.
+- Model credentials on that service. The harness uses the Gemini developer API
+  key, `GOOGLE_API_KEY`, which google-adk reads from the process environment, so
+  wire it into the service definition as a secret. The harness refuses to build
+  the planner when its Gemini model would call Vertex AI, which rejects the
+  planner's tool declarations. google-genai decides that from
+  `GOOGLE_GENAI_USE_ENTERPRISE` when it is set (`true` or `1`, in any case), and
+  otherwise from the deprecated `GOOGLE_GENAI_USE_VERTEXAI`, read the same way.
 - `DFO_APIS_URL` on that service, pointing at apis, the FastAPI app that
   serves both the Search and Datasets surfaces. The data-mcp component
   mounted in the harness reads it to reach that API and falls back to a

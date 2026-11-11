@@ -1243,7 +1243,7 @@ def _planner_question(args: dict[str, Any]) -> ElicitationQuestion:
     carries as its `RequestInput`'s `payload`, are the question directly:
     `message`, `candidates`, `options`, `recommended_spec_id` and `rationale`.
     `options` are fixed choices that are no source, such as whether to add
-    two datasets (`submission.service.COMBINATION_OPTIONS`); the planner reads
+    two datasets (`submission.service.COMBINATION_OPTIONS`). The planner reads
     only a pick of one, so they take no free text."""
     candidates = args.get("candidates") or []
     fixed = args.get("options") or []
