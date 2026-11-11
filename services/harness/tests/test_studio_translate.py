@@ -2786,6 +2786,55 @@ def test_a_refused_proposal_reads_reworking_the_draft_until_the_next_call() -> N
     assert not any("evidence_requirements" in (f.detail or "") for f in refused + retry)
 
 
+_REPEATED_WRITE = {"outcome": "invalid_input", "code": "plan_write_repeated", "message": "m"}
+
+
+def _planner_event(role: str, *parts: types.Part) -> Event:
+    """One planner event of `parts`: a response's calls (`model`) or their answers (`user`)."""
+    return Event(author="dfo_planner", content=types.Content(role=role, parts=list(parts)))
+
+
+@pytest.mark.parametrize(
+    ("first", "first_answer", "lines"),
+    [
+        (
+            "propose_plan",
+            {"outcome": "ok", "translation": {"outcome": "ok"}},
+            [
+                ("s0", "Checking the plan against the data", StepStatus.RUNNING),
+                ("s0", "Checking the plan against the data", StepStatus.COMPLETE),
+            ],
+        ),
+        ("reject_plan", {"outcome": "ok", "status": "rejected"}, []),
+    ],
+    ids=["after-an-accepted-proposal", "after-a-rejection"],
+)
+def test_a_proposal_refused_beside_an_earlier_plan_write_opens_no_line(
+    first: str, first_answer: dict[str, Any], lines: list[tuple[str, str, StepStatus]]
+) -> None:
+    """A response calls a plan write and then `propose_plan`, which is refused for
+    following it (`plan_write_repeated`). Only the first write's call opens a line:
+    an accepted proposal's checking line, which its answer completes, and none for a
+    rejection. The refused proposal opens no line of its own and leaves none running."""
+    translator = _translator()
+    calls = _planner_event(
+        "model",
+        types.Part(function_call=types.FunctionCall(name=first, args={})),
+        types.Part(function_call=types.FunctionCall(name="propose_plan", args={"question": "q"})),
+    )
+    answers = _planner_event(
+        "user",
+        *(
+            types.Part(function_response=types.FunctionResponse(name=name, response=response))
+            for name, response in ((first, first_answer), ("propose_plan", _REPEATED_WRITE))
+        ),
+    )
+
+    frames = translator.translate(calls) + translator.translate(answers)
+
+    assert _status_lines(frames) == lines
+
+
 def test_a_refusal_with_an_unlisted_code_reworks_the_draft_without_a_reason() -> None:
     translator = _translator()
 
