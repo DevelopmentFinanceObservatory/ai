@@ -269,7 +269,8 @@ def _pydantic_planner(specs: Sequence[ToolSpec], scripted: ScriptedGenai) -> Bas
 
 def _finish_reason(response: PlannerResponse) -> types.FinishReason | None:
     del response
-    # `PlannerResponse` carries no finish reason; every scripted reply finishes with `STOP`.
+    # The finish reason the scripted reply sent, which the node takes from the raw
+    # response. Every reply here finishes with `STOP`.
     return types.FinishReason.STOP
 
 

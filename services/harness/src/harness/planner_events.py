@@ -18,7 +18,10 @@ The builders leave out what ADK's node runner sets on every event a node
 yields: the event's id and timestamp, `invocation_id`, `node_info.path` and
 `node_info.output_for`, `author`, which it takes from the node's
 `Context.event_author`, so the node sets that to `planner.agent.AGENT_NAME`,
-and `branch`, which it takes from the run's `override_branch`.
+and `branch`, which it takes from the `override_branch` the node is run with
+(`harness.planner_seam`'s planner branch). The model response's finish reason,
+model version and usage are the ones the API reported, which the node reads
+off the raw google-genai response.
 
 A run stopped while a response's calls are running leaves no event for that
 response, as the ADK planner leaves none: ADK cancels the calls and appends
