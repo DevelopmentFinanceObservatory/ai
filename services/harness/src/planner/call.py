@@ -95,11 +95,11 @@ class PlannerCall(Protocol):
     `state` is the call's session state, `call_id` the id of the tool call
     being served (`None` outside one), and `steps` the session's history in
     order (`Step`). The answer arrives on a later invocation than the ask
-    that paused the run, so the steps run across the whole session, not one
-    invocation. `response_calls` is the function calls of the model response
-    that holds the call being served, in the order the model wrote them, which
-    `steps` cannot say, since an ask the user never answered and an ask of the
-    same response stand side by side in the steps.
+    that paused the run, so the steps span the whole session, across
+    invocations. `response_calls` gives the function calls of the model
+    response that holds the call being served, in the order the model wrote
+    them. `steps` cannot give that order, because an unanswered ask and an ask
+    of the same response stand side by side in the steps.
     """
 
     @property

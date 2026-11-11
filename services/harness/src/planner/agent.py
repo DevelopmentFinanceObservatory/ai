@@ -705,8 +705,11 @@ _TOOL_ERROR = "TOOL_ERROR"
 
 
 def _env_flag(name: str) -> bool | None:
-    """The environment variable `name` as google-genai reads a flag: `true` or `1`
-    in any case is true, any other value false, and an unset variable `None`."""
+    """The environment variable `name` read as google-genai reads a flag.
+
+    `true` or `1`, in any case, is true. Any other value is false, and an unset
+    variable gives `None`.
+    """
     value = os.environ.get(name)
     return None if value is None else value.lower() in ("true", "1")
 
@@ -809,7 +812,7 @@ class SpecTool(BaseTool):
         return self.declaration.model_copy(deep=True)
 
     def invoke(self, args: dict[str, Any], tool_context: ToolContext) -> object:
-        """The spec's answer to a call with `args`, an awaitable when its body is async."""
+        """The spec's answer to a call with `args`, awaitable when its body is async."""
         return run_tool(self.spec, args, call=AdkCall(tool_context), end_run=_end_run(tool_context))
 
     @override

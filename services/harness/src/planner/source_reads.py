@@ -103,7 +103,7 @@ logger = logging.getLogger(__name__)
 
 
 def _first_year_wanted(result: Mapping[str, object]) -> str | None:
-    """The pinned dataset a refusal says no first year is on record for; `None` for any other answer."""
+    """The pinned dataset a first-year refusal names, or `None` for any other answer."""
     detail = result.get("detail")
     if (
         not isinstance(detail, Mapping)
@@ -116,8 +116,8 @@ def _first_year_wanted(result: Mapping[str, object]) -> str | None:
 
 # The seconds one first-year read may take (`read_full_history`). It runs
 # inside a `propose_plan` call, so inside the planner entry's remaining time,
-# which `translator.discovery.resolve_definition` already holds it to; this
-# keeps a slow Search from spending that whole remainder on one read.
+# which `translator.discovery.resolve_definition` already holds it to. The
+# deadline keeps a slow Search from spending that whole remainder on one read.
 FIRST_YEAR_READ_DEADLINE_SECONDS = 10.0
 
 
@@ -163,7 +163,7 @@ def _first_year_unreadable(
 ) -> dict[str, object]:
     """Return the `SURFACE_UNAVAILABLE` problem for a first-year read that did not complete.
 
-    `refused` is the `first_year_unknown` refusal the read was made for; its
+    `refused` is the `first_year_unknown` refusal the read was made for. Its
     requirements and dataset carry over, under the fault
     `first_year_read_failed`. The same proposal can succeed later, so
     nothing in it needs changing.
@@ -223,11 +223,11 @@ async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the
     (`submission.service.admit`).
 
     The compile takes the time a resubmit has
-    (`translator.discovery.call_within_entry`): the capability row's call
-    timeout, above data-mcp's resubmit budget, within the planner entry's
-    time left.
+    (`translator.discovery.call_within_entry`). That is the capability row's
+    call timeout, above data-mcp's resubmit budget, within the planner
+    entry's time left.
 
-    `state` is read; the writes are made when the read returned is applied
+    `state` is read. The writes are made when the read returned is applied
     (`SourceRead`). It answers `None` once the pin is held, or the refusal
     the proposal answers: `SURFACE_UNAVAILABLE` when Search did not answer
     and can later, `OPERATION_UNSUPPORTED` when it refuses the options or
@@ -370,8 +370,8 @@ def _scope_unservable(read: ScopeRead, reason: str) -> dict[str, object]:
     Search does not state, so it cannot be counted as its calculation's other
     inputs are. `reason` says why, as a clause.
 
-    It refuses this proposal alone and records nothing: the pin cannot be
-    aligned, and another series of the input, or a plan leaving it out of
+    It refuses this proposal alone and records nothing. The pin cannot be
+    aligned, and another series of the input, or a plan that leaves it out of
     the calculation, can be, so the ask stays answerable.
     `detail.basis` names the input as `submission.service.basis_unservable`
     does, for the refusal's sentence (`harness.sentences`).
@@ -395,7 +395,11 @@ def _scope_unservable(read: ScopeRead, reason: str) -> dict[str, object]:
 
 
 def _origin_warnings(state: SessionState, origin: str) -> tuple[str, ...]:
-    """The warning codes on the record of `origin`, a pin a compile is made from (`translator.discovery.pin_warnings`), which the compile keeps."""
+    """The warning codes on the record of `origin`, a pin a compile is made from.
+
+    They are read through `translator.discovery.pin_warnings`, and the compile
+    keeps the codes.
+    """
     return pin_warnings(
         origin,
         entry=None,
@@ -428,7 +432,7 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     that is stays Search's answer. Search keeps the part's measure basis,
     and its region on another role, which an option the whole cannot serve
     would otherwise leave to Search's default. The provider scope of a
-    donor whole is posted as a carried entry: Search counts the whole on it
+    donor whole is posted as a carried entry. Search counts the whole on it
     where the whole offers it, and otherwise drops it and counts the whole
     on its own default, since the scope names whose spending a named donor
     counts and Search offers the inclusive scope on no total naming no
@@ -449,7 +453,7 @@ async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the co
     whole declaring the part and the axis pins. Like a compile from
     `compile_on_basis`, it is held there alone.
 
-    `state` is read; the writes are made when the read returned is applied
+    `state` is read. The writes are made when the read returned is applied
     (`SourceRead`). It answers `None` once the pin is held,
     `SURFACE_UNAVAILABLE` when Search did not answer and can later, or
     `SHARE_WHOLE_UNDERIVABLE` under a cause
@@ -654,17 +658,17 @@ def _uncontained(part_pin: str, axis: str, held: _Containment) -> tuple[str, str
 # Search's cause for an entry dropped because the part has no choice on its axis.
 _AXIS_ABSENT = "axis_absent"
 
-# The class of party a total holding a whole population can leave out and still
-# hold every party the part names: a residual names no party (`common.place_type`).
+# A total holding a whole population can leave out this class of party and still
+# hold every party the part names. A residual names no party (`common.place_type`).
 _NOT_A_PARTY_CLASS = "residual"
 
 
 def _parties_outside(
     scope: PartScope, spec: Mapping[str, Any], column: str, *, part_block: Mapping[str, Any]
 ) -> _Containment:
-    """Whether the whole Search answered with, `spec`, holds each party the part
-    `scope` records names on the role `column` (`compile_whole`), `part_block`
-    the part's spec block.
+    """Whether the whole Search answered with (`spec`) holds each party the part
+    `scope` records names on the role `column` (`compile_whole`). `part_block`
+    is the part's spec block.
 
     A whole binding nothing on `column` counts every party its dataset holds
     there, the part's own dataset, so it holds every party the part names.
@@ -672,29 +676,29 @@ def _parties_outside(
     the members Search lists for the group naming it on `column`
     (`ResolvedGroup.members`, DAC countries' total). A total holding a whole
     population (`ResolvedGroup.whole_of`) holds every party of its classes and
-    no other: the part's party where its ref shows it is of one
+    no other. It holds the part's party where its ref shows it is of one
     (`compiler.sources.party_class`, a country official), and not where its
     ref shows another. It holds a party whose ref shows no class where its
     classes are every class the side publishes (`ResolvedGroup.side_classes`),
-    residuals aside; where the side publishes another class, or Search states
+    residuals aside. Where the side publishes another class, or Search states
     no classes for the side but residuals, nothing here says which class that
     party is, so it is unshown.
     Any other party is outside where Search binds parties or lists a total's
     members there, and unshown where the total it binds states neither its
     members nor a whole class. Where Search's group on `column` is not
     readable (`compiler.sources.block_group`), as one naming a class of party
-    outside `PartyClass`, every party it does not bind is unshown; a group on
+    outside `PartyClass`, every party it does not bind is unshown. A group on
     another role is not read. The parties the part and the whole bind on
     `column` are those their scope records bind
-    (`submission.service.bound_parties`), a choice's among them; where the
-    whole's record does not read, those its definition binds
-    (`submission.service.block_parties`).
+    (`submission.service.bound_parties`), a choice's among them. Where the
+    whole's record does not read, the parties it binds are those its
+    definition binds (`submission.service.block_parties`).
 
     A party of the part the whole neither binds nor lists is read through the
-    part's own group on `column` where it is that group's total (the G7's): the
-    whole holds it where it holds every member Search lists for the group, does
-    not where one is outside, and nothing shows it does where Search lists no
-    members, or the part's group there is not readable.
+    part's own group on `column` where it is that group's total (the G7's). The
+    whole holds that party where it holds every member Search lists for the
+    group, does not where one is outside, and nothing shows it does where
+    Search lists no members, or the part's group there is not readable.
     """
     named = bound_parties(scope, column)
     bound = block_parties(spec, column, scope=part_scope(str(spec.get("spec_id")), spec))
@@ -837,7 +841,7 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     The holds are made when the read returned is applied (`SourceRead`). It
     answers `None` once the search is held, or `SURFACE_UNAVAILABLE` when
     Search did not answer, or refused in a way that can succeed later
-    (`translator.discovery.refusal_retryable`); nothing is held then, so the
+    (`translator.discovery.refusal_retryable`). Nothing is held then, so the
     next proposal searches again. A call that failed for a reason no retry
     changes (a `ToolSurfaceUnavailableError` not marked `retryable`) is held
     as a refused search.
@@ -900,7 +904,7 @@ async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
 
 
 def _search_unavailable(unpinned: Unpinned, cause: str) -> dict[str, object]:
-    """Return the `SURFACE_UNAVAILABLE` problem for a search of `unpinned` that can succeed later.
+    """The `SURFACE_UNAVAILABLE` problem for a search of `unpinned` that can succeed later.
 
     The same proposal can succeed later, so nothing in it needs changing.
     """
@@ -915,7 +919,8 @@ def _search_unavailable(unpinned: Unpinned, cause: str) -> dict[str, object]:
 
 
 def _scope_not_read(read: ScopeRead, cause: str) -> dict[str, object]:
-    """Return the `SURFACE_UNAVAILABLE` problem for a read of a candidate's scope that did not complete.
+    """The `SURFACE_UNAVAILABLE` problem for a read of a candidate's scope that did
+    not complete.
 
     The same proposal can succeed later, so nothing in it needs changing.
     """
@@ -929,7 +934,8 @@ def _scope_not_read(read: ScopeRead, cause: str) -> dict[str, object]:
 
 
 def _basis_uncompiled(realignment: Realignment, cause: str) -> dict[str, object]:
-    """Return the `SURFACE_UNAVAILABLE` problem for a compile on another basis or provider scope that did not complete.
+    """The `SURFACE_UNAVAILABLE` problem for a compile on another basis or provider
+    scope that did not complete.
 
     The same proposal can succeed later, so nothing in it needs changing.
     """
@@ -951,34 +957,34 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
     A refusal records nothing, so `propose` runs again once the read is held.
     Two refusals ask for one. A plan rolling from a dataset's first year
     needs that first year (`read_full_history`, held by
-    `planner.plan.save_full_history`): one read serves every requirement, and
-    every later proposal of the turn, that pins the dataset; an answer
+    `planner.plan.save_full_history`). One read serves every requirement, and
+    every later proposal of the turn, that pins the dataset. An answer
     stating no first year is held too, and the next refusal says so
     (`first_year_read_failed`). A calculation one of whose inputs pins no
     dataset while another carries a basis choice needs that input searched
     for and pinned (`BASIS_UNKNOWN`, `pin_by_search`), as does the part of
-    a declared whole; a search held
-    for the requirement's content is made once. A calculation whose inputs are
-    counted on different measure bases or provider scopes needs each input
-    it names compiled on their shared options, every option of one input in
-    one compile (`BASES_UNALIGNED`, `compile_on_basis`), and a declared
-    whole needs its part compiled with the axis left open (`compile_whole`).
+    a declared whole. A search held for the requirement's content is made
+    once. A calculation whose inputs are counted on different measure bases
+    or provider scopes needs each input it names compiled on their shared
+    options, every option of one input in one compile (`BASES_UNALIGNED`,
+    `compile_on_basis`), and a declared whole needs its part compiled with the
+    axis left open (`compile_whole`).
     An input pinned to a candidate Search offered with no scope choices needs
     them read first (`SCOPE_UNREAD`, `read_scope`), once a pin, however many
-    inputs pin it, and once a call: a refusal naming a pin already read
-    answers `OPERATION_UNSUPPORTED`, since Search's answer left it unread;
-    a pin already compiled on a set of options, or a whole already compiled,
-    is asked for once, so a refusal naming one
-    is answered as it stands, and inputs sharing a pin and a set of options
-    compile it once (`_alignment_key`).
+    inputs pin it, and once a call. A refusal naming a pin already read
+    answers `OPERATION_UNSUPPORTED`, since Search's answer left it unread.
+    A pin already compiled on a set of options, or a whole already compiled,
+    is asked for once, so a refusal naming one is answered as it stands, and
+    inputs sharing a pin and a set of options compile it once
+    (`_alignment_key`).
 
     The reads one refusal asks for run at once. Their writes are made in the
-    order the refusal names them, up to the first read refused, whose
-    refusal is answered as soon as it and every read before it are made,
-    and the reads after it are cancelled (`_held_in_order`), so the state is
-    the one reading them one after another leaves. A search the refused read's writes discarded keeps
-    its answer for the invocation (`pin_by_search`), so the next proposal
-    searches only for what was refused.
+    order the refusal names them, up to the first read refused. That refusal
+    is answered as soon as it and every read before it are made, and the
+    reads after it are cancelled (`_held_in_order`), so the state is the one
+    reading them one after another leaves. A search the refused read's writes
+    discarded keeps its answer for the invocation (`pin_by_search`), so the
+    next proposal searches only for what was refused.
     """
     scopes_read: set[str] = set()
     while True:
@@ -1006,7 +1012,7 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
             continue
         reads = scopes_wanted(result)
         if reads:
-            # A pin is read once a call: Search answered a read that left it
+            # A pin is read once a call. Search answered a read that left it
             # unread, and will answer it so again.
             again = next((item for item in reads if item.spec_id in scopes_read), None)
             if again is not None:
@@ -1049,7 +1055,7 @@ async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a r
 async def _held_in_order(
     reads: Iterable[Awaitable[SourceRead]], *, state: SessionState
 ) -> dict[str, object] | None:
-    """Run `reads` at once and apply each to `state` in order, answering the first refused.
+    """Run `reads` at once, apply each to `state` in order, and answer the first refused.
 
     Each read is applied once it and every read before it are made, so a
     refusal is answered without waiting for the reads after it, which are
@@ -1071,7 +1077,10 @@ async def _held_in_order(
 def _alignment_key(
     spec_id: str, option_ids: Iterable[str], whole_axis: str | None
 ) -> tuple[str, tuple[str, ...], str | None]:
-    """The compile that puts the pin `spec_id` on the options `option_ids`, or leaves its choice on `whole_axis` open, as a key.
+    """The key of the compile that puts pin `spec_id` on `option_ids`.
+
+    A compile that leaves the pin's choice on `whole_axis` open is keyed by
+    that axis.
 
     The options are sorted and deduplicated, so one compile naming the same
     options in another order is the same work.

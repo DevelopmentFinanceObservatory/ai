@@ -41,7 +41,7 @@ in.
 
 A turn is also failed when the agent hedged: a reject case that also had a
 `propose_plan` declare a plan ready (its answer carries `summary`,
-`planner.tools.declare_ready`) -- an agent cannot both record a rejection and
+`planner.tools.declare_ready`). An agent cannot both record a rejection and
 declare the same plan ready for the user's answer. A `translation` case hedges
 the same way -- a case expecting `ok` that also had a proposal's translation
 answer a referral, or a referral case that also had one answer `ok` -- since `_by_name` picks whichever response carries the stated
