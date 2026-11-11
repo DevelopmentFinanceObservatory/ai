@@ -709,7 +709,7 @@ def refuse_vertex_ai() -> None:
     The planner's declarations are the Gemini developer API's form
     (`planner.tool_spec.function_declaration`). Vertex AI rejects their
     optional `anyOf` schemas, which ADK rewrites only for its own function
-    tools. Every builder of the planner's tools calls this once.
+    tools. `create_planner_agent` calls this once.
 
     Raises:
         RuntimeError: ADK's Google variant (`get_google_llm_variant`) is
@@ -718,7 +718,8 @@ def refuse_vertex_ai() -> None:
     if get_google_llm_variant() is GoogleLLMVariant.VERTEX_AI:
         raise RuntimeError(
             "ADK's Google variant is Vertex AI, which rejects the planner's tool "
-            "declarations. Run the planner on a Gemini developer API key (GOOGLE_API_KEY)."
+            "declarations. Unset GOOGLE_GENAI_USE_ENTERPRISE and GOOGLE_GENAI_USE_VERTEXAI "
+            "and run the planner on a Gemini developer API key (GOOGLE_API_KEY)."
         )
 
 
