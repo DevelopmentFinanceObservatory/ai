@@ -505,12 +505,12 @@ async def propose_and_translate(
     """`propose_reading_sources` over `arguments`, translating the plan it records.
 
     Translation runs once, on the version the proposal recorded, after any
-    source reads. The
-    proposal's own `outcome` stays `ok` whatever the verdict, since the version
-    is recorded either way, and a verdict of `ok` declares the plan ready
-    (`ready_and_end`). A proposal that records nothing translates nothing. A
-    bare re-proposal after a transient verdict (`_transient_retry`) translates
-    the recorded version again and records nothing.
+    source reads. The proposal's own `outcome` stays `ok` whatever the verdict,
+    since the version is recorded either way, and a verdict of `ok` declares
+    the plan ready (`ready_and_end`). A proposal that records nothing
+    translates nothing. A bare re-proposal after a transient verdict
+    (`_transient_retry`) translates the recorded version again and records
+    nothing.
     """
     retried = _transient_retry(arguments, call.state)
     if retried is not None:

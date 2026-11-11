@@ -13,10 +13,10 @@ from planner.tool_spec import ToolSpec
 def call_planner_tool(tool: ToolSpec | SpecTool, /, *, tool_context: Any, **arguments: Any) -> Any:
     """Return what the planner tool answers `arguments` with (a coroutine when its body is async).
 
-    The call goes through `SpecTool.invoke`, as a served call does: the
+    The call goes through `SpecTool.invoke`, as a served call does. The
     arguments are converted and checked before the body runs. Every keyword
-    must name one of the spec's parameters, so a misspelt one fails here
-    rather than being dropped by the conversion.
+    must name one of the spec's parameters, so a misspelt one fails here and
+    the conversion cannot drop it.
     """
     served = tool if isinstance(tool, SpecTool) else SpecTool(tool)
     unknown = set(arguments) - {parameter.name for parameter in served.spec.parameters}

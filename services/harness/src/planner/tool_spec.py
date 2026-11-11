@@ -66,8 +66,8 @@ class ToolSpec:
     the call omits at its default.
 
     `compact` declares the tool the way `propose_plan` is declared: every
-    parameter carries a description, placed over the parameter's own schema
-    rather than inside it, and the whole schema is rewritten by
+    parameter carries a description, which overrides any in the parameter's own
+    schema, and the whole schema is rewritten by
     `planner.declaration.compact_schema`. Otherwise a description sits in the
     parameter's schema as pydantic places a field's.
     """
@@ -120,10 +120,10 @@ def function_declaration(spec: ToolSpec) -> types.FunctionDeclaration:
     `<name>Params` whose fields are the parameters, as ADK builds a function
     tool's, rewritten by `compact_schema` when `spec.compact` is set. A tool
     with no parameters declares no schema. This is ADK's declaration on the
-    Gemini developer API, which the harness runs on: it carries no response
+    Gemini developer API, which the harness runs on. It carries no response
     schema and keeps optional `anyOf` schemas as pydantic writes them. Vertex
-    AI rejects that form, and `planner.agent.SpecTool` refuses to serve a spec
-    when ADK is configured for Vertex AI.
+    AI rejects that form, and `planner.agent.refuse_vertex_ai` stops the
+    planner building when ADK is configured for Vertex AI.
 
     Raises:
         ValueError: `spec` is compact and some parameter has no description.

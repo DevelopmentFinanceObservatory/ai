@@ -42,10 +42,9 @@ from planner.tools import (
 PROPOSE_PLAN = PROPOSE_PLAN_PROPOSER.call
 
 # What each `propose_plan` argument means, as the model reads it on the
-# argument itself. `question` and
-# `starts_new_plan` read differently under `question_fixed`, the way
-# `submission.service._resolve_intent` enforces them; `_FIXED_ARGUMENTS`
-# replaces those two.
+# argument itself. `question` and `starts_new_plan` read differently under
+# `question_fixed`, the way `submission.service._resolve_intent` enforces them,
+# and `_FIXED_ARGUMENTS` replaces those two.
 _PROPOSE_PLAN_ARGUMENTS = {
     "question": (
         "The question this plan answers. Required on a first draft and with "
@@ -195,17 +194,18 @@ _REJECT_PLAN_DOC = inspect.cleandoc(
     """
 )
 
-# Keep the description to one sentence saying what the call returns: a longer one
-# makes Gemini reason at length before some calls (`tests/planner/test_skills.py`
-# bounds its length). The argument text sits on the parameters.
+# Keep the description to one sentence saying what the call returns, because a
+# longer one makes Gemini reason at length before some calls
+# (`tests/planner/test_skills.py` bounds its length). The argument text sits on
+# the parameters.
 _GET_SKILL_DOC = (
     "Returns the SKILL.md of the skill with the given id and the list of its files, "
     "or one file of the skill, verbatim, when `path` is given."
 )
 
-# `= []` defaults rather than `None`: an optional list declared `list[X] | None`
-# reaches the model as `anyOf: [array, null]`, which is not the flat array a
-# patch is written into. Nothing mutates these defaults.
+# `= []` defaults keep the declaration's arrays flat. An optional list declared
+# `list[X] | None` reaches the model as `anyOf: [array, null]`, and a patch is
+# written into a flat array. Nothing mutates these defaults.
 _ASK_PARAMETERS = (
     Parameter("message", str),
     Parameter("candidates", list[dict[str, str]], []),

@@ -98,8 +98,8 @@ class PlannerCall(Protocol):
     that paused the run, so the steps run across the whole session, not one
     invocation. `response_calls` is the function calls of the model response
     that holds the call being served, in the order the model wrote them, which
-    `steps` cannot say: an ask the user never answered and an ask of the same
-    response stand side by side in the steps.
+    `steps` cannot say, since an ask the user never answered and an ask of the
+    same response stand side by side in the steps.
     """
 
     @property

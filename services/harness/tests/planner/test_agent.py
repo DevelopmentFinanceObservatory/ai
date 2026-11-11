@@ -14668,10 +14668,10 @@ async def _requested_propose_plan_declaration() -> dict[str, Any]:
 
 async def test_propose_plan_reaches_the_model_described_whatever_adks_json_schema_flag() -> None:
     """ADK's `JSON_SCHEMA_FOR_FUNC_DECL` decides how ADK itself declares a
-    function. The planner's declarations are built without it, so with the
-    flag off the request still carries `propose_plan` with every argument
-    described, byte for byte as with it on, and the planner never runs
-    without the patch and version rules its arguments carry."""
+    function. The planner builds its declarations without it, so with the
+    flag off the request carries `propose_plan` with every argument
+    described, byte for byte as with it on, and the planner always has
+    the patch and version rules its arguments carry."""
     described = await _requested_propose_plan_declaration()
 
     with temporary_feature_override(FeatureName.JSON_SCHEMA_FOR_FUNC_DECL, False):
@@ -18759,7 +18759,7 @@ def test_an_ask_after_the_first_ask_of_a_response_is_refused(
 def test_an_ask_beside_an_ask_stays_refused_when_an_interrupt_holds_its_id(author: str) -> None:
     """The graph's planner node pauses on an accepted ask with an interrupt call under the
     ask's own id, so on a replayed invocation that event can be the latest one holding the
-    served ask's id. It is not the model's response: the ask is still the response's second
+    served ask's id. It is not the model's response. The ask is the response's second
     and is refused, whatever the agent that wrote the response is named."""
     ctx: Any = _FakeToolContext()
     response = _model_response(

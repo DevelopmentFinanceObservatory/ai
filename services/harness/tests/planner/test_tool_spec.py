@@ -5,7 +5,7 @@ arguments itself. These tests hold both to what ADK's `FunctionTool` makes
 from an equivalent Python signature: the declaration compared as JSON in the
 order the model receives it, and the conversion over every `propose_plan`
 call the `planner_entry` eval records plus hand cases for each rule.
-`SpecTool` serving a spec through an ADK run is checked too: the request
+A `SpecTool` serving a spec through an ADK run is checked as well. The request
 carries the built declarations and the instruction a tool-less agent would,
 and a refused call marks the tool's span as a `FunctionTool`'s refusal does.
 """
@@ -247,7 +247,7 @@ def _as_struct(value: Any) -> Any:
 
 
 def test_the_recorded_proposals_cover_the_task_set() -> None:
-    # 70 tasks; fewer would mean the glob or the task shape moved under the test.
+    # The task set holds at least 70 proposals. A lower count points at the glob or task shape.
     assert len(_recorded_proposals()) >= 70
 
 

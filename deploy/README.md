@@ -135,8 +135,7 @@ Before the first real deploy, infra needs to set up, per environment:
   service that already exists.
 - Model credentials on that service. The harness runs on the Gemini
   developer API key, `GOOGLE_API_KEY`, which google-adk reads straight from
-  the process environment rather than from this repo's settings classes, so
-  it must be wired into the service definition as a secret. The harness
+  the process environment, so it must be wired into the service definition as a secret. The harness
   refuses to build the planner when ADK's Google variant is Vertex AI, which
   rejects the planner's tool declarations. In google-adk 2.13 that is when
   `GOOGLE_GENAI_USE_ENTERPRISE` is `true` or `1`, or, with it unset, when the

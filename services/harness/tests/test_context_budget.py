@@ -423,7 +423,7 @@ async def _declaration_digests() -> dict[str, str]:
     surface or none, the question fixed or not.
 
     The character counts in the records cannot see a declaration reordered or
-    edited at the same length; these digests can.
+    edited at the same length. These digests can.
     """
     digests: dict[str, str] = {}
     for surface, question_fixed in itertools.product([False, True], repeat=2):

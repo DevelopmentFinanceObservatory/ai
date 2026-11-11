@@ -1,4 +1,4 @@
-"""The planner agent: `create_planner_agent` and the ADK tool that serves a planner tool.
+"""The planner agent (`create_planner_agent`) and the ADK tool that serves a planner tool.
 
 Each planner tool is a `planner.tool_spec.ToolSpec` (`planner.specs`), whose
 body runs `planner.tools`' or `planner.skills`' code over a
@@ -6,12 +6,12 @@ body runs `planner.tools`' or `planner.skills`' code over a
 ADK, and `AdkCall` is the `PlannerCall` an ADK tool call is. A `propose_plan`
 whose translation compiles declares the plan ready for the user's answer in
 code (`planner.tools.declare_ready`), and the run ends on it
-(`skip_summarization`) with no model call after; `end_run_when_ready` does the
+(`skip_summarization`) with no model call after. `end_run_when_ready` does the
 same for an answer the harness builds itself. Declaring a plan ready approves
-nothing: whatever runs this agent withholds execution until that answer
+nothing. Whatever runs this agent withholds execution until that answer
 arrives, which for the served path is the harness's own graph, keyed on the
-plan's revision rather than on an ADK tool confirmation this agent would have
-to carry across its own nested `Runner`.
+plan's revision, so no ADK tool confirmation has to cross this agent's own
+nested `Runner`.
 
 Built with a tool surface, the planner also carries `planner.skills`'
 `get_skill`, and its instruction carries `_SKILLS`, the paragraph naming it.
@@ -30,10 +30,9 @@ requires a plan that has been through that step. The checks a proposal passes
 before it is recorded are `submission.service`'s, which `propose_plan` runs
 over its call's session (`planner.call.CallSession` over `AdkCall`).
 
-Every planner tool answers with `planner.tool_results`' typed shape -- `ok`,
-`problem`, with a stable `code` and, where the next step is known, an
-`action` -- rather than an unstructured `{"error": ...}` a caller has to
-parse. When translation cannot carry a plan out, `propose_plan`'s
+Every planner tool answers with `planner.tool_results`' typed shape, `ok` or
+`problem` with a stable `code` and, where the next step is known, an
+`action`. When translation cannot carry a plan out, `propose_plan`'s
 `translation` is the `Referral` itself: this agent's instruction reads it
 straight off that answer, with nothing here to fetch it back a second time.
 """
@@ -729,9 +728,9 @@ class SpecTool(BaseTool):
     The model is shown `function_declaration(spec)`, and a call runs the
     spec's body over the call's `AdkCall` (`run_tool`), ending the run through
     `skip_summarization`. `_get_declaration` is the hook `BaseTool` reads the
-    declaration through: its `process_llm_request` adds it to the request's
-    one `types.Tool` of function declarations, creating it when the request
-    has none, and registers the tool under its name.
+    declaration through. Its `process_llm_request` adds the declaration to the
+    request's one `types.Tool` of function declarations, creating it when the
+    request has none, and registers the tool under its name.
 
     The declaration is the Gemini developer API's form, which Vertex AI
     rejects (`refuse_vertex_ai`).
@@ -748,8 +747,8 @@ class SpecTool(BaseTool):
 
     @override
     def _get_declaration(self) -> types.FunctionDeclaration:
-        # A copy: the request holds what this returns, and later request
-        # processing may edit it in place.
+        # Return a copy, since the request holds what this returns and later
+        # request processing may edit it in place.
         return self.declaration.model_copy(deep=True)
 
     def invoke(self, args: dict[str, Any], tool_context: ToolContext) -> object:
