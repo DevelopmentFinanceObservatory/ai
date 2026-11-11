@@ -58,7 +58,7 @@ _MAX_SOURCE_CODE_CHARS = 64
 _MAX_PART_SOURCES = 8
 _MAX_SOURCE_TEXT_CHARS = 120
 _MAX_SOURCE_REF_CHARS = 200
-_MAX_RAW_QUERY_CHARS = 2000
+MAX_RAW_QUERY_CHARS = 2000
 _MAX_CARRIED_ENTRIES = 16
 _MAX_PART_OPERATIONS = 8
 _MAX_OPERATION_PHRASE_CHARS = 200
@@ -248,8 +248,11 @@ class SearchPart(BaseModel):
         min_length=1,
         max_length=_MAX_UNIT_CHARS,
         description=(
-            "unit and price basis only, e.g. 'constant 2015 US dollars'; a flow's counting "
-            "basis goes in `variable` only if the user named it, else search elects it"
+            "the unit or price basis the user stated, in their words "
+            "(\"in constant 2015 dollars\" is 'constant 2015 US dollars'); leave it out when "
+            "the user stated none, and search elects one and names the others it holds. "
+            "Whether a flow is counted as commitments, gross or net disbursements goes in "
+            "`variable`, and only when the user named it."
         ),
     )
     open_roles: list[Annotated[str, Field(min_length=1, max_length=_MAX_ROLE_CHARS)]] | None = (
@@ -592,7 +595,7 @@ async def resolve_and_register(
 
 async def search(
     parts: Annotated[list[SearchPart] | None, Field(min_length=1, max_length=MAX_PARTS)] = None,
-    raw_query: Annotated[str | None, Field(min_length=1, max_length=_MAX_RAW_QUERY_CHARS)] = None,
+    raw_query: Annotated[str | None, Field(min_length=1, max_length=MAX_RAW_QUERY_CHARS)] = None,
 ) -> ToolResult:
     """Find what data and indicators exist for the user's ask.
 
