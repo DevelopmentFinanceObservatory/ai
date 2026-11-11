@@ -7,6 +7,7 @@ import json
 import logging
 from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -29,7 +30,7 @@ from harness.graph.state import (
     ORCHESTRATOR_STATUS_KEY,
     STEP_PROGRESS_KEY,
 )
-from harness.orchestrator_tools import HANDED_OFF
+from harness.orchestrator_tools import HANDED_OFF, OrchestratorTool
 from harness.provenance import ProvenanceStore
 from harness.reply_figures import DrawnSeries, card_holds
 from harness.scripted_plan import scripted_plan
@@ -47,6 +48,7 @@ from harness.studio_state import (
     remove_cards,
 )
 from harness.studio_translate import (
+    _RECOVERED,
     _ExecutorRecord,
     _record_detail,
     _record_label,
@@ -728,6 +730,29 @@ def test_a_failed_step_a_later_try_made_good_settles_as_complete(events):
     (settled,) = _settled_failures([*frames, *translator.finish()])
     assert settled.status is StepStatus.COMPLETE
     assert is_user_sentence(settled.detail)
+
+
+async def test_a_search_missing_its_query_settles_when_a_corrected_search_succeeds():
+    """The orchestrator's own answer to a call without a required argument
+    asks for a corrected call, so the later search settles the first line."""
+
+    async def search(query: str, tool_context: Any, parts: list[Any] | None = None) -> Any:
+        return {"parts": []}
+
+    ctx = SimpleNamespace(state={})
+    missing = await OrchestratorTool(search).run_async(args={"parts": []}, tool_context=ctx)
+    translator = _translator()
+
+    frames = _frames(
+        translator,
+        _call("c1", "search", {"parts": []}),
+        _response("c1", "search", missing),
+        _call("c2", "search", _SEARCH),
+        _response("c2", "search", {"parts": []}),
+    )
+
+    (settled,) = _settled_failures([*frames, *translator.finish()])
+    assert (settled.status, settled.detail) == (StepStatus.COMPLETE, _RECOVERED)
 
 
 @pytest.mark.parametrize(

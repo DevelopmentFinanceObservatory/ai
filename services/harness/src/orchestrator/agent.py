@@ -11,8 +11,8 @@ from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.google_llm import Gemini
 from google.adk.models.llm_request import LlmRequest
-from google.adk.tools import FunctionTool
 from google.genai import types
+from harness.orchestrator_tools import OrchestratorTool
 from harness.prefix_cache import gemini_model_name
 from harness.settings import DEFAULT_ORCHESTRATOR_THINKING_LEVEL
 from harness.turn_budget import BoundedGemini
@@ -438,8 +438,10 @@ def create_orchestrator_agent(
     static prefix from `prefix_cache` when one is given. `today` is the clock
     whose UTC date opens each request's contents. `thinking_level` caps the
     model's reasoning effort. A tool that raises answers the model with an
-    error (`answering_tool_failures`) and the turn goes on."""
-    agent_tools = [FunctionTool(tool) for tool in tools]
+    error (`answering_tool_failures`) and the turn goes on. Each tool runs as
+    an `OrchestratorTool`, which answers a call missing a required argument as
+    one to correct."""
+    agent_tools = [OrchestratorTool(tool) for tool in tools]
     return LlmAgent(
         name=AGENT_NAME,
         model=_retrying(model_name, prefix_cache=prefix_cache),
