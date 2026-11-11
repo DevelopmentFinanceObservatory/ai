@@ -42,17 +42,21 @@ The planner reaches the translator directly. `planner_tool_specs` takes
 model cannot call it. Every `propose_plan` that records a plan runs it on that
 plan and answers with the verdict under `translation`, beside its own `ok`, so
 the model spends no generation on translation. The plan travels through
-session state. Without it, `propose_plan` records the plan and stops.
+session state. `planner_specs`, the list a model is shown, requires both
+`translate` and `surface`; `planner_tool_specs` leaves both optional, and
+without `translate` `propose_plan` records the plan and stops.
 
 ## Skills
 
-`planner_tool_specs` takes a `surface`, the harness's
-`compiler.surface.ToolSurface`. Given one, the planner also carries
-`get_skill` from `planner.skills`, which calls data-mcp's `get_skill` through that
-surface (a skill's first page, or one file with `path`), and its instruction
-gains the paragraph that names it. `harness.planner_adapter.PlannerAdapter`
-passes the same surface translation discovers on. Without a surface the
-planner has no skill tool and the instruction says nothing about skills.
+`planner_specs` takes a `surface`, the harness's
+`compiler.surface.ToolSurface`, and lists `get_skill` from `planner.skills`
+ahead of `planner_tool_specs`' tools. `get_skill` calls data-mcp's `get_skill`
+through that surface (a skill's first page, or one file with `path`), and the
+instruction (`planner.instruction.planner_instruction`) carries the paragraph
+that names it. `harness.planner_adapter.PlannerAdapter` passes the same surface
+translation discovers on. `planner_tool_specs` takes a `surface` too, which
+`propose_plan` reads a pinned dataset's first year through, and lists no skill
+tool.
 
 The planner loads a skill when its description bears on the question. A
 question about DFO itself starts with `get_skill`, whose `skill_id`

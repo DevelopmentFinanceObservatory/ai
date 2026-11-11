@@ -2278,7 +2278,7 @@ def test_resolve_intent_refuses_a_restart_before_the_round_cap() -> None:
 
 
 def test_the_instruction_tells_the_planner_to_stop_on_a_different_question() -> None:
-    instruction = planner_instruction(has_translator=True)
+    instruction = planner_instruction()
 
     assert "`starts_new_plan=true` and stop there" in instruction
 
@@ -14272,7 +14272,7 @@ def test_declaring_a_plan_ready_twice_changes_nothing(
 
 # The instruction the served planner carries: the translator attached, the
 # skill tools built and the question held by the planner adapter.
-_SERVED_INSTRUCTION = planner_instruction(has_translator=True, has_skills=True)
+_SERVED_INSTRUCTION = planner_instruction()
 
 
 def test_the_instruction_names_every_referral_kind_the_translator_can_send() -> None:
@@ -14390,7 +14390,7 @@ def test_the_summary_carries_nothing_the_plan_record_already_states(
 def test_the_instruction_asks_for_no_closing_text_after_submitting() -> None:
     # The plan card is on the user's screen and a compiled proposal ends the run, so
     # the instruction asks for no closing turn to present the plan.
-    instruction = planner_instruction(has_translator=True)
+    instruction = planner_instruction()
 
     assert "none left out" not in instruction
     assert "each decision by its slot" not in instruction
@@ -14407,7 +14407,7 @@ def test_planner_instruction_treats_a_defaulted_time_window_as_settled() -> None
     # (`harness.tool_contracts.graph_envelope`). The instruction names
     # both verbatim, so the model can recognise them in the rendered
     # envelope.
-    instruction = planner_instruction(has_translator=True)
+    instruction = planner_instruction()
     assert "time_window_defaulted" in instruction
     assert "`window`" in instruction
 
@@ -14432,7 +14432,7 @@ def test_planner_instruction_carries_no_sentinel_range() -> None:
     # unlike the window, a verbatim source pin needs no `Decision`, so the
     # instruction states its own carve-out for it separately, not grouped
     # with the window's.
-    instruction = planner_instruction(has_translator=True)
+    instruction = planner_instruction()
     assert "1900 through 2100" not in instruction
     assert "1900" not in instruction
     assert "2100" not in instruction
@@ -14440,16 +14440,13 @@ def test_planner_instruction_carries_no_sentinel_range() -> None:
     assert "source, time window" not in instruction
 
 
-def test_only_a_planner_with_a_translator_is_told_to_read_a_translation() -> None:
-    # `harness.planner_adapter.PlannerAdapter` passes `has_translator=True`. Without
-    # a translator `propose_plan` answers with no `translation`. Neither
-    # instruction names a `translate` tool: translation is no tool of its own.
-    standalone = planner_instruction(has_translator=False)
-    paired = planner_instruction(has_translator=True)
+def test_the_instruction_tells_the_planner_to_read_a_translation() -> None:
+    # `propose_plan` answers with a `translation`. The instruction names no
+    # `translate` tool: translation is no tool of its own.
+    instruction = planner_instruction()
 
-    assert "`translation`" not in standalone
-    assert "`translation`" in paired
-    assert "`translate`" not in standalone + paired
+    assert "`translation`" in instruction
+    assert "`translate`" not in instruction
 
 
 async def test_an_accepted_proposal_answers_with_the_translation_and_no_translate_tool_is_declared(

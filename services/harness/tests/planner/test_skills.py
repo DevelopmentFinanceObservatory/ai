@@ -69,8 +69,16 @@ def _tools(surface: _RecordingSurface, state: dict[str, Any] | None = None) -> d
 _SKILL_TEXT = "---\nname: oda-concepts\n---\n\n# ODA concepts\n"
 
 
+async def _translate(call: Any) -> dict[str, object]:
+    raise AssertionError("no test here runs a translation")
+
+
 def _get_skill_declaration(surface: _RecordingSurface) -> Any:
-    get_skill = next(spec for spec in planner_specs(surface=surface) if spec.name == "get_skill")
+    get_skill = next(
+        spec
+        for spec in planner_specs(translate=_translate, surface=surface)
+        if spec.name == "get_skill"
+    )
     declaration = planner_tool_declaration(get_skill)
     assert declaration is not None
     return declaration
@@ -79,10 +87,10 @@ def _get_skill_declaration(surface: _RecordingSurface) -> Any:
 def test_a_planner_built_with_a_surface_carries_one_skill_tool_and_names_dfo_faq() -> None:
     surface = _RecordingSurface(ToolCallResult(is_error=False))
 
-    names = {spec.name for spec in planner_specs(surface=surface)}
+    names = {spec.name for spec in planner_specs(translate=_translate, surface=surface)}
     assert "get_skill" in names
     assert "get_skill_file" not in names
-    instruction = planner_instruction(has_translator=False, has_skills=True)
+    instruction = planner_instruction()
     assert "`get_skill`" in instruction
     assert "get_skill_file" not in instruction
     declaration = _get_skill_declaration(surface)
@@ -98,14 +106,6 @@ def test_the_skill_tools_description_stays_short() -> None:
     declaration = _get_skill_declaration(_RecordingSurface(ToolCallResult(is_error=False)))
 
     assert len(declaration.description) <= SKILL_DESCRIPTION_CEILING
-
-
-def test_a_planner_built_without_a_surface_has_no_skill_tools_and_no_skill_paragraph() -> None:
-    names = {spec.name for spec in planner_specs()}
-    assert names.isdisjoint({"get_skill", "get_skill_file"})
-    instruction = planner_instruction(has_translator=False)
-    assert "get_skill" not in instruction
-    assert "dfo-faq" not in instruction
 
 
 async def test_get_skill_calls_data_mcps_get_skill_and_returns_its_text() -> None:

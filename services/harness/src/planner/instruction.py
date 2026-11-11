@@ -1,8 +1,8 @@
 """The planner's instruction (`planner_instruction`), over no agent framework.
 
-The text is built from fixed paragraphs, and `planner_instruction` chooses the
-ones the planner it is for carries: with or without a translator, a skill
-tool, and a turn question fixed by the harness.
+The text is built from fixed paragraphs, and `planner_instruction` joins them
+for the planner `harness.planner_adapter.PlannerAdapter` runs, which carries a
+translator and a skill tool.
 `planner.pydantic_agent.planner_agent` serves it to the model.
 """
 
@@ -238,9 +238,7 @@ _VERSIONING = (
     "and stop there.\n\n"
 )
 
-# How to read skills, when the skill tool is built. Held apart because the
-# planner is also built without it, and an instruction naming a tool the
-# agent lacks sends the model at one ADK raises on.
+# How to read skills through `get_skill`, which the planner carries.
 _SKILLS = (
     'The search readings close with a "Skills named" line listing, by id, '
     "the skills that apply to them. When a skill bears on the question, "
@@ -253,10 +251,8 @@ _SKILLS = (
     "skill.\n\n"
 )
 
-# What to do once a plan is recorded, when a translator is attached to carry it
-# out and `propose_plan` answers with its verdict under `translation`. Held
-# apart because `PlannerAdapter` passes `has_translator=True`; with `False` the
-# agent's `propose_plan` answers with no translation to read.
+# What to do once a plan is recorded: `propose_plan` has a translator carry it
+# out and answers with its verdict under `translation`.
 _TRANSLATING = (
     "`source_name_ambiguous` means Search could not choose which "
     "publisher or table a source wording names. The user is asked which "
@@ -356,13 +352,6 @@ _TRANSLATING = (
 )
 
 
-_WITHOUT_A_TRANSLATOR = (
-    "Stop once `propose_plan` has recorded the plan: having it translated, "
-    "compiled and carried out belongs to a later step that is not "
-    "attached here, so there is no translator to call and nothing to "
-    "approve yet.\n\n"
-)
-
 _CLOSING = (
     "Every tool answers with an `outcome`, a `code` and sometimes an "
     "`action`. Follow the action and do not guess at the message. Nothing "
@@ -371,22 +360,7 @@ _CLOSING = (
 )
 
 
-def planner_instruction(
-    *,
-    has_translator: bool,
-    has_skills: bool = False,
-) -> str:
-    """The planner's instruction, for the agent it is actually part of.
-
-    `has_translator` and `has_skills` each name something the agent carries:
-    a translator `propose_plan` runs, or the skill tool. An instruction
-    describing a translation the agent does not run, or naming a tool it
-    lacks, sends the model after something that is not there.
-    """
-    return (
-        _PLANNING
-        + _VERSIONING
-        + (_SKILLS if has_skills else "")
-        + (_TRANSLATING if has_translator else _WITHOUT_A_TRANSLATOR)
-        + _CLOSING
-    )
+def planner_instruction() -> str:
+    """The planner's instruction, for the agent `PlannerAdapter` runs: one whose
+    `propose_plan` has every plan translated and which carries the skill tool."""
+    return _PLANNING + _VERSIONING + _SKILLS + _TRANSLATING + _CLOSING

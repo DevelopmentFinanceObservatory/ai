@@ -308,7 +308,6 @@
     }
   ],
   "declaration_digests": {
-    "surface=False": "90c78444d240a828cc0a341efeb6beedae6122a68955485f8f08661e68747f8b",
-    "surface=True": "5459ca281bff6523280ce27bf8e8782677d67ab4e0cd66babd7422ae188370e0"
+    "served": "5459ca281bff6523280ce27bf8e8782677d67ab4e0cd66babd7422ae188370e0"
   }
 }

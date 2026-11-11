@@ -359,18 +359,11 @@ def skill_tool_spec(surface: ToolSurface) -> ToolSpec:
     )
 
 
-def planner_specs(
-    *,
-    translate: Translate | None = None,
-    surface: ToolSurface | None = None,
-) -> list[ToolSpec]:
-    """The planner's tools, in the order the model is shown them: `get_skill`
-    when `surface` is given (`skill_tool_spec`), then
+def planner_specs(*, translate: Translate, surface: ToolSurface) -> list[ToolSpec]:
+    """The planner's tools as sent to a model with `planner.instruction.planner_instruction`,
+    in the order the model is shown them: `get_skill` (`skill_tool_spec`), then
     `planner_tool_specs`, each argument as that function documents it."""
     return [
-        *([skill_tool_spec(surface)] if surface is not None else []),
-        *planner_tool_specs(
-            translate=translate,
-            surface=surface,
-        ),
+        skill_tool_spec(surface),
+        *planner_tool_specs(translate=translate, surface=surface),
     ]

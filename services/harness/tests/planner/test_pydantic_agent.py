@@ -296,21 +296,21 @@ def _surface() -> ToolSurface:
     return cast(ToolSurface, SimpleNamespace())
 
 
-async def _first_request(surface: ToolSurface | None) -> Request:
+async def _first_request(surface: ToolSurface) -> Request:
     script = [reply(text_part("done"))]
     (request,) = (await pydantic_run(script, surface=surface, translate=_translate)).requests
     return request
 
 
-@pytest.mark.parametrize("with_skills", [False, True], ids=["no-skill-tool", "skill-tool"])
+# One row, kept so the stored expectation keeps the name `skill-tool`.
+@pytest.mark.parametrize("surface", [_surface()], ids=["skill-tool"])
 async def test_the_first_request_holds_the_question_the_brief_and_the_tool_declarations(
-    with_skills: bool, request: pytest.FixtureRequest
+    surface: ToolSurface, request: pytest.FixtureRequest
 ) -> None:
-    sent = await _first_request(_surface() if with_skills else None)
+    sent = await _first_request(surface)
 
     dumped = _request_dumped(sent)
-    if with_skills:
-        dumped["config"] = shared(dumped["config"], "request_config_recorded_entry")
+    dumped["config"] = shared(dumped["config"], "request_config_recorded_entry")
     expect(expectation_name(request), dumped)
     assert sent.content_list == [
         types.Content(role="user", parts=[types.Part(text=_QUESTION)]),
@@ -318,7 +318,7 @@ async def test_the_first_request_holds_the_question_the_brief_and_the_tool_decla
     ]
     (tool,) = sent.generate_config.tools or []
     assert [d.name for d in tool.function_declarations or []] == [
-        *(["get_skill"] if with_skills else []),
+        "get_skill",
         PLANNER_ASK,
         PROPOSE_PLAN,
         "reject_plan",

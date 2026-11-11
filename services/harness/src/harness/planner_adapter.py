@@ -398,7 +398,7 @@ class PlannerAdapter:
         # Built once and shared by every run, each of which names its own model.
         self._planner = pydantic_planner(
             self._specs,
-            instruction=planner_instruction(has_translator=True, has_skills=True),
+            instruction=planner_instruction(),
         )
 
     async def __call__(
