@@ -568,6 +568,35 @@ async def test_an_unsigned_first_call_is_replayed_with_the_placeholder_only_by_p
     _assert_same(adk, pydantic)
 
 
+async def test_calls_without_ids_are_stored_and_replayed_alike_on_both_planners(
+    plan: Plan,
+) -> None:
+    """Gemini sends its function calls without ids. Both planners give each one
+    an `adk-` id, store the call and its answer under it, and send the next
+    request without it."""
+    adk, pydantic = await _both(
+        _Script(
+            replies=[
+                reply(call_part(PROPOSE_PLAN, {}, signature=_SIGNED)),
+                reply(call_part(PROPOSE_PLAN, {}, signature=_SIGNED)),
+            ],
+            runs=[_planned(plan)],
+            setup=_proposals(_REFUSED),
+        )
+    )
+
+    for entry in (adk, pydantic):
+        ids = [call.id for event in _planner_events(entry) for call in event.get_function_calls()]
+        assert ids == ["adk-1", "adk-2"]
+        assert all(
+            part.function_call.id is None
+            for content in entry.requests[1].content_list
+            for part in content.parts or ()
+            if part.function_call is not None
+        )
+    _assert_same(adk, pydantic)
+
+
 # --- A Stop while a switch runs -----------------------------------------------------------
 
 

@@ -433,15 +433,16 @@ async def test_a_stop_while_calls_run_stores_nothing_of_their_response() -> None
     assert not {"stuck", _ROUNDS_KEY} & set(adk.state)
 
 
-async def test_calls_without_ids_differ_only_in_the_ids_each_framework_gives_them() -> None:
-    """Gemini may send a call without an id. ADK then gives it one starting `adk-`
-    and Pydantic AI one of its own, and each pairs its call and answer by it."""
+async def test_calls_without_ids_get_ids_of_adks_form_on_both_planners() -> None:
+    """Gemini may send a call without an id. ADK gives it one starting `adk-`, and
+    so does the Pydantic AI planner's model (`harness.planner_model`), so the
+    stored events differ only in the random part of the id."""
     adk, pydantic = await _both([reply(call_part(PROPOSE_PLAN, {"question": "q"}))], _ACCEPTED)
 
     adk_ids, pydantic_ids = (_call_ids(stored) for stored in (adk, pydantic))
     assert len(adk_ids) == len(pydantic_ids) == 1
     assert adk_ids[0].startswith("adk-")
-    assert not pydantic_ids[0].startswith("adk-")
+    assert pydantic_ids[0].startswith("adk-")
     renamed = [_renamed(event, pydantic_ids[0], adk_ids[0]) for event in pydantic.events]
     assert _dumped(renamed) == _dumped(adk.events)
 

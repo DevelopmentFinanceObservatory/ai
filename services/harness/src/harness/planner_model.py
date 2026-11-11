@@ -26,8 +26,10 @@ whose streamed call is wrapped. Each call the planner makes, in order:
    (`planner.settings.without_unsigned_thoughts`), so the planner's next
    request carries the parts the ADK planner's session keeps.
 
-Each request is sent less the call ids ADK gives a call the model sent
-without one, as the ADK planner sends it (`_without_client_call_ids`). Every
+A function call the model sent without an id reaches the planner with one of
+the form ADK gives it (`_with_client_call_ids`), so both planners store it
+under such an id, and each request is sent less those ids, as the ADK planner
+sends it (`_without_client_call_ids`). Every
 request streams. A non-streamed call refuses, since it would bypass all of the
 above.
 """
@@ -177,8 +179,12 @@ class _PlannerStream:
     async def __call__(
         self, *, model: str, contents: Any, config: Any = None
     ) -> AsyncIterator[types.GenerateContentResponse]:
-        return self._respond(
-            model=model, contents=_without_client_call_ids(contents), config=_with_retries(config)
+        return _with_client_call_ids(
+            self._respond(
+                model=model,
+                contents=_without_client_call_ids(contents),
+                config=_with_retries(config),
+            )
         )
 
     async def _respond(
@@ -273,6 +279,38 @@ class _PlannerStream:
                 yield LlmResponse(
                     content=content, usage_metadata=chunk.usage_metadata, partial=True
                 )
+
+
+async def _with_client_call_ids(
+    chunks: AsyncIterator[types.GenerateContentResponse],
+) -> AsyncGenerator[types.GenerateContentResponse]:
+    """`chunks`, each function call that arrived without an id given one as ADK
+    gives it (`generate_client_function_call_id`).
+
+    The ADK planner gives such a call an `adk-` id before its tools run and
+    stores it under that id. Pydantic AI would invent an id of its own form, so
+    this runs on every chunk the model hands Pydantic AI, a turn put in the
+    model's place and a closing turn included. A chunk carries each call whole
+    in one part, and both frameworks read each function call part as one call,
+    so one part gets one id.
+    """
+    async for chunk in chunks:
+        if not any(_id_less_calls(chunk)):
+            yield chunk
+            continue
+        named = chunk.model_copy(deep=True)
+        for call in _id_less_calls(named):
+            call.id = adk_functions.generate_client_function_call_id()
+        yield named
+
+
+def _id_less_calls(chunk: types.GenerateContentResponse) -> list[types.FunctionCall]:
+    """The function calls of `chunk`'s first candidate that carry no id."""
+    return [
+        part.function_call
+        for part in _parts(chunk)
+        if part.function_call is not None and not part.function_call.id
+    ]
 
 
 def _without_client_call_ids(contents: Any) -> list[types.Content]:
