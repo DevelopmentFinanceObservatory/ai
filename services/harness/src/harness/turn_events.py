@@ -25,7 +25,7 @@ REQUEST_INPUT_FUNCTION_CALL_NAME = request_input.name
 PLANNER_ASK = "ask_user_question"
 
 
-def _turn_question(callback_context: CallbackContext) -> types.Content | None:
+def turn_question(callback_context: CallbackContext) -> types.Content | None:
     """The message the user opened the turn with, or None when the turn has none.
 
     It is the latest event of the invocation the user wrote outside any
@@ -50,9 +50,9 @@ def _turn_question(callback_context: CallbackContext) -> types.Content | None:
 def after_turn_question(
     callback_context: CallbackContext, contents: Sequence[types.Content]
 ) -> int:
-    """The position just past the turn's question (`_turn_question`) in
+    """The position just past the turn's question (`turn_question`) in
     `contents`, its latest copy there, or 0 when `contents` lack it."""
-    question = _turn_question(callback_context)
+    question = turn_question(callback_context)
     if question is None:
         return 0
     return next(

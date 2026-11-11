@@ -47,7 +47,7 @@ from harness.planner_run import Ask, Directive, PlannerRun, Stop
 from harness.prefix_cache import PrefixCache
 from harness.sentences import SeamCode, refusal_sentence
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget
-from harness.turn_events import PLANNER_ASK, _turn_question
+from harness.turn_events import PLANNER_ASK, turn_question
 from harness.usage import log_usage
 
 logger = logging.getLogger(__name__)
@@ -173,7 +173,7 @@ def planner_node(
             tool_answered=run.tool_answered,
             tool_failed=tool_failed,
         )
-        question = _turn_question(ctx)
+        question = turn_question(ctx)
         response: PlannerResponse | None = None
         held: list[PlannerToolAnswer] = []
         try:

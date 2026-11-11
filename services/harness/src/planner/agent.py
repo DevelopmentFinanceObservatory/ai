@@ -798,6 +798,28 @@ def prepend_brief(callback_context: CallbackContext, llm_request: LlmRequest) ->
     )
 
 
+def planner_specs(
+    *,
+    translate: Translate | None = None,
+    surface: ToolSurface | None = None,
+    question_fixed: bool = False,
+    reads_user_words: bool = True,
+) -> list[ToolSpec]:
+    """The planner's tools, in the order the model is shown them: `get_skill`
+    when `surface` is given (`planner.specs.skill_tool_spec`), then
+    `planner.specs.planner_tool_specs`, each argument as
+    `create_planner_agent` documents it."""
+    return [
+        *([skill_tool_spec(surface)] if surface is not None else []),
+        *planner_tool_specs(
+            translate=translate,
+            question_fixed=question_fixed,
+            reads_user_words=reads_user_words,
+            surface=surface,
+        ),
+    ]
+
+
 def create_planner_agent(
     *,
     model_name: str,
@@ -806,6 +828,7 @@ def create_planner_agent(
     question_fixed: bool = False,
     reads_user_words: bool = True,
     prefix_cache: PrefixCache | None = None,
+    specs: Sequence[ToolSpec] | None = None,
 ) -> LlmAgent:
     """Build the planner `LlmAgent`.
 
@@ -845,6 +868,8 @@ def create_planner_agent(
             Gemini model retries a transient error (408, 429, 5xx) up to
             three attempts, as the orchestrator's does
             (`orchestrator.agent._retrying`).
+        specs: The tools the agent serves; None for `planner_specs` over the
+            arguments above.
 
     Returns:
         The configured `LlmAgent`.
@@ -863,15 +888,16 @@ def create_planner_agent(
         ),
         tools=[
             SpecTool(spec)
-            for spec in [
-                *([skill_tool_spec(surface)] if surface is not None else []),
-                *planner_tool_specs(
+            for spec in (
+                specs
+                if specs is not None
+                else planner_specs(
                     translate=translate,
+                    surface=surface,
                     question_fixed=question_fixed,
                     reads_user_words=reads_user_words,
-                    surface=surface,
-                ),
-            ]
+                )
+            )
         ],
         # Run as a workflow node (`harness.planner_seam.PlannerSeam._propose`'s
         # `ctx.run_node`), ADK runs an agent with no explicit `mode` as

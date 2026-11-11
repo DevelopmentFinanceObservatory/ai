@@ -140,6 +140,10 @@ Before the first real deploy, infra needs to set up, per environment:
   rejects the planner's tool declarations. In google-adk 2.13 that is when
   `GOOGLE_GENAI_USE_ENTERPRISE` is `true` or `1`, or, with it unset, when the
   deprecated `GOOGLE_GENAI_USE_VERTEXAI` is.
+- `PLANNER_RUNNER` on that service, optional: the framework the planner
+  runs on, `adk` for the ADK planner or `pydantic_ai` for the Pydantic AI
+  planner. Unset, it is `adk`. Both store the same session events, so a turn
+  paused under one resumes under the other on the next revision.
 - `DFO_APIS_URL` on that service, pointing at apis, the FastAPI app that
   serves both the Search and Datasets surfaces. The data-mcp component
   mounted in the harness reads it to reach that API and falls back to a

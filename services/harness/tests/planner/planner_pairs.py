@@ -29,6 +29,7 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.workflow import START, Workflow, node
 from google.genai import types
 from harness.planner_model import planner_model
+from harness.planner_node import SKIP_THOUGHT_SIGNATURE
 from orchestrator.agent import model_retry_options
 from planner.agent import (
     AGENT_NAME,
@@ -230,7 +231,11 @@ def assert_pinned_wire_differences(adk: Request, pydantic: Request) -> None:
     """Assert that the Pydantic AI planner's request equals the ADK planner's for
     the same turn apart from how each framework shapes a request on the wire.
 
-    The contents are equal, and every config field but six: the instruction as
+    The contents are equal but for one part: the first function call of a model
+    turn that Gemini sent with no thought signature, which the ADK planner
+    replays with none and Pydantic AI with Gemini's documented placeholder
+    (`harness.planner_node.SKIP_THOUGHT_SIGNATURE`, `_unsigned_first_calls_signed`).
+    Every config field is equal but six: the instruction as
     one user `Content` where the ADK planner sends text; one `Tool` per
     declaration where the ADK planner sends one `Tool` of them all, a
     declaration with no parameters given an empty object schema; an explicit
@@ -242,7 +247,7 @@ def assert_pinned_wire_differences(adk: Request, pydantic: Request) -> None:
     """
     adk_config, adk_contents = _request_dumped(adk)
     pydantic_config, pydantic_contents = _request_dumped(pydantic)
-    assert pydantic_contents == adk_contents
+    assert pydantic_contents == _unsigned_first_calls_signed(adk_contents)
     differing = {
         key
         for key in adk_config.keys() | pydantic_config.keys()
@@ -282,6 +287,29 @@ def assert_pinned_wire_differences(adk: Request, pydantic: Request) -> None:
     assert pydantic_config["http_options"]["retry_options"] == model_retry_options().model_dump(
         mode="json", exclude_none=True
     )
+
+
+# `SKIP_THOUGHT_SIGNATURE` as a dumped part holds it.
+_SKIP_SIGNATURE_DUMPED = types.Part(thought_signature=SKIP_THOUGHT_SIGNATURE).model_dump(
+    mode="json", exclude_none=True
+)["thought_signature"]
+
+
+def _unsigned_first_calls_signed(contents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`contents`, dumped, with the first function call part of each model turn
+    that carries no thought signature given `SKIP_THOUGHT_SIGNATURE`, as Pydantic
+    AI replays it (`pydantic_ai.models.google._function_call_part_dict`)."""
+    signed = []
+    for content in contents:
+        parts = content.get("parts", [])
+        first = next((i for i, part in enumerate(parts) if "function_call" in part), None)
+        if content.get("role") != "model" or first is None or "thought_signature" in parts[first]:
+            signed.append(content)
+            continue
+        parts = [*parts]
+        parts[first] = {**parts[first], "thought_signature": _SKIP_SIGNATURE_DUMPED}
+        signed.append({**content, "parts": parts})
+    return signed
 
 
 def _request_dumped(request: Request) -> tuple[dict[str, Any], list[dict[str, Any]]]:

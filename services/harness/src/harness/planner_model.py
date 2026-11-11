@@ -26,8 +26,10 @@ whose streamed call is wrapped. Each call the planner makes, in order:
    (`planner.settings.without_unsigned_thoughts`), so the planner's next
    request carries the parts the ADK planner's session keeps.
 
-Every request streams. A non-streamed call refuses, since it would bypass all
-of the above.
+Each request is sent less the call ids ADK gives a call the model sent
+without one, as the ADK planner sends it (`_without_client_call_ids`). Every
+request streams. A non-streamed call refuses, since it would bypass all of the
+above.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Any, cast
 
+from google.adk.flows.llm_flows import functions as adk_functions
 from google.adk.models.llm_response import LlmResponse
 from google.genai import Client, errors, types
 from orchestrator.agent import model_retry_options
@@ -174,7 +177,9 @@ class _PlannerStream:
     async def __call__(
         self, *, model: str, contents: Any, config: Any = None
     ) -> AsyncIterator[types.GenerateContentResponse]:
-        return self._respond(model=model, contents=contents, config=_with_retries(config))
+        return self._respond(
+            model=model, contents=_without_client_call_ids(contents), config=_with_retries(config)
+        )
 
     async def _respond(
         self, *, model: str, contents: Any, config: types.GenerateContentConfig
@@ -268,6 +273,22 @@ class _PlannerStream:
                 yield LlmResponse(
                     content=content, usage_metadata=chunk.usage_metadata, partial=True
                 )
+
+
+def _without_client_call_ids(contents: Any) -> list[types.Content]:
+    """`contents`, as `GoogleModel` built them, less the call ids ADK gives a
+    call the model sent without one.
+
+    A turn put in the model's place carries such an id
+    (`harness.planner_node.directive_turn`), and a later request of the run
+    replays it when the call does not end the run. The ADK planner strips those
+    ids from every request it sends (`remove_client_function_call_id`), so this
+    applies ADK's own rule to a copy of each content.
+    """
+    stripped = [types.Content.model_validate(content).model_copy(deep=True) for content in contents]
+    for content in stripped:
+        adk_functions.remove_client_function_call_id(content)
+    return stripped
 
 
 def _with_retries(config: Any) -> types.GenerateContentConfig:

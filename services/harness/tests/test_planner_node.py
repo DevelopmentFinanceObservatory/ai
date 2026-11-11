@@ -2,8 +2,8 @@
 
 Each entry runs twice on the same script of a scripted google-genai client:
 once with `PlannerSeam`'s ADK planner on `Gemini` over the client, once with
-`runner="pydantic_ai"` over the same client, which runs `harness.planner_node`
-in the ADK planner's place. Both run through the workflow node
+`Settings(planner_runner="pydantic_ai")` over the same client, which runs
+`harness.planner_node` in the ADK planner's place. Both run through the workflow node
 `tests.test_planner_seam._SeamHarness` drives, each in a session of its own,
 under Studio's streaming run config, and are compared on what the seam
 answers, the progress it reports, the requests the model received, the events
@@ -18,7 +18,7 @@ import asyncio
 import contextlib
 import itertools
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 from unittest import mock
 
@@ -40,7 +40,7 @@ from harness.sentences import SeamCode, refusal_sentence
 from harness.settings import Settings
 from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
 from harness.turn_events import PLANNER_ASK
-from planner.agent import AGENT_NAME, SpecTool, session_steps
+from planner.agent import AGENT_NAME, planner_specs, session_steps
 from planner.call import PlannerCall, elected_spec_ids
 from planner.plan import (
     DatasetRequirement,
@@ -58,7 +58,7 @@ from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
 from planner.tools import EndRun
 from submission.service import scope_choice_decisions
-from translator.tool import Translate
+from translator.tool import Translate, build_translate
 
 from .orchestrator_fakes import plan_call, stream, studio_client, turn_body
 from .planner.planner_pairs import assert_pinned_wire_differences
@@ -85,6 +85,8 @@ from .test_studio import _app, _interrupt_body, _pick, _text
 from .test_turn_records import _switchable_scope
 
 type Runner = Literal["adk", "pydantic_ai"]
+# A change to the planner's tools.
+type Tools = Callable[[Sequence[ToolSpec]], list[ToolSpec]]
 
 _MODEL = AgentSettings().planner_model_name
 _USAGE = usage_metadata(prompt=120, cached=40, candidates=9, thoughts=4)
@@ -124,34 +126,45 @@ def _seam(
     *,
     bounded: bool = False,
     translate: Translate | None = None,
+    tools: Tools | None = None,
 ) -> PlannerSeam:
-    """The seam on `runner`, its model calls answered by `scripted`. `bounded` keeps the
-    ADK planner's model to the turn's budget, as the served planner's is; the
-    Pydantic AI planner's model always keeps to it."""
+    """The seam on `runner`, its model calls answered by `scripted`, serving the
+    planner's tools as `tools` changes them. `bounded` keeps the ADK planner's
+    model to the turn's budget, as the served planner's is; the Pydantic AI
+    planner's model always keeps to it."""
     surface = FixtureSurface(schemas=[])
+    translate = translate if translate is not None else build_translate(surface=surface)
+    specs = planner_specs(
+        translate=translate, surface=surface, question_fixed=True, reads_user_words=False
+    )
+    settings = Settings(planner_runner=runner)
     if runner == "adk":
         model = (BoundedGemini if bounded else Gemini)(model=_MODEL, client=scripted.client)
-        return PlannerSeam(settings=Settings(), surface=surface, translate=translate, model=model)
+        return PlannerSeam(
+            settings=settings,
+            surface=surface,
+            translate=translate,
+            specs=tools(specs) if tools is not None else specs,
+            model=model,
+        )
     return PlannerSeam(
-        settings=Settings(),
+        settings=settings,
         surface=surface,
         translate=translate,
-        runner="pydantic_ai",
+        specs=tools(specs) if tools is not None else specs,
         client=scripted.client,
     )
 
 
-def _proposals(
-    *answers: dict[str, Any], records: Plan | None = None
-) -> Callable[[PlannerSeam], None]:
-    """Give the seam's planner a `propose_plan` that answers `answers` in turn, and
-    then as a proposal whose translation compiled the plan on record
+def _proposals(*answers: dict[str, Any], records: Plan | None = None) -> Tools:
+    """The planner's tools with a `propose_plan` that answers `answers` in turn,
+    and then as a proposal whose translation compiled the plan on record
     (`harness.scripted.use_compiled_proposals`), recording `records` first when
     the session holds no plan. Every call records the spec_ids the user picked,
-    read from its steps, under `_ELECTED_KEY`. Each seam set up gets `answers`
+    read from its steps, under `_ELECTED_KEY`. Each seam built gets `answers`
     afresh."""
 
-    def setup(seam: PlannerSeam) -> None:
+    def tools(specs: Sequence[ToolSpec]) -> list[ToolSpec]:
         left = list(answers)
 
         def body(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
@@ -162,17 +175,17 @@ def _proposals(
                 save_plan(call.state, records)
             return _compiled_proposal(call, end_run, arguments)
 
-        _serve_proposals(seam, body)
+        return _serving_proposals(specs, body)
 
-    return setup
+    return tools
 
 
-def _serve_proposals(seam: PlannerSeam, body: Callable[..., object]) -> None:
-    """Replace the seam's planner's `propose_plan` with one that runs `body`."""
-    spec = ToolSpec(name=PROPOSE_PLAN, description="Propose the plan.", parameters=(), body=body)
-    seam._agent.tools = [
-        SpecTool(spec) if tool.name == PROPOSE_PLAN else tool for tool in seam._agent.tools
-    ]
+def _serving_proposals(specs: Sequence[ToolSpec], body: Callable[..., object]) -> list[ToolSpec]:
+    """`specs` with a `propose_plan` that runs `body`."""
+    proposal = ToolSpec(
+        name=PROPOSE_PLAN, description="Propose the plan.", parameters=(), body=body
+    )
+    return [proposal if spec.name == PROPOSE_PLAN else spec for spec in specs]
 
 
 @dataclass
@@ -184,6 +197,8 @@ class _Entry:
     requests: list[Request]
     events: list[Event]
     state: dict[str, Any]
+    # The runner that sent each of `requests`.
+    senders: list[Runner] = field(default_factory=list)
 
 
 @dataclass
@@ -194,24 +209,43 @@ class _Script:
 
     replies: Sequence[Reply]
     runs: Sequence[Mapping[str, Any]]
-    setup: Callable[[PlannerSeam], None]
+    setup: Tools
     budget: Callable[[], TurnBudget] | None = None
     translate: Translate | None = None
 
 
 async def _entries(
-    runner: Runner,
+    runners: Runner | Sequence[Runner],
     script: _Script,
     *,
     then: Callable[[PlannerSeam, _SeamHarness], Any] | None = None,
 ) -> _Entry:
+    """Run `script`'s runs in one session, the run at each position on the runner
+    `runners` names there, or all on one runner. A run on another runner than the
+    run before it gets a seam built afresh over the same session, as a deploy or
+    a rollback between the two would leave it."""
     scripted = ScriptedGenai(script.replies)
-    seam = _seam(runner, scripted, bounded=script.budget is not None, translate=script.translate)
-    script.setup(seam)
+    on = [runners] * len(script.runs) if isinstance(runners, str) else list(runners)
+    assert len(on) == len(script.runs), "one runner for each run"
+    seams: list[PlannerSeam] = []
+    for position, runner in enumerate(on):
+        if position == 0 or runner != on[position - 1]:
+            seams.append(
+                _seam(
+                    runner,
+                    scripted,
+                    bounded=script.budget is not None,
+                    translate=script.translate,
+                    tools=script.setup,
+                )
+            )
+        else:
+            seams.append(seams[-1])
     harness = _SeamHarness()
     reports: list[dict[str, Any]] = []
     outputs: list[dict[str, Any] | None] = []
-    for arguments in script.runs:
+    senders: list[Runner] = []
+    for runner, seam, arguments in zip(on, seams, script.runs, strict=True):
         kwargs = {"question": _QUESTION, "readings": [], **arguments}
         answer = kwargs.pop("answer", None)
         if answer is not None:
@@ -226,14 +260,16 @@ async def _entries(
             )
         finally:
             current_turn_budget.reset(token)
+            senders += [runner] * (len(scripted.requests) - len(senders))
     if then is not None:
-        outputs.append(await then(seam, harness))
+        outputs.append(await then(seams[-1], harness))
     return _Entry(
         outputs=outputs,
         reports=[{k: v for k, v in report.items() if k != "duration_ms"} for report in reports],
         requests=scripted.requests,
         events=await harness.events(),
         state=dict(await harness.state()),
+        senders=senders,
     )
 
 
@@ -508,8 +544,7 @@ async def _raising(runner: Runner, plan: Plan) -> _Entry:
     scripted = ScriptedGenai(
         [reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED), _ask_call("a1"))]
     )
-    seam = _seam(runner, scripted)
-    _proposals(_REFUSED)(seam)
+    seam = _seam(runner, scripted, tools=_proposals(_REFUSED))
     harness = _SeamHarness()
     with (
         _numbered_call_ids(),
@@ -569,8 +604,7 @@ async def _stopped(runner: Runner, plan: Plan) -> _Entry:
             reply(call_part(PROPOSE_PLAN, {}, id="p2", signature=_SIGNED), _ask_call("a1")),
         ]
     )
-    seam = _seam(runner, scripted)
-    _serve_proposals(seam, body)
+    seam = _seam(runner, scripted, tools=lambda specs: _serving_proposals(specs, body))
     harness = _SeamHarness()
     running = asyncio.create_task(harness.run(seam, run_config=_SSE, readings=[], **_planned(plan)))
     await asyncio.wait_for(started.wait(), timeout=5)
@@ -730,8 +764,7 @@ async def _studio(
     planner on `runner`, and of the answer that resumes it when `answer` is
     given."""
     scripted = ScriptedGenai(replies)
-    seam = _seam(runner, scripted)
-    _proposals(records=plan)(seam)
+    seam = _seam(runner, scripted, tools=_proposals(records=plan))
     app = _app(plan_call(_QUESTION), _text("Planned."), planner=seam)
     async with studio_client(app) as client:
         with _numbered_call_ids():
