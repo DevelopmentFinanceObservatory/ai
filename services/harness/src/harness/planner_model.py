@@ -441,8 +441,8 @@ def _without_unsigned_thoughts(
     kind, thought or answer, into one part, signed when any part of the run
     is (`_text_runs`). A merged thought part is dropped or kept whole, so a
     run of thought chunks with a signature on any one of them stays, as on
-    the ADK planner. Which of several signatures the merged part keeps does
-    not decide it.
+    the ADK planner. The rule reads only whether the merged part carries a
+    signature.
     """
     runs = _text_runs([part for chunk in chunks for part in _parts(chunk)])
     merged = [_merged(run) for run in runs]

@@ -86,6 +86,7 @@ from harness.orchestrator_tools import (
 )
 from harness.planner_seam import PlannerSeam, PlannerSeamError
 from harness.prefix_cache import PrefixCache
+from harness.scripted import instruction_text
 from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import resolver_digest
@@ -717,7 +718,7 @@ class ModelRequest:
     @property
     def system_text(self) -> str:
         """The system instruction's text, whichever shape it was sent in."""
-        return _instruction_text(self.config.system_instruction)
+        return instruction_text(self.config.system_instruction)
 
     @property
     def declarations(self) -> dict[str, types.FunctionDeclaration]:
@@ -730,20 +731,6 @@ class ModelRequest:
             for declaration in tool.function_declarations or []
             if declaration.name is not None
         }
-
-
-def _instruction_text(instruction: object) -> str:
-    match instruction:
-        case str():
-            return instruction
-        case types.Content(parts=parts):
-            return "".join(part.text or "" for part in parts or [])
-        case types.Part(text=text):
-            return text or ""
-        case list():
-            return "".join(_instruction_text(item) for item in instruction)
-        case _:
-            return ""
 
 
 # An arm's change to each request the planner's model client is sent, made in place.

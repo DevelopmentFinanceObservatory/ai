@@ -49,13 +49,13 @@ from collections.abc import (
     Sequence,
 )
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, Any, Literal, override
 
 from compiler.surface import ToolSurface
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.events import Event
-from google.adk.models import Gemini
+from google.adk.models import BaseLlm, Gemini
 from google.adk.models.llm_request import LlmRequest
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.base_tool import BaseTool
@@ -711,33 +711,61 @@ def _env_flag(name: str) -> bool | None:
     return None if value is None else value.lower() in ("true", "1")
 
 
-def refuse_vertex_ai(client: Client | None = None) -> None:
-    """Refuse to build the planner when the google-genai client its model calls
-    through uses Vertex AI.
+def refuse_vertex_ai(
+    model_name: str,
+    client: Client | None = None,
+    *,
+    runner: Literal["adk", "pydantic_ai"] = "adk",
+) -> None:
+    """Refuse to build the planner when its model would call Vertex AI.
 
     The planner's declarations are the Gemini developer API's form
     (`planner.tool_spec.function_declaration`). Vertex AI rejects their
     optional `anyOf` schemas, which ADK rewrites only for its own function
     tools. `create_planner_agent` calls this once, when the planner's model
-    is ADK's `Gemini`, with the client that model calls through. Any other
-    model calls through no google-genai client.
+    is ADK's `Gemini`, with that model's name and the client it calls through.
+    Any other model calls through no google-genai client.
     `harness.planner_seam.PlannerSeam` calls it for the Pydantic AI planner's
-    client.
+    model and client.
+
+    A given client decides by its `vertexai`. With none, each runner builds
+    its own, and the decision is the one that client makes:
+
+    - The ADK planner's `Gemini` builds its client for `model_name` with no
+      client options (`Gemini.api_client`). A name of the form `projects/...`
+      selects Vertex AI. Otherwise google-genai takes the backend from the
+      environment: `GOOGLE_GENAI_USE_ENTERPRISE` when set, else
+      `GOOGLE_GENAI_USE_VERTEXAI`, each true when `true` or `1`.
+    - The Pydantic AI planner builds a plain `google.genai.Client()`, whose
+      backend the environment alone decides, by the same rule.
+
+    The rule is read here without building a client, since building one
+    without an API key or credentials raises. On the Pydantic AI planner a
+    `projects/...` name is refused whatever the client: it is a Vertex AI
+    resource path, and that planner runs on the developer API, which serves
+    no model by that name.
 
     Args:
-        client: The client the model calls through, decided by its `vertexai`.
-            None gives the client the harness builds with no options, whose
-            `vertexai` google-genai takes from the environment:
-            `GOOGLE_GENAI_USE_ENTERPRISE` when set, otherwise
-            `GOOGLE_GENAI_USE_VERTEXAI`, each true when `true` or `1`. That rule
-            is read here without building a client, since building one without
-            an API key or credentials raises.
+        model_name: The Gemini model's name, as the client is sent it.
+        client: The client the model calls through, or None for the one the
+            runner builds.
+        runner: The planner the model runs on.
 
     Raises:
-        RuntimeError: The client uses Vertex AI.
+        RuntimeError: The client uses Vertex AI, or the Pydantic AI planner is
+            given a Vertex AI resource path.
     """
+    if runner == "pydantic_ai" and model_name.startswith("projects/"):
+        raise RuntimeError(
+            f"{model_name!r} is a Vertex AI resource path, and the Pydantic AI planner "
+            "runs on the Gemini developer API, which serves no model by that name. "
+            "Name the model as the developer API does (models/... or its bare name), "
+            "or set PLANNER_RUNNER=adk."
+        )
     if client is not None:
         vertexai = client.vertexai
+    elif runner == "adk" and model_name.startswith("projects/"):
+        vertexai = True
     else:
         enterprise = _env_flag("GOOGLE_GENAI_USE_ENTERPRISE")
         vertexai = enterprise if enterprise is not None else _env_flag("GOOGLE_GENAI_USE_VERTEXAI")
@@ -745,8 +773,9 @@ def refuse_vertex_ai(client: Client | None = None) -> None:
         raise RuntimeError(
             "The planner's google-genai client uses Vertex AI, which rejects the "
             "planner's tool declarations. Run the planner on a Gemini developer API "
-            "key (GOOGLE_API_KEY): give a client built without vertexai, or unset "
-            "GOOGLE_GENAI_USE_ENTERPRISE and GOOGLE_GENAI_USE_VERTEXAI."
+            "key (GOOGLE_API_KEY): give a client built without vertexai, or name the "
+            "model without a projects/ path and unset GOOGLE_GENAI_USE_ENTERPRISE and "
+            "GOOGLE_GENAI_USE_VERTEXAI."
         )
 
 
@@ -857,6 +886,7 @@ def create_planner_agent(
     prefix_cache: PrefixCache | None = None,
     specs: Sequence[ToolSpec] | None = None,
     client: Client | None = None,
+    model: BaseLlm | None = None,
 ) -> LlmAgent:
     """Build the planner `LlmAgent`.
 
@@ -901,26 +931,34 @@ def create_planner_agent(
         client: The google-genai client a Gemini model calls through, used as
             it is, HTTP options included. None gives one ADK builds from the
             environment.
+        model: A model that replaces the one `model_name` names, used as given:
+            it calls through no client built here, so it is not checked for
+            Vertex AI, and takes no `client`.
 
     Returns:
         The configured `LlmAgent`.
 
     Raises:
-        RuntimeError: The model is ADK's `Gemini` and its google-genai client
-            would use Vertex AI (`refuse_vertex_ai`).
-        ValueError: A client is given for a model other than ADK's `Gemini`,
-            which alone takes one.
+        RuntimeError: The model `model_name` names is ADK's `Gemini` and its
+            google-genai client would use Vertex AI (`refuse_vertex_ai`).
+        ValueError: A client is given with `model`, or for a model other than
+            ADK's `Gemini`, which alone takes one.
     """
-    model = _retrying(model_name, prefix_cache=prefix_cache)
-    if isinstance(model, Gemini):
-        refuse_vertex_ai(client)
+    if model is not None:
         if client is not None:
-            model = model.model_copy(update={"client": client})
-    elif client is not None:
-        raise ValueError(f"a client runs a Gemini planner model only, not {model_name!r}")
+            raise ValueError("a model and a client replace the same thing; give one")
+        llm: str | BaseLlm = model
+    else:
+        llm = _retrying(model_name, prefix_cache=prefix_cache)
+        if isinstance(llm, Gemini):
+            refuse_vertex_ai(llm.model, client)
+            if client is not None:
+                llm = llm.model_copy(update={"client": client})
+        elif client is not None:
+            raise ValueError(f"a client runs a Gemini planner model only, not {model_name!r}")
     return LlmAgent(
         name=AGENT_NAME,
-        model=model,
+        model=llm,
         instruction=planner_instruction(
             has_translator=translate is not None,
             has_skills=surface is not None,

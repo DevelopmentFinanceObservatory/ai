@@ -32,9 +32,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from common.telemetry import current_trace_id
+from executor.classify import internal_fault
 from google.adk import Context, Event
-from google.adk.agents.invocation_context import LlmCallsLimitExceededError
-from google.adk.agents.run_config import RunConfig
 from google.adk.flows.llm_flows import functions as adk_functions
 from google.adk.telemetry import TelemetryConfig
 from google.adk.workflow import BaseNode, node
@@ -42,10 +41,11 @@ from google.genai import Client, types
 from planner.agent import AGENT_NAME, BRIEF_STATE_KEY, session_steps
 from planner.pydantic_agent import (
     PLANNER_PROFILE,
-    PlannerAgent,
     PlannerDeps,
     PlannerResponse,
     PlannerToolAnswer,
+    PydanticPlanner,
+    UnsentQuestionPartError,
     planner_agent,
     run_planner,
 )
@@ -89,7 +89,7 @@ class _Recorded:
 _PUT_IN_PLACE = _Recorded()
 
 
-def pydantic_planner(specs: Sequence[ToolSpec], *, instruction: str) -> PlannerAgent:
+def pydantic_planner(specs: Sequence[ToolSpec], *, instruction: str) -> PydanticPlanner:
     """The Pydantic AI planner on `specs` and `instruction`, which the ADK planner
     serves too, named as the ADK planner (`planner.agent.AGENT_NAME`). It has no
     model of its own, since each run names one (`planner_node`). Built once, it
@@ -107,7 +107,7 @@ def pydantic_planner(specs: Sequence[ToolSpec], *, instruction: str) -> PlannerA
 def planner_node(
     run: PlannerRun,
     *,
-    planner: PlannerAgent,
+    planner: PydanticPlanner,
     model_name: str,
     client: Client,
     budget: TurnBudget | None,
@@ -129,16 +129,25 @@ def planner_node(
         A node named `planner.agent.AGENT_NAME` that runs the planner once on
         the session's brief (`planner.agent.BRIEF_STATE_KEY`), after the
         turn's question, and yields the ADK planner's events for the run.
-        The run makes at most the invocation's `RunConfig.max_llm_calls`
-        model calls, when that is above zero, and the call past it raises
-        `LlmCallsLimitExceededError`, as the ADK planner's does (`_LlmCalls`).
+        Each model call the run makes is counted on the invocation's counter
+        (`InvocationContext.increment_llm_call_count`), with the
+        orchestrator's and every other planner run's, as the ADK planner's
+        are; a turn put in the model's place is not, as ADK counts no
+        response a callback gives. ADK raises `LlmCallsLimitExceededError` on
+        the call past `RunConfig.max_llm_calls`.
+        A question holding a part this planner does not send
+        (`planner.pydantic_agent.UnsentQuestionPartError`) ends the run before
+        any request on an `internal_error` refusal (`run.refused`). The seam
+        answers the entry with that refusal, marked not final
+        (`PlannerSeam._FINAL_CODES`), so the orchestrator may ask for a plan
+        again and meet the same refusal. Studio sends only text.
     """
 
     async def dfo_planner(ctx: Context, node_input: Any) -> AsyncIterator[Event]:
         del node_input
         ctx.event_author = AGENT_NAME
         recorded = _PUT_IN_PLACE
-        calls = _LlmCalls(ctx.run_config)
+        invocation = ctx.get_invocation_context()
 
         def before_request() -> types.Content | None:
             nonlocal recorded
@@ -146,7 +155,7 @@ def planner_node(
             if turn is not None:
                 recorded = _PUT_IN_PLACE
             else:
-                calls.count()
+                invocation.increment_llm_call_count()
             return turn
 
         def after_response(
@@ -237,6 +246,19 @@ def planner_node(
                     if answered_every_call(response, held):
                         yield tool_answers_event(response, held, ended=_ended(held))
                         held = []
+        except UnsentQuestionPartError as exc:
+            # Refused before any request, so nothing is held. The run ends on
+            # the refusal, which the seam answers the entry with; an exception
+            # here would fail the whole workflow, since ADK fails the root on
+            # a child node's error. The ADK planner sends the part.
+            logger.error(
+                "planner question refused session=%s invocation=%s: %s",
+                ctx.session.id,
+                ctx.invocation_id,
+                exc,
+            )
+            run.refused = internal_fault(str(exc))
+            return
         except Exception:
             # The ADK planner keeps the answers of a response's finished calls
             # when another of its calls fails. A cancellation stores nothing of
@@ -273,29 +295,6 @@ def directive_turn(directive: Directive | None) -> types.Content | None:
         case None:
             return None
     return types.Content(role="model", parts=[part])
-
-
-class _LlmCalls:
-    """The model calls one run has made, against the invocation's cap.
-
-    ADK counts an `LlmAgent`'s calls on the invocation
-    (`InvocationContext.increment_llm_call_count`) and raises
-    `LlmCallsLimitExceededError` on the call past `RunConfig.max_llm_calls`.
-    A turn put in the model's place is not a call. The invocation's count is
-    private to ADK, so this one counts the run's calls alone.
-    """
-
-    def __init__(self, config: RunConfig | None) -> None:
-        self._cap = config.max_llm_calls if config is not None else 0
-        self._made = 0
-
-    def count(self) -> None:
-        """Count one call, raising when it passes the cap."""
-        self._made += 1
-        if 0 < self._cap < self._made:
-            raise LlmCallsLimitExceededError(
-                f"Max number of llm calls limit of `{self._cap}` exceeded"
-            )
 
 
 def _ended(answers: Sequence[PlannerToolAnswer]) -> bool:

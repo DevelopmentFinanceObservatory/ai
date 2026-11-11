@@ -45,7 +45,7 @@ from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_SEARCHES_KEY
 from harness.planner_node import SKIP_THOUGHT_SIGNATURE
 from harness.planner_run import failed_tool_answer
 from harness.planner_seam import PlannerSeam
-from harness.scripted import _compiled_proposal
+from harness.scripted import _compiled_proposal, instruction_text
 from harness.sentences import SeamCode
 from harness.settings import Settings
 from harness.turn_budget import TurnBudget
@@ -256,25 +256,59 @@ def _genai_client(*, vertexai: bool) -> Client:
     return client
 
 
+# A Gemini model named by its Vertex AI resource path.
+_VERTEX_MODEL = f"projects/p/locations/global/publishers/google/models/{_MODEL}"
+
+
+_ON_VERTEX = "client uses Vertex AI"
+_RESOURCE_PATH = "Vertex AI resource path"
+
+
 @pytest.mark.parametrize("runner", ["adk", "pydantic_ai"])
 @pytest.mark.parametrize(
-    ("environment", "vertexai", "refused"),
+    ("environment", "model_name", "vertexai", "refusals"),
     [
-        pytest.param({}, None, False, id="default-client-developer-api"),
-        pytest.param({"GOOGLE_GENAI_USE_VERTEXAI": "1"}, None, True, id="default-client-vertex"),
-        pytest.param({}, True, True, id="client-on-vertex"),
-        pytest.param({"GOOGLE_GENAI_USE_VERTEXAI": "1"}, False, False, id="client-decides"),
+        pytest.param({}, _MODEL, None, {}, id="default-client-developer-api"),
+        pytest.param(
+            {"GOOGLE_GENAI_USE_VERTEXAI": "1"},
+            _MODEL,
+            None,
+            {"adk": _ON_VERTEX, "pydantic_ai": _ON_VERTEX},
+            id="default-client-vertex",
+        ),
+        pytest.param(
+            {},
+            _VERTEX_MODEL,
+            None,
+            {"adk": _ON_VERTEX, "pydantic_ai": _RESOURCE_PATH},
+            id="default-client-vertex-model-name",
+        ),
+        pytest.param(
+            {},
+            _VERTEX_MODEL,
+            False,
+            {"pydantic_ai": _RESOURCE_PATH},
+            id="developer-client-vertex-model-name",
+        ),
+        pytest.param(
+            {}, _MODEL, True, {"adk": _ON_VERTEX, "pydantic_ai": _ON_VERTEX}, id="client-on-vertex"
+        ),
+        pytest.param({"GOOGLE_GENAI_USE_VERTEXAI": "1"}, _MODEL, False, {}, id="client-decides"),
     ],
 )
-def test_both_planners_refuse_a_client_on_vertex_ai(
+def test_both_planners_refuse_a_model_that_would_call_vertex_ai(
     monkeypatch: pytest.MonkeyPatch,
     runner: Runner,
     environment: dict[str, str],
+    model_name: str,
     vertexai: bool | None,
-    refused: bool,
+    refusals: dict[Runner, str],
 ) -> None:
-    """A given client decides by its own `vertexai`. With none, the environment
-    decides, as google-genai builds the default client."""
+    """A given client decides by its own `vertexai`. With none, the client the
+    runner builds decides: ADK's `Gemini` sends a `projects/...` name to Vertex
+    AI, and otherwise the environment decides. The Pydantic AI planner runs on
+    the developer API, so it refuses a `projects/...` name, a Vertex AI resource
+    path, whatever the client."""
     for name in ("GOOGLE_GENAI_USE_ENTERPRISE", "GOOGLE_GENAI_USE_VERTEXAI"):
         monkeypatch.delenv(name, raising=False)
     for name, value in environment.items():
@@ -284,15 +318,75 @@ def test_both_planners_refuse_a_client_on_vertex_ai(
     def build() -> PlannerSeam:
         return PlannerSeam(
             settings=Settings(planner_runner=runner),
+            agent_settings=AgentSettings(planner_model_name=model_name),
             surface=FixtureSurface(schemas=[]),
             client=client,
         )
 
-    if refused:
-        with pytest.raises(RuntimeError, match="Vertex AI"):
+    refusal = refusals.get(runner)
+    if refusal is not None:
+        with pytest.raises(RuntimeError, match=refusal):
             build()
     else:
         build()
+
+
+def test_the_adk_planner_runs_a_model_given_in_place_of_the_named_one_unchecked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `model` replacing the settings' model calls through no client the seam
+    builds, so the Vertex AI rule for the replaced model's name refuses nothing."""
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "1")
+    given = Gemini(model=_MODEL)
+
+    seam = PlannerSeam(
+        settings=Settings(planner_runner="adk"),
+        agent_settings=AgentSettings(planner_model_name=_VERTEX_MODEL),
+        surface=FixtureSurface(schemas=[]),
+        model=given,
+    )
+
+    assert seam._agent is not None and seam._agent.model is given
+
+
+@pytest.mark.parametrize(
+    ("model_name", "refused"),
+    [("claude-3-5-sonnet", ValueError), (_VERTEX_MODEL, RuntimeError)],
+    ids=["not-gemini", "vertex-resource-path"],
+)
+def test_the_pydantic_ai_planners_model_is_refused_before_the_seam_builds_anything(
+    model_name: str, refused: type[Exception]
+) -> None:
+    with (
+        mock.patch.object(planner_seam, "build_tool_surface") as surface,
+        mock.patch.object(planner_seam, "planner_specs") as specs,
+        pytest.raises(refused),
+    ):
+        PlannerSeam(
+            settings=Settings(planner_runner="pydantic_ai"),
+            agent_settings=AgentSettings(planner_model_name=model_name),
+        )
+
+    surface.assert_not_called()
+    specs.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "Plan. Then propose.",
+        types.Content(
+            role="user", parts=[types.Part(text="Plan. "), types.Part(text="Then propose.")]
+        ),
+        types.Part(text="Plan. Then propose."),
+        {"role": "user", "parts": [{"text": "Plan. "}, {"text": "Then propose."}]},
+        {"text": "Plan. Then propose."},
+        [types.Part(text="Plan. "), {"text": "Then propose."}],
+    ],
+    ids=["str", "content", "part", "content-dict", "part-dict", "list"],
+)
+def test_an_instructions_text_reads_the_same_in_every_shape(instruction: object) -> None:
+    assert instruction_text(instruction) == "Plan. Then propose."
 
 
 @pytest.mark.parametrize("runner", _RUNNERS)

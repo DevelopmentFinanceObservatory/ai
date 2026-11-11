@@ -287,19 +287,27 @@ class ModelRequest:
     def system_text(self) -> str:
         """The system instruction's text, whether it was sent as a string, as the
         ADK planner sends it, or as a `Content`, as the Pydantic AI planner does."""
-        return _text(self.config.system_instruction)
+        return instruction_text(self.config.system_instruction)
 
 
-def _text(instruction: object) -> str:
+def instruction_text(instruction: object) -> str:
+    """The text of a request's system instruction, in any shape google-genai
+    takes it: a string, a `Content` or a `Part`, each also as the plain dict
+    google-genai validates into one (Pydantic AI builds its instruction as a
+    dict), or a list of them. The parts' texts are joined with nothing
+    between them, as the model reads one part after the next. Anything else
+    reads as no text."""
     match instruction:
         case str():
             return instruction
-        case types.Content(parts=parts):
-            return "".join(part.text or "" for part in parts or [])
-        case types.Part(text=text):
-            return text or ""
+        case types.Content() | types.Part():
+            return instruction_text(instruction.model_dump(exclude_none=True))
+        case {"parts": list() as parts}:
+            return instruction_text(parts)
+        case {"text": str() as text}:
+            return text
         case list():
-            return "".join(_text(item) for item in instruction)
+            return "".join(instruction_text(item) for item in instruction)
         case _:
             return ""
 
