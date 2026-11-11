@@ -473,13 +473,23 @@ async def test_a_refused_call_is_marked_failed_and_usage_is_counted_once_on_both
     assert sum(_generic_usage(calls[0]).values()) == usage["total"] + 40 + 4
 
 
+@pytest.mark.parametrize("capture", ["SPAN_ONLY", "EVENT_ONLY", "NO_CONTENT", None])
 async def test_a_dropped_thought_summary_stays_on_the_pydantic_ai_planners_span(
-    plan: Plan, exported_spans: InMemorySpanExporter
+    plan: Plan,
+    exported_spans: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+    capture: str | None,
 ) -> None:
     """An unsigned thought summary is left out of what the Pydantic AI planner
     keeps of a response, so its generation's output lacks the summary the ADK
-    planner's shows. The span carries it as `dfo.model.dropped_thoughts`."""
-    thought = "I weigh the two debt sources."
+    planner's shows. With message content on the spans the span carries it as
+    `dfo.model.dropped_thoughts`. With content kept off the spans (in events
+    only, off, or the variable unset) no span of either runner carries it."""
+    if capture is None:
+        monkeypatch.delenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT")
+    else:
+        monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", capture)
+    thought = "I weigh the two debt sources, sentinel-7f3a."
     script = _Script(
         replies=[
             reply(
@@ -494,20 +504,31 @@ async def test_a_dropped_thought_summary_stays_on_the_pydantic_ai_planners_span(
     )
     outputs: dict[Runner, Any] = {}
     dropped: dict[Runner, Any] = {}
+    carrying: dict[Runner, list[tuple[str, str]]] = {}
     for runner in _RUNNERS:
         exported_spans.clear()
         with _numbered_call_ids():
             await _entries(runner, script)
+        spans = exported_spans.get_finished_spans()
         (call,) = [
             span.attributes or {}
-            for span in exported_spans.get_finished_spans()
+            for span in spans
             if (span.attributes or {}).get("gen_ai.operation.name") in {"chat", "generate_content"}
         ]
-        outputs[runner] = _json(call["gen_ai.output.messages"])[0]["parts"]
+        outputs[runner] = _json(call.get("gen_ai.output.messages"))
         dropped[runner] = call.get("dfo.model.dropped_thoughts")
+        carrying[runner] = [
+            (span.name, key)
+            for span in spans
+            for key, value in (span.attributes or {}).items()
+            if "sentinel-7f3a" in str(value)
+        ]
 
-    assert outputs["adk"][0] == {"type": "text", "content": thought}
-    assert outputs["pydantic_ai"] == outputs["adk"][1:]
+    if capture != "SPAN_ONLY":
+        assert carrying == {"adk": [], "pydantic_ai": []}
+        return
+    assert outputs["adk"][0]["parts"][0] == {"type": "text", "content": thought}
+    assert outputs["pydantic_ai"][0]["parts"] == outputs["adk"][0]["parts"][1:]
     assert dropped == {"adk": None, "pydantic_ai": thought}
 
 

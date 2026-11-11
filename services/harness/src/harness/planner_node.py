@@ -52,7 +52,13 @@ from planner.pydantic_agent import (
 from planner.tool_spec import ToolSpec
 
 from harness.planner_events import answered_every_call, model_response_event, tool_answers_event
-from harness.planner_model import ResponseMetadata, Usage, planner_model
+from harness.planner_model import (
+    ResponseMetadata,
+    StreamResumedError,
+    Usage,
+    planner_model,
+    resumed_over_output,
+)
 from harness.planner_run import Ask, Directive, PlannerRun, Stop
 from harness.prefix_cache import PrefixCache
 from harness.sentences import SeamCode, refusal_sentence
@@ -141,6 +147,10 @@ def planner_node(
         answers the entry with that refusal, marked not final
         (`PlannerSeam._FINAL_CODES`), so the orchestrator may ask for a plan
         again and meet the same refusal. Studio sends only text.
+        A stream google-genai resumed over output no continuation token
+        covers (`harness.planner_model.resumed_over_output`) raises
+        `StreamResumedError`, a dropped connection, from Pydantic AI's
+        error.
     """
 
     async def dfo_planner(ctx: Context, node_input: Any) -> AsyncIterator[Event]:
@@ -202,6 +212,7 @@ def planner_node(
             before_request=before_request,
             after_response=after_response,
             profile=PLANNER_PROFILE,
+            include_content=planner.include_content,
         )
         deps = PlannerDeps(
             state=ctx.session.state,
@@ -259,12 +270,25 @@ def planner_node(
             )
             run.refused = internal_fault(str(exc))
             return
-        except Exception:
+        except Exception as exc:
             # The ADK planner keeps the answers of a response's finished calls
             # when another of its calls fails. A cancellation stores nothing of
             # the response, so it is not caught and the held answers go.
             if response is not None and held:
                 yield tool_answers_event(response, held, ended=_ended(held))
+            if resumed_over_output(exc):
+                # A dropped connection the SDK resumed. Raised as one, so the
+                # turn ends as a dropped Gemini call ends it
+                # (`compiler.surface.transient`). google-genai keeps the
+                # transport error that dropped the stream to itself.
+                logger.warning(
+                    "planner stream resumed over output session=%s invocation=%s trace_id=%s: %s",
+                    ctx.session.id,
+                    ctx.invocation_id,
+                    current_trace_id(),
+                    exc,
+                )
+                raise StreamResumedError(str(exc)) from exc
             raise
         # A run `run_planner` ends without raising on a response Pydantic AI
         # refuses may leave calls of the last response unanswered. The answers

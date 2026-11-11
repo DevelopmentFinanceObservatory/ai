@@ -15,18 +15,23 @@ planner and compare the frames it streams.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import dataclasses
 import gc
 import itertools
+import json
 import logging
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 from unittest import mock
 
+import aiohttp
+import httpx
 import pytest
 from compiler.surface import FixtureSurface
+from google import genai
 from google.adk import Context, Event
 from google.adk.agents.invocation_context import LlmCallsLimitExceededError
 from google.adk.agents.run_config import RunConfig, StreamingMode
@@ -35,7 +40,7 @@ from google.adk.models import Gemini
 from google.adk.runners import Runner as AdkRunner
 from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
-from google.genai import types
+from google.genai import errors, types
 from harness import planner_node as planner_node_module
 from harness import planner_run
 from harness.planner_run import PlannerSeamError
@@ -57,7 +62,6 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
 )
-from planner.pydantic_agent import PydanticPlanner
 from planner.settings import AgentSettings
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
@@ -841,7 +845,7 @@ async def test_a_call_pydantic_ai_answers_itself_still_stores_its_siblings_answe
     planner.agent.tool_plain(extra)
     seam._pydantic = (
         model_name,
-        PydanticPlanner(agent=planner.agent, tools=(*planner.tools, name)),
+        dataclasses.replace(planner, tools=(*planner.tools, name)),
     )
     harness = _SeamHarness()
 
@@ -1258,3 +1262,128 @@ async def test_a_studio_ask_and_its_answer_stream_the_same_frames_on_both_planne
     assert adk[0][-1]["event"] == "elicitation.request"
     assert "plan.proposed" in [frame["event"] for frame in adk[1]]
     assert pydantic == adk
+
+
+# --- A Gemini transport failure reaching Studio --------------------------------------
+
+
+def _error_frame(frames: Sequence[Mapping[str, Any]]) -> tuple[str, str]:
+    """The machine-readable code and retry mode of the turn's stream-fatal frame."""
+    (error,) = [frame["error"] for frame in frames if frame["event"] == "error"]
+    return error["error"], error["retry"]
+
+
+@pytest.mark.parametrize("runner", ["adk", "pydantic_ai"])
+@pytest.mark.parametrize(
+    "failed",
+    [
+        pytest.param(
+            Reply(open_error=errors.ServerError(503, {"error": {"code": 503}})),
+            id="unavailable-at-open",
+        ),
+        pytest.param(
+            Reply(
+                chunks=[[thought_part("Weighing.")], [call_part(PROPOSE_PLAN, {}, id="p1")]],
+                cut_after=1,
+                cut_with=aiohttp.ClientPayloadError("Response payload is not completed"),
+            ),
+            id="payload-cut-mid-stream",
+        ),
+    ],
+)
+async def test_a_dropped_gemini_call_ends_the_studio_turn_as_retry_later_on_both(
+    plan: Plan, runner: Runner, failed: Reply
+) -> None:
+    (frames,) = await _studio(runner, plan, [failed])
+
+    assert _error_frame(frames) == ("transient_unavailable", "retry_after_delay")
+
+
+def _sse_chunk(
+    *parts: dict[str, Any],
+    response_id: str,
+    token: bytes | None = None,
+    finish: str | None = None,
+) -> bytes:
+    """One `streamGenerateContent?alt=sse` event as the Gemini API sends it."""
+    candidate: dict[str, Any] = {"content": {"role": "model", "parts": list(parts)}}
+    if token is not None:
+        candidate["continuationToken"] = base64.b64encode(token).decode()
+    if finish is not None:
+        candidate["finishReason"] = finish
+    body = {"candidates": [candidate], "responseId": response_id, "modelVersion": _MODEL}
+    return f"data: {json.dumps(body)}\r\n\r\n".encode()
+
+
+class _Dropping(httpx.AsyncByteStream):
+    """A response body that sends `events`, then drops the connection when
+    `dropped` is set."""
+
+    def __init__(self, events: Sequence[bytes], *, dropped: bool) -> None:
+        self._events = events
+        self._dropped = dropped
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for event in self._events:
+            yield event
+        if self._dropped:
+            raise httpx.RemoteProtocolError("peer closed connection without sending complete body")
+
+
+async def test_a_stream_google_genai_resumed_over_a_repeated_call_ends_the_turn_as_retry_later(
+    plan: Plan,
+) -> None:
+    """The real google-genai client streams a checkpointed thought, then a
+    function call no continuation token covers, then the connection drops. The
+    SDK resumes from the thought's token and the resumed request repeats the
+    call. Pydantic AI refuses the repeat, so the tool runs no time at all, and
+    the turn ends as the dropped connection it is: retry later."""
+    token = b"checkpoint-1"
+    call = {"functionCall": {"name": PROPOSE_PLAN, "args": {}}, "thoughtSignature": "c2ln"}
+    hops = [
+        _Dropping(
+            [
+                _sse_chunk({"text": "Weighing.", "thought": True}, response_id="r1", token=token),
+                _sse_chunk(call, response_id="r1"),
+            ],
+            dropped=True,
+        ),
+        _Dropping([_sse_chunk(call, response_id="r2", finish="STOP")], dropped=False),
+    ]
+    sent: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.content)
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, stream=hops[len(sent) - 1]
+        )
+
+    client = genai.Client(
+        api_key="scripted",
+        http_options=types.HttpOptions(
+            async_client_args={"transport": httpx.MockTransport(handler)}
+        ),
+    )
+    ran: list[str] = []
+
+    def body(*_: Any) -> object:
+        ran.append(PROPOSE_PLAN)
+        return {"outcome": "ok"}
+
+    surface = FixtureSurface(schemas=[])
+    translate = build_translate(surface=surface)
+    seam = PlannerSeam(
+        settings=Settings(planner_runner="pydantic_ai"),
+        surface=surface,
+        translate=translate,
+        specs=_serving_proposals(seam_specs(surface=surface, translate=translate), body),
+        client=client,
+    )
+    app = _app(plan_call(_QUESTION), _text("Planned."), planner=seam)
+    async with studio_client(app) as studio:
+        frames = await stream(studio, "/api/studio/turn", turn_body(_QUESTION))
+
+    assert len(sent) == 2
+    assert base64.b64encode(token) in sent[1], "the SDK resumed from the thought's checkpoint"
+    assert ran == []
+    assert _error_frame(frames) == ("transient_unavailable", "retry_after_delay")

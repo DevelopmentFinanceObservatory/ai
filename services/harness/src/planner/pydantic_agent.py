@@ -191,11 +191,13 @@ type PlannerItem = PlannerResponse | PlannerToolAnswer
 
 @dataclass(frozen=True)
 class PydanticPlanner:
-    """The Pydantic AI planner (`planner_agent`): the agent and its tools' names,
-    in the order they are declared."""
+    """The Pydantic AI planner (`planner_agent`): the agent, its tools' names,
+    in the order they are declared, and whether its spans carry message
+    content (`include_content`)."""
 
     agent: Agent[PlannerDeps, str | None]
     tools: tuple[str, ...]
+    include_content: bool
 
 
 def tool_not_found(name: str, tools: Sequence[str]) -> dict[str, str]:
@@ -265,7 +267,7 @@ def planner_agent(
         ],
         name=name,
     )
-    return PydanticPlanner(agent=agent, tools=tools)
+    return PydanticPlanner(agent=agent, tools=tools, include_content=include_content)
 
 
 def _answering_unknown_tools(

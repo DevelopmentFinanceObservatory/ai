@@ -41,7 +41,8 @@ usage details Pydantic AI adds are not summed into the call's total. A turn put
 in place of a request is no model call and the ADK planner opens no span for
 it, so its span is marked a plain span for Langfuse. The thought summaries
 step 6 drops go on the span as `dfo.model.dropped_thoughts`, since the ADK
-planner's span shows them in its output.
+planner's span shows them in its output, when the span carries message content
+(`include_content`), as the ADK planner's output does.
 """
 
 from __future__ import annotations
@@ -59,6 +60,7 @@ from google.genai import Client, errors, types
 from opentelemetry import trace
 from orchestrator.agent import model_retry_options
 from planner.settings import without_unsigned_thoughts
+from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.providers.google import GoogleProvider
@@ -116,6 +118,7 @@ def planner_model(
     before_request: BeforeRequest | None = None,
     after_response: AfterResponse | None = None,
     profile: ModelProfile | None = None,
+    include_content: bool = False,
 ) -> GoogleModel:
     """The `GoogleModel` the Pydantic AI planner runs on.
 
@@ -131,6 +134,11 @@ def planner_model(
             closed (`AfterResponse`).
         profile: The model profile, which decides how requests are built.
             None gives Gemini's own (`google_model_profile`).
+        include_content: Whether each call's span carries message content,
+            the dropped thought summaries among it. Pass the value the
+            planner's agent is instrumented with
+            (`planner.pydantic_agent.PydanticPlanner.include_content`). The
+            default keeps the summaries off the span.
 
     Returns:
         A `GoogleModel` on `profile` whose streamed calls go through the
@@ -142,6 +150,7 @@ def planner_model(
         prefix_cache=prefix_cache,
         before_request=before_request,
         after_response=after_response,
+        include_content=include_content,
     )
     # `GoogleProvider` takes a `Client`, and the wrapper reads as one everywhere
     # `GoogleModel` reads it.
@@ -196,6 +205,7 @@ class _PlannerStream:
     prefix_cache: PrefixCache | None
     before_request: BeforeRequest | None
     after_response: AfterResponse | None
+    include_content: bool
 
     async def __call__(
         self, *, model: str, contents: Any, config: Any = None
@@ -232,7 +242,8 @@ class _PlannerStream:
             yield _chunk(answer.closing, usage=usage)
         else:
             kept = _without_unsigned_thoughts(answer.chunks)
-            _record_dropped_thoughts(span, answer.chunks, kept)
+            if self.include_content:
+                _record_dropped_thoughts(span, answer.chunks, kept)
             for chunk in kept:
                 yield chunk
 
@@ -306,6 +317,30 @@ class _PlannerStream:
                 yield LlmResponse(
                     content=content, usage_metadata=chunk.usage_metadata, partial=True
                 )
+
+
+class StreamResumedError(ConnectionError):
+    """A call's stream dropped and google-genai resumed it from a continuation
+    token that does not cover all the output it had delivered, so Pydantic AI
+    refused the repeat (`resumed_over_output`). It is a dropped connection,
+    which a later attempt may not meet, and is raised from Pydantic AI's
+    error."""
+
+
+def resumed_over_output(exc: BaseException) -> bool:
+    """Whether `exc` is the error Pydantic AI's Gemini stream parser
+    (`pydantic_ai.models.google.GeminiStreamedResponse`) raises when
+    google-genai resumed a dropped stream over output no continuation token
+    covers.
+
+    The parser raises that error as a plain `ModelAPIError` from no other
+    exception. Each other plain `ModelAPIError` on the streaming path is
+    raised from the error it maps: a google-genai `APIError` with a status
+    below 400 (`_map_api_error`), or a body the SDK could not decode
+    (`pydantic_ai.models._decode_errors.map_decode_errors`). Its subclasses
+    carry a status or a category of their own. The message is not read.
+    """
+    return type(exc) is ModelAPIError and exc.__cause__ is None
 
 
 async def _with_client_call_ids(
@@ -634,4 +669,12 @@ class _Client:
         return getattr(self._client, name)
 
 
-__all__ = ["AfterResponse", "BeforeRequest", "ResponseMetadata", "Usage", "planner_model"]
+__all__ = [
+    "AfterResponse",
+    "BeforeRequest",
+    "ResponseMetadata",
+    "StreamResumedError",
+    "Usage",
+    "planner_model",
+    "resumed_over_output",
+]

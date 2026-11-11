@@ -9,6 +9,7 @@ compares the first request each sends.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections.abc import Callable, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
@@ -254,7 +255,7 @@ def _with_tool(agent: PydanticPlanner, function: Callable[..., Any]) -> Pydantic
     the planner's tools are, to reach answers no planner tool gives. Pydantic
     AI validates its typed arguments and lets what the function raises through."""
     agent.agent.tool_plain(function)
-    return PydanticPlanner(agent=agent.agent, tools=(*agent.tools, function.__name__))
+    return dataclasses.replace(agent, tools=(*agent.tools, function.__name__))
 
 
 async def test_a_call_pydantic_ai_answers_with_a_retry_still_gets_its_answer() -> None:
