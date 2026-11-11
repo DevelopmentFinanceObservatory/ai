@@ -25,19 +25,26 @@ from __future__ import annotations
 import base64
 import copy
 import inspect
-from collections.abc import AsyncIterator, Callable, MutableMapping, Sequence
-from dataclasses import dataclass, field
+import logging
+import sys
+from collections.abc import AsyncIterator, Awaitable, Callable, MutableMapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from google.genai import types
 from pydantic_ai import Agent, RunContext, Tool
+from pydantic_ai.capabilities import ProcessHistory
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
     FunctionToolResultEvent,
+    ModelMessage,
     ModelRequest,
+    ModelRequestPart,
     ModelResponse,
     TextPart,
     ThinkingPart,
     ToolCallPart,
+    ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.models import Model
@@ -50,6 +57,8 @@ from planner.pydantic_call import PydanticCall, as_function_response
 from planner.settings import AGENT_THINKING_CONFIG
 from planner.tool_spec import ToolSpec, function_declaration, run_tool
 
+logger = logging.getLogger(__name__)
+
 # The schema Pydantic AI declares a tool with when its declaration has none:
 # Pydantic AI always sends `parameters_json_schema`.
 _NO_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
@@ -57,6 +66,13 @@ _NO_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
 # The turn budget bounds a run's model calls (`harness.turn_budget`), so Pydantic
 # AI's own default cap of 50 requests is lifted.
 _NO_REQUEST_LIMIT = UsageLimits(request_limit=None)
+
+# Pydantic AI charges a call to a tool the planner lacks against the tool retry
+# budget and ends the run once it is spent. The ADK planner answers every such
+# call and goes on, so the budget is lifted and the turn budget's call cap ends
+# a run that keeps making them. The planner's own tools never ask for a retry:
+# their arguments are not validated.
+_UNLIMITED_RETRIES = sys.maxsize
 
 # Carried by the request holding the user's message. Pydantic AI merges
 # consecutive requests into one content unless their `instructions` differ,
@@ -150,10 +166,20 @@ class PlannerResponse:
     `parts` are its parts as google-genai parts: each function call with its
     id, text, and each thought with `thought` set, each with its thought
     signature. `usage` is the request's usage as Pydantic AI reads it.
+    `finish_reason` is the finish reason Gemini reported on the response, as
+    google-genai names it, or `None` when it reported none. `model_version` is
+    the model that answered: the version Gemini reported, or the model the
+    request named when Gemini reported none. `block_reason` is Gemini's reason for blocking the prompt, for a response
+    that is a block and holds no candidate, which the ADK planner records as
+    an event with that `error_code` and no content. A response with no parts
+    and no block reason is one the ADK planner records no event for.
     """
 
     parts: tuple[types.Part, ...]
     usage: RequestUsage
+    finish_reason: types.FinishReason | None = None
+    model_version: str | None = None
+    block_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -184,9 +210,30 @@ class PlannerCallWrites:
 type PlannerItem = PlannerResponse | PlannerToolAnswer
 
 
-def planner_agent(
-    specs: Sequence[ToolSpec], *, instruction: str, model: Model
-) -> Agent[PlannerDeps, str | None]:
+@dataclass(frozen=True)
+class PlannerAgent:
+    """The Pydantic AI planner (`planner_agent`): the agent and its tools' names,
+    in the order they are declared."""
+
+    agent: Agent[PlannerDeps, str | None]
+    tools: tuple[str, ...]
+
+
+def tool_not_found(name: str, tools: Sequence[str]) -> dict[str, str]:
+    """The answer to a call of `name`, a tool the planner lacks, naming the tools
+    it can call in the order they are declared: the ADK planner's answer, word
+    for word."""
+    available = ", ".join(tools) or "none"
+    return {
+        "error": (
+            f"Invoking `{name}()` failed as no tool with that name is available. "
+            f"The tools you can call are: {available}. You could retry, but it is "
+            "IMPORTANT that you only call a tool from that list."
+        )
+    }
+
+
+def planner_agent(specs: Sequence[ToolSpec], *, instruction: str, model: Model) -> PlannerAgent:
     """The planner as a Pydantic AI agent on `model`, with `instruction` and one tool per spec.
 
     Each tool is declared as `function_declaration(spec)` states it, its
@@ -196,8 +243,13 @@ def planner_agent(
     request leaves Gemini on. A response with no tool call ends the run, an
     empty one included, as it ends the ADK planner's. Thinking is
     `planner.settings.AGENT_THINKING_CONFIG`.
+
+    A call to a tool the planner lacks is answered with `tool_not_found`, as
+    the ADK planner answers it, and the run goes on however many such calls
+    the model makes (`_UNLIMITED_RETRIES`).
     """
-    return Agent(
+    tools = tuple(spec.name for spec in specs)
+    agent = Agent(
         model,
         instructions=instruction,
         tools=[_tool(spec) for spec in specs],
@@ -206,6 +258,40 @@ def planner_agent(
         model_settings=GoogleModelSettings(
             google_thinking_config=AGENT_THINKING_CONFIG.model_dump(mode="json", exclude_none=True)
         ),
+        retries={"tools": _UNLIMITED_RETRIES},
+        capabilities=[ProcessHistory(_answering_unknown_tools(tools))],
+    )
+    return PlannerAgent(agent=agent, tools=tools)
+
+
+def _answering_unknown_tools(
+    tools: Sequence[str],
+) -> Callable[[list[ModelMessage]], Awaitable[list[ModelMessage]]]:
+    """A history processor that answers each call to a tool not in `tools` with
+    `tool_not_found`, in place of the retry Pydantic AI answers it with. It runs
+    before every model request, so the model reads the answer, and the run's
+    messages keep it, so a later call's steps read it too."""
+
+    async def process(messages: list[ModelMessage]) -> list[ModelMessage]:
+        return [
+            replace(message, parts=[_answered_if_unknown(part, tools) for part in message.parts])
+            if isinstance(message, ModelRequest)
+            else message
+            for message in messages
+        ]
+
+    return process
+
+
+def _answered_if_unknown(part: ModelRequestPart, tools: Sequence[str]) -> ModelRequestPart:
+    """`part`, or `tool_not_found`'s answer in its place when it answers a call
+    to a tool not in `tools`."""
+    if not isinstance(part, ToolReturnPart) or part.tool_name in tools:
+        return part
+    return ToolReturnPart(
+        tool_name=part.tool_name,
+        content=tool_not_found(part.tool_name, tools),
+        tool_call_id=part.tool_call_id,
     )
 
 
@@ -262,53 +348,84 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
 
 
 async def run_planner(
-    agent: Agent[PlannerDeps, str | None], deps: PlannerDeps, *, question: str, brief: str
+    planner: PlannerAgent, deps: PlannerDeps, *, question: str, brief: str
 ) -> AsyncIterator[PlannerItem]:
     """Run the planner once on `brief`, after the user's `question`, yielding as it goes.
 
     The run's first request holds `question`, then `brief`, as two user
     contents. Each model response is yielded as a `PlannerResponse` once
     received, before its calls run, and each call's answer as a
-    `PlannerToolAnswer` once that call has answered. The run stops before its
-    next model request once a tool ended it, and ends on a response with no
-    tool call.
+    `PlannerToolAnswer` once that call has answered, a call to a tool the
+    planner lacks included (`tool_not_found`). The run stops before its next
+    model request once a tool ended it, and ends on a response with no tool
+    call.
+
+    A response Pydantic AI refuses (`UnexpectedModelBehavior`: a stream with
+    no chunk, a blocked prompt) ends the run as a response with no tool call
+    ends the ADK planner's: the items yielded so far stand and nothing is
+    raised. A blocked prompt's response is yielded first, with its
+    `block_reason`.
 
     `deps` holds the session's state, the earlier steps and the callbacks
     (`PlannerDeps`). A run whose iteration stops early leaves the writes of
     the calls it did not yield in `deps.unyielded_writes()`.
     """
     history = [ModelRequest(parts=[UserPromptPart(question)], instructions=_QUESTION_INSTRUCTIONS)]
-    async with agent.iter(
+    async with planner.agent.iter(
         brief, message_history=history, deps=deps, usage_limits=_NO_REQUEST_LIMIT
     ) as run:
-        async for node in run:
-            if Agent.is_model_request_node(node):
-                if deps.ended:
-                    return
-                async with node.stream(run.ctx) as stream:
-                    async for _event in stream:
-                        pass
-                    response = stream.response
-                yield PlannerResponse(parts=response_parts(response), usage=response.usage)
-            elif Agent.is_call_tools_node(node):
-                async with node.stream(run.ctx) as events:
-                    async for event in events:
-                        if not isinstance(event, FunctionToolResultEvent):
-                            continue
-                        answered = _answered(deps, event.tool_call_id)
-                        if answered is not None:
-                            yield answered
+        try:
+            async for node in run:
+                if Agent.is_model_request_node(node):
+                    if deps.ended:
+                        return
+                    async with node.stream(run.ctx) as stream:
+                        async for _event in stream:
+                            pass
+                        response = stream.response
+                    yield _planner_response(response)
+                elif Agent.is_call_tools_node(node):
+                    async with node.stream(run.ctx) as events:
+                        async for event in events:
+                            if not isinstance(event, FunctionToolResultEvent):
+                                continue
+                            answered = _answered(deps, event, planner.tools)
+                            if answered is not None:
+                                yield answered
+        except UnexpectedModelBehavior as exc:
+            logger.warning("planner run ended on a response Pydantic AI refused: %s", exc)
 
 
-def _answered(deps: PlannerDeps, call_id: str) -> PlannerToolAnswer | None:
-    """The answer of the call `call_id`, taken out of what the run has not yielded,
-    or `None` for a call no planner tool served."""
-    call = deps._calls.get(call_id)
+def _planner_response(response: ModelResponse) -> PlannerResponse:
+    details = response.provider_details or {}
+    finish_reason = details.get("finish_reason")
+    block_reason = details.get("block_reason")
+    return PlannerResponse(
+        parts=response_parts(response),
+        usage=response.usage,
+        finish_reason=types.FinishReason(finish_reason) if finish_reason else None,
+        model_version=response.model_name,
+        block_reason=str(block_reason) if block_reason else None,
+    )
+
+
+def _answered(
+    deps: PlannerDeps, event: FunctionToolResultEvent, tools: Sequence[str]
+) -> PlannerToolAnswer | None:
+    """The answer of the call `event` reports: a planner tool's, taken out of
+    what the run has not yielded, or `tool_not_found`'s for a tool the planner
+    lacks, which writes nothing."""
+    name = event.part.tool_name
+    if name not in tools:
+        return PlannerToolAnswer(
+            name=name, call_id=event.tool_call_id, answer=tool_not_found(name, tools), writes={}
+        )
+    call = deps._calls.get(event.tool_call_id)
     if call is None or call.answer is None or call.writes is None:
         return None
-    del deps._calls[call_id]
+    del deps._calls[event.tool_call_id]
     return PlannerToolAnswer(
-        name=call.name, call_id=call_id, answer=call.answer, writes=call.writes
+        name=call.name, call_id=event.tool_call_id, answer=call.answer, writes=call.writes
     )
 
 

@@ -10,20 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from compiler.surface import ToolSurface
-from google.adk.agents.run_config import RunConfig, StreamingMode
-from google.adk.models import Gemini
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.adk.workflow import START, Workflow, node
 from google.genai import types
 from harness.turn_events import PLANNER_ASK
-from planner.agent import BRIEF_STATE_KEY, create_planner_agent, planner_instruction
+from orchestrator.agent import model_retry_options
 from planner.call import PlannerCall
 from planner.pydantic_agent import (
     PlannerCallWrites,
@@ -35,7 +30,7 @@ from planner.pydantic_agent import (
     planner_profile,
     run_planner,
 )
-from planner.specs import PROPOSE_PLAN, planner_tool_specs, skill_tool_spec
+from planner.specs import PROPOSE_PLAN, planner_tool_specs
 from planner.tool_spec import Parameter, ToolSpec
 from planner.tools import ASK_ACCEPTED, EndRun, load_pending_ask
 from pydantic_ai.models.google import GoogleModel
@@ -43,6 +38,7 @@ from pydantic_ai.providers.google import GoogleProvider
 
 from ..scripted_genai import (
     Reply,
+    Request,
     ScriptedGenai,
     call_part,
     reply,
@@ -50,10 +46,11 @@ from ..scripted_genai import (
     thought_part,
     usage_metadata,
 )
+from .planner_pairs import BRIEF, QUESTION, adk_run, pydantic_run
 
 _MODEL = "gemini-3.8-flash"
-_QUESTION = "How much aid did Ghana receive?"
-_BRIEF = "Context for this question: the readings."
+_QUESTION = QUESTION
+_BRIEF = BRIEF
 _ACCEPTED = {"outcome": "ok", "status": "ready"}
 _REFUSED = {"outcome": "refused", "code": "plan_invalid", "message": "Pin a source."}
 
@@ -122,12 +119,31 @@ async def _run(
     *,
     state: dict[str, Any] | None = None,
     run: _Run | None = None,
+    model_version: str | None = None,
 ) -> tuple[list[PlannerItem], ScriptedGenai]:
     scripted = ScriptedGenai(replies)
+    if model_version is not None:
+        _reporting_version(scripted, model_version)
     agent = planner_agent(specs, instruction="Plan.", model=_google_model(scripted))
     deps = _deps(state, run)
     items = [item async for item in run_planner(agent, deps, question=_QUESTION, brief=_BRIEF)]
     return items, scripted
+
+
+def _reporting_version(scripted: ScriptedGenai, version: str) -> None:
+    """Make every chunk `scripted` streams report `version` as its model version."""
+    opened = scripted.client.aio.models.generate_content_stream
+
+    async def open_stream(**request: Any) -> AsyncIterator[types.GenerateContentResponse]:
+        stream = await opened(**request)
+
+        async def versioned() -> AsyncIterator[types.GenerateContentResponse]:
+            async for chunk in stream:
+                yield chunk.model_copy(update={"model_version": version})
+
+        return versioned()
+
+    scripted.client.aio.models.generate_content_stream = open_stream  # type: ignore[method-assign]
 
 
 def _deps(state: dict[str, Any] | None = None, run: _Run | None = None) -> PlannerDeps:
@@ -153,8 +169,17 @@ async def test_an_accepted_proposal_ends_the_run_after_one_model_request() -> No
 
     items, scripted = await _run(
         [_propose(_ACCEPTED)],
-        [reply(signed, call, usage=usage_metadata(prompt=40, candidates=5)), reply(text_part("x"))],
+        [
+            reply(
+                signed,
+                call,
+                usage=usage_metadata(prompt=40, candidates=5),
+                finish_reason=types.FinishReason.MAX_TOKENS,
+            ),
+            reply(text_part("x")),
+        ],
         run=run,
+        model_version="gemini-3.8-flash-001",
     )
 
     assert len(scripted.requests) == 1
@@ -163,6 +188,10 @@ async def test_an_accepted_proposal_ends_the_run_after_one_model_request() -> No
     assert isinstance(response, PlannerResponse)
     assert response.parts == (signed, call)
     assert (response.usage.input_tokens, response.usage.output_tokens) == (40, 5)
+    assert (response.finish_reason, response.model_version) == (
+        types.FinishReason.MAX_TOKENS,
+        "gemini-3.8-flash-001",
+    )
     assert answer == PlannerToolAnswer(PROPOSE_PLAN, "p1", _ACCEPTED, {})
     assert run.answered == [(PROPOSE_PLAN, _ACCEPTED)]
 
@@ -296,55 +325,11 @@ def _surface() -> ToolSurface:
     return cast(ToolSurface, SimpleNamespace())
 
 
-async def _adk_first_request(surface: ToolSurface | None) -> Any:
-    scripted = ScriptedGenai([reply(text_part("done"))])
-    agent = create_planner_agent(
-        model_name=_MODEL,
-        translate=_translate,
-        surface=surface,
-        question_fixed=True,
-        reads_user_words=False,
-    )
-    agent.model = Gemini(model=_MODEL, client=scripted.client)
-
-    async def _planner(ctx: Any, node_input: Any) -> None:
-        del node_input
-        ctx.state[BRIEF_STATE_KEY] = _BRIEF
-        await ctx.run_node(agent, None, override_branch="dfo_planner")
-
-    workflow = Workflow(
-        name="turn", edges=[(START, node(_planner, name="planner", rerun_on_resume=True))]
-    )
-    sessions = InMemorySessionService()
-    session = await sessions.create_session(app_name="app", user_id="user")
-    runner = Runner(node=workflow, app_name="app", session_service=sessions)
-    async for _ in runner.run_async(
-        user_id="user",
-        session_id=session.id,
-        new_message=types.Content(role="user", parts=[types.Part(text=_QUESTION)]),
-        run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-    ):
-        pass
-    (request,) = scripted.requests
-    return request
-
-
-async def _pydantic_first_request(surface: ToolSurface | None) -> Any:
-    scripted = ScriptedGenai([reply(text_part("done"))])
-    specs = planner_tool_specs(
-        translate=_translate, question_fixed=True, reads_user_words=False, surface=surface
-    )
-    agent = planner_agent(
-        [*([skill_tool_spec(surface)] if surface is not None else []), *specs],
-        instruction=planner_instruction(
-            has_translator=True, has_skills=surface is not None, question_fixed=True
-        ),
-        model=_google_model(scripted),
-    )
-    async for _ in run_planner(agent, _deps(), question=_QUESTION, brief=_BRIEF):
-        pass
-    (request,) = scripted.requests
-    return request
+async def _first_requests(surface: ToolSurface | None) -> tuple[Request, Request]:
+    script = [reply(text_part("done"))]
+    (adk,) = (await adk_run(script, surface=surface, translate=_translate)).requests
+    (pydantic,) = (await pydantic_run(script, surface=surface, translate=_translate)).requests
+    return adk, pydantic
 
 
 def _dumped(request: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -360,8 +345,9 @@ async def test_the_first_request_equals_the_adk_planners_apart_from_the_pinned_w
     with_skills: bool,
 ) -> None:
     surface = _surface() if with_skills else None
-    adk, adk_contents = _dumped(await _adk_first_request(surface))
-    pydantic, pydantic_contents = _dumped(await _pydantic_first_request(surface))
+    adk_request, pydantic_request = await _first_requests(surface)
+    adk, adk_contents = _dumped(adk_request)
+    pydantic, pydantic_contents = _dumped(pydantic_request)
 
     assert (
         pydantic_contents
@@ -413,6 +399,11 @@ async def test_the_first_request_equals_the_adk_planners_apart_from_the_pinned_w
     # Unset, which google-genai reads as on, where the ADK planner sets it on.
     assert adk["automatic_continuation"] is True
     assert "automatic_continuation" not in pydantic
-    # Each framework's own client headers.
-    assert adk["http_options"].keys() == pydantic["http_options"].keys() == {"headers"}
+    # Each framework's own client headers, and the HTTP retries, which the ADK planner's
+    # model sets on its client and the Pydantic AI planner's on each request.
+    assert adk["http_options"].keys() == {"headers"}
+    assert pydantic["http_options"].keys() == {"headers", "retry_options"}
+    assert pydantic["http_options"]["retry_options"] == model_retry_options().model_dump(
+        mode="json", exclude_none=True
+    )
     assert adk["thinking_config"] == {"thinking_level": "LOW", "include_thoughts": True}
