@@ -51,7 +51,7 @@ from harness.graph.planning import planner_ask_interrupt
 from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_PRIOR_LEDGER_KEY, STEP_PROGRESS_KEY
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import decision_choice_id, decision_option_id
-from harness.planner_seam import PlannerSeam, PlannerSeamError
+from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
 from harness.scope_choices import PartScope, carried_entries
 from harness.scripted_plan import scripted_plan
 from harness.seeds import SEED_STEP_TOOL
@@ -1942,7 +1942,7 @@ def test_the_planner_starting_a_first_draft_opens_working_on_a_plan() -> None:
     assert _status_lines(frames) == [("s0", "Working on a plan", StepStatus.RUNNING)]
 
 
-def test_the_seams_late_progress_reports_are_not_shown() -> None:
+def test_the_adapters_late_progress_reports_are_not_shown() -> None:
     """The node relays the seam's reports only after the draft is done, so
     they would repeat the live lines out of order."""
     translator = _translator()
@@ -2011,14 +2011,14 @@ def test_the_segment_end_completes_a_line_still_running() -> None:
 
 
 async def test_a_planner_call_becomes_its_line_while_the_draft_is_still_running() -> None:
-    """A real `PlannerSeam`, driven through `ctx.run_node` the way the
+    """A real `PlannerAdapter`, driven through `ctx.run_node` the way the
     graph's planner node drives it, with its model held after its first
     call. The runner hands the translator the call and its response while
     the draft is still waiting, so their lines reach the wire before the
     draft ends."""
     paused = asyncio.Event()
     release = asyncio.Event()
-    seam = _scripted_seam(
+    adapter = _scripted_adapter(
         ScriptedGenai(
             [
                 _replied([("propose_plan", {"question": "kenya debt"})]),
@@ -2029,7 +2029,7 @@ async def test_a_planner_call_becomes_its_line_while_the_draft_is_still_running(
 
     async def planner(ctx: Context, node_input: Any) -> Any:
         del node_input
-        return await seam(ctx=ctx, question="kenya debt", readings=[])
+        return await adapter(ctx=ctx, question="kenya debt", readings=[])
 
     workflow = Workflow(
         name="status_test_wf", edges=[(START, node(planner, name="planner", rerun_on_resume=True))]
@@ -2105,9 +2105,9 @@ _SOURCE_ASK = {
 }
 
 
-def _scripted_seam(scripted: ScriptedGenai) -> PlannerSeam:
+def _scripted_adapter(scripted: ScriptedGenai) -> PlannerAdapter:
     """The seam over an empty fixture surface, its model answered by `scripted`."""
-    return PlannerSeam(
+    return PlannerAdapter(
         settings=Settings(), surface=FixtureSurface(schemas=[]), client=scripted.client
     )
 
@@ -2122,7 +2122,7 @@ def _replied(calls: Sequence[tuple[str, dict[str, Any]]]) -> Reply:
     return reply(*(call_part(name, args, id=f"call-{next(_CALL_IDS)}") for name, args in calls))
 
 
-async def _asked_through_the_seam(
+async def _asked_through_the_adapter(
     ask: dict[str, Any] | None,
     state: dict[str, Any],
     *,
@@ -2133,7 +2133,7 @@ async def _asked_through_the_seam(
     sessions: list[Session] | None = None,
 ) -> tuple[_Translator, list[Any], ScriptedGenai]:
     """`ask`, with the calls `beside` it, as the planner's first model
-    response in a real `PlannerSeam` run, and each of `then` as a later
+    response in a real `PlannerAdapter` run, and each of `then` as a later
     response, every event through the translator, then the segment's end.
     The node pauses on an accepted ask as the graph's planner node does
     (`harness.graph.planning.planner_ask_interrupt`). `returned`, given, gets
@@ -2145,11 +2145,11 @@ async def _asked_through_the_seam(
     `sessions`, given, gets the session the run left."""
     calls = [*([(PLANNER_ASK, ask)] if ask is not None else []), *beside]
     llm = ScriptedGenai([*(_replied(step) for step in (calls, *then)), reply(text_part("done"))])
-    seam = _scripted_seam(llm)
+    adapter = _scripted_adapter(llm)
 
     async def planner(ctx: Context, node_input: Any) -> AsyncIterator[Any]:
         del node_input
-        result = await seam(ctx=ctx, question="uk oda", readings=[])
+        result = await adapter(ctx=ctx, question="uk oda", readings=[])
         if "asked" in result:
             yield planner_ask_interrupt(result["asked"])
             return
@@ -2209,7 +2209,7 @@ async def test_an_ask_the_planner_s_tool_refuses_asks_nothing_and_the_run_goes_o
     carries on with the refusal in the model's next request and the planner
     node returns. Studio asks nothing and does not pause."""
     returned: list[Any] = []
-    translator, frames, llm = await _asked_through_the_seam(ask, state, returned=returned)
+    translator, frames, llm = await _asked_through_the_adapter(ask, state, returned=returned)
 
     assert [f.event for f in frames if f.event == "elicitation.request"] == []
     assert translator.paused is False
@@ -2224,7 +2224,7 @@ async def test_an_ask_the_planner_s_tool_accepts_pauses_on_its_question() -> Non
     """The segment ends on the ask, which asks the call's own question, and
     the planner node waits on it."""
     returned: list[Any] = []
-    translator, frames, llm = await _asked_through_the_seam(_SOURCE_ASK, {}, returned=returned)
+    translator, frames, llm = await _asked_through_the_adapter(_SOURCE_ASK, {}, returned=returned)
 
     assert len(llm.requests) == 1
     assert returned == []
@@ -2249,7 +2249,7 @@ async def test_an_answer_resumes_the_planner_with_the_user_s_pick_and_asks_nothi
     planner's readers of what the user picked walk it."""
     returned: list[Any] = []
     sessions: list[Session] = []
-    translator, frames, llm = await _asked_through_the_seam(
+    translator, frames, llm = await _asked_through_the_adapter(
         _SOURCE_ASK, {}, answer=_PICKED_B, returned=returned, sessions=sessions
     )
 
@@ -2278,8 +2278,8 @@ async def test_an_ask_made_beside_another_call_loses_none_of_that_call_s_activit
     the planner's run stops paused on the ask. Studio shows `propose_plan`'s
     lines as it does with no ask beside it, then asks the question."""
     proposal = [("propose_plan", {"question": "uk oda"})]
-    translator, frames, llm = await _asked_through_the_seam(_SOURCE_ASK, {}, beside=proposal)
-    _, alone, _ = await _asked_through_the_seam(None, {}, beside=proposal)
+    translator, frames, llm = await _asked_through_the_adapter(_SOURCE_ASK, {}, beside=proposal)
+    _, alone, _ = await _asked_through_the_adapter(None, {}, beside=proposal)
 
     assert len(llm.requests) == 1
     assert translator.paused is True
@@ -2312,7 +2312,7 @@ async def test_a_second_ask_in_the_same_response_is_refused() -> None:
     sibling = [(PLANNER_ASK, _FREE_TEXT_ASK)]
     returned: list[Any] = []
     sessions: list[Session] = []
-    translator, frames, llm = await _asked_through_the_seam(
+    translator, frames, llm = await _asked_through_the_adapter(
         _SOURCE_ASK, {}, beside=sibling, answer=_PICKED_B, returned=returned, sessions=sessions
     )
 
@@ -2338,7 +2338,7 @@ async def test_a_second_ask_in_the_same_response_is_refused() -> None:
 async def test_an_ask_after_a_refused_ask_pauses_on_its_question() -> None:
     """A refused ask has its answer, so it waits for nothing, and a valid ask
     in a later response is accepted."""
-    translator, frames, llm = await _asked_through_the_seam(
+    translator, frames, llm = await _asked_through_the_adapter(
         _AUTHORED_OPTIONS_ASK, {}, then=[[(PLANNER_ASK, _FREE_TEXT_ASK)]]
     )
 
@@ -2361,7 +2361,7 @@ def _timed_out(tool: str) -> Exception:
     [
         (
             [
-                PlannerSeamError(
+                PlannerAdapterError(
                     "This plan still needs translating and compiling into a workflow before "
                     "it can execute. Propose it again to have it translated."
                 )
@@ -2423,7 +2423,7 @@ def _timed_out(tool: str) -> Exception:
         ),
     ],
     ids=[
-        "planner-seam",
+        "planner-adapter",
         "refusal",
         "code-off-the-wire",
         "bare-exception",

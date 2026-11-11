@@ -1,4 +1,4 @@
-"""The materialisation seam: the store protocol data-mcp's `get_data` writes
+"""The materialisation interface: the store protocol data-mcp's `get_data` writes
 frames through and every analysis-mcp verb reads them back from (and writes
 its own results back through, keyed by its own `ops_`/`ocv_` pair).
 

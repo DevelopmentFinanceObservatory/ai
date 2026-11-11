@@ -1,1 +1,1 @@
-"""data_mcp: FastMCP wrapper over the apis Data seam: the Search and Datasets APIs."""
+"""data_mcp: FastMCP wrapper over the apis' Search and Datasets APIs."""

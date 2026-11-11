@@ -495,7 +495,7 @@ def user_spoke_since_recorded(call: PlannerCall, version: int) -> bool:
     message. A plan this session holds no recording response for was
     recorded before that message, so this answers `True`. The planner seam
     seeds such a plan from the graph's record
-    (`harness.planner_seam.PlannerSeam`).
+    (`harness.planner_adapter.PlannerAdapter`).
     """
     last: object = None
     recorded = False

@@ -1,4 +1,4 @@
-"""Tests for the entity resolution seam: wire translation, dedup, chunking, and validation."""
+"""Tests for the entity resolution client: wire translation, dedup, chunking, and validation."""
 
 from __future__ import annotations
 

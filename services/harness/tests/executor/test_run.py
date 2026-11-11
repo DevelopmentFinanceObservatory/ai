@@ -1301,14 +1301,14 @@ async def test_missing_years_are_recorded_or_refused_as_the_requirement_says(
 
 
 @pytest.mark.parametrize(
-    ("seam", "labels"),
+    ("lookup", "labels"),
     [
         pytest.param("graph", ["Kenya", "Germany", None], id="named-by-the-graph"),
         # A lookup that fails or hangs leaves the donors unlabelled, and the
         # step goes on, whatever seam was injected.
         pytest.param("graph-fails", ["Kenya", None, None], id="graph-lookup-fails"),
-        pytest.param("raises", ["Kenya", None, None], id="injected-seam-raises"),
-        pytest.param("hangs", ["Kenya", None, None], id="injected-seam-hangs"),
+        pytest.param("raises", ["Kenya", None, None], id="injected-lookup-raises"),
+        pytest.param("hangs", ["Kenya", None, None], id="injected-lookup-hangs"),
     ],
 )
 async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_graph(
@@ -1317,7 +1317,7 @@ async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_
     real_schemas: list[ToolSchema],
     requirement: RequirementFactory,
     monkeypatch: pytest.MonkeyPatch,
-    seam: str,
+    lookup: str,
     labels: list[str | None],
 ) -> None:
     """Kenya's series from two donors miss years. The approved source labels
@@ -1336,7 +1336,7 @@ async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_
 
     async def describe(dcids: list[str]) -> dict[str, Any]:
         asked.append(list(dcids))
-        if seam == "graph-fails":
+        if lookup == "graph-fails":
             raise UpstreamError(status=503, code="upstream_unavailable")
         return {
             "donor/DEU": OrganisationNode.model_construct(ref="donor/DEU", label="Germany"),
@@ -1345,7 +1345,7 @@ async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_
 
     async def injected(refs: Sequence[str]) -> Mapping[str, str]:
         asked.append(list(refs))
-        if seam == "raises":
+        if lookup == "raises":
             raise RuntimeError("a seam's own defect")
         await asyncio.Event().wait()
         return {}
@@ -1353,7 +1353,7 @@ async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_
     monkeypatch.setattr("executor.run.describe_nodes", describe)
     monkeypatch.setattr("executor.run.LABEL_ALLOWANCE_S", 0.05)
     plan = approved_plan(requirement=requirement(coverage=Coverage(on_missing="report_gaps")))
-    chosen = {} if seam.startswith("graph") else {"label_refs": injected}
+    chosen = {} if lookup.startswith("graph") else {"label_refs": injected}
 
     outcome = await asyncio.wait_for(
         _run(plan, surface=_surface(real_schemas, sparse), sleep=_Sleeps(), **chosen), timeout=5

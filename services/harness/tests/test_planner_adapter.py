@@ -1,4 +1,4 @@
-"""Tests for `harness.planner_seam`, the adapter over the planner
+"""Tests for `harness.planner_adapter`, the adapter over the planner
 (`harness.planner_node`) with translation attached to its `propose_plan`.
 
 Model-free. A scripted google-genai client (`tests.scripted_genai.ScriptedGenai`)
@@ -12,9 +12,9 @@ script a bare `propose_plan` amendment, whose translation runs the real
 translation loop against a canned surface. Whether the real model plans WELL is the eval sets' question
 (`evals/README.md`).
 
-`PlannerSeam` runs the planner through `ctx.run_node`, in the graph's own
+`PlannerAdapter` runs the planner through `ctx.run_node`, in the graph's own
 session, so every test below needs a real `Context`, not a bare call.
-`_run_seam` drives one, through a minimal one-node `Workflow`, the same
+`_run_adapter` drives one, through a minimal one-node `Workflow`, the same
 primitive `harness.graph`'s own planner node uses.
 """
 
@@ -47,7 +47,7 @@ from google.adk.sessions.state import State
 from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import types
-from harness import plan_display, planner_node, planner_seam
+from harness import plan_display, planner_adapter, planner_node
 from harness.decision_pick import DecisionPick
 from harness.graph import switch
 from harness.graph.planning import planner_ask_interrupt
@@ -58,6 +58,16 @@ from harness.graph.state import (
     ORCHESTRATOR_SPECS_KEY,
 )
 from harness.orchestrator_tools import _search_context
+from harness.planner_adapter import (
+    _ASKED_REFERRAL_INTRO,
+    _PLANNER_BRANCH,
+    _SHARE_UNIT_CODES,
+    PlannerAdapter,
+    PlannerAdapterError,
+    _check_branches,
+    _plan_context,
+    _skills_section,
+)
 from harness.planner_run import (
     _WHICH_INSTEAD,
     _WHICH_MEANT,
@@ -68,19 +78,9 @@ from harness.planner_run import (
     _pinnable_candidates,
     _stalled_referral,
 )
-from harness.planner_seam import (
-    _ASKED_REFERRAL_INTRO,
-    _PLANNER_BRANCH,
-    _SHARE_UNIT_CODES,
-    PlannerSeam,
-    PlannerSeamError,
-    _check_branches,
-    _plan_context,
-    _skills_section,
-)
 from harness.scripted import use_compiled_proposals
 from harness.sentences import (
-    SeamCode,
+    StopCode,
     referral_reason,
     referral_sentence,
     refusal_sentence,
@@ -207,7 +207,7 @@ SPEC_B = "spec_" + "b" * 32
 # through the `propose_plan` `use_compiled_proposals` installs.
 _DECLARE = [("propose_plan", {})]
 
-_APP = "planner_seam_test"
+_APP = "planner_adapter_test"
 _USER = "u"
 
 
@@ -277,8 +277,8 @@ def _scripted_planner(
     *,
     surface: FixtureSurface | None = None,
     compiled_proposals: bool = False,
-) -> PlannerSeam:
-    """The `PlannerSeam`, its model calls answered by `scripted`, over
+) -> PlannerAdapter:
+    """The `PlannerAdapter`, its model calls answered by `scripted`, over
     `surface` (an empty fixture surface by default). With `compiled_proposals`,
     `propose_plan` declares the plan on record ready
     (`harness.scripted.use_compiled_proposals`)."""
@@ -325,14 +325,14 @@ def _computed(step: Callable[[Request], Sequence[tuple[str, Mapping[str, Any]]] 
     return answer
 
 
-class _SeamHarness:
-    """Drives `PlannerSeam.__call__` through a real, dynamically-scheduled
+class _AdapterHarness:
+    """Drives `PlannerAdapter.__call__` through a real, dynamically-scheduled
     `Context` -- the same primitive `harness.graph`'s own planner node
-    drives `PlannerSeam` through, and the only way to get a `Context`
+    drives `PlannerAdapter` through, and the only way to get a `Context`
     `ctx.run_node` will accept, since this seam has no `Runner` of its
     own to call directly.
 
-    One `_SeamHarness` reuses the same session across every `run` call,
+    One `_AdapterHarness` reuses the same session across every `run` call,
     the way the graph's own session persists across a turn's several
     entries and across separate turns of one conversation alike -- so a
     test can inspect `ctx.state` (`state()`) after a call, without losing
@@ -347,7 +347,7 @@ class _SeamHarness:
 
     async def run(
         self,
-        seam: PlannerSeam,
+        adapter: PlannerAdapter,
         *,
         resume_inputs: dict[str, Any] | None = None,
         new_message: types.Content | None = None,
@@ -355,7 +355,7 @@ class _SeamHarness:
         run_config: RunConfig = SSE,
         **kwargs: Any,
     ) -> dict[str, Any] | None:
-        """Run `seam` once in this harness's session, under the switch's
+        """Run `adapter` once in this harness's session, under the switch's
         `_unless_stopped` when `stoppable`, as the planner node runs a pick's
         replan, and with `run_config`, Studio's streaming one by default, which
         a model on `ScriptedGenai` needs."""
@@ -373,7 +373,7 @@ class _SeamHarness:
                 # way a hand-built `Context` elsewhere in this suite stands
                 # in for one the framework would otherwise build.
                 ctx._resume_inputs = resume_inputs
-            drafting = seam(ctx=ctx, **kwargs)
+            drafting = adapter(ctx=ctx, **kwargs)
             drafted = await (switch._unless_stopped(ctx, drafting) if stoppable else drafting)
             # The pause the graph's planner node makes on an accepted ask.
             if isinstance(drafted, dict) and "asked" in drafted:
@@ -381,8 +381,8 @@ class _SeamHarness:
                 return
             yield Event(output=drafted)
 
-        node_fn = node(_node, name="seam_under_test", rerun_on_resume=True)
-        wf = Workflow(name="seam_test_wf", edges=[(START, node_fn)])
+        node_fn = node(_node, name="adapter_under_test", rerun_on_resume=True)
+        wf = Workflow(name="adapter_test_wf", edges=[(START, node_fn)])
         runner = Runner(node=wf, app_name=_APP, session_service=self._sessions)
         if self._session_id is None:
             session = await self._sessions.create_session(
@@ -422,7 +422,7 @@ class _SeamHarness:
         """This session's own event history -- what `planner.call.
         elected_spec_ids` reads to find what the user actually chose
         answering the planner's asks, and what `ctx.run_node`'s own
-        pause-and-resume depends on surviving (`harness.planner_seam`'s
+        pause-and-resume depends on surviving (`harness.planner_adapter`'s
         module docstring)."""
         assert self._session_id is not None, "run() has not been called yet"
         session = await self._sessions.get_session(
@@ -452,10 +452,10 @@ class _SeamHarness:
         self._sessions.sessions[_APP][_USER][self._session_id].state[key] = value
 
 
-async def _run_seam(seam: PlannerSeam, **kwargs: Any) -> dict[str, Any]:
-    """One-shot `_SeamHarness.run`, for a test that only makes one call and
+async def _run_adapter(adapter: PlannerAdapter, **kwargs: Any) -> dict[str, Any]:
+    """One-shot `_AdapterHarness.run`, for a test that only makes one call and
     does not need to inspect `ctx.state` afterward."""
-    output = await _SeamHarness().run(seam, **kwargs)
+    output = await _AdapterHarness().run(adapter, **kwargs)
     assert output is not None, "the seam node produced no output -- did it raise silently?"
     return output
 
@@ -516,15 +516,15 @@ def _translated_plan(
     return draft.with_translation(translation=translation, workflow=workflow)
 
 
-async def test_the_seam_returns_a_plan_a_graph_node_can_validate(
+async def test_the_adapter_returns_a_plan_a_graph_node_can_validate(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     plan = _translated_plan(decision, requirement, derived_requirement)
     scripted = ScriptedGenai([_calls(*_DECLARE)])
-    seam = _scripted_planner(scripted, compiled_proposals=True)
+    adapter = _scripted_planner(scripted, compiled_proposals=True)
 
-    drafted = await _run_seam(
-        seam, question=plan.question, readings=[], prior_plan=plan.model_dump(mode="json")
+    drafted = await _run_adapter(
+        adapter, question=plan.question, readings=[], prior_plan=plan.model_dump(mode="json")
     )
 
     # The node's own validation (`Plan.model_validate(drafted["plan"])` in
@@ -546,11 +546,11 @@ async def test_on_progress_reports_the_time_since_the_previous_round_trip(
     the same way the instant it arrives."""
     plan = _translated_plan(decision, requirement, derived_requirement)
     scripted = ScriptedGenai([_calls(*_DECLARE)])
-    seam = _scripted_planner(scripted, compiled_proposals=True)
+    adapter = _scripted_planner(scripted, compiled_proposals=True)
     reports: list[dict[str, Any]] = []
 
-    await _run_seam(
-        seam,
+    await _run_adapter(
+        adapter,
         question=plan.question,
         readings=[],
         prior_plan=plan.model_dump(mode="json"),
@@ -580,7 +580,7 @@ async def test_a_prior_plan_is_what_propose_plan_amends_from(
     as amending the wrong version. What records version 6 is therefore the
     graph's own seeded record, not what this seam left in the session.
     """
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
     made_decision = decision()
     requirements = [requirement(), derived_requirement()]
     proposal = {
@@ -597,19 +597,19 @@ async def test_a_prior_plan_is_what_propose_plan_amends_from(
             _says("done"),
         ]
     )
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
 
     # A draft with no translation is never declared ready, so this call
     # ends with no plan -- it exists only to leave a version-1 plan in the
     # session, to prove the second call does not read it back.
-    await harness.run(seam, question="kenya debt", readings=[])
+    await harness.run(adapter, question="kenya debt", readings=[])
     left_behind = load_plan(await harness.state())
     assert left_behind is not None
     assert left_behind.version == 1
 
     seeded = _translated_plan(decision, requirement, derived_requirement, version=5)
     await harness.run(
-        seam,
+        adapter,
         question="kenya debt",
         readings=[],
         prior_plan=seeded.model_dump(mode="json"),
@@ -626,14 +626,14 @@ async def test_a_model_that_stops_without_a_plan_ends_the_entry_on_plan_not_read
     """A run that ends with no plan declared ready and no referral on record
     ends the entry at once, on a refusal another plan may still answer."""
     scripted = ScriptedGenai([_says("Which years did you have in mind?")])
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
 
-    output = await _run_seam(seam, question="kenya debt", readings=[])
+    output = await _run_adapter(adapter, question="kenya debt", readings=[])
 
     assert output["refused"] == {
-        "text": refusal_sentence({"code": SeamCode.PLAN_NOT_READY}),
+        "text": refusal_sentence({"code": StopCode.PLAN_NOT_READY}),
         "final": False,
-        "code": SeamCode.PLAN_NOT_READY,
+        "code": StopCode.PLAN_NOT_READY,
     }
     assert len(scripted.requests) == 1
 
@@ -653,13 +653,13 @@ async def test_a_planner_tool_that_raises_ends_the_entry_on_a_final_refusal(
     """The run stops at the failed call and the orchestrator gets a final
     refusal naming the tool, with the traceback logged at ERROR."""
     scripted = ScriptedGenai([_calls(("get_skill", {"skill_id": "aid"})), _says("unreachable")])
-    seam = _scripted_planner(scripted, surface=_FailingSkillSurface(schemas=[]))
+    adapter = _scripted_planner(scripted, surface=_FailingSkillSurface(schemas=[]))
 
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
 
     with caplog.at_level(logging.ERROR):
         output = await harness.run(
-            cast(PlannerSeam, handing_back_planner_failures(seam)),
+            cast(PlannerAdapter, handing_back_planner_failures(adapter)),
             question="kenya debt",
             readings=[],
         )
@@ -688,10 +688,10 @@ async def test_an_unknown_tool_name_is_answered_with_the_tools_the_model_can_cal
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     scripted = ScriptedGenai([_calls(("no_such_tool", {})), _says("done")])
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
 
     with caplog.at_level(logging.ERROR):
-        output = await _run_seam(seam, question="kenya debt", readings=[])
+        output = await _run_adapter(adapter, question="kenya debt", readings=[])
 
     assert output["refused"]["final"] is False
 
@@ -716,8 +716,8 @@ async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, en
         COMPILE_FAILURES_STATE_KEY: ["fingerprint"],
         REFUSED_SPECS_STATE_KEY: [SPEC],
     }
-    harness = _SeamHarness(state=stale)
-    seam = _scripted_planner(ScriptedGenai([_says("Which years did you have in mind?")]))
+    harness = _AdapterHarness(state=stale)
+    adapter = _scripted_planner(ScriptedGenai([_says("Which years did you have in mind?")]))
     kwargs: dict[str, Any] = {}
     if entry == "amendment":
         kwargs["amendment"] = "show it"
@@ -725,7 +725,7 @@ async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, en
         kwargs["refusal"] = _unit_refusal("cross_frame_unit_mismatch")
 
     await harness.run(
-        seam,
+        adapter,
         question="kenya debt",
         readings=[],
         resume_inputs={"ask": {"result": "since 2015"}} if resumed else None,
@@ -794,10 +794,10 @@ async def test_a_question_with_nothing_left_after_a_decline_ends_on_the_decline(
             ),
         ]
     )
-    seam = _scripted_planner(scripted)
-    harness = _SeamHarness()
+    adapter = _scripted_planner(scripted)
+    harness = _AdapterHarness()
 
-    result = await harness.run(seam, question="total aid", readings=[])
+    result = await harness.run(adapter, question="total aid", readings=[])
 
     assert result is not None
     assert result["refused"]["final"] is True
@@ -854,10 +854,10 @@ async def test_the_brief_lists_the_asks_and_propose_plan_holds_the_plan_to_them(
             _says("Planned."),
         ]
     )
-    seam = _scripted_planner(scripted)
-    harness = _SeamHarness(state={ASKS_STATE_KEY: asks})
+    adapter = _scripted_planner(scripted)
+    harness = _AdapterHarness(state={ASKS_STATE_KEY: asks})
 
-    output = await harness.run(seam, question="total aid", readings=[])
+    output = await harness.run(adapter, question="total aid", readings=[])
 
     assert output is not None and output["refused"]["final"] is False
 
@@ -970,10 +970,10 @@ async def test_a_replan_over_a_refusal_no_operation_covers_earns_the_decline(
         "declined": [{"ask": asks[2], "code": "no_operation_covers", "ask_ref": 2}],
     }
     scripted = ScriptedGenai([_calls(("propose_plan", draft)), _says("Planned.")])
-    seam = _scripted_planner(scripted)
-    harness = _SeamHarness(state={ASKS_STATE_KEY: asks})
+    adapter = _scripted_planner(scripted)
+    harness = _AdapterHarness(state={ASKS_STATE_KEY: asks})
 
-    await harness.run(seam, question="GDP per person", readings=[], refusal=refusal)
+    await harness.run(adapter, question="GDP per person", readings=[], refusal=refusal)
 
     answered = _answers(scripted.requests[-1], "propose_plan")
     assert [(r["outcome"], r.get("code")) for r in answered] == [outcome]
@@ -1016,10 +1016,10 @@ async def test_a_first_draft_may_decline_an_ask_no_requirement_kind_states(
             "amends_version": 1,
         }
     scripted = ScriptedGenai([_calls(("propose_plan", draft)), _says("Planned.")])
-    seam = _scripted_planner(scripted)
-    harness = _SeamHarness(state={ASKS_STATE_KEY: asks})
+    adapter = _scripted_planner(scripted)
+    harness = _AdapterHarness(state={ASKS_STATE_KEY: asks})
 
-    await harness.run(seam, question="donors whose aid rose every year", readings=[], **kwargs)
+    await harness.run(adapter, question="donors whose aid rose every year", readings=[], **kwargs)
 
     answered = _answers(scripted.requests[-1], "propose_plan")
     if entry == "first-draft":
@@ -1049,15 +1049,15 @@ async def test_a_first_draft_with_only_declines_ends_on_the_declined_asks(paused
     if paused:
         script.insert(0, _calls((PLANNER_ASK, {"message": "Which period?"})))
     scripted = ScriptedGenai(script)
-    seam = _scripted_planner(scripted)
-    harness = _SeamHarness(state={ASKS_STATE_KEY: asks})
+    adapter = _scripted_planner(scripted)
+    harness = _AdapterHarness(state={ASKS_STATE_KEY: asks})
 
-    result = await harness.run(seam, question=draft["question"], readings=[])
+    result = await harness.run(adapter, question=draft["question"], readings=[])
     if paused:
         assert result is None
         interrupt_id = _pending_ask_interrupt_id(await harness.events())
         result = await harness.run(
-            seam,
+            adapter,
             question=draft["question"],
             readings=[],
             new_message=types.Content(
@@ -1103,10 +1103,10 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() 
             )
         ]
     )
-    seam = _scripted_planner(scripted)
-    harness = _SeamHarness()
+    adapter = _scripted_planner(scripted)
+    harness = _AdapterHarness()
 
-    output = await harness.run(seam, question="kenya debt", readings=[])
+    output = await harness.run(adapter, question="kenya debt", readings=[])
 
     assert output is None, "a pausing turn resolves no output -- the run is suspended, not done"
     events = await harness.events()
@@ -1138,10 +1138,10 @@ async def test_a_slow_call_beside_an_accepted_ask_answers_before_the_pause_and_r
     scripted = ScriptedGenai(
         [_calls((PLANNER_ASK, {"message": "Which years?"}), ("propose_plan", {})), _says("stop")]
     )
-    seam = scripted_planner(scripted, tools=slow_proposals)
-    harness = _SeamHarness()
+    adapter = scripted_planner(scripted, tools=slow_proposals)
+    harness = _AdapterHarness()
 
-    assert await harness.run(seam, question="kenya debt", readings=[]) is None
+    assert await harness.run(adapter, question="kenya debt", readings=[]) is None
     assert len(scripted.requests) == 1
     events = await harness.events()
     answered = [
@@ -1167,7 +1167,7 @@ async def test_a_slow_call_beside_an_accepted_ask_answers_before_the_pause_and_r
             )
         ],
     )
-    await harness.run(seam, question="kenya debt", readings=[], new_message=answer)
+    await harness.run(adapter, question="kenya debt", readings=[], new_message=answer)
 
     assert proposals == [1]
     assert len(scripted.requests) == 2
@@ -1188,11 +1188,11 @@ async def test_a_terminal_refusal_beside_an_accepted_ask_ends_the_entry_on_the_r
             )
         ]
     )
-    seam = _scripted_planner(scripted)
-    harness = _SeamHarness()
+    adapter = _scripted_planner(scripted)
+    harness = _AdapterHarness()
 
     result = await harness.run(
-        seam,
+        adapter,
         question="kenya debt",
         readings=[],
         prior_plan=seeded.model_dump(mode="json"),
@@ -1218,13 +1218,13 @@ async def test_an_ask_after_a_refused_ask_in_the_same_response_is_refused_too() 
             _says("done"),
         ]
     )
-    seam = _scripted_planner(scripted)
-    harness = _SeamHarness()
+    adapter = _scripted_planner(scripted)
+    harness = _AdapterHarness()
 
-    result = await harness.run(seam, question="kenya debt", readings=[])
+    result = await harness.run(adapter, question="kenya debt", readings=[])
 
     assert result is not None
-    assert result["refused"]["code"] == SeamCode.PLAN_NOT_READY
+    assert result["refused"]["code"] == StopCode.PLAN_NOT_READY
     assert load_pending_ask(await harness.state()) is None
     answers = [
         (response.response or {}).get("code", (response.response or {}).get("status"))
@@ -1246,22 +1246,24 @@ async def test_an_entry_that_raises_after_an_accepted_ask_leaves_no_ask_waiting(
 
     def stray(events: Any, **kwargs: Any) -> None:
         del events, kwargs
-        raise PlannerSeamError("a planner event carries another branch")
+        raise PlannerAdapterError("a planner event carries another branch")
 
-    monkeypatch.setattr(planner_seam, "_check_branches", stray)
+    monkeypatch.setattr(planner_adapter, "_check_branches", stray)
     scripted = ScriptedGenai([_calls((PLANNER_ASK, {"message": "Which years?"}))])
-    seam = _scripted_planner(scripted)
-    harness = _SeamHarness()
+    adapter = _scripted_planner(scripted)
+    harness = _AdapterHarness()
 
     result = await harness.run(
-        cast(PlannerSeam, handing_back_planner_failures(seam)), question="kenya debt", readings=[]
+        cast(PlannerAdapter, handing_back_planner_failures(adapter)),
+        question="kenya debt",
+        readings=[],
     )
 
     assert result is not None and "refused" in result
     assert load_pending_ask(await harness.state()) is None
 
 
-async def _pause_on_a_legacy_ask(harness: _SeamHarness, question: dict[str, Any]) -> None:
+async def _pause_on_a_legacy_ask(harness: _AdapterHarness, question: dict[str, Any]) -> None:
     """Leave `harness`'s session paused on a long-running
     `REQUEST_INPUT_FUNCTION_CALL_NAME` call asking `question`, with no pending
     ask recorded. No planner builds that call, so this helper stands in for the
@@ -1281,7 +1283,9 @@ async def _pause_on_a_legacy_ask(harness: _SeamHarness, question: dict[str, Any]
         )
         return {"asked": {"call_id": call_id, "args": question}}
 
-    assert await harness.run(cast(PlannerSeam, paused), question="kenya debt", readings=[]) is None
+    assert (
+        await harness.run(cast(PlannerAdapter, paused), question="kenya debt", readings=[]) is None
+    )
 
 
 async def test_an_answer_to_a_pause_from_before_the_node_level_ask_re_enters_the_planner() -> None:
@@ -1292,12 +1296,12 @@ async def test_an_answer_to_a_pause_from_before_the_node_level_ask_re_enters_the
         "message": "Which source did you mean?",
         "candidates": [{"spec_id": SPEC, "label": "a candidate"}],
     }
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
     await _pause_on_a_legacy_ask(harness, question)
     assert load_pending_ask(await harness.state()) is None
 
     scripted = ScriptedGenai([_says("stop")])
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
     answer = types.Content(
         role="user",
         parts=[
@@ -1306,7 +1310,7 @@ async def test_an_answer_to_a_pause_from_before_the_node_level_ask_re_enters_the
             )
         ],
     )
-    result = await harness.run(seam, question="kenya debt", readings=[], new_message=answer)
+    result = await harness.run(adapter, question="kenya debt", readings=[], new_message=answer)
 
     assert result is not None
     (request,) = scripted.requests
@@ -1322,17 +1326,17 @@ async def test_the_branch_check_runs_on_the_events_a_run_left_before_pausing_for
     """A run that ends on a planner-side ask has the events it appended
     checked, as a run that ends on a plan does."""
     checked: list[list[Event]] = []
-    real_check = planner_seam._check_branches
+    real_check = planner_adapter._check_branches
 
     def spy(events: Any, **kwargs: Any) -> None:
         checked.append(list(events))
         real_check(events, **kwargs)
 
-    monkeypatch.setattr(planner_seam, "_check_branches", spy)
+    monkeypatch.setattr(planner_adapter, "_check_branches", spy)
     scripted = ScriptedGenai([_calls((PLANNER_ASK, {"message": "Which source did you mean?"}))])
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
 
-    output = await _SeamHarness().run(seam, question="kenya debt", readings=[])
+    output = await _AdapterHarness().run(adapter, question="kenya debt", readings=[])
 
     assert output is None
     assert len(checked) == 1, "the branch check did not run on the run that paused"
@@ -1399,7 +1403,7 @@ def _referring_proposals(referral: dict[str, Any]) -> Callable[[Sequence[Any]], 
     ],
     ids=["unmeetable-with-candidates", "source-name-ambiguous"],
 )
-async def test_a_referral_the_user_decides_ends_the_run_on_the_seam_s_own_ask(
+async def test_a_referral_the_user_decides_ends_the_run_on_the_adapters_own_ask(
     referral: dict[str, Any], candidates: list[dict[str, str]]
 ) -> None:
     """The translation refers a requirement back with candidates the user
@@ -1407,10 +1411,10 @@ async def test_a_referral_the_user_decides_ends_the_run_on_the_seam_s_own_ask(
     `ask_user_question` call led by the referral's table sentence, and no
     model turn composes it."""
     scripted = ScriptedGenai([_calls(*_DECLARE), _says("never sent")])
-    seam = scripted_planner(scripted, tools=_referring_proposals(referral))
-    harness = _SeamHarness()
+    adapter = scripted_planner(scripted, tools=_referring_proposals(referral))
+    harness = _AdapterHarness()
 
-    output = await harness.run(seam, question="kenya debt", readings=[])
+    output = await harness.run(adapter, question="kenya debt", readings=[])
 
     assert output is None, "the ask should pause this call, not resolve it"
     assert len(scripted.requests) == 1
@@ -1456,8 +1460,8 @@ async def test_a_picks_replan_run_as_a_task_still_pauses_on_an_ask_and_resumes(
     scripted = ScriptedGenai(
         [_calls((PLANNER_ASK, {"message": "Which source did you mean?"})), _calls(*_DECLARE)]
     )
-    seam = _scripted_planner(scripted, compiled_proposals=True)
-    harness = _SeamHarness()
+    adapter = _scripted_planner(scripted, compiled_proposals=True)
+    harness = _AdapterHarness()
     reports: list[dict[str, Any]] = []
     entry: dict[str, Any] = {
         "question": plan.question,
@@ -1468,7 +1472,7 @@ async def test_a_picks_replan_run_as_a_task_still_pauses_on_an_ask_and_resumes(
         "stoppable": True,
     }
 
-    paused = await harness.run(seam, **entry)
+    paused = await harness.run(adapter, **entry)
 
     assert paused is None, "the ask should pause the replan, not resolve it"
     assert decision_pick(await harness.state()) == _PICKED
@@ -1476,7 +1480,7 @@ async def test_a_picks_replan_run_as_a_task_still_pauses_on_an_ask_and_resumes(
     resume = types.Content(
         role="user", parts=[create_request_input_response(interrupt_id, {"result": "2020"})]
     )
-    resumed = await harness.run(seam, new_message=resume, **entry)
+    resumed = await harness.run(adapter, new_message=resume, **entry)
     assert resumed is not None and resumed["plan"]["version"] == plan.version
     assert decision_pick(await harness.state()) == _PICKED
     assert [report["tools"] for report in reports] == [[PLANNER_ASK], ["propose_plan"]]
@@ -1487,7 +1491,7 @@ _BRIEF_MARKER = "Context for this question."
 
 def _brief_follows_the_question(request: Any) -> str:
     """The one brief in `request`, after checking it directly follows the
-    turn's question. That is the latest "probe", the message `_SeamHarness`
+    turn's question. That is the latest "probe", the message `_AdapterHarness`
     opens every run on."""
     texts = [
         "".join(part.text or "" for part in content.parts or []) for content in _contents(request)
@@ -1527,11 +1531,11 @@ async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
             _says("noted, but not done yet"),
         ]
     )
-    seam = _scripted_planner(scripted, compiled_proposals=True)
-    harness = _SeamHarness()
+    adapter = _scripted_planner(scripted, compiled_proposals=True)
+    harness = _AdapterHarness()
 
     paused = await harness.run(
-        seam, question=plan.question, readings=[], prior_plan=plan.model_dump(mode="json")
+        adapter, question=plan.question, readings=[], prior_plan=plan.model_dump(mode="json")
     )
     assert paused is None, "the ask should pause this call, not resolve it"
     asked = len(scripted.requests)
@@ -1542,7 +1546,7 @@ async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
         parts=[create_request_input_response(interrupt_id, {"result": {"spec_id": SPEC}})],
     )
     resumed = await harness.run(
-        seam,
+        adapter,
         question=plan.question,
         readings=[],
         prior_plan=plan.model_dump(mode="json"),
@@ -1559,7 +1563,7 @@ async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
 
     amending = len(scripted.requests)
     await harness.run(
-        seam,
+        adapter,
         question=plan.question,
         readings=[],
         prior_plan=resumed["plan"],
@@ -1599,11 +1603,11 @@ def test_a_wave_with_two_refused_specs_names_both() -> None:
     (`executor.run._Run.execute`'s siblings); a `RediscoveryNeeded` among
     them names a second refused spec this seam must treat the same as the
     primary's own: named in the `avoid` sentence, not just the first."""
-    seam = _scripted_planner(ScriptedGenai([]))
+    adapter = _scripted_planner(ScriptedGenai([]))
     refusal = _rediscovery_refusal(SPEC)
     refusal["also_stopped"] = [_rediscovery_refusal(SPEC_B)]
 
-    message = seam._message(
+    message = adapter._message(
         question="malaria grants and population for kenya",
         prior_plan=None,
         refusal=refusal,
@@ -1751,10 +1755,10 @@ async def _first_request_with_readings(
     blocks and warnings `search` keeps) already in session state, answering
     `refusal` or the user's `amendment`."""
     scripted = ScriptedGenai([_calls(*_DECLARE)])
-    seam = _scripted_planner(scripted, compiled_proposals=True)
-    harness = _SeamHarness(stored)
+    adapter = _scripted_planner(scripted, compiled_proposals=True)
+    harness = _AdapterHarness(stored)
     await harness.run(
-        seam,
+        adapter,
         question=plan.question,
         prior_plan=plan.model_dump(mode="json"),
         readings=readings,
@@ -1904,14 +1908,16 @@ async def test_a_refusal_payload_is_held_with_its_code_until_a_later_search_lift
     for another code (`also`) holds it for good when either code is."""
     runs = 3 if between is not None else 2
     scripted = ScriptedGenai([_says("still nothing")] * runs)
-    seam = _scripted_planner(scripted)
-    harness = _SeamHarness()
+    adapter = _scripted_planner(scripted)
+    harness = _AdapterHarness()
     refusal = _rediscovery_refusal(SPEC, code)
     if also is not None:
         refusal["also_stopped"] = [_rediscovery_refusal(SPEC, also)]
     before = datetime.now(UTC)
 
-    await harness.run(seam, question="aid to guatemala", readings=_turn_readings(), refusal=refusal)
+    await harness.run(
+        adapter, question="aid to guatemala", readings=_turn_readings(), refusal=refusal
+    )
     state = await harness.state()
     assert state[REFUSED_SPECS_STATE_KEY] == [SPEC]
     (held,) = load_refused_specs(state)
@@ -1920,7 +1926,7 @@ async def test_a_refusal_payload_is_held_with_its_code_until_a_later_search_lift
     after = datetime.now(UTC)
     if between is not None:
         await harness.run(
-            seam,
+            adapter,
             question="aid to guatemala",
             readings=_turn_readings(),
             refusal=refusal,
@@ -1930,7 +1936,7 @@ async def test_a_refusal_payload_is_held_with_its_code_until_a_later_search_lift
     readings[0]["observed_at"] = (before if observed == "before" else after).isoformat()
     calls = len(scripted.requests)
     await harness.run(
-        seam, question="aid to guatemala", readings=readings, amendment="only since 2015"
+        adapter, question="aid to guatemala", readings=readings, amendment="only since 2015"
     )
 
     state = await harness.state()
@@ -1984,7 +1990,7 @@ async def test_every_spec_refused_since_the_first_draft_is_named_and_unpinnable(
     sentence and leaves them out of the pin sources. The next first-draft
     entry starts clean."""
     scripted = ScriptedGenai([_says("still nothing")] * 5)
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
     readings = _offering_readings(siblings)
     calls: list[dict[str, Any]] = [
         {},
@@ -2000,13 +2006,13 @@ async def test_every_spec_refused_since_the_first_draft_is_named_and_unpinnable(
         del node_input
         for call in calls:
             before = len(scripted.requests)
-            await seam(ctx=ctx, question="aid to guatemala", readings=readings, **call)
+            await adapter(ctx=ctx, question="aid to guatemala", readings=readings, **call)
             pinnable.append(list(pin_sources(cast(SessionState, ctx.session.state))))
             briefs.append(_brief_follows_the_question(scripted.requests[before]))
 
     wf = Workflow(
-        name="seam_test_wf",
-        edges=[(START, node(_node, name="seam_under_test", rerun_on_resume=True))],
+        name="adapter_test_wf",
+        edges=[(START, node(_node, name="adapter_under_test", rerun_on_resume=True))],
     )
     sessions = InMemorySessionService()
     runner = Runner(node=wf, app_name=_APP, session_service=sessions)
@@ -2034,7 +2040,7 @@ async def test_every_spec_refused_since_the_first_draft_is_named_and_unpinnable(
         assert _SIBLING not in avoided and SPEC_B not in avoided
     # The second replan names its own refusal's reason and the earlier one's.
     assert "member_count = 872" in _avoided(briefs[2])
-    assert planner_seam._REFUSED_EARLIER in _avoided(briefs[3])
+    assert planner_adapter._REFUSED_EARLIER in _avoided(briefs[3])
 
 
 @pytest.mark.parametrize("siblings", ["unfetched", "fetched"])
@@ -2082,16 +2088,16 @@ async def test_a_replan_admits_a_pin_of_another_count_the_refused_reading_offere
             _says("done"),
         ]
     )
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
     after: dict[str, Any] = {}
 
     async def _node(ctx: Context, node_input: Any) -> Any:
         del node_input
-        await seam(ctx=ctx, question="aid", readings=dumped)
+        await adapter(ctx=ctx, question="aid", readings=dumped)
         first = load_plan(ctx.state)
         assert first is not None
         after["replanned_from"] = len(scripted.requests)
-        await seam(
+        await adapter(
             ctx=ctx,
             question="aid",
             readings=dumped,
@@ -2102,8 +2108,8 @@ async def test_a_replan_admits_a_pin_of_another_count_the_refused_reading_offere
         after["pinnable"] = list(pin_sources(cast(SessionState, ctx.session.state)))
 
     wf = Workflow(
-        name="seam_test_wf",
-        edges=[(START, node(_node, name="seam_under_test", rerun_on_resume=True))],
+        name="adapter_test_wf",
+        edges=[(START, node(_node, name="adapter_under_test", rerun_on_resume=True))],
     )
     sessions = InMemorySessionService()
     runner = Runner(node=wf, app_name=_APP, session_service=sessions)
@@ -2399,9 +2405,9 @@ def test_the_digest_carries_what_an_amendment_has_to_preserve() -> None:
     rest on. The plan's `question`, `version` and `status` say what is being
     changed and from where.
     """
-    seam = _scripted_planner(ScriptedGenai([]))
+    adapter = _scripted_planner(ScriptedGenai([]))
     plan = _distinct_plan()
-    message = seam._message(
+    message = adapter._message(
         question="QUESTION_TEXT",
         prior_plan=plan,
         refusal=None,
@@ -2431,7 +2437,7 @@ def test_the_digest_carries_what_an_amendment_has_to_preserve() -> None:
     ):
         assert preserved in message, (
             f"the prior plan's digest dropped {preserved!r}, which an amendment has to see "
-            "to preserve it. `_plan_context` in `harness.planner_seam` is what renders "
+            "to preserve it. `_plan_context` in `harness.planner_adapter` is what renders "
             "this section. The raw plan itself never appears in the message."
         )
 
@@ -2469,7 +2475,7 @@ def test_the_plan_section_shows_the_plan_the_model_wrote(decision: Any) -> None:
 
     message = _scripted_planner(ScriptedGenai([]))._message(
         question="QUESTION_TEXT",
-        prior_plan=planner_seam._as_authored(stored),
+        prior_plan=planner_adapter._as_authored(stored),
         refusal=None,
         amendment=None,
         canvas_digest=None,
@@ -2493,10 +2499,10 @@ async def test_the_brief_seeded_with_a_split_plan_shows_the_plan_the_model_wrote
     copy's pin."""
     stored = stored_split_plan(decision)
     scripted = ScriptedGenai([_says("still nothing")])
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
 
-    await _run_seam(
-        seam, question=stored.question, readings=[], prior_plan=stored.model_dump(mode="json")
+    await _run_adapter(
+        adapter, question=stored.question, readings=[], prior_plan=stored.model_dump(mode="json")
     )
 
     brief = _prompt_text(scripted.requests[0])
@@ -2619,7 +2625,7 @@ async def test_an_amend_call_shows_the_other_count_and_the_plan_pins_it(
             _says("done"),
         ]
     )
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
     plans: list[Plan | None] = []
     amended_from: list[int] = []
 
@@ -2628,11 +2634,11 @@ async def test_an_amend_call_shows_the_other_count_and_the_plan_pins_it(
     # compiles, so each ends with no plan ready, leaving its draft on record.
     async def _node(ctx: Context, node_input: Any) -> Any:
         del node_input
-        await seam(ctx=ctx, question="aid", readings=readings)
+        await adapter(ctx=ctx, question="aid", readings=readings)
         first = load_plan(ctx.state)
         assert first is not None
         amended_from.append(len(scripted.requests))
-        await seam(
+        await adapter(
             ctx=ctx,
             question="aid",
             readings=readings,
@@ -2642,8 +2648,8 @@ async def test_an_amend_call_shows_the_other_count_and_the_plan_pins_it(
         plans.append(load_plan(ctx.state))
 
     wf = Workflow(
-        name="seam_test_wf",
-        edges=[(START, node(_node, name="seam_under_test", rerun_on_resume=True))],
+        name="adapter_test_wf",
+        edges=[(START, node(_node, name="adapter_under_test", rerun_on_resume=True))],
     )
     sessions = InMemorySessionService()
     runner = Runner(node=wf, app_name=_APP, session_service=sessions)
@@ -2675,18 +2681,20 @@ async def test_an_entry_records_whether_the_users_amendment_opened_it() -> None:
     """An entry carrying the user's amendment says so in state, for `propose_plan`
     to honour a decision they make in it. The next entry without one, a replan
     here, clears it, and a resume inside an entry keeps what the entry recorded."""
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
     scripted = ScriptedGenai([_says("Planned.")] * 4)
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
     recorded = []
 
-    await harness.run(seam, question="kenya debt", readings=[])
+    await harness.run(adapter, question="kenya debt", readings=[])
     recorded.append(amendment_entry(await harness.state()))
-    await harness.run(seam, question="kenya debt", readings=[], amendment="one total")
+    await harness.run(adapter, question="kenya debt", readings=[], amendment="one total")
     recorded.append(amendment_entry(await harness.state()))
-    await harness.run(seam, question="kenya debt", readings=[], resume_inputs={"ask": {}})
+    await harness.run(adapter, question="kenya debt", readings=[], resume_inputs={"ask": {}})
     recorded.append(amendment_entry(await harness.state()))
-    await harness.run(seam, question="kenya debt", readings=[], refusal=_rediscovery_refusal(SPEC))
+    await harness.run(
+        adapter, question="kenya debt", readings=[], refusal=_rediscovery_refusal(SPEC)
+    )
     recorded.append(amendment_entry(await harness.state()))
 
     assert recorded == [False, True, True, False]
@@ -2711,20 +2719,22 @@ async def test_an_entry_records_the_pick_it_replans_for_and_says_it_on_its_own_l
     from the user's amendment. Its refusal carries the sentence the card shows
     under the decision. A resume inside the entry keeps the pick, and the
     next entry without one clears it."""
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
     scripted = ScriptedGenai([_says("Planned.")] * 3)
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
     pick = _PICKED
     recorded = []
 
-    refused = await harness.run(seam, question="kenya aid", readings=[], pick=pick)
+    refused = await harness.run(adapter, question="kenya aid", readings=[], pick=pick)
     state = await harness.state()
     recorded.append((decision_pick(state), amendment_entry(state)))
     (last,) = scripted.requests[-1].content_list[-1:]
     asked = "\n".join(part.text or "" for part in last.parts or [])
-    await harness.run(seam, question="kenya aid", readings=[], pick=pick, resume_inputs={"ask": {}})
+    await harness.run(
+        adapter, question="kenya aid", readings=[], pick=pick, resume_inputs={"ask": {}}
+    )
     recorded.append(decision_pick(await harness.state()))
-    amended = await harness.run(seam, question="kenya aid", readings=[], amendment="one total")
+    amended = await harness.run(adapter, question="kenya aid", readings=[], amendment="one total")
     recorded.append(decision_pick(await harness.state()))
 
     assert recorded == [(_PICKED, False), _PICKED, None]
@@ -2743,12 +2753,12 @@ async def test_an_entry_records_the_pick_it_replans_for_and_says_it_on_its_own_l
     )
     assert "The user asks for this change" not in asked
     assert refused is not None and amended is not None
-    assert refused["refused"]["code"] == amended["refused"]["code"] == SeamCode.PLAN_NOT_READY
+    assert refused["refused"]["code"] == amended["refused"]["code"] == StopCode.PLAN_NOT_READY
     assert refused["refused"]["reason"]
     assert "reason" not in amended["refused"]
 
 
-async def test_an_amendment_still_works_through_the_seam(
+async def test_an_amendment_still_works_through_the_adapter(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """An amendment proposed against the digest amends the stored plan.
@@ -2765,7 +2775,7 @@ async def test_an_amendment_still_works_through_the_seam(
     digest this brief rendered. A brief that lost the prior plan would leave
     the model with no version to name.
     """
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
     seeded = _translated_plan(decision, requirement, derived_requirement, version=5).model_dump(
         mode="json"
     )
@@ -2780,10 +2790,10 @@ async def test_an_amendment_still_works_through_the_seam(
         "amends_version": 5,
     }
     scripted = ScriptedGenai([_calls(("propose_plan", proposal)), _says("done")])
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
 
     await harness.run(
-        seam,
+        adapter,
         question="kenya debt",
         readings=[],
         prior_plan=seeded,
@@ -2816,20 +2826,20 @@ def test_an_amend_or_replan_brief_is_the_first_draft_brief_then_its_ask(
     question as a first draft renders them, and closes on its ask, so the
     model sees the ask in context and the brief's text up to the ask is the
     same on every call of a turn."""
-    seam = _scripted_planner(ScriptedGenai([]))
+    adapter = _scripted_planner(ScriptedGenai([]))
     brief = {
         "question": "gdp guatemala",
         "prior_plan": None,
         "canvas_digest": {"blocks": ["a block"]},
         "conversation_digest": {"turns": ["an earlier turn"]},
-        "ledger": planner_seam._readings_ledger([]),
+        "ledger": planner_adapter._readings_ledger([]),
     }
-    first_draft = seam._message(**brief, refusal=None, amendment=None)
-    closing = planner_seam._ask_text(
+    first_draft = adapter._message(**brief, refusal=None, amendment=None)
+    closing = planner_adapter._ask_text(
         amendment=ask.get("amendment"), refusal=ask.get("refusal"), pick=None
     )
 
-    message = seam._message(**brief, refusal=ask.get("refusal"), amendment=ask.get("amendment"))
+    message = adapter._message(**brief, refusal=ask.get("refusal"), amendment=ask.get("amendment"))
 
     assert message == first_draft + closing
     assert closing and "Question: gdp guatemala" not in closing
@@ -3240,7 +3250,7 @@ def test_a_stalled_referral_ends_the_entry_on_plan_not_ready_carrying_its_constr
 
     assert tracker.ready_to_break
     assert tracker.refused == {
-        "code": SeamCode.PLAN_NOT_READY,
+        "code": StopCode.PLAN_NOT_READY,
         "detail": {
             "kind": "requirement_needs_repair",
             "requirement_id": "gdp_gtm",
@@ -3300,7 +3310,7 @@ def test_a_closing_referral_ends_the_entry_on_the_proposal_carrying_it(
     assert tracker.submitted is None
     assert tracker.refused is not None
     assert named in refusal_sentence(tracker.refused)
-    assert PlannerSeam._refused(tracker.refused)["refused"]["final"] is True
+    assert PlannerAdapter._refused(tracker.refused)["refused"]["final"] is True
 
 
 _NOT_CALLED = "'search' was not called: the planner entry has no time left for it"
@@ -3477,7 +3487,7 @@ def _gdp_plan(decision: Any, requirement: Any, derived_requirement: Any) -> Plan
     )
 
 
-async def test_the_planner_runs_on_the_model_and_translation_the_seam_is_given(
+async def test_the_planner_runs_on_the_model_and_translation_the_adapter_is_given(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     translated: list[Plan | None] = []
@@ -3496,12 +3506,12 @@ async def test_the_planner_runs_on_the_model_and_translation_the_seam_is_given(
         ],
     }
     scripted = ScriptedGenai([_calls(("propose_plan", proposal)), _says("done")])
-    seam = scripted_planner(scripted, translate=translate)
+    adapter = scripted_planner(scripted, translate=translate)
 
-    result = await _run_seam(seam, question="kenya debt", readings=[])
+    result = await _run_adapter(adapter, question="kenya debt", readings=[])
 
     # The caller's translation gives no verdict, so the plan is never declared ready.
-    assert result["refused"]["code"] == SeamCode.PLAN_NOT_READY
+    assert result["refused"]["code"] == StopCode.PLAN_NOT_READY
     assert [plan.version if plan else None for plan in translated] == [1]
     (answered,) = _answers(scripted.requests[1], "propose_plan")
     assert answered["translation"] == {"translated_by": "the caller"}
@@ -3511,14 +3521,14 @@ async def test_every_planner_generation_runs_at_the_low_thinking_config(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     scripted = ScriptedGenai([_computed(_propose_again_step()), _says("done")])
-    seam = _scripted_planner(
+    adapter = _scripted_planner(
         scripted,
         surface=_SkillPagesSurface(schemas=[], responses={"search": _NO_DATA_SEARCH_RESPONSE}),
     )
     draft = _gdp_plan(decision, requirement, derived_requirement)
 
-    await _run_seam(
-        seam, question=draft.question, readings=[], prior_plan=draft.model_dump(mode="json")
+    await _run_adapter(
+        adapter, question=draft.question, readings=[], prior_plan=draft.model_dump(mode="json")
     )
 
     assert len(scripted.requests) > 1
@@ -3552,7 +3562,7 @@ async def test_a_later_entry_sees_the_brief_and_none_of_the_earlier_entrys_calls
             _says("noted"),
         ]
     )
-    seam = _scripted_planner(
+    adapter = _scripted_planner(
         scripted,
         surface=_skill_surface(
             {
@@ -3572,7 +3582,7 @@ async def test_a_later_entry_sees_the_brief_and_none_of_the_earlier_entrys_calls
 
             async def _entry(ctx: Context, node_input: Any, entry: dict[str, Any] = entry) -> Any:
                 del node_input
-                return await seam(
+                return await adapter(
                     ctx=ctx,
                     question="gdp guatemala",
                     readings=readings,
@@ -3583,7 +3593,7 @@ async def test_a_later_entry_sees_the_brief_and_none_of_the_earlier_entrys_calls
             await ctx.run_node(node(_entry, name="planner", rerun_on_resume=True))
 
     wf = Workflow(
-        name="seam_test_wf", edges=[(START, node(_turn, name="turn", rerun_on_resume=True))]
+        name="adapter_test_wf", edges=[(START, node(_turn, name="turn", rerun_on_resume=True))]
     )
     sessions = InMemorySessionService()
     runner = Runner(node=wf, app_name=_APP, session_service=sessions)
@@ -3647,15 +3657,15 @@ async def test_a_first_draft_carries_no_skill_an_earlier_plan_read() -> None:
             _says("done"),
         ]
     )
-    seam = _scripted_planner(scripted, surface=_skill_page_surface())
-    harness = _SeamHarness()
+    adapter = _scripted_planner(scripted, surface=_skill_page_surface())
+    harness = _AdapterHarness()
     entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
 
-    await harness.run(seam, **entry)
+    await harness.run(adapter, **entry)
     amending = len(scripted.requests)
-    await harness.run(seam, amendment="only since 2015", **entry)
+    await harness.run(adapter, amendment="only since 2015", **entry)
     drafting = len(scripted.requests)
-    await harness.run(seam, **entry)
+    await harness.run(adapter, **entry)
 
     amend = _brief_follows_the_question(scripted.requests[amending])
     assert _skills_named(amend) == "dfo-faq*" and _SKILL_PAGE in amend
@@ -3687,11 +3697,11 @@ async def test_a_page_stored_with_the_old_tools_call_lines_is_shown_naming_get_s
         skill_page_key(pages[1]): _OLD_FILE_PAGE,
     }
     scripted = ScriptedGenai([_says("stop")])
-    seam = _scripted_planner(scripted, surface=_skill_page_surface())
-    harness = _SeamHarness(state)
+    adapter = _scripted_planner(scripted, surface=_skill_page_surface())
+    harness = _AdapterHarness(state)
 
     await harness.run(
-        seam,
+        adapter,
         question="kenya debt",
         readings=_skill_readings("dfo-faq"),
         amendment="only since 2015",
@@ -3727,7 +3737,7 @@ async def test_each_skill_page_text_is_stored_once_across_the_plans_events() -> 
             _says("stop"),
         ]
     )
-    seam = _scripted_planner(
+    adapter = _scripted_planner(
         scripted,
         surface=_skill_surface(
             {
@@ -3736,11 +3746,11 @@ async def test_each_skill_page_text_is_stored_once_across_the_plans_events() -> 
             }
         ),
     )
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
     entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
 
-    await harness.run(seam, **entry)
-    await harness.run(seam, amendment="only since 2015", **entry)
+    await harness.run(adapter, **entry)
+    await harness.run(adapter, amendment="only since 2015", **entry)
 
     deltas = [
         json.dumps(event.actions.state_delta)
@@ -3778,12 +3788,12 @@ async def test_the_skills_an_entry_shows_survive_a_planner_ask_and_reach_the_nex
             _says("stop"),
         ]
     )
-    seam = _scripted_planner(scripted, surface=_skill_page_surface())
-    harness = _SeamHarness()
+    adapter = _scripted_planner(scripted, surface=_skill_page_surface())
+    harness = _AdapterHarness()
     entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
 
-    await harness.run(seam, **entry)
-    paused = await harness.run(seam, amendment="only since 2015", **entry)
+    await harness.run(adapter, **entry)
+    paused = await harness.run(adapter, amendment="only since 2015", **entry)
     assert paused is None, "the ask should pause the amend"
     resuming = len(scripted.requests)
     answer = types.Content(
@@ -3794,9 +3804,9 @@ async def test_the_skills_an_entry_shows_survive_a_planner_ask_and_reach_the_nex
             )
         ],
     )
-    await harness.run(seam, amendment="only since 2015", new_message=answer, **entry)
+    await harness.run(adapter, amendment="only since 2015", new_message=answer, **entry)
     replanning = len(scripted.requests)
-    await harness.run(seam, amendment="and drop Kenya", **entry)
+    await harness.run(adapter, amendment="and drop Kenya", **entry)
 
     resumed = scripted.requests[resuming]
     brief = _brief_follows_the_question(resumed)
@@ -3865,11 +3875,11 @@ async def test_an_answer_that_resumes_a_run_after_a_translated_proposal_is_read(
             _says("stop"),
         ]
     )
-    seam = _scripted_planner(scripted, surface=surface)
-    harness = _SeamHarness()
+    adapter = _scripted_planner(scripted, surface=surface)
+    harness = _AdapterHarness()
     plan_json = draft.model_dump(mode="json")
 
-    paused = await harness.run(seam, question=draft.question, readings=[], prior_plan=plan_json)
+    paused = await harness.run(adapter, question=draft.question, readings=[], prior_plan=plan_json)
     assert paused is None, "the ask should pause this call, not resolve it"
 
     interrupt_id = _pending_ask_interrupt_id(await harness.events())
@@ -3878,7 +3888,7 @@ async def test_an_answer_that_resumes_a_run_after_a_translated_proposal_is_read(
         parts=[create_request_input_response(interrupt_id, {"result": {"text": "use debt stock"}})],
     )
     output = await harness.run(
-        seam,
+        adapter,
         question=draft.question,
         readings=[],
         prior_plan=plan_json,
@@ -4078,10 +4088,10 @@ async def test_each_congo_is_settled_by_its_own_answer_and_reaches_search_as_pic
             _says("stop"),
         ]
     )
-    seam = _scripted_planner(scripted, surface=surface)
-    harness = _SeamHarness()
+    adapter = _scripted_planner(scripted, surface=surface)
+    harness = _AdapterHarness()
 
-    assert await harness.run(seam, question=draft.question, readings=[]) is None
+    assert await harness.run(adapter, question=draft.question, readings=[]) is None
     for pick in (
         f"{dataset.id}|donor|Congo|country/COD",
         f"{dataset.id}|recipient|Congo|country/COG",
@@ -4091,7 +4101,7 @@ async def test_each_congo_is_settled_by_its_own_answer_and_reaches_search_as_pic
             role="user",
             parts=[create_request_input_response(interrupt_id, {"result": {"spec_id": pick}})],
         )
-        await harness.run(seam, question=draft.question, readings=[], new_message=answer)
+        await harness.run(adapter, question=draft.question, readings=[], new_message=answer)
 
     proposals = [
         part.function_response.response
@@ -4157,10 +4167,10 @@ async def test_a_repeating_referral_ends_the_entry_on_its_second_identical_refer
     surface = _SkillPagesSurface(schemas=[], responses={"search": _NO_DATA_SEARCH_RESPONSE})
     draft = _gdp_plan(decision, requirement, derived_requirement)
     scripted = ScriptedGenai([_computed(_propose_again_step())] * 2)
-    seam = _scripted_planner(scripted, surface=surface)
+    adapter = _scripted_planner(scripted, surface=surface)
 
-    result = await _run_seam(
-        seam,
+    result = await _run_adapter(
+        adapter,
         question="gdp guatemala",
         readings=[],
         prior_plan=draft.model_dump(mode="json"),
@@ -4168,9 +4178,9 @@ async def test_a_repeating_referral_ends_the_entry_on_its_second_identical_refer
 
     referred = {"kind": "no_data", "requirement_id": "gdp_gtm"}
     assert result["refused"] == {
-        "text": refusal_sentence({"code": SeamCode.PLAN_NOT_READY, "detail": referred}),
+        "text": refusal_sentence({"code": StopCode.PLAN_NOT_READY, "detail": referred}),
         "final": False,
-        "code": SeamCode.PLAN_NOT_READY,
+        "code": StopCode.PLAN_NOT_READY,
     }
     assert len(scripted.requests) == 2
 
@@ -4192,15 +4202,15 @@ async def test_a_run_leaves_every_event_it_appended_scoped_to_the_planner(
     makes a model call in a planner run.
     """
     scripted = ScriptedGenai([_computed(step) for step in _repeating_proposal_script(1)])
-    seam = _scripted_planner(
+    adapter = _scripted_planner(
         scripted,
         surface=_SkillPagesSurface(schemas=[], responses={"search": _NO_DATA_SEARCH_RESPONSE}),
     )
     draft = _gdp_plan(decision, requirement, derived_requirement)
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
 
     await harness.run(
-        seam,
+        adapter,
         question=draft.question,
         readings=[],
         prior_plan=draft.model_dump(mode="json"),
@@ -4240,7 +4250,7 @@ def test_a_planner_event_off_the_planner_branch_fails_the_branch_check(
     branch: str | None,
 ) -> None:
     """The planner's events carry exactly `_PLANNER_BRANCH`. Any other value fails, an empty one included."""
-    with pytest.raises(PlannerSeamError, match="other than"):
+    with pytest.raises(PlannerAdapterError, match="other than"):
         _branch_check(("dfo_planner", branch))
 
 
@@ -4280,10 +4290,10 @@ async def test_translation_finds_the_plan_a_bare_amendment_records(
     surface = _SkillPagesSurface(schemas=[], responses={"search": _NO_DATA_SEARCH_RESPONSE})
     draft = _gdp_plan(decision, requirement, derived_requirement)
     scripted = ScriptedGenai([_computed(_propose_again_step()), _says("stop")])
-    seam = _scripted_planner(scripted, surface=surface)
+    adapter = _scripted_planner(scripted, surface=surface)
 
-    await _run_seam(
-        seam,
+    await _run_adapter(
+        adapter,
         question=draft.question,
         readings=[],
         prior_plan=draft.model_dump(mode="json"),
@@ -4367,10 +4377,10 @@ async def test_the_planners_proposal_carries_the_referral_with_its_outcome(
         ],
     )
     scripted = ScriptedGenai([_computed(_propose_again_step()), _says("stop")])
-    seam = _scripted_planner(scripted, surface=surface)
+    adapter = _scripted_planner(scripted, surface=surface)
 
-    await _run_seam(
-        seam,
+    await _run_adapter(
+        adapter,
         question="aid to guatemala",
         readings=[],
         prior_plan=draft.model_dump(mode="json"),
@@ -4394,7 +4404,7 @@ async def test_the_planners_proposal_carries_the_referral_with_its_outcome(
 async def test_two_conversations_on_one_planner_each_report_into_their_own_stream(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """One `PlannerSeam` serves every conversation, and each run reports to
+    """One `PlannerAdapter` serves every conversation, and each run reports to
     the call it belongs to. Conversation A pauses on its first planner generation,
     conversation B runs its whole turn, and only then does A call `propose_plan`:
     A's report has to land in A's own `on_progress` stream, and B's stream
@@ -4413,7 +4423,7 @@ async def test_two_conversations_on_one_planner_each_report_into_their_own_strea
             _says("nothing yet"),
         ]
     )
-    seam = _scripted_planner(
+    adapter = _scripted_planner(
         scripted,
         surface=_SkillPagesSurface(schemas=[], responses={"search": _NO_DATA_SEARCH_RESPONSE}),
     )
@@ -4421,12 +4431,12 @@ async def test_two_conversations_on_one_planner_each_report_into_their_own_strea
     reports_a: list[dict[str, Any]] = []
     reports_b: list[dict[str, Any]] = []
 
-    harness_a = _SeamHarness()
-    harness_b = _SeamHarness()
+    harness_a = _AdapterHarness()
+    harness_b = _AdapterHarness()
 
     async def _run_a() -> None:
         await harness_a.run(
-            seam,
+            adapter,
             question="gdp guatemala",
             readings=[],
             prior_plan=draft.model_dump(mode="json"),
@@ -4439,7 +4449,7 @@ async def test_two_conversations_on_one_planner_each_report_into_their_own_strea
     # Conversation B's whole turn, in this coroutine's own task, while A
     # sits suspended above, before its `propose_plan` call.
     await harness_b.run(
-        seam, question="unrelated question", readings=[], on_progress=reports_b.append
+        adapter, question="unrelated question", readings=[], on_progress=reports_b.append
     )
     reports_b_after_b = list(reports_b)
 
@@ -4455,8 +4465,8 @@ async def test_two_conversations_on_one_planner_each_report_into_their_own_strea
     )
 
 
-def test_planner_seam_error_carries_a_do_not_retry_refusal_by_default() -> None:
-    exc = PlannerSeamError("the pair did not converge")
+def test_planner_adapter_error_carries_a_do_not_retry_refusal_by_default() -> None:
+    exc = PlannerAdapterError("the pair did not converge")
 
     assert exc.refusal["retry_mode"] == "do_not_retry"
     assert exc.refusal["fix"]["detail"] == "the pair did not converge"
@@ -4505,7 +4515,7 @@ async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
     """The `amend` edge (`approve_n -> planner_n`) seeds `prior_plan` from
     the graph's own record, so a plan is already recorded when this call's
     one generation runs. This seam's pair is always built with
-    `question_fixed=True` (`PlannerSeam.__init__`), so a `starts_new_plan`
+    `question_fixed=True` (`PlannerAdapter.__init__`), so a `starts_new_plan`
     call there is refused as `QUESTION_FIXED` -- terminal, recording
     nothing -- rather than beginning a second plan for a different
     question out from under the graph's own `question` state.
@@ -4514,11 +4524,11 @@ async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
     scripted = ScriptedGenai(
         [_calls(("propose_plan", {"starts_new_plan": True, "question": "a different question"}))]
     )
-    seam = _scripted_planner(scripted)
-    harness = _SeamHarness()
+    adapter = _scripted_planner(scripted)
+    harness = _AdapterHarness()
 
     result = await harness.run(
-        seam,
+        adapter,
         question="kenya debt",
         readings=[],
         prior_plan=seeded.model_dump(mode="json"),
@@ -4546,7 +4556,7 @@ async def test_a_second_turn_on_one_session_clears_the_first_drafts_plan_and_bri
     drafts its own plan. It is not refused for restating no `amends_version`
     against a plan still on record from the first entry.
     """
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
     second_proposal = {
         "question": "kenya oda 2023",
         "answer_mode": "computed",
@@ -4561,11 +4571,11 @@ async def test_a_second_turn_on_one_session_clears_the_first_drafts_plan_and_bri
     scripted = ScriptedGenai(
         [_calls(*_DECLARE), _calls(("propose_plan", second_proposal)), _says("done")]
     )
-    seam = _scripted_planner(scripted, compiled_proposals=True)
+    adapter = _scripted_planner(scripted, compiled_proposals=True)
     first_plan = _translated_plan(decision, requirement, derived_requirement, version=1)
 
     first = await harness.run(
-        seam,
+        adapter,
         question="kenya debt",
         readings=[],
         prior_plan=first_plan.model_dump(mode="json"),
@@ -4574,12 +4584,12 @@ async def test_a_second_turn_on_one_session_clears_the_first_drafts_plan_and_bri
     first_requests = len(scripted.requests)
 
     # A seam with the real `propose_plan`, on the same session.
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
 
     # This second entry's draft carries no translation, so it is never
     # declared ready and the entry ends with no plan -- the recorded plan
     # `propose_plan` itself left behind is what this test is about.
-    await harness.run(seam, question="kenya oda 2023", readings=[])
+    await harness.run(adapter, question="kenya oda 2023", readings=[])
 
     # The second call's own generation carries its own question.
     brief = _prompt_text(scripted.requests[first_requests])
@@ -4604,14 +4614,14 @@ async def test_a_later_first_draft_reads_none_of_the_earlier_plans_alignments(
     """The earlier entry's plan moved its `second` onto a compile. A later
     first-draft entry of the turn clears that plan, and its alignments go with
     it, so they are gone even when the entry records no plan of its own."""
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
     # The first entry's declaration, then the later entry's call and the
     # generation its answer asks for.
     scripted = ScriptedGenai([_calls(*_DECLARE), _calls(*_DECLARE), _says("done")])
-    seam = _scripted_planner(scripted, compiled_proposals=True)
+    adapter = _scripted_planner(scripted, compiled_proposals=True)
     first_plan = _translated_plan(decision, requirement, derived_requirement, version=1)
     first = await harness.run(
-        seam, question="kenya debt", readings=[], prior_plan=first_plan.model_dump(mode="json")
+        adapter, question="kenya debt", readings=[], prior_plan=first_plan.model_dump(mode="json")
     )
     assert first is not None and "plan" in first
     moved = AlignedInput(
@@ -4623,8 +4633,8 @@ async def test_a_later_first_draft_reads_none_of_the_earlier_plans_alignments(
     )
     harness.seed_state(ALIGNMENTS_STATE_KEY, [moved.model_dump(mode="json")])
 
-    seam = _scripted_planner(scripted)
-    await harness.run(seam, question="kenya oda 2023", readings=[])
+    adapter = _scripted_planner(scripted)
+    await harness.run(adapter, question="kenya oda 2023", readings=[])
 
     state = await harness.state()
     assert load_plan(state) is None
@@ -4662,7 +4672,7 @@ class _Drafts(NamedTuple):
     plan: Plan
 
 
-async def _assert_stored_as_live(harness: _SeamHarness) -> None:
+async def _assert_stored_as_live(harness: _AdapterHarness) -> None:
     """Every key the last run left in the live session state, but a `temp:`
     one, is in the session reloaded from the store with the same value. A key
     the live state holds as `None` may be absent from the store."""
@@ -4689,67 +4699,69 @@ def _answer_to_the_last_ask(events: list[Event]) -> types.Content:
     )
 
 
-async def _first_draft_proposes(harness: _SeamHarness, drafts: _Drafts) -> None:
+async def _first_draft_proposes(harness: _AdapterHarness, drafts: _Drafts) -> None:
     scripted = ScriptedGenai([_calls(("propose_plan", drafts.proposal)), _says("stop")])
-    seam = _scripted_planner(scripted)
-    await harness.run(seam, question="kenya debt", readings=[])
+    adapter = _scripted_planner(scripted)
+    await harness.run(adapter, question="kenya debt", readings=[])
     await _assert_stored_as_live(harness)
 
 
-async def _first_draft_asks(harness: _SeamHarness, drafts: _Drafts) -> None:
+async def _first_draft_asks(harness: _AdapterHarness, drafts: _Drafts) -> None:
     del drafts
-    seam = _scripted_planner(ScriptedGenai([_calls(_ASK_A_SOURCE)]))
-    assert await harness.run(seam, question="kenya debt", readings=[]) is None
+    adapter = _scripted_planner(ScriptedGenai([_calls(_ASK_A_SOURCE)]))
+    assert await harness.run(adapter, question="kenya debt", readings=[]) is None
     await _assert_stored_as_live(harness)
 
 
-async def _asks_after_a_referral(harness: _SeamHarness, drafts: _Drafts) -> None:
+async def _asks_after_a_referral(harness: _AdapterHarness, drafts: _Drafts) -> None:
     async def referring(call: Any) -> dict[str, object]:
         del call
         return dict(_NEEDS_REPAIR)
 
     scripted = ScriptedGenai([_calls(("propose_plan", drafts.proposal)), _calls(_ASK_A_SOURCE)])
-    seam = scripted_planner(scripted, translate=referring)
-    assert await harness.run(seam, question="kenya debt", readings=[]) is None
+    adapter = scripted_planner(scripted, translate=referring)
+    assert await harness.run(adapter, question="kenya debt", readings=[]) is None
     await _assert_stored_as_live(harness)
 
 
-async def _resumed_after_an_answer(harness: _SeamHarness, drafts: _Drafts) -> None:
+async def _resumed_after_an_answer(harness: _AdapterHarness, drafts: _Drafts) -> None:
     scripted = ScriptedGenai(
         [_calls(_ASK_A_SOURCE), _calls(("propose_plan", drafts.proposal)), _says("stop")]
     )
-    seam = _scripted_planner(scripted)
-    assert await harness.run(seam, question="kenya debt", readings=[]) is None
+    adapter = _scripted_planner(scripted)
+    assert await harness.run(adapter, question="kenya debt", readings=[]) is None
     answer = _answer_to_the_last_ask(await harness.events())
-    await harness.run(seam, question="kenya debt", readings=[], new_message=answer)
+    await harness.run(adapter, question="kenya debt", readings=[], new_message=answer)
     await _assert_stored_as_live(harness)
 
 
-async def _resumed_proposes_and_asks_again(harness: _SeamHarness, drafts: _Drafts) -> None:
+async def _resumed_proposes_and_asks_again(harness: _AdapterHarness, drafts: _Drafts) -> None:
     scripted = ScriptedGenai(
         [_calls(_ASK_A_SOURCE), _calls(("propose_plan", drafts.proposal)), _calls(_ASK_A_SOURCE)]
     )
-    seam = _scripted_planner(scripted)
-    assert await harness.run(seam, question="kenya debt", readings=[]) is None
+    adapter = _scripted_planner(scripted)
+    assert await harness.run(adapter, question="kenya debt", readings=[]) is None
     answer = _answer_to_the_last_ask(await harness.events())
-    assert await harness.run(seam, question="kenya debt", readings=[], new_message=answer) is None
+    assert (
+        await harness.run(adapter, question="kenya debt", readings=[], new_message=answer) is None
+    )
     await _assert_stored_as_live(harness)
 
 
-async def _resumed_from_a_legacy_ask(harness: _SeamHarness, drafts: _Drafts) -> None:
+async def _resumed_from_a_legacy_ask(harness: _AdapterHarness, drafts: _Drafts) -> None:
     del drafts
     await _pause_on_a_legacy_ask(harness, {"message": "Which source did you mean?"})
-    seam = _scripted_planner(ScriptedGenai([_says("stop")]))
+    adapter = _scripted_planner(ScriptedGenai([_says("stop")]))
     answer = _answer_to_the_last_ask(await harness.events())
-    await harness.run(seam, question="kenya debt", readings=[], new_message=answer)
+    await harness.run(adapter, question="kenya debt", readings=[], new_message=answer)
     await _assert_stored_as_live(harness)
 
 
-async def _opened_by_a_card_pick(harness: _SeamHarness, drafts: _Drafts) -> None:
-    seam = _scripted_planner(ScriptedGenai([_calls(_ASK_A_SOURCE)]))
+async def _opened_by_a_card_pick(harness: _AdapterHarness, drafts: _Drafts) -> None:
+    adapter = _scripted_planner(ScriptedGenai([_calls(_ASK_A_SOURCE)]))
     assert (
         await harness.run(
-            seam,
+            adapter,
             question=drafts.plan.question,
             readings=[],
             prior_plan=drafts.plan.model_dump(mode="json"),
@@ -4760,24 +4772,28 @@ async def _opened_by_a_card_pick(harness: _SeamHarness, drafts: _Drafts) -> None
     await _assert_stored_as_live(harness)
 
 
-async def _amended(harness: _SeamHarness, drafts: _Drafts) -> None:
+async def _amended(harness: _AdapterHarness, drafts: _Drafts) -> None:
     await _first_draft_proposes(harness, drafts)
-    seam = _scripted_planner(ScriptedGenai([_says("stop")]))
-    await harness.run(seam, question="kenya debt", readings=[], amendment="one total")
+    adapter = _scripted_planner(ScriptedGenai([_says("stop")]))
+    await harness.run(adapter, question="kenya debt", readings=[], amendment="one total")
     await _assert_stored_as_live(harness)
 
 
-async def _replanned_on_a_refusal(harness: _SeamHarness, drafts: _Drafts) -> None:
+async def _replanned_on_a_refusal(harness: _AdapterHarness, drafts: _Drafts) -> None:
     await _first_draft_proposes(harness, drafts)
-    seam = _scripted_planner(ScriptedGenai([_says("stop")]))
-    await harness.run(seam, question="kenya debt", readings=[], refusal=_rediscovery_refusal(SPEC))
-    await _assert_stored_as_live(harness)
-
-
-async def _replanned_on_a_refusal_earning_a_decline(harness: _SeamHarness, drafts: _Drafts) -> None:
-    seam = _scripted_planner(ScriptedGenai([_says("stop")]))
+    adapter = _scripted_planner(ScriptedGenai([_says("stop")]))
     await harness.run(
-        seam,
+        adapter, question="kenya debt", readings=[], refusal=_rediscovery_refusal(SPEC)
+    )
+    await _assert_stored_as_live(harness)
+
+
+async def _replanned_on_a_refusal_earning_a_decline(
+    harness: _AdapterHarness, drafts: _Drafts
+) -> None:
+    adapter = _scripted_planner(ScriptedGenai([_says("stop")]))
+    await harness.run(
+        adapter,
         question=drafts.plan.question,
         readings=[],
         prior_plan=drafts.plan.model_dump(mode="json"),
@@ -4786,7 +4802,7 @@ async def _replanned_on_a_refusal_earning_a_decline(harness: _SeamHarness, draft
     await _assert_stored_as_live(harness)
 
 
-async def _a_second_first_draft(harness: _SeamHarness, drafts: _Drafts) -> None:
+async def _a_second_first_draft(harness: _AdapterHarness, drafts: _Drafts) -> None:
     await _first_draft_proposes(harness, drafts)
     await _first_draft_proposes(harness, drafts)
 
@@ -4808,7 +4824,7 @@ async def _a_second_first_draft(harness: _SeamHarness, drafts: _Drafts) -> None:
     ],
 )
 async def test_an_entry_leaves_no_session_write_out_of_the_stored_session(
-    scenario: Callable[[_SeamHarness, _Drafts], Awaitable[None]],
+    scenario: Callable[[_AdapterHarness, _Drafts], Awaitable[None]],
     decision: Any,
     requirement: Any,
     derived_requirement: Any,
@@ -4821,14 +4837,14 @@ async def test_an_entry_leaves_no_session_write_out_of_the_stored_session(
         _amendment_proposal(decision, requirement, derived_requirement),
         _translated_plan(decision, requirement, derived_requirement),
     )
-    await scenario(_SeamHarness(), drafts)
+    await scenario(_AdapterHarness(), drafts)
 
 
 async def test_a_sixth_amendment_turn_still_records_its_own_version(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """Reproduces the production sequence: six separate amendment turns on
-    the same question, each its own `PlannerSeam.__call__`. `__call__`
+    the same question, each its own `PlannerAdapter.__call__`. `__call__`
     resets the counter at the top of every fresh turn (never on a resume --
     see the resume test below), so every turn gets its own four-round
     budget and a sixth amendment still lands as its own new version instead
@@ -4843,7 +4859,7 @@ async def test_a_sixth_amendment_turn_still_records_its_own_version(
     1-2-3-4-5-6 across the six turns rather than any turn resetting it at
     version 1.
     """
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
     proposal = _amendment_proposal(decision, requirement, derived_requirement)
 
     # The version the recorded plan stands at as each turn opens. Turn 1
@@ -4856,9 +4872,9 @@ async def test_a_sixth_amendment_turn_still_records_its_own_version(
 
     # Each turn's proposal, then the generation its draft's answer asks for.
     scripted = ScriptedGenai([amend, _says("done")] * 6)
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
     for turn in range(1, 7):
-        await harness.run(seam, question="kenya debt", readings=[], amendment=f"turn {turn}")
+        await harness.run(adapter, question="kenya debt", readings=[], amendment=f"turn {turn}")
         plan = load_plan(await harness.state())
         assert plan is not None
         version = plan.version
@@ -4880,28 +4896,28 @@ async def test_a_second_calls_brief_extends_the_first_byte_for_byte() -> None:
     conversation_digest = {"turns": ["an earlier turn"]}
 
     scripted = ScriptedGenai([_says("still nothing"), _says("still nothing")])
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
 
-    expected_first_message = seam._message(
+    expected_first_message = adapter._message(
         question=question,
         prior_plan=None,
         refusal=None,
         amendment=None,
         canvas_digest=canvas_digest,
         conversation_digest=conversation_digest,
-        ledger=planner_seam._readings_ledger(readings),
+        ledger=planner_adapter._readings_ledger(readings),
     )
 
     async def _node(ctx: Context, node_input: Any) -> Any:
         del node_input
-        await seam(
+        await adapter(
             ctx=ctx,
             question=question,
             readings=readings,
             canvas_digest=canvas_digest,
             conversation_digest=conversation_digest,
         )
-        await seam(
+        await adapter(
             ctx=ctx,
             question=question,
             readings=readings,
@@ -4910,8 +4926,8 @@ async def test_a_second_calls_brief_extends_the_first_byte_for_byte() -> None:
             amendment="only since 2015",
         )
 
-    node_fn = node(_node, name="seam_under_test", rerun_on_resume=True)
-    wf = Workflow(name="seam_test_wf", edges=[(START, node_fn)])
+    node_fn = node(_node, name="adapter_under_test", rerun_on_resume=True)
+    wf = Workflow(name="adapter_test_wf", edges=[(START, node_fn)])
     sessions = InMemorySessionService()
     runner = Runner(node=wf, app_name=_APP, session_service=sessions)
     session = await sessions.create_session(app_name=_APP, user_id=_USER)
@@ -4923,7 +4939,7 @@ async def test_a_second_calls_brief_extends_the_first_byte_for_byte() -> None:
 
     assert _brief_follows_the_question(scripted.requests[0]) == expected_first_message
     second = _brief_follows_the_question(scripted.requests[1])
-    assert second == expected_first_message + planner_seam._ask_text(
+    assert second == expected_first_message + planner_adapter._ask_text(
         amendment="only since 2015", refusal=None, pick=None
     )
 
@@ -4936,7 +4952,7 @@ async def test_a_turn_that_loops_past_the_round_cap_is_refused_not_raised(
     single `_propose`/`ctx.run_node` call and nothing but the round cap counts
     that. This scripts five `propose_plan` calls in one continuous planner
     turn (one `__call__`, one `_propose`, and no second turn), so the fifth is the one that goes past the cap. The seam returns a
-    refusal and does not raise `PlannerSeamError`: raising it would end the
+    refusal and does not raise `PlannerAdapterError`: raising it would end the
     turn through `_stream_fatal`'s `close_turn(error=...)`, which `begin_turn`
     documents as abandoning the paused session and its plan, so the last
     recorded version could no longer be approved.
@@ -4949,9 +4965,9 @@ async def test_a_turn_that_loops_past_the_round_cap_is_refused_not_raised(
     proposal = _amendment_proposal(decision, requirement, derived_requirement)
     step = _computed(_amend_step(proposal, start_version=1))
     scripted = ScriptedGenai([_calls(("propose_plan", proposal)), step, step, step, step])
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
 
-    result = await _run_seam(seam, question="kenya debt", readings=[])
+    result = await _run_adapter(adapter, question="kenya debt", readings=[])
 
     assert "refused" in result
     text = result["refused"]["text"]
@@ -4971,13 +4987,13 @@ async def test_a_refused_loop_leaves_the_last_recorded_version_on_record(
     The four calls before it amend what each recorded (`_amend_step`), so
     the plan on record is the fourth: version 4, still a draft.
     """
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
     proposal = _amendment_proposal(decision, requirement, derived_requirement)
     step = _computed(_amend_step(proposal, start_version=1))
     scripted = ScriptedGenai([_calls(("propose_plan", proposal)), step, step, step, step])
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
 
-    result = await harness.run(seam, question="kenya debt", readings=[])
+    result = await harness.run(adapter, question="kenya debt", readings=[])
 
     assert result is not None and "refused" in result
     plan = load_plan(await harness.state())
@@ -5008,7 +5024,7 @@ async def test_the_round_budget_is_not_reset_on_a_resume_of_the_same_turn(
     would land the fifth call within a fresh 1-2 budget, succeeding
     rather than refusing at all.
     """
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
     proposal = _amendment_proposal(decision, requirement, derived_requirement)
 
     # One continuous planner turn: three real `propose_plan` rounds (no
@@ -5039,8 +5055,8 @@ async def test_the_round_budget_is_not_reset_on_a_resume_of_the_same_turn(
             resumed_step,
         ]
     )
-    seam = _scripted_planner(scripted)
-    paused = await harness.run(seam, question="kenya debt", readings=[])
+    adapter = _scripted_planner(scripted)
+    paused = await harness.run(adapter, question="kenya debt", readings=[])
     paused_requests = len(scripted.requests)
     assert paused is None, "the ask should pause this call, not resolve it"
 
@@ -5058,7 +5074,7 @@ async def test_the_round_budget_is_not_reset_on_a_resume_of_the_same_turn(
         parts=[create_request_input_response(interrupt_id, {"result": {"spec_id": SPEC}})],
     )
     result = await harness.run(
-        seam,
+        adapter,
         question="kenya debt",
         readings=[],
         amendment="one more change",
@@ -5098,15 +5114,15 @@ async def test_discovery_inside_an_entry_reads_the_request_s_wall_bound() -> Non
         return _says("done")
 
     scripted = ScriptedGenai([_read_time_left, _read_time_left])
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
     budget = _request_budget(wall_s=600.0, clock=lambda: 5.0)
 
     token = current_turn_budget.set(budget)
     try:
-        await _run_seam(seam, question="kenya debt", readings=[])
+        await _run_adapter(adapter, question="kenya debt", readings=[])
     finally:
         current_turn_budget.reset(token)
-    await _run_seam(seam, question="kenya debt", readings=[])
+    await _run_adapter(adapter, question="kenya debt", readings=[])
 
     assert seen == [600.0, None]
     assert discovery_time_left() is None
@@ -5126,9 +5142,9 @@ async def test_a_call_cut_inside_an_entry_and_still_running_is_cancelled_when_th
         return _says("done")
 
     scripted = ScriptedGenai([_keep_a_cut_call])
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
 
-    await _run_seam(seam, question="kenya debt", readings=[])
+    await _run_adapter(adapter, question="kenya debt", readings=[])
 
     assert kept
     assert all(task.cancelled() for task in kept)
@@ -5138,27 +5154,27 @@ async def test_a_call_cut_inside_an_entry_and_still_running_is_cancelled_when_th
 @pytest.mark.parametrize(
     ("spent", "code"),
     [
-        ({"model_time_spent": 90.0}, SeamCode.TURN_MODEL_TIME_SPENT),
-        ({"model_calls": 30}, SeamCode.TURN_MODEL_CALLS_SPENT),
-        ({"wall_s": 0.0}, SeamCode.TURN_WALL_TIME_SPENT),
+        ({"model_time_spent": 90.0}, StopCode.TURN_MODEL_TIME_SPENT),
+        ({"model_calls": 30}, StopCode.TURN_MODEL_CALLS_SPENT),
+        ({"wall_s": 0.0}, StopCode.TURN_WALL_TIME_SPENT),
     ],
 )
 async def test_a_run_whose_model_call_the_budget_closed_ends_the_entry_on_that_bound(
-    spent: dict[str, float], code: SeamCode
+    spent: dict[str, float], code: StopCode
 ) -> None:
     """The model answers a closed call with the bound's sentence
     (`harness.turn_budget.bounded`) and makes no request. With no referral to
     ask about, that ends the planner's run, and the entry refuses on the
-    bound, final for the request, in place of `SeamCode.PLAN_NOT_READY`."""
+    bound, final for the request, in place of `StopCode.PLAN_NOT_READY`."""
     budget = _request_budget()
     for name, value in spent.items():
         setattr(budget, name, value)
     scripted = ScriptedGenai([_says("never sent")])
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
 
     token = current_turn_budget.set(budget)
     try:
-        result = await _run_seam(seam, question="kenya debt", readings=[])
+        result = await _run_adapter(adapter, question="kenya debt", readings=[])
     finally:
         current_turn_budget.reset(token)
 
@@ -5241,11 +5257,11 @@ async def _budget_closes_after(
 
     replies: list[Step] = [_calls(("propose_plan", {})) for _ in translations[1:]]
     scripted = ScriptedGenai([*replies, last_proposal])
-    seam = scripted_planner(scripted, tools=tools)
-    harness = _SeamHarness()
+    adapter = scripted_planner(scripted, tools=tools)
+    harness = _AdapterHarness()
     token = current_turn_budget.set(budget)
     try:
-        output = await harness.run(seam, question="gdp guatemala", readings=[])
+        output = await harness.run(adapter, question="gdp guatemala", readings=[])
     finally:
         current_turn_budget.reset(token)
     assert len(scripted.requests) == len(translations), "the closed call was sent"
@@ -5282,7 +5298,7 @@ async def test_a_referral_resolved_by_a_later_ok_translation_lets_the_budget_ref
     )
 
     assert _asks(events) == [], "a cleared referral must not surface an ask"
-    code = SeamCode.TURN_MODEL_TIME_SPENT
+    code = StopCode.TURN_MODEL_TIME_SPENT
     assert output == {
         "refused": {"text": refusal_sentence({"code": code}), "final": True, "code": code}
     }
@@ -5308,8 +5324,8 @@ async def test_a_referral_surviving_a_malformed_translation_still_gets_asked_whe
     }
 
 
-def test_a_closing_code_outside_seam_code_still_asks_on_a_referral_with_candidates() -> None:
-    """The closing code is read as a `SeamCode` only when the entry refuses on
+def test_a_closing_code_outside_stop_code_still_asks_on_a_referral_with_candidates() -> None:
+    """The closing code is read as a `StopCode` only when the entry refuses on
     it, so a code no member names still asks the user over a referral that
     names sources to pin."""
     tracker = PlannerRun(agent="dfo_planner")
@@ -5331,9 +5347,9 @@ def test_a_closing_code_outside_seam_code_still_asks_on_a_referral_with_candidat
     assert tracker.refused is None
 
 
-def test_a_closing_code_outside_seam_code_raises_when_nothing_is_pinnable() -> None:
+def test_a_closing_code_outside_stop_code_raises_when_nothing_is_pinnable() -> None:
     """With nothing to pin the entry refuses on the closing code, so a code no
-    `SeamCode` member names raises and records no refusal."""
+    `StopCode` member names raises and records no refusal."""
     tracker = PlannerRun(agent="dfo_planner")
 
     with pytest.raises(ValueError, match="closed_by_a_newer_bound"):
@@ -5364,18 +5380,18 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
         ],
     )
     scripted = ScriptedGenai([_computed(_propose_again_step()), _says("noted, but not done yet")])
-    seam = _scripted_planner(
+    adapter = _scripted_planner(
         scripted,
         surface=_SkillPagesSurface(
             schemas=[], responses={"search": _TWO_CANDIDATES_SEARCH_RESPONSE}
         ),
     )
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
 
     token = current_turn_budget.set(_request_budget(model_calls_max=1))
     try:
         paused = await harness.run(
-            seam, question=draft.question, readings=[], prior_plan=draft.model_dump(mode="json")
+            adapter, question=draft.question, readings=[], prior_plan=draft.model_dump(mode="json")
         )
     finally:
         current_turn_budget.reset(token)
@@ -5399,7 +5415,7 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
         parts=[create_request_input_response(interrupt_id, {"result": {"spec_id": SPEC_B}})],
     )
     await harness.run(
-        seam,
+        adapter,
         question=draft.question,
         readings=[],
         prior_plan=draft.model_dump(mode="json"),
@@ -5419,10 +5435,10 @@ async def test_a_submitted_plan_ends_the_planner_run_with_no_further_model_call(
     asks the model for nothing after it, so the submission stands."""
     plan = _translated_plan(decision, requirement, derived_requirement)
     scripted = ScriptedGenai([_calls(*_DECLARE)])
-    seam = _scripted_planner(scripted, compiled_proposals=True)
+    adapter = _scripted_planner(scripted, compiled_proposals=True)
 
-    result = await _run_seam(
-        seam, question=plan.question, readings=[], prior_plan=plan.model_dump(mode="json")
+    result = await _run_adapter(
+        adapter, question=plan.question, readings=[], prior_plan=plan.model_dump(mode="json")
     )
 
     assert len(scripted.requests) == 1
@@ -5547,7 +5563,7 @@ async def _run_the_planner(
     """One first-turn entry showing the planner the dataset Search answered over
     2020-2024, as a search reading whose block the turn's state holds."""
     scripted = ScriptedGenai(script)
-    seam = scripted_planner(scripted, surface=reads)
+    adapter = scripted_planner(scripted, surface=reads)
     reading = SearchReading.model_validate(
         {
             "text": "education aid over the last five years",
@@ -5557,8 +5573,10 @@ async def _run_the_planner(
             "window": {"start": 2020, "end": 2024, "source": "requested"},
         }
     )
-    harness = _SeamHarness({ORCHESTRATOR_SPECS_KEY: {_AID_SPEC: _AID_BLOCK}})
-    await harness.run(seam, question=_LAST_FIVE_YEARS, readings=[reading.model_dump(mode="json")])
+    harness = _AdapterHarness({ORCHESTRATOR_SPECS_KEY: {_AID_SPEC: _AID_BLOCK}})
+    await harness.run(
+        adapter, question=_LAST_FIVE_YEARS, readings=[reading.model_dump(mode="json")]
+    )
     return scripted, await harness.state()
 
 
@@ -5683,9 +5701,9 @@ async def test_the_brief_marks_each_ask_with_the_parties_it_breaks_down_by(
     across_years: list[int],
 ) -> None:
     scripted = ScriptedGenai([_says("Planned.")])
-    seam = _scripted_planner(scripted)
+    adapter = _scripted_planner(scripted)
     asks = ["the total", "Debt service by creditor"]
-    harness = _SeamHarness(
+    harness = _AdapterHarness(
         state={
             ASKS_STATE_KEY: asks,
             ASK_BREAKDOWNS_STATE_KEY: [AskBreakdown(ask=1, by=("creditor",)).model_dump()],
@@ -5693,7 +5711,7 @@ async def test_the_brief_marks_each_ask_with_the_parties_it_breaks_down_by(
         }
     )
 
-    await harness.run(seam, question="debt service by creditor", readings=[])
+    await harness.run(adapter, question="debt service by creditor", readings=[])
 
     prompt = _prompt_text(scripted.requests[0])
     if across_years:
@@ -5782,13 +5800,13 @@ async def test_a_revision_repins_the_plan_and_its_scope_decisions_follow_with_no
         return {"outcome": "ok"}
 
     scripted = ScriptedGenai([])
-    seam = scripted_planner(scripted, translate=translate)
+    adapter = scripted_planner(scripted, translate=translate)
     revised_pin = pinned.model_copy(update={"source_spec_id": new})
 
     async def _node(ctx: Context, node_input: Any) -> Any:
         del node_input
         save_pin_sources(cast(SessionState, ctx.state), shown)
-        return await seam.revise(
+        return await adapter.revise(
             ctx=ctx,
             prior_plan=plan.model_dump(mode="json"),
             evidence_requirements=[revised_pin.model_dump(mode="json")],
@@ -5933,20 +5951,20 @@ async def test_a_region_switch_and_its_users_decision_carry_through_an_amendment
         ]
 
     scripted = ScriptedGenai([_computed(_amend), _says("done")])
-    seam = scripted_planner(scripted, translate=translate)
+    adapter = scripted_planner(scripted, translate=translate)
     revised_pin = pinned.model_copy(update={"source_spec_id": new})
 
     async def _node(ctx: Context, node_input: Any) -> Any:
         del node_input
         state = cast(SessionState, ctx.state)
         save_pin_sources(state, shown)
-        switched = await seam.revise(
+        switched = await adapter.revise(
             ctx=ctx,
             prior_plan=plan.model_dump(mode="json"),
             evidence_requirements=[revised_pin.model_dump(mode="json")],
             inherits={new: old},
         )
-        await seam(
+        await adapter(
             ctx=ctx,
             question="kenya debt",
             readings=[],
@@ -5996,7 +6014,7 @@ async def test_a_region_switch_and_its_users_decision_carry_through_an_amendment
         (
             ReferralKind.PINNED_SOURCE_NOT_FOUND,
             "choice_required",
-            SeamCode.PLAN_NOT_READY,
+            StopCode.PLAN_NOT_READY,
             False,
             "For health (CRS 120) and population and reproductive health (CRS 130), "
             f"{referral_reason(ReferralKind.PINNED_SOURCE_NOT_FOUND)}.",
@@ -6005,7 +6023,7 @@ async def test_a_region_switch_and_its_users_decision_carry_through_an_amendment
         (
             ReferralKind.DISCOVERY_UNAVAILABLE,
             "transient",
-            SeamCode.DISCOVERY_UNAVAILABLE,
+            StopCode.DISCOVERY_UNAVAILABLE,
             True,
             "The data service did not answer while finding data for health (CRS 120) "
             "and population and reproductive health (CRS 130).",
@@ -6068,7 +6086,7 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
             "reason": f"{dataset.id!r} pins {new!r}, which discovery did not find.",
         }
 
-    seam = scripted_planner(ScriptedGenai([]), translate=translate)
+    adapter = scripted_planner(ScriptedGenai([]), translate=translate)
 
     reading = SearchReading.from_part(
         {"variable": "health aid", "status": "definite", "spec_id": new, "scope": scope}
@@ -6078,7 +6096,7 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
         del node_input
         save_pin_sources(cast(SessionState, ctx.state), shown)
         ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
-        return await seam.revise(
+        return await adapter.revise(
             ctx=ctx,
             prior_plan=plan.model_dump(mode="json"),
             evidence_requirements=[
@@ -6140,7 +6158,7 @@ def test_a_declared_wholes_compile_leaves_the_readings_unchanged() -> None:
     planner_state: dict[str, Any] = {}
     save_aligned_pin(cast(SessionState, planner_state), whole, warnings=())
 
-    planner_seam.store_searched_pin_readings(cast(Any, ctx), cast(SessionState, planner_state))
+    planner_adapter.store_searched_pin_readings(cast(Any, ctx), cast(SessionState, planner_state))
 
     assert ctx.state == {ORCHESTRATOR_SEARCHES_KEY: [origin]}
 
@@ -6198,7 +6216,7 @@ def test_a_revision_names_a_pin_by_the_block_it_is_held_in(
     )
     token = current_earlier_block.set({HEALTH: block}.get)
     try:
-        sources = planner_seam._sources_by_spec_id(cast(SessionState, state), plan)
+        sources = planner_adapter._sources_by_spec_id(cast(SessionState, state), plan)
     finally:
         current_earlier_block.reset(token)
 
@@ -6255,13 +6273,13 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_no_reading_and_its_row_swit
         return {"outcome": "ok"}
 
     surface = BasisCompiles()
-    seam = scripted_planner(ScriptedGenai([]), surface=cast(Any, surface), translate=translate)
+    adapter = scripted_planner(ScriptedGenai([]), surface=cast(Any, surface), translate=translate)
 
     async def _node(ctx: Context, node_input: Any) -> Any:
         del node_input
         save_pin_sources(cast(SessionState, ctx.state), shown)
         ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [origin.model_dump(mode="json")]
-        await seam.revise(
+        await adapter.revise(
             ctx=ctx,
             prior_plan=plan.model_dump(mode="json"),
             evidence_requirements=[health.model_dump(mode="json")],
@@ -6439,13 +6457,13 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
         return {"outcome": "ok"}
 
     surface = BasisCompiles()
-    seam = scripted_planner(ScriptedGenai([]), surface=cast(Any, surface), translate=translate)
+    adapter = scripted_planner(ScriptedGenai([]), surface=cast(Any, surface), translate=translate)
 
     async def _node(ctx: Context, node_input: Any) -> Any:
         del node_input
         state = cast(SessionState, ctx.state)
         save_pin_sources(state, shown)
-        await seam.revise(
+        await adapter.revise(
             ctx=ctx,
             prior_plan=plan.model_dump(mode="json"),
             evidence_requirements=[health.model_dump(mode="json")],
@@ -6457,7 +6475,7 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
             state,
             {**pin_sources(state), _HEALTH_SWITCHED: PinSource(block=switched, settled=True)},
         )
-        await seam.revise(
+        await adapter.revise(
             ctx=ctx,
             prior_plan=aligned.model_dump(mode="json"),
             evidence_requirements=[
@@ -6627,11 +6645,11 @@ async def test_a_provider_switch_compiles_the_parts_whole_once_a_turn(
 
     # Each revision is offered as recorded: what it compiles is not this test's.
     monkeypatch.setattr(
-        planner_seam, "end_run_when_ready", lambda answer, ctx: {**answer, "summary": {}}
+        planner_adapter, "end_run_when_ready", lambda answer, ctx: {**answer, "summary": {}}
     )
     compiles = fake()
-    seam = scripted_planner(ScriptedGenai([]), surface=cast(Any, compiles), translate=translate)
-    switching = switch.switch_node(planner=seam, definition_surface=cast(Any, compiles))
+    adapter = scripted_planner(ScriptedGenai([]), surface=cast(Any, compiles), translate=translate)
+    switching = switch.switch_node(planner=adapter, definition_surface=cast(Any, compiles))
 
     async def _node(ctx: Context, node_input: Any) -> Any:
         del node_input
@@ -6641,7 +6659,7 @@ async def test_a_provider_switch_compiles_the_parts_whole_once_a_turn(
             {"variable": "US health aid", "status": "definite", "spec_id": part_pin, "scope": scope}
         )
         ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
-        drafted = await seam.revise(
+        drafted = await adapter.revise(
             ctx=ctx,
             prior_plan=plan.model_dump(mode="json"),
             evidence_requirements=[part.model_dump(mode="json")],

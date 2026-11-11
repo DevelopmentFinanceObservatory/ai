@@ -12,7 +12,7 @@ the skill. A call that does not complete answers with one sentence saying so.
 
 Each answer data-mcp serves without an error is also recorded in session
 state (`SKILLS_READ_STATE_KEY`). A later run of the same plan is shown what an
-earlier run read (`harness.planner_seam`) and does not read it again.
+earlier run read (`harness.planner_adapter`) and does not read it again.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ DFO_FAQ_SKILL_ID = "dfo-faq"
 # them, each once: `{"skill_id", "path", "offset"}`, `path` `None` for a
 # skill's first page. Each page's text sits under its own key (`skill_page_key`),
 # so every read writes its own text once and this list stays small.
-# `harness.planner_seam` clears it on a plan's first draft.
+# `harness.planner_adapter` clears it on a plan's first draft.
 SKILLS_READ_STATE_KEY = "planner:skills_read"
 
 logger = logging.getLogger(__name__)

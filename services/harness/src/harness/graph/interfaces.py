@@ -61,7 +61,7 @@ class PlannerModel(Protocol):
     Returns `{"plan": <planner.plan.Plan as JSON>, "summary": <approval summary>}`
     on a draft, or `{"refused": {"text": <plain sentence>, "final": <bool>,
     "code": <refusal code>}}` when the seam ends the entry without one
-    (`harness.planner_seam.PlannerSeam._refused`); `final` says no other plan
+    (`harness.planner_adapter.PlannerAdapter._refused`); `final` says no other plan
     for the same ask can succeed, and `code` names the refusal for a caller
     that tells refusals apart. It returns `{"asked": {"call_id", "args"}}`
     when the planner's run ended on a question for the user, which the node
@@ -95,7 +95,7 @@ class PlannerModel(Protocol):
     that hosts its models as a dynamically-scheduled child of this node
     (`ctx.run_node`) can do so in the graph's own session, rather than
     building a second `Runner`/session service of its own
-    (`harness.planner_seam.PlannerSeam`). A seam with nothing to run
+    (`harness.planner_adapter.PlannerAdapter`). A seam with nothing to run
     through it simply never touches it.
 
     `readings` are the search readings of the conversation's earlier turns

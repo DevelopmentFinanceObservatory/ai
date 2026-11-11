@@ -6,7 +6,7 @@ closed a model call (`PlannerRun.model_answered`). Before each model request
 it says whether the run asks the user, stops, or leaves the request to the
 model (`PlannerRun.next_request`). The answer is a `Directive`: `Ask` with the
 `PLANNER_ASK` call's arguments, or `Stop` with the refusal the run ends on.
-`harness.planner_seam` makes one for each planner run, `harness.planner_node`
+`harness.planner_adapter` makes one for each planner run, `harness.planner_node`
 drives it through the planner's model hooks, and
 `harness.planner_node.directive_turn` builds the model turn each directive
 stands for.
@@ -24,7 +24,7 @@ from planner.plan import discovery_time_left, truncate
 from planner.tool_results import Outcome
 from translator.referral import USER_DECIDES
 
-from harness.sentences import TERMINAL_PROPOSE_CODES, SeamCode, referral_sentence
+from harness.sentences import TERMINAL_PROPOSE_CODES, StopCode, referral_sentence
 
 # What `_stalled_referral` counts a referral by: its kind, requirement,
 # constraint, and the (name, role) of each entity it leaves unsettled.
@@ -49,7 +49,7 @@ _WHICH_MEANT = "Which of these did you mean?"
 _WHICH_INSTEAD = "Which of these should be used instead?"
 
 
-class PlannerSeamError(RuntimeError):
+class PlannerAdapterError(RuntimeError):
     """The planner produced no plan ready for the user's answer.
 
     Raised so that a plan the user approves is a plan
@@ -91,11 +91,11 @@ type Directive = Ask | Stop
 class PlannerRun:
     """What one planner run has settled so far, and how its next request is answered.
 
-    One per run of the planner (`harness.planner_seam.PlannerSeam._propose`),
+    One per run of the planner (`harness.planner_adapter.PlannerAdapter._propose`),
     held for that run alone. The resume of an entry by the user's answer to
     an ask is a run of its own, so it starts with no stall counts, a fresh
     event cap and no last referral. Its brief shows the referral the asking
-    run saw last (`harness.planner_seam._answer_text`).
+    run saw last (`harness.planner_adapter._answer_text`).
 
     `submitted` is the answer of the call that declared the plan ready
     (`planner.tools.declare_ready`), `refused` the refusal the run ends on,
@@ -150,13 +150,11 @@ class PlannerRun:
         What it raises propagates, as what `on_progress` raises does.
 
         Raises:
-            PlannerSeamError: On the answer past `_MAX_EVENTS` in one run.
+            PlannerAdapterError: On the answer past `_MAX_EVENTS` in one run.
         """
         self._events += 1
         if self._events > _MAX_EVENTS:
-            raise PlannerSeamError(
-                f"the planner seam ran past {_MAX_EVENTS} events without settling"
-            )
+            raise PlannerAdapterError(f"the planner ran past {_MAX_EVENTS} events without settling")
         if self._on_tool_answered is not None:
             self._on_tool_answered(name, answer)
         if self._on_progress is not None:
@@ -177,9 +175,9 @@ class PlannerRun:
             # (`QUESTION_FIXED`, the `question_fixed` mode of
             # `planner.specs.planner_specs`, which
             # the seam's own planner always uses, see
-            # `harness.planner_seam.PlannerSeam.__init__`). The cap bounds the
+            # `harness.planner_adapter.PlannerAdapter.__init__`). The cap bounds the
             # proposals within one entry into the planner, since
-            # `PlannerSeam.__call__` resets the count on each entry. A restart
+            # `PlannerAdapter.__call__` resets the count on each entry. A restart
             # is refused however fresh that budget is. `NOTHING_TO_PLAN`
             # declines every ask, and `PRICES_UNSERVED` needs a search the
             # planner cannot make (`submission.prices_choice`). Stop the
@@ -194,7 +192,7 @@ class PlannerRun:
                 self.submitted = answer
 
     def tool_failed(self, name: str, error: BaseException) -> dict[str, Any]:
-        """End the run on `SeamCode.PLANNER_TOOL_FAILED` for tool `name`, which
+        """End the run on `StopCode.PLANNER_TOOL_FAILED` for tool `name`, which
         raised `error`, unless a refusal already ends it, and answer what the
         model reads as that call's response (`failed_tool_answer`).
 
@@ -204,7 +202,7 @@ class PlannerRun:
         """
         if self.refused is None:
             self.ready_to_break = True
-            self.refused = {"code": SeamCode.PLANNER_TOOL_FAILED, "detail": {"tool": name}}
+            self.refused = {"code": StopCode.PLANNER_TOOL_FAILED, "detail": {"tool": name}}
         return failed_tool_answer(name, error)
 
     def model_answered(self, closed_by: str | None) -> Directive | None:
@@ -221,14 +219,14 @@ class PlannerRun:
         With nothing pinnable (no referral, or a `no_data` referral, whose
         nearest-series candidates carry no `spec_id`) the closing text stands
         and this answers `None`. The run refuses on the bound, as the
-        `SeamCode` `closed_by` names, and ends on it.
+        `StopCode` `closed_by` names, and ends on it.
         """
         if closed_by is None:
             return None
         candidates = _pinnable_candidates(self.last_referral)
         if not candidates:
             self.ready_to_break = True
-            self.refused = {"code": SeamCode(closed_by), "detail": {}}
+            self.refused = {"code": StopCode(closed_by), "detail": {}}
             return None
         return Ask(_clarifying_question_args(candidates, lead=_BUDGET_CLOSED_LEAD))
 
@@ -265,7 +263,7 @@ class PlannerRun:
         transient one with no discovery time left (`closing_refusal`), ends
         the entry on its own refusal, since the next translation would stop
         where this one did. A referral that recurs with nothing new
-        (`_stalled_referral`) ends it on `SeamCode.PLAN_NOT_READY`, carrying
+        (`_stalled_referral`) ends it on `StopCode.PLAN_NOT_READY`, carrying
         that referral. Either way the planner's turn stops before its next
         generation. A referral the user decides, with candidates to pick from
         (`_user_decided_ask`), replaces that next generation with the
@@ -295,7 +293,7 @@ def failed_tool_answer(name: str, error: BaseException) -> dict[str, Any]:
 def not_ready(referral: Mapping[str, Any] | None) -> dict[str, Any]:
     """The refusal for an entry that ended with no plan ready, carrying `referral` if any."""
     return {
-        "code": SeamCode.PLAN_NOT_READY,
+        "code": StopCode.PLAN_NOT_READY,
         "detail": _referral_detail(referral) if referral is not None else {},
     }
 
@@ -332,14 +330,14 @@ def closing_refusal(referral: dict[str, Any] | None) -> dict[str, Any] | None:
         return None
     if referral.get("outcome") == Outcome.INTERNAL.value:
         return {
-            "code": SeamCode.TRANSLATION_INTERNAL_FAILURE,
+            "code": StopCode.TRANSLATION_INTERNAL_FAILURE,
             "detail": {"reference": str(referral.get("reference"))},
         }
     requirement_id = referral.get("requirement_id")
     reason = referral.get("reason")
     if referral.get("not_issued") and not referral.get("budget_spent"):
         return {
-            "code": SeamCode.TURN_WALL_TIME_SPENT,
+            "code": StopCode.TURN_WALL_TIME_SPENT,
             "detail": {"requirement_id": requirement_id, "reason": reason},
         }
     time_left = discovery_time_left()
@@ -350,12 +348,12 @@ def closing_refusal(referral: dict[str, Any] | None) -> dict[str, Any] | None:
     )
     if referral.get("budget_spent") or out_of_time:
         return {
-            "code": SeamCode.DISCOVERY_UNAVAILABLE,
+            "code": StopCode.DISCOVERY_UNAVAILABLE,
             "detail": {"requirement_id": requirement_id, "reason": reason},
         }
     if referral.get("repeated"):
         return {
-            "code": SeamCode.TRANSLATION_REPEATED,
+            "code": StopCode.TRANSLATION_REPEATED,
             "detail": _referral_detail(referral),
         }
     return None

@@ -188,7 +188,7 @@
       "author": "dfo_planner",
       "branch": "dfo_planner",
       "invocation": 0,
-      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "path": "adapter_test_wf@1/adapter_under_test@1/dfo_planner@1",
       "partial": false,
       "content": {
         "parts": [
@@ -209,7 +209,7 @@
       "author": "dfo_planner",
       "branch": "dfo_planner",
       "invocation": 0,
-      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "path": "adapter_test_wf@1/adapter_under_test@1/dfo_planner@1",
       "partial": false,
       "content": {
         "parts": [
@@ -249,7 +249,7 @@
       "author": "dfo_planner",
       "branch": "dfo_planner",
       "invocation": 0,
-      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "path": "adapter_test_wf@1/adapter_under_test@1/dfo_planner@1",
       "partial": false,
       "content": {
         "parts": [
@@ -270,7 +270,7 @@
       "author": "dfo_planner",
       "branch": "dfo_planner",
       "invocation": 0,
-      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "path": "adapter_test_wf@1/adapter_under_test@1/dfo_planner@1",
       "partial": false,
       "content": {
         "parts": [
@@ -314,7 +314,7 @@
       "author": "dfo_planner",
       "branch": "dfo_planner",
       "invocation": 0,
-      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "path": "adapter_test_wf@1/adapter_under_test@1/dfo_planner@1",
       "partial": false,
       "content": {
         "parts": [
@@ -335,7 +335,7 @@
       "author": "dfo_planner",
       "branch": "dfo_planner",
       "invocation": 0,
-      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "path": "adapter_test_wf@1/adapter_under_test@1/dfo_planner@1",
       "partial": false,
       "content": {
         "parts": [

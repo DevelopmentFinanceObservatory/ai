@@ -65,7 +65,7 @@ from harness.conversation import (
 )
 from harness.decision_pick import is_decision_choice
 from harness.early_mint import EarlyMints
-from harness.graph.seams import Executor
+from harness.graph.interfaces import Executor
 from harness.graph.state import (
     AGENT_NAME,
     APPLY_CHOICE_STATE_KEY,

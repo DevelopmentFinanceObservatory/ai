@@ -477,7 +477,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
 
     `question_fixed` is `_resolve_intent`'s. `reads_user_words` says the
     planner reads the user's own words in every entry, as the standalone
-    planner does when it is True; `harness.planner_seam.PlannerSeam` passes
+    planner does when it is True; `harness.planner_adapter.PlannerAdapter` passes
     False, so the planner reads them only in an entry the user's amendment
     opened (`planner.plan.amendment_entry`). Only where it reads them may
     `proposal.across_years` name a step, and each step it names takes a
@@ -1386,9 +1386,9 @@ def _decline_unearned(
     A decline this plan adds needs its code among the `unsupported` answers
     recorded in this planner entry (`load_unsupported`): `propose_plan`'s or
     its translation's, or one a replan's run-time refusal stands for
-    (`harness.planner_seam._earned_by_refusal`); or among its optional
+    (`harness.planner_adapter._earned_by_refusal`); or among its optional
     declines (`load_optional_declines`), which hold `no_operation_covers`
-    in a first-draft entry (`harness.planner_seam`), for an ask no
+    in a first-draft entry (`harness.planner_adapter`), for an ask no
     `PERIOD_REDUCTION_UNSTATED` refusal named (`_declinable`). A decline carried
     unchanged from `previous`, the plan this one amends, was earned when it
     was recorded; one restated with the same `Decline.key` in other words is
@@ -1901,7 +1901,7 @@ _BUDGET_FRESH = "The user's next message opens a fresh budget."
 # The refusal for a `starts_new_plan` call while `question_fixed`. The call is
 # how the model tells the harness the user's reply asks a different question,
 # so the message says what happened and that nothing further is needed from
-# it. `harness.planner_seam` ends the turn on this code as it does on
+# it. `harness.planner_adapter` ends the turn on this code as it does on
 # `BUDGET_EXHAUSTED`.
 _QUESTION_FIXED_RESTART = (
     "This turn's question is fixed, so `starts_new_plan` cannot open a plan for a "
@@ -1939,14 +1939,14 @@ def _resolve_intent(
     `amends_version` and `starts_new_plan` are read in that order, so a call
     stating both is treated as an amendment, since a payload shaped as a
     patch is read as one. `rounds_so_far` counts the proposals made in this
-    entry into the planner. `PlannerSeam` zeroes it on every entry that is not
+    entry into the planner. `PlannerAdapter` zeroes it on every entry that is not
     a mid-turn resume. An amendment or a restart increments it, since every
     version opens a fresh discovery budget, and past `MAX_PLAN_ROUNDS` the call
     is refused rather than recorded, with no `action` named, since any tool
     named there would restart the loop. A restart begins at version 1 and is
     counted like an amendment, so restarting does not escape the bound.
 
-    `question_fixed` (`harness.planner_seam.PlannerSeam` passes `True`;
+    `question_fixed` (`harness.planner_adapter.PlannerAdapter` passes `True`;
     `False` leaves both readings free) narrows both
     readings once a plan is recorded, against `existing.question` rather than
     the call's own wording of the question it is answering:

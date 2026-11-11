@@ -8,7 +8,7 @@ publisher). Every frame is the one Kenyan life-expectancy series.
 
 A real planner runs on a scripted model through `scripted_client`, a
 google-genai client whose streamed calls answer from a script, which
-`harness.planner_seam.PlannerSeam` takes as its `client`.
+`harness.planner_adapter.PlannerAdapter` takes as its `client`.
 `use_compiled_proposals` gives the planner's tools a `propose_plan` that
 declares the plan already on record ready, for a script that drives no
 translation.
@@ -322,7 +322,7 @@ def scripted_client(answer: ScriptedAnswer) -> Client:
 
     The answer streams as one chunk, a model turn of that one part finished with
     `STOP` and no usage. Everything else a model class reads off a client is a
-    real `Client`'s, so the planner takes it as `harness.planner_seam.PlannerSeam`'s
+    real `Client`'s, so the planner takes it as `harness.planner_adapter.PlannerAdapter`'s
     `client`, and an ADK model as `Gemini(client=...)`, each driven by one
     script over the requests it puts on the wire.
     """

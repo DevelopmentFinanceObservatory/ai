@@ -55,9 +55,9 @@ from harness.graph.planning import planner_ask_interrupt
 from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_SEARCHES_KEY, store_search
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import card_questions, plan_words, shown_decisions
-from harness.planner_seam import (
+from harness.planner_adapter import (
     _PLANNER_BRANCH,
-    PlannerSeam,
+    PlannerAdapter,
     _reading_pin_sources,
     end_run_when_ready,
 )
@@ -482,7 +482,7 @@ def _legacy_clarify_answer_event(spec_id: str) -> Event:
 def _show(
     ctx: _FakeToolContext, spec_id: str, *, settled: bool = True, earlier_turn: bool = False
 ) -> None:
-    """Add `spec_id` to the datasets `harness.planner_seam` showed the planner."""
+    """Add `spec_id` to the datasets `harness.planner_adapter` showed the planner."""
     sources = pin_sources(ctx.state)
     sources[spec_id] = PinSource(settled=settled, earlier_turn=earlier_turn)
     save_pin_sources(ctx.state, sources)
@@ -1490,7 +1490,7 @@ def test_a_fresh_entry_into_the_planner_starts_its_rounds_afresh(
     requirements: RequirementPair,
 ) -> None:
     # The allowance is per entry into the planner, so a spent one does not stop
-    # the user asking something else. `PlannerSeam.__call__` zeroes the count
+    # the user asking something else. `PlannerAdapter.__call__` zeroes the count
     # on that entry (`save_plan_rounds` below stands in for it), and the new
     # question gets a full allowance.
     tools = _tools_by_name()
@@ -3124,7 +3124,7 @@ def test_a_referral_does_not_reach_the_next_turn(
     )
     next_turn = SimpleNamespace(session=SimpleNamespace(state=ctx.state), state={})
 
-    PlannerSeam._persist_durable(next_turn)  # type: ignore[arg-type]
+    PlannerAdapter._persist_durable(next_turn)  # type: ignore[arg-type]
 
     fresh = _FakeToolContext()
     fresh.state.update(next_turn.state)
@@ -12744,7 +12744,7 @@ def test_a_users_choice_of_one_figure_over_every_row_stands_against_a_regrouping
         ),
         (False, lambda version: [], True),
     ],
-    ids=["user_message", "seam_message", "amendment_then_retry_echo", "not_recorded_here"],
+    ids=["user_message", "adapter_message", "amendment_then_retry_echo", "not_recorded_here"],
 )
 def test_what_counts_as_the_user_speaking_after_the_plan_was_recorded(
     decision: DecisionFactory,
@@ -14806,7 +14806,7 @@ def test_planner_instruction_carries_no_sentinel_range() -> None:
 
 
 def test_only_a_planner_with_a_translator_is_told_to_read_a_translation() -> None:
-    # `harness.planner_seam.PlannerSeam` passes `has_translator=True`. Without
+    # `harness.planner_adapter.PlannerAdapter` passes `has_translator=True`. Without
     # a translator `propose_plan` answers with no `translation`. Neither
     # instruction names a `translate` tool: translation is no tool of its own.
     standalone = planner_instruction(has_translator=False)

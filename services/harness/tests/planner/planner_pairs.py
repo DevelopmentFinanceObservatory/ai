@@ -38,7 +38,7 @@ MODEL = "gemini-3.8-flash"
 QUESTION = "How much aid did Ghana receive?"
 BRIEF = "Context for this question: the readings."
 
-# The branch `PlannerSeam` runs the planner on (`harness.planner_seam`).
+# The branch `PlannerAdapter` runs the planner on (`harness.planner_adapter`).
 _BRANCH = "dfo_planner"
 
 # One entry of a run's conversation: a model response's part (`types.Part`
@@ -46,8 +46,8 @@ _BRANCH = "dfo_planner"
 type Turn = tuple[Any, ...]
 
 
-def seam_specs(*, surface: ToolSurface | None, translate: Translate | None) -> list[ToolSpec]:
-    """The planner's tools as `harness.planner_seam.PlannerSeam` builds them over
+def adapter_specs(*, surface: ToolSurface | None, translate: Translate | None) -> list[ToolSpec]:
+    """The planner's tools as `harness.planner_adapter.PlannerAdapter` builds them over
     `surface` and `translate`, for a test that changes them before handing them
     to the seam as `specs`."""
     return planner_specs(
@@ -80,7 +80,7 @@ async def pydantic_run(
     """
     scripted = ScriptedGenai(replies)
     planner = planner_agent(
-        seam_specs(surface=surface, translate=translate),
+        adapter_specs(surface=surface, translate=translate),
         instruction=planner_instruction(
             has_translator=translate is not None,
             has_skills=surface is not None,

@@ -1,7 +1,7 @@
 """The tool surface the planner's translation discovers on and compiles
 against, and the planner reads skills through (`build_tool_surface`).
 
-`harness.planner_seam.PlannerSeam` builds the planner on it with translation
+`harness.planner_adapter.PlannerAdapter` builds the planner on it with translation
 attached to `propose_plan`, so the planner and translation meet there.
 `planner.specs.planner_specs` takes a translation to run and the surface it
 reads skills through, `translator.tool` takes the same surface to discover on

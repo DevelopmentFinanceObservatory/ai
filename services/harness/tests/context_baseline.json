@@ -29,7 +29,7 @@
         "total_chars": 87572,
         "buckets": [
           {
-            "bucket": "text(seam-brief)",
+            "bucket": "text(planner-brief)",
             "count": 1,
             "chars": 87567
           },
@@ -70,7 +70,7 @@
         "total_chars": 120293,
         "buckets": [
           {
-            "bucket": "text(seam-brief)",
+            "bucket": "text(planner-brief)",
             "count": 1,
             "chars": 87567
           },
@@ -121,7 +121,7 @@
         "total_chars": 120767,
         "buckets": [
           {
-            "bucket": "text(seam-brief)",
+            "bucket": "text(planner-brief)",
             "count": 1,
             "chars": 87567
           },
@@ -182,7 +182,7 @@
         "total_chars": 7657,
         "buckets": [
           {
-            "bucket": "text(seam-brief)",
+            "bucket": "text(planner-brief)",
             "count": 1,
             "chars": 7652
           },
@@ -228,7 +228,7 @@
             "chars": 32671
           },
           {
-            "bucket": "text(seam-brief)",
+            "bucket": "text(planner-brief)",
             "count": 1,
             "chars": 7652
           },
@@ -279,7 +279,7 @@
             "chars": 32671
           },
           {
-            "bucket": "text(seam-brief)",
+            "bucket": "text(planner-brief)",
             "count": 1,
             "chars": 7652
           },

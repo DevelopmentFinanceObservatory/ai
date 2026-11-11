@@ -392,7 +392,7 @@ def create_app(
     # GOOGLE_API_KEY fails the first turn, visibly, as a stream-fatal error
     # frame. The planner node is the planner with
     # `translator.tool.build_translate`'s translation attached to
-    # `propose_plan`, behind `harness.planner_seam.PlannerSeam`.
+    # `propose_plan`, behind `harness.planner_adapter.PlannerAdapter`.
     # The server allows exactly the origins listed in STUDIO_CORS_ORIGINS (a
     # browser page on another port during local testing); with the list
     # empty it sends no CORS headers, which is the deployed posture.

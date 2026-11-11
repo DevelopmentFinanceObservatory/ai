@@ -39,7 +39,7 @@ from planner.plan import Plan as PlannerPlan
 from harness.decision_pick import DecisionPick, decision_pick
 from harness.early_mint import EarlyMints
 from harness.graph import switch as switch_module
-from harness.graph.seams import (
+from harness.graph.interfaces import (
     PlannerModel,
 )
 from harness.graph.state import (
@@ -57,7 +57,7 @@ from harness.graph.state import (
     state_json,
 )
 from harness.graph.switch import SwitchFailedError
-from harness.sentences import SeamCode
+from harness.sentences import StopCode
 
 logger = logging.getLogger(__name__)
 
@@ -95,13 +95,13 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         Three routes out, all explicit on the final yield: `"ok"`, to
         the `approve` node, for a drafted plan; `"pending_refusal"`, also to
         the `approve` node, for a seam that refuses to draft one at all -- either
-        `PlannerSeam`'s own `MAX_PLAN_ROUNDS` cap, or `starts_new_plan`
+        `PlannerAdapter`'s own `MAX_PLAN_ROUNDS` cap, or `starts_new_plan`
         refused as `QUESTION_FIXED` because this seam's pair is built with
-        the question fixed (`harness.planner_seam.PlannerSeam.__init__`) --
+        the question fixed (`harness.planner_adapter.PlannerAdapter.__init__`) --
         surfaced as `{"refused": {"text": ...}}` rather than a raised
-        `PlannerSeamError` -- while `ctx.state["plan"]` still holds a plan
+        `PlannerAdapterError` -- while `ctx.state["plan"]` still holds a plan
         `PENDING_APPROVAL`; and `"refused"`, to `plan_done`, for the same
-        two refusals when it does not. Raising `PlannerSeamError` here
+        two refusals when it does not. Raising `PlannerAdapterError` here
         instead would end the turn through `_stream_fatal`'s own
         `close_turn(error=...)`, which `studio_state.begin_turn` documents
         as abandoning the paused session and its plan -- exactly the plan
@@ -147,7 +147,7 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         `asyncio.ensure_future` wrapper of its own: ADK's own docstring
         warns against wrapping a `ctx.run_node`-calling call in a task like
         that, and this node has two reasons that matters. A real
-        `PlannerModel` seam (`harness.planner_seam.PlannerSeam`) calls
+        `PlannerModel` seam (`harness.planner_adapter.PlannerAdapter`) calls
         `ctx.run_node` from inside it, and the direct await closes a real
         turn simply:
         `studio.py`'s `_sse_stream` -> `_unwind` cancels the event stream on
@@ -187,7 +187,7 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         # plan still `PENDING_APPROVAL` right before the `approve` node re-offers
         # it. A later `plan` call in the same turn finds the earlier call's
         # plan on record -- withholding it here is what lets
-        # `harness.planner_seam.PlannerSeam.__call__` tell this is a genuine
+        # `harness.planner_adapter.PlannerAdapter.__call__` tell this is a genuine
         # first draft and clear its own `planner:plan` and briefed-flag
         # state for it (see that module's docstring), rather than reading
         # as a continuing call on an already-briefed session that would
@@ -421,7 +421,7 @@ def _pick_refused(refused: dict[str, Any], pick: DecisionPick) -> SwitchFailedEr
     retryable under the codes a scope switch's revision is
     (`harness.graph.switch._RETRYABLE_REVISION_CODES`): a later pick of the
     same option escapes only a refusal for time or an unreachable service."""
-    code = str(refused.get("code") or SeamCode.PLAN_NOT_READY)
+    code = str(refused.get("code") or StopCode.PLAN_NOT_READY)
     return SwitchFailedError(
         str(refused.get("reason") or refused.get("text") or "")
         or f"The plan could not be redrafted to use {pick.chosen}.",

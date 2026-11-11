@@ -47,7 +47,7 @@ its violations and rubric scores.
 ## Scripted mode
 
 Scripted mode (`orchestrator_scripted.py`) serves the studio routes over the real
-workflow, the real orchestrator tools and the real `PlannerSeam`, and scripts what a
+workflow, the real orchestrator tools and the real `PlannerAdapter`, and scripts what a
 model or an upstream would answer. The planner's model calls are answered by a
 scripted google-genai client (`harness.scripted.scripted_client`). CI runs the same
 battery via `services/harness/tests/test_studio_orchestrator_eval.py`. A case's `scenario`

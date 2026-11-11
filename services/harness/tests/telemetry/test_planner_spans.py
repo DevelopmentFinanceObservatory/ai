@@ -39,6 +39,7 @@ from planner.tool_spec import Parameter, ToolSpec
 
 from ..planner_expectations import expect, expectation_name, shared
 from ..scripted_genai import Reply, call_part, reply, thought_part
+from ..test_planner_adapter import _translated_plan
 from ..test_planner_node import (
     _MODEL,
     _REFUSED,
@@ -53,7 +54,6 @@ from ..test_planner_node import (
     _Script,
     _serving_proposals,
 )
-from ..test_planner_seam import _translated_plan
 
 _SESSION = "conv_01planner_spans"
 # Where a span's conversation is the session the run's workflow ran in.

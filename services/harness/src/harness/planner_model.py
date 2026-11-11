@@ -59,7 +59,7 @@ from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
 from harness.prefix_cache import CACHE_GONE_CODES, PrefixCache, against_cache
-from harness.sentences import SeamCode
+from harness.sentences import StopCode
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded_by
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ type BeforeRequest = Callable[[], types.Content | None]
 # Called with the code of the bound that closed the call (None when none did)
 # and the last usage any of its chunks carried. It gives a model turn to answer
 # with in place of the response, or None to keep it.
-type AfterResponse = Callable[[SeamCode | None, Usage | None], types.Content | None]
+type AfterResponse = Callable[[StopCode | None, Usage | None], types.Content | None]
 
 
 def planner_model(
@@ -130,7 +130,7 @@ def refuse_vertex_ai(model_name: str, client: Client | None = None) -> None:
 
     The planner's declarations are the Gemini developer API's form
     (`planner.tool_spec.function_declaration`), and Vertex AI rejects their
-    optional `anyOf` schemas. `harness.planner_seam.PlannerSeam` calls this
+    optional `anyOf` schemas. `harness.planner_adapter.PlannerAdapter` calls this
     with the planner's model name and the client it calls through.
 
     A `projects/...` name is refused whatever the client: it is a Vertex AI
@@ -189,7 +189,7 @@ class _Answer:
 
     chunks: list[types.GenerateContentResponse] = field(default_factory=list)
     closing: types.Content | None = None
-    closed_by: SeamCode | None = None
+    closed_by: StopCode | None = None
 
     @property
     def usage(self) -> Usage | None:
@@ -293,7 +293,7 @@ class _PlannerStream:
                 code = (response.custom_metadata or {}).get(CLOSED_BY_KEY)
                 if code is not None:
                     answer.closing = response.content
-                    answer.closed_by = SeamCode(code)
+                    answer.closed_by = StopCode(code)
         return answer
 
     async def _raw(

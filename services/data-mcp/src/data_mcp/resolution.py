@@ -1,4 +1,4 @@
-"""Entity resolution seam: human-typed names to graph dcids, via apis' Graph door.
+"""Entity resolution client: human-typed names to graph dcids, via apis' Graph door.
 
 `get_data`'s scope block carries entities as spoken text ("France", "Sub-Saharan Africa")
 keyed by role. `resolve_entities` posts them to `POST /api/graph/resolve` with the group and

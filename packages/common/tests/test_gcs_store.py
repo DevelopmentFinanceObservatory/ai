@@ -103,7 +103,7 @@ class _FakeBucket:
 
 
 class _FakeStorageClient:
-    """Fakes the narrow `_StorageClient` seam `gcs_store.py` calls through.
+    """Fakes the narrow `_StorageClient` interface `gcs_store.py` calls through.
 
     `objects`/`metadata` are plain dicts, exposed so a test can pass the
     same pair to a second, independently constructed fake client -- standing

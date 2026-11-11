@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 from data_mcp.definition_store import canonicalize, spec_id_for
 from google.adk.events import EventActions
-from harness.planner_seam import _reading_pin_sources
+from harness.planner_adapter import _reading_pin_sources
 from harness.turn_records import RecordedIdentity
 from planner.plan import (
     AMENDMENT_ENTRY_STATE_KEY,
@@ -395,7 +395,7 @@ def test_a_first_draft_declines_no_ask_a_reduction_refusal_named(
     outcome: tuple[Outcome, str | None],
 ) -> None:
     """A first draft's permission to decline as `no_operation_covers`
-    (`harness.planner_seam`) covers no ask a `period_reduction_unstated`
+    (`harness.planner_adapter`) covers no ask a `period_reduction_unstated`
     refusal named in the entry, and still covers an ask it did not name."""
     ctx = _context(asks=(ASK, OTHER_ASK))
     record_optional_decline(ctx.state, UnsupportedOperation.NO_OPERATION_COVERS, terminal=True)

@@ -134,7 +134,7 @@ from harness.dfo_faq import (
     read_catalogue_counts,
     read_dfo_faq,
 )
-from harness.graph.seams import Executor
+from harness.graph.interfaces import Executor
 from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,

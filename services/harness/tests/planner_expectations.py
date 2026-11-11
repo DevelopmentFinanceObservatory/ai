@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from harness.planner_seam import _READINGS_CONTEXT
+from harness.planner_adapter import _READINGS_CONTEXT
 
 PLANNER_RUNS = Path(__file__).parent / "fixtures" / "planner_runs"
 _SHARED = PLANNER_RUNS / "shared"

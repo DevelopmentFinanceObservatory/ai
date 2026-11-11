@@ -23,14 +23,14 @@ from google.adk.workflow import START, BaseNode, Edge, Workflow, node
 from harness.conversation import current_conversation_id
 from harness.early_mint import EarlyMints
 from harness.graph.execute import execute_node
+from harness.graph.interfaces import (
+    Executor,
+    PlannerModel,
+)
 from harness.graph.orchestrate import ask, orchestrate_node, route
 from harness.graph.plan_done import plan_done_node
 from harness.graph.planning import approve_node, plan_start, planner_node
 from harness.graph.resume import run_resumer
-from harness.graph.seams import (
-    Executor,
-    PlannerModel,
-)
 from harness.graph.seed import seed_node
 from harness.graph.state import (
     AGENT_NAME,
@@ -57,7 +57,7 @@ def planner_entry(planner: PlannerModel) -> PlannerEntry:
     route_n = node(route, name="route")
     plan_start_n = node(plan_start, name="plan_start")
     # `rerun_on_resume=True`: a real `PlannerModel` seam
-    # (`harness.planner_seam.PlannerSeam`) calls `ctx.run_node` from inside
+    # (`harness.planner_adapter.PlannerAdapter`) calls `ctx.run_node` from inside
     # this node, and ADK raises `ValueError` at that call unless the
     # *calling* node itself carries this flag (`agents/context.py`'s
     # `_run_node_internal`).

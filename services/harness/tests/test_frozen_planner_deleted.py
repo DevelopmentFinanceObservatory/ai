@@ -2,9 +2,9 @@
 
 `harness.studio_planner` and `harness.studio_plan` were the studio's own
 pinned planner agent and its plan contract. The frozen adapter that drove
-them, `harness.planner_seam`, exported `PlannerAgent` and
+them, `harness.planner_adapter`, exported `PlannerAgent` and
 `PlannerAgentError`. That module path now names its replacement instead
-(`harness.planner_seam.PlannerSeam`, over `harness.planner_node` and
+(`harness.planner_adapter.PlannerAdapter`, over `harness.planner_node` and
 `translator.tool`), so banning the path would also ban legitimate use of
 the current seam. Banning `PlannerAgent`/`PlannerAgentError` by name is
 strictly stronger than banning the old path was: it catches the frozen
@@ -90,7 +90,7 @@ def test_the_guard_catches_a_banned_module_import(tmp_path: Path, source: str, m
 
 def test_the_guard_catches_a_banned_symbol_import(tmp_path: Path) -> None:
     """The symbol ban is provably failable too: `PlannerAgent` imported from
-    any module, not only the old `harness.planner_seam` path, is caught --
+    any module, not only the old `harness.planner_adapter` path, is caught --
     the coverage a module-path ban on that path alone could not offer, since
     the path is now legitimately in use by its replacement."""
     scratch = tmp_path / "offender.py"

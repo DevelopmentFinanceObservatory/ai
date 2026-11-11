@@ -209,7 +209,7 @@ class Settings(BaseServiceSettings):
       the caller. 0.61% of dev calls waited longer.
 
     A spent budget, cap or wall bound ends the request with its sentence
-    (`harness.sentences.SEAM_SENTENCES`) as the final message, with no further
+    (`harness.sentences.STOP_SENTENCES`) as the final message, with no further
     model call, unless it closes a planner call while the last referral names
     sources to choose from: the planner then asks the user to pick one
     (`harness.planner_run.PlannerRun.model_answered`).

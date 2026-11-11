@@ -1,6 +1,6 @@
 """The planner as a workflow node (`planner_node`).
 
-`harness.planner_seam.PlannerSeam` runs the planner through `ctx.run_node`.
+`harness.planner_adapter.PlannerAdapter` runs the planner through `ctx.run_node`.
 That node is a function node named `planner.settings.AGENT_NAME` that drives
 `planner.pydantic_agent.run_planner` on `harness.planner_model.planner_model`
 and yields events holding what an ADK `LlmAgent` stores for the same
@@ -56,7 +56,7 @@ from harness.planner_model import (
 )
 from harness.planner_run import Ask, Directive, PlannerRun, Stop
 from harness.prefix_cache import PrefixCache
-from harness.sentences import SeamCode, refusal_sentence
+from harness.sentences import StopCode, refusal_sentence
 from harness.turn_budget import TurnBudget
 from harness.turn_events import PLANNER_ASK, turn_question
 from harness.usage import log_usage
@@ -120,7 +120,7 @@ def planner_node(
         (`planner.pydantic_agent.UnsentQuestionPartError`) ends the run before
         any request on an `internal_error` refusal (`run.refused`). The seam
         answers the entry with that refusal, marked not final
-        (`PlannerSeam._FINAL_CODES`), so the orchestrator may ask for a plan
+        (`PlannerAdapter._FINAL_CODES`), so the orchestrator may ask for a plan
         again and meet the same refusal. Studio sends only text.
         A stream google-genai resumed over output no continuation token
         covers (`harness.planner_model.resumed_over_output`) raises
@@ -139,7 +139,7 @@ def planner_node(
                 invocation.increment_llm_call_count()
             return turn
 
-        def after_response(closed_by: SeamCode | None, usage: Usage | None) -> types.Content | None:
+        def after_response(closed_by: StopCode | None, usage: Usage | None) -> types.Content | None:
             # A call a bound closed is logged with the usage its chunks
             # reported before the cut.
             if usage is not None:

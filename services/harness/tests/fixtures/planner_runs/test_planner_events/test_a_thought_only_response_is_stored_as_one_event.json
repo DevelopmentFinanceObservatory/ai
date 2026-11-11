@@ -25,7 +25,7 @@
       "author": "dfo_planner",
       "branch": "dfo_planner",
       "invocation": 0,
-      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "path": "adapter_test_wf@1/adapter_under_test@1/dfo_planner@1",
       "partial": false,
       "content": {
         "parts": [
@@ -39,7 +39,7 @@
       "state_delta": {}
     },
     {
-      "author": "seam_test_wf",
+      "author": "adapter_test_wf",
       "actions": {
         "state_delta": {
           "planner:plan": null,
@@ -76,10 +76,10 @@
         }
       },
       "node_info": {
-        "path": "seam_test_wf@1/seam_under_test@1",
+        "path": "adapter_test_wf@1/adapter_under_test@1",
         "output_for": [
-          "seam_test_wf@1/seam_under_test@1",
-          "seam_test_wf@1"
+          "adapter_test_wf@1/adapter_under_test@1",
+          "adapter_test_wf@1"
         ]
       },
       "invocation": 0

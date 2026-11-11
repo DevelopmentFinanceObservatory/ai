@@ -31,7 +31,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
 )
-from harness.planner_seam import PlannerSeam
+from harness.planner_adapter import PlannerAdapter
 from harness.scope_choices import planner_axes
 from harness.settings import Settings
 from harness.studio_state import ConversationState
@@ -76,11 +76,11 @@ from .test_graph import (
     _ManifestSurface,
     _output_of,
     _plan_runner,
+    _Planner,
     _resume,
-    _Seam,
     _start,
 )
-from .test_planner_seam import _SeamHarness
+from .test_planner_adapter import _AdapterHarness
 
 _FRANCE = _french_dac1(_US_MULTILATERAL)
 _MULTILATERAL = _US_MULTILATERAL["spec_id"]
@@ -115,11 +115,11 @@ def _proposal(question: str, decision: DecisionFactory, *requirements: Any) -> A
     )
 
 
-def _seam(surface: ToolSurface, proposal: Any) -> PlannerSeam:
+def _adapter(surface: ToolSurface, proposal: Any) -> PlannerAdapter:
     """The seam over `surface`, its model sending the `propose_plan` call
     `proposal` and then text."""
     scripted = ScriptedGenai([reply(call_part(*proposal)), reply(text_part("done"))])
-    return PlannerSeam(settings=Settings(), surface=surface, client=scripted.client)
+    return PlannerAdapter(settings=Settings(), surface=surface, client=scripted.client)
 
 
 async def _compiled(plan: Plan, blocks: dict[str, dict[str, Any]]) -> Plan:
@@ -157,13 +157,13 @@ async def _turn_one(
         us or _searched(_US_TOTAL, "US ODA"),
         _searched(_FRANCE, "France's multilateral ODA"),
     ]
-    turn_one = _SeamHarness(
+    turn_one = _AdapterHarness(
         {
             ORCHESTRATOR_SEARCHES_KEY: searched,
             ORCHESTRATOR_SPECS_KEY: {_TOTAL: _US_TOTAL, _FRANCE["spec_id"]: _FRANCE},
         }
     )
-    seam = _seam(
+    adapter = _adapter(
         surface,
         _proposal(
             _COMPARISON,
@@ -173,7 +173,7 @@ async def _turn_one(
             _difference("second", "other"),
         ),
     )
-    await turn_one.run(seam, question=_COMPARISON, readings=searched)
+    await turn_one.run(adapter, question=_COMPARISON, readings=searched)
     state = await turn_one.state()
     compared = load_plan(state)
     assert compared is not None
@@ -325,9 +325,9 @@ async def test_a_turn_two_direct_pin_of_a_turn_one_compile_reads_no_planner_mark
     prior = await _turn_one_closed(decision)
     surface = cast(ToolSurface, _multilateral_compiles())
 
-    turn_two = _SeamHarness({ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
+    turn_two = _AdapterHarness({ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
     share = "What share of US ODA goes to multilaterals?"
-    seam = _seam(
+    adapter = _adapter(
         surface,
         _proposal(
             share,
@@ -337,7 +337,7 @@ async def test_a_turn_two_direct_pin_of_a_turn_one_compile_reads_no_planner_mark
             _share("first", "second"),
         ),
     )
-    await turn_two.run(seam, question=share, readings=prior["readings"])
+    await turn_two.run(adapter, question=share, readings=prior["readings"])
     state = await turn_two.state()
 
     plan = load_plan(state)
@@ -373,9 +373,9 @@ async def test_a_turn_two_restatement_of_the_comparison_moves_the_total_again(
     year = Period(start=2020, end=2020)
     copies = {_over_period(block, year): block for block in (_US_MULTILATERAL, _FRANCE)}
     surface = _multilateral_compiles(copies, translates=True)
-    turn_two = _SeamHarness({ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
+    turn_two = _AdapterHarness({ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
     question = "And in 2020?"
-    seam = _seam(
+    adapter = _adapter(
         cast(ToolSurface, surface),
         _proposal(
             question,
@@ -390,7 +390,7 @@ async def test_a_turn_two_restatement_of_the_comparison_moves_the_total_again(
     token = current_recorded_identity.set(conversation.recorded_identity)
     caplog.clear()
     try:
-        await turn_two.run(seam, question=question, readings=prior["readings"])
+        await turn_two.run(adapter, question=question, readings=prior["readings"])
     finally:
         current_recorded_identity.reset(token)
     state = await turn_two.state()
@@ -505,9 +505,9 @@ async def test_a_paused_plan_stored_before_the_change_approves_on_its_revision()
         plan,
         {_MULTILATERAL: _US_MULTILATERAL, _STORED_FRANCE["spec_id"]: _STORED_FRANCE},
     )
-    seam = _Seam([{"plan": paused.model_dump(mode="json"), "summary": {}}])
+    planner = _Planner([{"plan": paused.model_dump(mode="json"), "summary": {}}])
     surface = _Unreachable()
-    runner, _ = _plan_runner(seam, tool_surface=surface)
+    runner, _ = _plan_runner(planner, tool_surface=surface)
     events = await _start(runner)
     offered = _output_of(events, "planner")
     assert offered["revision"] == plan_revision(paused)

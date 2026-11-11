@@ -14,7 +14,7 @@ Its tests live in `services/harness/tests/translator/`.
 ## What it does
 
 One function, built by `translator.tool.build_translate()` and attached by
-`harness.planner_seam.PlannerSeam`, which the planner's
+`harness.planner_adapter.PlannerAdapter`, which the planner's
 `propose_plan` calls on every plan it records. `propose_plan` writes the plan
 to session state (`planner.plan.save_plan`, keyed on `PLAN_STATE_KEY`), and
 translation reads it back itself (`translator.discovery.current_draft`,

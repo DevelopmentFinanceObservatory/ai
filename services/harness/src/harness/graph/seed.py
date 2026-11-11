@@ -24,11 +24,11 @@ from translator.discovery import (
     DefinitionNotResolvedError,
 )
 
-from harness.graph.orchestrate import AgentHandBack
-from harness.graph.resume import ResumeRuns
-from harness.graph.seams import (
+from harness.graph.interfaces import (
     Executor,
 )
+from harness.graph.orchestrate import AgentHandBack
+from harness.graph.resume import ResumeRuns
 from harness.graph.state import (
     APPLY_CHOICE_STATE_KEY,
     state_json,

@@ -553,7 +553,7 @@ async def test_a_new_plan_reads_a_pin_on_an_old_compile_as_its_own(
     `second` pins gross directly reads gross, through its amendments too: the old
     plan's alignment of an input with that id says nothing of the new plan's pin.
     The new plan is a replan, or the first draft of a later `plan` call of the turn,
-    which finds the plan state cleared (`harness.planner_seam`)."""
+    which finds the plan state cleared (`harness.planner_adapter`)."""
     ctx = _FakeToolContext()
     await _gross_compared_with_net_average(ctx, decision)
     if fresh == "first-draft":

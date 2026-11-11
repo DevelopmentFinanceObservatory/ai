@@ -161,14 +161,14 @@ UNSUPPORTED_STATE_KEY = "planner:unsupported"
 
 # The session-state slot saying whether the planner's current entry opened
 # with the user's own amendment of the plan at the approval card.
-# `harness.planner_seam.PlannerSeam` writes it with `PLAN_ROUNDS_STATE_KEY`
+# `harness.planner_adapter.PlannerAdapter` writes it with `PLAN_ROUNDS_STATE_KEY`
 # when an entry starts, so an ask-the-user resume inside one entry keeps it.
 # Unset, the entry carries no amendment.
 AMENDMENT_ENTRY_STATE_KEY = "planner:amendment_entry"
 
 # The session-state slot holding the option the user picked for a planner
 # decision on the plan card, as a `DecisionPick` dump, when the planner's
-# current entry replans to hold that pick. `harness.planner_seam.PlannerSeam`
+# current entry replans to hold that pick. `harness.planner_adapter.PlannerAdapter`
 # writes it, or clears it, with `AMENDMENT_ENTRY_STATE_KEY` when an entry
 # starts, so an ask-the-user resume inside one entry keeps it. Admission
 # refuses a plan that does not state the pick (`submission.service.admit`).
@@ -193,7 +193,7 @@ TERMINAL_DECLINES_STATE_KEY = "planner:terminal_declines"
 REDUCTION_REFUSED_ASKS_STATE_KEY = "planner:reduction_refused_asks"
 
 # Every spec_id the executor refused since the session's last first-draft
-# entry, as a list of bare spec_ids. `harness.planner_seam.PlannerSeam` writes
+# entry, as a list of bare spec_ids. `harness.planner_adapter.PlannerAdapter` writes
 # it on each entry and clears it on a first draft, and admission refuses a plan
 # pinning one still in force (`submission.service.refused_in_force`,
 # `submission.service.admit`).
@@ -215,7 +215,7 @@ SPEC_SEARCHED_STATE_KEY = "planner:spec_searched_at"
 
 # The session-state slot holding a `PinSource` for every spec_id the
 # planner was shown this entry, keyed by spec_id in the order it was shown
-# (`pin_sources`). `harness.planner_seam` writes it from the search
+# (`pin_sources`). `harness.planner_adapter` writes it from the search
 # readings its first message renders, one entry per spec_id they name.
 # `propose_plan` (`planner.tools`) reads a settled entry's measure choice and
 # the identity its block carries, and `translator.discovery.discover_source`
@@ -295,7 +295,7 @@ FULL_HISTORIES_STATE_KEY = "planner:full_histories"
 # `MAX_ASK_CHARS` characters each (`load_asks`). The orchestrator's
 # `plan_start` node writes it beside the brief on every plan call, and the
 # `plan` tool refuses a call that lists none
-# (`harness.orchestrator_tools._asks_refusal`). `harness.planner_seam` lists the asks in the
+# (`harness.orchestrator_tools._asks_refusal`). `harness.planner_adapter` lists the asks in the
 # planner's first message, and `propose_plan` (`planner.tools.propose`) copies them onto
 # every plan it records, so `Plan` refuses one that does not account for each
 # exactly once. Unset, a plan carries no asks and no ask is accounted for.
@@ -384,7 +384,7 @@ MAX_GROUP_BY = 2
 # The most characters the model-authored part of one plan may serialise to: its
 # `question`, `decisions` and `evidence_requirements`, as compact JSON with
 # non-ASCII characters left as written. The count is raw characters, which is
-# what `harness.planner_seam` renders: free text as it is, and entities,
+# what `harness.planner_adapter` renders: free text as it is, and entities,
 # predicates and a decision's `fixes` as JSON in the same encoding. The brief
 # renders these fields in full, so this is what bounds the plan section to this
 # many characters plus the render's own line framing. The largest plan in the
@@ -6329,7 +6329,7 @@ def identity_on_record(
 
 # The seconds a discovery call made now may take inside a planner entry. That is
 # what remains of the request's wall-clock bound (`harness.turn_budget.TurnBudget`).
-# Set by `harness.planner_seam` for each planner run inside a request. Unset
+# Set by `harness.planner_adapter` for each planner run inside a request. Unset
 # otherwise, where a call takes its capability row's own timeout.
 current_discovery_time_left: ContextVar[Callable[[], float] | None] = ContextVar(
     "discovery_time_left", default=None

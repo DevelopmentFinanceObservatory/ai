@@ -2,7 +2,7 @@
 
 The workflow is the deterministic spine around the orchestrator agent:
 routing, approval, retries and execution are code; only the orchestrator and
-the planner (`PlannerModel`, implemented by `harness.planner_seam`) generate.
+the planner (`PlannerModel`, implemented by `harness.planner_adapter`) generate.
 A turn runs `seed` (the runs an earlier turn left unfinished, carried on,
 and any datasets the user brought from Search) ->
 `orchestrate` (the agent and its tools, `harness.orchestrator_tools`) ->

@@ -8,7 +8,7 @@ session opens (`fastmcp.client.transports.memory._enter_server_lifespan`),
 so mount/degrade behaviour is exercised exactly as it runs in production,
 not simulated around it.
 
-`server.PlatformAssembler` is the one seam substituted per test: either the
+`server.PlatformAssembler` is the one class substituted per test: either the
 real class wired to an `httpx2.MockTransport`, or a small fake standing in
 for an unreachable or misbehaving platform. Tool *behaviour* once mounted
 (safety net, refusal passthrough) runs against a `StubAssembler` substituted

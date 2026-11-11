@@ -4,7 +4,7 @@ This file measures what the planner is handed and holds
 each part of it to a ceiling. The bounds themselves live in production code:
 `planner.plan` limits the plan and cuts user text (`MAX_PLAN_RECORD_CHARS`,
 `cut_user_text`), `harness.studio_state` limits the two digests, and
-`harness.planner_seam` holds the search readings to a budget and cuts the question, the amendment
+`harness.planner_adapter` holds the search readings to a budget and cuts the question, the amendment
 and a refusal. This file's ceilings are derived from those limits or measured
 from a recorded scenario, and each control test shows its ceiling can fail.
 
@@ -89,13 +89,13 @@ from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp.skills_client import PAGE_CHARS, continuation_line, page_of, with_closing_line
 from google.adk.models.llm_request import LlmRequest
 from google.genai import types
-from harness import planner_seam, studio_state
-from harness.planner_seam import (
+from harness import planner_adapter, studio_state
+from harness.planner_adapter import (
     _PLAN_MEASURE_CHOICE_CAP,
     _PLAN_SOURCE_SENTENCE_CAP,
     _READINGS_BUDGET,
     _READINGS_CONTEXT,
-    PlannerSeam,
+    PlannerAdapter,
     _plan_context,
     _readings_ledger,
     _section,
@@ -147,9 +147,9 @@ from planner.workflow import Workflow as PlanWorkflow
 
 from .context_probe import (
     BOUNDING_PATTERNS,
+    BRIEF_BUCKET,
+    BRIEF_MARKER,
     RELAY_MARKER,
-    SEAM_BUCKET,
-    SEAM_MARKER,
     bucket_chars,
     compose,
     contents_leading,
@@ -162,7 +162,7 @@ from .context_probe import (
     record_chars as _record_chars,
 )
 from .scripted_genai import Reply, Request, ScriptedGenai, call_part, reply, text_part
-from .test_planner_seam import _NO_DATA_SEARCH_RESPONSE, _gdp_plan, _SeamHarness
+from .test_planner_adapter import _NO_DATA_SEARCH_RESPONSE, _AdapterHarness, _gdp_plan
 
 # The root conftest.py chdirs every test into a tmp_path, so this must be absolute.
 _BASELINE_PATH = Path(__file__).resolve().parent / "context_baseline.json"
@@ -216,24 +216,24 @@ PLANNER_CONTENTS_CEILING = 1_220
 # the seam's event limit and entry deadline.
 SKILL_PAGE_CEILING = 40_800
 
-# The seam's own brief, bucketed as `text(seam-brief)` on its opening words
-# (`harness.planner_seam._READINGS_CONTEXT`): the search readings, the two
+# The seam's own brief, bucketed as `text(planner-brief)` on its opening words
+# (`harness.planner_adapter._READINGS_CONTEXT`): the search readings, the two
 # digests, the plan being changed and the question. A session sends it on its
 # first planner call and only the ask thereafter, so this bounds what that one
 # call is billed in full before a cache can serve it.
-# `harness.planner_seam._plan_context` renders the prior plan as a
+# `harness.planner_adapter._plan_context` renders the prior plan as a
 # line-rendered digest, and `_READINGS_BUDGET` holds the readings.
 #
 # A two-requirement plan is the wrong end of the range to size this from: the
 # seam's own docstring probe records the realistic upper end at nine
 # requirements, and the section that dominates it is the prior plan, re-sent on
-# every amend and replan call. `test_the_seam_brief_holds_a_nine_requirement_plan_under_its_ceiling`
+# every amend and replan call. `test_the_planner_brief_holds_a_nine_requirement_plan_under_its_ceiling`
 # measures that upper end, with readings at their whole budget: 11,131 chars for
 # a draft plan and 12,627 for a compiled one (the plan section alone is
 # 8,723 -> 6,942 raw-to-digest for the draft, 22,609 -> 8,438 for the compiled
 # one, and the readings section 3,486). The ceiling is 25% above the compiled
 # case, as this file's own convention says.
-SEAM_BRIEF_CEILING = 15_800
+BRIEF_CEILING = 15_800
 
 # The seam's brief in the realistic scenario, which carries the brief a
 # deployed planner call recorded (`_RECORDED_BRIEF_PATH`): three search
@@ -250,10 +250,10 @@ RECORDED_BRIEF_CEILING = 9_460
 BOUNDED_CONTEXT = "bounded-context"
 
 
-def _seam(scripted: ScriptedGenai) -> PlannerSeam:
+def _adapter(scripted: ScriptedGenai) -> PlannerAdapter:
     """The seam the recorded round runs on, over a canned data-mcp surface, its
     model calls answered by `scripted`."""
-    return PlannerSeam(
+    return PlannerAdapter(
         settings=Settings(),
         surface=FixtureSurface(
             schemas=[],
@@ -349,11 +349,11 @@ async def _recorded_round(
     """
     draft = _gdp_plan(decision, requirement, derived_requirement)
     scripted = ScriptedGenai(_script())
-    seam = _seam(scripted)
+    adapter = _adapter(scripted)
 
     arguments: dict[str, Any] = {"question": draft.question, **context}
-    output = await _SeamHarness(state).run(
-        seam, prior_plan=draft.model_dump(mode="json"), **arguments
+    output = await _AdapterHarness(state).run(
+        adapter, prior_plan=draft.model_dump(mode="json"), **arguments
     )
     assert output is not None and "refused" in output, output
 
@@ -421,13 +421,13 @@ async def _declaration_digests() -> dict[str, str]:
             surface=FixtureSurface(schemas=[]) if surface else None,
             question_fixed=question_fixed,
         )
-        seam = PlannerSeam(
+        adapter = PlannerAdapter(
             settings=Settings(),
             surface=FixtureSurface(schemas=[]),
             specs=specs,
             client=scripted.client,
         )
-        await _SeamHarness().run(seam, question="go", readings=[])
+        await _AdapterHarness().run(adapter, question="go", readings=[])
         digests[f"surface={surface},question_fixed={question_fixed}"] = _declarations_digest(
             scripted.requests[0]
         )
@@ -612,10 +612,10 @@ def _declare(record: dict[str, Any]) -> list[tuple[str, int, int]]:
             "planner contents",
             record["contents"]["total_chars"]
             - bucket_chars(record, SKILL_BUCKET)
-            - bucket_chars(record, SEAM_BUCKET),
+            - bucket_chars(record, BRIEF_BUCKET),
             PLANNER_CONTENTS_CEILING,
         ),
-        ("seam brief", bucket_chars(record, SEAM_BUCKET), RECORDED_BRIEF_CEILING),
+        ("planner brief", bucket_chars(record, BRIEF_BUCKET), RECORDED_BRIEF_CEILING),
         ("skill page", bucket_chars(record, SKILL_BUCKET), SKILL_PAGE_CEILING),
     ]
 
@@ -661,7 +661,7 @@ def test_no_relayed_foreign_agent_text_reaches_the_planner(
     """No relayed text reaches the planner, tagged with an author or not.
 
     Translation runs inside the planner's own `propose_plan` call, and
-    `harness.planner_seam._PLANNER_BRANCH` keeps another agent's turns off the
+    `harness.planner_adapter._PLANNER_BRANCH` keeps another agent's turns off the
     planner's branch, so no fenced relay belongs in a planner request.
     """
     planner_records = [
@@ -756,7 +756,7 @@ def test_the_leading_contents_of_a_run_are_only_ever_appended_to(measured: Any) 
     earlier turn was rewritten, not merely appended to, would miss the cache
     from the rewrite onward. Every request the planner sends here carries the
     run's whole history, so this is a real property of the served path and not
-    an artefact of the fixture: `harness.planner_seam._propose` runs every
+    an artefact of the fixture: `harness.planner_adapter._propose` runs every
     generation of an entry in one planner run.
 
     The guarantee this protects: a supersession edit stays transient and is
@@ -799,7 +799,7 @@ def _request(
     tool_names: list[str],
     texts: list[str],
     relay: tuple[str, int] | None = None,
-    seam: int | None = None,
+    brief: int | None = None,
     skill: int | None = None,
 ) -> Any:
     """A `LlmRequest` carrying the named declarations and text parts, oversized.
@@ -807,9 +807,9 @@ def _request(
     `relay`, when given, prepends an ADK-shaped fenced relay of
     `(author, chars)`: the framing `_fencing._present_other_agent_message`
     emits, so the relay bucket is exercised against the real shape, not
-    one this test invented. `seam`, when given, prepends a seam-brief part of
-    that many chars, `harness.planner_seam._READINGS_CONTEXT`'s own opening
-    words, which is what `context_probe` buckets on, so the seam ceiling is
+    one this test invented. `brief`, when given, prepends a planner-brief part of
+    that many chars, `harness.planner_adapter._READINGS_CONTEXT`'s own opening
+    words, which is what `context_probe` buckets on, so the brief ceiling is
     exercised against a part that really is one. `skill`, when given, appends
     a `get_skill` answer of that many chars.
     """
@@ -817,10 +817,10 @@ def _request(
         types.FunctionDeclaration(name=name, description="x" * _INFLATED) for name in tool_names
     ]
     contents = [types.Content(role="user", parts=[types.Part(text=text)]) for text in texts]
-    if seam is not None:
+    if brief is not None:
         contents.insert(
             0,
-            types.Content(role="user", parts=[types.Part(text=SEAM_MARKER + "\n" + "z" * seam)]),
+            types.Content(role="user", parts=[types.Part(text=BRIEF_MARKER + "\n" + "z" * brief)]),
         )
     if skill is not None:
         contents.append(
@@ -872,7 +872,7 @@ def test_every_ceiling_fails_when_its_segment_grows() -> None:
     request = _request(
         tool_names=["propose_plan", "ask_user_question", "reject_plan"],
         texts=["t" * _INFLATED] * 3,
-        seam=_INFLATED,
+        brief=_INFLATED,
         skill=SKILL_PAGE_CEILING + 1,
     )
     inflated = compose(request, agent="planner", scenario="realistic", call_index=0)
@@ -888,16 +888,16 @@ def test_every_ceiling_fails_when_its_segment_grows() -> None:
 #
 # The recorded scenario above runs a two-requirement plan, the small end of the
 # plans this seam renders and the wrong end to size a ceiling from.
-# `planner_seam.py`'s own docstring probe records nine requirements as the
-# realistic upper end, so `SEAM_BRIEF_CEILING` is sized from that and this test
+# `planner_adapter.py`'s own docstring probe records nine requirements as the
+# realistic upper end, so `BRIEF_CEILING` is sized from that and this test
 # measures it directly.
 
 # Requirements in the plan the seam probe records as the realistic upper end.
-_SEAM_PROBE_REQUIREMENTS = 9
+_BRIEF_PROBE_REQUIREMENTS = 9
 
 
 def _nine_requirement_plan() -> Any:
-    """A nine-requirement plan, the size `planner_seam`'s own probe records.
+    """A nine-requirement plan, the size `planner_adapter`'s own probe records.
 
     Each dataset requirement feeds one aggregate, so the plan is nine of each
     and a decision per indicator: the shape a question about a handful of
@@ -912,10 +912,10 @@ def _nine_requirement_plan() -> Any:
             resolved_by=ResolvedBy.PLANNER_DEFAULT,
             rationale=f"Annual measure {i} is the standard published frequency for this indicator.",
         )
-        for i in range(_SEAM_PROBE_REQUIREMENTS)
+        for i in range(_BRIEF_PROBE_REQUIREMENTS)
     ]
     requirements: list[Any] = []
-    for i in range(_SEAM_PROBE_REQUIREMENTS):
+    for i in range(_BRIEF_PROBE_REQUIREMENTS):
         requirements.append(
             DatasetRequirement(
                 id=f"req_{i}",
@@ -949,7 +949,7 @@ def _nine_requirement_plan() -> Any:
     )
 
 
-def _seam_brief(
+def _planner_brief(
     *,
     prior_plan: dict[str, Any] | None,
     readings: Sequence[Mapping[str, Any]] = (),
@@ -960,12 +960,12 @@ def _seam_brief(
     amendment: str | None = None,
     refused: Sequence[str] = (),
 ) -> str:
-    """One `_message` render, the way `PlannerSeam.__call__` asks for it."""
-    seam = PlannerSeam(
+    """One `_message` render, the way `PlannerAdapter.__call__` asks for it."""
+    adapter = PlannerAdapter(
         settings=Settings(),
         surface=FixtureSurface(schemas=[], responses={}),
     )
-    return seam._message(
+    return adapter._message(
         question=question,
         prior_plan=prior_plan,
         refusal=refusal,
@@ -977,13 +977,13 @@ def _seam_brief(
     )
 
 
-def test_the_seam_brief_holds_a_nine_requirement_plan_under_its_ceiling() -> None:
+def test_the_planner_brief_holds_a_nine_requirement_plan_under_its_ceiling() -> None:
     """The realistic upper end, measured: a nine-requirement plan in the brief.
 
     Both a draft plan and a compiled one, since a compiled plan carries the
     `translation` and `workflow` the digest renders a summary of. Each is
     rendered against readings far past their budget, so the readings section
-    is at its largest, and held to `SEAM_BRIEF_CEILING` on its own.
+    is at its largest, and held to `BRIEF_CEILING` on its own.
 
     This is the test the ceiling is sized from. The recorded scenario's own
     brief is two requirements and three readings, so a ceiling taken from it
@@ -994,10 +994,10 @@ def test_the_seam_brief_holds_a_nine_requirement_plan_under_its_ceiling() -> Non
     readings = _maximal_readings()
 
     for label, plan in (("draft", dumped), ("compiled", _compiled(draft))):
-        render = _seam_brief(readings=readings, prior_plan=plan)
-        assert len(render) <= SEAM_BRIEF_CEILING, (
+        render = _planner_brief(readings=readings, prior_plan=plan)
+        assert len(render) <= BRIEF_CEILING, (
             f"a nine-requirement {label} plan renders a {len(render)}-char seam brief, "
-            f"past the {SEAM_BRIEF_CEILING} ceiling this test derives from that same case"
+            f"past the {BRIEF_CEILING} ceiling this test derives from that same case"
         )
         # A guard on the guard: a render that dropped the plan entirely would
         # clear the ceiling for the wrong reason.
@@ -1008,7 +1008,7 @@ def test_the_seam_brief_holds_a_nine_requirement_plan_under_its_ceiling() -> Non
 def _compiled(plan: Any) -> dict[str, Any]:
     """`plan` with a compiled translation and workflow, as `harness.graph`'s
     execute edge leaves it: the largest shape a prior plan ever reaches."""
-    spec_ids = [f"spec_{index + 1:032x}" for index in range(_SEAM_PROBE_REQUIREMENTS)]
+    spec_ids = [f"spec_{index + 1:032x}" for index in range(_BRIEF_PROBE_REQUIREMENTS)]
     operations: list[Any] = []
     steps: list[Any] = []
     for index, spec_id in enumerate(spec_ids):
@@ -1063,10 +1063,10 @@ def _compiled(plan: Any) -> dict[str, Any]:
     return plan.with_translation(translation=translation, workflow=workflow).model_dump(mode="json")
 
 
-def test_the_seam_brief_ceiling_fails_when_the_plan_section_grows() -> None:
+def test_the_planner_brief_ceiling_fails_when_the_plan_section_grows() -> None:
     """The control for the seam ceiling: a brief past it is rejected.
 
-    `SEAM_BRIEF_CEILING` bounds a rendering this seam builds, so a test that
+    `BRIEF_CEILING` bounds a rendering this seam builds, so a test that
     only ever measured the real scenario would pass whatever the renderer did
     to the real scenario. This hands `_declare` a record built the same way
     `test_every_ceiling_fails_when_its_segment_grows` builds one (a seam part
@@ -1075,16 +1075,16 @@ def test_the_seam_brief_ceiling_fails_when_the_plan_section_grows() -> None:
     request = _request(
         tool_names=["propose_plan", "ask_user_question", "reject_plan"],
         texts=["t" * _INFLATED] * 3,
-        seam=_INFLATED,
+        brief=_INFLATED,
     )
     record = compose(request, agent="planner", scenario="realistic", call_index=0)
-    measured = bucket_chars(record, SEAM_BUCKET)
-    assert measured > SEAM_BRIEF_CEILING, (
+    measured = bucket_chars(record, BRIEF_BUCKET)
+    assert measured > BRIEF_CEILING, (
         f"a fabricated seam part of {_INFLATED} chars measured {measured}, which does not "
         "exceed the ceiling (the bucket is not reading the seam part it is meant to)"
     )
     reported = {label for label, value, ceiling in _declare(record) if value > ceiling}
-    assert "seam brief" in reported, (
+    assert "planner brief" in reported, (
         "the seam-brief ceiling did not report on a request carrying an oversized seam "
         f"part. Reported set was {sorted(reported)}"
     )
@@ -1097,7 +1097,7 @@ def test_the_seam_brief_ceiling_fails_when_the_plan_section_grows() -> None:
 # schema allows and nobody writes. This tier measures the largest legal input to
 # each part of the planner's brief and holds it to a ceiling derived from the
 # limits that make it legal: `planner.plan.MAX_PLAN_RECORD_CHARS` for the plan,
-# `planner_seam`'s budget for the readings, `studio_state`'s maxima for the two
+# `planner_adapter`'s budget for the readings, `studio_state`'s maxima for the two
 # digests. The ceilings are computed in this file from those constants, so a
 # limit that moves changes its ceiling with it.
 #
@@ -1107,7 +1107,7 @@ def test_the_seam_brief_ceiling_fails_when_the_plan_section_grows() -> None:
 # its measure and other counts at `_PLAN_MEASURE_CHOICE_CAP`, and its other
 # rendered strings are ids that the `Identifier` and `SpecId` patterns
 # bound. The live question, the amendment text and a refusal are
-# unbounded on the wire, so `PlannerSeam._message` cuts each at
+# unbounded on the wire, so `PlannerAdapter._message` cuts each at
 # `MAX_QUESTION_CHARS` (`cut_user_text`) and the tier feeds each one far past it.
 
 _FIXED_IDENTIFIER_CHARS = BOUNDING_PATTERNS[r"^[a-z][a-z0-9_]{0,63}$"]
@@ -1326,7 +1326,7 @@ READINGS_SECTION_CEILING = len(_READINGS_CONTEXT.format(readings="")) + _READING
 
 
 def _readings_section(readings: Sequence[Mapping[str, Any]]) -> str:
-    """The readings section `PlannerSeam._message` opens every brief with."""
+    """The readings section `PlannerAdapter._message` opens every brief with."""
     return _READINGS_CONTEXT.format(readings=_readings_ledger(readings).text)
 
 
@@ -1349,7 +1349,7 @@ def test_the_readings_ceiling_fails_when_the_budget_is_removed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The control for the readings ceiling: with the budget gone, it is exceeded."""
-    monkeypatch.setattr(planner_seam, "_READINGS_BUDGET", 10**9)
+    monkeypatch.setattr(planner_adapter, "_READINGS_BUDGET", 10**9)
 
     assert len(_readings_section(_maximal_readings())) > READINGS_SECTION_CEILING
 
@@ -1512,7 +1512,7 @@ def _maximal_refusal() -> dict[str, Any]:
     100,000-character step id: a `share_of` on the odd stops, which gets the
     repair, and a `compare` on the even ones, which earns a decline. The run
     computed 100,000 asks first. So the ask carries every sentence
-    `PlannerSeam._message` can add to a refusal, each at its largest.
+    `PlannerAdapter._message` can add to a refusal, each at its largest.
     """
 
     def refused(index: int) -> dict[str, Any]:
@@ -1542,7 +1542,7 @@ def _share_units_repair_ceiling() -> int:
     The seam cuts its list of steps at `MAX_QUESTION_CHARS`, and the wording
     around the list is measured by rendering it for a placeholder.
     """
-    one = planner_seam._share_units_repair_sentence(_share_units_stop("s"))
+    one = planner_adapter._share_units_repair_sentence(_share_units_stop("s"))
     return len(one) - len(repr("s")) + MAX_QUESTION_CHARS
 
 
@@ -1552,19 +1552,19 @@ def _failed_run_ceiling() -> int:
     The seam cuts its list of ask numbers at `MAX_QUESTION_CHARS`, and the
     sentence is longest when the asks section marks an ask the user removed.
     """
-    one = planner_seam._failed_run_sentence([0], removed=True)
+    one = planner_adapter._failed_run_sentence([0], removed=True)
     listed = len(one) - len("0") + MAX_QUESTION_CHARS
-    return listed - len(planner_seam._failed_run_sentence(None))
+    return listed - len(planner_adapter._failed_run_sentence(None))
 
 
 def _earned_decline_ceiling() -> int:
     """The sentence naming every decline a run-time refusal can earn."""
-    earnable = set(planner_seam._UNSUPPORTED_BY_RUN_TIME_CODE.values())
-    return len(planner_seam._earned_decline_sentence(earnable))
+    earnable = set(planner_adapter._UNSUPPORTED_BY_RUN_TIME_CODE.values())
+    return len(planner_adapter._earned_decline_sentence(earnable))
 
 
 def _ask_kwargs(ask: str) -> dict[str, Any]:
-    """`_seam_brief`'s arguments for the amendment ask or the refusal ask. The
+    """`_planner_brief`'s arguments for the amendment ask or the refusal ask. The
     amendment follows replans that refused a hundred and one specs, whose
     sentence it carries."""
     if ask == "refusal":
@@ -1575,16 +1575,16 @@ def _ask_kwargs(ask: str) -> dict[str, Any]:
 def _ask_only(ask: str) -> str:
     """The amendment ask or the refusal ask a brief closes on, alone."""
     asked = {"amendment": None, "refusal": None, **_ask_kwargs(ask)}
-    return planner_seam._ask_text(pick=None, **asked)
+    return planner_adapter._ask_text(pick=None, **asked)
 
 
 def _maximal_brief_parts(ask: str) -> dict[str, str]:
-    """Every section of the largest brief `PlannerSeam._message` builds, apart.
+    """Every section of the largest brief `PlannerAdapter._message` builds, apart.
 
     The parts are rendered by the functions `_message` calls, so the sum of
     their lengths can be checked against the whole. The question is the cut
     the seam makes of a 100,000-character one, and the ask is the amendment
-    or refusal ask the brief closes on (`planner_seam._ask_text`).
+    or refusal ask the brief closes on (`planner_adapter._ask_text`).
     """
     cut_question = _BRIEF_QUESTION[: MAX_QUESTION_CHARS - len(CUT_MARKER)] + CUT_MARKER
     return {
@@ -1598,8 +1598,8 @@ def _maximal_brief_parts(ask: str) -> dict[str, str]:
 
 
 def _ask_chars(*, amendment: str | None = None, refusal: dict[str, Any] | None = None) -> int:
-    """Characters of the ask a brief closes on (`planner_seam._ask_text`)."""
-    return len(planner_seam._ask_text(amendment=amendment, refusal=refusal, pick=None))
+    """Characters of the ask a brief closes on (`planner_adapter._ask_text`)."""
+    return len(planner_adapter._ask_text(amendment=amendment, refusal=refusal, pick=None))
 
 
 def _refused_sentence_ceiling(sentence: Callable[[list[tuple[str, str]]], str]) -> int:
@@ -1632,7 +1632,7 @@ def _maximal_brief_ceilings(ask: str) -> dict[str, int]:
             framing
             + MAX_QUESTION_CHARS
             + _failed_run_ceiling()
-            + _refused_sentence_ceiling(planner_seam._avoid_sentence)
+            + _refused_sentence_ceiling(planner_adapter._avoid_sentence)
             + _earned_decline_ceiling()
             + _share_units_repair_ceiling()
         )
@@ -1643,7 +1643,7 @@ def _maximal_brief_ceilings(ask: str) -> dict[str, int]:
             - 1
             + MAX_QUESTION_CHARS
             + len("\n\n")
-            + _refused_sentence_ceiling(planner_seam._avoid_sentence)
+            + _refused_sentence_ceiling(planner_adapter._avoid_sentence)
         )
     return {
         "readings": READINGS_SECTION_CEILING,
@@ -1665,12 +1665,12 @@ def test_the_largest_legal_brief_is_within_the_sum_of_its_parts_maxima(ask: str)
 
     Readings far past their budget, the two digests through their own functions, the
     largest legal plan, a question and the amendment or refusal ask, rendered by
-    `PlannerSeam._message`. The message names each part with its size and
+    `PlannerAdapter._message`. The message names each part with its size and
     ceiling, so a failure says which one moved.
     """
     parts = _maximal_brief_parts(ask)
     ceilings = _maximal_brief_ceilings(ask)
-    brief = _seam_brief(
+    brief = _planner_brief(
         readings=_maximal_readings(),
         prior_plan=_legal_maximum_plan_record(),
         canvas_digest=_largest_canvas_digest(),
@@ -1699,7 +1699,7 @@ def test_the_largest_legal_brief_is_within_the_sum_of_its_parts_maxima(ask: str)
 
 def test_the_brief_ceiling_fails_when_a_part_is_inflated() -> None:
     """The control for the composed ceiling: one inflated part puts the brief over it."""
-    brief = _seam_brief(
+    brief = _planner_brief(
         readings=_maximal_readings(),
         prior_plan=_legal_maximum_plan_record(),
         canvas_digest={"blocks": [{"title": "x" * LEGAL_MAXIMUM_BRIEF_CEILING}]},
@@ -1711,14 +1711,14 @@ def test_the_brief_ceiling_fails_when_a_part_is_inflated() -> None:
 
 
 @pytest.mark.parametrize("ask", _ASKS)
-def test_the_question_and_ask_ceilings_fail_when_the_seam_stops_cutting(
+def test_the_question_and_ask_ceilings_fail_when_the_adapter_stops_cutting(
     ask: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The control for the user-text ceilings: with the cut gone, they are exceeded."""
-    monkeypatch.setattr(planner_seam, "cut_user_text", lambda text, cap: text)
+    monkeypatch.setattr(planner_adapter, "cut_user_text", lambda text, cap: text)
     ceilings = _maximal_brief_ceilings(ask)
 
-    question = _seam_brief(prior_plan=None, question=_BRIEF_QUESTION)
+    question = _planner_brief(prior_plan=None, question=_BRIEF_QUESTION)
     asked = _ask_only(ask)
 
     assert len(question) > ceilings["question"]
@@ -1734,7 +1734,7 @@ def test_the_question_and_ask_ceilings_fail_when_the_seam_stops_cutting(
 
 
 def _bounded_context() -> dict[str, Any]:
-    """What `PlannerSeam.__call__` is handed besides the plan and the question."""
+    """What `PlannerAdapter.__call__` is handed besides the plan and the question."""
     return {
         "readings": _maximal_readings(),
         "canvas_digest": _largest_canvas_digest(),
@@ -1742,12 +1742,12 @@ def _bounded_context() -> dict[str, Any]:
     }
 
 
-# The seam's brief in the `BOUNDED_CONTEXT` scenario: `SEAM_BRIEF_CEILING`, which
+# The seam's brief in the `BOUNDED_CONTEXT` scenario: `BRIEF_CEILING`, which
 # already covers readings at their budget, a nine-requirement plan and the
 # question, plus the two digests at their maxima (`CANVAS_SECTION_CEILING` and
 # `CONVERSATION_SECTION_CEILING`).
 BOUNDED_CONTEXT_BRIEF_CEILING = (
-    SEAM_BRIEF_CEILING + CANVAS_SECTION_CEILING + CONVERSATION_SECTION_CEILING
+    BRIEF_CEILING + CANVAS_SECTION_CEILING + CONVERSATION_SECTION_CEILING
 )
 
 # The planner's whole `contents` in that scenario: the realistic history's
@@ -1769,7 +1769,7 @@ def test_the_bounded_production_context_stays_under_its_derived_ceilings(
     """
     planner = _largest(records, scenario=BOUNDED_CONTEXT, agent="planner")
 
-    brief = bucket_chars(planner, SEAM_BUCKET)
+    brief = bucket_chars(planner, BRIEF_BUCKET)
     contents = planner["contents"]["total_chars"]
 
     assert brief > CANVAS_DIGEST_MAX_BYTES * 0.9, (
@@ -1778,7 +1778,7 @@ def test_the_bounded_production_context_stays_under_its_derived_ceilings(
     )
     assert brief <= BOUNDED_CONTEXT_BRIEF_CEILING, (
         f"the bounded-context seam brief is {brief:,} chars, past {BOUNDED_CONTEXT_BRIEF_CEILING:,} "
-        f"(SEAM_BRIEF_CEILING {SEAM_BRIEF_CEILING:,} + canvas {CANVAS_SECTION_CEILING:,} + "
+        f"(BRIEF_CEILING {BRIEF_CEILING:,} + canvas {CANVAS_SECTION_CEILING:,} + "
         f"conversation {CONVERSATION_SECTION_CEILING:,})"
     )
     assert contents <= BOUNDED_CONTEXT_CONTENTS_CEILING, (
@@ -1792,11 +1792,11 @@ def test_the_bounded_context_ceilings_fail_when_the_brief_grows() -> None:
     request = _request(
         tool_names=["propose_plan"],
         texts=[],
-        seam=BOUNDED_CONTEXT_BRIEF_CEILING + 1,
+        brief=BOUNDED_CONTEXT_BRIEF_CEILING + 1,
     )
     record = compose(request, agent="planner", scenario=BOUNDED_CONTEXT, call_index=0)
 
-    assert bucket_chars(record, SEAM_BUCKET) > BOUNDED_CONTEXT_BRIEF_CEILING
+    assert bucket_chars(record, BRIEF_BUCKET) > BOUNDED_CONTEXT_BRIEF_CEILING
     assert record["contents"]["total_chars"] > BOUNDED_CONTEXT_BRIEF_CEILING
 
 

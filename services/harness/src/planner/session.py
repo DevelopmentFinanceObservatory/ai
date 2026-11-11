@@ -216,7 +216,7 @@ def _user_message(event: Any) -> bool:
 
     A user-authored event with text and no `branch`. The planner seam sends
     its own messages (the brief, an amendment's or a refusal's ask) as
-    user-role content under `harness.planner_seam._PLANNER_BRANCH`, so they
+    user-role content under `harness.planner_adapter._PLANNER_BRANCH`, so they
     are not the user's.
     """
     return (

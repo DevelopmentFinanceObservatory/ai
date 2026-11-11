@@ -975,7 +975,7 @@ class _FetchProgress:
     Mutable and passed by reference from `materialise_and_register` down through
     `_fetch_artifact_bytes` into `_fetch_artifact_bytes_uncapped`, rather than returned
     alongside the fetched bytes: `_fetch_artifact_bytes`'s own return shape (`bytes | None`)
-    is a seam `data_mcp`'s and `harness`'s own test suites monkeypatch directly, and a
+    is an interface `data_mcp`'s and `harness`'s own test suites monkeypatch directly, and a
     `TimeoutError` cancelling the fetch coroutine mid-flight would lose a plain return
     value along with the cancelled frame anyway.
     """

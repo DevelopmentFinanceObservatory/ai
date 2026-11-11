@@ -1,4 +1,4 @@
-"""The materialisation seam shared by data-mcp and analysis-mcp: one
+"""The materialisation interface shared by data-mcp and analysis-mcp: one
 content-addressed store, keyed by the pair every surface in this platform
 calls a frame reference."""
 

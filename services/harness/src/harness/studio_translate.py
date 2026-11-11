@@ -74,7 +74,7 @@ from pydantic import ValidationError
 
 from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
-from harness.graph.seams import Executor
+from harness.graph.interfaces import Executor
 from harness.graph.state import (
     APPROVE_INTERRUPT,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
@@ -504,7 +504,7 @@ class _RecordingExecutor:
     async def aclose(self) -> None:
         """Release the wrapped executor's resources, if it holds any.
 
-        `Executor` (`harness.graph.seams.Executor`) is a bare-call protocol with
+        `Executor` (`harness.graph.interfaces.Executor`) is a bare-call protocol with
         no `aclose` of its own; `McpExecutor` adds one to release its
         long-lived per-conversation presentation-mcp clients
         (`harness.mcp_client.McpExecutor.aclose`), while the scripted

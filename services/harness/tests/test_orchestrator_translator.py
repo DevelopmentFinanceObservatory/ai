@@ -35,7 +35,7 @@ from harness.reply_figures import DrawnSeries, card_holds
 from harness.scripted_plan import scripted_plan
 from harness.sentences import (
     TERMINAL_PROPOSE_CODES,
-    SeamCode,
+    StopCode,
     failure_sentence,
     refusal_sentence,
 )
@@ -404,7 +404,7 @@ def test_explain_dfos_step_shows_the_counts_it_read(counts, detail):
     ]
 
 
-# A refusal detail with every slot a `SEAM_SENTENCES` template reads filled.
+# A refusal detail with every slot a `STOP_SENTENCES` template reads filled.
 _FILLED_DETAIL = {
     "tool": "propose_plan",
     "reference": "4f2a9c0d1e7b4a55",
@@ -435,7 +435,7 @@ def _plan_failed_step(failure: object) -> ActivityStep:
     return next(f for f in frames if f.event == "activity.step" and f.status is StepStatus.FAILED)
 
 
-@pytest.mark.parametrize("code", [*SeamCode, *TERMINAL_PROPOSE_CODES])
+@pytest.mark.parametrize("code", [*StopCode, *TERMINAL_PROPOSE_CODES])
 def test_a_plan_the_planner_refused_shows_its_code_s_sentence_and_none_of_its_detail(code):
     """The refusal's own sentence is filled for the agent with a tool name, a
     reference, a requirement id or the declined ask. The step reads the
@@ -464,7 +464,7 @@ def test_a_hand_back_for_constant_prices_reads_as_a_search_for_them():
     [
         # A reason written for the agent stays out, and the code's sentence shows.
         (
-            {"code": "internal_error", "reason": "the planner seam ran past 400 events"},
+            {"code": "internal_error", "reason": "the planner ran past 400 events"},
             "internal_error",
         ),
         ({"code": None, "reason": "the pair did not converge"}, None),

@@ -7,7 +7,7 @@ so the digest's citation, latest period, caveats and steps are the words the car
 shows, and a summed frame's family is named by its title. The body follows dfo-spec-kit's
 `description.schema.json`; `VersionDescription` keeps only the members `get_data` reads.
 
-`fetch_version_description` is the public seam. Any failure, a refusal (404 for a
+`fetch_version_description` is the public entry point. Any failure, a refusal (404 for a
 version without a record, 410 for a revoked one), a 503, a timeout or a body that
 does not parse, logs one warning and returns `None`, and the digest renders without
 a description, as it does without statistics.

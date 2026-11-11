@@ -5,7 +5,7 @@ An adapter over the planner, a Pydantic AI agent run as a workflow node
 `propose_plan`. The planner runs as a dynamically-scheduled child of the
 graph's own node, through `Context.run_node`, and this module reads what it
 leaves in session state and translates it into
-`harness.graph.seams.PlannerModel`'s contract.
+`harness.graph.interfaces.PlannerModel`'s contract.
 
 The planner's own tools settle methodology and carry it to a compiled
 workflow (`propose_plan`, whose `translation` is either the compiled outcome
@@ -43,7 +43,7 @@ the answer added (`_answer_text`), since the planner node reruns on resume.
 nine-requirement plan, compiled, and readings at their whole budget, the plan
 section is 8,438 characters where its raw JSON is 22,609, and the readings
 section is 3,486. The whole brief renders 12,627 characters, and
-`test_context_budget.py` holds it to a `SEAM_BRIEF_CEILING` of 15,800, 25%
+`test_context_budget.py` holds it to a `BRIEF_CEILING` of 15,800, 25%
 above that. These are character counts of the brief alone.
 """
 
@@ -165,8 +165,8 @@ from harness.graph.state import (
 from harness.planner_model import refuse_vertex_ai
 from harness.planner_node import planner_node, pydantic_planner
 from harness.planner_run import (
+    PlannerAdapterError,
     PlannerRun,
-    PlannerSeamError,
     closing_refusal,
     not_ready,
     referral_of,
@@ -174,7 +174,7 @@ from harness.planner_run import (
 from harness.prefix_cache import PrefixCache, gemini_model_name
 from harness.sentences import (
     PlanWords,
-    SeamCode,
+    StopCode,
     refusal_reason,
     refusal_sentence,
 )
@@ -236,7 +236,7 @@ a spec_id or a source that neither these readings nor a referral has named.
 # and a longer one sheds sentences before it folds or drops any reading
 # (`render_readings`).
 _READINGS_BUDGET = 3_000
-# The ledger `PlannerSeam._message` renders when its caller passes none.
+# The ledger `PlannerAdapter._message` renders when its caller passes none.
 _NO_READINGS = RenderedReadings("", ())
 
 # How many of the skill pages the planner read for this plan
@@ -310,7 +310,7 @@ _FACET_MISMATCH_CODE = "cross_frame_facet_mismatch"
 
 @dataclass(frozen=True)
 class _RevisionSession(CallSession):
-    """The session a revision's proposal is checked against (`PlannerSeam.revise`).
+    """The session a revision's proposal is checked against (`PlannerAdapter.revise`).
 
     The user has spoken since the plan it amends was recorded: their switch
     is the revision. A dataset that replaces one the user picked answering
@@ -331,8 +331,8 @@ class _RevisionSession(CallSession):
         return elected | {new for new, old in self.inherits.items() if old in elected}
 
 
-class PlannerSeam:
-    """`harness.graph.seams.PlannerModel`, implemented by `src/planner` and the translation it runs."""
+class PlannerAdapter:
+    """`harness.graph.interfaces.PlannerModel`, implemented by `src/planner` and the translation it runs."""
 
     def __init__(
         self,
@@ -650,9 +650,9 @@ class PlannerSeam:
                 if plan.status is not PlanStatus.PENDING_APPROVAL:
                     # `declare_ready` enforces this (`planner.tools.
                     # _execution_blocked`); repeated here so a future gap in that
-                    # allowlist reaches this seam as a loud `PlannerSeamError`
+                    # allowlist reaches this seam as a loud `PlannerAdapterError`
                     # instead of a plan the graph shows the user as approvable.
-                    raise PlannerSeamError(
+                    raise PlannerAdapterError(
                         f"a plan that is {plan.status.value} was declared ready, not "
                         "pending_approval; refusing to report it ready"
                     )
@@ -666,7 +666,7 @@ class PlannerSeam:
             finally:
                 # Every exit of this method runs through here: a normal return,
                 # an ask the planner's run ended on included, and a raised
-                # `PlannerSeamError`. Nothing in this method catches that
+                # `PlannerAdapterError`. Nothing in this method catches that
                 # exception, so only a `finally` runs before the flush this
                 # node's own `NodeRunner` performs (see `_persist_durable`'s own
                 # docstring).
@@ -798,7 +798,7 @@ class PlannerSeam:
         referral does: on its closing refusal
         (`harness.planner_run.closing_refusal`), on the service that did not
         answer for a transient one, which no later round proposes again
-        (`_unanswered`), or as `SeamCode.PLAN_NOT_READY` with the referral's
+        (`_unanswered`), or as `StopCode.PLAN_NOT_READY` with the referral's
         reason (`harness.planner_run.not_ready`), since no model is there to
         settle it.
 
@@ -890,7 +890,7 @@ class PlannerSeam:
         refusal the run ended on. A run that ends with no plan declared ready
         and no refusal of its own ends on the bound that closed one of its
         model calls (`harness.turn_budget.TurnBudget.closed`), or else on
-        `SeamCode.PLAN_NOT_READY`, carrying the referral the last translation
+        `StopCode.PLAN_NOT_READY`, carrying the referral the last translation
         answered, if any (`harness.planner_run.not_ready`). A run that ends on
         an accepted ask answers neither: the ask is in session state for
         `__call__` to return.
@@ -975,13 +975,13 @@ class PlannerSeam:
     # not answering, or a request that spent a bound of its budget.
     _FINAL_CODES = frozenset(
         {
-            SeamCode.TURN_MODEL_TIME_SPENT,
-            SeamCode.TURN_MODEL_CALLS_SPENT,
-            SeamCode.TURN_WALL_TIME_SPENT,
-            SeamCode.TRANSLATION_INTERNAL_FAILURE,
-            SeamCode.TRANSLATION_REPEATED,
-            SeamCode.DISCOVERY_UNAVAILABLE,
-            SeamCode.PLANNER_TOOL_FAILED,
+            StopCode.TURN_MODEL_TIME_SPENT,
+            StopCode.TURN_MODEL_CALLS_SPENT,
+            StopCode.TURN_WALL_TIME_SPENT,
+            StopCode.TRANSLATION_INTERNAL_FAILURE,
+            StopCode.TRANSLATION_REPEATED,
+            StopCode.DISCOVERY_UNAVAILABLE,
+            StopCode.PLANNER_TOOL_FAILED,
             ProblemCode.NOTHING_TO_PLAN,
         }
     )
@@ -995,7 +995,7 @@ class PlannerSeam:
         return {
             "refused": {
                 "text": refusal_sentence(refused),
-                "final": refused.get("code") in PlannerSeam._FINAL_CODES,
+                "final": refused.get("code") in PlannerAdapter._FINAL_CODES,
                 "code": refused.get("code"),
             }
         }
@@ -1006,7 +1006,7 @@ class PlannerSeam:
         as one sentence for the user (`harness.sentences.refusal_reason`),
         naming requirements by `words` (`harness.plan_display.plan_words`), under `reason`, which
         a switch that did not apply shows under its choice."""
-        answer = PlannerSeam._refused(refused)
+        answer = PlannerAdapter._refused(refused)
         answer["refused"]["reason"] = refusal_reason(refused, words=words)
         return answer
 
@@ -1264,14 +1264,14 @@ def _sources_by_spec_id(state: SessionState, plan: Plan) -> dict[str, SelectedSo
 
 def _unanswered(referral: Mapping[str, Any]) -> dict[str, Any] | None:
     """The refusal a revision ends on for a transient referral, or `None` for
-    any other: Search not answering as `SeamCode.DISCOVERY_UNAVAILABLE`, and
+    any other: Search not answering as `StopCode.DISCOVERY_UNAVAILABLE`, and
     any other service, such as the calculation service, as
     `ProblemCode.SURFACE_UNAVAILABLE`. Each carries the requirement the
     referral is about and its reason."""
     if referral.get("outcome") != Outcome.TRANSIENT.value:
         return None
     return {
-        "code": SeamCode.DISCOVERY_UNAVAILABLE
+        "code": StopCode.DISCOVERY_UNAVAILABLE
         if referral.get("kind") == ReferralKind.DISCOVERY_UNAVAILABLE
         else ProblemCode.SURFACE_UNAVAILABLE,
         "detail": {
@@ -1525,7 +1525,7 @@ def _check_branches(events: Sequence[Event], *, planner: str) -> None:
     may have appended nothing yet.
 
     Raises:
-        PlannerSeamError: If a planner event carries another branch. Nothing
+        PlannerAdapterError: If a planner event carries another branch. Nothing
             about the run is reported back. A planner whose events reach
             every branch has also read every unbranched event, so the plan it
             produced cannot be trusted to have been drafted from its own
@@ -1537,7 +1537,7 @@ def _check_branches(events: Sequence[Event], *, planner: str) -> None:
         if event.author == planner and event.branch != _PLANNER_BRANCH
     )
     if strays:
-        raise PlannerSeamError(
+        raise PlannerAdapterError(
             f"{len(strays)} planner event(s) this run appended carry a branch other than "
             f"{_PLANNER_BRANCH!r}: {strays!r}. ADK treats an unbranched event as belonging "
             "to every branch and filters a branched one by path, so the planner's events "
@@ -2099,4 +2099,4 @@ def _section(title: str, body: dict[str, Any] | None) -> str:
     return f"\n{title}:\n{json.dumps(body)}\n" if body else ""
 
 
-__all__ = ["PlannerSeam", "PlannerSeamError"]
+__all__ = ["PlannerAdapter", "PlannerAdapterError"]

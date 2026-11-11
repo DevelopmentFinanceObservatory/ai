@@ -143,7 +143,7 @@ def _mint_response() -> dict[str, Any]:
             "spec_id": _SPEC_ID,
             "identity": {
                 "identity_version": "spec1",
-                "shape": {"id": "SeamTestShape", "kind": "stat_var"},
+                "shape": {"id": "AcrossServicesShape", "kind": "stat_var"},
                 "entities": {"reporter": ["country/KEN"]},
                 "facets": {},
                 "requested_window": {"kind": "all"},
@@ -152,7 +152,7 @@ def _mint_response() -> dict[str, Any]:
         },
         "content_version": _CONTENT_VERSION,
         "coverage": {"rows": 1, "dimensions": []},
-        "citation": {"text": "seam test fixture", "sources": []},
+        "citation": {"text": "across-services test fixture", "sources": []},
         "trace": {"graph_revision": "g1", "facets": []},
         "warnings": [],
         "artifacts": [
