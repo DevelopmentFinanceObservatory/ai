@@ -140,10 +140,12 @@ def planner_node(
             return turn
 
         def after_response(closed_by: SeamCode | None, usage: Usage | None) -> types.Content | None:
-            if closed_by is not None:
-                return directive_turn(run.model_answered(closed_by))
+            # A call a bound closed is logged with the usage its chunks
+            # reported before the cut.
             if usage is not None:
                 log_usage(AGENT_NAME, usage)
+            if closed_by is not None:
+                return directive_turn(run.model_answered(closed_by))
             return None
 
         def tool_failed(name: str, error: BaseException) -> dict[str, Any]:

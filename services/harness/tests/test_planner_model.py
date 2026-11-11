@@ -9,15 +9,16 @@ way. Bounds are fractions of a second, so a cut fires at once.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
-from google.genai import errors, types
+from google.genai import Client, _api_client, errors, types
 from harness.planner_model import (
     UnexpectedRequestFormError,
     Usage,
@@ -79,9 +80,10 @@ async def _hanging(
     delivered = 0
     async for chunk in stream:
         if delivered == after:
-            await asyncio.Event().wait()
+            break
         delivered += 1
         yield chunk
+    await asyncio.Event().wait()
 
 
 class _Caches:
@@ -393,6 +395,52 @@ async def test_every_request_carries_the_orchestrators_retries() -> None:
     orchestrator_model = _retrying(MODEL)
     assert isinstance(orchestrator_model, BoundedGemini)
     assert http_options.retry_options == orchestrator_model.retry_options == model_retry_options()
+
+
+_UNAVAILABLE = {"error": {"code": 503, "status": "UNAVAILABLE"}}
+_ACCRA = {
+    "candidates": [
+        {"content": {"role": "model", "parts": [{"text": "Accra"}]}, "finishReason": "STOP"}
+    ]
+}
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["uncached", "prefix-cached"])
+async def test_a_503_is_retried_by_google_genai_before_the_planner_sees_it(
+    cached: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fault goes in under google-genai's retry loop, so the attempts counted
+    # are the ones the SDK makes. A client built without retry options makes
+    # one, so the retries are the ones each request carries.
+    sent: list[dict[str, Any]] = []
+
+    async def answer(
+        self: Any, http_request: _api_client.HttpRequest, stream: bool = False, **_: Any
+    ) -> _api_client.HttpResponse:
+        if http_request.url.endswith("/cachedContents"):
+            return _api_client.HttpResponse({}, [json.dumps({"name": CACHE_NAME})])
+        sent.append(cast(dict[str, Any], http_request.data))
+        if len(sent) < 3:
+            raise errors.ServerError(503, _UNAVAILABLE)
+        return _api_client.HttpResponse({}, [json.dumps(_ACCRA)])
+
+    async def no_wait(seconds: float) -> None:
+        del seconds
+
+    monkeypatch.setattr(_api_client.BaseApiClient, "_async_request_once", answer)
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+    model = planner_model(
+        MODEL,
+        client=Client(api_key="test-key"),
+        budget=None,
+        prefix_cache=PrefixCache() if cached else None,
+    )
+
+    response = await _pai(model)
+
+    assert len(sent) == 3
+    assert {request.get("cachedContent") for request in sent} == {CACHE_NAME if cached else None}
+    assert _pai_text(response) == "Accra"
 
 
 async def test_a_non_streamed_request_refuses() -> None:

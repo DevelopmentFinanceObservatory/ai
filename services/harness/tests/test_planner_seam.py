@@ -399,6 +399,17 @@ class _SeamHarness:
                 output = event.output
         return cast(dict[str, Any] | None, output)
 
+    async def restore(self, events: Sequence[Event], state: Mapping[str, Any]) -> None:
+        """Make `events`, on `state`, this harness's session, for a test that
+        resumes a session another build stored."""
+        assert self._session_id is None, "run() has been called already"
+        session = await self._sessions.create_session(
+            app_name=_APP, user_id=_USER, state=dict(state)
+        )
+        self._session_id = session.id
+        for event in events:
+            await self._sessions.append_event(session, event)
+
     async def state(self) -> SessionState:
         assert self._session_id is not None, "run() has not been called yet"
         session = await self._sessions.get_session(
@@ -1305,65 +1316,6 @@ async def test_an_answer_to_a_pause_from_before_the_node_level_ask_re_enters_the
     brief = _brief_follows_the_question(request)
     assert question["message"] in brief
     assert f"They picked 'a candidate', id `{SPEC}`." in brief
-
-
-async def test_an_ask_stored_with_an_empty_text_part_after_its_call_resumes_to_the_plan(
-    monkeypatch: pytest.MonkeyPatch, decision: Any, requirement: Any, derived_requirement: Any
-) -> None:
-    """A conversation paused on a planner ask by the ADK planner stores the
-    ask's model response as ADK stored a live one: the function call, then an
-    empty text part. The user's answer resumes it with the pick in the brief,
-    and the turn ends with the plan."""
-    plan = _translated_plan(decision, requirement, derived_requirement)
-    question = {
-        "message": "Which source did you mean?",
-        "candidates": [{"spec_id": SPEC, "label": "a candidate"}],
-    }
-    scripted = ScriptedGenai([_calls((PLANNER_ASK, question)), _calls(*_DECLARE)])
-    seam = _scripted_planner(scripted, compiled_proposals=True)
-    harness = _SeamHarness()
-    entry: dict[str, Any] = {
-        "question": plan.question,
-        "readings": [],
-        "prior_plan": plan.model_dump(mode="json"),
-    }
-
-    as_kept = planner_node.model_response_event
-
-    def as_stored(response: Any) -> Event:
-        event = as_kept(response)
-        assert event.content is not None and event.content.parts is not None
-        event.content.parts.append(types.Part(text=""))
-        return event
-
-    with monkeypatch.context() as patched:
-        patched.setattr(planner_node, "model_response_event", as_stored)
-        assert await harness.run(seam, **entry) is None
-    (stored,) = [
-        event.content.parts
-        for event in await harness.events()
-        if event.content and event.get_function_calls() and event.author == AGENT_NAME
-    ]
-    assert stored is not None and stored[-1].text == ""
-
-    answer = types.Content(
-        role="user",
-        parts=[
-            create_request_input_response(
-                _pending_ask_interrupt_id(await harness.events()), {"result": {"spec_id": SPEC}}
-            )
-        ],
-    )
-    resumed = await harness.run(seam, new_message=answer, **entry)
-
-    assert resumed is not None and resumed["plan"]["version"] == plan.version
-    assert len(scripted.requests) == 2
-    brief = _brief_follows_the_question(scripted.requests[1])
-    assert f"They picked 'a candidate', id `{SPEC}`." in brief
-    tool_context = SimpleNamespace(
-        state={}, function_call_id=None, session=SimpleNamespace(events=await harness.events())
-    )
-    assert elected_spec_ids(SessionCall.of(tool_context)) == frozenset({SPEC})
 
 
 async def test_the_branch_check_runs_on_the_events_a_run_left_before_pausing_for_an_ask(

@@ -37,8 +37,8 @@ from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import errors, types
 from harness import planner_node as planner_node_module
-from harness import planner_run
-from harness.planner_run import PlannerSeamError
+from harness import planner_run, planner_seam, usage
+from harness.planner_run import PlannerRun, PlannerSeamError
 from harness.planner_seam import PlannerSeam
 from harness.scripted import _compiled_proposal
 from harness.sentences import SeamCode, refusal_sentence
@@ -93,6 +93,7 @@ from .scripted_planner import SIGNED as _SIGNED
 from .scripted_planner import SSE as _SSE
 from .scripted_planner import Tools, scripted_planner
 from .scripted_planner import numbered_call_ids as _numbered_call_ids
+from .test_planner_model import _HangingGenai
 from .test_planner_seam import (
     _APP,
     _USER,
@@ -770,6 +771,30 @@ async def test_a_budget_closing_a_call_with_nothing_to_pin_refuses(
     _assert_expected(request, entry)
 
 
+async def test_a_call_a_bound_closes_logs_the_usage_its_chunks_reported(
+    plan: Plan, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The stream stops after a chunk that reported usage, and the model-time
+    bound closes the call. Operators cost a turn from its `token usage` lines,
+    so the closed call logs the usage it reported."""
+    unfinished = Reply(chunks=[[text_part("Partly")]], usage=_USAGE, finish_reason=None)
+    scripted = _HangingGenai([unfinished], hang_after=1)
+    seam = scripted_planner(scripted, tools=_proposals())
+    budget = TurnBudget(model_time_s=0.05, model_calls_max=30, wall_s=60.0, first_chunk_s=30.0)
+    token = current_turn_budget.set(budget)
+    try:
+        with caplog.at_level(logging.INFO, logger=usage.logger.name):
+            output = await _SeamHarness().run(seam, readings=[], **_planned(plan))
+    finally:
+        current_turn_budget.reset(token)
+
+    code = SeamCode.TURN_MODEL_TIME_SPENT
+    assert output is not None and output["refused"]["code"] == code
+    assert [record.args for record in caplog.records if record.name == usage.logger.name] == [
+        (AGENT_NAME, 120, 40, 9, 4, 133)
+    ]
+
+
 # --- Responses that are no turn, and a run that raises ----------------------------------
 
 
@@ -1027,13 +1052,31 @@ async def _stopped(plan: Plan) -> _Entry:
 
 
 async def test_a_stop_while_a_planner_tool_hangs_stores_the_answered_call_and_not_the_hanging_one(
-    plan: Plan, request: pytest.FixtureRequest
+    plan: Plan,
+    request: pytest.FixtureRequest,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    entry = await _stopped(plan)
+    """The Stop's cancellation reaches the hanging tool as a cancellation: the
+    run logs no tool failure and records no refusal."""
+    runs: list[PlannerRun] = []
+
+    def recorded(**kwargs: Any) -> PlannerRun:
+        runs.append(PlannerRun(**kwargs))
+        return runs[-1]
+
+    monkeypatch.setattr(planner_seam, "PlannerRun", recorded)
+    with caplog.at_level(logging.ERROR):
+        entry = await _stopped(plan)
 
     assert entry.state["planner:first"] == "answered"
     assert "planner:hanging" not in entry.state
     _assert_expected(request, entry)
+    assert [
+        record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR
+    ] == []
+    (run,) = runs
+    assert run.refused is None
 
 
 async def test_a_stop_while_the_node_waits_on_its_event_closes_the_run_in_its_task(

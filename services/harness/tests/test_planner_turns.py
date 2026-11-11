@@ -1,5 +1,6 @@
 """`PlannerSeam`'s planner on a scripted google-genai client: its model, its
-requests and its sessions over turns that amend, replan and switch.
+requests and its sessions over turns that amend, replan and switch, and its
+resume of the sessions in `fixtures/adk_planner_sessions`.
 
 Each test runs a script on a scripted google-genai client through the seam. An
 entry is checked against the stored expectation of its test
@@ -17,6 +18,7 @@ import json
 import re
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from unittest import mock
 
@@ -54,6 +56,7 @@ from planner.plan import (
     load_plan,
     save_plan,
 )
+from planner.session import session_steps
 from planner.settings import AgentSettings
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
@@ -83,8 +86,10 @@ from .test_graph import (
 )
 from .test_planner_model import CACHE_NAME, _Caches, _with_caches
 from .test_planner_node import (
+    _ELECTED_KEY,
     _MODEL,
     _QUESTION,
+    _READ_KEY,
     _REFUSED,
     _SIGNED,
     _SPEC,
@@ -108,6 +113,9 @@ from .test_planner_seam import (
     _APP,
     _PICKED,
     _USER,
+    SPEC,
+    _brief_follows_the_question,
+    _pending_ask_interrupt_id,
     _rediscovery_refusal,
     _SeamHarness,
     _translated_plan,
@@ -411,6 +419,92 @@ async def test_the_seams_observer_sees_each_answer_the_model_reads(plan: Plan) -
     assert observed[2] == (PROPOSE_PLAN, failed_tool_answer(PROPOSE_PLAN, raised))
     assert observed[3][1] is not None and observed[3][1]["outcome"] == Outcome.OK
     assert len(observed) == 4
+
+
+# --- Sessions the ADK planner stored ------------------------------------------------------
+
+_ADK_SESSIONS = Path(__file__).parent / "fixtures" / "adk_planner_sessions"
+# The question the planner asked in each of `_ADK_SESSIONS`' sessions.
+_ASKED = {"message": "Which source did you mean?"}
+
+
+@pytest.mark.parametrize(
+    ("recording", "call_id", "asked", "answer", "picked", "elected"),
+    [
+        (
+            "paused_on_a_planner_ask",
+            "a1",
+            {**_ASKED, "candidates": [{"spec_id": SPEC, "label": "a candidate"}]},
+            {"result": {"spec_id": SPEC}},
+            f"They picked 'a candidate', id `{SPEC}`.",
+            [SPEC],
+        ),
+        (
+            "paused_on_adk_request_input",
+            "r1",
+            _ASKED,
+            {"result": "2020"},
+            "They picked '2020', id `2020`.",
+            [],
+        ),
+    ],
+    ids=["planner-ask", "adk-request-input"],
+)
+async def test_a_session_the_adk_planner_paused_on_an_ask_resumes_to_the_plan(
+    plan: Plan,
+    recording: str,
+    call_id: str,
+    asked: dict[str, Any],
+    answer: dict[str, Any],
+    picked: str,
+    elected: list[str],
+) -> None:
+    """A conversation the ADK planner left paused on an ask, as it stored it
+    (`fixtures/adk_planner_sessions`), resumes on the user's answer: the planner
+    reads the ask and its answer from the stored events, puts the question in
+    the brief, replays no empty text part, and lands the plan."""
+    stored = json.loads((_ADK_SESSIONS / f"{recording}.json").read_text())
+    harness = _SeamHarness()
+    await harness.restore(
+        [Event.model_validate(event) for event in stored["events"]], stored["state"]
+    )
+    scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
+    seam = scripted_planner(scripted, tools=_proposals())
+    assert _pending_ask_interrupt_id(await harness.events()) == call_id
+    resume = types.Content(role="user", parts=[create_request_input_response(call_id, answer)])
+
+    output = await harness.run(seam, new_message=resume, readings=[], **_planned(plan))
+
+    assert (
+        output is not None
+        and output["plan"]["workflow"] == plan.model_dump(mode="json")["workflow"]
+    )
+    steps = list(session_steps(await harness.events()))
+    assert [(step.kind, step.call_id) for step in steps] == [
+        ("message", None),
+        ("call", call_id),
+        ("answer", call_id),
+        ("response", None),
+    ]
+    assert steps[1].args == steps[2].args == asked
+    assert steps[2].body == answer
+    state = await harness.state()
+    assert state[_READ_KEY] == {
+        "steps": [["message", None], ["call", call_id], ["answer", call_id]],
+        "response_calls": [[PROPOSE_PLAN, "p1"]],
+    }
+    assert state[_ELECTED_KEY] == elected
+    (request,) = scripted.requests
+    brief = _brief_follows_the_question(request)
+    assert _ASKED["message"] in brief
+    assert picked in brief
+    assert not [
+        part
+        for content in request.content_list
+        if content.role == "model"
+        for part in content.parts or ()
+        if part.text == ""
+    ], "the ADK planner's trailing empty text part is replayed"
 
 
 # --- Amendments and replans ---------------------------------------------------------------

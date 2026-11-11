@@ -987,8 +987,8 @@ def build_seam(
     """The seam `harness.wiring.build_planner` builds, with the probe's translate step and the
     planner's model calls going through `client`.
 
-    The planner, its instruction, its tools and the seam's callbacks are production's
-    own.
+    The planner, its instruction, its tools and the planner node the seam runs it in
+    (`harness.planner_node`) are production's own.
     """
     return PlannerSeam(
         settings=Settings(),
