@@ -7,10 +7,11 @@ plan's steps) and `scripted_publish_result` (the completion gate's
 publisher). Every frame is the one Kenyan life-expectancy series.
 
 A real planner runs on a scripted model through `scripted_client`, a
-google-genai client whose streamed calls answer from a script, which the ADK
-planner's `Gemini` and the Pydantic AI planner both take. `use_compiled_proposals`
-gives the planner's tools a `propose_plan` that declares the plan already on
-record ready, for a script that drives no translation.
+google-genai client whose streamed calls answer from a script. The ADK
+planner's `Gemini` and the Pydantic AI planner both take that client.
+`use_compiled_proposals` gives the planner's tools a `propose_plan` that
+declares the plan already on record ready, for a script that drives no
+translation.
 """
 
 from __future__ import annotations

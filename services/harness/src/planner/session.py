@@ -7,7 +7,7 @@ so one reader serves a tool call on either. `SessionCall` is the
 
 The events a call reads are those of the session as its tool runs. ADK appends
 a model response's event before the response's calls run, and their answers
-in one event once every call has answered: the ADK planner's flow does so, and
+in one event once every call has answered. The ADK planner's flow does so, and
 the Pydantic AI planner's node (`harness.planner_node`) yields each response's
 event before Pydantic AI runs its calls, and ADK appends each event a node
 yields before the node goes on. So a call sees the earlier events, its own
@@ -130,7 +130,7 @@ def session_steps(events: SessionEvents, *, serving: str | None = None) -> Itera
     """The steps of a session's `events`, in event order (`planner.call.Step`).
 
     The only reader of ADK events in the planner. A message the user typed
-    (`_user_message`) is one `message` step; the event's other parts are not
+    (`_user_message`) is one `message` step. The event's other parts are not
     read, and no producer in the harness sends a user-typed event that also
     carries a function part. Every other event yields a `call` step for each
     ask carrying an id, an `answer` step for each response to one, paired
@@ -143,11 +143,10 @@ def session_steps(events: SessionEvents, *, serving: str | None = None) -> Itera
     the call, never reached the user: it yields no step at all, so every
     reader sees the session as if the ask had not been made. An accepted
     one's tool answers `ASK_ACCEPTED`, which says nothing the user did and is
-    not read,
-    and the graph's planner node pauses on it with a `RequestInput` under
-    the call's own id, so the user's answer to that interrupt is the
+    not read, and the graph's planner node pauses on it with a `RequestInput`
+    under the call's own id, so the user's answer to that interrupt is the
     answer to the call, and the interrupt's own call repeats the question.
-    A workflow interrupt is a `RequestInput` its node yields:
+    A workflow interrupt is a `RequestInput` its node yields.
     `create_request_input_event` builds the call with `id=interrupt_id` and
     dumps the whole `RequestInput` into its `args`, so the node's own
     `payload` nests under `args["payload"]`, and

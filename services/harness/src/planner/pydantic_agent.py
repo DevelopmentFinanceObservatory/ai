@@ -2,10 +2,10 @@
 
 The agent serves each `planner.tool_spec.ToolSpec` with the declaration the
 ADK planner shows for it (`function_declaration`), and a call runs the spec's
-body over the `planner.call.PlannerCall` its run's `PlannerDeps` makes (`serve_tool`), with the
-model's arguments as sent. `run_planner` drives one run with `Agent.iter`
-from the user's message and the brief, as the ADK planner's `single_turn`
-run starts from the turn's question and the brief
+body (`serve_tool`) over the `planner.call.PlannerCall` its run's
+`PlannerDeps` makes, with the model's arguments as sent. `run_planner` drives
+one run with `Agent.iter` from the user's message and the brief, as the ADK
+planner's `single_turn` run starts from the turn's question and the brief
 (`planner.agent.prepend_brief`), and yields each model response as it
 arrives and then its calls' answers, with the state they wrote, once every
 call has answered. A tool that ends the run (`planner.tools.EndRun`) stops it
@@ -107,9 +107,9 @@ class PlannerDeps:
     model request, so the keys a response's calls wrote are told apart from
     the keys of the responses before it. `call_for` makes the `PlannerCall` a
     tool call runs over, from that state view and the call's id, so the
-    planner reads the session through whatever stores it. `tool_answered` is told each tool's
-    answer and `tool_failed` each tool that raised. `ended` says whether a
-    tool ended the run.
+    planner reads the session through whatever stores it. `tool_answered` is
+    told each tool's answer and `tool_failed` each tool that raised. `ended`
+    says whether a tool ended the run.
     """
 
     state: MutableMapping[str, Any]
@@ -123,13 +123,13 @@ class PlannerDeps:
         self._response_view = RecordingState(self.state)
 
     def end_run(self) -> None:
-        """Record that a tool ended the run, so no model request follows the current calls."""
+        """Mark the run ended, so no model request follows the current calls."""
         self.ended = True
 
 
 @dataclass(frozen=True)
 class PlannerResponse:
-    """One model response of the run, as soon as it is received and before its calls run.
+    """One model response of the run, yielded on receipt, before its calls run.
 
     `parts` are its parts as google-genai parts: each function call with its
     id, text, and each thought with `thought` set, each with its thought
@@ -288,7 +288,7 @@ def _tool(spec: ToolSpec) -> Tool[PlannerDeps]:
 
 
 def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
-    """The function Pydantic AI calls for `spec`, with the model's arguments unvalidated.
+    """The function Pydantic AI calls for `spec`, taking the arguments as sent.
 
     It runs the spec's body (`serve_tool`) over the call's `PlannerCall`, whose
     state is the view the response's calls write through. An answer that is
@@ -297,9 +297,8 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
     callback answers it, and a cancellation propagates. An answer of the
     body's holding an `error` key, the refusal of a call missing a required
     argument (`planner.tool_spec.missing_arguments`), marks the call's span
-    failed (`planner.tool_spec.serve_tool`). Either
-    answer goes to `tool_answered` as the call finishes, and what that raises
-    fails the run.
+    failed (`planner.tool_spec.serve_tool`). Either answer goes to
+    `tool_answered` as the call finishes, and what that raises fails the run.
     """
 
     async def call(ctx: RunContext[PlannerDeps], **raw: Any) -> dict[str, Any]:
@@ -326,7 +325,7 @@ async def run_planner(
     model: Model | None = None,
     conversation_id: str | None = None,
 ) -> AsyncGenerator[PlannerItem]:
-    """Run the planner once on `brief`, after the user's `question`, yielding as it goes.
+    """Run the planner once on the user's `question` and `brief`, yielding as it goes.
 
     The run's first request holds `question`, then `brief`, as two user
     contents, or `brief` alone for a turn with no question, as the ADK
@@ -335,17 +334,17 @@ async def run_planner(
     (`_question_prompt`). Each model response is yielded as a
     `PlannerResponse` once received, before its calls run. Once every call
     has answered, their answers are yielded as one `PlannerAnswers`, before
-    the next model request: the tool returns Pydantic AI collects into that
-    request (`ModelRequestNode.request`), in call order, with
+    the next model request. They are the tool returns Pydantic AI collects
+    into that request (`ModelRequestNode.request`), in call order, with
     `tool_not_found`'s answer for a call to a tool the planner lacks. The run
     stops after yielding them once a tool ended it, and ends on a response
     with no tool call.
 
     A response Pydantic AI refuses (`UnexpectedModelBehavior`, as for a stream
     with no chunk or a blocked prompt) ends the run, as a response with no tool
-    call ends the ADK planner's, and raises nothing. A blocked prompt's response is
-    yielded first, with no parts. Any other exception is raised. A run that
-    ends either way while a response's calls run yields none of their
+    call ends the ADK planner's, and raises nothing. A blocked prompt's
+    response is yielded first, with no parts. Any other exception is raised. A
+    run that ends either way while a response's calls run yields none of their
     answers. Closing the iterator closes the run (`Agent.iter`) and any
     stream it holds open.
 
@@ -388,8 +387,8 @@ async def run_planner(
                     response = stream.response
                 yield _planner_response(response)
         except UnexpectedModelBehavior as exc:
-            # The exception's text can hold the response (its `body`, a refusal, a part's
-            # repr), so only its class is logged.
+            # The exception's text can hold the response (its `body`, a refusal,
+            # a part's repr), so only its class is logged.
             logger.warning(
                 "planner run ended on a response Pydantic AI refused: %s", type(exc).__name__
             )

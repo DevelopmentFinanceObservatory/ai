@@ -58,10 +58,10 @@ dataset requirements that feed them, and the planner's tools answer with a
 typed result carrying a stable code, rather than an unstructured error string,
 so a caller can branch on what stopped a call without parsing its message.
 `harness.planner_seam.PlannerSeam` attaches the translator to the planner's
-`propose_plan` on either runner: an accepted proposal runs translation on the plan it recorded, the plan passes
-through session state, and the proposal's answer carries a `translation`
-verdict, `{"outcome": "ok"}` for a compiled plan or the referral translation
-stopped on.
+`propose_plan` on either runner. An accepted proposal runs translation on the
+plan it recorded, the plan passes through session state, and the proposal's
+answer carries a `translation` verdict, `{"outcome": "ok"}` for a compiled plan
+or the referral translation stopped on.
 Nothing runs until the user approves. A `propose_plan` whose translation
 compiles declares the plan ready for the user's answer in code
 (`planner.tools.declare_ready`). It approves nothing and executes nothing.

@@ -75,7 +75,8 @@ _USAGE_DETAILS = "langfuse.observation.usage_details"
 # The OpenTelemetry GenAI attribute ADK records a call's thought tokens under.
 _REASONING_TOKENS = "gen_ai.usage.reasoning.output_tokens"
 
-# A model turn to answer the next request with in place of the model, or None to send it.
+# A model turn to answer the next request with in place of the model, or None
+# to send the request.
 type BeforeRequest = Callable[[], types.Content | None]
 
 
@@ -109,8 +110,7 @@ def planner_model(
 
     Returns:
         A `GoogleModel` on `PLANNER_PROFILE`, the profile `_in_adk_planner_form`
-        expects, whose streamed calls go through the
-        steps above.
+        expects, whose streamed calls go through the steps above.
     """
     stream = _PlannerStream(
         client=client,
@@ -144,7 +144,8 @@ class _Answer:
 
 @dataclass
 class _PlannerStream:
-    """The streamed call `GoogleModel` makes, with the planner's hooks, cache and budget."""
+    """The streamed call `GoogleModel` makes, with the planner's hooks, cache and
+    budget."""
 
     client: Client
     budget: TurnBudget | None
@@ -367,17 +368,18 @@ def _without_client_call_ids(contents: Any) -> list[types.Content]:
 
 
 class UnexpectedRequestFormError(ValueError):
-    """A request config `GoogleModel` built is not in a form `_in_adk_planner_form` rewrites.
+    """A request config `GoogleModel` built is not in a form
+    `_in_adk_planner_form` rewrites.
 
     Gemini's behaviour follows a request's bytes, so a form the rewrite does
-    not know is refused instead of sent as it came.
+    not know is refused.
     """
 
 
 def _in_adk_planner_form(config: Any) -> types.GenerateContentConfig:
     """`config`, as `GoogleModel` built it, put in the form the ADK planner sends.
 
-    Gemini's behaviour follows the request's bytes, not only its meaning: a
+    Gemini's behaviour follows the request's bytes as well as its meaning. A
     parameterless tool declared with an empty object schema, where the ADK
     planner declares none, made Gemini reason for some 12,000 tokens on one
     call in six of a live task's entries, and never without it. The prefix
@@ -477,7 +479,8 @@ def _require_only_auto(tool_config: types.ToolConfig | None) -> None:
 
 
 def _require_only_text(modalities: list[str] | None) -> None:
-    """Check that `modalities` is `TEXT` alone, which is the default, so none need be sent."""
+    """Check that `modalities` is `TEXT` alone, which is the default, so none
+    need be sent."""
     if modalities != [types.Modality.TEXT]:
         raise UnexpectedRequestFormError(
             f"the response modalities are not TEXT alone: {modalities!r}"

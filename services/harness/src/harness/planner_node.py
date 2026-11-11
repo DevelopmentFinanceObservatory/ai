@@ -2,13 +2,14 @@
 
 `harness.planner_seam.PlannerSeam` runs the planner through `ctx.run_node`.
 On the Pydantic AI planner that node is a function node named as the ADK
-planner (`planner.settings.AGENT_NAME`) that drives `planner.pydantic_agent.
-run_planner` on `harness.planner_model.planner_model` and yields events holding
-what the ADK planner's `LlmAgent` stores for the same exchange, as far as the
-session's readers read it (`harness.planner_events`). ADK's node runner stamps each with the author the
-node sets, the branch of the seam's `override_branch`, the invocation and the
-node's path, so the session the run leaves reads as the ADK planner's to
-`planner.session.session_steps`, `harness.studio_translate` and the seam.
+planner (`planner.settings.AGENT_NAME`) that drives
+`planner.pydantic_agent.run_planner` on `harness.planner_model.planner_model`
+and yields events holding what the ADK planner's `LlmAgent` stores for the same
+exchange, as far as the session's readers read it (`harness.planner_events`).
+ADK's node runner stamps each with the author the node sets, the branch of the
+seam's `override_branch`, the invocation and the node's path, so the session
+the run leaves reads as the ADK planner's to `planner.session.session_steps`,
+`harness.studio_translate` and the seam.
 
 The run traces as the ADK planner's does: its agent is named `AGENT_NAME`, its
 spans name the session as their conversation, and they carry message content
@@ -112,14 +113,13 @@ def planner_node(
 
     Returns:
         A node named `planner.settings.AGENT_NAME` that runs the planner once on
-        `brief`, after the
-        turn's question, and yields the run's events (`harness.planner_events`).
-        Each model call the run makes is counted on the invocation's counter
-        (`InvocationContext.increment_llm_call_count`), with the
-        orchestrator's and every other planner run's, as the ADK planner's
-        are; a turn put in the model's place is not, as ADK counts no
-        response a callback gives. ADK raises `LlmCallsLimitExceededError` on
-        the call past `RunConfig.max_llm_calls`.
+        `brief`, after the turn's question, and yields the run's events
+        (`harness.planner_events`). Each model call the run makes is counted on
+        the invocation's counter (`InvocationContext.increment_llm_call_count`),
+        with the orchestrator's and every other planner run's, as the ADK
+        planner's are. A turn put in the model's place is not counted, as ADK
+        counts no response a callback gives. ADK raises
+        `LlmCallsLimitExceededError` on the call past `RunConfig.max_llm_calls`.
         A question holding a part this planner does not send
         (`planner.pydantic_agent.UnsentQuestionPartError`) ends the run before
         any request on an `internal_error` refusal (`run.refused`). The seam
@@ -198,7 +198,7 @@ def planner_node(
                         yield model_response_event(item)
         except UnsentQuestionPartError as exc:
             # Refused before any request. The run ends on the refusal, which
-            # the seam answers the entry with; an exception here would fail
+            # the seam answers the entry with. An exception here would fail
             # the whole workflow, since ADK fails the root on a child node's
             # error. The ADK planner sends the part.
             logger.error(
