@@ -5,9 +5,11 @@ module can load ADK through a module it imports. `planner/tools.py` holds the
 planner's tool bodies over a `PlannerCall`, `planner/source_reads.py` the reads
 they make and `planner/skills.py` the skill reads. `planner/specs.py` declares
 each tool as a `planner/tool_spec.py` `ToolSpec`, whose declaration
-`planner/declaration.py` compacts. `planner/agent.py` serves the specs to ADK.
-`harness/planner_run.py` holds a planner run's bookkeeping, which
-`harness/planner_seam.py` drives from ADK's callbacks.
+`planner/declaration.py` compacts. `planner/agent.py` serves the specs to ADK,
+and `planner/pydantic_agent.py` to Pydantic AI, whose tool calls read their
+session through `planner/pydantic_call.py`. `harness/planner_run.py` holds a
+planner run's bookkeeping, which `harness/planner_seam.py` drives from ADK's
+callbacks.
 """
 
 from __future__ import annotations
@@ -24,6 +26,8 @@ _MODULES = sorted(
         "harness/planner_run.py",
         "planner/call.py",
         "planner/declaration.py",
+        "planner/pydantic_agent.py",
+        "planner/pydantic_call.py",
         "planner/skills.py",
         "planner/source_reads.py",
         "planner/specs.py",
