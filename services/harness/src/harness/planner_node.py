@@ -3,9 +3,9 @@
 `harness.planner_seam.PlannerSeam` runs the planner through `ctx.run_node`.
 On the Pydantic AI planner that node is a function node named as the ADK
 planner (`planner.agent.AGENT_NAME`) that drives `planner.pydantic_agent.
-run_planner` on `harness.planner_model.planner_model` and yields the events the
-ADK planner's `LlmAgent` stores for the same exchange
-(`harness.planner_events`). ADK's node runner stamps each with the author the
+run_planner` on `harness.planner_model.planner_model` and yields events holding
+what the ADK planner's `LlmAgent` stores for the same exchange, as far as the
+session's readers read it (`harness.planner_events`). ADK's node runner stamps each with the author the
 node sets, the branch of the seam's `override_branch`, the invocation and the
 node's path, so the session the run leaves reads as the ADK planner's to
 `planner.session.session_steps`, `harness.studio_translate` and the seam.
@@ -28,7 +28,6 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
-from dataclasses import dataclass
 from typing import Any
 
 from common.telemetry import current_trace_id
@@ -52,7 +51,6 @@ from planner.tool_spec import ToolSpec
 
 from harness.planner_events import model_response_event, tool_answers_event
 from harness.planner_model import (
-    ResponseMetadata,
     StreamResumedError,
     Usage,
     planner_model,
@@ -61,7 +59,7 @@ from harness.planner_model import (
 from harness.planner_run import Ask, Directive, PlannerRun, Stop
 from harness.prefix_cache import PrefixCache
 from harness.sentences import SeamCode, refusal_sentence
-from harness.turn_budget import CLOSED_BY_KEY, TurnBudget
+from harness.turn_budget import TurnBudget
 from harness.turn_events import PLANNER_ASK, turn_question
 from harness.usage import log_usage
 
@@ -72,26 +70,6 @@ logger = logging.getLogger(__name__)
 # the documented placeholder that makes the API skip validation for a call
 # injected outside a model turn.
 SKIP_THOUGHT_SIGNATURE = b"skip_thought_signature_validator"
-
-
-@dataclass(frozen=True)
-class _Recorded:
-    """The metadata the ADK planner's event records beside a response's parts, and
-    whether that response is the aggregate of a stream (`partial` False) or a turn
-    put in the model's place (`partial` None)."""
-
-    usage: Usage | None = None
-    finish_reason: types.FinishReason | None = None
-    model_version: str | None = None
-    custom_metadata: dict[str, Any] | None = None
-    partial: bool | None = None
-    error_code: str | None = None
-    error_message: str | None = None
-
-
-# A model turn put in place of a request or of a closed call's response. ADK
-# stores the callback's response, which carries only its content.
-_PUT_IN_PLACE = _Recorded()
 
 
 def pydantic_planner(specs: Sequence[ToolSpec], *, instruction: str) -> PydanticPlanner:
@@ -133,7 +111,7 @@ def planner_node(
     Returns:
         A node named `planner.agent.AGENT_NAME` that runs the planner once on
         the session's brief (`planner.agent.BRIEF_STATE_KEY`), after the
-        turn's question, and yields the ADK planner's events for the run.
+        turn's question, and yields the run's events (`harness.planner_events`).
         Each model call the run makes is counted on the invocation's counter
         (`InvocationContext.increment_llm_call_count`), with the
         orchestrator's and every other planner run's, as the ADK planner's
@@ -155,41 +133,20 @@ def planner_node(
     async def dfo_planner(ctx: Context, node_input: Any) -> AsyncIterator[Event]:
         del node_input
         ctx.event_author = AGENT_NAME
-        recorded = _PUT_IN_PLACE
         invocation = ctx.get_invocation_context()
 
         def before_request() -> types.Content | None:
-            nonlocal recorded
             turn = directive_turn(run.next_request())
-            if turn is not None:
-                recorded = _PUT_IN_PLACE
-            else:
+            if turn is None:
                 invocation.increment_llm_call_count()
             return turn
 
-        def after_response(
-            closed_by: SeamCode | None, metadata: ResponseMetadata
-        ) -> types.Content | None:
-            nonlocal recorded
-            if closed_by is None:
-                if metadata.usage is not None:
-                    log_usage(AGENT_NAME, metadata.usage)
-                recorded = _Recorded(
-                    usage=metadata.usage,
-                    finish_reason=metadata.finish_reason,
-                    model_version=metadata.model_version,
-                    partial=False,
-                    error_code=metadata.error_code,
-                    error_message=metadata.error_message,
-                )
-                return None
-            turn = directive_turn(run.model_answered(closed_by))
-            recorded = (
-                _PUT_IN_PLACE
-                if turn is not None
-                else _Recorded(custom_metadata={CLOSED_BY_KEY: closed_by.value})
-            )
-            return turn
+        def after_response(closed_by: SeamCode | None, usage: Usage | None) -> types.Content | None:
+            if closed_by is not None:
+                return directive_turn(run.model_answered(closed_by))
+            if usage is not None:
+                log_usage(AGENT_NAME, usage)
+            return None
 
         def tool_failed(name: str, error: BaseException) -> dict[str, Any]:
             logger.error(
@@ -234,20 +191,11 @@ def planner_node(
             async with aclosing(items):
                 async for item in items:
                     if isinstance(item, PlannerAnswers):
-                        yield tool_answers_event(item, ended=deps.ended)
-                    # ADK stores no event for a response with no parts, unless
-                    # the response is an error, a blocked prompt's.
-                    elif item.parts or recorded.error_code is not None:
-                        yield model_response_event(
-                            item,
-                            usage=recorded.usage,
-                            finish_reason=recorded.finish_reason,
-                            model_version=recorded.model_version,
-                            custom_metadata=recorded.custom_metadata,
-                            partial=recorded.partial,
-                            error_code=recorded.error_code,
-                            error_message=recorded.error_message,
-                        )
+                        yield tool_answers_event(item)
+                    # A response with no parts, an empty or a blocked one,
+                    # leaves nothing a reader reads.
+                    elif item.parts:
+                        yield model_response_event(item)
         except UnsentQuestionPartError as exc:
             # Refused before any request. The run ends on the refusal, which
             # the seam answers the entry with; an exception here would fail

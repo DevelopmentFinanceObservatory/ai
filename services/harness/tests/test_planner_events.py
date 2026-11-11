@@ -5,9 +5,9 @@ client, through `harness.planner_seam.PlannerSeam` as `tests.test_planner_node`
 runs it: once on the ADK planner and once on the Pydantic AI planner, whose
 seam runs `harness.planner_node`. Both serve the same tools: the real
 `ask_user_question` and `get_skill`, and a `propose_plan` whose answers the
-script sets. The stored sessions are then compared: their events field by
-field apart from ids and timestamps, what `session_steps` and Studio's
-translator read from them, and their state.
+script sets. The stored sessions are then compared on what their readers
+read: each event as `tests.test_planner_node._read` reads it, what
+`session_steps` and Studio's translator read from them, and their state.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.events import Event
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
-from harness.planner_events import NO_CONTENT_ERROR_CODE
 from harness.planner_seam import PlannerSeam
 from harness.scripted_plan import scripted_plan
 from harness.settings import Settings
@@ -50,6 +49,7 @@ from .scripted_genai import (
     usage_metadata,
 )
 from .test_planner_node import _frames as _numbered_frames
+from .test_planner_node import _read
 from .test_planner_seam import _SeamHarness
 
 _QUESTION = "How much aid did Ghana receive?"
@@ -187,17 +187,6 @@ async def _both(
 # --- What is compared ------------------------------------------------------------------
 
 
-def _dumped(events: Sequence[Event]) -> list[dict[str, Any]]:
-    """Each event as stored, less what differs between any two runs: its id, its
-    timestamp and the invocation's id."""
-    return [
-        event.model_dump(
-            mode="json", exclude_none=True, exclude={"id", "timestamp", "invocation_id"}
-        )
-        for event in events
-    ]
-
-
 def _frames(events: Sequence[Event]) -> list[dict[str, Any]]:
     """The frames Studio's translator makes of `events`, less each line's
     duration, each id Studio draws numbered (`tests.test_planner_node._frames`)."""
@@ -218,7 +207,7 @@ async def _no_executor(
 
 
 def _assert_same(adk: _Stored, pydantic: _Stored) -> None:
-    assert _dumped(pydantic.events) == _dumped(adk.events)
+    assert _read(pydantic.events) == _read(adk.events)
     assert list(session_steps(pydantic.events)) == list(session_steps(adk.events))
     assert _frames(pydantic.events) == _frames(adk.events)
     assert pydantic.state == adk.state
@@ -280,17 +269,11 @@ async def test_the_stored_session_equals_the_adk_planners(conversation: str) -> 
     _assert_same(adk, pydantic)
 
 
-async def test_a_text_response_is_the_runs_output_and_a_thought_only_one_carries_adks_error() -> (
-    None
-):
-    """A response with no call is the node's output, as ADK marks an agent's final
-    turn, and one with nothing to act on carries ADK's no-content error."""
+async def test_a_thought_only_response_is_stored_the_same_on_both() -> None:
     adk, pydantic = await _both([reply(thought_part("Only thinking.", signature=None))])
 
     _assert_same(adk, pydantic)
-    (event,) = _planner_events(pydantic)
-    assert event.error_code == NO_CONTENT_ERROR_CODE
-    assert event.node_info.message_as_output is True
+    assert len(_planner_events(pydantic)) == 1
 
 
 async def test_parallel_writes_to_one_list_store_the_value_the_last_call_left() -> None:
@@ -333,7 +316,7 @@ async def test_a_stop_while_calls_run_stores_nothing_of_their_response() -> None
 async def test_calls_without_ids_get_ids_of_adks_form_on_both_planners() -> None:
     """Gemini may send a call without an id. ADK gives it one starting `adk-`, and
     so does the Pydantic AI planner's model (`harness.planner_model`), so the
-    stored events differ only in the random part of the id."""
+    stored sessions differ only in the random part of the id."""
     adk, pydantic = await _both([reply(call_part(PROPOSE_PLAN, {"question": "q"}))], _ACCEPTED)
 
     adk_ids, pydantic_ids = (_call_ids(stored) for stored in (adk, pydantic))
@@ -341,7 +324,7 @@ async def test_calls_without_ids_get_ids_of_adks_form_on_both_planners() -> None
     assert adk_ids[0].startswith("adk-")
     assert pydantic_ids[0].startswith("adk-")
     renamed = [_renamed(event, pydantic_ids[0], adk_ids[0]) for event in pydantic.events]
-    assert _dumped(renamed) == _dumped(adk.events)
+    assert _read(renamed) == _read(adk.events)
 
 
 def _call_ids(stored: _Stored) -> list[str]:

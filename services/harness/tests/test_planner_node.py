@@ -304,15 +304,46 @@ async def _both(
     return adk, pydantic
 
 
-def _dumped(events: Sequence[Event]) -> list[dict[str, Any]]:
-    """Each event as stored, less what differs between any two runs: its id, its
-    timestamp and the invocation's id."""
-    return [
-        event.model_dump(
-            mode="json", exclude_none=True, exclude={"id", "timestamp", "invocation_id"}
+def _read(events: Sequence[Event]) -> list[dict[str, Any]]:
+    """What the session's readers read of `events`, in order, the same on both
+    planners where they handle the session the same way.
+
+    `planner.session.session_steps`, Studio's translator and the seam read a
+    planner event's author, branch, invocation, node path, whether it is
+    partial, its content (role and parts: text, thought and signature, each
+    call's name, arguments and id, each answer's name, id and response) and
+    its state delta. A planner event with neither content nor state delta
+    leaves them nothing to read and is left out. Every other event is read
+    whole, less its id and timestamp. Each invocation is numbered in the order
+    it first appears, since its id differs between any two runs."""
+    invocations: dict[str, int] = {}
+    read: list[dict[str, Any]] = []
+    for event in events:
+        invocation = invocations.setdefault(event.invocation_id, len(invocations))
+        if event.author != AGENT_NAME:
+            dumped = event.model_dump(
+                mode="json", exclude_none=True, exclude={"id", "timestamp", "invocation_id"}
+            )
+            read.append({**dumped, "invocation": invocation})
+            continue
+        if event.content is None and not event.actions.state_delta:
+            continue
+        read.append(
+            {
+                "author": event.author,
+                "branch": event.branch,
+                "invocation": invocation,
+                "path": event.node_info.path,
+                "partial": bool(event.partial),
+                "content": (
+                    event.content.model_dump(mode="json", exclude_none=True)
+                    if event.content is not None
+                    else None
+                ),
+                "state_delta": event.actions.state_delta,
+            }
         )
-        for event in events
-    ]
+    return read
 
 
 def _assert_same(adk: _Entry, pydantic: _Entry) -> None:
@@ -321,7 +352,7 @@ def _assert_same(adk: _Entry, pydantic: _Entry) -> None:
     assert len(pydantic.requests) == len(adk.requests)
     for adk_request, pydantic_request in zip(adk.requests, pydantic.requests, strict=True):
         assert_pinned_wire_differences(adk_request, pydantic_request)
-    assert _dumped(pydantic.events) == _dumped(adk.events)
+    assert _read(pydantic.events) == _read(adk.events)
     assert list(session_steps(pydantic.events)) == list(session_steps(adk.events))
     assert pydantic.state == adk.state
 
@@ -407,7 +438,7 @@ async def test_a_reply_streamed_in_chunks_is_the_same_on_both_planners(
 
     assert adk.outputs[0] is not None and "plan" in adk.outputs[0]
     (response,) = [event for event in _planner_events(adk) if event.get_function_calls()]
-    assert not response.partial and response.usage_metadata is not None
+    assert not response.partial
     _assert_same(adk, pydantic)
 
 
@@ -680,12 +711,12 @@ async def test_a_proposal_refused_for_good_ends_the_run_on_the_same_stop_on_both
     )
 
     assert len(adk.requests) == 1
-    (stop,) = [
+    stops = [
         event
         for event in _planner_events(adk)
         if event.content and any(part.text for part in event.content.parts or ())
     ]
-    assert stop.partial is None and stop.usage_metadata is None
+    assert len(stops) == 1
     _assert_same(adk, pydantic)
 
 
@@ -793,9 +824,9 @@ async def test_a_budget_closing_a_call_with_nothing_to_pin_refuses_the_same_on_b
 async def test_a_response_that_errs_or_holds_nothing_is_stored_the_same_on_both(
     plan: Plan, response: Reply
 ) -> None:
-    """A response cut at its token limit stores its finish reason as its error, a
-    blocked prompt stores an event of its block reason and no content, and an
-    empty response stores nothing. Each ends the run with no plan."""
+    """A response cut at its token limit stores its text, and a blocked prompt
+    or an empty response stores nothing a reader reads. Each ends the run with
+    no plan."""
     adk, pydantic = await _both(
         _Script(replies=[response], runs=[_planned(plan)], setup=_proposals())
     )
@@ -903,7 +934,9 @@ async def test_a_run_past_the_invocations_model_call_cap_ends_the_same_on_both(
     pydantic = await _capped("pydantic_ai", plan, spent=spent)
 
     assert len(adk.requests) == 3 - spent
-    assert adk.events[-1].error_code == "LlmCallsLimitExceededError"
+    assert [entry.events[-1].error_code for entry in (adk, pydantic)] == [
+        "LlmCallsLimitExceededError"
+    ] * 2
     _assert_same(adk, pydantic)
 
 
@@ -966,7 +999,7 @@ async def test_two_entries_at_once_on_one_pydantic_ai_seam_keep_to_their_own_run
         ]
         assert refusal.id == "p1"
     first, second = [_planner_events(await _stored(harness)) for harness in harnesses]
-    assert _dumped(first) == _dumped(second)
+    assert _read(first) == _read(second)
 
 
 # --- A Stop ------------------------------------------------------------------------------

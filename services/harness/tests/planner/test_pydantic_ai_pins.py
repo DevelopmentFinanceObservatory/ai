@@ -342,8 +342,8 @@ async def test_an_empty_response_ends_the_run_with_no_second_request() -> None:
 
 
 async def test_a_blocked_prompt_ends_the_run_and_raises_nothing() -> None:
-    # Pydantic AI hands over a blocked prompt as a response with no parts. The node
-    # reads the block reason off the stream (`harness.planner_model.ResponseMetadata`).
+    # Pydantic AI hands over a blocked prompt as a response with no parts, which the
+    # node stores no event for.
     items, scripted = await _run([_BARE], [blocked_reply(types.BlockedReason.SAFETY)])
 
     assert len(scripted.requests) == 1

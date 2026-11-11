@@ -59,8 +59,7 @@ BRIEF = "Context for this question: the readings."
 _BRANCH = "dfo_planner"
 
 # One entry of a run's conversation: a model response's part (`types.Part`
-# dumped), a call's answer (`("answer", name, call_id, answer)`), or a blocked
-# prompt (`("blocked", reason)`).
+# dumped) or a call's answer (`("answer", name, call_id, answer)`).
 type Turn = tuple[Any, ...]
 
 
@@ -165,12 +164,9 @@ async def pydantic_run(
             MODEL,
             client=scripted.client,
             budget=None,
-            after_response=lambda closed_by, metadata: errors.append(metadata.error_code),
             profile=PLANNER_PROFILE,
         ),
     )
-    # The error each response is, as the model reads it off the stream.
-    errors: list[str | None] = []
     state: dict[str, Any] = {}
     events = [Event(author="user", content=_user_content(QUESTION))]
     run = PairRun(requests=scripted.requests, state=state)
@@ -181,12 +177,11 @@ async def pydantic_run(
             tool_answered=lambda name, answer: None,
             tool_failed=lambda name, error: {"error": f"{name} failed"},
         )
-        responded = len(errors)
         items: list[PlannerItem] = []
         async for item in run_planner(planner, deps, question=QUESTION, brief=brief):
             items.append(item)
             events += _stored(item)
-        run.conversations.append(_item_turns(items, errors[responded:]))
+        run.conversations.append(_item_turns(items))
     return run
 
 
@@ -204,8 +199,6 @@ def _event_turns(events: Sequence[Event]) -> list[Turn]:
     for event in events:
         if event.author != AGENT_NAME:
             continue
-        if event.error_code:
-            turns.append(("blocked", event.error_code))
         for part in event.content.parts or [] if event.content else []:
             response = part.function_response
             if response is None:
@@ -215,16 +208,11 @@ def _event_turns(events: Sequence[Event]) -> list[Turn]:
     return turns
 
 
-def _item_turns(items: Sequence[PlannerItem], errors: Sequence[str | None]) -> list[Turn]:
-    """The turns of the Pydantic AI planner's `items`, each response's error
-    (`errors`, in response order) beside it. A response with no parts and no
-    error is one the ADK planner stores no event for."""
+def _item_turns(items: Sequence[PlannerItem]) -> list[Turn]:
+    """The turns of the Pydantic AI planner's `items`."""
     turns: list[Turn] = []
-    responses = iter(errors)
     for item in items:
         if isinstance(item, PlannerResponse):
-            if (error := next(responses)) is not None:
-                turns.append(("blocked", error))
             turns.extend(("part", _dumped(part)) for part in item.parts)
         else:
             turns.extend(

@@ -21,8 +21,8 @@ planner sends (`_in_adk_planner_form`). Each call the planner makes, in order:
    function call was streamed runs no tool. A call a bound closes answers with
    the closing sentence the ADK planner's model gives;
 5. hands `after_response` the code of the bound that closed the call, if one
-   did, and what the API reported on the response (`ResponseMetadata`); a
-   model turn it returns replaces the response;
+   did, and the usage the API reported for it; a model turn it returns
+   replaces the response;
 6. otherwise delivers the held chunks less their unsigned thought summaries
    (`planner.settings.without_unsigned_thoughts`), so the planner's next
    request carries the parts the ADK planner's session keeps.
@@ -86,27 +86,10 @@ _REASONING_TOKENS = "gen_ai.usage.reasoning.output_tokens"
 type BeforeRequest = Callable[[], types.Content | None]
 
 
-@dataclass(frozen=True)
-class ResponseMetadata:
-    """What the API reported on one call's response, read as ADK's stream
-    aggregator reads it for the response it stores: the last usage and the
-    last finish reason any chunk carried, the last chunk's model version, and
-    the error the response is. A finish reason other than `STOP` is the error,
-    with the last chunk's finish message. A last chunk with no candidate and a
-    blocked prompt is the block, with its message. Each is None when the API
-    reported none."""
-
-    usage: Usage | None = None
-    finish_reason: types.FinishReason | None = None
-    model_version: str | None = None
-    error_code: str | None = None
-    error_message: str | None = None
-
-
 # Called with the code of the bound that closed the call (None when none did)
-# and what the API reported on the response. It gives a model turn to answer
+# and the last usage any of its chunks carried. It gives a model turn to answer
 # with in place of the response, or None to keep it.
-type AfterResponse = Callable[[SeamCode | None, ResponseMetadata], types.Content | None]
+type AfterResponse = Callable[[SeamCode | None, Usage | None], types.Content | None]
 
 
 def planner_model(
@@ -168,32 +151,11 @@ class _Answer:
     closed_by: SeamCode | None = None
 
     @property
-    def metadata(self) -> ResponseMetadata:
-        """What the API reported on the call's chunks (`ResponseMetadata`)."""
+    def usage(self) -> Usage | None:
+        """The last usage any of the call's chunks carried, as ADK's stream
+        aggregator reads it."""
         usages = [chunk.usage_metadata for chunk in self.chunks if chunk.usage_metadata]
-        finish_reasons = [
-            chunk.candidates[0].finish_reason
-            for chunk in self.chunks
-            if chunk.candidates and chunk.candidates[0].finish_reason
-        ]
-        finish_reason = finish_reasons[-1] if finish_reasons else None
-        last = self.chunks[-1] if self.chunks else None
-        candidate = last.candidates[0] if last is not None and last.candidates else None
-        error_code = error_message = None
-        if finish_reason is not None and finish_reason != types.FinishReason.STOP:
-            error_code = finish_reason.value
-            error_message = candidate.finish_message if candidate is not None else None
-        elif last is not None and candidate is None and last.prompt_feedback is not None:
-            block_reason = last.prompt_feedback.block_reason
-            error_code = block_reason.value if block_reason is not None else None
-            error_message = last.prompt_feedback.block_reason_message
-        return ResponseMetadata(
-            usage=usages[-1] if usages else None,
-            finish_reason=finish_reason,
-            model_version=last.model_version if last is not None else None,
-            error_code=error_code,
-            error_message=error_message,
-        )
+        return usages[-1] if usages else None
 
 
 @dataclass
@@ -228,11 +190,10 @@ class _PlannerStream:
             yield _chunk(turn, usage=None)
             return
         answer = await self._send(model=model, contents=contents, config=config)
-        metadata = answer.metadata
-        usage = metadata.usage
+        usage = answer.usage
         _record_usage(span, usage)
         replaced = (
-            self.after_response(answer.closed_by, metadata)
+            self.after_response(answer.closed_by, usage)
             if self.after_response is not None
             else None
         )
@@ -672,7 +633,6 @@ class _Client:
 __all__ = [
     "AfterResponse",
     "BeforeRequest",
-    "ResponseMetadata",
     "StreamResumedError",
     "Usage",
     "planner_model",

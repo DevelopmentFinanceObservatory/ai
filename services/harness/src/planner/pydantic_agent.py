@@ -138,9 +138,8 @@ class PlannerResponse:
 
     `parts` are its parts as google-genai parts: each function call with its
     id, text, and each thought with `thought` set, each with its thought
-    signature. What the API reported on the response (usage, finish reason, a
-    blocked prompt) is the stream's metadata, which `harness.planner_model`
-    reads as `ResponseMetadata`.
+    signature. A blocked prompt is a response with no parts. The usage the API
+    reported is read off the stream by `harness.planner_model`.
     """
 
     parts: tuple[types.Part, ...]
