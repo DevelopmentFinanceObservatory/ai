@@ -184,16 +184,40 @@ async def test_an_adk_run_carries_the_built_declarations_and_the_planner_instruc
     assert expected.startswith(instruction)
 
 
+@pytest.mark.parametrize(
+    ("environment", "model_name", "refused"),
+    [
+        pytest.param({}, "gemini-2.5-flash", False, id="developer-api"),
+        pytest.param(
+            {"GOOGLE_GENAI_USE_ENTERPRISE": "true"}, "gemini-2.5-flash", True, id="enterprise"
+        ),
+        pytest.param(
+            {"GOOGLE_GENAI_USE_VERTEXAI": "1"}, "gemini-2.5-flash", True, id="legacy-vertexai"
+        ),
+        pytest.param(
+            {"GOOGLE_GENAI_USE_ENTERPRISE": "false", "GOOGLE_GENAI_USE_VERTEXAI": "true"},
+            "gemini-2.5-flash",
+            False,
+            id="enterprise-decides-over-vertexai",
+        ),
+        pytest.param({"GOOGLE_GENAI_USE_ENTERPRISE": "true"}, "m", False, id="not-a-gemini-model"),
+    ],
+)
 def test_the_planner_builds_on_the_developer_api_and_refuses_vertex_ai(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, environment: dict[str, str], model_name: str, refused: bool
 ) -> None:
-    """The declarations are the Gemini developer API's form, which Vertex AI rejects."""
-    monkeypatch.setenv("GOOGLE_GENAI_USE_ENTERPRISE", "false")
-    create_planner_agent(model_name="m")
+    """The declarations are the Gemini developer API's form, which Vertex AI rejects.
+    A Gemini model's google-genai client takes Vertex AI from the environment."""
+    for name in ("GOOGLE_GENAI_USE_ENTERPRISE", "GOOGLE_GENAI_USE_VERTEXAI"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
 
-    monkeypatch.setenv("GOOGLE_GENAI_USE_ENTERPRISE", "true")
-    with pytest.raises(RuntimeError):
-        create_planner_agent(model_name="m")
+    if refused:
+        with pytest.raises(RuntimeError):
+            create_planner_agent(model_name=model_name)
+    else:
+        create_planner_agent(model_name=model_name)
 
 
 # --- Conversion ----------------------------------------------------------------------

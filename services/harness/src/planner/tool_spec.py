@@ -123,7 +123,7 @@ def function_declaration(spec: ToolSpec) -> types.FunctionDeclaration:
     Gemini developer API, which the harness runs on. It carries no response
     schema and keeps optional `anyOf` schemas as pydantic writes them. Vertex
     AI rejects that form, and `planner.agent.refuse_vertex_ai` stops the
-    planner building when ADK is configured for Vertex AI.
+    planner building when its model's google-genai client would use Vertex AI.
 
     Raises:
         ValueError: `spec` is compact and some parameter has no description.
