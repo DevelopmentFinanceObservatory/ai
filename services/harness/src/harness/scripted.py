@@ -334,7 +334,7 @@ def scripted_client(answer: ScriptedAnswer) -> Client:
         contents: types.ContentListUnion | types.ContentListUnionDict,
         config: types.GenerateContentConfigOrDict | None = None,
     ) -> AsyncIterator[types.GenerateContentResponse]:
-        # Both planners send a list of contents. Any other form fails validation here.
+        # The planner sends a list of contents. Any other form fails validation here.
         listed = contents if isinstance(contents, list) else [contents]
         request = ModelRequest(
             model=model,
