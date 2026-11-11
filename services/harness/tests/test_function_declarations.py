@@ -24,12 +24,14 @@ from planner.declaration import _referred
 from .orchestrator_fakes import no_executor, no_resolver
 from .planner_tools import planner_tool_declaration
 
-# Every LLM agent the harness builds, by the builder that builds it: the
-# planner as the server builds it, the planner its own eval set scores, and the
-# orchestrator.
+# Every ADK LLM agent the harness builds, by the builder that builds it: the
+# planner as the server builds it on the ADK runner, the planner its own eval
+# set scores, and the orchestrator.
 _AGENTS: dict[str, Callable[[], LlmAgent]] = {
     "served_planner": lambda: (
-        build_planner(settings=Settings(), surface=FixtureSurface(schemas=[]))._agent
+        build_planner(
+            settings=Settings(planner_runner="adk"), surface=FixtureSurface(schemas=[])
+        )._agent
     ),
     "standalone_planner": lambda: create_planner_agent(model_name="gemini-test"),
     "orchestrator": lambda: create_orchestrator_agent(

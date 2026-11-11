@@ -195,6 +195,13 @@ from .search_results import search_result_parts
 from .split_plan import SPEC_DEBT, SPEC_DEBT_HISTORY, stored_split_plan
 from .test_turn_records import _switchable_scope
 
+
+def _adk_settings() -> Settings:
+    """Every seam here runs the ADK planner: the tests script its model and
+    read its agent through `seam._agent`."""
+    return Settings(planner_runner="adk")
+
+
 SPEC = "spec_" + "a" * 32
 SPEC_B = "spec_" + "b" * 32
 
@@ -316,13 +323,13 @@ def _seam(
     record ready (`harness.scripted.use_compiled_proposals`)."""
     surface = FixtureSurface(schemas=[])
     if not compiled_proposals:
-        return PlannerSeam(settings=Settings(), surface=surface, agent_settings=agent_settings)
+        return PlannerSeam(settings=_adk_settings(), surface=surface, agent_settings=agent_settings)
     translate = build_translate(surface=surface)
     specs = planner_specs(
         translate=translate, surface=surface, question_fixed=True, reads_user_words=False
     )
     return PlannerSeam(
-        settings=Settings(),
+        settings=_adk_settings(),
         surface=surface,
         agent_settings=agent_settings,
         translate=translate,
@@ -638,7 +645,7 @@ async def test_a_planner_tool_that_raises_ends_the_entry_on_a_final_refusal(
 ) -> None:
     """The run stops at the failed call and the orchestrator gets a final
     refusal naming the tool, with the traceback logged at ERROR."""
-    seam = PlannerSeam(settings=Settings(), surface=_FailingSkillSurface(schemas=[]))
+    seam = PlannerSeam(settings=_adk_settings(), surface=_FailingSkillSurface(schemas=[]))
     llm = ScriptedPlannerLlm(script=[[("get_skill", {"skill_id": "aid"})], "unreachable"])
     seam._agent.model = llm
 
@@ -3495,7 +3502,7 @@ def _translator_seam(
     agent_settings: AgentSettings | None = None,
 ) -> PlannerSeam:
     return PlannerSeam(
-        settings=Settings(),
+        settings=_adk_settings(),
         surface=_SkillPagesSurface(schemas=[], responses=responses),
         agent_settings=agent_settings,
     )
@@ -3548,7 +3555,7 @@ async def test_the_planner_runs_on_the_model_and_translation_the_seam_is_given(
     }
     llm = ScriptedPlannerLlm(script=[[("propose_plan", proposal)]])
     seam = PlannerSeam(
-        settings=Settings(),
+        settings=_adk_settings(),
         surface=FixtureSurface(schemas=[]),
         translate=translate,
         model=llm,
@@ -4099,7 +4106,7 @@ async def test_each_congo_is_settled_by_its_own_answer_and_reaches_search_as_pic
         ]
 
     surface = _RecordingSearch([_CONGO_SEARCH_RESPONSE, _NO_DATA_SEARCH_RESPONSE])
-    seam = PlannerSeam(settings=Settings(), surface=surface)
+    seam = PlannerSeam(settings=_adk_settings(), surface=surface)
     seam._agent.model = ScriptedPlannerLlm(
         script=[
             [
@@ -4747,7 +4754,9 @@ async def _asks_after_a_referral(harness: _SeamHarness, drafts: _Drafts) -> None
         del call
         return dict(_NEEDS_REPAIR)
 
-    seam = PlannerSeam(settings=Settings(), surface=FixtureSurface(schemas=[]), translate=referring)
+    seam = PlannerSeam(
+        settings=_adk_settings(), surface=FixtureSurface(schemas=[]), translate=referring
+    )
     seam._agent.model = ScriptedPlannerLlm(
         script=[[("propose_plan", drafts.proposal)], [_ASK_A_SOURCE]]
     )
@@ -5587,7 +5596,7 @@ async def _run_the_planner(
 ) -> tuple[ScriptedPlannerLlm, SessionState]:
     """One first-turn entry showing the planner the dataset Search answered over
     2020-2024, as a search reading whose block the turn's state holds."""
-    seam = PlannerSeam(settings=Settings(), surface=reads)
+    seam = PlannerSeam(settings=_adk_settings(), surface=reads)
     llm = ScriptedPlannerLlm(script=script)
     seam._agent.model = llm
     reading = SearchReading.model_validate(
@@ -5824,7 +5833,7 @@ async def test_a_revision_repins_the_plan_and_its_scope_decisions_follow_with_no
 
     llm = ScriptedPlannerLlm(script=[])
     seam = PlannerSeam(
-        settings=Settings(), surface=FixtureSurface(schemas=[]), translate=translate, model=llm
+        settings=_adk_settings(), surface=FixtureSurface(schemas=[]), translate=translate, model=llm
     )
     revised_pin = pinned.model_copy(update={"source_spec_id": new})
 
@@ -5976,7 +5985,7 @@ async def test_a_region_switch_and_its_users_decision_carry_through_an_amendment
         ]
 
     seam = PlannerSeam(
-        settings=Settings(),
+        settings=_adk_settings(),
         surface=FixtureSurface(schemas=[]),
         translate=translate,
         model=ScriptedPlannerLlm(script=[_amend]),
@@ -6115,7 +6124,7 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
         }
 
     seam = PlannerSeam(
-        settings=Settings(),
+        settings=_adk_settings(),
         surface=FixtureSurface(schemas=[]),
         translate=translate,
         model=ScriptedPlannerLlm(script=[]),
@@ -6307,7 +6316,7 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_no_reading_and_its_row_swit
 
     surface = BasisCompiles()
     seam = PlannerSeam(
-        settings=Settings(),
+        settings=_adk_settings(),
         surface=cast(Any, surface),
         translate=translate,
         model=ScriptedPlannerLlm(script=[]),
@@ -6496,7 +6505,7 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
 
     surface = BasisCompiles()
     seam = PlannerSeam(
-        settings=Settings(),
+        settings=_adk_settings(),
         surface=cast(Any, surface),
         translate=translate,
         model=ScriptedPlannerLlm(script=[]),
@@ -6692,7 +6701,7 @@ async def test_a_provider_switch_compiles_the_parts_whole_once_a_turn(
     )
     compiles = fake()
     seam = PlannerSeam(
-        settings=Settings(),
+        settings=_adk_settings(),
         surface=cast(Any, compiles),
         translate=translate,
         model=ScriptedPlannerLlm(script=[]),
