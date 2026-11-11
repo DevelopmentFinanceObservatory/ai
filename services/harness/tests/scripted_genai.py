@@ -131,6 +131,16 @@ def reply(
     return Reply(chunks=[parts], usage=usage, finish_reason=finish_reason)
 
 
+def live_call_reply(
+    *calls: types.Part,
+    usage: types.GenerateContentResponseUsageMetadata | None = None,
+) -> Reply:
+    """A function-call reply as live Gemini streams one: a chunk of the calls,
+    then a chunk of one empty text part, which carries the finish reason and
+    the usage."""
+    return Reply(chunks=[calls, [types.Part(text="")]], usage=usage)
+
+
 def empty_reply() -> Reply:
     """A reply whose one candidate carries no parts."""
     return Reply(chunks=[[]])

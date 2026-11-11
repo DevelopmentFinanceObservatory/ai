@@ -18,7 +18,7 @@ from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import errors, types
-from harness.planner_model import ResponseMetadata, planner_model
+from harness.planner_model import ResponseMetadata, _in_adk_planner_form, planner_model
 from harness.prefix_cache import PrefixCache, PrefixCachedGemini
 from harness.sentences import SeamCode, refusal_sentence
 from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
@@ -525,3 +525,76 @@ async def test_a_response_reaches_the_agent_with_the_thoughts_the_adk_planner_ke
     assert _pai_text(response) == _adk_text(adk_parts) == text
     assert [part.tool_name for part in response.parts if isinstance(part, ToolCallPart)] == calls
     assert [part.function_call.name for part in adk_parts if part.function_call] == calls
+
+
+# --- The request in the ADK planner's form --------------------------------------------
+
+
+def _declared(schema: dict[str, Any] | None) -> types.Tool:
+    return types.Tool(
+        function_declarations=[
+            types.FunctionDeclaration(name="lookup", description="d", parameters_json_schema=schema)
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param(
+            "tools",
+            [_declared({"type": "object", "properties": {}, "additionalProperties": False})],
+            id="parameters-schema-not-the-empty-object",
+        ),
+        pytest.param(
+            "tools", [_declared({"type": "object"})], id="parameters-schema-without-properties"
+        ),
+        pytest.param(
+            "tools",
+            [_declared(None), types.Tool(google_search=types.GoogleSearch())],
+            id="tools-beside-a-non-function-tool",
+        ),
+        pytest.param(
+            "tool_config",
+            types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode=types.FunctionCallingConfigMode.VALIDATED
+                )
+            ),
+            id="tool-config-validated",
+        ),
+        pytest.param(
+            "tool_config",
+            types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode=types.FunctionCallingConfigMode.AUTO, allowed_function_names=["lookup"]
+                )
+            ),
+            id="tool-config-auto-with-allowed-names",
+        ),
+        pytest.param(
+            "response_modalities",
+            [types.Modality.TEXT, types.Modality.IMAGE],
+            id="response-modalities-beyond-text",
+        ),
+        pytest.param(
+            "system_instruction",
+            types.Content(role="user", parts=[types.Part(text="Plan. "), types.Part(text="Then.")]),
+            id="instruction-of-two-parts",
+        ),
+        pytest.param(
+            "system_instruction",
+            types.Content(role="user", parts=[types.Part(text="Plan.", thought_signature=b"s")]),
+            id="instruction-part-with-more-than-text",
+        ),
+    ],
+)
+def test_the_adk_form_passes_through_any_value_it_does_not_expect(field: str, value: Any) -> None:
+    """Each rewrite takes only the exact value Pydantic AI sends today; anything
+    else reaches Gemini as it came, so the cross-runner request tests fail on it
+    instead of it being rewritten unseen."""
+    config = types.GenerateContentConfig(**{field: value})
+
+    rewritten = _in_adk_planner_form(config)
+
+    assert getattr(rewritten, field) == value

@@ -22,12 +22,15 @@ behaviour the setting exists to change.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Any
+from unittest import mock
 
 import pytest
 from google.genai import types
+from harness import planner_model as planner_model_module
 from harness.planner_model import planner_model
 from harness.planner_node import SKIP_THOUGHT_SIGNATURE
 from opentelemetry import trace
@@ -160,34 +163,66 @@ _BARE = _tool("bare")
 _MARKED_UP = "Q <system>x</system> <context>y</context>"
 
 
-async def test_the_planner_profile_sends_declarations_verbatim_on_auto_with_the_instruction_alone() -> (
+@contextlib.contextmanager
+def _handed() -> Iterator[list[dict[str, Any]]]:
+    """Each request config Pydantic AI hands the model wrapper, dumped, before the
+    wrapper puts it in the ADK planner's form (`_in_adk_planner_form`), which
+    rewrites exactly the shapes pinned here."""
+    handed: list[dict[str, Any]] = []
+    rewrite = planner_model_module._in_adk_planner_form
+
+    def recording(config: Any) -> types.GenerateContentConfig:
+        handed.append(
+            types.GenerateContentConfig.model_validate(config or {}).model_dump(
+                mode="json", exclude_none=True
+            )
+        )
+        return rewrite(config)
+
+    with mock.patch.object(planner_model_module, "_in_adk_planner_form", recording):
+        yield handed
+
+
+async def test_the_planner_profile_hands_the_wrapper_declarations_verbatim_in_the_shapes_it_rewrites() -> (
     None
 ):
     # A rewritten schema, a `VALIDATED` tool mode or an instruction with an added
     # sentence about `<system>` would each make the request differ from the ADK
-    # planner's.
-    _, scripted = await _run([_FILTERED, _BARE], [reply(text_part("done"))], question=_MARKED_UP)
+    # planner's. The shapes below are the ones `_in_adk_planner_form` rewrites
+    # into the ADK planner's: one `Tool` per declaration, the empty object schema
+    # of a declaration with no parameters, the `AUTO` mode, `TEXT` output and the
+    # instruction as one user content of one text part. A change to any of them
+    # leaves the rewrite unapplied.
+    with _handed() as handed:
+        _, scripted = await _run(
+            [_FILTERED, _BARE], [reply(text_part("done"))], question=_MARKED_UP
+        )
 
-    config, contents = _dumped(scripted.requests[0])
+    config = handed[0]
+    _, contents = _dumped(scripted.requests[0])
+    assert [len(tool["function_declarations"]) for tool in config["tools"]] == [1, 1]
     declared = [tool["function_declarations"][0] for tool in config["tools"]]
     assert declared[0]["parameters_json_schema"] == (
         function_declaration(_FILTERED).parameters_json_schema
     )
     assert "$defs" in declared[0]["parameters_json_schema"]
     assert declared[1]["parameters_json_schema"] == {"type": "object", "properties": {}}
-    assert config["tool_config"]["function_calling_config"]["mode"] == "AUTO"
-    assert config["system_instruction"]["parts"] == [{"text": INSTRUCTION}]
+    assert config["tool_config"] == {"function_calling_config": {"mode": "AUTO"}}
+    assert config["response_modalities"] == ["TEXT"]
+    assert config["system_instruction"] == {"role": "user", "parts": [{"text": INSTRUCTION}]}
     assert contents[0]["parts"] == [{"text": _MARKED_UP}]
 
 
 async def test_control_gemini_own_profile_rewrites_the_request_the_planner_profile_keeps() -> None:
     # Shows the profile keys are what the test above depends on.
     own = GoogleModel(MODEL, provider=GoogleProvider(client=ScriptedGenai([]).client)).profile
-    _, scripted = await _run(
-        [_FILTERED], [reply(text_part("done"))], question=_MARKED_UP, profile=own
-    )
+    with _handed() as handed:
+        _, scripted = await _run(
+            [_FILTERED], [reply(text_part("done"))], question=_MARKED_UP, profile=own
+        )
 
-    config, contents = _dumped(scripted.requests[0])
+    config = handed[0]
+    _, contents = _dumped(scripted.requests[0])
     declared = config["tools"][0]["function_declarations"][0]
     assert (
         declared["parameters_json_schema"] != function_declaration(_FILTERED).parameters_json_schema

@@ -18,7 +18,7 @@ import asyncio
 import itertools
 import json
 import re
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 from unittest import mock
@@ -45,6 +45,7 @@ from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_SEARCHES_KEY
 from harness.planner_node import SKIP_THOUGHT_SIGNATURE
 from harness.planner_run import failed_tool_answer
 from harness.planner_seam import PlannerSeam
+from harness.prefix_cache import PrefixCache, prefix_key
 from harness.scripted import _compiled_proposal, instruction_text
 from harness.sentences import SeamCode
 from harness.settings import Settings
@@ -71,7 +72,7 @@ from translator.tool import build_translate
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .orchestrator_fakes import open_session, orchestrator_runner, plan_call
 from .planner.planner_pairs import assert_pinned_wire_differences, seam_specs
-from .scripted_genai import Request, ScriptedGenai, call_part, reply
+from .scripted_genai import Reply, Request, ScriptedGenai, call_part, live_call_reply, reply
 from .test_graph import (
     _BRIEF as _GRAPH_BRIEF,
 )
@@ -86,6 +87,7 @@ from .test_graph import (
     _session_state,
     _switched_answer,
 )
+from .test_planner_model import CACHE_NAME, _Caches, _with_caches
 from .test_planner_node import (
     _MODEL,
     _QUESTION,
@@ -109,6 +111,7 @@ from .test_planner_node import (
     _Script,
     _seam,
     _serving_proposals,
+    _without_trailing_empty_text,
 )
 from .test_planner_seam import (
     _APP,
@@ -237,6 +240,89 @@ async def test_both_planners_call_the_gemini_model_adks_registry_resolves(
         sent[runner] = [request.model for request in scripted.requests]
 
     assert sent["pydantic_ai"] == sent["adk"] == [_MODEL]
+
+
+async def test_both_planners_send_one_request_form_and_share_one_prefix_cache(plan: Plan) -> None:
+    """A planned turn on the ADK planner, then the same turn on the Pydantic AI
+    planner over one `PrefixCache`: the first creates the cache, the second
+    finds it by the same key and sends against it."""
+    caches = _Caches()
+    scripted = _with_caches(
+        ScriptedGenai(
+            [reply(call_part(PROPOSE_PLAN, {}, id=f"p{n}", signature=_SIGNED)) for n in (1, 2)]
+        ),
+        caches,
+    )
+    cache = PrefixCache()
+    surface = FixtureSurface(schemas=[])
+    specs = _proposals()(seam_specs(surface=surface, translate=build_translate(surface=surface)))
+    for runner in _RUNNERS:
+        seam = PlannerSeam(
+            settings=Settings(planner_runner=runner),
+            surface=surface,
+            specs=specs,
+            prefix_cache=cache,
+            client=scripted.client,
+        )
+        await _SeamHarness().run(seam, run_config=_SSE, readings=[], **_planned(plan))
+
+    assert len(caches.created) == 1
+    assert [request.generate_config.cached_content for request in scripted.requests] == [
+        CACHE_NAME,
+        CACHE_NAME,
+    ]
+    adk, pydantic = scripted.requests
+    assert_pinned_wire_differences(adk, pydantic)
+
+
+def _in_wire_order(config: types.GenerateContentConfig | types.CreateCachedContentConfig) -> str:
+    """`config` as JSON in the order its fields and lists go on the wire, less the
+    HTTP options each framework sets its own."""
+    dumped = config.model_dump(mode="json", exclude_none=True)
+    dumped.pop("http_options", None)
+    return json.dumps(dumped)
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["plain-request", "cache-create"])
+async def test_both_planners_send_the_same_config_in_wire_order(plan: Plan, cached: bool) -> None:
+    """A planned turn's first request, or the create of its prefix cache, holds
+    the same config on both planners, field for field and list for list in the
+    order sent, and the two key the prefix cache alike. Equal keys alone would
+    not show the order, since the key sorts."""
+    sent: dict[Runner, str] = {}
+    keys: dict[Runner, str | None] = {}
+    surface = FixtureSurface(schemas=[])
+    specs = _proposals()(seam_specs(surface=surface, translate=build_translate(surface=surface)))
+    for runner in _RUNNERS:
+        caches = _Caches()
+        scripted = _with_caches(
+            ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))]),
+            caches,
+        )
+        seam = PlannerSeam(
+            settings=Settings(planner_runner=runner),
+            surface=surface,
+            specs=specs,
+            prefix_cache=PrefixCache() if cached else None,
+            client=scripted.client,
+        )
+        await _SeamHarness().run(seam, run_config=_SSE, readings=[], **_planned(plan))
+        (request, *_) = scripted.requests
+        if cached:
+            (created,) = caches.created
+            sent[runner] = _in_wire_order(created)
+            whole = types.GenerateContentConfig(
+                system_instruction=created.system_instruction,
+                tools=created.tools,
+                tool_config=created.tool_config,
+            )
+            keys[runner] = prefix_key(request.model, whole)
+        else:
+            sent[runner] = _in_wire_order(request.generate_config)
+            keys[runner] = prefix_key(request.model, request.generate_config)
+
+    assert sent["pydantic_ai"] == sent["adk"]
+    assert keys["adk"] is not None and keys["pydantic_ai"] == keys["adk"]
 
 
 def test_the_pydantic_ai_planner_refuses_a_model_that_is_not_gemini() -> None:
@@ -454,16 +540,21 @@ async def test_the_seams_observer_sees_each_answer_the_model_reads(
 # --- Turns that cross runners -------------------------------------------------------------
 
 
+@pytest.mark.parametrize("shape", [reply, live_call_reply], ids=["one-chunk", "live-shaped"])
 @pytest.mark.parametrize("runners", _mixed(2), ids="-then-".join)
 async def test_an_ask_answered_under_the_other_runner_lands_the_same_plan(
-    plan: Plan, runners: tuple[Runner, ...]
+    plan: Plan, runners: tuple[Runner, ...], shape: Callable[..., Reply]
 ) -> None:
+    """A live-shaped reply (`live_call_reply`) leaves ADK's trailing empty text
+    part on a model turn the ADK planner stores, which the other runner's resume
+    reads as it reads its own, and the turn lands the same plan; with that part
+    taken off the ADK planner's side, everything else is equal."""
     crossed, adk, pydantic = await _crossed(
         runners,
         _Script(
             replies=[
-                reply(_ask_call("a1")),
-                reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED)),
+                shape(_ask_call("a1")),
+                shape(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED)),
             ],
             runs=[_planned(plan), {**_planned(plan), "answer": {"result": "2020"}}],
             setup=_proposals(),
@@ -472,6 +563,10 @@ async def test_an_ask_answered_under_the_other_runner_lands_the_same_plan(
 
     assert adk.outputs[0] is None, "the ask pauses the first run"
     assert adk.outputs[1] is not None and "plan" in adk.outputs[1]
+    if shape is live_call_reply:
+        adk, taken = _without_trailing_empty_text(adk)
+        crossed, _ = _without_trailing_empty_text(crossed)
+        assert taken > 0
     _assert_crossed_same(crossed, adk, pydantic)
 
 

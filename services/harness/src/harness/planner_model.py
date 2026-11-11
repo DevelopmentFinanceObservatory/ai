@@ -1,7 +1,8 @@
 """The Gemini model the Pydantic AI planner runs on, kept to the turn's budget.
 
 `planner_model` builds Pydantic AI's `GoogleModel` over a google-genai client
-whose streamed call is wrapped. Each call the planner makes, in order:
+whose streamed call is wrapped. Each request is first put in the form the ADK
+planner sends (`_in_adk_planner_form`). Each call the planner makes, in order:
 
 1. asks `before_request` for a model turn to answer with; given one, the call
    answers with it and sends nothing, so no budget is spent;
@@ -203,7 +204,7 @@ class _PlannerStream:
             self._respond(
                 model=model,
                 contents=_without_client_call_ids(contents),
-                config=_with_planner_options(config),
+                config=_in_adk_planner_form(config),
             )
         )
 
@@ -406,20 +407,108 @@ def _without_client_call_ids(contents: Any) -> list[types.Content]:
     return stripped
 
 
-def _with_planner_options(config: Any) -> types.GenerateContentConfig:
-    """`config`, as `GoogleModel` built it, carrying the ADK planner's HTTP retries
-    and its `automatic_continuation`, which the ADK planner sets on explicitly
-    (`planner.agent.create_planner_agent`)."""
+# The parameters schema Pydantic AI gives a declaration with no parameters
+# (`pydantic_ai.models.google._function_declaration_from_tool`).
+_NO_PARAMETERS_SCHEMA = {"type": "object", "properties": {}}
+
+
+def _in_adk_planner_form(config: Any) -> types.GenerateContentConfig:
+    """`config`, as `GoogleModel` built it, put in the form the ADK planner sends.
+
+    Gemini's behaviour follows the request's bytes, not only its meaning: a
+    parameterless tool declared with an empty object schema, where the ADK
+    planner declares none, made Gemini reason for some 12,000 tokens on one
+    call in six of a live task's entries, and never without it. The prefix
+    cache is keyed on the same fields (`harness.prefix_cache.prefix_key`), so a
+    request in this form shares the ADK planner's cache. The request that
+    creates the cache is this one, so the cache holds the same form.
+
+    Each field Pydantic AI sends otherwise is rewritten, and kept as it came
+    when it holds anything the ADK planner's form has no equal for:
+
+    - the system instruction, one user `Content` of one text part, becomes
+      that text;
+    - one `Tool` per function declaration becomes one `Tool` of them all, in
+      order;
+    - a declaration whose parameters schema is the empty object
+      (`_NO_PARAMETERS_SCHEMA`) loses it;
+    - a tool config of nothing but the `AUTO` function calling mode is
+      dropped, as `AUTO` is Gemini's default with tools;
+    - `response_modalities` of `TEXT` alone is dropped, as text is the
+      default;
+    - the ADK planner's HTTP retries (`model_retry_options`) and
+      `automatic_continuation` are set, as `planner.agent.create_planner_agent`
+      sets them.
+
+    Each framework's own HTTP headers stay, as does the placeholder signature
+    Pydantic AI gives an unsigned replayed call in the contents.
+    """
     built = types.GenerateContentConfig.model_validate(config or {})
     http_options = built.http_options or types.HttpOptions()
     return built.model_copy(
         update={
+            "system_instruction": _instruction_as_text(built.system_instruction),
+            "tools": _as_one_tool(built.tools),
+            "tool_config": None if _only_auto(built.tool_config) else built.tool_config,
+            "response_modalities": (
+                None
+                if built.response_modalities == [types.Modality.TEXT]
+                else built.response_modalities
+            ),
             "http_options": http_options.model_copy(
                 update={"retry_options": model_retry_options()}
             ),
             "automatic_continuation": True,
         }
     )
+
+
+def _instruction_as_text(instruction: Any) -> Any:
+    """`instruction` as its text when it is one `Content` of one text part,
+    else as it is."""
+    if not isinstance(instruction, types.Content) or not instruction.parts:
+        return instruction
+    if len(instruction.parts) != 1:
+        return instruction
+    part = instruction.parts[0]
+    dumped = part.model_dump(exclude_none=True)
+    return part.text if dumped.keys() == {"text"} else instruction
+
+
+def _as_one_tool(tools: list[Any] | None) -> list[Any] | None:
+    """`tools` as one `Tool` holding every function declaration in order, each
+    less an empty parameters schema, when every tool holds function
+    declarations alone, else as they are."""
+    if not tools or not all(
+        isinstance(tool, types.Tool)
+        and tool.model_dump(exclude_none=True).keys() == {"function_declarations"}
+        for tool in tools
+    ):
+        return tools
+    return [
+        types.Tool(
+            function_declarations=[
+                _without_empty_parameters(declaration)
+                for tool in tools
+                for declaration in tool.function_declarations or ()
+            ]
+        )
+    ]
+
+
+def _without_empty_parameters(
+    declaration: types.FunctionDeclaration,
+) -> types.FunctionDeclaration:
+    if declaration.parameters_json_schema != _NO_PARAMETERS_SCHEMA:
+        return declaration
+    return declaration.model_copy(update={"parameters_json_schema": None})
+
+
+def _only_auto(tool_config: types.ToolConfig | None) -> bool:
+    """Whether `tool_config` sets nothing but the `AUTO` function calling mode."""
+    return tool_config is not None and tool_config.model_dump(mode="json", exclude_none=True) == {
+        "function_calling_config": {"mode": "AUTO"}
+    }
 
 
 def _chunk(content: types.Content, *, usage: Usage | None) -> types.GenerateContentResponse:

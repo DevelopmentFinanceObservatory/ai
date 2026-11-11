@@ -68,7 +68,10 @@ def model_response_event(
     """The event the ADK planner stores for the model response `response`.
 
     Its content is the response's parts as the model role's, each function
-    call with its id, or none for a response with no parts. A response with
+    call with its id, or none for a response with no parts. Those are the parts
+    Pydantic AI kept, so an empty text chunk Gemini streams after a function
+    call is not among them, where ADK's stream aggregator keeps it as a part. A
+    response with
     a call names no long-running call, since no planner tool is one. A
     response with parts and no call is the run's output, its text less any
     thought, as ADK takes a finished agent turn's. A finished response whose

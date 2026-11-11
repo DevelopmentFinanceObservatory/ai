@@ -11,13 +11,14 @@ call's answer, with the state the call wrote, as the run makes them. A tool
 that ends the run (`planner.tools.EndRun`) stops it before the next model
 request.
 
-What the model is sent equals the ADK planner's request for the same turn,
-apart from how Pydantic AI shapes a request on the wire: the system
-instruction as a `Content`, one `Tool` per declaration, an empty parameters
-schema on a tool that takes none, an explicit `AUTO` tool config,
-`response_modalities` and its own HTTP headers. The model must be built with
-`PLANNER_PROFILE`, which sends each declaration's schema as given and adds
-nothing to the instruction.
+Pydantic AI shapes a request its own way: the system instruction as a
+`Content`, one `Tool` per declaration, an empty parameters schema on a tool
+that takes none, an explicit `AUTO` tool config and `response_modalities`.
+The planner's model (`harness.planner_model`) puts each request in the ADK
+planner's form before it is sent, so the model is sent the ADK planner's
+request for the same turn but for each framework's HTTP headers. The model
+must be built with `PLANNER_PROFILE`, which sends each declaration's schema
+as given and adds nothing to the instruction.
 """
 
 from __future__ import annotations

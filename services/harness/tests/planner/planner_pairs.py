@@ -246,20 +246,25 @@ def _stored(items: Sequence[PlannerItem]) -> list[Event]:
 
 def assert_pinned_wire_differences(adk: Request, pydantic: Request) -> None:
     """Assert that the Pydantic AI planner's request equals the ADK planner's for
-    the same turn apart from how each framework shapes a request on the wire.
+    the same turn apart from what each framework sends of its own.
 
-    The contents are equal but for the first function call of a model turn that
-    Gemini sent with no thought signature, which the ADK planner replays with
-    none and Pydantic AI with Gemini's documented placeholder
+    The model wrapper puts Pydantic AI's request in the ADK planner's form
+    (`harness.planner_model._in_adk_planner_form`), so the contents are equal
+    but for the first function call of a model turn that Gemini sent with no
+    thought signature, which the ADK planner replays with none and Pydantic AI
+    with Gemini's documented placeholder
     (`harness.planner_node.SKIP_THOUGHT_SIGNATURE`, `_unsigned_first_calls_signed`).
-    Every config field is equal but five: the instruction as one user `Content`
-    where the ADK planner sends text; one `Tool` per declaration where the ADK
-    planner sends one `Tool` of them all, a declaration with no parameters
-    given an empty object schema; an explicit `AUTO` function calling mode
-    where the ADK planner leaves it unset, which is `AUTO`;
-    `response_modalities` `TEXT`; and each framework's HTTP headers, with the
-    HTTP retries the ADK planner's model sets on its client carried on each
-    request.
+    Every config field is equal but the HTTP options: each framework's HTTP
+    headers, with the HTTP retries the ADK planner's model sets on its client
+    carried on each request.
+
+    One more difference holds when Gemini streams a function call and then an
+    empty text chunk, as it does live (`tests.scripted_genai.live_call_reply`):
+    ADK's stream aggregator keeps the empty text as a part after the call, and
+    Pydantic AI drops an empty delta, so the ADK planner's replayed model turn
+    ends on a `{"text": ""}` part the Pydantic AI planner's lacks. This
+    assertion does not allow it; `without_trailing_empty_text` takes it off the
+    ADK planner's side first.
     """
     adk_config, adk_contents = _request_dumped(adk)
     pydantic_config, pydantic_contents = _request_dumped(pydantic)
@@ -269,38 +274,28 @@ def assert_pinned_wire_differences(adk: Request, pydantic: Request) -> None:
         for key in adk_config.keys() | pydantic_config.keys()
         if adk_config.get(key) != pydantic_config.get(key)
     }
-    assert differing == {
-        "system_instruction",
-        "tools",
-        "tool_config",
-        "response_modalities",
-        "http_options",
-    }
-    assert pydantic_config["system_instruction"] == {
-        "role": "user",
-        "parts": [{"text": adk_config["system_instruction"]}],
-    }
-    (adk_tool,) = adk_config["tools"]
-    assert pydantic_config["tools"] == [
-        {
-            "function_declarations": [
-                declaration
-                if "parameters_json_schema" in declaration
-                else {**declaration, "parameters_json_schema": {"type": "object", "properties": {}}}
-            ]
-        }
-        for declaration in adk_tool["function_declarations"]
-    ]
-    assert pydantic_config["tool_config"] == {"function_calling_config": {"mode": "AUTO"}}
-    assert "tool_config" not in adk_config
-    assert pydantic_config["response_modalities"] == ["TEXT"]
-    assert "response_modalities" not in adk_config
+    assert differing == {"http_options"}
     assert adk_config["automatic_continuation"] is True
     assert adk_config["http_options"].keys() == {"headers"}
     assert pydantic_config["http_options"].keys() == {"headers", "retry_options"}
     assert pydantic_config["http_options"]["retry_options"] == model_retry_options().model_dump(
         mode="json", exclude_none=True
     )
+
+
+def without_trailing_empty_text(content: types.Content) -> types.Content:
+    """`content` less the empty text part ADK's stream aggregator keeps after a
+    function call that ends a model turn (`assert_pinned_wire_differences`), or
+    `content` itself when it ends on no such part."""
+    parts = content.parts or []
+    if (
+        content.role == "model"
+        and len(parts) >= 2
+        and parts[-1].model_dump(exclude_none=True) == {"text": ""}
+        and parts[-2].function_call is not None
+    ):
+        return content.model_copy(update={"parts": parts[:-1]})
+    return content
 
 
 # `SKIP_THOUGHT_SIGNATURE` as a dumped part holds it.
