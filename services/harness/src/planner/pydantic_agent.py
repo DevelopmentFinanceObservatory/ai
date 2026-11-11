@@ -114,13 +114,15 @@ PLANNER_PROFILE = GoogleModelProfile(
 @dataclass
 class _Call:
     """One tool call of the run: its tool, the view it writes through, its
-    answer once it has one, and whether it ended the run."""
+    answer once it has one, whether it ended the run, and whether its answer
+    has been told to `PlannerDeps.tool_answered`."""
 
     name: str
     view: RecordingState
     answer: dict[str, Any] | None = None
     writes: dict[str, Any] | None = None
     ended: bool = False
+    reported: bool = False
 
 
 @dataclass
@@ -321,8 +323,10 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
     `error` key, the refusal of a call missing a required argument
     (`planner.tool_spec.missing_arguments`), marks the call's span failed, as
     the ADK planner marks its tool's (`_mark_tool_error`). Either answer goes
-    to `tool_answered` and, unless that raises, is kept with the call's writes
-    for the run to yield.
+    to `tool_answered`, the call marked reported first, and, unless that
+    raises, is kept with the call's writes for the run to yield. A call whose
+    `tool_answered` raised is not kept, as the ADK planner keeps no answer its
+    after-tool callback raised on, and is not reported again (`_answered`).
     """
 
     async def call(ctx: RunContext[PlannerDeps], **raw: Any) -> dict[str, Any]:
@@ -351,6 +355,7 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
             answer = deps.tool_failed(spec.name, exc)
         response = as_function_response(answer)
         writes = deps._written(record.view)
+        record.reported = True
         deps.tool_answered(spec.name, response)
         record.writes, record.answer = writes, response
         return response
@@ -463,8 +468,9 @@ def _question_prompt(question: types.Content | str) -> str | list[UserContent]:
     sends every part of the question as it is.
 
     Raises:
-        UnsentQuestionPartError: A part is neither text nor an inline file;
-            the message names the part's fields.
+        UnsentQuestionPartError: A part is neither text nor an inline file,
+            the message naming the part's fields, or is an inline file with
+            no bytes.
     """
     if isinstance(question, str):
         return question
@@ -472,7 +478,12 @@ def _question_prompt(question: types.Content | str) -> str | list[UserContent]:
     for part in question.parts or ():
         if part.text is not None:
             prompt.append(part.text)
-        elif part.inline_data is not None and part.inline_data.data is not None:
+        elif part.inline_data is not None:
+            if part.inline_data.data is None:
+                raise UnsentQuestionPartError(
+                    "the question holds an inline_data part with no bytes, so the "
+                    "Pydantic AI planner has no file to send for it"
+                )
             media_type = part.inline_data.mime_type or "application/octet-stream"
             prompt.append(BinaryContent(data=part.inline_data.data, media_type=media_type))
         else:
@@ -507,7 +518,9 @@ def _answered(
     lacks, which writes nothing, or, for a call Pydantic AI answered without
     running its tool, the answer the model is sent (`_sent_answer`) with
     whatever the call wrote, told to `deps.tool_answered` here as a tool's
-    own answer is told in `_tool_function`."""
+    own answer is told in `_tool_function`, unless that call was told already
+    (its `tool_answered` raised one of Pydantic AI's control exceptions, such
+    as `ModelRetry`, after its tool answered)."""
     name = event.part.tool_name
     if name not in tools:
         return PlannerToolAnswer(
@@ -519,7 +532,8 @@ def _answered(
     writes = deps._written(call.view) if call is not None else {}
     ended = call.ended if call is not None else False
     answer = _sent_answer(event.part)
-    deps.tool_answered(name, answer)
+    if call is None or not call.reported:
+        deps.tool_answered(name, answer)
     return PlannerToolAnswer(name, event.tool_call_id, answer, writes, ended)
 
 

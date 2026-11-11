@@ -25,13 +25,14 @@ from planner.pydantic_agent import (
     PlannerResponse,
     PlannerToolAnswer,
     PydanticPlanner,
+    UnsentQuestionPartError,
     planner_agent,
     run_planner,
 )
 from planner.specs import PROPOSE_PLAN, planner_tool_specs
 from planner.tool_spec import Parameter, ToolSpec
 from planner.tools import ASK_ACCEPTED, EndRun, load_pending_ask
-from pydantic_ai.exceptions import UnexpectedModelBehavior
+from pydantic_ai.exceptions import ModelRetry, UnexpectedModelBehavior
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
@@ -288,10 +289,40 @@ async def test_a_call_pydantic_ai_answers_with_a_retry_still_gets_its_answer() -
     assert answers["w1"] == PlannerToolAnswer("write_a", "w1", {"outcome": "ok"}, {"a": 1})
     assert answers["c1"].name == "counted"
     assert set(answers["c1"].answer) == {"error"}
-    assert sorted(run.answered) == [
-        ("counted", answers["c1"].answer),
-        ("write_a", {"outcome": "ok"}),
-    ]
+    # Each answer is told once. A tool's own is told as it answers, before
+    # Pydantic AI reports the call, and the retry as the run yields it, so the
+    # two orders can differ: the yield order of one response's calls is
+    # Pydantic AI's, which has varied between runs of this test.
+    yielded = [item for item in items if isinstance(item, PlannerToolAnswer)]
+    assert sorted(run.answered, key=repr) == sorted(
+        ((item.name, item.answer) for item in yielded), key=repr
+    )
+    assert len(run.answered) == len(yielded) == 2
+
+
+async def test_a_call_whose_tool_answered_asks_for_a_retry_is_reported_once() -> None:
+    """A planner tool's answer `tool_answered` refuses with Pydantic AI's
+    `ModelRetry` is told once: Pydantic AI then answers the call itself with
+    the retry, which the run yields as the model is sent it, and does not tell
+    again."""
+    run = _Run()
+
+    def tool_answered(name: str, answer: dict[str, Any]) -> None:
+        run.tool_answered(name, answer)
+        if len(run.answered) == 1:
+            raise ModelRetry("answer again")
+
+    scripted = ScriptedGenai([reply(call_part("write_a", id="w1")), reply(text_part("done"))])
+    agent = planner_agent([_write("a", 1)], instruction="Plan.", model=_google_model(scripted))
+    deps = PlannerDeps(
+        state={}, earlier=(), tool_answered=tool_answered, tool_failed=run.tool_failed
+    )
+
+    items = [item async for item in run_planner(agent, deps, question=_QUESTION, brief=_BRIEF)]
+
+    assert run.answered == [("write_a", {"outcome": "ok"})]
+    (answer,) = [item for item in items if isinstance(item, PlannerToolAnswer)]
+    assert (answer.call_id, set(answer.answer)) == ("w1", {"error"})
 
 
 async def test_a_run_pydantic_ai_ends_after_a_call_answered_yields_that_answer() -> None:
@@ -322,6 +353,28 @@ async def test_a_run_pydantic_ai_ends_after_a_call_answered_yields_that_answer()
     items = [item async for item in run_planner(agent, deps, question=_QUESTION, brief=_BRIEF)]
 
     assert items[1:] == [PlannerToolAnswer("write_a", "w1", {"outcome": "ok"}, {"a": 1})]
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        types.Part(file_data=types.FileData(file_uri="gs://b/f.pdf", mime_type="x/pdf")),
+        types.Part(inline_data=types.Blob(mime_type="x/pdf")),
+    ],
+    ids=["file-by-uri", "inline-data-without-bytes"],
+)
+async def test_a_question_part_the_planner_cannot_send_is_refused_before_any_request(
+    part: types.Part,
+) -> None:
+    scripted = ScriptedGenai([reply(text_part("done"))])
+    agent = planner_agent([], instruction="Plan.", model=_google_model(scripted))
+    question = types.Content(role="user", parts=[types.Part(text="kenya debt"), part])
+
+    with pytest.raises(UnsentQuestionPartError):
+        async for _ in run_planner(agent, _deps(), question=question, brief=_BRIEF):
+            pass
+
+    assert scripted.requests == []
 
 
 # --- The first request equals the ADK planner's --------------------------------------

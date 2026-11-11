@@ -34,8 +34,6 @@ from typing import Any
 from common.telemetry import current_trace_id
 from executor.classify import internal_fault
 from google.adk import Context, Event
-from google.adk.agents.invocation_context import LlmCallsLimitExceededError
-from google.adk.agents.run_config import RunConfig
 from google.adk.flows.llm_flows import functions as adk_functions
 from google.adk.telemetry import TelemetryConfig
 from google.adk.workflow import BaseNode, node
@@ -131,22 +129,25 @@ def planner_node(
         A node named `planner.agent.AGENT_NAME` that runs the planner once on
         the session's brief (`planner.agent.BRIEF_STATE_KEY`), after the
         turn's question, and yields the ADK planner's events for the run.
-        The run makes at most `RunConfig.max_llm_calls` model calls of its
-        own, when that is above zero, and the call past it raises
-        `LlmCallsLimitExceededError`, the error the ADK planner raises. ADK
-        counts every model call of the invocation against the cap, the
-        orchestrator's and earlier planner runs' included, so a turn can make
-        more calls in total on this planner before the cap trips (`_LlmCalls`).
+        Each model call the run makes is counted on the invocation's counter
+        (`InvocationContext.increment_llm_call_count`), with the
+        orchestrator's and every other planner run's, as the ADK planner's
+        are; a turn put in the model's place is not, as ADK counts no
+        response a callback gives. ADK raises `LlmCallsLimitExceededError` on
+        the call past `RunConfig.max_llm_calls`.
         A question holding a part this planner does not send
         (`planner.pydantic_agent.UnsentQuestionPartError`) ends the run before
-        any request on an `internal_error` refusal (`run.refused`).
+        any request on an `internal_error` refusal (`run.refused`). The seam
+        answers the entry with that refusal, marked not final
+        (`PlannerSeam._FINAL_CODES`), so the orchestrator may ask for a plan
+        again and meet the same refusal. Studio sends only text.
     """
 
     async def dfo_planner(ctx: Context, node_input: Any) -> AsyncIterator[Event]:
         del node_input
         ctx.event_author = AGENT_NAME
         recorded = _PUT_IN_PLACE
-        calls = _LlmCalls(ctx.run_config)
+        invocation = ctx.get_invocation_context()
 
         def before_request() -> types.Content | None:
             nonlocal recorded
@@ -154,7 +155,7 @@ def planner_node(
             if turn is not None:
                 recorded = _PUT_IN_PLACE
             else:
-                calls.count()
+                invocation.increment_llm_call_count()
             return turn
 
         def after_response(
@@ -294,33 +295,6 @@ def directive_turn(directive: Directive | None) -> types.Content | None:
         case None:
             return None
     return types.Content(role="model", parts=[part])
-
-
-class _LlmCalls:
-    """The model calls one planner run has made, against `RunConfig.max_llm_calls`.
-
-    ADK counts every `LlmAgent` call of the invocation on one counter
-    (`InvocationContext.increment_llm_call_count`), the orchestrator's and
-    every planner run's, and raises `LlmCallsLimitExceededError` on the call
-    past the cap. This counts one run's calls alone, because ADK keeps the
-    invocation's count where no public API reads or adds to it. A turn on the
-    Pydantic AI planner can therefore make more model calls in total before
-    the cap trips: up to the cap in each planner run, beside the
-    orchestrator's own. A turn put in the model's place is not a call, as in
-    ADK.
-    """
-
-    def __init__(self, config: RunConfig | None) -> None:
-        self._cap = config.max_llm_calls if config is not None else 0
-        self._made = 0
-
-    def count(self) -> None:
-        """Count one call, raising when it passes the cap."""
-        self._made += 1
-        if 0 < self._cap < self._made:
-            raise LlmCallsLimitExceededError(
-                f"Max number of llm calls limit of `{self._cap}` exceeded"
-            )
 
 
 def _ended(answers: Sequence[PlannerToolAnswer]) -> bool:

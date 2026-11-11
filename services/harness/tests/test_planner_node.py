@@ -780,20 +780,41 @@ async def _stored(harness: _SeamHarness) -> _Entry:
     return _Entry(outputs=[], reports=[], requests=[], events=await harness.events(), state={})
 
 
-async def _capped(runner: Runner, plan: Plan) -> _Entry:
-    """An entry whose model is refused a third call by the invocation's cap of two
-    (`RunConfig.max_llm_calls`), its first two proposals refused."""
+@dataclass
+class _SpentFirst:
+    """`seam`, called after `spent` model calls of the invocation, as the
+    orchestrator's calls before the planner's spend the invocation's allowance."""
+
+    seam: PlannerSeam
+    spent: int
+
+    async def __call__(self, *, ctx: Context, **kwargs: Any) -> dict[str, Any]:
+        invocation = ctx.get_invocation_context()
+        for _ in range(self.spent):
+            invocation.increment_llm_call_count()
+        return await self.seam(ctx=ctx, **kwargs)
+
+
+async def _capped(runner: Runner, plan: Plan, *, spent: int) -> _Entry:
+    """An entry under the invocation's cap of three model calls
+    (`RunConfig.max_llm_calls`), `spent` of them spent before the planner runs,
+    whose proposals are all refused, so the planner calls until the cap trips."""
     scripted = ScriptedGenai(
         [
             reply(call_part(PROPOSE_PLAN, {}, id=f"p{n}", signature=_SIGNED), usage=_USAGE)
-            for n in (1, 2, 3)
+            for n in (1, 2, 3, 4)
         ]
     )
-    seam = _seam(runner, scripted, tools=_proposals(_REFUSED, _REFUSED))
+    seam = _seam(runner, scripted, tools=_proposals(_REFUSED, _REFUSED, _REFUSED))
     harness = _SeamHarness()
-    capped = RunConfig(streaming_mode=StreamingMode.SSE, max_llm_calls=2)
+    capped = RunConfig(streaming_mode=StreamingMode.SSE, max_llm_calls=3)
     with pytest.raises(LlmCallsLimitExceededError):
-        await harness.run(seam, run_config=capped, readings=[], **_planned(plan))
+        await harness.run(
+            cast(PlannerSeam, _SpentFirst(seam, spent)),
+            run_config=capped,
+            readings=[],
+            **_planned(plan),
+        )
     return _Entry(
         outputs=[],
         reports=[],
@@ -803,15 +824,17 @@ async def _capped(runner: Runner, plan: Plan) -> _Entry:
     )
 
 
+@pytest.mark.parametrize("spent", [0, 1], ids=["nothing-spent", "one-call-spent-before"])
 async def test_a_run_past_the_invocations_model_call_cap_ends_the_same_on_both(
-    plan: Plan,
+    plan: Plan, spent: int
 ) -> None:
-    """The call past `RunConfig.max_llm_calls` raises before it is sent, and the
-    session stores the same error event on both planners."""
-    adk = await _capped("adk", plan)
-    pydantic = await _capped("pydantic_ai", plan)
+    """The call past `RunConfig.max_llm_calls` raises before it is sent, counted
+    with the invocation's calls before the planner ran, and the session stores
+    the same error event on both planners."""
+    adk = await _capped("adk", plan, spent=spent)
+    pydantic = await _capped("pydantic_ai", plan, spent=spent)
 
-    assert len(adk.requests) == 2
+    assert len(adk.requests) == 3 - spent
     assert adk.events[-1].error_code == "LlmCallsLimitExceededError"
     _assert_same(adk, pydantic)
 
