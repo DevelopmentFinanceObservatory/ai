@@ -555,19 +555,19 @@ def _function_calls(event: Any) -> list[Any]:
 
 
 def _response_holding(events: Sequence[Event], call_id: str) -> list[Any]:
-    """The function calls of the latest planner model response in `events` that
-    holds a call with `call_id`, in order, or none.
+    """The function calls of the latest model response in `events` that holds a
+    call with `call_id`, in order, or none.
 
-    A model response is an event the planner agent authors (`AGENT_NAME`).
     The graph's planner node pauses on an accepted ask with an interrupt call
-    under the ask's own id, in an event the node authors, so a later event
-    can hold the id without being the response that made the call.
+    (`REQUEST_INPUT_FUNCTION_CALL_NAME`) under the ask's own id, so a later
+    event can hold the id without being the response that made the call. A
+    call of that name under `call_id` is skipped.
     """
     for event in reversed(events):
-        if getattr(event, "author", None) != AGENT_NAME:
-            continue
         calls = _function_calls(event)
-        if any(call.id == call_id for call in calls):
+        if any(
+            call.id == call_id and call.name != REQUEST_INPUT_FUNCTION_CALL_NAME for call in calls
+        ):
             return calls
     return []
 
@@ -704,6 +704,25 @@ def _user_message(event: Any) -> bool:
 _TOOL_ERROR = "TOOL_ERROR"
 
 
+def refuse_vertex_ai() -> None:
+    """Refuse to build the planner when ADK's Google variant is Vertex AI.
+
+    The planner's declarations are the Gemini developer API's form
+    (`planner.tool_spec.function_declaration`). Vertex AI rejects their
+    optional `anyOf` schemas, which ADK rewrites only for its own function
+    tools. Every builder of the planner's tools calls this once.
+
+    Raises:
+        RuntimeError: ADK's Google variant (`get_google_llm_variant`) is
+            Vertex AI.
+    """
+    if get_google_llm_variant() is GoogleLLMVariant.VERTEX_AI:
+        raise RuntimeError(
+            "ADK's Google variant is Vertex AI, which rejects the planner's tool "
+            "declarations. Run the planner on a Gemini developer API key (GOOGLE_API_KEY)."
+        )
+
+
 class SpecTool(BaseTool):
     """A `planner.tool_spec.ToolSpec` served to an ADK `LlmAgent`.
 
@@ -714,23 +733,11 @@ class SpecTool(BaseTool):
     one `types.Tool` of function declarations, creating it when the request
     has none, and registers the tool under its name.
 
-    The declaration is the Gemini developer API's form. Vertex AI rejects its
-    optional `anyOf` schemas, which ADK rewrites for Vertex AI alone, so a
-    `SpecTool` refuses to be built when ADK's Google variant
-    (`get_google_llm_variant`) is Vertex AI.
-
-    Raises:
-        RuntimeError: ADK is configured for Vertex AI.
+    The declaration is the Gemini developer API's form, which Vertex AI
+    rejects (`refuse_vertex_ai`).
     """
 
     def __init__(self, spec: ToolSpec) -> None:
-        if get_google_llm_variant() is GoogleLLMVariant.VERTEX_AI:
-            raise RuntimeError(
-                f"The planner tool {spec.name!r} declares its arguments for the Gemini "
-                "developer API, and Vertex AI rejects that form. Unset "
-                "GOOGLE_GENAI_USE_VERTEXAI and GOOGLE_GENAI_USE_ENTERPRISE and run on "
-                "GOOGLE_API_KEY."
-            )
         super().__init__(name=spec.name, description=spec.description)
         self.spec = spec
 
@@ -843,9 +850,9 @@ def create_planner_agent(
         The configured `LlmAgent`.
 
     Raises:
-        RuntimeError: ADK is configured for Vertex AI, where the planner's
-            declarations would be rejected (`SpecTool`).
+        RuntimeError: ADK's Google variant is Vertex AI (`refuse_vertex_ai`).
     """
+    refuse_vertex_ai()
     return LlmAgent(
         name=AGENT_NAME,
         model=_retrying(model_name, prefix_cache=prefix_cache),

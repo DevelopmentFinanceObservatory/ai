@@ -1,9 +1,10 @@
 """Backs the harness-planner-v2 eval set with the same planner agent the harness runs.
 
 Score it with `just eval-planner`, then read the results with `just eval-web` --
-`evals/README.md` covers why scoring belongs to the CLI. Both need a
-`GOOGLE_API_KEY` or Vertex AI credentials in the repo-root `.env`, which ADK
-loads before importing this module.
+`evals/README.md` covers why scoring belongs to the CLI. Both need a Gemini
+developer API key, `GOOGLE_API_KEY`, in the repo-root `.env`, which ADK loads
+before importing this module. The planner refuses to build when ADK's Google
+variant is Vertex AI.
 
 The planner is built with no translator, so the cases score
 its plan-lifecycle tools alone.

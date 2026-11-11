@@ -137,9 +137,10 @@ Before the first real deploy, infra needs to set up, per environment:
   developer API key, `GOOGLE_API_KEY`, which google-adk reads straight from
   the process environment rather than from this repo's settings classes, so
   it must be wired into the service definition as a secret. The harness
-  refuses to build the planner on Vertex AI (`GOOGLE_GENAI_USE_VERTEXAI` or
-  `GOOGLE_GENAI_USE_ENTERPRISE` set true), whose schema rules its tool
-  declarations do not meet.
+  refuses to build the planner when ADK's Google variant is Vertex AI, which
+  rejects the planner's tool declarations. In google-adk 2.13 that is when
+  `GOOGLE_GENAI_USE_ENTERPRISE` is `true` or `1`, or, with it unset, when the
+  deprecated `GOOGLE_GENAI_USE_VERTEXAI` is.
 - `DFO_APIS_URL` on that service, pointing at apis, the FastAPI app that
   serves both the Search and Datasets surfaces. The data-mcp component
   mounted in the harness reads it to reach that API and falls back to a

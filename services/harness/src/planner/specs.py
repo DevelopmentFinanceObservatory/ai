@@ -15,7 +15,6 @@ from typing import Any
 from compiler.surface import ToolSurface
 from harness.turn_events import PLANNER_ASK
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
-from submission.service import Proposal
 from translator.tool import Translate
 
 from planner.call import PlannerCall
@@ -29,13 +28,13 @@ from planner.plan import (
     EvidenceRequirement,
 )
 from planner.skills import DFO_FAQ_SKILL_ID, read_skill_page
-from planner.source_reads import with_source_reads
 from planner.tool_spec import REQUIRED, Parameter, ToolSpec
 from planner.tools import (
     EndRun,
     ask_user,
     propose,
     propose_and_translate,
+    propose_reading_sources,
     reject,
 )
 
@@ -297,25 +296,22 @@ def planner_tool_specs(
             (`_described`).
     """
 
-    def draft(call: PlannerCall, arguments: dict[str, Any]) -> dict[str, object]:
-        return propose(
-            call,
-            Proposal(**arguments),
-            question_fixed=question_fixed,
-            reads_user_words=reads_user_words,
-        )
-
     def propose_plan(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
         del end_run
-        return draft(call, arguments)
+        return propose(
+            call, arguments, question_fixed=question_fixed, reads_user_words=reads_user_words
+        )
 
     async def propose_plan_reading(
         call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]
     ) -> object:
         del end_run
-        assert surface is not None
-        return await with_source_reads(
-            lambda: draft(call, arguments), state=call.state, surface=surface
+        return await propose_reading_sources(
+            call,
+            arguments,
+            question_fixed=question_fixed,
+            reads_user_words=reads_user_words,
+            surface=surface,
         )
 
     async def propose_plan_translating(

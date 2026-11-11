@@ -1,6 +1,6 @@
 """The planner's tool bodies, over a `planner.call.PlannerCall` and no agent framework.
 
-`ask_user`, `propose` (with `propose_and_translate`)
+`ask_user`, `propose` (with `propose_reading_sources` and `propose_and_translate`)
 and `reject` are what the planner's `ask_user_question`, `propose_plan` and
 `reject_plan` do. Each reads its call's session state and steps through the
 `PlannerCall` it is given, and a tool that ends the planner's run does so
@@ -454,16 +454,42 @@ def ask_user(
 
 
 def propose(
-    call: PlannerCall, proposal: Proposal, *, question_fixed: bool, reads_user_words: bool
+    call: PlannerCall,
+    arguments: Mapping[str, Any],
+    *,
+    question_fixed: bool,
+    reads_user_words: bool,
 ) -> dict[str, object]:
-    """Record the plan `proposal` states, or patch the one on record, over `call`'s session."""
+    """Record the plan a `propose_plan` call's `arguments` state, or patch the one
+    on record, over `call`'s session."""
     return submit(
         CallSession(call),
-        proposal,
+        Proposal(**arguments),
         question_fixed=question_fixed,
         reads_user_words=reads_user_words,
         proposer=PROPOSE_PLAN_PROPOSER,
     )
+
+
+async def propose_reading_sources(
+    call: PlannerCall,
+    arguments: Mapping[str, Any],
+    *,
+    question_fixed: bool,
+    reads_user_words: bool,
+    surface: ToolSurface | None,
+) -> dict[str, object]:
+    """`propose`, and with a `surface`, each source read the proposal is refused
+    for want of made and the proposal made again (`with_source_reads`)."""
+
+    def draft() -> dict[str, object]:
+        return propose(
+            call, arguments, question_fixed=question_fixed, reads_user_words=reads_user_words
+        )
+
+    if surface is None:
+        return draft()
+    return await with_source_reads(draft, state=call.state, surface=surface)
 
 
 async def propose_and_translate(
@@ -476,11 +502,10 @@ async def propose_and_translate(
     translate: Translate,
     surface: ToolSurface | None,
 ) -> dict[str, object]:
-    """`propose` the plan `arguments` state, translating the plan it records.
+    """`propose_reading_sources` over `arguments`, translating the plan it records.
 
-    With a `surface`, each source read the proposal is refused for want of
-    is made and the proposal made again (`with_source_reads`). Translation
-    runs once, on the version the proposal recorded, after those reads. The
+    Translation runs once, on the version the proposal recorded, after any
+    source reads. The
     proposal's own `outcome` stays `ok` whatever the verdict, since the version
     is recorded either way, and a verdict of `ok` declares the plan ready
     (`ready_and_end`). A proposal that records nothing translates nothing. A
@@ -498,19 +523,12 @@ async def propose_and_translate(
             translation=await translate(call),
         )
         return ready_and_end(answer, call, end_run)
-
-    def draft() -> dict[str, object]:
-        return propose(
-            call,
-            Proposal(**arguments),
-            question_fixed=question_fixed,
-            reads_user_words=reads_user_words,
-        )
-
-    result = (
-        draft()
-        if surface is None
-        else await with_source_reads(draft, state=call.state, surface=surface)
+    result = await propose_reading_sources(
+        call,
+        arguments,
+        question_fixed=question_fixed,
+        reads_user_words=reads_user_words,
+        surface=surface,
     )
     if result.get("outcome") != Outcome.OK.value:
         return result

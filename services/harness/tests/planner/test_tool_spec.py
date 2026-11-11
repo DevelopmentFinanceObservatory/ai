@@ -184,11 +184,15 @@ async def test_an_adk_run_carries_the_built_declarations_and_the_planner_instruc
     assert expected.startswith(instruction)
 
 
-def test_the_planner_refuses_to_build_for_vertex_ai(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_planner_builds_on_the_developer_api_and_refuses_vertex_ai(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The declarations are the Gemini developer API's form, which Vertex AI rejects."""
-    monkeypatch.setenv("GOOGLE_GENAI_USE_ENTERPRISE", "true")
+    monkeypatch.setenv("GOOGLE_GENAI_USE_ENTERPRISE", "false")
+    create_planner_agent(model_name="m")
 
-    with pytest.raises(RuntimeError, match="Vertex AI"):
+    monkeypatch.setenv("GOOGLE_GENAI_USE_ENTERPRISE", "true")
+    with pytest.raises(RuntimeError):
         create_planner_agent(model_name="m")
 
 

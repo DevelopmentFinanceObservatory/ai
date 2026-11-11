@@ -1,7 +1,8 @@
 """The planner's call record, tool specs and bodies, the submission chain and the translator import no ADK.
 
 Each module's source is parsed, not imported, so the check reads each
-module's own imports only. `planner/tools.py` holds the planner's tool bodies
+module's own imports only, and a module may still load ADK through a module it
+imports. `planner/tools.py` holds the planner's tool bodies
 over a `PlannerCall`, `planner/source_reads.py` the reads they make and
 `planner/skills.py` the skill reads. `planner/specs.py` declares each tool as a
 `planner/tool_spec.py` `ToolSpec`, whose declaration `planner/declaration.py`

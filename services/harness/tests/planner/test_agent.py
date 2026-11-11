@@ -14625,25 +14625,29 @@ def test_a_plan_tool_refuses_an_argument_it_does_not_describe() -> None:
 
 
 @pytest.mark.parametrize(
-    "descriptions",
+    ("descriptions", "offending"),
     [
         pytest.param(
             {k: v for k, v in specs._PROPOSE_PLAN_ARGUMENTS.items() if k != "removed_asks"},
+            "removed_asks",
             id="parameter-undescribed",
         ),
         pytest.param(
             specs._PROPOSE_PLAN_ARGUMENTS | {"dropped_argument": "Gone."},
+            "dropped_argument",
             id="description-names-no-parameter",
         ),
     ],
 )
 def test_propose_plan_refuses_to_build_unless_each_argument_is_described_once(
-    monkeypatch: pytest.MonkeyPatch, descriptions: dict[str, str]
+    monkeypatch: pytest.MonkeyPatch, descriptions: dict[str, str], offending: str
 ) -> None:
     monkeypatch.setattr(specs, "_PROPOSE_PLAN_ARGUMENTS", descriptions)
 
-    with pytest.raises(ValueError, match="describe each argument exactly once"):
+    with pytest.raises(ValueError) as refused:
         planner_tool_specs()
+
+    assert offending in str(refused.value)
 
 
 async def _requested_propose_plan_declaration() -> dict[str, Any]:
@@ -18688,10 +18692,8 @@ def test_a_call_reads_the_session_events_once() -> None:
 
 
 def _model_response(*calls: Any) -> Any:
-    """A fake session event holding one model response's `calls`, as ADK writes them
-    together under the planner agent's name."""
+    """A fake session event holding one model response's `calls`, as ADK writes them together."""
     return SimpleNamespace(
-        author=AGENT_NAME,
         content=SimpleNamespace(
             parts=[SimpleNamespace(function_call=call, function_response=None) for call in calls]
         ),
@@ -18753,18 +18755,21 @@ def test_an_ask_after_the_first_ask_of_a_response_is_refused(
     assert (asked.call_id if asked else None) == ("first" if first_accepted else None)
 
 
-def test_an_ask_beside_an_ask_stays_refused_when_an_interrupt_holds_its_id() -> None:
+@pytest.mark.parametrize("author", [AGENT_NAME, "another_planner"])
+def test_an_ask_beside_an_ask_stays_refused_when_an_interrupt_holds_its_id(author: str) -> None:
     """The graph's planner node pauses on an accepted ask with an interrupt call under the
     ask's own id, so on a replayed invocation that event can be the latest one holding the
     served ask's id. It is not the model's response: the ask is still the response's second
-    and is refused."""
+    and is refused, whatever the agent that wrote the response is named."""
     ctx: Any = _FakeToolContext()
+    response = _model_response(
+        SimpleNamespace(id="first", name=PLANNER_ASK, args={"message": "Which?"}),
+        SimpleNamespace(id="second", name=PLANNER_ASK, args={"message": "Which years?"}),
+    )
+    response.author = author
     ctx.session.events.extend(
         [
-            _model_response(
-                SimpleNamespace(id="first", name=PLANNER_ASK, args={"message": "Which?"}),
-                SimpleNamespace(id="second", name=PLANNER_ASK, args={"message": "Which years?"}),
-            ),
+            response,
             planner_ask_interrupt({"call_id": "second", "args": {"message": "Which years?"}}),
         ]
     )
