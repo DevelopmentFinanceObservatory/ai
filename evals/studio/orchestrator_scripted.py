@@ -30,10 +30,8 @@ routes (`create_studio_router`), the surface a browser uses.
 from __future__ import annotations
 
 import copy
-import inspect
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from typing import Any
 
 import httpx2
@@ -68,12 +66,9 @@ from harness.tool_contracts import ResolverError, resolver_digest
 from harness.wiring import handing_back_planner_failures
 from orchestrator.agent import create_orchestrator_agent
 from planner.agent import planner_specs
-from planner.call import PlannerCall
 from planner.plan import Plan, SessionState, save_plan
-from planner.tool_spec import ToolBody, ToolSpec
-from planner.tools import EndRun
+from planner.tool_spec import ToolSpec
 from pydantic import Field
-from pydantic_core import to_jsonable_python
 from translator.tool import build_translate
 
 # What a model says once its script runs out. The run records the exhaustion
@@ -91,9 +86,10 @@ class Log:
     "contents": [Content as JSON]}`; a call entry is `{"kind": "call",
     "layer": "step" | "executor", "tool": ..., "arguments": ..., "outcome":
     "ok" | "refused", "code": ...}`, and one from a scripted planner's tool
-    call carries `"layer": "planner"`, the arguments as the tool's body received
-    them, the tool's own `outcome` and its whole `response`; a `{"kind":
-    "turn", "index": n}` marker opens each message turn.
+    call carries `"layer": "planner"`, no arguments, and the `outcome`, `code`
+    and whole `response` of the answer the model receives
+    (`planner_tool_answered`); a `{"kind": "turn", "index": n}` marker opens
+    each message turn.
     """
 
     def __init__(self) -> None:
@@ -102,6 +98,22 @@ class Log:
 
     def mark_turn(self, index: int) -> None:
         self.entries.append({"kind": "turn", "index": index})
+
+    def planner_tool_answered(self, tool: str, answer: dict[str, Any] | None) -> None:
+        """Record a planner tool call by the answer the model receives for it: the
+        tool's own, an argument refusal, or the seam's answer for a tool that
+        raised (`PlannerSeam`'s `on_tool_answered`)."""
+        response = answer or {}
+        self.entries.append(
+            {
+                "kind": "call",
+                "layer": "planner",
+                "tool": tool,
+                "outcome": response.get("outcome"),
+                "code": response.get("code"),
+                "response": copy.deepcopy(response),
+            }
+        )
 
     def record_request(self, agent: str, *, system: str, contents: Sequence[types.Content]) -> None:
         self.entries.append(
@@ -189,33 +201,6 @@ class PlannerScript:
             return self._script.pop(0)
         self._log.exhausted.append("planner")
         return types.Part.from_text(text=_EXHAUSTED_TEXT)
-
-
-def logging_tool_calls(specs: Sequence[ToolSpec], log: Log) -> tuple[ToolSpec, ...]:
-    """`specs`, each recording its calls and answers in `log`."""
-    return tuple(replace(spec, body=_logged(spec, log)) for spec in specs)
-
-
-def _logged(spec: ToolSpec, log: Log) -> ToolBody:
-    async def body(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
-        answer = spec.body(call, end_run, arguments)
-        if inspect.isawaitable(answer):
-            answer = await answer
-        response = answer if isinstance(answer, dict) else {}
-        log.entries.append(
-            {
-                "kind": "call",
-                "layer": "planner",
-                "tool": spec.name,
-                "arguments": to_jsonable_python(arguments),
-                "outcome": response.get("outcome"),
-                "code": response.get("code"),
-                "response": copy.deepcopy(response),
-            }
-        )
-        return answer
-
-    return body
 
 
 class ScriptedPairPlanner:
@@ -458,12 +443,13 @@ def _planner_seam(
     *,
     surface: ScriptedSurface,
     answer: OfferedPlans | PlannerScript,
-    tools: Callable[[Sequence[ToolSpec]], Sequence[ToolSpec]],
+    tools: Callable[[Sequence[ToolSpec]], Sequence[ToolSpec]] = tuple,
+    on_tool_answered: Callable[[str, dict[str, Any] | None], None] | None = None,
 ) -> PlannerSeam:
     """The real seam on the planner `settings` names, over `surface`, its model
-    calls answered by `answer` and its tools the ones the seam builds for itself
+    calls answered by `answer`, its tools the ones the seam builds for itself
     (`planner.agent.planner_specs` over `surface` and its translation) as
-    `tools` changes them."""
+    `tools` changes them, and each tool's answer told to `on_tool_answered`."""
     translate = build_translate(surface=surface)
     specs = planner_specs(
         translate=translate, surface=surface, question_fixed=True, reads_user_words=False
@@ -474,6 +460,7 @@ def _planner_seam(
         translate=translate,
         specs=tools(specs),
         client=scripted_client(answer),
+        on_tool_answered=on_tool_answered,
     )
 
 
@@ -510,7 +497,7 @@ def build_studio(
                 log=log, searches=copy.deepcopy(scenario.get("translator_search") or [])
             ),
             answer=script,
-            tools=lambda specs: logging_tool_calls(specs, log),
+            on_tool_answered=log.planner_tool_answered,
         )
         planner = handing_back_planner_failures(seam)
 

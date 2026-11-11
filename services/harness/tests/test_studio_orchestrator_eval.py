@@ -28,9 +28,11 @@ from google.adk.events import Event
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from harness import planner_seam
+from harness.planner_run import failed_tool_answer
 from harness.reply_figures import card_result
 from harness.studio_state import ConversationState, StudioStore
 from harness.studio_translate import _RecordingExecutor, _Translator
+from planner.skills import GET_SKILL
 
 from .orchestrator_fakes import (
     CannedSearch,
@@ -124,6 +126,51 @@ async def test_both_planners_log_the_same_first_planner_request(
 
     assert first["adk"]["system"]
     assert first["pydantic_ai"] == first["adk"]
+
+
+class _SkillReadFailedError(RuntimeError):
+    """What the planner's `get_skill` raises in the raising-tool test."""
+
+
+@pytest.mark.parametrize("runner", ["adk", "pydantic_ai"])
+async def test_a_planner_tool_that_raises_is_logged_as_the_answer_the_model_receives(
+    runner: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A planner tool whose body raises is logged on either planner, with the
+    answer the seam gives the model for it (`failed_tool_answer`)."""
+    scripted = _load("orchestrator_scripted")
+    run = _load("run")
+    (case,) = run.load_cases(
+        "scripted", only=["orchestrator-every-ask-reaches-the-card-and-the-hand-back"]
+    )
+    case = copy.deepcopy(case)
+    case["scenario"]["planner"] = [{"call": "get_skill", "args": {"skill_id": "aid"}}]
+    monkeypatch.setenv("PLANNER_RUNNER", runner)
+    serve = scripted.CannedDataSurface.call_tool
+
+    async def failing_skill_reads(self: Any, *, tool: Any, **kwargs: Any) -> Any:
+        if tool == GET_SKILL:
+            raise _SkillReadFailedError
+        return await serve(self, tool=tool, **kwargs)
+
+    monkeypatch.setattr(scripted.CannedDataSurface, "call_tool", failing_skill_reads)
+
+    async with scripted.orchestrator_client(case["scenario"]) as (client, log):
+        await run.run_case(client, case, on_turn=log.mark_turn)
+
+    planner_calls = [
+        entry for entry in log.entries if entry["kind"] == "call" and entry["layer"] == "planner"
+    ]
+    assert planner_calls == [
+        {
+            "kind": "call",
+            "layer": "planner",
+            "tool": "get_skill",
+            "outcome": None,
+            "code": None,
+            "response": failed_tool_answer("get_skill", _SkillReadFailedError()),
+        }
+    ]
 
 
 def _request(agent: str, *texts: str, system: str = "") -> dict[str, Any]:
