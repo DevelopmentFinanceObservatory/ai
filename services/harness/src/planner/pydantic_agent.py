@@ -59,7 +59,7 @@ from pydantic_ai.usage import UsageLimits
 
 from planner.call import RecordingState
 from planner.session import SessionCall, SessionEvents
-from planner.settings import AGENT_THINKING_CONFIG
+from planner.settings import AGENT_THINKING_CONFIG, without_unsigned_thoughts
 from planner.tool_spec import ToolSpec, function_declaration, run_tool
 
 logger = logging.getLogger(__name__)
@@ -138,8 +138,9 @@ class PlannerResponse:
 
     `parts` are its parts as google-genai parts: each function call with its
     id, text, and each thought with `thought` set, each with its thought
-    signature. A blocked prompt is a response with no parts. The usage the API
-    reported is read off the stream by `harness.planner_model`.
+    signature, less its unsigned thought summaries (`_without_unsigned_thoughts`).
+    A blocked prompt is a response with no parts. The usage the API reported is
+    read off the stream by `harness.planner_model`.
     """
 
     parts: tuple[types.Part, ...]
@@ -164,13 +165,11 @@ type PlannerItem = PlannerResponse | PlannerAnswers
 
 @dataclass(frozen=True)
 class PydanticPlanner:
-    """The Pydantic AI planner (`planner_agent`): the agent, its tools' names,
-    in the order they are declared, and whether its spans carry message
-    content (`include_content`)."""
+    """The Pydantic AI planner (`planner_agent`): the agent and its tools'
+    names, in the order they are declared."""
 
     agent: Agent[PlannerDeps, str | None]
     tools: tuple[str, ...]
-    include_content: bool
 
 
 def tool_not_found(name: str, tools: Sequence[str]) -> dict[str, str]:
@@ -210,14 +209,17 @@ def planner_agent(
 
     A call to a tool the planner lacks is answered with `tool_not_found`, as
     the ADK planner answers it, and the run goes on however many such calls
-    the model makes (`_UNLIMITED_RETRIES`).
+    the model makes (`_UNLIMITED_RETRIES`). Each request replays the run's
+    earlier responses less their unsigned thought summaries, as the ADK
+    planner's session keeps them (`_as_the_adk_planner_replays`).
 
     The agent traces through the global tracer provider: a span per run
     (`invoke_agent <name>`), per model call (`chat <model>`) and per tool call
     (`execute_tool <tool>`), with the OpenTelemetry GenAI attributes. With
-    `include_content` the spans carry the model's messages, the instruction
-    and each call's arguments and answer. The request parameters are left
-    off, since the tool declarations are on each model call's span.
+    `include_content` the spans carry the model's messages, each response's
+    thought summaries among them, the instruction and each call's arguments
+    and answer. The request parameters are left off, since the tool
+    declarations are on each model call's span.
     """
     tools = tuple(spec.name for spec in specs)
     agent = Agent(
@@ -231,7 +233,7 @@ def planner_agent(
         ),
         retries={"tools": _UNLIMITED_RETRIES},
         capabilities=[
-            ProcessHistory(_answering_unknown_tools(tools)),
+            ProcessHistory(_as_the_adk_planner_replays(tools)),
             Instrumentation(
                 InstrumentationSettings(
                     include_content=include_content, include_model_request_parameters=False
@@ -240,21 +242,24 @@ def planner_agent(
         ],
         name=name,
     )
-    return PydanticPlanner(agent=agent, tools=tools, include_content=include_content)
+    return PydanticPlanner(agent=agent, tools=tools)
 
 
-def _answering_unknown_tools(
+def _as_the_adk_planner_replays(
     tools: Sequence[str],
 ) -> Callable[[list[ModelMessage]], Awaitable[list[ModelMessage]]]:
-    """A history processor that answers each call to a tool not in `tools` with
-    `tool_not_found`, in place of the retry Pydantic AI answers it with. It runs
-    before every model request, so the model reads the answer."""
+    """A history processor that puts the run's messages in the form the ADK
+    planner replays them: each call to a tool not in `tools` answered with
+    `tool_not_found`, in place of the retry Pydantic AI answers it with, and
+    each response less its unsigned thought summaries (`_without_unsigned_thoughts`).
+    It runs before every model request, and Pydantic AI keeps what it returns
+    as the run's messages."""
 
     async def process(messages: list[ModelMessage]) -> list[ModelMessage]:
         return [
             replace(message, parts=[_answered_if_unknown(part, tools) for part in message.parts])
             if isinstance(message, ModelRequest)
-            else message
+            else _without_unsigned_thoughts(message)
             for message in messages
         ]
 
@@ -447,7 +452,28 @@ def _question_prompt(question: types.Content | str) -> str | list[UserContent]:
 
 
 def _planner_response(response: ModelResponse) -> PlannerResponse:
-    return PlannerResponse(parts=response_parts(response))
+    return PlannerResponse(parts=response_parts(_without_unsigned_thoughts(response)))
+
+
+def _without_unsigned_thoughts(response: ModelResponse) -> ModelResponse:
+    """`response` less the thought summaries `without_unsigned_thoughts` drops
+    from its parts: each thought with no signature, unless every part is one.
+
+    Pydantic AI's parts manager merges a run of streamed thought chunks into
+    one `ThinkingPart`, signed when any chunk of the run was, as ADK's stream
+    aggregator merges them, so the rule reads the parts both planners hold.
+    """
+    parts = response_parts(response)
+    kept = without_unsigned_thoughts(parts)
+    if kept is None:
+        return response
+    kept_ids = {id(part) for part in kept}
+    return replace(
+        response,
+        parts=[
+            part for part, sent in zip(response.parts, parts, strict=True) if id(sent) in kept_ids
+        ],
+    )
 
 
 def _answers(

@@ -22,10 +22,7 @@ planner sends (`_in_adk_planner_form`). Each call the planner makes, in order:
    the closing sentence the ADK planner's model gives;
 5. hands `after_response` the code of the bound that closed the call, if one
    did, and the usage the API reported for it; a model turn it returns
-   replaces the response;
-6. otherwise delivers the held chunks less their unsigned thought summaries
-   (`planner.settings.without_unsigned_thoughts`), so the planner's next
-   request carries the parts the ADK planner's session keeps.
+   replaces the response; otherwise the held chunks are delivered.
 
 A function call the model sent without an id reaches the planner with one of
 the form ADK gives it (`_with_client_call_ids`), so both planners store it
@@ -39,10 +36,7 @@ that Pydantic AI leaves out (`_record_usage`). That is the reasoning tokens and
 the usage Langfuse derives from the ADK planner's span, set outright so that the
 usage details Pydantic AI adds are not summed into the call's total. A turn put
 in place of a request is no model call and the ADK planner opens no span for
-it, so its span is marked a plain span for Langfuse. The thought summaries
-step 6 drops go on the span as `dfo.model.dropped_thoughts`, since the ADK
-planner's span shows them in its output, when the span carries message content
-(`include_content`), as the ADK planner's output does.
+it, so its span is marked a plain span for Langfuse.
 """
 
 from __future__ import annotations
@@ -59,7 +53,6 @@ from google.adk.models.llm_response import LlmResponse
 from google.genai import Client, errors, types
 from opentelemetry import trace
 from orchestrator.agent import model_retry_options
-from planner.settings import without_unsigned_thoughts
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.profiles import ModelProfile
@@ -101,7 +94,6 @@ def planner_model(
     before_request: BeforeRequest | None = None,
     after_response: AfterResponse | None = None,
     profile: ModelProfile | None = None,
-    include_content: bool = False,
 ) -> GoogleModel:
     """The `GoogleModel` the Pydantic AI planner runs on.
 
@@ -117,11 +109,6 @@ def planner_model(
             closed (`AfterResponse`).
         profile: The model profile, which decides how requests are built.
             None gives Gemini's own (`google_model_profile`).
-        include_content: Whether each call's span carries message content,
-            the dropped thought summaries among it. Pass the value the
-            planner's agent is instrumented with
-            (`planner.pydantic_agent.PydanticPlanner.include_content`). The
-            default keeps the summaries off the span.
 
     Returns:
         A `GoogleModel` on `profile` whose streamed calls go through the
@@ -133,7 +120,6 @@ def planner_model(
         prefix_cache=prefix_cache,
         before_request=before_request,
         after_response=after_response,
-        include_content=include_content,
     )
     # `GoogleProvider` takes a `Client`, and the wrapper reads as one everywhere
     # `GoogleModel` reads it.
@@ -167,7 +153,6 @@ class _PlannerStream:
     prefix_cache: PrefixCache | None
     before_request: BeforeRequest | None
     after_response: AfterResponse | None
-    include_content: bool
 
     async def __call__(
         self, *, model: str, contents: Any, config: Any = None
@@ -202,10 +187,7 @@ class _PlannerStream:
         elif answer.closing is not None:
             yield _chunk(answer.closing, usage=usage)
         else:
-            kept = _without_unsigned_thoughts(answer.chunks)
-            if self.include_content:
-                _record_dropped_thoughts(span, answer.chunks, kept)
-            for chunk in kept:
+            for chunk in answer.chunks:
                 yield chunk
 
     async def _send(
@@ -370,23 +352,6 @@ def _record_usage(span: trace.Span, usage: Usage | None) -> None:
     span.set_attribute(_USAGE_DETAILS, json.dumps(details))
 
 
-def _record_dropped_thoughts(
-    span: trace.Span,
-    chunks: list[types.GenerateContentResponse],
-    kept: list[types.GenerateContentResponse],
-) -> None:
-    """Put the text of the thought summaries `chunks` held and `kept` does not
-    on `span`, as `dfo.model.dropped_thoughts`."""
-    if kept is chunks or not span.is_recording():
-        return
-    left = {id(part) for chunk in kept for part in _parts(chunk)}
-    dropped = "".join(
-        part.text or "" for chunk in chunks for part in _parts(chunk) if id(part) not in left
-    )
-    if dropped:
-        span.set_attribute("dfo.model.dropped_thoughts", dropped)
-
-
 def _without_client_call_ids(contents: Any) -> list[types.Content]:
     """`contents`, as `GoogleModel` built them, less the call ids ADK gives a
     call the model sent without one.
@@ -515,82 +480,11 @@ def _chunk(content: types.Content, *, usage: Usage | None) -> types.GenerateCont
     )
 
 
-def _without_unsigned_thoughts(
-    chunks: list[types.GenerateContentResponse],
-) -> list[types.GenerateContentResponse]:
-    """`chunks`, one response's, less the parts of each merged part
-    `without_unsigned_thoughts` drops.
-
-    The rule reads the response as an agent holds it: ADK's stream aggregator
-    and Pydantic AI's parts manager both merge consecutive text parts of one
-    kind, thought or answer, into one part, signed when any part of the run
-    is (`_text_runs`). A merged thought part is dropped or kept whole, so a
-    run of thought chunks with a signature on any one of them stays, as on
-    the ADK planner. The rule reads only whether the merged part carries a
-    signature.
-    """
-    runs = _text_runs([part for chunk in chunks for part in _parts(chunk)])
-    merged = [_merged(run) for run in runs]
-    kept = without_unsigned_thoughts(merged)
-    if kept is None:
-        return chunks
-    kept_runs = {id(part) for part in kept}
-    kept_ids = {
-        id(part)
-        for run, whole in zip(runs, merged, strict=True)
-        if id(whole) in kept_runs
-        for part in run
-    }
-    return [_keeping(chunk, kept_ids) for chunk in chunks]
-
-
-def _text_runs(parts: list[types.Part]) -> list[list[types.Part]]:
-    """`parts` in runs: consecutive parts with text and one `thought` value
-    together, every other part alone."""
-    runs: list[list[types.Part]] = []
-    for part in parts:
-        last = runs[-1][-1] if runs else None
-        if last is not None and part.text and last.text and part.thought == last.thought:
-            runs[-1].append(part)
-        else:
-            runs.append([part])
-    return runs
-
-
-def _merged(run: list[types.Part]) -> types.Part:
-    """The one part an agent makes of `run`, as far as `without_unsigned_thoughts`
-    reads it: its text, its kind, and a thought signature when any part of the
-    run carries one."""
-    if len(run) == 1:
-        return run[0]
-    signature = next((part.thought_signature for part in run if part.thought_signature), None)
-    return types.Part(
-        text="".join(part.text or "" for part in run),
-        thought=run[0].thought,
-        thought_signature=signature,
-    )
-
-
 def _parts(chunk: types.GenerateContentResponse) -> list[types.Part]:
     """The parts of `chunk`'s first candidate, the one ADK and Pydantic AI read."""
     if not chunk.candidates or chunk.candidates[0].content is None:
         return []
     return chunk.candidates[0].content.parts or []
-
-
-def _keeping(
-    chunk: types.GenerateContentResponse, kept_ids: set[int]
-) -> types.GenerateContentResponse:
-    """`chunk` with only the parts of its first candidate whose ids are in `kept_ids`."""
-    if not chunk.candidates:
-        return chunk
-    first, *rest = chunk.candidates
-    content = first.content
-    if content is None:
-        return chunk
-    parts = [part for part in content.parts or [] if id(part) in kept_ids]
-    first = first.model_copy(update={"content": content.model_copy(update={"parts": parts})})
-    return chunk.model_copy(update={"candidates": [first, *rest]})
 
 
 class _Models:

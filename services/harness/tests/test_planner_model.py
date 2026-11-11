@@ -23,6 +23,7 @@ from harness.prefix_cache import PrefixCache, PrefixCachedGemini
 from harness.sentences import SeamCode, refusal_sentence
 from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
 from orchestrator.agent import _retrying, model_retry_options
+from planner.pydantic_agent import _without_unsigned_thoughts
 from planner.settings import drop_thought_parts, without_unsigned_thoughts
 from pydantic_ai.messages import (
     ModelRequest,
@@ -461,13 +462,15 @@ async def test_a_response_reaches_the_agent_with_the_thoughts_the_adk_planner_ke
     calls: list[str],
 ) -> None:
     """Consecutive thought chunks merge into one part, signed when any chunk of
-    them is. The rule then drops each unsigned one unless nothing else is left.
-    Both planners keep `thoughts` (each part's text and whether it is signed),
-    `text` and `calls`."""
+    them is. The rule then drops each merged unsigned one unless nothing else is
+    left. Both planners keep `thoughts` (each part's text and whether it is
+    signed), `text` and `calls`."""
     script = [Reply(chunks=chunks)]
     pai_scripted, adk_scripted = ScriptedGenai(script), ScriptedGenai(script)
 
-    response = await _pai(planner_model(MODEL, client=pai_scripted.client, budget=_budget()))
+    response = _without_unsigned_thoughts(
+        await _pai(planner_model(MODEL, client=pai_scripted.client, budget=_budget()))
+    )
     adk = await _adk(BoundedGemini(model=MODEL, client=adk_scripted.client), _budget())
     final = adk[-1]
     assert not final.partial

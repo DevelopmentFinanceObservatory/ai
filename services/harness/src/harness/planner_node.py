@@ -168,7 +168,6 @@ def planner_node(
             before_request=before_request,
             after_response=after_response,
             profile=PLANNER_PROFILE,
-            include_content=planner.include_content,
         )
         deps = PlannerDeps(
             state=ctx.session.state,

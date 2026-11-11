@@ -216,7 +216,7 @@ def _seen(span: ReadableSpan, session: str) -> dict[str, Any]:
         "budget": {
             key: (value if key == "dfo.model.thoughts_token_count" else "timed")
             for key, value in attributes.items()
-            if key.startswith("dfo.model.") and key != "dfo.model.dropped_thoughts"
+            if key.startswith("dfo.model.")
         },
     }
 
@@ -474,17 +474,17 @@ async def test_a_refused_call_is_marked_failed_and_usage_is_counted_once_on_both
 
 
 @pytest.mark.parametrize("capture", ["SPAN_ONLY", "EVENT_ONLY", "NO_CONTENT", None])
-async def test_a_dropped_thought_summary_stays_on_the_pydantic_ai_planners_span(
+async def test_a_dropped_thought_summary_reaches_a_span_only_with_span_content(
     plan: Plan,
     exported_spans: InMemorySpanExporter,
     monkeypatch: pytest.MonkeyPatch,
     capture: str | None,
 ) -> None:
-    """An unsigned thought summary is left out of what the Pydantic AI planner
-    keeps of a response, so its generation's output lacks the summary the ADK
-    planner's shows. With message content on the spans the span carries it as
-    `dfo.model.dropped_thoughts`. With content kept off the spans (in events
-    only, off, or the variable unset) no span of either runner carries it."""
+    """An unsigned thought summary, which neither planner keeps of a response,
+    is in its generation's output on both runners when message content is on
+    the spans: ADK's as a text part, Pydantic AI's as a thinking part. With
+    content kept off the spans (in events only, off, or the variable unset) no
+    span of either runner carries it."""
     if capture is None:
         monkeypatch.delenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT")
     else:
@@ -503,7 +503,6 @@ async def test_a_dropped_thought_summary_stays_on_the_pydantic_ai_planners_span(
         budget=_budget,
     )
     outputs: dict[Runner, Any] = {}
-    dropped: dict[Runner, Any] = {}
     carrying: dict[Runner, list[tuple[str, str]]] = {}
     for runner in _RUNNERS:
         exported_spans.clear()
@@ -516,7 +515,6 @@ async def test_a_dropped_thought_summary_stays_on_the_pydantic_ai_planners_span(
             if (span.attributes or {}).get("gen_ai.operation.name") in {"chat", "generate_content"}
         ]
         outputs[runner] = _json(call.get("gen_ai.output.messages"))
-        dropped[runner] = call.get("dfo.model.dropped_thoughts")
         carrying[runner] = [
             (span.name, key)
             for span in spans
@@ -528,8 +526,8 @@ async def test_a_dropped_thought_summary_stays_on_the_pydantic_ai_planners_span(
         assert carrying == {"adk": [], "pydantic_ai": []}
         return
     assert outputs["adk"][0]["parts"][0] == {"type": "text", "content": thought}
-    assert outputs["pydantic_ai"][0]["parts"] == outputs["adk"][0]["parts"][1:]
-    assert dropped == {"adk": None, "pydantic_ai": thought}
+    assert outputs["pydantic_ai"][0]["parts"][0] == {"type": "thinking", "content": thought}
+    assert outputs["pydantic_ai"][0]["parts"][1:] == outputs["adk"][0]["parts"][1:]
 
 
 def _attribute(span: Any, key: str) -> Any:

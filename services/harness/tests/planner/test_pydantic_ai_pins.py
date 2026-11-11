@@ -499,8 +499,9 @@ async def test_the_first_unsigned_call_of_a_response_replays_with_the_skip_signa
 
 
 async def test_consecutive_thought_chunks_make_one_part_that_keeps_the_signature() -> None:
-    # `planner_model` drops unsigned thoughts after the merge Pydantic AI and ADK both
-    # make, so a run of thought chunks with a signature on one chunk stays whole.
+    # The planner drops unsigned thoughts from the parts this merge makes
+    # (`planner.pydantic_agent._without_unsigned_thoughts`), so a run of thought
+    # chunks with a signature on one chunk stays whole, as on the ADK planner.
     chunks = Reply(
         chunks=[
             [thought_part("a", signature=None)],
