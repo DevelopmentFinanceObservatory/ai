@@ -430,7 +430,6 @@ def submit(
     view: SessionView,
     proposal: Proposal,
     *,
-    reads_user_words: bool,
     proposer: Proposer,
 ) -> dict[str, object]:
     """Check `proposal` against `view` and record it, answering as `propose_plan` does.
@@ -441,12 +440,7 @@ def submit(
     nothing but an `unsupported` answer. `proposer` is the tool `proposal`
     came through.
     """
-    admitted = admit(
-        view,
-        proposal,
-        reads_user_words=reads_user_words,
-        proposer=proposer,
-    )
+    admitted = admit(view, proposal, proposer=proposer)
     if not isinstance(admitted, Admission):
         return admitted
     view.record_admission(admitted)
@@ -467,16 +461,12 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     view: SessionView,
     proposal: Proposal,
     *,
-    reads_user_words: bool,
     proposer: Proposer,
 ) -> Admission | dict[str, object]:
     """Run the chain over `proposal`, answering the plan to record or the refusal that stops it.
 
-    `reads_user_words` says the
-    planner reads the user's own words in every entry, as the standalone
-    planner does when it is True; `harness.planner_adapter.PlannerAdapter` passes
-    False, so the planner reads them only in an entry the user's amendment
-    opened (`planner.plan.amendment_entry`). Only where it reads them may
+    The planner reads the user's own words only in an entry the user's
+    amendment opened (`planner.plan.amendment_entry`). Only there may
     `proposal.across_years` name a step, and each step it names takes a
     licence to combine its years (`planner.plan.period_licences_held`).
     `proposer` is the tool every refusal's `action` names. Writes nothing
@@ -525,7 +515,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             ),
             propose=proposer.call,
         ) or _invalid_data(exc, proposer)
-    reads_user_words = reads_user_words or amendment_entry(view.state)
+    in_amendment_entry = amendment_entry(view.state)
     question = proposal.question
     answer_mode = proposal.answer_mode
     removed_evidence_requirements = patch.removed_evidence_requirements
@@ -598,7 +588,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             patch.across_years,
             requirements=written,
             previous=previous,
-            reads_user_words=reads_user_words,
+            in_amendment_entry=in_amendment_entry,
         )
         or _removed_asks_refused(patch, previous, view)
         or _refused_spec_pinned(written, refused)
@@ -900,7 +890,6 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         stated=stated,
         statement=statement(stated, to_origin={}, alignments=entries),
         previous=previous,
-        reads_user_words=reads_user_words,
         proposer=proposer,
         sources=sources,
     )
@@ -2746,7 +2735,6 @@ def _unrecordable(
     stated: Plan,
     statement: Plan,
     previous: Plan | None,
-    reads_user_words: bool,
     proposer: Proposer,
     sources: SourceReadings,
 ) -> dict[str, object] | None:
@@ -2775,7 +2763,7 @@ def _unrecordable(
     per member of a party nobody named that no decision states
     (`_result_scope_unstated`), and for a step reducing across years for a
     result no ask across years asks for (`_period_reduction_unstated`,
-    against `stated`, read with `reads_user_words`).
+    against `stated`).
     """
     if not plan.evidence_requirements:
         return (
@@ -2798,7 +2786,7 @@ def _unrecordable(
         or _breakdown_decline_unearned(statement, view)
         or _decline_missing(plan, view, proposer)
         or _result_scope_unstated(plan)
-        or _period_reduction_unstated(stated, view, reads_user_words=reads_user_words)
+        or _period_reduction_unstated(stated, view)
     )
 
 
@@ -2905,9 +2893,7 @@ def _one_year_together(together_with: Sequence[str]) -> str:
     )
 
 
-def _period_reduction_unstated(
-    plan: Plan, view: SessionView, *, reads_user_words: bool
-) -> dict[str, object] | None:
+def _period_reduction_unstated(plan: Plan, view: SessionView) -> dict[str, object] | None:
     """Return the `PERIOD_REDUCTION_UNSTATED` refusal naming every step of `plan` that reduces across years for a result no ask across years asks for, or `None`.
 
     The rule is `planner.plan.unstated_period_reductions`, over the
@@ -2925,7 +2911,7 @@ def _period_reduction_unstated(
     Otherwise the refusal gives two ways to settle the step: keep the years
     (`_keep_the_years`), or read one year, the second only where the step
     holds a year it can read alone (`planner.plan.YearsHeld.one_year`).
-    Where the planner reads the user's own words (`reads_user_words`), it
+    In an amendment entry, where the planner reads the user's own words, it
     adds a third, naming the step in `across_years` when those words ask for
     the figure.
 
@@ -2946,6 +2932,7 @@ def _period_reduction_unstated(
     if not gaps:
         return None
     view.record_reduction_refused(ask for gap in gaps for ask in gap.asks)
+    in_amendment_entry = amendment_entry(view.state)
     steps = {requirement.id: requirement for requirement in plan.evidence_requirements}
     sentences = []
     offered: list[dict[str, object] | None] = []
@@ -2994,7 +2981,7 @@ def _period_reduction_unstated(
                     f"{_one_year_rolling(read.offset, rolls='`rolling` naming both')}."
                     f"{_one_year_together(gap.together_with)}"
                 )
-            if reads_user_words:
+            if in_amendment_entry:
                 remedies += (
                     f" If the user's own words ask for one ranking over {years}, leave "
                     f"`per_period` false on {step} and name {step} in `across_years`."
@@ -3012,7 +2999,7 @@ def _period_reduction_unstated(
                     f"op `eq` and {_one_year_rolling(read.offset, rolls='`rolling`')}."
                     f"{_one_year_together(gap.together_with)}"
                 )
-            if reads_user_words:
+            if in_amendment_entry:
                 remedies += (
                     f" If the user's own words ask for one figure over {years}, name {step} "
                     "in `across_years`."
@@ -3051,7 +3038,7 @@ def _across_years_unread(
     *,
     requirements: Sequence[EvidenceRequirement],
     previous: Plan | None,
-    reads_user_words: bool,
+    in_amendment_entry: bool,
 ) -> dict[str, object] | None:
     """Return the `INVALID_PLAN` refusal of an `across_years` naming steps where the planner reads none of the user's own words, or `None`.
 
@@ -3060,7 +3047,7 @@ def _across_years_unread(
     A step whose licence `previous` holds as `requirements` state it is a
     restatement, which grants nothing (`planner.plan.licences_restated`).
     """
-    if reads_user_words:
+    if in_amendment_entry:
         return None
     restated = licences_restated(across_years, requirements=requirements, previous=previous)
     unread = [name for name in across_years if name not in restated]

@@ -252,7 +252,6 @@ def _reject_plan(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) 
 def planner_tool_specs(
     *,
     translate: Translate | None = None,
-    reads_user_words: bool = True,
     surface: ToolSurface | None = None,
 ) -> list[ToolSpec]:
     """The planner's tools: `ask_user_question`, `propose_plan` and `reject_plan`.
@@ -270,11 +269,6 @@ def planner_tool_specs(
     body is a coroutine function. Omitted, it reads nothing and refuses such a
     plan `first_year_unknown`.
 
-    `reads_user_words` is passed straight to `submission.service.admit` on
-    every `propose_plan` call.
-    It says whether the planner reads the user's own words in every entry, so
-    `propose_plan`'s `across_years` may name a step in any of them.
-
     Raises:
         ValueError: `propose_plan`'s parameters and their descriptions differ
             (`_described`).
@@ -282,7 +276,7 @@ def planner_tool_specs(
 
     def propose_plan(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
         del end_run
-        return propose(call, arguments, reads_user_words=reads_user_words)
+        return propose(call, arguments)
 
     async def propose_plan_reading(
         call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]
@@ -291,7 +285,6 @@ def planner_tool_specs(
         return await propose_reading_sources(
             call,
             arguments,
-            reads_user_words=reads_user_words,
             surface=surface,
         )
 
@@ -303,7 +296,6 @@ def planner_tool_specs(
             call,
             end_run,
             arguments=arguments,
-            reads_user_words=reads_user_words,
             translate=translate,
             surface=surface,
         )
@@ -371,7 +363,6 @@ def planner_specs(
     *,
     translate: Translate | None = None,
     surface: ToolSurface | None = None,
-    reads_user_words: bool = True,
 ) -> list[ToolSpec]:
     """The planner's tools, in the order the model is shown them: `get_skill`
     when `surface` is given (`skill_tool_spec`), then
@@ -380,7 +371,6 @@ def planner_specs(
         *([skill_tool_spec(surface)] if surface is not None else []),
         *planner_tool_specs(
             translate=translate,
-            reads_user_words=reads_user_words,
             surface=surface,
         ),
     ]

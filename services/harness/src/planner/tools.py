@@ -507,8 +507,6 @@ def ask_user(
 def propose(
     call: PlannerCall,
     arguments: Mapping[str, Any],
-    *,
-    reads_user_words: bool,
 ) -> dict[str, object]:
     """Record the plan a `propose_plan` call's `arguments` state, or patch the one
     on record, over `call`'s session. A call after another plan write in its response
@@ -519,7 +517,6 @@ def propose(
     return submit(
         CallSession(call),
         Proposal(**arguments),
-        reads_user_words=reads_user_words,
         proposer=PROPOSE_PLAN_PROPOSER,
     )
 
@@ -528,14 +525,13 @@ async def propose_reading_sources(
     call: PlannerCall,
     arguments: Mapping[str, Any],
     *,
-    reads_user_words: bool,
     surface: ToolSurface | None,
 ) -> dict[str, object]:
     """`propose`. With a `surface`, the source reads a refusal asks for are made,
     and the proposal is made again (`with_source_reads`)."""
 
     def draft() -> dict[str, object]:
-        return propose(call, arguments, reads_user_words=reads_user_words)
+        return propose(call, arguments)
 
     if surface is None:
         return draft()
@@ -547,7 +543,6 @@ async def propose_and_translate(
     end_run: EndRun,
     *,
     arguments: Mapping[str, Any],
-    reads_user_words: bool,
     translate: Translate,
     surface: ToolSurface | None,
 ) -> dict[str, object]:
@@ -579,7 +574,6 @@ async def propose_and_translate(
     result = await propose_reading_sources(
         call,
         arguments,
-        reads_user_words=reads_user_words,
         surface=surface,
     )
     if result.get("outcome") != Outcome.OK.value:

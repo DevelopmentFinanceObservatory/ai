@@ -50,7 +50,7 @@ def adapter_specs(*, surface: ToolSurface | None, translate: Translate | None) -
     """The planner's tools as `harness.planner_adapter.PlannerAdapter` builds them over
     `surface` and `translate`, for a test that changes them before handing them
     to the adapter as `specs`."""
-    return planner_specs(translate=translate, surface=surface, reads_user_words=False)
+    return planner_specs(translate=translate, surface=surface)
 
 
 @dataclass

@@ -393,7 +393,6 @@ class PlannerAdapter:
             else planner_specs(
                 translate=self._translate,
                 surface=self._surface,
-                reads_user_words=False,
             )
         )
         # Built once and shared by every run, each of which names its own model.
@@ -833,7 +832,6 @@ class PlannerAdapter:
             lambda: submit(
                 view,
                 proposal,
-                reads_user_words=False,
                 proposer=PROPOSE_PLAN_PROPOSER,
             ),
             state=state,

@@ -450,7 +450,7 @@ def _planner_adapter(
     (`planner.specs.planner_specs` over `surface` and its translation) as
     `tools` changes them, and each tool's answer told to `on_tool_answered`."""
     translate = build_translate(surface=surface)
-    specs = planner_specs(translate=translate, surface=surface, reads_user_words=False)
+    specs = planner_specs(translate=translate, surface=surface)
     return PlannerAdapter(
         settings=settings,
         surface=surface,
