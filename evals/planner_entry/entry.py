@@ -702,18 +702,58 @@ GAVE_UP = "gave_up"
 
 @dataclass
 class ModelRequest:
-    """One request the planner's model client is sent, in google-genai's types."""
+    """One request the planner's model client is sent, in google-genai's types.
+
+    Each runner builds its own shape: the ADK planner sends the system instruction as
+    a string and every declaration in one `Tool`, the Pydantic AI planner sends the
+    instruction as a `Content` and one `Tool` per declaration. `system_text` and
+    `declarations` read both alike.
+    """
 
     model: str
     contents: list[types.Content]
     config: types.GenerateContentConfig
+
+    @property
+    def system_text(self) -> str:
+        """The system instruction's text, whichever shape it was sent in."""
+        return _instruction_text(self.config.system_instruction)
+
+    @property
+    def declarations(self) -> dict[str, types.FunctionDeclaration]:
+        """Every function declaration the request sends, by name, whichever `Tool`
+        holds it. Each is the request's own object, so an edit may change it in place."""
+        return {
+            declaration.name: declaration
+            for tool in self.config.tools or []
+            if isinstance(tool, types.Tool)
+            for declaration in tool.function_declarations or []
+            if declaration.name is not None
+        }
+
+
+def _instruction_text(instruction: object) -> str:
+    match instruction:
+        case str():
+            return instruction
+        case types.Content(parts=parts):
+            return "".join(part.text or "" for part in parts or [])
+        case types.Part(text=text):
+            return text or ""
+        case list():
+            return "".join(_instruction_text(item) for item in instruction)
+        case _:
+            return ""
 
 
 # An arm's change to each request the planner's model client is sent, made in place.
 # The system instruction, tools and tool config travel where the request sends them:
 # on the request itself, or, on a request sent against the prefix cache
 # (`harness.prefix_cache`), on that cache's create, which the edit is handed as a
-# request with no contents.
+# request with no contents. Each runner shapes its request its own way
+# (`ModelRequest`), so an edit that treats the runners alike reads the instruction
+# through `ModelRequest.system_text` and finds a declaration through
+# `ModelRequest.declarations`.
 RequestEdit = Callable[[ModelRequest], None]
 
 
@@ -738,9 +778,11 @@ class Probe:
 
     The planner's model reaches the model only through the client `client` returns, on
     either runner, so a turn the seam or the turn budget answers in the model's place
-    is no call. A request sent while the previous call's answer is unfinished is that
-    call sent again (a first-chunk resend, or a resend after the prefix cache was
-    found gone), so it is one call, timed from its first send."""
+    is no call. A call stays open from its first send until a whole answer arrives or
+    the entry's next request starts (`next_request`): a send while one is open is that
+    call sent again (a first-chunk resend, or a resend after the prefix cache was found
+    gone, at open or while its stream was read), so it is one call, timed from its
+    first send. A call whose answer never arrived keeps its usage unknown."""
 
     plan: Plan | None = None
     plan_call: str | None = None
@@ -783,6 +825,10 @@ class Probe:
         each answer's usage and latency noted. `client` itself is left unchanged."""
         return _ProbedClient(client, _ProbedModels(client.aio.models, self, edits), edits)
 
+    def next_request(self) -> None:
+        """Start a request of the entry: no call stays open across two requests."""
+        self._answering = False
+
     def _sent(self, request: ModelRequest) -> None:
         self.requests.append(request)
         if self._answering:
@@ -803,26 +849,16 @@ class Probe:
             "latency_s": round(time.perf_counter() - self._started, 3),
         }
 
-    def _failed(self) -> None:
-        self._answering = False
-
     async def _watched(
         self, stream: AsyncIterator[types.GenerateContentResponse]
     ) -> AsyncIterator[types.GenerateContentResponse]:
         """`stream`'s chunks, the last usage any carried noted once it ends. A stream
-        cut by its reader (a bound or a first-chunk resend) leaves the call unfinished;
-        one that raised ends it unanswered."""
+        that raised or that its reader cut leaves the call open for a resend."""
         usage = None
-        try:
-            async with aclosing(
-                cast(AsyncGenerator[types.GenerateContentResponse], stream)
-            ) as chunks:
-                async for chunk in chunks:
-                    usage = chunk.usage_metadata or usage
-                    yield chunk
-        except Exception:
-            self._failed()
-            raise
+        async with aclosing(cast(AsyncGenerator[types.GenerateContentResponse], stream)) as chunks:
+            async for chunk in chunks:
+                usage = chunk.usage_metadata or usage
+                yield chunk
         self._answered(usage)
 
 
@@ -863,13 +899,9 @@ class _ProbedModels:
         self._probe._sent(request)
         if self._edits:
             model, contents, config = request.model, request.contents, request.config
-        try:
-            stream = await self._models.generate_content_stream(
-                model=model, contents=contents, config=config
-            )
-        except Exception:
-            self._probe._failed()
-            raise
+        stream = await self._models.generate_content_stream(
+            model=model, contents=contents, config=config
+        )
         return self._probe._watched(stream)
 
     def __getattr__(self, name: str) -> Any:
@@ -996,7 +1028,8 @@ def entry_workflow(planner: PlannerModel) -> Workflow:
 @dataclass(frozen=True)
 class EntryRun:
     """One finished entry: the planner's events and the user's answers to its asks, what
-    the probe saw, and how it ended."""
+    the probe saw, how it ended, and the planner runner it ran on
+    (`harness.settings.Settings.planner_runner`)."""
 
     events: list[Event]
     state: dict[str, Any]
@@ -1008,6 +1041,7 @@ class EntryRun:
     error: str | None
     timed_out: bool
     wall_s: float
+    planner_runner: str
 
 
 async def run_entry(
@@ -1077,6 +1111,7 @@ async def run_entry(
         content: types.Content | None = message
         while content is not None:
             budgets.append(TurnBudget.from_settings(settings))
+            probe.next_request()
             token = current_turn_budget.set(budgets[-1])
             identities = current_recorded_identity.set(conversation.recorded_identity)
             try:
@@ -1125,6 +1160,7 @@ async def run_entry(
         error=error,
         timed_out=timed_out,
         wall_s=wall_s,
+        planner_runner=settings.planner_runner,
     )
 
 
@@ -1328,7 +1364,8 @@ def entry_record(
     """One run's JSON record: what the planner did, what it cost, and how it ended.
 
     `experiment` identifies the treatment the run had (`run.experiment`), so a resumed
-    run directory never mixes two. `period_reductions` and `period_reduction` say
+    run directory never mixes two, and `planner_runner` names the runner it ran on.
+    `period_reductions` and `period_reduction` say
     what the accepted plan does with its years.
     """
     calls = tool_calls(run.events)
@@ -1341,6 +1378,7 @@ def entry_record(
         "task": task.id,
         "rep": rep,
         "model": model,
+        "planner_runner": run.planner_runner,
         "revision": revision,
         "experiment": experiment,
         "inputs": run.inputs,

@@ -34,7 +34,7 @@ from typing import Any, get_args
 import pytest
 from compiler.surface import ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
-from google.genai import Client, types
+from google.genai import Client, errors, types
 from harness.turn_events import PLANNER_ASK
 from langfuse.api import DatasetItem, NotFoundError
 from planner.plan import EvidenceRequirement
@@ -536,6 +536,7 @@ def test_a_refusal_the_entry_ended_on_wins_over_an_ask_left_on_record(
         error=None,
         timed_out=False,
         wall_s=0.0,
+        planner_runner="adk",
     )
 
     assert entry.stop_reason(run) == stop
@@ -628,6 +629,7 @@ async def test_a_scripted_entry_records_the_same_on_either_runner_but_its_timing
         record = entry.entry_record(
             task=task, run=run, arm="a", rep=1, model="m", revision="r", experiment="e"
         )
+        assert record.pop("planner_runner") == runner
         records[runner] = _untimed(record)
 
     assert records["adk"]["stop_reason"] == "accepted"
@@ -637,20 +639,42 @@ async def test_a_scripted_entry_records_the_same_on_either_runner_but_its_timing
 
 def _describe_propose_plan(request: Any) -> None:
     """An arm's edit: `propose_plan`'s declaration described as `edited`."""
-    for tool in request.config.tools or []:
-        for declaration in tool.function_declarations or []:
-            if declaration.name == "propose_plan":
-                declaration.description = "edited"
+    request.declarations["propose_plan"].description = "edited"
 
 
 def _propose_plan_description(request: Any) -> str | None:
-    (declaration,) = (
-        declaration
-        for tool in request.config.tools or []
-        for declaration in tool.function_declarations or []
-        if declaration.name == "propose_plan"
-    )
-    return declaration.description
+    return request.declarations["propose_plan"].description
+
+
+async def test_a_request_reads_the_same_instruction_and_declarations_on_either_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ADK planner sends its instruction as a string and every declaration in one
+    `Tool`; the Pydantic AI planner sends a `Content` and one `Tool` per declaration.
+    `ModelRequest` reads both alike."""
+    entry.quiet_logs()
+    task = _task(_PLAIN)
+    first: dict[str, Any] = {}
+    for runner in ("adk", "pydantic_ai"):
+        monkeypatch.setenv("PLANNER_RUNNER", runner)
+        model = validate.ScriptedModel([[("propose_plan", dict(task.reference_payload))]])
+        run = await entry.run_entry(
+            task, entry.load_recording(task.id), prefix_cache=None, client=model.client
+        )
+        first[runner] = run.probe.requests[0]
+    adk, pydantic_ai = first["adk"], first["pydantic_ai"]
+
+    assert isinstance(adk.config.system_instruction, str)
+    assert isinstance(pydantic_ai.config.system_instruction, types.Content)
+    assert len(adk.config.tools) == 1 < len(pydantic_ai.config.tools)
+    assert adk.system_text and pydantic_ai.system_text == adk.system_text
+    assert "propose_plan" in adk.declarations
+    # A tool with no parameters is declared with an empty schema on the Pydantic AI
+    # planner alone (`tests/planner/planner_pairs.py`), so the names and descriptions
+    # are compared.
+    assert {
+        name: declaration.description for name, declaration in pydantic_ai.declarations.items()
+    } == {name: declaration.description for name, declaration in adk.declarations.items()}
 
 
 @pytest.mark.usefixtures("planner_runner")
@@ -705,6 +729,90 @@ async def test_an_arms_edit_reaches_the_prefix_caches_create() -> None:
     assert sent.tools[0].function_declarations[0].description == "edited"
     assert sent.model_copy(update={"tools": config.tools}) == config
     assert declaration.description == "as served"
+
+
+_USAGE = types.GenerateContentResponseUsageMetadata(prompt_token_count=10, candidates_token_count=2)
+
+
+def _gone() -> errors.ClientError:
+    return errors.ClientError(403, {"error": {"code": 403, "message": "CachedContent not found"}})
+
+
+async def _sent_stream(send: str) -> Any:
+    """The chunks one send streams: `answer` one with usage; `cut` one without, then
+    one its reader never takes; `stall` none before its reader gives up; `read_gone`
+    the prefix cache found gone once read."""
+    if send == "read_gone":
+        raise _gone()
+    if send == "stall":
+        await asyncio.Event().wait()
+    yield types.GenerateContentResponse(usage_metadata=_USAGE if send == "answer" else None)
+    yield types.GenerateContentResponse(usage_metadata=_USAGE)
+
+
+async def _probed_calls(sends: list[str]) -> tuple[list[bool], int]:
+    """What a `Probe` makes of `sends`, read as the planner's model reads its client: a
+    stall cut by the first-chunk bound, a call cut by a bound after one chunk, a cache
+    found gone (`open_gone` at open, `read_gone` while read), and `next_request` for
+    the entry's next request. Each call, whether its usage is known, and the sends."""
+    probe = entry.Probe()
+    client = Client(api_key="scripted")
+    sent = iter(send for send in sends if send != "next_request")
+
+    async def open_stream(*, model: str, contents: Any, config: Any = None) -> Any:
+        del model, contents, config
+        send = next(sent)
+        if send == "open_gone":
+            raise _gone()
+        return _sent_stream(send)
+
+    client.aio.models.generate_content_stream = open_stream  # ty: ignore[invalid-assignment]
+    models = probe.client(client).aio.models
+    for send in sends:
+        if send == "next_request":
+            probe.next_request()
+            continue
+        with contextlib.suppress(errors.ClientError):
+            stream = await models.generate_content_stream(model="m", contents=[])
+            async with contextlib.aclosing(stream) as chunks:
+                if send == "stall":
+                    with contextlib.suppress(TimeoutError):
+                        async with asyncio.timeout(0.01):
+                            await anext(chunks)
+                    continue
+                async for _chunk in chunks:
+                    if send == "cut":
+                        break
+    known = [call["prompt_tokens"] is not None for call in probe.calls]
+    return known, len(probe.requests)
+
+
+@pytest.mark.parametrize(
+    ("sends", "known"),
+    [
+        (["answer"], [True]),
+        (["stall", "answer"], [True]),
+        (["open_gone", "answer"], [True]),
+        (["read_gone", "answer"], [True]),
+        (["cut"], [False]),
+        (["cut", "next_request", "answer"], [False, True]),
+    ],
+    ids=[
+        "plain",
+        "first-chunk-resend",
+        "cache-gone-at-open",
+        "cache-gone-while-read",
+        "budget-closed",
+        "next-request",
+    ],
+)
+async def test_a_model_call_is_one_call_however_many_sends_it_took(
+    sends: list[str], known: list[bool]
+) -> None:
+    calls, requests = await _probed_calls(sends)
+
+    assert calls == known
+    assert requests == len([send for send in sends if send != "next_request"])
 
 
 def _before_the_mark(record: dict[str, Any]) -> dict[str, Any]:
