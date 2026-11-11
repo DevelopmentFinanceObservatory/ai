@@ -76,6 +76,8 @@ async def test_the_default_planner_looks_up_each_request_in_the_prefix_cache_it_
 ) -> None:
     """The served planner on the default runner (Pydantic AI) sends each model
     call through the process's one prefix cache."""
+    # The default is the code's, whatever runner the ambient environment names.
+    monkeypatch.delenv("PLANNER_RUNNER", raising=False)
     scripted = ScriptedGenai([reply(text_part("No plan."))])
     # The seam builds its google-genai client from the environment.
     monkeypatch.setattr(planner_seam, "Client", lambda: scripted.client)
