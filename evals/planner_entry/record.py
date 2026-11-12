@@ -61,7 +61,7 @@ from planner.plan import SessionState
 from planner.skills import DFO_FAQ_SKILL_ID
 from planner.source_reads import read_full_history
 from submission.service import first_year_reads
-from validate import ScriptedLlm, accepted_run, task_payloads, tool_schemas
+from validate import ScriptedModel, accepted_run, task_payloads, tool_schemas
 
 
 class RecordingResolver:
@@ -193,7 +193,7 @@ async def _first_year_results(
     """The answers to each first-year read an entry over `recording` can make that the
     recording does not hold, read now. A scripted entry with no plan leaves the datasets
     the seam showed the planner in its state, and those are read."""
-    entry = await run_entry(task, recording, prefix_cache=None, model=ScriptedLlm())
+    entry = await run_entry(task, recording, prefix_cache=None, client=ScriptedModel().client)
     surface = _RecordingSurface(client, recording["tools"])
     for identity in first_year_reads(cast(SessionState, entry.state)):
         await read_full_history(surface, identity, deadline_s=RECORDING_READ_SECONDS)

@@ -1,4 +1,4 @@
-"""Tests for `harness.agents`: the planner built with translation attached.
+"""Tests for the planner the seam builds with translation attached, and `harness.agents`.
 
 Construction, plus one run through a real `Runner` for the rules ADK only
 enforces at run time. Whether the planner's model acts on the `translation`
@@ -13,12 +13,13 @@ from typing import Any
 
 import pytest
 import translator.tool as translator_tool
-from compiler.surface import FixtureSurface, McpSurface, ToolCallResult
+from compiler.surface import FixtureSurface, McpSurface, ToolCallResult, ToolSurface
 from data_mcp import resolution
 from google.adk.agents import LlmAgent
 from google.adk.models.google_llm import Gemini
 from google.adk.sessions import InMemorySessionService
-from harness.agents import build_tool_surface, create_planner_with_translator
+from harness.agents import build_tool_surface
+from harness.planner_seam import PlannerSeam
 from harness.settings import Settings
 from planner.agent import SpecTool
 from planner.settings import AgentSettings
@@ -33,8 +34,17 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PLANNER_MODEL_NAME", raising=False)
 
 
-def _planner() -> LlmAgent:
-    return create_planner_with_translator(settings=Settings(), surface=FixtureSurface(schemas=[]))
+def _planner(
+    surface: ToolSurface | None = None, agent_settings: AgentSettings | None = None
+) -> LlmAgent:
+    """The ADK planner the seam serves."""
+    seam = PlannerSeam(
+        settings=Settings(planner_runner="adk"),
+        agent_settings=agent_settings,
+        surface=surface if surface is not None else FixtureSurface(schemas=[]),
+    )
+    assert seam._agent is not None
+    return seam._agent
 
 
 async def test_the_served_translation_resolves_through_the_graph_and_reads_the_newest_year(
@@ -100,11 +110,15 @@ async def test_the_planner_reads_skills_through_the_surface_translation_gets() -
         schemas=[],
         responses={"get_skill": ToolCallResult(is_error=False, text="# DFO FAQ\n")},
     )
-    agent = create_planner_with_translator(settings=Settings(), surface=surface)
+    agent = _planner(surface)
     tools = {tool.name: tool for tool in agent.tools if isinstance(tool, SpecTool)}
 
     answer = await call_planner_tool(
-        tools["get_skill"], skill_id="dfo-faq", tool_context=SimpleNamespace(state={})
+        tools["get_skill"],
+        skill_id="dfo-faq",
+        tool_context=SimpleNamespace(
+            state={}, session=SimpleNamespace(events=[]), function_call_id=None
+        ),
     )
 
     assert answer == "# DFO FAQ\n"
@@ -112,11 +126,7 @@ async def test_the_planner_reads_skills_through_the_surface_translation_gets() -
 
 
 def test_the_planner_runs_the_model_its_setting_pins() -> None:
-    agent = create_planner_with_translator(
-        settings=Settings(),
-        agent_settings=AgentSettings(planner_model_name="gemini-planner"),
-        surface=FixtureSurface(schemas=[]),
-    )
+    agent = _planner(agent_settings=AgentSettings(planner_model_name="gemini-planner"))
 
     assert isinstance(agent.model, Gemini)
     assert agent.model.model == "gemini-planner"

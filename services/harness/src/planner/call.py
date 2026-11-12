@@ -8,12 +8,13 @@ what they answered since the translator's referral
 (`combination_picks`), whether they spoke since a plan version was recorded
 (`user_spoke_since_recorded`), and the prices they chose (`prices_chosen`).
 `CallSession` is the `submission.service.SessionView` over a call, through
-those readers. `planner.agent.AdkCall` is the call ADK serves a tool with.
+those readers. `planner.session.SessionCall` is the call either planner serves
+a tool with.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, NamedTuple, Protocol
@@ -67,7 +68,7 @@ class Step(NamedTuple):
     """One step of a session's history, as the readers of what the user answered walk it.
 
     `message` is a message the user typed into the session, which the
-    planner seam's own messages are not (`planner.agent._user_message`).
+    planner seam's own messages are not (`planner.session._user_message`).
     `call` is an ask, the planner's own (`PLANNER_ASK`) or a workflow
     interrupt's `adk_request_input`, with its id and `args`. `answer` is a
     response to one, with its id, the `args` of the nearest preceding call
@@ -122,6 +123,37 @@ class PlannerCall(Protocol):
         ...
 
 
+class RecordingState:
+    """A view over a state mapping that reads and writes through to it and
+    records each key written through the view, in first-write order.
+
+    The view is a `planner.plan.SessionState`. Writes made to the mapping by
+    anything but the view are unrecorded.
+    """
+
+    def __init__(self, state: MutableMapping[str, Any]) -> None:
+        self._state = state
+        self._written: dict[str, None] = {}
+
+    @property
+    def written(self) -> tuple[str, ...]:
+        """Every key written through the view, in first-write order."""
+        return tuple(self._written)
+
+    def get(self, key: str, default: Any = None, /) -> Any:
+        return self._state.get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._state[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._state[key] = value
+        self._written[key] = None
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._state
+
+
 def candidate_ids(candidates: Any) -> frozenset[str]:
     """The spec_ids of a list of `{"spec_id", "label"}` candidates."""
     return frozenset(
@@ -139,7 +171,7 @@ def _offered_candidates(args: dict[str, Any]) -> dict[str, frozenset[str]]:
       model supplied, flat -- `args["candidates"]`, the one question `q1`.
     - the graph's `ask` node, under `harness.graph`'s `CLARIFY_INTERRUPT`:
       its `args` hold the whole interrupt request, so the caller's own
-      `payload` nests under `args["payload"]` (`planner.agent.session_steps`
+      `payload` nests under `args["payload"]` (`planner.session.session_steps`
       says how the session records it). Its `questions` each carry their own `id` and
       `candidates`, whose ids are scoped to that question. A `payload` with
       `candidates` and no `questions` holds the one question `q1`.
@@ -182,10 +214,10 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
     A prices refusal that sends the planner to the user (`detail.part`,
     `submission.prices_choice`) binds the planner's next ask offering
     `PRICES_OPTIONS` that reached the user (a refused ask leaves no step,
-    `planner.agent.session_steps`) to its part, and the user's pick there sets the part's
-    prices, marked `asked` so the planner does not ask it again
-    (`submission.prices_choice`). The user's own words there release the
-    part's choice, as they do on the orchestrator's question, and a skip
+    `planner.session.session_steps`) to its part, and the user's pick there
+    sets the part's prices, marked `asked` so the planner does not ask it
+    again (`submission.prices_choice`). The user's own words there release
+    the part's choice, as they do on the orchestrator's question, and a skip
     keeps it, marking a constant choice `asked`. A switch of the part's
     prices row on the plan card (`_prices_switched`) is a new answer for the
     part, marked `asked` too, while its replan is under way or once the plan
@@ -398,7 +430,7 @@ def elected_spec_ids(call: PlannerCall) -> frozenset[str]:
 
     The record is read, not kept in a state key: the call carrying its
     offered candidates, and the answer once it arrives, are both in the
-    session's history (`planner.agent.session_steps` says how ADK writes
+    session's history (`planner.session.session_steps` says how ADK writes
     them).
 
     Read across the whole session, not scoped to one invocation: the ask
@@ -615,7 +647,7 @@ def combination_picks(
     off that refusal's own response, so the model cannot point an ask at another sum. A
     refusal binds the first ask after it that reached the user and no other, so an ask
     with no refusal of its own before it asks about nothing. An ask the tool or ADK refused
-    leaves no step (`planner.agent.session_steps`), so it binds nothing and leaves the
+    leaves no step (`planner.session.session_steps`), so it binds nothing and leaves the
     refusal for the next ask. Each response pairs with the nearest preceding call sharing
     its `id`, as `elected_spec_ids` pairs them. The combination ask is one question, `q1`
     (`harness.graph.state.resume_answers`). Each answer about a combination replaces the one

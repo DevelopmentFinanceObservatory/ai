@@ -25,9 +25,11 @@ from google.adk.agents import LlmAgent
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools.function_tool import FunctionTool
 from harness.scripted import use_compiled_proposals
-from planner.agent import AGENT_NAME, SpecTool, create_planner_agent, planner_instruction
+from planner.agent import SpecTool, create_planner_agent
 from planner.declaration import compact_schema
+from planner.instruction import planner_instruction
 from planner.plan import AskAnswer, Decline
+from planner.settings import AGENT_NAME
 from planner.specs import PROPOSE_PLAN, planner_tool_specs, skill_tool_spec
 from planner.tool_spec import (
     Parameter,
@@ -122,11 +124,9 @@ def _adk_declaration(spec: ToolSpec) -> str:
 
 
 def _compiled_proposal_spec() -> ToolSpec:
-    agent = create_planner_agent(model_name="m")
-    use_compiled_proposals(agent)
-    (tool,) = [tool for tool in agent.tools if getattr(tool, "name", None) == PROPOSE_PLAN]
-    assert isinstance(tool, SpecTool)
-    return tool.spec
+    specs = use_compiled_proposals(_specs(translate=False, surface=False, question_fixed=False))
+    (spec,) = [spec for spec in specs if spec.name == PROPOSE_PLAN]
+    return spec
 
 
 @pytest.mark.parametrize(("translate", "surface", "question_fixed"), _VARIANTS)

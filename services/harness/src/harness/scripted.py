@@ -5,14 +5,19 @@ Each answers from fixed data with no LLM, no MCP call and no upstream:
 `ScriptedPlannerModel` (the planner), `ScriptedSurface` (an approved
 plan's steps) and `scripted_publish_result` (the completion gate's
 publisher). Every frame is the one Kenyan life-expectancy series.
-`use_compiled_proposals` gives a real planner a `propose_plan` that declares
-the plan already on record ready, for a scripted planner model that drives no
+
+A real planner runs on a scripted model through `scripted_client`, a
+google-genai client whose streamed calls answer from a script. The ADK
+planner's `Gemini` and the Pydantic AI planner both take that client.
+`use_compiled_proposals` gives the planner's tools a `propose_plan` that
+declares the plan already on record ready, for a script that drives no
 translation.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from common.materialisation import FrameRef
@@ -27,8 +32,7 @@ from compiler.surface import (
 )
 from executor.completion import FramePublished
 from google.adk import Context
-from google.adk.agents import LlmAgent
-from planner.agent import SpecTool
+from google.genai import Client, types
 from planner.call import PlannerCall
 from planner.plan import load_plan, plan_revision
 from planner.specs import PROPOSE_PLAN
@@ -259,8 +263,8 @@ def _compiled_proposal(call: PlannerCall, end_run: EndRun, arguments: dict[str, 
     return ready_and_end(answer, call, end_run)
 
 
-def use_compiled_proposals(agent: LlmAgent) -> None:
-    """Replace `agent`'s `propose_plan` with one that records nothing and
+def use_compiled_proposals(specs: Sequence[ToolSpec]) -> tuple[ToolSpec, ...]:
+    """`specs` with `propose_plan` replaced by one that records nothing and
     answers as a proposal whose translation compiled the plan on record.
 
     The replacement declares no arguments and no description. Its answer goes
@@ -268,12 +272,93 @@ def use_compiled_proposals(agent: LlmAgent) -> None:
     `PENDING_APPROVAL` is declared ready and ends the run, as a compiled
     proposal does, and any other is refused under `submission`.
     """
-    compiled = SpecTool(
-        ToolSpec(name=PROPOSE_PLAN, description="", parameters=(), body=_compiled_proposal)
+    compiled = ToolSpec(name=PROPOSE_PLAN, description="", parameters=(), body=_compiled_proposal)
+    return tuple(compiled if spec.name == PROPOSE_PLAN else spec for spec in specs)
+
+
+@dataclass(frozen=True)
+class ModelRequest:
+    """One streamed model call as `scripted_client` received it."""
+
+    model: str
+    contents: list[types.Content]
+    config: types.GenerateContentConfig
+
+    @property
+    def system_text(self) -> str:
+        """The system instruction's text, in whichever shape it was sent. Both
+        planners send a string (`harness.planner_model._in_adk_planner_form`)."""
+        return instruction_text(self.config.system_instruction)
+
+
+def instruction_text(instruction: object) -> str:
+    """The text of a request's system instruction, in any shape google-genai
+    takes it: a string, a `Content` or a `Part`, each also as the plain dict
+    google-genai validates into one (Pydantic AI builds its instruction as a
+    dict), or a list of them. The parts' texts are joined with nothing
+    between them, as the model reads one part after the next. Anything else
+    reads as no text."""
+    match instruction:
+        case str():
+            return instruction
+        case types.Content() | types.Part():
+            return instruction_text(instruction.model_dump(exclude_none=True))
+        case {"parts": list() as parts}:
+            return instruction_text(parts)
+        case {"text": str() as text}:
+            return text
+        case list():
+            return "".join(instruction_text(item) for item in instruction)
+        case _:
+            return ""
+
+
+# What a scripted client answers a model call with.
+type ScriptedAnswer = Callable[[ModelRequest], types.Part]
+
+
+def scripted_client(answer: ScriptedAnswer) -> Client:
+    """A google-genai client whose every streamed call answers with `answer(request)`.
+
+    The answer streams as one chunk, a model turn of that one part finished with
+    `STOP` and no usage. Everything else a model class reads off a client is a
+    real `Client`'s. The ADK planner's model takes it as `Gemini(client=...)`
+    and the Pydantic AI planner as `harness.planner_seam.PlannerSeam`'s
+    `client`, so one script drives either planner over the requests each puts
+    on the wire.
+    """
+    client = Client(api_key="scripted")
+
+    async def stream(
+        *,
+        model: str,
+        contents: types.ContentListUnion | types.ContentListUnionDict,
+        config: types.GenerateContentConfigOrDict | None = None,
+    ) -> AsyncIterator[types.GenerateContentResponse]:
+        # Both planners send a list of contents. Any other form fails validation here.
+        listed = contents if isinstance(contents, list) else [contents]
+        request = ModelRequest(
+            model=model,
+            contents=[types.Content.model_validate(content) for content in listed],
+            config=types.GenerateContentConfig.model_validate(config or {}),
+        )
+        return _one_chunk(answer(request))
+
+    # The client is this function's own, so its one streaming method is replaced
+    # outright. ty reads the assignment as one over the unbound method.
+    client.aio.models.generate_content_stream = stream  # ty: ignore[invalid-assignment]
+    return client
+
+
+async def _one_chunk(part: types.Part) -> AsyncIterator[types.GenerateContentResponse]:
+    yield types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                content=types.Content(role="model", parts=[part]),
+                finish_reason=types.FinishReason.STOP,
+            )
+        ]
     )
-    agent.tools = [
-        compiled if getattr(tool, "name", None) == PROPOSE_PLAN else tool for tool in agent.tools
-    ]
 
 
 class ScriptedPlannerModel:

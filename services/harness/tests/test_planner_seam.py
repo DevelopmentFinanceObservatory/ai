@@ -38,6 +38,7 @@ from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk import Context, Event
+from google.adk.agents.run_config import RunConfig
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
@@ -95,7 +96,6 @@ from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded, current_turn
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from harness.wiring import handing_back_planner_failures
-from planner.agent import AdkCall
 from planner.call import elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
@@ -153,12 +153,14 @@ from planner.plan import (
     save_refused_specs,
 )
 from planner.records import GroupBy, Reduction, RelativePeriod
+from planner.session import SessionCall
 from planner.settings import (
     AGENT_THINKING_CONFIG,
     AgentSettings,
     drop_thought_parts,
 )
 from planner.skills import SKILLS_READ_STATE_KEY, skill_page_key
+from planner.specs import planner_specs
 from planner.tool_results import ProblemCode, ok
 from planner.tools import load_pending_ask
 from planner.workflow import (
@@ -178,6 +180,7 @@ from submission.service import (
 from translator.discovery import current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY
 from translator.referral import ReferralKind
+from translator.tool import build_translate
 
 from .basis_alignment import (
     HEALTH,
@@ -307,11 +310,24 @@ def _last_amended_version(request: Any, *, default: int) -> int:
 def _seam(
     *,
     agent_settings: AgentSettings | None = None,
+    compiled_proposals: bool = False,
 ) -> PlannerSeam:
+    """The seam over an empty fixture surface. With `compiled_proposals`, its tools
+    are the ones it builds for itself with `propose_plan` declaring the plan on
+    record ready (`harness.scripted.use_compiled_proposals`)."""
+    surface = FixtureSurface(schemas=[])
+    if not compiled_proposals:
+        return PlannerSeam(settings=Settings(), surface=surface, agent_settings=agent_settings)
+    translate = build_translate(surface=surface)
+    specs = planner_specs(
+        translate=translate, surface=surface, question_fixed=True, reads_user_words=False
+    )
     return PlannerSeam(
         settings=Settings(),
-        surface=FixtureSurface(schemas=[]),
+        surface=surface,
         agent_settings=agent_settings,
+        translate=translate,
+        specs=use_compiled_proposals(specs),
     )
 
 
@@ -342,11 +358,13 @@ class _SeamHarness:
         resume_inputs: dict[str, Any] | None = None,
         new_message: types.Content | None = None,
         stoppable: bool = False,
+        run_config: RunConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any] | None:
         """Run `seam` once in this harness's session, under the switch's
         `_unless_stopped` when `stoppable`, as the planner node runs a pick's
-        replan."""
+        replan, and with `run_config`, Studio's streaming one for a model that
+        streams."""
 
         async def _node(ctx: Context, node_input: Any) -> AsyncIterator[Any]:
             del node_input
@@ -380,7 +398,7 @@ class _SeamHarness:
         content = new_message or types.Content(role="user", parts=[types.Part(text="probe")])
         output: Any = None
         async for event in runner.run_async(
-            user_id=_USER, session_id=self._session_id, new_message=content
+            user_id=_USER, session_id=self._session_id, new_message=content, run_config=run_config
         ):
             assert isinstance(event, Event)
             if event.output is not None:
@@ -492,8 +510,7 @@ async def test_the_seam_returns_a_plan_a_graph_node_can_validate(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     plan = _translated_plan(decision, requirement, derived_requirement)
-    seam = _seam()
-    use_compiled_proposals(seam._agent)
+    seam = _seam(compiled_proposals=True)
     seam._agent.model = ScriptedPlannerLlm(script=[_DECLARE])
 
     drafted = await _run_seam(
@@ -518,8 +535,7 @@ async def test_on_progress_reports_the_time_since_the_previous_round_trip(
     from a one-second lookup on a feed where every line otherwise prints
     the same way the instant it arrives."""
     plan = _translated_plan(decision, requirement, derived_requirement)
-    seam = _seam()
-    use_compiled_proposals(seam._agent)
+    seam = _seam(compiled_proposals=True)
     seam._agent.model = ScriptedPlannerLlm(script=[_DECLARE])
     reports: list[dict[str, Any]] = []
 
@@ -1103,7 +1119,7 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() 
     planner's run, and the seam answers the ask, which the node pauses on, so
     the node resolves no output. The call's own function-call event is on
     record afterward, in the session's own event history
-    (`planner.agent.session_steps`'s own docstring). But an offer is not an
+    (`planner.session.session_steps`'s own docstring). But an offer is not an
     election: with no answer from the user on record, nothing the call
     offered counts as something the user chose.
     """
@@ -1135,7 +1151,7 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() 
     fake_tool_context = SimpleNamespace(
         state={}, function_call_id=None, session=SimpleNamespace(events=events)
     )
-    assert elected_spec_ids(AdkCall(fake_tool_context)) == frozenset()
+    assert elected_spec_ids(SessionCall.of(fake_tool_context)) == frozenset()
 
 
 async def test_a_slow_call_beside_an_accepted_ask_answers_before_the_pause_and_runs_once() -> None:
@@ -1470,11 +1486,10 @@ async def test_a_picks_replan_run_as_a_task_still_pauses_on_an_ask_and_resumes(
     finishes the draft, and the seam's callbacks find their own call
     (`_active_call`) in the task, so its proposal is reported."""
     plan = _translated_plan(decision, requirement, derived_requirement)
-    seam = _seam()
+    seam = _seam(compiled_proposals=True)
     seam._agent.model = ScriptedPlannerLlm(
         script=[[(PLANNER_ASK, {"message": "Which source did you mean?"})], _DECLARE]
     )
-    use_compiled_proposals(seam._agent)
     harness = _SeamHarness()
     reports: list[dict[str, Any]] = []
     entry: dict[str, Any] = {
@@ -1527,7 +1542,7 @@ async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
     amend call's, which renders the plan it changes and the amendment after
     the readings. No request carries a brief twice."""
     plan = _translated_plan(decision, requirement, derived_requirement)
-    seam = _seam()
+    seam = _seam(compiled_proposals=True)
     llm = ScriptedPlannerLlm(
         script=[
             [
@@ -1544,7 +1559,6 @@ async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
             _DECLARE,
         ]
     )
-    use_compiled_proposals(seam._agent)
     seam._agent.model = llm
     harness = _SeamHarness()
 
@@ -1769,9 +1783,8 @@ async def _first_request_with_readings(
     """Run one fresh orchestrator entry over `readings`, with `stored` (the
     blocks and warnings `search` keeps) already in session state, answering
     `refusal` or the user's `amendment`."""
-    seam = _seam()
+    seam = _seam(compiled_proposals=True)
     llm = ScriptedPlannerLlm(script=[_DECLARE])
-    use_compiled_proposals(seam._agent)
     seam._agent.model = llm
     harness = _SeamHarness(stored)
     await harness.run(
@@ -3556,53 +3569,6 @@ async def test_the_planner_runs_on_the_model_and_translation_the_seam_is_given(
     assert answered["translation"] == {"translated_by": "the caller"}
 
 
-class _ThinkingLlm(ScriptedPlannerLlm):
-    """`ScriptedPlannerLlm`, opening each answer with a thought part."""
-
-    async def generate_content_async(self, llm_request: Any, stream: bool = False) -> Any:
-        async for response in super().generate_content_async(llm_request, stream):
-            assert response.content is not None
-            parts = [types.Part(text="weighing it", thought=True), *(response.content.parts or [])]
-            yield response.model_copy(update={"content": types.Content(role="model", parts=parts)})
-
-
-async def test_a_callers_model_callbacks_see_only_what_passes_between_planner_and_model(
-    decision: Any, requirement: Any, derived_requirement: Any
-) -> None:
-    """The first proposal restarts the plan on the amend edge and is refused as
-    `QUESTION_FIXED`, which ends the entry, so the seam answers the second request itself
-    and the caller's before-model callback never sees it. The caller's after-model
-    callback sees the thought part `drop_thought_parts` then drops."""
-    seeded = _translated_plan(decision, requirement, derived_requirement, version=3)
-    requests: list[Any] = []
-    responses: list[LlmResponse] = []
-    llm = _ThinkingLlm(
-        script=[[("propose_plan", {"starts_new_plan": True, "question": "a different question"})]]
-    )
-    seam = PlannerSeam(
-        settings=Settings(),
-        surface=FixtureSurface(schemas=[]),
-        model=llm,
-        before_model_callbacks=[lambda _context, request: requests.append(request)],
-        after_model_callbacks=[lambda _context, response: responses.append(response)],
-    )
-
-    result = await _run_seam(
-        seam,
-        question="kenya debt",
-        readings=[],
-        prior_plan=seeded.model_dump(mode="json"),
-        amendment="actually, tell me about Kenya's ODA instead",
-    )
-
-    assert result["refused"]["code"] == "question_fixed"
-    assert len(llm.captured_requests) == len(requests) == 1
-    assert [bool(part.thought) for response in responses for part in response.content.parts] == [
-        True,
-        False,
-    ]
-
-
 async def test_every_planner_generation_runs_at_the_low_thinking_config(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
@@ -4623,10 +4589,9 @@ async def test_a_second_turn_on_one_session_clears_the_first_drafts_plan_and_bri
     against a plan still on record from the first entry.
     """
     harness = _SeamHarness()
-    seam = _seam()
+    seam = _seam(compiled_proposals=True)
     first_plan = _translated_plan(decision, requirement, derived_requirement, version=1)
     first_llm = ScriptedPlannerLlm(script=[_DECLARE])
-    use_compiled_proposals(seam._agent)
     seam._agent.model = first_llm
 
     first = await harness.run(
@@ -4680,9 +4645,8 @@ async def test_a_later_first_draft_reads_none_of_the_earlier_plans_alignments(
     first-draft entry of the turn clears that plan, and its alignments go with
     it, so they are gone even when the entry records no plan of its own."""
     harness = _SeamHarness()
-    seam = _seam()
+    seam = _seam(compiled_proposals=True)
     first_plan = _translated_plan(decision, requirement, derived_requirement, version=1)
-    use_compiled_proposals(seam._agent)
     seam._agent.model = ScriptedPlannerLlm(script=[_DECLARE])
     first = await harness.run(
         seam, question="kenya debt", readings=[], prior_plan=first_plan.model_dump(mode="json")
@@ -5486,7 +5450,7 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
     fake_tool_context = SimpleNamespace(
         state={}, function_call_id=None, session=SimpleNamespace(events=await harness.events())
     )
-    assert elected_spec_ids(AdkCall(fake_tool_context)) == frozenset({SPEC_B})
+    assert elected_spec_ids(SessionCall.of(fake_tool_context)) == frozenset({SPEC_B})
 
 
 async def test_a_submitted_plan_ends_the_planner_run_with_no_further_model_call(
@@ -5495,9 +5459,8 @@ async def test_a_submitted_plan_ends_the_planner_run_with_no_further_model_call(
     """A compiled proposal declared ready is the planner's last event: ADK asks the
     model for nothing after it, so the submission stands."""
     plan = _translated_plan(decision, requirement, derived_requirement)
-    seam = _seam()
+    seam = _seam(compiled_proposals=True)
     llm = ScriptedPlannerLlm(script=[_DECLARE])
-    use_compiled_proposals(seam._agent)
     seam._agent.model = llm
 
     result = await _run_seam(

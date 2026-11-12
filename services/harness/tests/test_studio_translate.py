@@ -88,7 +88,6 @@ from harness.wire import (
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR
 from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
-from planner.agent import session_steps
 from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
@@ -101,6 +100,7 @@ from planner.plan import (
     plan_revision,
 )
 from planner.records import AmbiguousEntityReading, EntityCandidate, EntityKey
+from planner.session import session_steps
 from planner.tool_results import ProblemCode
 from planner.workflow import ToolId
 from pydantic import BaseModel, ConfigDict, ValidationError

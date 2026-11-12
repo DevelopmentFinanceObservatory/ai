@@ -36,8 +36,7 @@ import asyncio
 import re
 import sys
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import aclosing
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,6 +47,7 @@ from entry import (
     KINDS,
     TASKS_DIR,
     EntryRun,
+    ModelRequest,
     PeriodReduction,
     Task,
     TranslationCalls,
@@ -61,13 +61,8 @@ from entry import (
     stray_recordings,
     tool_calls,
 )
-from google.adk.models.base_llm import BaseLlm
-from google.adk.models.llm_request import LlmRequest
-from google.adk.models.llm_response import LlmResponse
-from google.genai import types
-from harness.turn_budget import bounded
+from google.genai import Client, types
 from harness.turn_events import PLANNER_ASK
-from pydantic import Field
 from submission.service import COMBINATION_OPTIONS, COMBINE_OPTION
 
 MINIMUM_TASKS = 60
@@ -91,26 +86,41 @@ SCRIPTED_USAGE = types.GenerateContentResponseUsageMetadata(
 )
 
 
-class ScriptedLlm(BaseLlm):
-    """Answers each generation with the next step of `script`; past its end, with text.
-    Keeps every request it was sent. A streamed generation answers first as a partial
-    chunk and then whole, as `Gemini` does under SSE, each with `SCRIPTED_USAGE`. Each
-    generation keeps to the current turn budget as the planner's model does
-    (`harness.turn_budget.bounded`)."""
+class ScriptedModel:
+    """Answers each streamed generation `client` is sent with the next step of
+    `script`, as one chunk carrying `SCRIPTED_USAGE`; past its end, with text. Keeps
+    every request it was sent in `requests`.
 
-    model: str = "scripted-planner"
-    script: list[Step] = Field(default_factory=list)
-    requests: list[LlmRequest] = Field(default_factory=list)
+    `client` is a google-genai client of its own, so the planner's model on either
+    runner, and the turn budget it keeps to, run as they do against the API.
+    """
 
-    async def generate_content_async(self, llm_request: LlmRequest, stream: bool = False) -> Any:
-        answer = bounded(lambda: self._answer(llm_request, stream), stream=stream)
-        async with aclosing(answer) as responses:
-            async for response in responses:
-                yield response
+    def __init__(self, script: Sequence[Step] = ()) -> None:
+        self.script = list(script)
+        self.requests: list[ModelRequest] = []
+        self.client = Client(api_key="scripted")
+        # The client is this object's own, so its streamed call is the script's.
+        self.client.aio.models.generate_content_stream = self.open  # ty: ignore[invalid-assignment]
 
-    async def _answer(self, llm_request: LlmRequest, stream: bool) -> Any:
-        index = len(self.requests)
-        self.requests.append(llm_request)
+    async def open(
+        self, *, model: str, contents: Any, config: Any = None
+    ) -> AsyncIterator[types.GenerateContentResponse]:
+        """The stream answering one request."""
+        self.requests.append(
+            ModelRequest(
+                model=model,
+                contents=[
+                    types.Content.model_validate(content).model_copy(deep=True)
+                    for content in contents
+                ],
+                config=types.GenerateContentConfig.model_validate(config or {}).model_copy(
+                    deep=True
+                ),
+            )
+        )
+        return self._answer(len(self.requests) - 1)
+
+    async def _answer(self, index: int) -> AsyncIterator[types.GenerateContentResponse]:
         if index >= len(self.script):
             parts = [types.Part.from_text(text="done")]
         else:
@@ -118,10 +128,15 @@ class ScriptedLlm(BaseLlm):
                 types.Part.from_function_call(name=name, args=args)
                 for name, args in self.script[index]
             ]
-        content = types.Content(role="model", parts=parts)
-        if stream:
-            yield LlmResponse(content=content, partial=True, usage_metadata=SCRIPTED_USAGE)
-        yield LlmResponse(content=content, usage_metadata=SCRIPTED_USAGE)
+        yield types.GenerateContentResponse(
+            candidates=[
+                types.Candidate(
+                    content=types.Content(role="model", parts=parts),
+                    finish_reason=types.FinishReason.STOP,
+                )
+            ],
+            usage_metadata=SCRIPTED_USAGE,
+        )
 
 
 def _kinds(payload: Mapping[str, Any]) -> set[str]:
@@ -201,7 +216,7 @@ async def accepted_run(
         task,
         recording,
         prefix_cache=None,
-        model=ScriptedLlm(script=script),
+        client=ScriptedModel(script).client,
         timeout_s=timeout_s,
         answers=answers,
         translation=translation,
@@ -319,7 +334,7 @@ async def check_task(task: Task) -> list[str]:
         )
     try:
         recording = load_recording(task.id)
-        shown = await run_entry(task, recording, prefix_cache=None, model=ScriptedLlm())
+        shown = await run_entry(task, recording, prefix_cache=None, client=ScriptedModel().client)
         if gaps := await first_year_gaps(shown.state, recording):
             faults.append(
                 f"the recording holds no answer for {len(gaps)} first-year reads, so record "
@@ -384,11 +399,16 @@ def _print(task: Task, faults: list[str]) -> None:
 
 async def first_message(task: Task) -> str:
     """The user content of the planner's first request for `task`, as a live run sends it."""
-    model = ScriptedLlm()
-    await run_entry(task, load_recording(task.id), prefix_cache=None, model=model, timeout_s=60.0)
+    run = await run_entry(
+        task,
+        load_recording(task.id),
+        prefix_cache=None,
+        client=ScriptedModel().client,
+        timeout_s=60.0,
+    )
     return "\n\n".join(
         part.text
-        for content in model.requests[0].contents
+        for content in run.probe.requests[0].contents
         if content.role == "user"
         for part in content.parts or []
         if part.text

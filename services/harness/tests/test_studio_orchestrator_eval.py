@@ -3,8 +3,9 @@
 The cases run the real workflow and planner seam under a real ADK runner, with
 every model scripted, and check what each model was shown. Three things are
 held here: the cases report as marked (a pass, or an expected failure that
-still fails), each check and each stream invariant fails when the property it
-states is broken, and the case file can fail.
+still fails) on the ADK planner and on the Pydantic AI planner, each check and
+each stream invariant fails when the property it states is broken, and the
+case file can fail.
 
 `evals/` sits outside the workspace, so its modules are loaded by file path.
 """
@@ -26,9 +27,12 @@ import pytest
 from google.adk.events import Event
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+from harness import planner_seam
+from harness.planner_run import failed_tool_answer
 from harness.reply_figures import card_result
 from harness.studio_state import ConversationState, StudioStore
 from harness.studio_translate import _RecordingExecutor, _Translator
+from planner.skills import GET_SKILL
 
 from .orchestrator_fakes import (
     CannedSearch,
@@ -65,9 +69,21 @@ def _suite() -> dict[str, Any]:
     return json.loads(CASES_PATH.read_text())
 
 
-async def test_scripted_cases_report_as_marked() -> None:
+@pytest.mark.parametrize("runner", ["adk", "pydantic_ai"])
+async def test_scripted_cases_report_as_marked(
+    runner: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _load("orchestrator_scripted")
     run = _load("run")
+    monkeypatch.setenv("PLANNER_RUNNER", runner)
+    nodes = []
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        nodes.append(1)
+        return node(*args, **kwargs)
+
+    node = planner_seam.planner_node
+    monkeypatch.setattr(planner_seam, "planner_node", counted)
 
     results, passed = await run.run_suite(mode="scripted", url="", judge=False)
 
@@ -80,6 +96,82 @@ async def test_scripted_cases_report_as_marked() -> None:
         if r["status"] not in ("PASS", "XFAIL")
     }
     assert passed and failures == {}
+    # `runner` picks the planner. Only the Pydantic AI planner runs as
+    # `planner_node`.
+    assert bool(nodes) is (runner == "pydantic_ai")
+
+
+async def test_both_planners_log_the_same_first_planner_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The log holds a planner request in one form whichever planner sent it: the
+    system instruction as text and the contents. Both planners send the ADK
+    planner's form (`harness.planner_model._in_adk_planner_form`), and a first
+    request holds no model turn, so no difference between the planners reaches
+    it."""
+    scripted = _load("orchestrator_scripted")
+    run = _load("run")
+    (case,) = run.load_cases(
+        "scripted", only=["orchestrator-every-ask-reaches-the-card-and-the-hand-back"]
+    )
+    first: dict[str, dict[str, Any]] = {}
+    for runner in ("adk", "pydantic_ai"):
+        monkeypatch.setenv("PLANNER_RUNNER", runner)
+        async with scripted.orchestrator_client(case["scenario"]) as (client, log):
+            await run.run_case(client, case, on_turn=log.mark_turn)
+        first[runner] = next(
+            entry
+            for entry in log.entries
+            if entry["kind"] == "request" and entry["agent"] == "planner"
+        )
+
+    assert first["adk"]["system"]
+    assert first["pydantic_ai"] == first["adk"]
+
+
+class _SkillReadFailedError(RuntimeError):
+    """What the planner's `get_skill` raises in the raising-tool test."""
+
+
+@pytest.mark.parametrize("runner", ["adk", "pydantic_ai"])
+async def test_a_planner_tool_that_raises_is_logged_as_the_answer_the_model_receives(
+    runner: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A planner tool whose body raises is logged on either planner, with the
+    answer the seam gives the model for it (`failed_tool_answer`)."""
+    scripted = _load("orchestrator_scripted")
+    run = _load("run")
+    (case,) = run.load_cases(
+        "scripted", only=["orchestrator-every-ask-reaches-the-card-and-the-hand-back"]
+    )
+    case = copy.deepcopy(case)
+    case["scenario"]["planner"] = [{"call": "get_skill", "args": {"skill_id": "aid"}}]
+    monkeypatch.setenv("PLANNER_RUNNER", runner)
+    serve = scripted.CannedDataSurface.call_tool
+
+    async def failing_skill_reads(self: Any, *, tool: Any, **kwargs: Any) -> Any:
+        if tool == GET_SKILL:
+            raise _SkillReadFailedError
+        return await serve(self, tool=tool, **kwargs)
+
+    monkeypatch.setattr(scripted.CannedDataSurface, "call_tool", failing_skill_reads)
+
+    async with scripted.orchestrator_client(case["scenario"]) as (client, log):
+        await run.run_case(client, case, on_turn=log.mark_turn)
+
+    planner_calls = [
+        entry for entry in log.entries if entry["kind"] == "call" and entry["layer"] == "planner"
+    ]
+    assert planner_calls == [
+        {
+            "kind": "call",
+            "layer": "planner",
+            "tool": "get_skill",
+            "outcome": None,
+            "code": None,
+            "response": failed_tool_answer("get_skill", _SkillReadFailedError()),
+        }
+    ]
 
 
 def _request(agent: str, *texts: str, system: str = "") -> dict[str, Any]:

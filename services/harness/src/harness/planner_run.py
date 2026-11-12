@@ -6,8 +6,10 @@ closed a model call (`PlannerRun.model_answered`). Before each model request
 it says whether the run asks the user, stops, or leaves the request to the
 model (`PlannerRun.next_request`). The answer is a `Directive`: `Ask` with the
 `PLANNER_ASK` call's arguments, or `Stop` with the refusal the run ends on.
-`harness.planner_seam` drives one through the planner `LlmAgent`'s callbacks
-and builds the model turn each directive stands for.
+`harness.planner_seam` drives one through the ADK planner's callbacks and
+`harness.planner_node` through the Pydantic AI planner's model hooks, and
+`harness.planner_node.directive_turn` builds the model turn each directive
+stands for.
 """
 
 from __future__ import annotations
@@ -104,14 +106,20 @@ class PlannerRun:
     `refused`.
 
     `on_progress`, when given, receives one report per tool answer, naming
-    `agent` and the tool.
+    `agent` and the tool. `on_tool_answered`, when given, receives each
+    tool's name and the answer the model reads (`tool_answered`).
     """
 
     def __init__(
-        self, *, agent: str, on_progress: Callable[[dict[str, Any]], None] | None = None
+        self,
+        *,
+        agent: str,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+        on_tool_answered: Callable[[str, dict[str, Any] | None], None] | None = None,
     ) -> None:
         self._agent = agent
         self._on_progress = on_progress
+        self._on_tool_answered = on_tool_answered
         self.submitted: dict[str, Any] | None = None
         self.refused: dict[str, Any] | None = None
         self.ready_to_break = False
@@ -136,6 +144,11 @@ class PlannerRun:
         `summary` says the call declared that plan ready
         (`planner.tools.declare_ready`).
 
+        The run's `on_tool_answered` observer is told the name and answer before
+        any of that, on every answer within `_MAX_EVENTS`: a tool's own, a
+        refusal of its arguments, and `tool_failed`'s for a tool that raised.
+        What it raises propagates, as what `on_progress` raises does.
+
         Raises:
             PlannerSeamError: On the answer past `_MAX_EVENTS` in one run.
         """
@@ -144,6 +157,8 @@ class PlannerRun:
             raise PlannerSeamError(
                 f"the planner seam ran past {_MAX_EVENTS} events without settling"
             )
+        if self._on_tool_answered is not None:
+            self._on_tool_answered(name, answer)
         if self._on_progress is not None:
             now = time.monotonic()
             self._on_progress(
