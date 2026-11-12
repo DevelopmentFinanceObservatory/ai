@@ -13,10 +13,10 @@
               "spec_id": "ops_084d19648d7cb0f3c9774176fe7db7e8",
               "recipe": {
                 "normal_form_hash": "rnf_7b8b51c90a0be52b22dd82ccb4db98b8",
-                "replay_key": "rpk_56a7d248d2a69457ca54396188f4c2d1"
+                "replay_key": "rpk_2dee842d61b374aaf55db6a7fe8e4bea"
               }
             },
-            "content_version": "ocv_89ab4ab1452283b76d81af368a77d5cf",
+            "content_version": "ocv_02d824606687cd1e73c976251520463c",
             "output_digest": "out_22e05f89e0f58be6742b19a37cccea96",
             "roots": [
               {
@@ -29,7 +29,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [
               {
                 "anchor": "latest",
@@ -54,7 +54,7 @@
       "summary": {
         "verb": "growth",
         "spec_id": "ops_084d19648d7cb0f3c9774176fe7db7e8",
-        "content_version": "ocv_89ab4ab1452283b76d81af368a77d5cf",
+        "content_version": "ocv_02d824606687cd1e73c976251520463c",
         "frame_content_version": "cv_a4eb1be51928e6d4ba0d862c7cb5062c",
         "rows": 1,
         "role_keys": [
@@ -98,8 +98,8 @@
           "window_start": "2017"
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -161,8 +161,8 @@
         "absent_count": 1
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": [
@@ -176,7 +176,7 @@
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"rolling\":\"tree\",\"tree\":{\"arguments\":{\"left_entity\":{},\"right_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"ocv_6cc0a5dca5a70333419a604070d3c5d1\",\"spec_id\":\"ops_2719a7dd1ebc0c15567f9fb24ff4c75c\"},\"other\":{\"content_version\":\"ocv_96323a4f0dfaf26d903a6f0a3ecc4a99\",\"spec_id\":\"ops_a5234dfadca6deb24f4d31c07140e0e6\"}},\"verb\":\"compare\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"rolling\":\"tree\",\"tree\":{\"arguments\":{\"left_entity\":{},\"right_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"ocv_a69b13f4842f8419e0126f571e7d3f35\",\"spec_id\":\"ops_2719a7dd1ebc0c15567f9fb24ff4c75c\"},\"other\":{\"content_version\":\"ocv_c2e250266a32fa860641ca5e356c4568\",\"spec_id\":\"ops_a5234dfadca6deb24f4d31c07140e0e6\"}},\"verb\":\"compare\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
@@ -187,13 +187,13 @@
             "parts": [],
             "sentence": "Computed by DFO: growth, then growth, then compare.",
             "spec": {
-              "spec_id": "ops_be33f235adf3dcd9b4d4f62b5e69e6b8",
+              "spec_id": "ops_20a39d580717844c4be7ba3ae0076010",
               "recipe": {
                 "normal_form_hash": "rnf_30f5ea0808ab1ea2a73e0cc07e10cb6d",
-                "replay_key": "rpk_d2fe17c08acbb4706c1492a109f794ed"
+                "replay_key": "rpk_0b054a0a88d2690c995353a756539c91"
               }
             },
-            "content_version": "ocv_f77dc4cedc0dcb613086c20b70daf45b",
+            "content_version": "ocv_800a40c0ce5240a350fa1b58b635fdf2",
             "output_digest": "out_5418bfa18ede42cef8af28384fc3475a",
             "roots": [
               {
@@ -215,7 +215,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [
               {
                 "anchor": "latest",
@@ -231,7 +231,7 @@
               }
             ],
             "artifact": {
-              "digest": "sha256:be7749b155c1e3c40c39c32cd3be3e6890ebe1fe3df5290646e5577393d3baa5",
+              "digest": "sha256:8980e1266f692bb8ea480f155cac5afba17eda19bf16fd630a9689426b7ee101",
               "rendering": {
                 "format": "parquet",
                 "bundle": false,
@@ -241,13 +241,13 @@
           }
         ]
       },
-      "frame_content_version": "cv_1508873fda200087018d8b65c9da4fc2",
+      "frame_content_version": "cv_a57aaa5e6019e6c31adc6192c3c1d083",
       "output_digest": "out_5418bfa18ede42cef8af28384fc3475a",
       "summary": {
         "verb": "compare",
-        "spec_id": "ops_be33f235adf3dcd9b4d4f62b5e69e6b8",
-        "content_version": "ocv_f77dc4cedc0dcb613086c20b70daf45b",
-        "frame_content_version": "cv_1508873fda200087018d8b65c9da4fc2",
+        "spec_id": "ops_20a39d580717844c4be7ba3ae0076010",
+        "content_version": "ocv_800a40c0ce5240a350fa1b58b635fdf2",
+        "frame_content_version": "cv_a57aaa5e6019e6c31adc6192c3c1d083",
         "rows": 1,
         "role_keys": [],
         "stat_var_count": 1,
@@ -268,14 +268,14 @@
           "left_unit": null,
           "right_entity": {},
           "right_frame_ref": {
-            "content_version": "ocv_ee03dd2cb4b5758045b1faea53327462",
+            "content_version": "ocv_8c9e265a881856ed90ca1248cb13c9ea",
             "spec_id": "ops_6065d633550678b39a6bb1b76c2da68c"
           },
           "right_unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -283,7 +283,7 @@
           "inherited_stat_var": true
         },
         "result": {
-          "stat_var": "dcid:ops_be33f235adf3dcd9b4d4f62b5e69e6b8",
+          "stat_var": "dcid:ops_20a39d580717844c4be7ba3ae0076010",
           "left_stat_vars": [
             "dcid:ODA"
           ],
@@ -338,8 +338,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": [
@@ -373,10 +373,10 @@
               "spec_id": "ops_9ddf7254ed5ac6647f8db92d90cd7a1e",
               "recipe": {
                 "normal_form_hash": "rnf_43bd133146c8d71c599f8b4c826d5c42",
-                "replay_key": "rpk_2af5eb15ca006b08058421943afa6065"
+                "replay_key": "rpk_9de0d3d113a6797acfd4f39bb48962d9"
               }
             },
-            "content_version": "ocv_c8b3a3432053cce9d4b6bf9884db15ed",
+            "content_version": "ocv_a47bb0bdae4441ea0367d969e9ee7eca",
             "output_digest": "out_cb2d02e77ab52060df85d72c86033e34",
             "roots": [
               {
@@ -389,7 +389,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:810ac61c910a52f04f8bc7837b24ea366a38ee573abefd08964437c0faaa65bf",
@@ -407,7 +407,7 @@
       "summary": {
         "verb": "rank",
         "spec_id": "ops_9ddf7254ed5ac6647f8db92d90cd7a1e",
-        "content_version": "ocv_c8b3a3432053cce9d4b6bf9884db15ed",
+        "content_version": "ocv_a47bb0bdae4441ea0367d969e9ee7eca",
         "frame_content_version": "cv_5b4979c11f1c71e8b4c13abedf30cabd",
         "rows": 2,
         "role_keys": [
@@ -458,8 +458,8 @@
           "window_start": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -565,8 +565,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -587,10 +587,10 @@
               "spec_id": "ops_5f186a986299715234e8242996939563",
               "recipe": {
                 "normal_form_hash": "rnf_df3f7b414bbf659f7c899a1d51b7b24c",
-                "replay_key": "rpk_070bfd15d15b1cc52dd4458e3b3d86f1"
+                "replay_key": "rpk_a8f7ff6486c6ea46ff360ca3c694e0df"
               }
             },
-            "content_version": "ocv_49b211e5468561cfa7fad241fae8392d",
+            "content_version": "ocv_9e9372af7ac55c4bef24415a27c4be19",
             "output_digest": "out_1cd06760525becc7ace01e426596c217",
             "roots": [
               {
@@ -603,7 +603,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:174cb3e48d4ee2b772ae2930983ae858b384181229c6edf32518d98a1a8535e8",
@@ -621,7 +621,7 @@
       "summary": {
         "verb": "rank",
         "spec_id": "ops_5f186a986299715234e8242996939563",
-        "content_version": "ocv_49b211e5468561cfa7fad241fae8392d",
+        "content_version": "ocv_9e9372af7ac55c4bef24415a27c4be19",
         "frame_content_version": "cv_e2bfd7b4327f5543174217ad7e31be60",
         "rows": 2,
         "role_keys": [
@@ -670,8 +670,8 @@
           "window_start": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -775,8 +775,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -797,10 +797,10 @@
               "spec_id": "ops_6f525c26238b6842f9610b2cabd82cd9",
               "recipe": {
                 "normal_form_hash": "rnf_13c590d52d07d2568a84070beb97cd64",
-                "replay_key": "rpk_6e425f7f0a0eb5d6926b63f7c5deaa90"
+                "replay_key": "rpk_a515dccb8e4f0c3ca21afef681dc3d30"
               }
             },
-            "content_version": "ocv_6f91db5bee530638f223798a05d4f3e2",
+            "content_version": "ocv_e90b4ffc93c5f8b3e30dc8f89fb0afae",
             "output_digest": "out_cb2d02e77ab52060df85d72c86033e34",
             "roots": [
               {
@@ -813,7 +813,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:810ac61c910a52f04f8bc7837b24ea366a38ee573abefd08964437c0faaa65bf",
@@ -831,7 +831,7 @@
       "summary": {
         "verb": "aggregate",
         "spec_id": "ops_6f525c26238b6842f9610b2cabd82cd9",
-        "content_version": "ocv_6f91db5bee530638f223798a05d4f3e2",
+        "content_version": "ocv_e90b4ffc93c5f8b3e30dc8f89fb0afae",
         "frame_content_version": "cv_5b4979c11f1c71e8b4c13abedf30cabd",
         "rows": 2,
         "role_keys": [
@@ -878,8 +878,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -990,8 +990,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -1012,10 +1012,10 @@
               "spec_id": "ops_9b0b3640309eda362948a6b2a6b5981f",
               "recipe": {
                 "normal_form_hash": "rnf_7660da81622d85293268e90d625c4aa1",
-                "replay_key": "rpk_57d86cf53983a79bcbaeefd60db0ff73"
+                "replay_key": "rpk_992b6620619146f1db86680841f70760"
               }
             },
-            "content_version": "ocv_1bb2a93592cff2efa609514d6f524d64",
+            "content_version": "ocv_4326e94d57f2e7cfefb66798a774bb9a",
             "output_digest": "out_1cd06760525becc7ace01e426596c217",
             "roots": [
               {
@@ -1028,7 +1028,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:174cb3e48d4ee2b772ae2930983ae858b384181229c6edf32518d98a1a8535e8",
@@ -1046,7 +1046,7 @@
       "summary": {
         "verb": "aggregate",
         "spec_id": "ops_9b0b3640309eda362948a6b2a6b5981f",
-        "content_version": "ocv_1bb2a93592cff2efa609514d6f524d64",
+        "content_version": "ocv_4326e94d57f2e7cfefb66798a774bb9a",
         "frame_content_version": "cv_e2bfd7b4327f5543174217ad7e31be60",
         "rows": 2,
         "role_keys": [
@@ -1091,8 +1091,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -1201,8 +1201,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -1223,10 +1223,10 @@
               "spec_id": "ops_43c57460feb9e030b4edbc9616bbada2",
               "recipe": {
                 "normal_form_hash": "rnf_ee21d51c4ef3b3664be12a01c587b283",
-                "replay_key": "rpk_7c328bb821bd295ca1383e37899d2f63"
+                "replay_key": "rpk_17e1595c405caf7b89f386bcc2896a82"
               }
             },
-            "content_version": "ocv_ce5e95e1b04e3f48a3c3ac5ecbc69e06",
+            "content_version": "ocv_075240f634e2a0eee586eb8c3fe64185",
             "output_digest": "out_31912bc3d818a67e0406077f9b5b49a4",
             "roots": [
               {
@@ -1239,7 +1239,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:3a357bd6ceb98c47479c6a5236d0b71d83c988fd8ff048dc0d939ce731dbd36d",
@@ -1257,7 +1257,7 @@
       "summary": {
         "verb": "rank",
         "spec_id": "ops_43c57460feb9e030b4edbc9616bbada2",
-        "content_version": "ocv_ce5e95e1b04e3f48a3c3ac5ecbc69e06",
+        "content_version": "ocv_075240f634e2a0eee586eb8c3fe64185",
         "frame_content_version": "cv_03469fcf8ca1a76891b6769568917dee",
         "rows": 1,
         "role_keys": [
@@ -1304,8 +1304,8 @@
           "window_start": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -1451,8 +1451,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -1473,10 +1473,10 @@
               "spec_id": "ops_126b2ed0808938bf059605237c476494",
               "recipe": {
                 "normal_form_hash": "rnf_3fa0d7be6c7d966db876a8db77bb1e38",
-                "replay_key": "rpk_73df00088258ffab1cef87d6e9ed22e3"
+                "replay_key": "rpk_938854dc264b09d91dccbd5b0a088f0b"
               }
             },
-            "content_version": "ocv_ae29212c29c04d9faa0bdad3cac11127",
+            "content_version": "ocv_90d7ca268f3cdd46f54e930875582a52",
             "output_digest": "out_91eeba3f0c1276c62ed06f4ce7c77b40",
             "roots": [
               {
@@ -1489,7 +1489,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:f1ed1bdbaa9a5079cef91c99e4d27c46989c9a967ad67aaddbf3b32bd107e750",
@@ -1507,7 +1507,7 @@
       "summary": {
         "verb": "rank",
         "spec_id": "ops_126b2ed0808938bf059605237c476494",
-        "content_version": "ocv_ae29212c29c04d9faa0bdad3cac11127",
+        "content_version": "ocv_90d7ca268f3cdd46f54e930875582a52",
         "frame_content_version": "cv_5eded3259c50d342ba9b3091768cdd55",
         "rows": 2,
         "role_keys": [
@@ -1555,8 +1555,8 @@
           "window_start": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -1659,8 +1659,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -1681,10 +1681,10 @@
               "spec_id": "ops_1e432bd9984023782ac2e6452c603a4e",
               "recipe": {
                 "normal_form_hash": "rnf_9e3ec7a838ef8a52fa082fa50efddb1b",
-                "replay_key": "rpk_6f6842f741c32495de7b226f598fd34e"
+                "replay_key": "rpk_3741165feb381cd63116698645588b5f"
               }
             },
-            "content_version": "ocv_27cf965cd48d5d5254ad1c4afdc0042b",
+            "content_version": "ocv_f9e392452db8e9351abab517ef43a7f2",
             "output_digest": "out_03d845a686fc88ffa143d911ad14f606",
             "roots": [
               {
@@ -1697,7 +1697,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:f43eb2f4d5267e45d761621fcc867fbed35ba9166e1d3c815f84236986e4d691",
@@ -1715,7 +1715,7 @@
       "summary": {
         "verb": "rank",
         "spec_id": "ops_1e432bd9984023782ac2e6452c603a4e",
-        "content_version": "ocv_27cf965cd48d5d5254ad1c4afdc0042b",
+        "content_version": "ocv_f9e392452db8e9351abab517ef43a7f2",
         "frame_content_version": "cv_0c35aacc4bf09cd474e9e016b86e18d0",
         "rows": 2,
         "role_keys": [
@@ -1762,8 +1762,8 @@
           "window_start": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -1865,8 +1865,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -1881,8 +1881,8 @@
       "status": 422,
       "detail": "rank with aggregation=\"sum\" adds values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -1907,8 +1907,8 @@
       "status": 422,
       "detail": "rank with aggregation=\"sum\" adds values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -1931,8 +1931,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -1991,8 +1991,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -2044,13 +2044,13 @@
             "parts": [],
             "sentence": "Computed by DFO: filter, then rank.",
             "spec": {
-              "spec_id": "ops_05ffd324417e7a41ceecf5ce8bd1cd3e",
+              "spec_id": "ops_4f82972d82660a8a0c4595e0cb8b0c53",
               "recipe": {
                 "normal_form_hash": "rnf_3a36f0a01a8ec85de470bf9d059057d1",
-                "replay_key": "rpk_e35f01a6be8235d185be42e864c39c7c"
+                "replay_key": "rpk_95c1bfcce4d0ef47fbf7e9f320982d5c"
               }
             },
-            "content_version": "ocv_d04d1fe8e6a9ee6f2fa65a07961551af",
+            "content_version": "ocv_2d9cbc691f0933543f458d52443706b9",
             "output_digest": "out_8827f8b14064a3e977ffe7cfb9951b76",
             "roots": [
               {
@@ -2063,7 +2063,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [
               {
                 "anchor": "latest",
@@ -2093,8 +2093,8 @@
       "output_digest": "out_8827f8b14064a3e977ffe7cfb9951b76",
       "summary": {
         "verb": "rank",
-        "spec_id": "ops_05ffd324417e7a41ceecf5ce8bd1cd3e",
-        "content_version": "ocv_d04d1fe8e6a9ee6f2fa65a07961551af",
+        "spec_id": "ops_4f82972d82660a8a0c4595e0cb8b0c53",
+        "content_version": "ocv_2d9cbc691f0933543f458d52443706b9",
         "frame_content_version": "cv_03a6ef462ba37f5611b35fea13f7b5ce",
         "rows": 1,
         "role_keys": [
@@ -2162,8 +2162,8 @@
           "window_start": "2023"
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -2253,8 +2253,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": [
@@ -2285,13 +2285,13 @@
             "parts": [],
             "sentence": "Computed by DFO: filter, then rank.",
             "spec": {
-              "spec_id": "ops_d4a2b9eecc2c0cb3377513ac95dbd05d",
+              "spec_id": "ops_7ce93e9ada05bfd64874add3becde303",
               "recipe": {
                 "normal_form_hash": "rnf_c235748958633def5b6db01d31d5ecab",
-                "replay_key": "rpk_363e3b160604e1946059cd8191051f9d"
+                "replay_key": "rpk_f0d1608fada90de58a89c3be6e34b4e8"
               }
             },
-            "content_version": "ocv_fd2c2b662046da12428cb3c0f2f3ba69",
+            "content_version": "ocv_6ccb9a20a2bcef4ef1fd840306b60ced",
             "output_digest": "out_903c54929870d0607cbfe8639b2475ee",
             "roots": [
               {
@@ -2304,7 +2304,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:79be14b7fc62bd8ba5e68a1abe4fe7c202558714d47d0e2f315da3ebcc2bdadd",
@@ -2321,8 +2321,8 @@
       "output_digest": "out_903c54929870d0607cbfe8639b2475ee",
       "summary": {
         "verb": "rank",
-        "spec_id": "ops_d4a2b9eecc2c0cb3377513ac95dbd05d",
-        "content_version": "ocv_fd2c2b662046da12428cb3c0f2f3ba69",
+        "spec_id": "ops_7ce93e9ada05bfd64874add3becde303",
+        "content_version": "ocv_6ccb9a20a2bcef4ef1fd840306b60ced",
         "frame_content_version": "cv_7a4c04b93b448cf353f53c9462a80780",
         "rows": 3,
         "role_keys": [
@@ -2354,8 +2354,8 @@
           "window_start": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -2442,8 +2442,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -2458,8 +2458,8 @@
       "status": 422,
       "detail": "This frame's places share no level a filter can keep: 'observationAbout_type' holds Country, Place, and no one of AdministrativeArea1, AdministrativeArea2, City, Continent, Country, EurostatNUTS1, EurostatNUTS2, EurostatNUTS3 is among every place's types. A frame that names no place holds the world, regions, World Bank groups, countries and their subdivisions side by side, and ranking or summing them together counts a place beside the places inside it. Filter the frame first with a place_level predicate on 'observationAbout_type' naming one of those levels, such as Country, then retry with that result's frame_ref. A type outside those levels, such as Place or ProvisionalNode, names no level, and no place_level filter keeps the places that carry it alone.",
       "code": "place_levels_mixed",
-      "trace_id": "22c2dcd34c3d4140a0611b14c7608e97",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -2472,7 +2472,7 @@
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"observationAbout\"]},\"inputs\":{\"data\":{\"content_version\":\"ocv_e15e14e168f63aff3d560bc34eb2351a\",\"spec_id\":\"ops_e2c8673818dca190708f4e846c319fbf\"}},\"verb\":\"rank\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"observationAbout\"]},\"inputs\":{\"data\":{\"content_version\":\"ocv_bd7d717ff00dcf806537d3eec7da27cd\",\"spec_id\":\"ops_e2c8673818dca190708f4e846c319fbf\"}},\"verb\":\"rank\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
@@ -2483,13 +2483,13 @@
             "parts": [],
             "sentence": "Computed by DFO: filter, then rank.",
             "spec": {
-              "spec_id": "ops_d4a2b9eecc2c0cb3377513ac95dbd05d",
+              "spec_id": "ops_7ce93e9ada05bfd64874add3becde303",
               "recipe": {
                 "normal_form_hash": "rnf_c235748958633def5b6db01d31d5ecab",
-                "replay_key": "rpk_363e3b160604e1946059cd8191051f9d"
+                "replay_key": "rpk_f0d1608fada90de58a89c3be6e34b4e8"
               }
             },
-            "content_version": "ocv_fd2c2b662046da12428cb3c0f2f3ba69",
+            "content_version": "ocv_6ccb9a20a2bcef4ef1fd840306b60ced",
             "output_digest": "out_903c54929870d0607cbfe8639b2475ee",
             "roots": [
               {
@@ -2502,7 +2502,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:79be14b7fc62bd8ba5e68a1abe4fe7c202558714d47d0e2f315da3ebcc2bdadd",
@@ -2519,8 +2519,8 @@
       "output_digest": "out_903c54929870d0607cbfe8639b2475ee",
       "summary": {
         "verb": "rank",
-        "spec_id": "ops_d4a2b9eecc2c0cb3377513ac95dbd05d",
-        "content_version": "ocv_fd2c2b662046da12428cb3c0f2f3ba69",
+        "spec_id": "ops_7ce93e9ada05bfd64874add3becde303",
+        "content_version": "ocv_6ccb9a20a2bcef4ef1fd840306b60ced",
         "frame_content_version": "cv_7a4c04b93b448cf353f53c9462a80780",
         "rows": 3,
         "role_keys": [
@@ -2552,8 +2552,8 @@
           "window_start": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -2640,8 +2640,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -2662,10 +2662,10 @@
               "spec_id": "ops_b990a7cc6a7d8d88f7f7ce60620f9f51",
               "recipe": {
                 "normal_form_hash": "rnf_4f0cc24856d91d350f81ca4ff9343cf9",
-                "replay_key": "rpk_711c1e46f587d0f2a73166b132a9adbc"
+                "replay_key": "rpk_ee80f683cfb05dcd20a640656ec847f6"
               }
             },
-            "content_version": "ocv_28e92406ebace41bfaebcc91ad3257cb",
+            "content_version": "ocv_3c1ff212080d48175b039915b06ae4c8",
             "output_digest": "out_3d8b5d402581db800fce5c40aedc8e87",
             "roots": [
               {
@@ -2678,7 +2678,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:82e1747c4c4b072d436b55d743f3906e97d0020b13ba9b3c31fd9f9accb7363d",
@@ -2696,7 +2696,7 @@
       "summary": {
         "verb": "rank",
         "spec_id": "ops_b990a7cc6a7d8d88f7f7ce60620f9f51",
-        "content_version": "ocv_28e92406ebace41bfaebcc91ad3257cb",
+        "content_version": "ocv_3c1ff212080d48175b039915b06ae4c8",
         "frame_content_version": "cv_47ab9bff0167df5354ac77e83e7b4aa8",
         "rows": 5,
         "role_keys": [
@@ -2727,8 +2727,8 @@
           "window_start": "2021"
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -2843,8 +2843,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -2865,10 +2865,10 @@
               "spec_id": "ops_5c9d0c80cf0e0b3fa750b1b8858f4667",
               "recipe": {
                 "normal_form_hash": "rnf_e5350e9cd4a17dfa61a8e5b68520408d",
-                "replay_key": "rpk_ff6d3cc52ec9572a9d3ef230d67d0a2b"
+                "replay_key": "rpk_325c83d88eb0e6170b99a8772a897944"
               }
             },
-            "content_version": "ocv_9ac36cad072c0d7e6529c7d8cfe77462",
+            "content_version": "ocv_4b43a8820be258c449fca28fee29df7c",
             "output_digest": "out_c7cc785f74cad084e859ae2b38546eea",
             "roots": [
               {
@@ -2891,7 +2891,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:63e139323e88f57bd57df2fa4facf6cc9d24bbf0c8291a57bbbc4c10c5172d22",
@@ -2909,7 +2909,7 @@
       "summary": {
         "verb": "rank",
         "spec_id": "ops_5c9d0c80cf0e0b3fa750b1b8858f4667",
-        "content_version": "ocv_9ac36cad072c0d7e6529c7d8cfe77462",
+        "content_version": "ocv_4b43a8820be258c449fca28fee29df7c",
         "frame_content_version": "cv_a9d07eb8a06005831df7c805d299bb29",
         "rows": 2,
         "role_keys": [
@@ -2940,8 +2940,8 @@
           "window_start": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -3013,8 +3013,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -3035,10 +3035,10 @@
               "spec_id": "ops_7484607947fed3fc19c056088274653e",
               "recipe": {
                 "normal_form_hash": "rnf_dc7916fcc765c469e2f68cb2d48864f1",
-                "replay_key": "rpk_921fb539fa77c2fb54f99242ce1ba054"
+                "replay_key": "rpk_bd40226f9dde12c7e09aa1b9c7ef0d23"
               }
             },
-            "content_version": "ocv_85f315f679dbd721b195f444ed71540a",
+            "content_version": "ocv_8cccf63482f2d3c2e78215709b408228",
             "output_digest": "out_3d8b5d402581db800fce5c40aedc8e87",
             "roots": [
               {
@@ -3051,7 +3051,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:82e1747c4c4b072d436b55d743f3906e97d0020b13ba9b3c31fd9f9accb7363d",
@@ -3069,7 +3069,7 @@
       "summary": {
         "verb": "rank",
         "spec_id": "ops_7484607947fed3fc19c056088274653e",
-        "content_version": "ocv_85f315f679dbd721b195f444ed71540a",
+        "content_version": "ocv_8cccf63482f2d3c2e78215709b408228",
         "frame_content_version": "cv_47ab9bff0167df5354ac77e83e7b4aa8",
         "rows": 5,
         "role_keys": [
@@ -3100,8 +3100,8 @@
           "window_start": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -3216,8 +3216,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -3238,10 +3238,10 @@
               "spec_id": "ops_73899128e8a92a04b9191c20f8d775c4",
               "recipe": {
                 "normal_form_hash": "rnf_22c0432f7a3eb3a45fbb9571cc0aa4c3",
-                "replay_key": "rpk_7455212f0534804b6d68ae50a8e0b4b6"
+                "replay_key": "rpk_d2a074048fc358ac5721dc4bc679b951"
               }
             },
-            "content_version": "ocv_a014f07921a439fa369fadc470f99059",
+            "content_version": "ocv_4bccfba3fb85cb48e8723eba10362782",
             "output_digest": "out_91eeba3f0c1276c62ed06f4ce7c77b40",
             "roots": [
               {
@@ -3254,7 +3254,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:f1ed1bdbaa9a5079cef91c99e4d27c46989c9a967ad67aaddbf3b32bd107e750",
@@ -3272,7 +3272,7 @@
       "summary": {
         "verb": "aggregate",
         "spec_id": "ops_73899128e8a92a04b9191c20f8d775c4",
-        "content_version": "ocv_a014f07921a439fa369fadc470f99059",
+        "content_version": "ocv_4bccfba3fb85cb48e8723eba10362782",
         "frame_content_version": "cv_5eded3259c50d342ba9b3091768cdd55",
         "rows": 2,
         "role_keys": [
@@ -3316,8 +3316,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -3425,8 +3425,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -3441,8 +3441,8 @@
       "status": 422,
       "detail": "unit='converted to current prices, pounds sterling' is not one of the units this frame declares: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -3501,10 +3501,10 @@
               "spec_id": "ops_260f30d50104591c8bde5a9177cd6d50",
               "recipe": {
                 "normal_form_hash": "rnf_f2d8898ddb6f8e0f6f33ed05e264d519",
-                "replay_key": "rpk_45d5cc79f381b8b3c08c6bb848563109"
+                "replay_key": "rpk_05a1ede9569b351743c62ec955c85c60"
               }
             },
-            "content_version": "ocv_780d792ef4b0283c588e479c4ff6fbce",
+            "content_version": "ocv_2d3942a2a8e4abbf24041def10425f92",
             "output_digest": "out_03d845a686fc88ffa143d911ad14f606",
             "roots": [
               {
@@ -3517,7 +3517,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:f43eb2f4d5267e45d761621fcc867fbed35ba9166e1d3c815f84236986e4d691",
@@ -3535,7 +3535,7 @@
       "summary": {
         "verb": "aggregate",
         "spec_id": "ops_260f30d50104591c8bde5a9177cd6d50",
-        "content_version": "ocv_780d792ef4b0283c588e479c4ff6fbce",
+        "content_version": "ocv_2d3942a2a8e4abbf24041def10425f92",
         "frame_content_version": "cv_0c35aacc4bf09cd474e9e016b86e18d0",
         "rows": 2,
         "role_keys": [
@@ -3578,8 +3578,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -3686,8 +3686,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -3702,8 +3702,8 @@
       "status": 422,
       "detail": "unit='dcid:USDollar per dcid:SquareKilometer' is not one of the units this frame declares: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -3766,8 +3766,8 @@
       "status": 422,
       "detail": "aggregate with aggregation=\"sum\" adds values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -3792,8 +3792,8 @@
       "status": 422,
       "detail": "aggregate with aggregation=\"sum\" adds values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -3816,8 +3816,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -3876,8 +3876,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -3932,10 +3932,10 @@
               "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
               "recipe": {
                 "normal_form_hash": "rnf_30c1ec15499853d6896800b86aacec96",
-                "replay_key": "rpk_1feeb2b731194c41d3c1229517d87196"
+                "replay_key": "rpk_8647e43e4cfb048597849f53834ef5e8"
               }
             },
-            "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d",
+            "content_version": "ocv_95872279900a5936617b7caddb671659",
             "output_digest": "out_13c1754b3d84ac49b72c9bdb26aec782",
             "roots": [
               {
@@ -3948,7 +3948,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:3a30cabf83ad7a2a92c5fd8dbc9c9b5f4e4e6b056a8397659f976eddcc024fd8",
@@ -3966,7 +3966,7 @@
       "summary": {
         "verb": "aggregate",
         "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
-        "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d",
+        "content_version": "ocv_95872279900a5936617b7caddb671659",
         "frame_content_version": "cv_5239f91d11f1dda02241db87a3d90657",
         "rows": 8,
         "role_keys": [
@@ -3990,8 +3990,8 @@
           "unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -4174,8 +4174,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -4196,10 +4196,10 @@
               "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
               "recipe": {
                 "normal_form_hash": "rnf_30c1ec15499853d6896800b86aacec96",
-                "replay_key": "rpk_1feeb2b731194c41d3c1229517d87196"
+                "replay_key": "rpk_8647e43e4cfb048597849f53834ef5e8"
               }
             },
-            "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d",
+            "content_version": "ocv_95872279900a5936617b7caddb671659",
             "output_digest": "out_13c1754b3d84ac49b72c9bdb26aec782",
             "roots": [
               {
@@ -4212,7 +4212,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:3a30cabf83ad7a2a92c5fd8dbc9c9b5f4e4e6b056a8397659f976eddcc024fd8",
@@ -4230,7 +4230,7 @@
       "summary": {
         "verb": "aggregate",
         "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
-        "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d",
+        "content_version": "ocv_95872279900a5936617b7caddb671659",
         "frame_content_version": "cv_5239f91d11f1dda02241db87a3d90657",
         "rows": 8,
         "role_keys": [
@@ -4254,8 +4254,8 @@
           "unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -4438,8 +4438,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -4460,10 +4460,10 @@
               "spec_id": "ops_72f6c8509f2e577055a6f0d55ef7a13e",
               "recipe": {
                 "normal_form_hash": "rnf_ab746c489d4193f747a46c1def5902d8",
-                "replay_key": "rpk_8e82f301eae373c9444aa2da61b0983b"
+                "replay_key": "rpk_3a78a710bca17d0606fc03a8ead7f604"
               }
             },
-            "content_version": "ocv_d971cc5bddae69cfad74f619ca9b6242",
+            "content_version": "ocv_37acdfbd51a3be43952a6f6dc37534c7",
             "output_digest": "out_3d8b5d402581db800fce5c40aedc8e87",
             "roots": [
               {
@@ -4476,7 +4476,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:82e1747c4c4b072d436b55d743f3906e97d0020b13ba9b3c31fd9f9accb7363d",
@@ -4494,7 +4494,7 @@
       "summary": {
         "verb": "aggregate",
         "spec_id": "ops_72f6c8509f2e577055a6f0d55ef7a13e",
-        "content_version": "ocv_d971cc5bddae69cfad74f619ca9b6242",
+        "content_version": "ocv_37acdfbd51a3be43952a6f6dc37534c7",
         "frame_content_version": "cv_47ab9bff0167df5354ac77e83e7b4aa8",
         "rows": 5,
         "role_keys": [
@@ -4521,8 +4521,8 @@
           "unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -4643,8 +4643,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -4662,13 +4662,13 @@
             "parts": [],
             "sentence": "Computed by DFO: filter, then aggregate.",
             "spec": {
-              "spec_id": "ops_c9196f46f05695c9ade6b050cb94eeaa",
+              "spec_id": "ops_67a7aa8301be63e7f1fa39927798d01c",
               "recipe": {
                 "normal_form_hash": "rnf_bafa06d7ba4676ae5d3883dae8d77f3a",
-                "replay_key": "rpk_b2e0b2a5915c8c95cbca6a194adf2305"
+                "replay_key": "rpk_27abcefc9ff9ed8bf2bdf2b839c7da8e"
               }
             },
-            "content_version": "ocv_605e50c65338faace3526cd46134c5a4",
+            "content_version": "ocv_8dd362447506b4d86a22bed8bc5d49aa",
             "output_digest": "out_453089b8c289e342bcf18d7cfd1580bc",
             "roots": [
               {
@@ -4681,7 +4681,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:b16791e7820ae463fd78fe709a4c382268c86d5475f6f1b7c8e620319102d900",
@@ -4698,8 +4698,8 @@
       "output_digest": "out_453089b8c289e342bcf18d7cfd1580bc",
       "summary": {
         "verb": "aggregate",
-        "spec_id": "ops_c9196f46f05695c9ade6b050cb94eeaa",
-        "content_version": "ocv_605e50c65338faace3526cd46134c5a4",
+        "spec_id": "ops_67a7aa8301be63e7f1fa39927798d01c",
+        "content_version": "ocv_8dd362447506b4d86a22bed8bc5d49aa",
         "frame_content_version": "cv_2a27b95ea76d93558667c1a9d845e642",
         "rows": 2,
         "role_keys": [],
@@ -4719,8 +4719,8 @@
           "unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -4790,8 +4790,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -4806,8 +4806,8 @@
       "status": 422,
       "detail": "This frame's places share no level a filter can keep: 'observationAbout_type' holds Country, Place, and no one of AdministrativeArea1, AdministrativeArea2, City, Continent, Country, EurostatNUTS1, EurostatNUTS2, EurostatNUTS3 is among every place's types. A frame that names no place holds the world, regions, World Bank groups, countries and their subdivisions side by side, and ranking or summing them together counts a place beside the places inside it. Filter the frame first with a place_level predicate on 'observationAbout_type' naming one of those levels, such as Country, then retry with that result's frame_ref. A type outside those levels, such as Place or ProvisionalNode, names no level, and no place_level filter keeps the places that carry it alone.",
       "code": "place_levels_mixed",
-      "trace_id": "22c2dcd34c3d4140a0611b14c7608e97",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -4820,7 +4820,7 @@
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"inputs\":{\"data\":{\"content_version\":\"ocv_e15e14e168f63aff3d560bc34eb2351a\",\"spec_id\":\"ops_e2c8673818dca190708f4e846c319fbf\"}},\"verb\":\"aggregate\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"inputs\":{\"data\":{\"content_version\":\"ocv_bd7d717ff00dcf806537d3eec7da27cd\",\"spec_id\":\"ops_e2c8673818dca190708f4e846c319fbf\"}},\"verb\":\"aggregate\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
@@ -4831,13 +4831,13 @@
             "parts": [],
             "sentence": "Computed by DFO: filter, then aggregate.",
             "spec": {
-              "spec_id": "ops_c9196f46f05695c9ade6b050cb94eeaa",
+              "spec_id": "ops_67a7aa8301be63e7f1fa39927798d01c",
               "recipe": {
                 "normal_form_hash": "rnf_bafa06d7ba4676ae5d3883dae8d77f3a",
-                "replay_key": "rpk_b2e0b2a5915c8c95cbca6a194adf2305"
+                "replay_key": "rpk_27abcefc9ff9ed8bf2bdf2b839c7da8e"
               }
             },
-            "content_version": "ocv_605e50c65338faace3526cd46134c5a4",
+            "content_version": "ocv_8dd362447506b4d86a22bed8bc5d49aa",
             "output_digest": "out_453089b8c289e342bcf18d7cfd1580bc",
             "roots": [
               {
@@ -4850,7 +4850,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:b16791e7820ae463fd78fe709a4c382268c86d5475f6f1b7c8e620319102d900",
@@ -4867,8 +4867,8 @@
       "output_digest": "out_453089b8c289e342bcf18d7cfd1580bc",
       "summary": {
         "verb": "aggregate",
-        "spec_id": "ops_c9196f46f05695c9ade6b050cb94eeaa",
-        "content_version": "ocv_605e50c65338faace3526cd46134c5a4",
+        "spec_id": "ops_67a7aa8301be63e7f1fa39927798d01c",
+        "content_version": "ocv_8dd362447506b4d86a22bed8bc5d49aa",
         "frame_content_version": "cv_2a27b95ea76d93558667c1a9d845e642",
         "rows": 2,
         "role_keys": [],
@@ -4888,8 +4888,8 @@
           "unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -4959,8 +4959,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -4981,10 +4981,10 @@
               "spec_id": "ops_bf28259c8b5a093fca98cbc2b083a698",
               "recipe": {
                 "normal_form_hash": "rnf_fe1c2b09cd9f1f97a9ef47164d3eef60",
-                "replay_key": "rpk_558f6307ec588b83af0a7d56f0be4769"
+                "replay_key": "rpk_9bb2c6423db0e4882b4bc62e9423aaa0"
               }
             },
-            "content_version": "ocv_8c0d4cb67009b7a11bb5c7ca1c6b66a3",
+            "content_version": "ocv_46c294fef34d283865c901edd86577c0",
             "output_digest": "out_629abc5f83291d89bfcbe491ad452a5a",
             "roots": [
               {
@@ -5007,7 +5007,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:b38390d1f15f362a62aac67dd5b5b33f52b42b37acc52164c983e01ce0ad0ec2",
@@ -5025,7 +5025,7 @@
       "summary": {
         "verb": "aggregate",
         "spec_id": "ops_bf28259c8b5a093fca98cbc2b083a698",
-        "content_version": "ocv_8c0d4cb67009b7a11bb5c7ca1c6b66a3",
+        "content_version": "ocv_46c294fef34d283865c901edd86577c0",
         "frame_content_version": "cv_cbc0b29d9af2b696140d6d0a15383c9f",
         "rows": 1,
         "role_keys": [],
@@ -5048,8 +5048,8 @@
           "unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -5106,8 +5106,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -5128,10 +5128,10 @@
               "spec_id": "ops_352fff6dfac1775fe3665dd41b73db21",
               "recipe": {
                 "normal_form_hash": "rnf_bbc359ba5336d67f4839021831d7fc5a",
-                "replay_key": "rpk_5564fd0b539de6bfef1577dcaec8064e"
+                "replay_key": "rpk_e64cd07dc2cb9c0eb7b2af4144cce7e1"
               }
             },
-            "content_version": "ocv_d75c52fd9e480b772e53375c3ef4d70f",
+            "content_version": "ocv_27815c2f82641a71299aedc4210b218a",
             "output_digest": "out_b5a0f74237fdc7870fd6c6e724f487f0",
             "roots": [
               {
@@ -5144,7 +5144,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:4d2f357a4a058c838dde0b5261eb5a91c7ffe48f5fb1e9b47893024b551ef5de",
@@ -5162,7 +5162,7 @@
       "summary": {
         "verb": "aggregate",
         "spec_id": "ops_352fff6dfac1775fe3665dd41b73db21",
-        "content_version": "ocv_d75c52fd9e480b772e53375c3ef4d70f",
+        "content_version": "ocv_27815c2f82641a71299aedc4210b218a",
         "frame_content_version": "cv_e89ad2d8cec34678a772fdbbb55ec5bb",
         "rows": 1,
         "role_keys": [],
@@ -5185,8 +5185,8 @@
           "unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -5248,15 +5248,15 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[]},\"inputs\":{\"data\":{\"content_version\":\"ocv_d971cc5bddae69cfad74f619ca9b6242\",\"spec_id\":\"ops_72f6c8509f2e577055a6f0d55ef7a13e\"}},\"verb\":\"aggregate\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[]},\"inputs\":{\"data\":{\"content_version\":\"ocv_37acdfbd51a3be43952a6f6dc37534c7\",\"spec_id\":\"ops_72f6c8509f2e577055a6f0d55ef7a13e\"}},\"verb\":\"aggregate\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
@@ -5267,13 +5267,13 @@
             "parts": [],
             "sentence": "Computed by DFO: aggregate, then aggregate.",
             "spec": {
-              "spec_id": "ops_f89c61974dde8e9fe18a624b6a071e73",
+              "spec_id": "ops_6b5af53469f88a8397b4a55c71318668",
               "recipe": {
                 "normal_form_hash": "rnf_fe5b153c101052b86023d362013012b6",
-                "replay_key": "rpk_9335c35d6e515d6a4e9e58a217587947"
+                "replay_key": "rpk_8a0a12cdc7bcf787a234f8b9fa2ae3c5"
               }
             },
-            "content_version": "ocv_5caa272282da20b20dd52f626006e24f",
+            "content_version": "ocv_3367c8dfc9f40b630a819f27871aa618",
             "output_digest": "out_b5a0f74237fdc7870fd6c6e724f487f0",
             "roots": [
               {
@@ -5286,7 +5286,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:4d2f357a4a058c838dde0b5261eb5a91c7ffe48f5fb1e9b47893024b551ef5de",
@@ -5303,8 +5303,8 @@
       "output_digest": "out_b5a0f74237fdc7870fd6c6e724f487f0",
       "summary": {
         "verb": "aggregate",
-        "spec_id": "ops_f89c61974dde8e9fe18a624b6a071e73",
-        "content_version": "ocv_5caa272282da20b20dd52f626006e24f",
+        "spec_id": "ops_6b5af53469f88a8397b4a55c71318668",
+        "content_version": "ocv_3367c8dfc9f40b630a819f27871aa618",
         "frame_content_version": "cv_e89ad2d8cec34678a772fdbbb55ec5bb",
         "rows": 1,
         "role_keys": [],
@@ -5327,8 +5327,8 @@
           "unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -5380,8 +5380,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -5396,8 +5396,8 @@
       "status": 422,
       "detail": "rank_by names column(s) this frame has no grain for: ['reporter']. Available: ['reporter'].",
       "code": "role_ambiguous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -5426,10 +5426,10 @@
               "spec_id": "ops_7b8c2028606d1ff7427e46336c0990cc",
               "recipe": {
                 "normal_form_hash": "rnf_b1cf570edb88880be7b3cd63cc0a1af6",
-                "replay_key": "rpk_8910fe060be57810c330e090b6b7805a"
+                "replay_key": "rpk_5fab996bd430cd0a62a26f215f4d27b2"
               }
             },
-            "content_version": "ocv_d4a722520b8f4bde52b83fd0cb70ac3d",
+            "content_version": "ocv_78d9e6dd385c3bab64db0ef1a17eb7bf",
             "output_digest": "out_85da2eae4f92fab295153a2c450a9d6c",
             "roots": [
               {
@@ -5442,7 +5442,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:6caad7f96cca386bc63ba7225afa28426b6010d5d78fec4cb5b5f893c217e213",
@@ -5460,7 +5460,7 @@
       "summary": {
         "verb": "growth",
         "spec_id": "ops_7b8c2028606d1ff7427e46336c0990cc",
-        "content_version": "ocv_d4a722520b8f4bde52b83fd0cb70ac3d",
+        "content_version": "ocv_78d9e6dd385c3bab64db0ef1a17eb7bf",
         "frame_content_version": "cv_5e4f5712803b5d037ba912d7ab172154",
         "rows": 2,
         "role_keys": [
@@ -5506,8 +5506,8 @@
           "window_start": "2020"
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -5603,8 +5603,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -5625,10 +5625,10 @@
               "spec_id": "ops_b1256ae51375947434aa609ac93867b8",
               "recipe": {
                 "normal_form_hash": "rnf_f05cc4cc355fef825c4dc93428f2ab9c",
-                "replay_key": "rpk_519dd7ac0b962440b26523f2498ebd13"
+                "replay_key": "rpk_63a70f5c05dde1802ae9c07e3ad05365"
               }
             },
-            "content_version": "ocv_878b720ca1448b4dfedeb7c34b132ef8",
+            "content_version": "ocv_9d5f197ddfa11159327dc93287b47656",
             "output_digest": "out_85da2eae4f92fab295153a2c450a9d6c",
             "roots": [
               {
@@ -5641,7 +5641,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:6caad7f96cca386bc63ba7225afa28426b6010d5d78fec4cb5b5f893c217e213",
@@ -5659,7 +5659,7 @@
       "summary": {
         "verb": "growth",
         "spec_id": "ops_b1256ae51375947434aa609ac93867b8",
-        "content_version": "ocv_878b720ca1448b4dfedeb7c34b132ef8",
+        "content_version": "ocv_9d5f197ddfa11159327dc93287b47656",
         "frame_content_version": "cv_5e4f5712803b5d037ba912d7ab172154",
         "rows": 2,
         "role_keys": [
@@ -5704,8 +5704,8 @@
           "window_start": "2020"
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -5800,8 +5800,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -5822,10 +5822,10 @@
               "spec_id": "ops_38c1ec20b7baef10034a1fb6dc20038e",
               "recipe": {
                 "normal_form_hash": "rnf_3e860bb1f01b1cf736fcc05999d63fed",
-                "replay_key": "rpk_77630eb9750b5a24786ba7f817c70221"
+                "replay_key": "rpk_1b10b0e05500c56df4b0aa6be4b61849"
               }
             },
-            "content_version": "ocv_61a4f9f676cf8b452d9f92c1d96ce772",
+            "content_version": "ocv_7507349e6c701cfb698124fab591bd89",
             "output_digest": "out_85da2eae4f92fab295153a2c450a9d6c",
             "roots": [
               {
@@ -5838,7 +5838,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:6caad7f96cca386bc63ba7225afa28426b6010d5d78fec4cb5b5f893c217e213",
@@ -5856,7 +5856,7 @@
       "summary": {
         "verb": "growth",
         "spec_id": "ops_38c1ec20b7baef10034a1fb6dc20038e",
-        "content_version": "ocv_61a4f9f676cf8b452d9f92c1d96ce772",
+        "content_version": "ocv_7507349e6c701cfb698124fab591bd89",
         "frame_content_version": "cv_5e4f5712803b5d037ba912d7ab172154",
         "rows": 2,
         "role_keys": [
@@ -5905,8 +5905,8 @@
           "window_start": "2020"
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -6005,8 +6005,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -6027,10 +6027,10 @@
               "spec_id": "ops_3b258acd45883aae0bded418225a560a",
               "recipe": {
                 "normal_form_hash": "rnf_83cfb5d1aaffcd066977bab848a97923",
-                "replay_key": "rpk_6b9ed851b95a9c3358e14a42ea647a43"
+                "replay_key": "rpk_97bc0f1dc3d8db6d78f1454c84576d58"
               }
             },
-            "content_version": "ocv_21ec7196d973af2f493526a16fa109dc",
+            "content_version": "ocv_6db44e8669817b515d37d4e7a27c91e3",
             "output_digest": "out_85da2eae4f92fab295153a2c450a9d6c",
             "roots": [
               {
@@ -6043,7 +6043,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:6caad7f96cca386bc63ba7225afa28426b6010d5d78fec4cb5b5f893c217e213",
@@ -6061,7 +6061,7 @@
       "summary": {
         "verb": "growth",
         "spec_id": "ops_3b258acd45883aae0bded418225a560a",
-        "content_version": "ocv_21ec7196d973af2f493526a16fa109dc",
+        "content_version": "ocv_6db44e8669817b515d37d4e7a27c91e3",
         "frame_content_version": "cv_5e4f5712803b5d037ba912d7ab172154",
         "rows": 2,
         "role_keys": [
@@ -6108,8 +6108,8 @@
           "window_start": "2020"
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -6206,8 +6206,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -6222,8 +6222,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -6282,8 +6282,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -6338,10 +6338,10 @@
               "spec_id": "ops_b668a43f8241b425eb6deb75144c4075",
               "recipe": {
                 "normal_form_hash": "rnf_817803369a3c149a24ba3d98c0beb98c",
-                "replay_key": "rpk_faebd304310e37f4f2faa0f99229d559"
+                "replay_key": "rpk_2c1129df78e2319160f9346f5787572f"
               }
             },
-            "content_version": "ocv_284bd476345408f12b05c5d670ad8df7",
+            "content_version": "ocv_748b0a24bad25eb59c0946d299883f5b",
             "output_digest": "out_14e187c83c8b8df90c9160d83af40678",
             "roots": [
               {
@@ -6354,7 +6354,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:d03a5d61968dd6fdea3196d886ff4daed163e6ceadea838f1b39ce682fbbb4c6",
@@ -6372,7 +6372,7 @@
       "summary": {
         "verb": "growth",
         "spec_id": "ops_b668a43f8241b425eb6deb75144c4075",
-        "content_version": "ocv_284bd476345408f12b05c5d670ad8df7",
+        "content_version": "ocv_748b0a24bad25eb59c0946d299883f5b",
         "frame_content_version": "cv_e74e558e99cc1f0e6f485afa18678f47",
         "rows": 4,
         "role_keys": [
@@ -6402,8 +6402,8 @@
           "window_start": "2022"
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -6493,8 +6493,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -6509,8 +6509,8 @@
       "status": 404,
       "detail": "the frame spec_6c09c7172ee773753e041cd711e3de27, cv_72ed3e117dc140e357377ee2717c90c6 cannot be read: not held. Run the analysis with latest=True to read its dataset's current version",
       "code": "snapshot_not_found",
-      "trace_id": "22c2dcd34c3d4140a0611b14c7608e97",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -6535,10 +6535,10 @@
               "spec_id": "ops_b668a43f8241b425eb6deb75144c4075",
               "recipe": {
                 "normal_form_hash": "rnf_817803369a3c149a24ba3d98c0beb98c",
-                "replay_key": "rpk_faebd304310e37f4f2faa0f99229d559"
+                "replay_key": "rpk_2c1129df78e2319160f9346f5787572f"
               }
             },
-            "content_version": "ocv_284bd476345408f12b05c5d670ad8df7",
+            "content_version": "ocv_748b0a24bad25eb59c0946d299883f5b",
             "output_digest": "out_14e187c83c8b8df90c9160d83af40678",
             "roots": [
               {
@@ -6551,7 +6551,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:d03a5d61968dd6fdea3196d886ff4daed163e6ceadea838f1b39ce682fbbb4c6",
@@ -6569,7 +6569,7 @@
       "summary": {
         "verb": "growth",
         "spec_id": "ops_b668a43f8241b425eb6deb75144c4075",
-        "content_version": "ocv_284bd476345408f12b05c5d670ad8df7",
+        "content_version": "ocv_748b0a24bad25eb59c0946d299883f5b",
         "frame_content_version": "cv_e74e558e99cc1f0e6f485afa18678f47",
         "rows": 4,
         "role_keys": [
@@ -6599,8 +6599,8 @@
           "window_start": "2022"
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -6690,8 +6690,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -6712,10 +6712,10 @@
               "spec_id": "ops_912f7a66ff8680f52fcbaaa395059021",
               "recipe": {
                 "normal_form_hash": "rnf_91d78e36ccb64f31160957b825f864e8",
-                "replay_key": "rpk_db59564368733c3508a5f2cc4d6f9294"
+                "replay_key": "rpk_2eff5a0cd7889b914b6ed4400ef8ef15"
               }
             },
-            "content_version": "ocv_02efe9aa3e24171ce679fadf7e295e31",
+            "content_version": "ocv_9d7ae07ff6d418b4770ef08d85ec31eb",
             "output_digest": "out_f9b26857b1b396216812ad6d59ada394",
             "roots": [
               {
@@ -6728,7 +6728,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:6a5c5a7307e14c1270c629dd18d4c069f9ccbf8436ed71c55a77e26ea40ad470",
@@ -6746,7 +6746,7 @@
       "summary": {
         "verb": "growth",
         "spec_id": "ops_912f7a66ff8680f52fcbaaa395059021",
-        "content_version": "ocv_02efe9aa3e24171ce679fadf7e295e31",
+        "content_version": "ocv_9d7ae07ff6d418b4770ef08d85ec31eb",
         "frame_content_version": "cv_7d7073e129ca316e4fee0ec1a93e89f6",
         "rows": 1,
         "role_keys": [
@@ -6787,8 +6787,8 @@
           "window_start": "2017"
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -6868,8 +6868,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -6890,10 +6890,10 @@
               "spec_id": "ops_552e60c8b8b1dba703fb4fb73de00d5a",
               "recipe": {
                 "normal_form_hash": "rnf_f50ba5bd45f9f4394a38d640b8d982b0",
-                "replay_key": "rpk_da19031204bc620fb8b215ab39b079d4"
+                "replay_key": "rpk_7d75bbd78ba41310ef232b1023b905ce"
               }
             },
-            "content_version": "ocv_f19e096a4cdcaa552109ceda8027d42d",
+            "content_version": "ocv_5da5d75fbab2122c25403df9e0d8bcbd",
             "output_digest": "out_22e05f89e0f58be6742b19a37cccea96",
             "roots": [
               {
@@ -6906,7 +6906,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:6544abcf368ff968b24f433238e920531847cd8609f748971576b867e6f79463",
@@ -6924,7 +6924,7 @@
       "summary": {
         "verb": "growth",
         "spec_id": "ops_552e60c8b8b1dba703fb4fb73de00d5a",
-        "content_version": "ocv_f19e096a4cdcaa552109ceda8027d42d",
+        "content_version": "ocv_5da5d75fbab2122c25403df9e0d8bcbd",
         "frame_content_version": "cv_a4eb1be51928e6d4ba0d862c7cb5062c",
         "rows": 1,
         "role_keys": [
@@ -6955,8 +6955,8 @@
           "window_start": "2017"
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -7018,8 +7018,8 @@
         "absent_count": 1
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -7040,10 +7040,10 @@
               "spec_id": "ops_6099760ba49e5eb2cd8a17fe822a1660",
               "recipe": {
                 "normal_form_hash": "rnf_0dadb8cc836c30b51ec4a8f9f7c40fd2",
-                "replay_key": "rpk_3e2a81763dc85e453e7942b5068c3ed9"
+                "replay_key": "rpk_710d41ea5e336dc59a70fdd199fbf787"
               }
             },
-            "content_version": "ocv_b59420cc3217c4d7721e1803c0a669f5",
+            "content_version": "ocv_7e1bcb5e2ba70e8b8074b4a1c55c0383",
             "output_digest": "out_6578b331d701f41fb266e1a8dd723e33",
             "roots": [
               {
@@ -7062,7 +7062,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:6ae04dff3c7e48aee54303cdbed5d2aafc74df3ea018cae13ae8e2d8610efb83",
@@ -7080,7 +7080,7 @@
       "summary": {
         "verb": "growth",
         "spec_id": "ops_6099760ba49e5eb2cd8a17fe822a1660",
-        "content_version": "ocv_b59420cc3217c4d7721e1803c0a669f5",
+        "content_version": "ocv_7e1bcb5e2ba70e8b8074b4a1c55c0383",
         "frame_content_version": "cv_c593c2bc5f651a394abfc5c8c1ec2792",
         "rows": 1,
         "role_keys": [],
@@ -7105,8 +7105,8 @@
           "window_start": "2021"
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -7152,8 +7152,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -7174,10 +7174,10 @@
               "spec_id": "ops_a5234dfadca6deb24f4d31c07140e0e6",
               "recipe": {
                 "normal_form_hash": "rnf_9fc7f81730987a1f386c7d1e94af4b8f",
-                "replay_key": "rpk_e0d8c95bf1e6d9f605cf2f666498f618"
+                "replay_key": "rpk_e1f358d7f433e4548d0b564785ba6ceb"
               }
             },
-            "content_version": "ocv_96323a4f0dfaf26d903a6f0a3ecc4a99",
+            "content_version": "ocv_c2e250266a32fa860641ca5e356c4568",
             "output_digest": "out_78e40bbfc51588bce92f4aa150bc5f19",
             "roots": [
               {
@@ -7190,7 +7190,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [
               {
                 "anchor": "latest",
@@ -7221,7 +7221,7 @@
       "summary": {
         "verb": "growth",
         "spec_id": "ops_a5234dfadca6deb24f4d31c07140e0e6",
-        "content_version": "ocv_96323a4f0dfaf26d903a6f0a3ecc4a99",
+        "content_version": "ocv_c2e250266a32fa860641ca5e356c4568",
         "frame_content_version": "cv_815df3e699e8b84e7e2a26af3690ad18",
         "rows": 1,
         "role_keys": [],
@@ -7276,8 +7276,8 @@
           "window_start": "2015"
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -7356,8 +7356,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": [
@@ -7391,10 +7391,10 @@
               "spec_id": "ops_2719a7dd1ebc0c15567f9fb24ff4c75c",
               "recipe": {
                 "normal_form_hash": "rnf_c82ef428fdfe0dffb1952b678d22e1ae",
-                "replay_key": "rpk_a1010d283c6a9a676e3ece8f2464236b"
+                "replay_key": "rpk_3e59b7497a1da0ed4ce89745d5fa6e43"
               }
             },
-            "content_version": "ocv_6cc0a5dca5a70333419a604070d3c5d1",
+            "content_version": "ocv_a69b13f4842f8419e0126f571e7d3f35",
             "output_digest": "out_5db56b803f06b262e5b07247fcf8f1e7",
             "roots": [
               {
@@ -7407,7 +7407,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [
               {
                 "anchor": "latest",
@@ -7438,7 +7438,7 @@
       "summary": {
         "verb": "growth",
         "spec_id": "ops_2719a7dd1ebc0c15567f9fb24ff4c75c",
-        "content_version": "ocv_6cc0a5dca5a70333419a604070d3c5d1",
+        "content_version": "ocv_a69b13f4842f8419e0126f571e7d3f35",
         "frame_content_version": "cv_baa21b117cd703fcb0641de2ad038af5",
         "rows": 1,
         "role_keys": [],
@@ -7493,8 +7493,8 @@
           "window_start": "2016"
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -7573,8 +7573,8 @@
         "absent_count": 0
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": [
@@ -7608,10 +7608,10 @@
               "spec_id": "ops_c1ebb45c3984eb0f20a267928c54f561",
               "recipe": {
                 "normal_form_hash": "rnf_24920344741d2c8549c732c3f168a23f",
-                "replay_key": "rpk_ae537cc792ed53675d1316bf1a8db6f2"
+                "replay_key": "rpk_310f4cedb43a1d1554bf978d3fa3b1fd"
               }
             },
-            "content_version": "ocv_edcc9fafc41d8cc31bbd245aa6e8db64",
+            "content_version": "ocv_113569789009ec4cd58f27765ab950f1",
             "output_digest": "out_6965c239d1dc53fa5e8f98b222d90f93",
             "roots": [
               {
@@ -7633,7 +7633,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:040ea87d2ba0b9f5639807c7ab4eb1aefab83d02dd409a717ea5250e9d3091a0",
@@ -7651,7 +7651,7 @@
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_c1ebb45c3984eb0f20a267928c54f561",
-        "content_version": "ocv_edcc9fafc41d8cc31bbd245aa6e8db64",
+        "content_version": "ocv_113569789009ec4cd58f27765ab950f1",
         "frame_content_version": "cv_585190e4f1798f0740a3cc777ce2a6b0",
         "rows": 2,
         "role_keys": [
@@ -7682,8 +7682,8 @@
           "numerator_unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -7767,8 +7767,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -7789,10 +7789,10 @@
               "spec_id": "ops_13688280809626c7b15344cf664c318e",
               "recipe": {
                 "normal_form_hash": "rnf_4d2c5a11c80521e22de262dc58144bf2",
-                "replay_key": "rpk_bf9896ad71d15ea5bc7ab18fe07a3cca"
+                "replay_key": "rpk_77a734a426b16c839a0d62dbebe22b5c"
               }
             },
-            "content_version": "ocv_448a2ffa1b1def7bce27d525ed1b37a3",
+            "content_version": "ocv_bca6cbab38a8641f5c2aa755747e6bc4",
             "output_digest": "out_ca0705382c4409aa83a275efe849cf5f",
             "roots": [
               {
@@ -7805,7 +7805,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:2fe70db785a2b903d4d2d505cde6d4c2c56135581be615425673a886a37b854c",
@@ -7823,7 +7823,7 @@
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_13688280809626c7b15344cf664c318e",
-        "content_version": "ocv_448a2ffa1b1def7bce27d525ed1b37a3",
+        "content_version": "ocv_bca6cbab38a8641f5c2aa755747e6bc4",
         "frame_content_version": "cv_d417f0f635a4d74904b2db77df832b2e",
         "rows": 2,
         "role_keys": [],
@@ -7908,8 +7908,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -8096,8 +8096,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -8118,10 +8118,10 @@
               "spec_id": "ops_06565272cb2cd4f43138a15996bef69b",
               "recipe": {
                 "normal_form_hash": "rnf_37446874553d05e2fed0fb9aaad40605",
-                "replay_key": "rpk_bd0ba3c012b2a92bbdb7e2b5fca3f65b"
+                "replay_key": "rpk_2314d9010c0c1d3f2e960df75ad6c24e"
               }
             },
-            "content_version": "ocv_8a28c06b56639485bc4e00efc46decad",
+            "content_version": "ocv_7b102b150158271066431d3d78083e39",
             "output_digest": "out_ca0705382c4409aa83a275efe849cf5f",
             "roots": [
               {
@@ -8134,7 +8134,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:50ba4941ed38c0954a4c035e1aa37438c63692912f149a2a5a9161d61f44e589",
@@ -8152,7 +8152,7 @@
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_06565272cb2cd4f43138a15996bef69b",
-        "content_version": "ocv_8a28c06b56639485bc4e00efc46decad",
+        "content_version": "ocv_7b102b150158271066431d3d78083e39",
         "frame_content_version": "cv_f691812529360532c4533078b164b4a1",
         "rows": 2,
         "role_keys": [],
@@ -8233,8 +8233,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -8417,8 +8417,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -8439,10 +8439,10 @@
               "spec_id": "ops_af5f53f6c3193ad91352b701b1dd7c50",
               "recipe": {
                 "normal_form_hash": "rnf_667224626215a5c863faef2697d13c0f",
-                "replay_key": "rpk_8f54e9bfc42abef1cca1ccacca830b7e"
+                "replay_key": "rpk_cf50e014a1fec609d28527a4ebe0f8aa"
               }
             },
-            "content_version": "ocv_d8c5e6e95524a5a860e49ee3e44d51b7",
+            "content_version": "ocv_0f2ceb399af3da144f259fb544a0be69",
             "output_digest": "out_d677668592a1cfaef5939e83f13fda84",
             "roots": [
               {
@@ -8455,7 +8455,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:f8909ce1c82725d231f44b1753e9da3022e4df037e1cfb2e42e0b16cbfe866ba",
@@ -8473,7 +8473,7 @@
       "summary": {
         "verb": "quotient_of",
         "spec_id": "ops_af5f53f6c3193ad91352b701b1dd7c50",
-        "content_version": "ocv_d8c5e6e95524a5a860e49ee3e44d51b7",
+        "content_version": "ocv_0f2ceb399af3da144f259fb544a0be69",
         "frame_content_version": "cv_3575d560c9407f46d1699d08e3e25258",
         "rows": 2,
         "role_keys": [],
@@ -8552,8 +8552,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -8747,8 +8747,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -8769,10 +8769,10 @@
               "spec_id": "ops_9cabb8af99da6e36fc8c5593f6eea110",
               "recipe": {
                 "normal_form_hash": "rnf_6ebf872323e54e94d52f28e58a8afc67",
-                "replay_key": "rpk_c1e5441cb4837916d8025c489b482ff2"
+                "replay_key": "rpk_5a2098eb3e93230c958d46719f2558ba"
               }
             },
-            "content_version": "ocv_4b3f850cb3c035a102cead8363acfa41",
+            "content_version": "ocv_bad3eed3119d55f24be9d94ed06a378b",
             "output_digest": "out_fbebaa247eb50136b118c85816befa10",
             "roots": [
               {
@@ -8785,7 +8785,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:ff63a39d0988e41a6e04d0e630a41a4d12c30f524f3c6c2caf87e15666908c78",
@@ -8803,7 +8803,7 @@
       "summary": {
         "verb": "quotient_of",
         "spec_id": "ops_9cabb8af99da6e36fc8c5593f6eea110",
-        "content_version": "ocv_4b3f850cb3c035a102cead8363acfa41",
+        "content_version": "ocv_bad3eed3119d55f24be9d94ed06a378b",
         "frame_content_version": "cv_68d93d671cefc9d596b1636eec5f3ac6",
         "rows": 2,
         "role_keys": [],
@@ -8880,8 +8880,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -9071,8 +9071,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -9087,8 +9087,8 @@
       "status": 422,
       "detail": "The numerator resolved to unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient already, and a unit of the form 'X per Y' holds one unit on each side, so it cannot be the numerator part of the result's unit. Retry with a numerator frame_ref that holds a measure in a single unit, such as one of the frames the earlier quotient_of call read.",
       "code": "quotient_of_side_unit_unsupported",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -9114,8 +9114,8 @@
       "status": 422,
       "detail": "The numerator resolved to unit 'dcid:USDollar per Count_Person', a quotient already, and a unit of the form 'X per Y' holds one unit on each side, so it cannot be the numerator part of the result's unit. Retry with a numerator frame_ref that holds a measure in a single unit, such as one of the frames the earlier quotient_of call read.",
       "code": "quotient_of_side_unit_unsupported",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -9139,8 +9139,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -9199,8 +9199,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -9255,10 +9255,10 @@
               "spec_id": "ops_09c6c1bc7e8fb8c3183118c64d3c3ef8",
               "recipe": {
                 "normal_form_hash": "rnf_b2fe368f81e765736dbf7c459ce62da6",
-                "replay_key": "rpk_3a170140d85b3b6c03816043903518db"
+                "replay_key": "rpk_190eab505cf2c48f88125c2c6627aa91"
               }
             },
-            "content_version": "ocv_26a7d0e448a2a93fae238f3931569ce9",
+            "content_version": "ocv_36fa6ee9a3f553a8812293ce0a12352c",
             "output_digest": "out_0f5029384b7d9569e19cf0c19ba7610e",
             "roots": [
               {
@@ -9280,7 +9280,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:c93d8de487338d939b0f488919902ad9f324b9781c3a8732005121458a3dd014",
@@ -9298,7 +9298,7 @@
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_09c6c1bc7e8fb8c3183118c64d3c3ef8",
-        "content_version": "ocv_26a7d0e448a2a93fae238f3931569ce9",
+        "content_version": "ocv_36fa6ee9a3f553a8812293ce0a12352c",
         "frame_content_version": "cv_a5ebc3acebb4c3559281a29da7a9fd35",
         "rows": 2,
         "role_keys": [],
@@ -9352,8 +9352,8 @@
           "numerator_unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -9484,8 +9484,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -9506,10 +9506,10 @@
               "spec_id": "ops_e60e8ff75bb984732284089e42a32ad1",
               "recipe": {
                 "normal_form_hash": "rnf_5ac7a814411bc9e7a4fdf21b092bf67a",
-                "replay_key": "rpk_c16b7861545d6aee89b1305f9c956050"
+                "replay_key": "rpk_bf421778ff5c52b3783c3a044119f9db"
               }
             },
-            "content_version": "ocv_6e1bfaeb0e965bbf44df3862d1a56996",
+            "content_version": "ocv_8be8ef137a34b1293e8790e6ab845469",
             "output_digest": "out_3d7b238271a1bf311f5ec6480ddeb616",
             "roots": [
               {
@@ -9522,7 +9522,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:84347918ce0c0b178e37243baf40fe5fa380829de8324da4b64e87f65dd56c93",
@@ -9540,7 +9540,7 @@
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_e60e8ff75bb984732284089e42a32ad1",
-        "content_version": "ocv_6e1bfaeb0e965bbf44df3862d1a56996",
+        "content_version": "ocv_8be8ef137a34b1293e8790e6ab845469",
         "frame_content_version": "cv_f51fb2daa9646dce85739365170544a5",
         "rows": 2,
         "role_keys": [],
@@ -9607,8 +9607,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -9768,8 +9768,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -9790,10 +9790,10 @@
               "spec_id": "ops_b5ef33fb6e799236c7986050f04dcba7",
               "recipe": {
                 "normal_form_hash": "rnf_1ed86756d22e907622213c2d1fcd218f",
-                "replay_key": "rpk_11837d27ba62b5f274f0b50951e8dc89"
+                "replay_key": "rpk_b69890929aa6b1b53b0ea9a9f5d11557"
               }
             },
-            "content_version": "ocv_4421b4efd53660ed05c9b787382e692a",
+            "content_version": "ocv_c4c3335114b39981796b7c0ba6f69ae6",
             "output_digest": "out_3d7b238271a1bf311f5ec6480ddeb616",
             "roots": [
               {
@@ -9806,7 +9806,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:cc7ab25365b2610473d2059f625bd0b94c3134a1952c954f76ae21ac62b63740",
@@ -9824,7 +9824,7 @@
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_b5ef33fb6e799236c7986050f04dcba7",
-        "content_version": "ocv_4421b4efd53660ed05c9b787382e692a",
+        "content_version": "ocv_c4c3335114b39981796b7c0ba6f69ae6",
         "frame_content_version": "cv_9d982ba237b77ba58f500b06968a6d19",
         "rows": 2,
         "role_keys": [],
@@ -9889,8 +9889,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -10048,8 +10048,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -10064,8 +10064,8 @@
       "status": 422,
       "detail": "The denominator side of share_of sums more than one row for a period, with values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Narrow that side to one entity with denominator_entity, or key the share with numerator_by and denominator_by so each key reads one row, or take a mean, max or min of the figures with aggregate first. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -10091,8 +10091,8 @@
       "status": 422,
       "detail": "The denominator side of share_of sums more than one row for a period, with values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Narrow that side to one entity with denominator_entity, or key the share with numerator_by and denominator_by so each key reads one row, or take a mean, max or min of the figures with aggregate first. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -10119,13 +10119,13 @@
             "parts": [],
             "sentence": "Computed by DFO: filter, then share_of.",
             "spec": {
-              "spec_id": "ops_986cf557b9e21b8e69ca8bc560e4060c",
+              "spec_id": "ops_4c169d82f399eed68b2cc220908e93ba",
               "recipe": {
                 "normal_form_hash": "rnf_4d736288017a5d097b836e559b1d4a9f",
-                "replay_key": "rpk_b8243ee28a5c8af03d8989dbab56a09b"
+                "replay_key": "rpk_3df4e7db2f55c17165809f976062ec18"
               }
             },
-            "content_version": "ocv_e07d6e5b25293c297ec761e57cd40d70",
+            "content_version": "ocv_e4cae367ab4ca11b650f0798c0f9e46f",
             "output_digest": "out_93ce433f7ed3bc7057675a1553693471",
             "roots": [
               {
@@ -10138,10 +10138,10 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:6f0079aca7b90790fdbf4299e03cad63de0aca22e68c6168315facf8d0d80704",
+              "digest": "sha256:284b3cd6239fdc6e2189ec8ee6c0e3247e9d7097fbe7e33e644bcadd093bc2f2",
               "rendering": {
                 "format": "parquet",
                 "bundle": false,
@@ -10151,13 +10151,13 @@
           }
         ]
       },
-      "frame_content_version": "cv_cd3ed4e9109ec0c06206d94e222aad9b",
+      "frame_content_version": "cv_a86a52b6fe452f9e5deded091b7932dc",
       "output_digest": "out_93ce433f7ed3bc7057675a1553693471",
       "summary": {
         "verb": "share_of",
-        "spec_id": "ops_986cf557b9e21b8e69ca8bc560e4060c",
-        "content_version": "ocv_e07d6e5b25293c297ec761e57cd40d70",
-        "frame_content_version": "cv_cd3ed4e9109ec0c06206d94e222aad9b",
+        "spec_id": "ops_4c169d82f399eed68b2cc220908e93ba",
+        "content_version": "ocv_e4cae367ab4ca11b650f0798c0f9e46f",
+        "frame_content_version": "cv_a86a52b6fe452f9e5deded091b7932dc",
         "rows": 6,
         "role_keys": [
           "observationAbout",
@@ -10183,15 +10183,15 @@
           "numerator_unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
           "dimensionless": true
         },
         "result": {
-          "stat_var": "dcid:ops_986cf557b9e21b8e69ca8bc560e4060c",
+          "stat_var": "dcid:ops_4c169d82f399eed68b2cc220908e93ba",
           "numerator_stat_var": "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal",
           "denominator_stat_var": "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal",
           "numerator_resolved_unit": "USDollar",
@@ -10324,8 +10324,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -10340,8 +10340,8 @@
       "status": 422,
       "detail": "This frame's places share no level a filter can keep: 'observationAbout_type' holds Country, Place, and no one of AdministrativeArea1, AdministrativeArea2, City, Continent, Country, EurostatNUTS1, EurostatNUTS2, EurostatNUTS3 is among every place's types. A frame that names no place holds the world, regions, World Bank groups, countries and their subdivisions side by side, and ranking or summing them together counts a place beside the places inside it. Filter the frame first with a place_level predicate on 'observationAbout_type' naming one of those levels, such as Country, then retry with that result's frame_ref. A type outside those levels, such as Place or ProvisionalNode, names no level, and no place_level filter keeps the places that carry it alone.",
       "code": "place_levels_mixed",
-      "trace_id": "22c2dcd34c3d4140a0611b14c7608e97",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -10354,7 +10354,7 @@
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"denominator_by\":{},\"denominator_entity\":{},\"numerator_by\":[\"observationAbout\"],\"numerator_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"ocv_e15e14e168f63aff3d560bc34eb2351a\",\"spec_id\":\"ops_e2c8673818dca190708f4e846c319fbf\"}},\"verb\":\"share_of\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"denominator_by\":{},\"denominator_entity\":{},\"numerator_by\":[\"observationAbout\"],\"numerator_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"ocv_bd7d717ff00dcf806537d3eec7da27cd\",\"spec_id\":\"ops_e2c8673818dca190708f4e846c319fbf\"}},\"verb\":\"share_of\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
@@ -10365,13 +10365,13 @@
             "parts": [],
             "sentence": "Computed by DFO: filter, then share_of.",
             "spec": {
-              "spec_id": "ops_986cf557b9e21b8e69ca8bc560e4060c",
+              "spec_id": "ops_4c169d82f399eed68b2cc220908e93ba",
               "recipe": {
                 "normal_form_hash": "rnf_4d736288017a5d097b836e559b1d4a9f",
-                "replay_key": "rpk_b8243ee28a5c8af03d8989dbab56a09b"
+                "replay_key": "rpk_3df4e7db2f55c17165809f976062ec18"
               }
             },
-            "content_version": "ocv_e07d6e5b25293c297ec761e57cd40d70",
+            "content_version": "ocv_e4cae367ab4ca11b650f0798c0f9e46f",
             "output_digest": "out_93ce433f7ed3bc7057675a1553693471",
             "roots": [
               {
@@ -10384,10 +10384,10 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:6f0079aca7b90790fdbf4299e03cad63de0aca22e68c6168315facf8d0d80704",
+              "digest": "sha256:284b3cd6239fdc6e2189ec8ee6c0e3247e9d7097fbe7e33e644bcadd093bc2f2",
               "rendering": {
                 "format": "parquet",
                 "bundle": false,
@@ -10397,13 +10397,13 @@
           }
         ]
       },
-      "frame_content_version": "cv_cd3ed4e9109ec0c06206d94e222aad9b",
+      "frame_content_version": "cv_a86a52b6fe452f9e5deded091b7932dc",
       "output_digest": "out_93ce433f7ed3bc7057675a1553693471",
       "summary": {
         "verb": "share_of",
-        "spec_id": "ops_986cf557b9e21b8e69ca8bc560e4060c",
-        "content_version": "ocv_e07d6e5b25293c297ec761e57cd40d70",
-        "frame_content_version": "cv_cd3ed4e9109ec0c06206d94e222aad9b",
+        "spec_id": "ops_4c169d82f399eed68b2cc220908e93ba",
+        "content_version": "ocv_e4cae367ab4ca11b650f0798c0f9e46f",
+        "frame_content_version": "cv_a86a52b6fe452f9e5deded091b7932dc",
         "rows": 6,
         "role_keys": [
           "observationAbout",
@@ -10429,15 +10429,15 @@
           "numerator_unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
           "dimensionless": true
         },
         "result": {
-          "stat_var": "dcid:ops_986cf557b9e21b8e69ca8bc560e4060c",
+          "stat_var": "dcid:ops_4c169d82f399eed68b2cc220908e93ba",
           "numerator_stat_var": "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal",
           "denominator_stat_var": "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal",
           "numerator_resolved_unit": "USDollar",
@@ -10570,8 +10570,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -10586,8 +10586,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -10646,8 +10646,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -10702,10 +10702,10 @@
               "spec_id": "ops_3816f1337b19a03af721072207d9646a",
               "recipe": {
                 "normal_form_hash": "rnf_16fb6a0478fc9b394c36a928df4683c4",
-                "replay_key": "rpk_9df130e9f5f7322df36aae3f9013bf64"
+                "replay_key": "rpk_428088f55486718df141af951ec37d88"
               }
             },
-            "content_version": "ocv_4a313b974ca156af3d7e85ed492eaab0",
+            "content_version": "ocv_4ba5c6f90628423c9913bbcdbde25474",
             "output_digest": "out_5cfaa515477276d00ec843dc92c6b502",
             "roots": [
               {
@@ -10743,7 +10743,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:6a05417f9d29c504b43ae79ea1cebdf738afa16440ef36768b9dc57c62a54ba0",
@@ -10761,7 +10761,7 @@
       "summary": {
         "verb": "quotient_of",
         "spec_id": "ops_3816f1337b19a03af721072207d9646a",
-        "content_version": "ocv_4a313b974ca156af3d7e85ed492eaab0",
+        "content_version": "ocv_4ba5c6f90628423c9913bbcdbde25474",
         "frame_content_version": "cv_8f7d3107ef2342322fcaa027481dbb7c",
         "rows": 2,
         "role_keys": [],
@@ -10800,8 +10800,8 @@
           "numerator_unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -10910,8 +10910,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -10932,10 +10932,10 @@
               "spec_id": "ops_eae0e09c993cb737c16375d565e19428",
               "recipe": {
                 "normal_form_hash": "rnf_3cd541b1fe7d1d0d9d41aa61a1205e30",
-                "replay_key": "rpk_d03f0f286fb869dd6b5609c14d38fd8a"
+                "replay_key": "rpk_552bc931ae079ada9c0040262688143e"
               }
             },
-            "content_version": "ocv_a2caf3361763d52135ebdc6dbcd83510",
+            "content_version": "ocv_eff2188b5a714d45ab24eba9aec9b861",
             "output_digest": "out_f29ddb53a86e556188b1f949159224b9",
             "roots": [
               {
@@ -10973,7 +10973,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:6ee0c8fe6c99a7480451afab7939b7bd952c48963032fd5948ea23851ab4bcb4",
@@ -10991,7 +10991,7 @@
       "summary": {
         "verb": "share_of",
         "spec_id": "ops_eae0e09c993cb737c16375d565e19428",
-        "content_version": "ocv_a2caf3361763d52135ebdc6dbcd83510",
+        "content_version": "ocv_eff2188b5a714d45ab24eba9aec9b861",
         "frame_content_version": "cv_e45ffc2d33e350d8d9f6344e50fcedde",
         "rows": 2,
         "role_keys": [],
@@ -11030,8 +11030,8 @@
           "numerator_unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": {
@@ -11135,8 +11135,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -11157,10 +11157,10 @@
               "spec_id": "ops_c5533abdd4455c4653a4d9a49468fd51",
               "recipe": {
                 "normal_form_hash": "rnf_7d138dd7a28870b10a837599042fa4cf",
-                "replay_key": "rpk_9a2880a4bff304f143050315bd328d3e"
+                "replay_key": "rpk_f2ed28c4e89b49611f95d8b20f00307c"
               }
             },
-            "content_version": "ocv_0b2be31d3c2969b80a42941a8c7268ef",
+            "content_version": "ocv_02414e71fc9e71c0e358029d8ad6fd2b",
             "output_digest": "out_da46ecf3052e80ba67049c178254dc6c",
             "roots": [
               {
@@ -11182,7 +11182,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:0e943842d6b8953b2f06500fe422a6f8e6ebaecfd43729b2b83d10164290111a",
@@ -11200,7 +11200,7 @@
       "summary": {
         "verb": "quotient_of",
         "spec_id": "ops_c5533abdd4455c4653a4d9a49468fd51",
-        "content_version": "ocv_0b2be31d3c2969b80a42941a8c7268ef",
+        "content_version": "ocv_02414e71fc9e71c0e358029d8ad6fd2b",
         "frame_content_version": "cv_5c5bd1a1c64508a96290dfc479bb4a5d",
         "rows": 3,
         "role_keys": [],
@@ -11240,8 +11240,8 @@
           "numerator_unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -11375,8 +11375,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -11397,10 +11397,10 @@
               "spec_id": "ops_d7976d9245839ea43eef967747614729",
               "recipe": {
                 "normal_form_hash": "rnf_ab414a5d06e0e011edf20592a8e521c3",
-                "replay_key": "rpk_b868abde921401f159ddf07e80abd1ad"
+                "replay_key": "rpk_c491ff8f5bde5a96e48786569d2d33db"
               }
             },
-            "content_version": "ocv_a07c8e9ae884fdbeb14dd2a85e4321fb",
+            "content_version": "ocv_cd1739ac481d3e3d2b1bd6afae6ef257",
             "output_digest": "out_51ad35f5dda02f0d7ab3d37f4ce9041e",
             "roots": [
               {
@@ -11442,7 +11442,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:a02e7461d733a55a5fc2496462cefdb450079f5e06dcd02f2d3ecdf0d49bb377",
@@ -11460,7 +11460,7 @@
       "summary": {
         "verb": "join",
         "spec_id": "ops_d7976d9245839ea43eef967747614729",
-        "content_version": "ocv_a07c8e9ae884fdbeb14dd2a85e4321fb",
+        "content_version": "ocv_cd1739ac481d3e3d2b1bd6afae6ef257",
         "frame_content_version": "cv_238f1fe623f9c224cbe91dc916901309",
         "rows": 8,
         "role_keys": [
@@ -11486,8 +11486,8 @@
           "right_unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -11568,8 +11568,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -11590,10 +11590,10 @@
               "spec_id": "ops_b09f18c8673904225635210f93508916",
               "recipe": {
                 "normal_form_hash": "rnf_b62a5ecc70c90a30c2b9ded50b083e2a",
-                "replay_key": "rpk_6f27f24724553d13b6c9a21ad99a4143"
+                "replay_key": "rpk_30fc5df60ad18ad15011dae139ed9650"
               }
             },
-            "content_version": "ocv_72e4a13a1c59625b583e3560a455402a",
+            "content_version": "ocv_0e29e9b32f17148819d65b9e7f4e163d",
             "output_digest": "out_284e0d402ff5d8fce15dfd0f9f423260",
             "roots": [
               {
@@ -11615,7 +11615,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:a952dd2392674388215b340760dc8d13cb43eff7121d608e7f73bec0790d1784",
@@ -11633,7 +11633,7 @@
       "summary": {
         "verb": "join",
         "spec_id": "ops_b09f18c8673904225635210f93508916",
-        "content_version": "ocv_72e4a13a1c59625b583e3560a455402a",
+        "content_version": "ocv_0e29e9b32f17148819d65b9e7f4e163d",
         "frame_content_version": "cv_93fcd898751fa0a0005b8c421f0dc1cf",
         "rows": 8,
         "role_keys": [
@@ -11690,8 +11690,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -11832,8 +11832,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -11854,10 +11854,10 @@
               "spec_id": "ops_3516a780d14cdb9f93eb2c4ab346f5e6",
               "recipe": {
                 "normal_form_hash": "rnf_ba1458ef32760bd8225a03bceb5ced8c",
-                "replay_key": "rpk_08b80a4f33da5dfeee4831fe90d034e4"
+                "replay_key": "rpk_4e5fa39d55d0f218aad3f31e60a63061"
               }
             },
-            "content_version": "ocv_09a3f1bb625746c110c7f8bbdbbcdb8e",
+            "content_version": "ocv_5146fb9b7ae2b8b582cda6cb12902a5a",
             "output_digest": "out_c7c25689dd0d7ffc35396264425dd764",
             "roots": [
               {
@@ -11879,7 +11879,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:77d8eaad05c49d97d62a67a0d35f3ec1d9ea67c052741f03dfa6bb03fa8a88f4",
@@ -11897,7 +11897,7 @@
       "summary": {
         "verb": "join",
         "spec_id": "ops_3516a780d14cdb9f93eb2c4ab346f5e6",
-        "content_version": "ocv_09a3f1bb625746c110c7f8bbdbbcdb8e",
+        "content_version": "ocv_5146fb9b7ae2b8b582cda6cb12902a5a",
         "frame_content_version": "cv_2ad1e64b35787c2e4f4dfc9f2f13d504",
         "rows": 8,
         "role_keys": [
@@ -11952,8 +11952,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -12092,8 +12092,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -12114,10 +12114,10 @@
               "spec_id": "ops_913b75a4461813cc07f7e39039fb4e1c",
               "recipe": {
                 "normal_form_hash": "rnf_4de2cd9b646cc01b047f31bff66547da",
-                "replay_key": "rpk_2735fd25afca8bd592422ab7bcd2eb9b"
+                "replay_key": "rpk_48ec068e36dfbbf9feaa014fadb95ca6"
               }
             },
-            "content_version": "ocv_3f8b0a1cd2110009e2a081de46d14c91",
+            "content_version": "ocv_4db610993685cfdf5ab9b610c6ff881c",
             "output_digest": "out_7bfc3d96c014d48c0348810c6be5d02e",
             "roots": [
               {
@@ -12139,7 +12139,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:129aca6246a410f17cda7f30b105c6dff09045143ab8dc38c6c5fe82c25e8a5e",
@@ -12157,7 +12157,7 @@
       "summary": {
         "verb": "join",
         "spec_id": "ops_913b75a4461813cc07f7e39039fb4e1c",
-        "content_version": "ocv_3f8b0a1cd2110009e2a081de46d14c91",
+        "content_version": "ocv_4db610993685cfdf5ab9b610c6ff881c",
         "frame_content_version": "cv_60369a5ec3441cb98fa955cebdd157fa",
         "rows": 8,
         "role_keys": [
@@ -12220,8 +12220,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -12368,8 +12368,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -12390,10 +12390,10 @@
               "spec_id": "ops_ac766aa2d2bd73f15d1e6151ff3cdd3a",
               "recipe": {
                 "normal_form_hash": "rnf_a491533ccdb907e80195cf58ea790405",
-                "replay_key": "rpk_a0b1de8c83f34a8aa1bffbdfa8af3b93"
+                "replay_key": "rpk_4945eb378eafd4f133f278428451109a"
               }
             },
-            "content_version": "ocv_a27bd7d24ca22ec1a5aa94cee30c35db",
+            "content_version": "ocv_f213dc06cc485c0586339bf6641fab23",
             "output_digest": "out_d3abac500ffe2e1ac2fb489261545e1f",
             "roots": [
               {
@@ -12415,7 +12415,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:49fa543db40120fbbb6f32cc47ce5d943459ce9e1d4a165dfa155fcdf0fc9dbd",
@@ -12433,7 +12433,7 @@
       "summary": {
         "verb": "join",
         "spec_id": "ops_ac766aa2d2bd73f15d1e6151ff3cdd3a",
-        "content_version": "ocv_a27bd7d24ca22ec1a5aa94cee30c35db",
+        "content_version": "ocv_f213dc06cc485c0586339bf6641fab23",
         "frame_content_version": "cv_7edccaef7e25f284ed744acde456a739",
         "rows": 8,
         "role_keys": [
@@ -12492,8 +12492,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -12636,8 +12636,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -12652,8 +12652,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `left_unit or right_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -12718,10 +12718,10 @@
               "spec_id": "ops_9edb37594cac2dad43c5cd2b5af56c04",
               "recipe": {
                 "normal_form_hash": "rnf_5071daf9aed45f28b394137775da43c3",
-                "replay_key": "rpk_f68d67ad1d5d4e17e5ce8604f1ab4625"
+                "replay_key": "rpk_77b0154feb0fb6e63554fd8bf189176a"
               }
             },
-            "content_version": "ocv_b9c142b61937c2efc679cbe79f3d3e1f",
+            "content_version": "ocv_c3ae8a28d2c0dc80ac7610f98d3d0ebd",
             "output_digest": "out_4a7848c111c3929d325840b74839257b",
             "roots": [
               {
@@ -12743,7 +12743,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:5ce2af1933285a0ded9333f7ccd551a649e8e169c5bdf57ca61b5fc0f54e59cb",
@@ -12761,7 +12761,7 @@
       "summary": {
         "verb": "join",
         "spec_id": "ops_9edb37594cac2dad43c5cd2b5af56c04",
-        "content_version": "ocv_b9c142b61937c2efc679cbe79f3d3e1f",
+        "content_version": "ocv_c3ae8a28d2c0dc80ac7610f98d3d0ebd",
         "frame_content_version": "cv_dfdab27a6b2731bbb6833c857b31702a",
         "rows": 12,
         "role_keys": [
@@ -12785,8 +12785,8 @@
           "right_unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -12889,8 +12889,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -12905,8 +12905,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `left_unit or right_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -12961,10 +12961,10 @@
               "spec_id": "ops_d6dac6aab37195ab1754ea3fbbc1c480",
               "recipe": {
                 "normal_form_hash": "rnf_f3aff513d6aec69629129a1112dcff9f",
-                "replay_key": "rpk_a9a7849e183680abf93ba73462d7f93d"
+                "replay_key": "rpk_1d27ce92cdd5d9f42fddcb3e23058cb2"
               }
             },
-            "content_version": "ocv_ce8a3ada71747203a7752f89a7ba62b9",
+            "content_version": "ocv_2e9984720836d2b2001b3b32312dfc67",
             "output_digest": "out_bd1e70245b985266854247b84db46cad",
             "roots": [
               {
@@ -12977,7 +12977,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:0ca22bc614ceb01aef16df0bd16f901463da1f089d11ba0ec2bd7d820c7243fd",
@@ -12995,7 +12995,7 @@
       "summary": {
         "verb": "compare",
         "spec_id": "ops_d6dac6aab37195ab1754ea3fbbc1c480",
-        "content_version": "ocv_ce8a3ada71747203a7752f89a7ba62b9",
+        "content_version": "ocv_2e9984720836d2b2001b3b32312dfc67",
         "frame_content_version": "cv_b4b8666761f1d3c2a12e77af97b2150b",
         "rows": 2,
         "role_keys": [],
@@ -13072,8 +13072,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -13243,8 +13243,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -13265,10 +13265,10 @@
               "spec_id": "ops_4424dec4c9ad7c20f6a8937256352ef0",
               "recipe": {
                 "normal_form_hash": "rnf_81d0f61c6b74433a753a2025680b74c2",
-                "replay_key": "rpk_a2fa445811ecf71d52586de21b32b5d3"
+                "replay_key": "rpk_00750f18af16ae6803f8162d233a7bff"
               }
             },
-            "content_version": "ocv_364ee72ae95134ea31cb7d91f6af4ec6",
+            "content_version": "ocv_7707facc67b7a3312a462269d6c859f7",
             "output_digest": "out_242ebd3eb79cd825501f0937d0761b4a",
             "roots": [
               {
@@ -13281,7 +13281,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:7278ccdaa74fa8d149411115441136d6be87b1e34287c5e42ddc32d59e16a0f0",
@@ -13299,7 +13299,7 @@
       "summary": {
         "verb": "sum_of",
         "spec_id": "ops_4424dec4c9ad7c20f6a8937256352ef0",
-        "content_version": "ocv_364ee72ae95134ea31cb7d91f6af4ec6",
+        "content_version": "ocv_7707facc67b7a3312a462269d6c859f7",
         "frame_content_version": "cv_bf12965bf66117519644636cfc4aac36",
         "rows": 2,
         "role_keys": [],
@@ -13376,8 +13376,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -13538,8 +13538,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -13560,10 +13560,10 @@
               "spec_id": "ops_eb036dd5fd8af90adf6a43bccb83d61d",
               "recipe": {
                 "normal_form_hash": "rnf_37a5f1136e38bb7865d502910e4a5270",
-                "replay_key": "rpk_ff2ed10c4ee60c231f23b6e27ddd70c9"
+                "replay_key": "rpk_aa43170569aeec31875166ae7a603002"
               }
             },
-            "content_version": "ocv_85e6ef9b4638c95d152ced5bbebf6279",
+            "content_version": "ocv_29ccb067e9f150cdca13aa338cb193ac",
             "output_digest": "out_bb927b7e0cdc60df9519a331792ccce1",
             "roots": [
               {
@@ -13576,7 +13576,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:aedaa7517ca01d762ce507afc8f24daf36b8dd8aa5a0c0efa958427ebd90211d",
@@ -13594,7 +13594,7 @@
       "summary": {
         "verb": "compare",
         "spec_id": "ops_eb036dd5fd8af90adf6a43bccb83d61d",
-        "content_version": "ocv_85e6ef9b4638c95d152ced5bbebf6279",
+        "content_version": "ocv_29ccb067e9f150cdca13aa338cb193ac",
         "frame_content_version": "cv_628e6f3710a0f79c3eb4f07681f11055",
         "rows": 2,
         "role_keys": [],
@@ -13669,8 +13669,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -13838,8 +13838,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -13860,10 +13860,10 @@
               "spec_id": "ops_f9fe681a723572b738d95314e735c3c6",
               "recipe": {
                 "normal_form_hash": "rnf_2ec80189930154d84996195fc910cd5f",
-                "replay_key": "rpk_8aa2fe2120c37407080115e1be9a98da"
+                "replay_key": "rpk_4868a14db1c232d264ef2d203b71e057"
               }
             },
-            "content_version": "ocv_9c497da0899eba1ff39c89b61bfab491",
+            "content_version": "ocv_44117fa43ee7c585f59ad07260959ae7",
             "output_digest": "out_4162b61a82ca601d846034b04dbe84f8",
             "roots": [
               {
@@ -13876,7 +13876,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:98c0a829cff894265c265158f9d353068fa98e19830ae183a808ab31d8bc07b7",
@@ -13894,7 +13894,7 @@
       "summary": {
         "verb": "sum_of",
         "spec_id": "ops_f9fe681a723572b738d95314e735c3c6",
-        "content_version": "ocv_9c497da0899eba1ff39c89b61bfab491",
+        "content_version": "ocv_44117fa43ee7c585f59ad07260959ae7",
         "frame_content_version": "cv_24279cd66d9b7eed171a91d3464a7162",
         "rows": 2,
         "role_keys": [],
@@ -13969,8 +13969,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -14130,8 +14130,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -14152,10 +14152,10 @@
               "spec_id": "ops_32938d5df216225f2964862c974b723f",
               "recipe": {
                 "normal_form_hash": "rnf_fe18c9b62323bdba9d2f2503445fa924",
-                "replay_key": "rpk_ac353d799bfbd55b6cd3790d8fbd6403"
+                "replay_key": "rpk_2bb51c6452b86c198910886fc8ff48f4"
               }
             },
-            "content_version": "ocv_2d2805885ce7c5534f5250ea5b378532",
+            "content_version": "ocv_15a8273502630aed58e56428c835906f",
             "output_digest": "out_2bb7c651e6f284d5d1d7fa184760f555",
             "roots": [
               {
@@ -14168,7 +14168,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:ffdd27594993374a9d3c141cd566e335d4deeb0eb0b88cdc3bb0696a2dc2cfe7",
@@ -14186,7 +14186,7 @@
       "summary": {
         "verb": "compare",
         "spec_id": "ops_32938d5df216225f2964862c974b723f",
-        "content_version": "ocv_2d2805885ce7c5534f5250ea5b378532",
+        "content_version": "ocv_15a8273502630aed58e56428c835906f",
         "frame_content_version": "cv_dea80cff95e533818f81dbda06a34bcc",
         "rows": 2,
         "role_keys": [],
@@ -14269,8 +14269,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -14446,8 +14446,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -14462,8 +14462,8 @@
       "status": 422,
       "detail": "The left side of sum_of holds values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Take a mean, max or min of the figures with aggregate. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -14495,10 +14495,10 @@
               "spec_id": "ops_62463e899f543a8cb032581ced66e215",
               "recipe": {
                 "normal_form_hash": "rnf_54151aea741987795b408615cfee1b9c",
-                "replay_key": "rpk_319b68627ab1fe69a3d73029d3593a33"
+                "replay_key": "rpk_b484645d443f502188e7aa18dd737aed"
               }
             },
-            "content_version": "ocv_e8448333daab1ba715f86bc39729181f",
+            "content_version": "ocv_712bcd061ae52e2ea440a650df64df6d",
             "output_digest": "out_dce5e04d6b4fe79aaffcf717733e7999",
             "roots": [
               {
@@ -14511,7 +14511,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:bafecff069b91421f0971e2a80c0a097e8c1336b5f7dec01ce1978fc459fb527",
@@ -14529,7 +14529,7 @@
       "summary": {
         "verb": "compare",
         "spec_id": "ops_62463e899f543a8cb032581ced66e215",
-        "content_version": "ocv_e8448333daab1ba715f86bc39729181f",
+        "content_version": "ocv_712bcd061ae52e2ea440a650df64df6d",
         "frame_content_version": "cv_43618241a4d91808d12eb0c3e90b669c",
         "rows": 2,
         "role_keys": [],
@@ -14608,8 +14608,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -14781,8 +14781,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -14797,8 +14797,8 @@
       "status": 422,
       "detail": "The left side of sum_of holds values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Take a mean, max or min of the figures with aggregate. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -14822,8 +14822,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `left_unit or right_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -14882,8 +14882,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `left_unit or right_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -14942,8 +14942,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `left_unit or right_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -14992,8 +14992,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `left_unit or right_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "b4fe7812f6fc4406958b24eb4069c6e6",
-      "capability_version": "dset_9ab17ec0e311a676",
+      "trace_id": "d33ad9d51a2f4ae487c5a06554ac6c67",
+      "capability_version": "dset_135e455c1eb8ac63",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -15048,10 +15048,10 @@
               "spec_id": "ops_b6815bb00f347fb0663b706fefb3afcc",
               "recipe": {
                 "normal_form_hash": "rnf_f89fa3704613b937b6008a20f523682f",
-                "replay_key": "rpk_32e4f1aa3a3c753fc2593fb30d407b8b"
+                "replay_key": "rpk_296eb4e51490354a118880fa34c35ee4"
               }
             },
-            "content_version": "ocv_775dfc7f60ad0c41540acf7b68c0ad2d",
+            "content_version": "ocv_38bed0c70390ecd35b72ae120aebb67a",
             "output_digest": "out_e24e634c4917fb37ea4330fa7d06f4f7",
             "roots": [
               {
@@ -15089,7 +15089,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:dc83e0cc43fb5024cfb4f66fa76211d0fc54c37c5e6e503df8a5701e196ddf5d",
@@ -15107,7 +15107,7 @@
       "summary": {
         "verb": "compare",
         "spec_id": "ops_b6815bb00f347fb0663b706fefb3afcc",
-        "content_version": "ocv_775dfc7f60ad0c41540acf7b68c0ad2d",
+        "content_version": "ocv_38bed0c70390ecd35b72ae120aebb67a",
         "frame_content_version": "cv_6bc4bd75f21498cc1c88708bea08d072",
         "rows": 2,
         "role_keys": [],
@@ -15144,8 +15144,8 @@
           "right_unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -15236,8 +15236,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -15258,10 +15258,10 @@
               "spec_id": "ops_80c99f59dd644c26e884efde38e57d91",
               "recipe": {
                 "normal_form_hash": "rnf_99039f0e1f7aca01d9e676b0eef6bc0e",
-                "replay_key": "rpk_d66c55bb13917fb3d2f11ee1057eb3b4"
+                "replay_key": "rpk_001a85c5597d7bb267ef0d0a140c76b7"
               }
             },
-            "content_version": "ocv_a9c91eec7a73a7556c54232153352c26",
+            "content_version": "ocv_b66289c469dceeda9d1b21cb1a017bf1",
             "output_digest": "out_9564a48174f70909f4b9668a76cc9f9a",
             "roots": [
               {
@@ -15299,7 +15299,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:bd1eb43b3e4432d1421bc371d700f96ec98d7609c50d8695a2d59df114447389",
@@ -15317,7 +15317,7 @@
       "summary": {
         "verb": "sum_of",
         "spec_id": "ops_80c99f59dd644c26e884efde38e57d91",
-        "content_version": "ocv_a9c91eec7a73a7556c54232153352c26",
+        "content_version": "ocv_b66289c469dceeda9d1b21cb1a017bf1",
         "frame_content_version": "cv_8239403767e58cc048bee6f791d624a5",
         "rows": 2,
         "role_keys": [],
@@ -15354,8 +15354,8 @@
           "right_unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -15443,8 +15443,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -15465,10 +15465,10 @@
               "spec_id": "ops_8c33e77b1a0805f26ee8d59342c7d602",
               "recipe": {
                 "normal_form_hash": "rnf_84ab2142c244dcd4475e129505e253f3",
-                "replay_key": "rpk_d875fe580f6050d2f9977173154361b2"
+                "replay_key": "rpk_fbd9a8fa361bf11fb86fcbb5ca43a9dc"
               }
             },
-            "content_version": "ocv_4ee805e30c6a28371b19edfd049d7997",
+            "content_version": "ocv_39dffaf2056d5bf1b1cd1f5e523665d5",
             "output_digest": "out_a1bd8db52ab74a90bed51c52c1531d0a",
             "roots": [
               {
@@ -15490,7 +15490,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:e37ba52dd570de639d1d1ba0c351481dd346cbe057d0ee1097b3e8956aa8c178",
@@ -15508,7 +15508,7 @@
       "summary": {
         "verb": "compare",
         "spec_id": "ops_8c33e77b1a0805f26ee8d59342c7d602",
-        "content_version": "ocv_4ee805e30c6a28371b19edfd049d7997",
+        "content_version": "ocv_39dffaf2056d5bf1b1cd1f5e523665d5",
         "frame_content_version": "cv_bfe60d67153eda7188ee49879763ab51",
         "rows": 2,
         "role_keys": [],
@@ -15560,8 +15560,8 @@
           "right_unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -15681,8 +15681,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -15703,10 +15703,10 @@
               "spec_id": "ops_d6da044b747a07a11663d8d1900039fd",
               "recipe": {
                 "normal_form_hash": "rnf_640abfd00836a879dc00fd0672141d18",
-                "replay_key": "rpk_6f13999a5cd6f082123b250f96c65138"
+                "replay_key": "rpk_b375096adc95dfc810754a8d06f8000e"
               }
             },
-            "content_version": "ocv_7d2a1f5ca4aab51c25e32b0cd209db77",
+            "content_version": "ocv_12a3cf80c4fa8d633f8f1026d97bed06",
             "output_digest": "out_7770ae421714a582695d22104bcc90b4",
             "roots": [
               {
@@ -15728,7 +15728,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:60bcf5c1e5e053f0ef447110d6edbb730c6e9f08b06eb2ff692f83fbc6e564ef",
@@ -15746,7 +15746,7 @@
       "summary": {
         "verb": "sum_of",
         "spec_id": "ops_d6da044b747a07a11663d8d1900039fd",
-        "content_version": "ocv_7d2a1f5ca4aab51c25e32b0cd209db77",
+        "content_version": "ocv_12a3cf80c4fa8d633f8f1026d97bed06",
         "frame_content_version": "cv_0a1cf22879c61190f1df8752b7840f94",
         "rows": 13,
         "role_keys": [],
@@ -15784,8 +15784,8 @@
           "right_unit": null
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -16012,8 +16012,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -16034,10 +16034,10 @@
               "spec_id": "ops_e2c8673818dca190708f4e846c319fbf",
               "recipe": {
                 "normal_form_hash": "rnf_4c6e775af77518863c2791fe2b70151b",
-                "replay_key": "rpk_ad2524116bec2b9cdad47923f5efa496"
+                "replay_key": "rpk_30408bba16263ec9926a8784f9d29d16"
               }
             },
-            "content_version": "ocv_e15e14e168f63aff3d560bc34eb2351a",
+            "content_version": "ocv_bd7d717ff00dcf806537d3eec7da27cd",
             "output_digest": "out_faead739bc3315522276ff7b13366974",
             "roots": [
               {
@@ -16050,7 +16050,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:c4dbd75daa853a46113e97a3f9cd68830fc447099f0320610efc016567c62355",
@@ -16068,7 +16068,7 @@
       "summary": {
         "verb": "filter",
         "spec_id": "ops_e2c8673818dca190708f4e846c319fbf",
-        "content_version": "ocv_e15e14e168f63aff3d560bc34eb2351a",
+        "content_version": "ocv_bd7d717ff00dcf806537d3eec7da27cd",
         "frame_content_version": "cv_e0ffa388ddf7e41d254bccdeac5b7d2c",
         "rows": 6,
         "role_keys": [
@@ -16108,8 +16108,8 @@
           ]
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -16301,8 +16301,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -16323,10 +16323,10 @@
               "spec_id": "ops_efa70f8a3b60aed92d95ff0d8af2f0e2",
               "recipe": {
                 "normal_form_hash": "rnf_6bae5be163e7656c0012e8b2ea4e4160",
-                "replay_key": "rpk_c263d47eb5012d4caf75bc5aaaad393a"
+                "replay_key": "rpk_2086cae5d0aa0b99aa2da3ce07f2a842"
               }
             },
-            "content_version": "ocv_ab56b091d0c86075845cf2f263812d98",
+            "content_version": "ocv_9cff835380b6eafe25ae1675c440fcfd",
             "output_digest": "out_526706a69e6fa02f2d272094e7a693a1",
             "roots": [
               {
@@ -16339,7 +16339,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [
               {
                 "anchor": "latest",
@@ -16364,7 +16364,7 @@
       "summary": {
         "verb": "filter",
         "spec_id": "ops_efa70f8a3b60aed92d95ff0d8af2f0e2",
-        "content_version": "ocv_ab56b091d0c86075845cf2f263812d98",
+        "content_version": "ocv_9cff835380b6eafe25ae1675c440fcfd",
         "frame_content_version": "cv_d4f7e8b249f0cb8122d241bfc5db0dd4",
         "rows": 3,
         "role_keys": [
@@ -16414,8 +16414,8 @@
           }
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -16522,8 +16522,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": [
@@ -16551,10 +16551,10 @@
               "spec_id": "ops_0e16ba31f3859f42f38ce47b49829418",
               "recipe": {
                 "normal_form_hash": "rnf_512f5ba7ce4a040cf1c9cc34d608c4e9",
-                "replay_key": "rpk_8e9ad8799b010a979f0208fd0b01747a"
+                "replay_key": "rpk_c3d0ac4d20e5486c33171373e9468615"
               }
             },
-            "content_version": "ocv_9aa6f93492ccfbac9b63c4ba4678e5ce",
+            "content_version": "ocv_2db1f2f8729f2d1b53ea3852ad73b582",
             "output_digest": "out_58d2ef4daa11cdd2c841f7b9f3850ca7",
             "roots": [
               {
@@ -16577,7 +16577,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:c8a7372ed955108c15c57e2e4bb2cae78e3ac2aa9353936de0662eb56a983e0d",
@@ -16595,7 +16595,7 @@
       "summary": {
         "verb": "filter",
         "spec_id": "ops_0e16ba31f3859f42f38ce47b49829418",
-        "content_version": "ocv_9aa6f93492ccfbac9b63c4ba4678e5ce",
+        "content_version": "ocv_2db1f2f8729f2d1b53ea3852ad73b582",
         "frame_content_version": "cv_773db7bf376540ce2b2a01b68b261904",
         "rows": 2,
         "role_keys": [
@@ -16632,8 +16632,8 @@
           ]
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -16722,8 +16722,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -16744,10 +16744,10 @@
               "spec_id": "ops_bfafdb8af4541978de9751efa5ebc975",
               "recipe": {
                 "normal_form_hash": "rnf_b3c9a83dc5b32dc8550bf3f6e973449a",
-                "replay_key": "rpk_b4ea4950a0b6eeb564c613ce7d975c7a"
+                "replay_key": "rpk_0d081a2ad0f04346767c719292b28b43"
               }
             },
-            "content_version": "ocv_f8156698a88568a497736f33cd3715ee",
+            "content_version": "ocv_3c5a2b28180a9d947c88b3a51cce7949",
             "output_digest": "out_0dade7d69db60c9d86e61e59fffb3eb3",
             "roots": [
               {
@@ -16760,7 +16760,7 @@
                 }
               }
             ],
-            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
               "digest": "sha256:a6c6eb21d8a230f8f94c5aea49cba5c29b63fd2b8c2cb9f112da43cddf1e29f9",
@@ -16778,7 +16778,7 @@
       "summary": {
         "verb": "filter",
         "spec_id": "ops_bfafdb8af4541978de9751efa5ebc975",
-        "content_version": "ocv_f8156698a88568a497736f33cd3715ee",
+        "content_version": "ocv_3c5a2b28180a9d947c88b3a51cce7949",
         "frame_content_version": "cv_85d6c5546f2c6eacfc3dc6d1b57361e9",
         "rows": 2,
         "role_keys": [
@@ -16819,8 +16819,8 @@
           ]
         },
         "execution_identity": {
-          "engine_version": "0.9.0",
-          "frame_grammar_version": "1.1.0",
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
           "reduction_policy_version": "0.2.0"
         },
         "derived": null,
@@ -16917,8 +16917,8 @@
         "kind": "observation"
       },
       "execution_identity": {
-        "engine_version": "0.9.0",
-        "frame_grammar_version": "1.1.0",
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
         "reduction_policy_version": "0.2.0"
       },
       "resolved_periods": []
@@ -16940,11 +16940,11 @@
     },
     "retry_after": null
   },
-  "GET /api/datasets/derived/ops_2719a7dd1ebc0c15567f9fb24ff4c75c/ocv_6cc0a5dca5a70333419a604070d3c5d1?": {
+  "GET /api/datasets/derived/ops_2719a7dd1ebc0c15567f9fb24ff4c75c/ocv_a69b13f4842f8419e0126f571e7d3f35?": {
     "status": 200,
     "body": {
       "spec_id": "ops_2719a7dd1ebc0c15567f9fb24ff4c75c",
-      "content_version": "ocv_6cc0a5dca5a70333419a604070d3c5d1",
+      "content_version": "ocv_a69b13f4842f8419e0126f571e7d3f35",
       "retention": {
         "pinned": false,
         "held_until": "2026-11-27T00:00:00Z"
@@ -16955,12 +16955,12 @@
       },
       "recipe": {
         "normal_form_hash": "rnf_c82ef428fdfe0dffb1952b678d22e1ae",
-        "replay_key": "rpk_a1010d283c6a9a676e3ece8f2464236b",
-        "execution_identity": "0.9.0|1.1.0|0.2.0",
+        "replay_key": "rpk_3e59b7497a1da0ed4ce89745d5fa6e43",
+        "execution_identity": "0.9.1|1.2.0|0.2.0",
         "tree": {
           "frame": {
             "spec_id": "ops_2719a7dd1ebc0c15567f9fb24ff4c75c",
-            "content_version": "ocv_6cc0a5dca5a70333419a604070d3c5d1"
+            "content_version": "ocv_a69b13f4842f8419e0126f571e7d3f35"
           },
           "op_spec": {
             "frame_ref": {
@@ -17060,11 +17060,11 @@
     },
     "retry_after": null
   },
-  "GET /api/datasets/derived/ops_3ba66c5a3a5d27e37d4882343feaac0d/ocv_d2bf532ce770acf5cfb69cd6390eea9d?": {
+  "GET /api/datasets/derived/ops_3ba66c5a3a5d27e37d4882343feaac0d/ocv_95872279900a5936617b7caddb671659?": {
     "status": 200,
     "body": {
       "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
-      "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d",
+      "content_version": "ocv_95872279900a5936617b7caddb671659",
       "retention": {
         "pinned": false,
         "held_until": "2026-11-27T00:00:00Z"
@@ -17075,12 +17075,12 @@
       },
       "recipe": {
         "normal_form_hash": "rnf_30c1ec15499853d6896800b86aacec96",
-        "replay_key": "rpk_1feeb2b731194c41d3c1229517d87196",
-        "execution_identity": "0.9.0|1.1.0|0.2.0",
+        "replay_key": "rpk_8647e43e4cfb048597849f53834ef5e8",
+        "execution_identity": "0.9.1|1.2.0|0.2.0",
         "tree": {
           "frame": {
             "spec_id": "ops_3ba66c5a3a5d27e37d4882343feaac0d",
-            "content_version": "ocv_d2bf532ce770acf5cfb69cd6390eea9d"
+            "content_version": "ocv_95872279900a5936617b7caddb671659"
           },
           "op_spec": {
             "frame_ref": {
@@ -17149,11 +17149,11 @@
     },
     "retry_after": null
   },
-  "GET /api/datasets/derived/ops_a5234dfadca6deb24f4d31c07140e0e6/ocv_96323a4f0dfaf26d903a6f0a3ecc4a99?": {
+  "GET /api/datasets/derived/ops_a5234dfadca6deb24f4d31c07140e0e6/ocv_c2e250266a32fa860641ca5e356c4568?": {
     "status": 200,
     "body": {
       "spec_id": "ops_a5234dfadca6deb24f4d31c07140e0e6",
-      "content_version": "ocv_96323a4f0dfaf26d903a6f0a3ecc4a99",
+      "content_version": "ocv_c2e250266a32fa860641ca5e356c4568",
       "retention": {
         "pinned": false,
         "held_until": "2026-11-27T00:00:00Z"
@@ -17164,12 +17164,12 @@
       },
       "recipe": {
         "normal_form_hash": "rnf_9fc7f81730987a1f386c7d1e94af4b8f",
-        "replay_key": "rpk_e0d8c95bf1e6d9f605cf2f666498f618",
-        "execution_identity": "0.9.0|1.1.0|0.2.0",
+        "replay_key": "rpk_e1f358d7f433e4548d0b564785ba6ceb",
+        "execution_identity": "0.9.1|1.2.0|0.2.0",
         "tree": {
           "frame": {
             "spec_id": "ops_a5234dfadca6deb24f4d31c07140e0e6",
-            "content_version": "ocv_96323a4f0dfaf26d903a6f0a3ecc4a99"
+            "content_version": "ocv_c2e250266a32fa860641ca5e356c4568"
           },
           "op_spec": {
             "frame_ref": {
@@ -17269,11 +17269,11 @@
     },
     "retry_after": null
   },
-  "GET /api/datasets/derived/ops_b668a43f8241b425eb6deb75144c4075/ocv_284bd476345408f12b05c5d670ad8df7?": {
+  "GET /api/datasets/derived/ops_b668a43f8241b425eb6deb75144c4075/ocv_748b0a24bad25eb59c0946d299883f5b?": {
     "status": 200,
     "body": {
       "spec_id": "ops_b668a43f8241b425eb6deb75144c4075",
-      "content_version": "ocv_284bd476345408f12b05c5d670ad8df7",
+      "content_version": "ocv_748b0a24bad25eb59c0946d299883f5b",
       "retention": {
         "pinned": false,
         "held_until": "2026-11-27T00:00:00Z"
@@ -17284,12 +17284,12 @@
       },
       "recipe": {
         "normal_form_hash": "rnf_817803369a3c149a24ba3d98c0beb98c",
-        "replay_key": "rpk_faebd304310e37f4f2faa0f99229d559",
-        "execution_identity": "0.9.0|1.1.0|0.2.0",
+        "replay_key": "rpk_2c1129df78e2319160f9346f5787572f",
+        "execution_identity": "0.9.1|1.2.0|0.2.0",
         "tree": {
           "frame": {
             "spec_id": "ops_b668a43f8241b425eb6deb75144c4075",
-            "content_version": "ocv_284bd476345408f12b05c5d670ad8df7"
+            "content_version": "ocv_748b0a24bad25eb59c0946d299883f5b"
           },
           "op_spec": {
             "frame_ref": {

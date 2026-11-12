@@ -24,13 +24,16 @@ One refresh (`LiveRefresh._refresh`):
    and the stamp a kind root is named under) is the one its mint record holds. A
    root recorded with neither columns nor a stamp counts as minted without kinds
    here, so a flow root recorded without kinds stands until its dataset moves.
-4. Computes the replay key of the recipe on the roots' current identities
-   (`common.recipe.replay_key`) and asks apis for the frame stored under it. A
-   root recorded with neither columns nor a stamp whose current version lists a
-   stamp is named under it only when its replay mints kinds, so its stored
-   definition is read first to learn that (`LiveRefresh._settle_kinds`). A hit is
-   rendered without replaying, so a card replays once for each change of a root's
-   pair or stamp: the replay publishes under the key the next refresh looks up.
+4. Computes the replay key of the recipe on the roots' current identities and the
+   execution identity apis' capabilities document names for its analysis runner
+   (`common.recipe.replay_key`, `harness.recipe_replay.runner_execution_identity`)
+   and asks apis for the frame stored under it. An apis that names no identity
+   gets no lookup, and the card is replayed. A root recorded with neither columns
+   nor a stamp whose current version lists a stamp is named under it only when
+   its replay mints kinds, so its stored definition is read first to learn that
+   (`LiveRefresh._settle_kinds`). A hit is rendered without replaying, so a card
+   replays once for each change of a root's pair or stamp: the replay publishes
+   under the key the next refresh looks up.
 5. Otherwise replays the recipe (`harness.recipe_replay.replay_recipe`), which
    mints the roots, runs the verbs, and publishes the frame with its recipe.
    The replayer reads the replay key once more before it publishes, under the
@@ -67,7 +70,6 @@ from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, S
 from dataclasses import dataclass
 from typing import Any, Final
 
-from analysis_mcp.execution_identity import current_execution_identity
 from common import live_apis
 from common.apis_auth import apis_auth_provider
 from common.live_apis import (
@@ -109,6 +111,7 @@ from harness.recipe_replay import (
     ToolAnswer,
     refusal_outcome,
     replay_recipe,
+    runner_execution_identity,
 )
 from harness.settings import LIVE_REFRESH_HARD_STOP_GRACE_S, Settings
 
@@ -592,17 +595,26 @@ class LiveRefresh:
 
         await self._settle_kinds(records, checks, listed, deadline=deadline)
         identities = [check.identity() for check in checks]
-        key = replay_key(
-            normal_form_hash=normal_form_hash,
-            root_datasets=identities,
-            execution_identities=[current_execution_identity().canonical_string()],
+        # With no execution identity from apis the key cannot be known, so the card replays.
+        execution_identity = await runner_execution_identity(self._apis)
+        key = (
+            None
+            if execution_identity is None
+            else replay_key(
+                normal_form_hash=normal_form_hash,
+                root_datasets=identities,
+                execution_identities=[execution_identity.canonical_string()],
+            )
         )
-        target = await self._apis.find_replay(replay_key=key)
+        target = None if key is None else await self._apis.find_replay(replay_key=key)
         if target is None:
             replayed = await self.replay(recipe, deadline=deadline)
             if isinstance(replayed, Pending | Refused):
                 return _answer_of(replayed)
-            _log_another_key(component_id, looked_up=key, identities=identities, replayed=replayed)
+            if key is not None:
+                _log_another_key(
+                    component_id, looked_up=key, identities=identities, replayed=replayed
+                )
             target = FramePair(replayed.frame.spec_id, replayed.frame.content_version)
 
         render = await self._apis.render(component_id=component_id, revision=revision, frame=target)

@@ -262,19 +262,24 @@ async def test_a_raising_tool_is_answered_through_tool_failed_and_the_run_goes_o
 
 
 @pytest.mark.parametrize(
-    "part",
+    "parts",
     [
-        types.Part(file_data=types.FileData(file_uri="gs://b/f.pdf", mime_type="x/pdf")),
-        types.Part(inline_data=types.Blob(mime_type="x/pdf")),
+        [
+            types.Part(text="kenya debt"),
+            types.Part(file_data=types.FileData(file_uri="gs://b/f.pdf", mime_type="x/pdf")),
+        ],
+        [types.Part(text="kenya debt"), types.Part(inline_data=types.Blob(mime_type="x/pdf"))],
+        [],
+        None,
     ],
-    ids=["file-by-uri", "inline-data-without-bytes"],
+    ids=["file-by-uri", "inline-data-without-bytes", "no-parts", "parts-unset"],
 )
-async def test_a_question_part_the_planner_cannot_send_is_refused_before_any_request(
-    part: types.Part,
+async def test_a_question_the_planner_cannot_send_is_refused_before_any_request(
+    parts: list[types.Part] | None,
 ) -> None:
     scripted = ScriptedGenai([reply(text_part("done"))])
     agent = planner_agent([], instruction="Plan.", model=_google_model(scripted))
-    question = types.Content(role="user", parts=[types.Part(text="kenya debt"), part])
+    question = types.Content(role="user", parts=parts)
 
     with pytest.raises(UnsentQuestionPartError):
         async for _ in run_planner(agent, _deps(), question=question, brief=_BRIEF):

@@ -116,8 +116,8 @@ def planner_node(
         the model's place is not counted, as ADK counts no response a callback
         gives. ADK raises `LlmCallsLimitExceededError` on the call past
         `RunConfig.max_llm_calls`.
-        A question holding a part this planner does not send
-        (`planner.pydantic_agent.UnsentQuestionPartError`) ends the run before
+        A question holding a part this planner does not send, or no part
+        (`planner.pydantic_agent.UnsentQuestionPartError`), ends the run before
         any request on an `internal_error` refusal (`run.refused`). The adapter
         answers the entry with that refusal, marked not final
         (`PlannerAdapter._FINAL_CODES`), so the orchestrator may ask for a plan

@@ -396,16 +396,19 @@ def _question_prompt(question: types.Content | str) -> str | list[str]:
     """`question`'s parts as the user prompt Pydantic AI sends as one content of
     the same parts: one text part as its text, several as a list of them.
 
-    Studio sends one text part (`harness.studio`). Any other part is refused.
+    Studio sends one text part (`harness.studio`). Any other part is refused,
+    and so is a question with no part, which Gemini rejects as an empty content.
 
     Raises:
         UnsentQuestionPartError: A part is not text, the message naming the
-            part's fields.
+            part's fields, or the question holds no part.
     """
     if isinstance(question, str):
         return question
+    if not question.parts:
+        raise UnsentQuestionPartError("the question holds no part; the planner takes text parts")
     prompt: list[str] = []
-    for part in question.parts or ():
+    for part in question.parts:
         if part.text is None:
             received = sorted(part.model_dump(exclude_none=True))
             raise UnsentQuestionPartError(
