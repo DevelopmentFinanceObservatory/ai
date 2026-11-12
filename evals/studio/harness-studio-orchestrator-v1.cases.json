@@ -30,7 +30,6 @@
         {
           "call": "search",
           "args": {
-            "query": "life expectancy in Kenya since 2000",
             "parts": [
               {
                 "variable": "life expectancy"
@@ -74,7 +73,6 @@
         {
           "call": "search",
           "args": {
-            "query": "life expectancy in Kenya from 2015 to 2022",
             "parts": [
               {
                 "variable": "life expectancy"
@@ -130,7 +128,6 @@
         {
           "call": "search",
           "args": {
-            "query": "life expectancy in Kenya since 2000",
             "parts": [
               {
                 "variable": "life expectancy"
@@ -188,7 +185,6 @@
         {
           "call": "search",
           "args": {
-            "query": "life expectancy in Kenya since 2000",
             "parts": [
               {
                 "variable": "life expectancy"
@@ -330,7 +326,6 @@
         {
           "call": "search",
           "args": {
-            "query": "life expectancy in Kenya since 2000",
             "parts": [
               {
                 "variable": "life expectancy"
@@ -566,7 +561,6 @@
         {
           "call": "search",
           "args": {
-            "query": "life expectancy in Kenya since 2000",
             "parts": [
               {
                 "variable": "life expectancy"
@@ -616,7 +610,6 @@
         {
           "call": "search",
           "args": {
-            "query": "life expectancy in Kenya since 2000",
             "parts": [
               {
                 "variable": "life expectancy"
@@ -839,7 +832,6 @@
         {
           "call": "search",
           "args": {
-            "query": "life expectancy in Kenya since 2000",
             "parts": [
               {
                 "variable": "life expectancy"

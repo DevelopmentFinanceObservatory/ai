@@ -30,7 +30,7 @@ from harness.graph.state import (
     ORCHESTRATOR_STATUS_KEY,
     STEP_PROGRESS_KEY,
 )
-from harness.orchestrator_tools import HANDED_OFF, OrchestratorTool
+from harness.orchestrator_tools import HANDED_OFF, OrchestratorTool, build_orchestrator_tools
 from harness.provenance import ProvenanceStore
 from harness.reply_figures import DrawnSeries, card_holds
 from harness.scripted_plan import scripted_plan
@@ -160,7 +160,7 @@ def test_the_closing_message_ends_with_a_note_on_each_loose_match_the_turn_used(
     [
         (
             "search",
-            {"query": "life expectancy in Kenya"},
+            {"parts": [{"variable": "life expectancy in Kenya"}]},
             {"parts": []},
             "Searching for data",
             "Reading what the search found",
@@ -594,7 +594,7 @@ _SLIP = {
     "code": "request_invalid",
     "retry_mode": "correct_and_retry",
 }
-_SEARCH = {"query": "ODA to Kenya"}
+_SEARCH = {"parts": [{"variable": "ODA to Kenya"}]}
 
 
 def _call(call_id: str, name: str, args: dict[str, Any]) -> Event:
@@ -732,15 +732,21 @@ def test_a_failed_step_a_later_try_made_good_settles_as_complete(events):
     assert is_user_sentence(settled.detail)
 
 
-async def test_a_search_missing_its_query_settles_when_a_corrected_search_succeeds():
-    """The orchestrator's own answer to a call without a required argument
-    asks for a corrected call, so the later search settles the first line."""
+async def test_a_search_with_nothing_to_search_settles_when_a_corrected_search_succeeds():
+    """`search`'s answer to a call that sends neither `parts` nor `text` asks
+    for a corrected call, so the later search settles the first line."""
 
-    async def search(query: str, tool_context: Any, parts: list[Any] | None = None) -> Any:
-        return {"parts": []}
+    async def resolver(**_: Any) -> dict[str, Any]:
+        return {"part_digests": []}
 
+    (search,) = [
+        tool
+        for tool in build_orchestrator_tools(resolver=resolver, executor=None)
+        if tool.__name__ == "search"
+    ]
     ctx = SimpleNamespace(state={})
     missing = await OrchestratorTool(search).run_async(args={"parts": []}, tool_context=ctx)
+    assert missing["invalid"] == [{"loc": "parts", "type": "missing"}]
     translator = _translator()
 
     frames = _frames(
@@ -762,7 +768,7 @@ async def test_a_search_missing_its_query_settles_when_a_corrected_search_succee
         lambda: [
             _call("c1", "search", _SEARCH),
             _response("c1", "search", _FAULT),
-            _call("c2", "search", {"query": "FDI to Kenya"}),
+            _call("c2", "search", {"parts": [{"variable": "FDI to Kenya"}]}),
             _response("c2", "search", {"parts": []}),
         ],
         # f5b: no plan, then an answer from separate fetches.
@@ -888,7 +894,10 @@ def _responses(*responses: tuple[str, str, dict[str, Any]]) -> Event:
             lambda: [
                 _call("c1", "search", _SLIPPED),
                 _response("c1", "search", _SLIP),
-                _calls(("c2", "search", _SEARCH), ("c3", "search", {"query": "FDI to Kenya"})),
+                _calls(
+                    ("c2", "search", _SEARCH),
+                    ("c3", "search", {"parts": [{"variable": "FDI to Kenya"}]}),
+                ),
                 _responses(("c2", "search", _FAULT), ("c3", "search", _FOUND)),
             ],
             [StepStatus.COMPLETE, StepStatus.FAILED],
@@ -897,7 +906,10 @@ def _responses(*responses: tuple[str, str, dict[str, Any]]) -> Event:
             lambda: [
                 _call("c1", "search", _SLIPPED),
                 _response("c1", "search", _SLIP),
-                _calls(("c2", "search", _SEARCH), ("c3", "search", {"query": "FDI to Kenya"})),
+                _calls(
+                    ("c2", "search", _SEARCH),
+                    ("c3", "search", {"parts": [{"variable": "FDI to Kenya"}]}),
+                ),
                 _responses(("c2", "search", _FOUND), ("c3", "search", _FAULT)),
             ],
             [StepStatus.COMPLETE, StepStatus.FAILED],
@@ -916,7 +928,10 @@ def _responses(*responses: tuple[str, str, dict[str, Any]]) -> Event:
         # correction of it.
         (
             lambda: [
-                _calls(("c1", "search", _SLIPPED), ("c2", "search", {"query": "FDI to Kenya"})),
+                _calls(
+                    ("c1", "search", _SLIPPED),
+                    ("c2", "search", {"parts": [{"variable": "FDI to Kenya"}]}),
+                ),
                 _responses(("c1", "search", _SLIP), ("c2", "search", _FOUND)),
             ],
             [StepStatus.FAILED],
@@ -1041,10 +1056,84 @@ def test_a_later_call_of_its_tool_that_completes_settles_a_slip(events, settled)
     assert [frame.status for frame in steps] == settled
 
 
+@pytest.mark.parametrize(
+    ("args", "led_by"),
+    [
+        ({"text": "aid to Kenya", "parts": [{"variable": "ODA"}]}, "aid to Kenya"),
+        (
+            {"parts": [{"variable": "ODA"}, {"variable": "GDP"}, {}]},
+            "ODA, GDP",
+        ),
+        ({"text": "  ", "parts": [{"variable": "ODA"}]}, "ODA"),
+        ({"text": 7, "parts": [{"variable": "ODA"}]}, "ODA"),
+        ({"parts": "aid to Kenya"}, None),
+        ({"parts": {"variable": "ODA"}}, None),
+        ({"parts": ["ODA", None, {"variable": "GDP"}]}, "GDP"),
+        ({"parts": [{"variable": 5}, {"variable": ["ODA"]}, {"variable": " "}]}, None),
+        (
+            {
+                "parts": [
+                    {"variable": "ODA", "entities": [{"text": "Kenya"}]},
+                    {"variable": "ODA", "entities": [{"text": "Uganda"}]},
+                    {"variable": "ODA", "entities": [{"text": "Kenya"}]},
+                ]
+            },
+            "ODA (Kenya), ODA (Uganda)",
+        ),
+        (
+            {
+                "parts": [
+                    {
+                        "variable": "life expectancy",
+                        "entities": [{"text": "Kenya"}, {"text": "Uganda"}],
+                    }
+                ]
+            },
+            "life expectancy (Kenya, Uganda)",
+        ),
+        ({"parts": [{"variable": "GDP", "entities": "Kenya"}]}, "GDP"),
+        ({"parts": [{"variable": "GDP", "entities": {"text": "Kenya"}}]}, "GDP"),
+        (
+            {"parts": [{"variable": "GDP", "entities": ["Kenya", None, {"text": "Ghana"}]}]},
+            "GDP (Ghana)",
+        ),
+        ({"parts": [{"variable": "GDP", "entities": [{"text": 5}, {"text": " "}, {}]}]}, "GDP"),
+    ],
+    ids=[
+        "text",
+        "parts",
+        "blank-text",
+        "text-not-a-string",
+        "parts-a-string",
+        "parts-a-mapping",
+        "parts-holding-strings-and-none",
+        "variables-not-strings",
+        "parts-by-place-each-once",
+        "one-part-two-places",
+        "entities-a-string",
+        "entities-a-mapping",
+        "entities-holding-strings-and-none",
+        "entity-texts-not-strings",
+    ],
+)
+def test_a_search_step_leads_with_the_words_searched_for(args, led_by):
+    search = types.FunctionCall(id="call_1", name="search", args=args)
+    answer = types.FunctionResponse(id="call_1", name="search", response={"parts": []})
+
+    frames = _frames(
+        _translator(),
+        _event(types.Part(function_call=search)),
+        _event(types.Part(function_response=answer)),
+    )
+
+    steps = [f for f in frames if f.event == "activity.step" and f.tool == "search"]
+    assert [f.detail for f in steps] == [led_by, led_by]
+
+
 def test_a_fetch_names_the_measure_its_search_found_and_carries_its_summary():
     translator = _translator()
     search = types.FunctionCall(
-        id="call_1", name="search", args={"query": "life expectancy and infant mortality in Rwanda"}
+        id="call_1", name="search", args={"text": "life expectancy and infant mortality in Rwanda"}
     )
     found = {
         "parts": [
@@ -1545,7 +1634,10 @@ def test_plan_path_step_progress_becomes_a_running_fetch_line():
 
 
 def test_tool_call_labels_come_from_the_arguments():
-    assert _tool_call_label("search", {"query": "GDP per capita in Kenya"}) == "Searching for data"
+    assert (
+        _tool_call_label("search", {"parts": [{"variable": "GDP per capita in Kenya"}]})
+        == "Searching for data"
+    )
     assert _tool_call_label("fetch", {"spec_id": "spec_x"}) == "Fetching data"
     assert _tool_call_label("fetch", {"spec_id": "spec_x"}, "GDP") == "Fetching GDP"
     assert _tool_call_label("make_charts", {"charts": [{}, {}]}) == "Making 2 charts"
@@ -1626,7 +1718,7 @@ def test_a_search_line_carries_the_limits_its_result_states_in_words():
         ],
     }
 
-    frames = _frames(_translator(), *_batch(("search", {"query": "q"}, found)))
+    frames = _frames(_translator(), *_batch(("search", {"parts": [{"variable": "q"}]}, found)))
 
     assert _reading_lines(frames) == [
         (
@@ -1703,7 +1795,10 @@ async def test_one_fetch_names_its_measure_and_the_years_its_retrieval_covers(wi
     [
         # The later stage names a mixed batch.
         (
-            [("search", {"query": "q"}, {"parts": []}), ("fetch", {"spec_id": "s"}, {})],
+            [
+                ("search", {"parts": [{"variable": "q"}]}, {"parts": []}),
+                ("fetch", {"spec_id": "s"}, {}),
+            ],
             "Looking at the data",
         ),
         (
@@ -1711,13 +1806,16 @@ async def test_one_fetch_names_its_measure_and_the_years_its_retrieval_covers(wi
             "Going over the charts",
         ),
         (
-            [("recall", {"part": "plan"}, {}), ("search", {"query": "q"}, {"parts": []})],
+            [
+                ("recall", {"part": "plan"}, {}),
+                ("search", {"parts": [{"variable": "q"}]}, {"parts": []}),
+            ],
             "Reading what the search found",
         ),
         # A batch that hands off opens no line.
         (
             [
-                ("search", {"query": "q"}, {"parts": []}),
+                ("search", {"parts": [{"variable": "q"}]}, {"parts": []}),
                 ("ask_user", {"question": "Which?"}, {HANDED_OFF: "ask"}),
             ],
             None,
@@ -1761,7 +1859,7 @@ def test_parallel_calls_give_one_line_after_the_last_response(batch, label):
 )
 def test_a_reading_line_closes_when_anything_else_happens(next_event):
     translator = _translator()
-    _frames(translator, *_batch(("search", {"query": "q"}, {"parts": []})))
+    _frames(translator, *_batch(("search", {"parts": [{"variable": "q"}]}, {"parts": []})))
 
     closing = translator.translate(next_event)
 
@@ -1772,7 +1870,7 @@ def test_a_reading_line_closes_when_anything_else_happens(next_event):
 
 def test_a_reading_line_closes_when_the_segment_ends():
     translator = _translator()
-    _frames(translator, *_batch(("search", {"query": "q"}, {"parts": []})))
+    _frames(translator, *_batch(("search", {"parts": [{"variable": "q"}]}, {"parts": []})))
 
     assert _steps(translator.finish()) == [("Reading what the search found", StepStatus.COMPLETE)]
 
@@ -1781,7 +1879,7 @@ def test_a_skill_read_keeps_the_reading_line_running():
     translator = _translator()
     frames = _frames(
         translator,
-        *_batch(("search", {"query": "q"}, {"parts": []})),
+        *_batch(("search", {"parts": [{"variable": "q"}]}, {"parts": []})),
         *_batch(("get_skill", {"skill_id": "oda-measures"}, {"text": "notes"})),
     )
 

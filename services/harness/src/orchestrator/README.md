@@ -17,7 +17,7 @@ The harness gives it eight (`harness.orchestrator_tools`):
 
 | Tool          | Behaviour                                                                                                                        |
 | ------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `search`      | Sends the question and every part it names to Search in one call; returns each part's reading                                    |
+| `search`      | Sends every part of the question to Search in one call, or `text` for Search to read itself; returns each part's reading         |
 | `fetch`       | Retrieves one dataset, summing a family of indicators, and returns frame ids with their views                                    |
 | `make_charts` | Draws charts from those frames on the canvas and returns what each holds and its reply figures, or why it failed                 |
 | `ask_user`    | Records one to three questions for the user; the workflow pauses once for all of them and hands every answer back                |

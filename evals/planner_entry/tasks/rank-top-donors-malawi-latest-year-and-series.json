@@ -5,7 +5,6 @@
   "question": "Rank the top donors to Malawi in the latest year and chart them over time",
   "searches": [
     {
-      "query": "Rank the top donors to Malawi in the latest year and chart them over time",
       "parts": [
         {
           "variable": "official development assistance",

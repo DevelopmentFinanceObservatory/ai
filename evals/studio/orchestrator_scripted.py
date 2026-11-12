@@ -299,11 +299,9 @@ class CannedResolver:
 
     def __init__(self, results: list[Mapping[str, Any]]) -> None:
         self._results = list(results)
-        self.questions: list[str] = []
 
-    async def __call__(self, *, question: str, **kwargs: Any) -> dict[str, Any]:
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
         del kwargs
-        self.questions.append(question)
         if not self._results:
             raise ResolverError("the case scripted no further search result")
         return resolver_digest(search_envelope(self._results.pop(0)))

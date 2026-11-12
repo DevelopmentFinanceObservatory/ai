@@ -5,7 +5,6 @@
   "question": "What share of Kenya's ODA went to health between 2015 and 2022?",
   "searches": [
     {
-      "query": "What share of Kenya's ODA went to health between 2015 and 2022?",
       "parts": [
         {
           "variable": "official development assistance for health",

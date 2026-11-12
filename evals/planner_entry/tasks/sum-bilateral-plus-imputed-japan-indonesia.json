@@ -5,7 +5,6 @@
   "question": "What was Japan's total ODA to Indonesia in each year from 2015 to 2021, counting both its bilateral aid and its imputed share of multilateral aid?",
   "searches": [
     {
-      "query": "What was Japan's total ODA to Indonesia in each year from 2015 to 2021, counting both its bilateral aid and its imputed share of multilateral aid?",
       "parts": [
         {
           "variable": "bilateral ODA",
@@ -40,7 +39,6 @@
       ]
     },
     {
-      "query": "Japan's official development assistance to Indonesia, 2015 to 2021",
       "parts": [
         {
           "variable": "official development assistance",

@@ -189,9 +189,12 @@ def call(name: str, **args: Any) -> types.Part:
     return types.Part.from_function_call(name=name, args=args)
 
 
-def search_call(query: str, *variables: str) -> types.Part:
-    """A `search` call with one part per variable, or one part reading `query`."""
-    return call("search", query=query, parts=[{"variable": v} for v in variables or (query,)])
+def search_call(*variables: str, text: str | None = None) -> types.Part:
+    """A parsed `search` call with one part per variable; `text` makes it a retry."""
+    args: dict[str, Any] = {"parts": [{"variable": v} for v in variables]}
+    if text is not None:
+        args["text"] = text
+    return call("search", **args)
 
 
 def fetch_call(spec_id: str = SCRIPTED_SPEC, **args: Any) -> types.Part:

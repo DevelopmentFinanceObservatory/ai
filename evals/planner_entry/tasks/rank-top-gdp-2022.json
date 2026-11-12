@@ -5,7 +5,6 @@
   "question": "Which 10 countries had the highest GDP in 2022?",
   "searches": [
     {
-      "query": "Which 10 countries had the highest GDP in 2022?",
       "parts": [
         {
           "variable": "GDP",

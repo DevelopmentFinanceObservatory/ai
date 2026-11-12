@@ -5,7 +5,6 @@
   "question": "How much external debt service did Zambia pay in total from 2015 to 2022?",
   "searches": [
     {
-      "query": "How much external debt service did Zambia pay in total from 2015 to 2022?",
       "parts": [
         {
           "variable": "external debt service",

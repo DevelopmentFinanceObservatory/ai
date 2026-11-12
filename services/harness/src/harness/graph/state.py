@@ -406,8 +406,8 @@ _PENDING_ACTION = TypeAdapter(Annotated[PendingAsk | PendingPlan, Field(discrimi
 # `invalid_arguments` counts the calls of any tool refused for malformed
 # arguments, which spend nothing of the tool's own budget.
 BUDGETS = {
-    # The first search, a corrected place, and one raw-text search for each
-    # part the first left unanswered.
+    # The first search, a corrected place, and one `text` search for each
+    # part whose result carried `retry_with_text`.
     "search": MAX_PARTS + 2,
     "fetch": 6,
     "make_charts": 5,

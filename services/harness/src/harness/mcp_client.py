@@ -359,19 +359,23 @@ class McpResolver:
     async def __call__(
         self,
         *,
-        question: str,
+        question: str | None,
         parts: list[dict[str, Any]],
         raw_text: bool = False,
         context: SearchContext | None = None,
     ) -> dict[str, Any]:
         """Call data-mcp `search` and digest the envelope it returns.
 
+        A raw-text search (`raw_text`) sends `question` alone, for Search to
+        read itself. A parsed search sends `parts` alone and no raw query;
+        `question` is None for it.
+
         `context` rides in the request's `_meta` under
         `SEARCH_CONTEXT_META_KEY`, where data-mcp reads it and the tool's
         input schema, which outside clients see, does not name it.
         """
         if raw_text:
-            # The orchestrator's second search: Search reads `question` itself
+            # The orchestrator's `text` search: Search reads `question` itself
             # through its raw-text door, so no decomposition is sent.
             arguments: dict[str, Any] = {"raw_query": question}
         elif not parts:
@@ -387,7 +391,7 @@ class McpResolver:
                 },
             )
         else:
-            arguments = {"parts": parts, "raw_query": question}
+            arguments = {"parts": parts}
         client = await self._clients.get()
         try:
             result = await _call_held(

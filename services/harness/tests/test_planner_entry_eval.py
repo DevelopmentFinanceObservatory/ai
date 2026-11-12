@@ -75,7 +75,7 @@ async def test_every_task_validates_and_the_set_covers_every_kind() -> None:
 
 def _search_reworded(task: Any) -> dict[str, Any]:
     searches = [search.model_dump() for search in task.searches]
-    searches[0]["query"] += " (reworded)"
+    searches[0]["parts"][0]["variable"] += " (reworded)"
     return {"searches": searches}
 
 
@@ -792,7 +792,7 @@ def test_an_unmarked_ask_digests_as_it_did_before_asks_carried_the_mark() -> Non
     # The pinned digest is the one `inputs_digest` gives this task over this recording
     # when no ask is marked.
     assert entry.inputs_digest(task, recording) == (
-        "dcda82f03fa9c004ffacfc14bc3fe4c66255aed890f6155ca84d79c395465afe"
+        "2320097975b175e97b05d2ee4b02beae2efd8756134cdfb0f2e323706a09e147"
     )
     assert entry.inputs_digest(marked, recording) != entry.inputs_digest(task, recording)
 

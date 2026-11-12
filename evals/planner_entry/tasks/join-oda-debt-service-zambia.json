@@ -5,7 +5,6 @@
   "question": "Show Zambia's ODA received and its external debt service in one table for each year from 2015 to 2022.",
   "searches": [
     {
-      "query": "Show Zambia's ODA received and its external debt service in one table for each year from 2015 to 2022.",
       "parts": [
         {
           "variable": "official development assistance",

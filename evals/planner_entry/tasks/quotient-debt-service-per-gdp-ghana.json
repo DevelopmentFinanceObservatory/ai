@@ -5,7 +5,6 @@
   "question": "What was Ghana's external debt service relative to its GDP in each year from 2012 to 2021?",
   "searches": [
     {
-      "query": "What was Ghana's external debt service relative to its GDP in each year from 2012 to 2021?",
       "parts": [
         {
           "variable": "external debt service",
