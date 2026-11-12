@@ -615,19 +615,17 @@ _RETRY_PART = {"variable": "climate finance", "entities": [{"text": "Kenya", "ro
 @pytest.mark.parametrize(
     ("status", "reason", "offered"),
     [
-        ("no_data", None, False),
-        ("unsupported", None, False),
+        ("no_data", None, True),
+        ("unsupported", None, True),
         ("no_data", "qualifier_not_bound", True),
-        ("unsupported", "variable_not_resolved", True),
-        ("no_data", "entity_not_resolved", True),
+        ("unsupported", "no_observations", True),
         ("definite", None, False),
         ("candidates", None, False),
-        ("no_data", "role_not_resolved", False),
-        ("no_data", "unit_not_resolved", False),
-        ("no_data", "no_observations", False),
+        ("definite", "qualifier_not_bound", False),
+        ("candidates", "variable_not_resolved", False),
     ],
 )
-async def test_a_parsed_search_offers_a_text_search_only_where_one_may_answer(
+async def test_a_parsed_search_offers_a_text_search_on_each_part_it_did_not_answer(
     status: str, reason: str | None, offered: bool
 ):
     reading: dict[str, Any] = {"variable": "climate finance", "status": status}
@@ -1122,8 +1120,13 @@ async def test_search_stores_a_reading_for_every_part_and_warnings_for_every_spe
 
     found = await tools["search"](ctx, [{"variable": "education aid"}])
 
-    # The model sees the part summaries, which carry none of the stored facts.
-    assert found["parts"] == graph_envelope(envelope)["part_digests"]
+    # The model sees the part summaries, which carry none of the stored facts, and
+    # on the part Search did not answer the offer of a search with the user's words.
+    summaries = [dict(part) for part in graph_envelope(envelope)["part_digests"]]
+    for summary in summaries:
+        if summary["status"] == "no_data":
+            summary["retry_with_text"] = orchestrator_tools.RETRY_WITH_TEXT
+    assert found["parts"] == summaries
     definite, no_data, candidates = (
         SearchReading.model_validate(stored) for stored in ctx.state["orchestrator:searches"]
     )

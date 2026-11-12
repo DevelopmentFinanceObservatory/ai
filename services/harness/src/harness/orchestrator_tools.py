@@ -1247,17 +1247,15 @@ _TEXT_TOO_LONG = f"text: String should have at most {MAX_RAW_QUERY_CHARS} charac
 _TEXT_SEARCHED_KEY = "orchestrator:text_searched"
 _TEXT_SEARCH_RAN = "*"
 # A parsed search's part reading that a search with the user's words may
-# answer carries this sentence as `retry_with_text`: a part Search refused for
-# a phrase it could not apply, a measure it could not resolve, or a place it
-# could not place once the place was corrected (`_RETRY_REASONS`). Search
-# states a reason only on a part it found no data for, so the reason alone
-# decides. Every other reason, and a part that states none, offers no such
-# search.
+# answer carries this sentence as `retry_with_text`: every part Search found
+# no data for or could not support (`_RETRY_STATUSES`), whatever reason it
+# states. A part Search answered, definite or with candidates, offers no such
+# search, whatever it left out.
 RETRY_WITH_TEXT = (
     "Search once more for this part alone: `text` set to the user's own words for it, and "
     "this part alone in `parts`."
 )
-_RETRY_REASONS = frozenset({"qualifier_not_bound", "variable_not_resolved", "entity_not_resolved"})
+_RETRY_STATUSES = frozenset({"no_data", "unsupported"})
 
 
 def _words(text: str) -> str:
@@ -1318,7 +1316,7 @@ def _offer_text_retries(
         return
     keys = [_part_key(part) for part in parts] if tied else None
     for index, reading in enumerate(readings):
-        if reading.get("reason") in _RETRY_REASONS and (
+        if reading.get("status") in _RETRY_STATUSES and (
             keys is None or keys[index] not in searched
         ):
             reading["retry_with_text"] = RETRY_WITH_TEXT
