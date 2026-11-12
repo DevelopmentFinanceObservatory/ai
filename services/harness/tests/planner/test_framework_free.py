@@ -1,5 +1,5 @@
-"""The planner's call record, tool specs and bodies, submission chain and translator
-import no ADK.
+"""The planner's call record, specs, bodies, run, submission chain and
+translator import no ADK.
 
 Each module's source is parsed. The check reads each module's own imports, so a
 module can load ADK through a module it imports. `planner/tools.py` holds the
@@ -7,6 +7,8 @@ planner's tool bodies over a `PlannerCall`, `planner/source_reads.py` the reads
 they make and `planner/skills.py` the skill reads. `planner/specs.py` declares
 each tool as a `planner/tool_spec.py` `ToolSpec`, whose declaration
 `planner/declaration.py` compacts. `planner/agent.py` serves the specs to ADK.
+`harness/planner_run.py` holds a planner run's bookkeeping, which
+`harness/planner_seam.py` drives from ADK's callbacks.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ _SRC = Path(__file__).parents[2] / "src"
 
 _MODULES = sorted(
     [
+        "harness/planner_run.py",
         "planner/call.py",
         "planner/declaration.py",
         "planner/skills.py",

@@ -412,6 +412,17 @@ def cut_user_text(text: str, cap: int) -> str:
     return (text[: max(cap - len(CUT_MARKER), 0)] + CUT_MARKER)[:cap]
 
 
+def truncate(text: str, cap: int) -> str:
+    """Return `text` when it is at most `cap` characters, else a prefix of it ending in "…".
+
+    The ellipsis is inside `cap`, so for a positive `cap` the result is never
+    longer than `cap`, and every caller passes a positive constant. Use it for
+    text the harness renders for a model, such as a candidate's label or a
+    decision's prose. `cut_user_text` marks a cut of the user's own words.
+    """
+    return text if len(text) <= cap else text[: cap - 1] + "…"
+
+
 # One word of a requirement's `across`, a party as the party word alone. A
 # requirement states each party once, so it holds at most one word per
 # `planner.parties.Party`.

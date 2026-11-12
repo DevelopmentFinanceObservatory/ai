@@ -139,7 +139,7 @@ def _offered_candidates(args: dict[str, Any]) -> dict[str, frozenset[str]]:
       model supplied, flat -- `args["candidates"]`, the one question `q1`.
     - the graph's `ask` node, under `harness.graph`'s `CLARIFY_INTERRUPT`:
       its `args` hold the whole interrupt request, so the caller's own
-      `payload` nests under `args["payload"]` (`planner.agent._session_steps`
+      `payload` nests under `args["payload"]` (`planner.agent.session_steps`
       says how the session records it). Its `questions` each carry their own `id` and
       `candidates`, whose ids are scoped to that question. A `payload` with
       `candidates` and no `questions` holds the one question `q1`.
@@ -182,7 +182,7 @@ def prices_chosen(call: PlannerCall) -> dict[str, PricesChoice]:
     A prices refusal that sends the planner to the user (`detail.part`,
     `submission.prices_choice`) binds the planner's next ask offering
     `PRICES_OPTIONS` that reached the user (a refused ask leaves no step,
-    `planner.agent._session_steps`) to its part, and the user's pick there sets the part's
+    `planner.agent.session_steps`) to its part, and the user's pick there sets the part's
     prices, marked `asked` so the planner does not ask it again
     (`submission.prices_choice`). The user's own words there release the
     part's choice, as they do on the orchestrator's question, and a skip
@@ -398,7 +398,7 @@ def elected_spec_ids(call: PlannerCall) -> frozenset[str]:
 
     The record is read, not kept in a state key: the call carrying its
     offered candidates, and the answer once it arrives, are both in the
-    session's history (`planner.agent._session_steps` says how ADK writes
+    session's history (`planner.agent.session_steps` says how ADK writes
     them).
 
     Read across the whole session, not scoped to one invocation: the ask
@@ -615,7 +615,7 @@ def combination_picks(
     off that refusal's own response, so the model cannot point an ask at another sum. A
     refusal binds the first ask after it that reached the user and no other, so an ask
     with no refusal of its own before it asks about nothing. An ask the tool or ADK refused
-    leaves no step (`planner.agent._session_steps`), so it binds nothing and leaves the
+    leaves no step (`planner.agent.session_steps`), so it binds nothing and leaves the
     refusal for the next ask. Each response pairs with the nearest preceding call sharing
     its `id`, as `elected_spec_ids` pairs them. The combination ask is one question, `q1`
     (`harness.graph.state.resume_answers`). Each answer about a combination replaces the one

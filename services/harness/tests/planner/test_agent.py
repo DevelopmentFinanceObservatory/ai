@@ -327,7 +327,7 @@ HANDED_BACK_KINDS = (
 
 class _FakeSession:
     """A minimal stand-in for ADK's `Session`: just `.events`, read through
-    `planner.agent._session_steps` by `planner.call.elected_spec_ids` to find
+    `planner.agent.session_steps` by `planner.call.elected_spec_ids` to find
     what the user actually chose answering `ask_user_question`, and by
     `planner.call.answered_since_referral` to find whether they answered at
     all. Empty by default -- a test that needs an election on record populates
@@ -365,12 +365,12 @@ def _ask_event(candidates: list[dict[str, str]], *, call_id: str = "call-1") -> 
     carrying `candidates` in its `args` and `call_id` in its `id` -- the
     shape `planner.call.elected_spec_ids` pairs against a matching
     `_answer_event`'s `id`. A `SimpleNamespace` tree rather than a real
-    `google.adk.events.Event`: `planner.agent._session_steps` only ever reads
+    `google.adk.events.Event`: `planner.agent.session_steps` only ever reads
     `.content.parts[*].function_call.{id,name,args}` and
     `.content.parts[*].function_response`, so that is all this (and
     `_answer_event`, below) build. `function_response` is set to `None`
     explicitly -- a real ADK `Part` always carries the field, defaulting to
-    `None`, and `_session_steps` reads it unconditionally off every part.
+    `None`, and `session_steps` reads it unconditionally off every part.
     """
     call = SimpleNamespace(id=call_id, name=PLANNER_ASK, args={"candidates": candidates})
     part = SimpleNamespace(function_call=call, function_response=None)
@@ -14360,7 +14360,7 @@ def test_a_typed_message_is_one_step_whatever_else_its_event_carries() -> None:
         ),
     )
 
-    steps = planner_agent._session_steps([typed, answer])
+    steps = planner_agent.session_steps([typed, answer])
 
     assert [step.kind for step in steps] == ["message", "answer"]
 

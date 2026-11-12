@@ -38,7 +38,7 @@ from compiler.surface import (
     ToolSurfaceUnavailableError,
 )
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
-from harness.planner_seam import _not_ready
+from harness.planner_run import not_ready
 from harness.sentences import refusal_sentence
 from planner.operations import Translation
 from planner.plan import (
@@ -1810,7 +1810,7 @@ async def test_a_referral_on_a_copy_names_its_origin_to_the_model(
     assert answer["requirement_id"] == "debt"
     assert "'debt'" in str(answer["reason"])
     assert "debt_history" not in json.dumps(answer)
-    sentence = refusal_sentence(_not_ready(answer))
+    sentence = refusal_sentence(not_ready(answer))
     assert "'debt'" in sentence
     assert "debt_history" not in sentence
     stored = load_referral(context.state)

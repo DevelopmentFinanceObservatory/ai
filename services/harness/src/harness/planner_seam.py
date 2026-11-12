@@ -51,7 +51,6 @@ import asyncio
 import contextvars
 import json
 import logging
-import time
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -62,7 +61,7 @@ from common.telemetry import current_trace_id
 from compiler.compile import CompileIssueCode
 from compiler.surface import ToolSurface
 from data_mcp.skills_client import name_get_skill_in_call_lines
-from executor.classify import RECOVERABLE_SPEC_CODES, internal_fault
+from executor.classify import RECOVERABLE_SPEC_CODES
 from google.adk import Context, Event
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.base_llm import BaseLlm
@@ -97,7 +96,6 @@ from planner.plan import (
     clear_unsupported,
     current_discovery_time_left,
     cut_user_text,
-    discovery_time_left,
     held_sources,
     load_ask_breakdowns,
     load_asks,
@@ -114,6 +112,7 @@ from planner.plan import (
     save_plan_rounds,
     save_refused_specs,
     standing_block,
+    truncate,
     warning_codes,
     windowed_pins,
 )
@@ -148,7 +147,7 @@ from submission.service import (
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import CutCalls, current_cut_calls, resolving_once
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY, clear_compile_failures
-from translator.referral import USER_DECIDES, ReferralKind
+from translator.referral import ReferralKind
 from translator.tool import Translate, build_translate, permitted_repair
 
 from harness import plan_display
@@ -165,12 +164,21 @@ from harness.graph.state import (
     stored_mapping,
     stored_sequence,
 )
+from harness.planner_run import (
+    Ask,
+    Directive,
+    PlannerRun,
+    PlannerSeamError,
+    Stop,
+    closing_refusal,
+    failed_tool_answer,
+    not_ready,
+    referral_of,
+)
 from harness.prefix_cache import PrefixCache
 from harness.sentences import (
-    TERMINAL_PROPOSE_CODES,
     PlanWords,
     SeamCode,
-    referral_sentence,
     refusal_reason,
     refusal_sentence,
 )
@@ -190,15 +198,6 @@ from harness.turn_records import (
 from harness.usage import log_usage
 
 logger = logging.getLogger(__name__)
-
-# What `PlannerSeam._stalled_referral` counts a referral by: its kind,
-# requirement, constraint, and the (name, role) of each entity it leaves
-# unsettled.
-type StallKey = tuple[str, str | None, str | None, tuple[tuple[str, str | None], ...]]
-
-# Insurance against a runaway tool loop inside one agent run. A healthy plan
-# takes well under this many tool calls (skill reads and proposals).
-_MAX_EVENTS = 60
 
 # The branch every planner run is stamped with, so ADK's own branch filter
 # keeps the planner's events and another agent's apart. `ctx.run_node` is
@@ -278,11 +277,6 @@ _REFUSED_EARLIER = "on an earlier run"
 _PLAN_DESCRIPTION_CAP = 200
 _PLAN_RATIONALE_CAP = 300
 
-# A referral candidate's `label` is the resolve's own `rendered_sentence`,
-# which can run to a paragraph. Capped where `_pinnable_candidates` shapes
-# it for a question to the user.
-_CANDIDATE_LABEL_CAP = 120
-
 # A compiled source's `sentence` is the resolved reading in search's own
 # words. Capped so a nine-source plan cannot let one verbose sentence carry
 # the section.
@@ -325,83 +319,7 @@ _SHARE_UNIT_CODES = frozenset({"cross_frame_unit_unbound", "cross_frame_unit_mis
 _FACET_MISMATCH_CODE = "cross_frame_facet_mismatch"
 
 
-class PlannerSeamError(RuntimeError):
-    """The planner produced no plan ready for the user's answer.
-
-    Raised so that a plan the user approves is a plan
-    `planner.tools.declare_ready` declared ready.
-
-    `refusal` is the shape `harness.studio_translate._stream_fatal` reads
-    (`code`, `retry_mode`), so the user reads the sentence of its code. The
-    default code is `internal_error`, because the seam stopping on its own
-    account is a fault of the system, whatever the question. The wire
-    grammar has no member for it, so the frame states
-    `capability_unavailable`. Every way this seam fails on its own account
-    replays the same way against the same state, so the default is
-    `do_not_retry`. A caller told to retry a deterministic failure pays for
-    the same stall again. `fix.detail` holds the message for the log.
-    """
-
-    def __init__(self, message: str, *, refusal: dict[str, Any] | None = None) -> None:
-        super().__init__(message)
-        self.refusal = refusal or internal_fault(message)
-
-
-class _RunTracker:
-    """Per-`_propose` scratch state the planner's callbacks read and mutate
-    through `_active_call` (see `_CallState`).
-
-    Never a session field and never shared across calls: each `_propose`
-    call builds a fresh tracker, hands it to `_active_call.set(...)` for
-    the duration of its own `await ctx.run_node(...)` call, and resets
-    that var in a `finally` -- deterministically visible to the code
-    right after that `await` returns, no queue needed to get the count or
-    the stall back out, and never reachable from a callback firing for a
-    different call (see `PlannerSeam.__init__` and `PlannerSeam._propose`
-    for why the callbacks themselves are assigned once, not per call, and
-    therefore cannot close over their own call's tracker directly). See
-    `_track_tool_call`.
-    """
-
-    def __init__(self) -> None:
-        self.referral_counts: dict[StallKey, int] = {}
-        self.refused: dict[str, Any] | None = None
-        self.ready_to_break = False
-        # The `PLANNER_ASK` call args the next generation is replaced with,
-        # for a referral the user decides (`_user_decided_ask`).
-        self.ask: dict[str, Any] | None = None
-        self.submitted: dict[str, Any] | None = None
-        self.events = 0
-        # The referral the last translation with an `outcome` answered,
-        # or `None` once one of those translations answers something
-        # other than a referral -- see `_track_tool_call`. An entry that ends
-        # with no plan ready carries it (`_not_ready`).
-        self.last_referral: dict[str, Any] | None = None
-        # The clock a progress report's `duration_ms` measures against:
-        # reset every time one fires, so each report covers everything
-        # since the last one, including the thinking the model call that
-        # produced this one spent before ever emitting a function call --
-        # not a measurement of the call in isolation, which nothing here
-        # ever sees start.
-        self.last_progress = time.monotonic()
-
-
-@dataclass(frozen=True, slots=True)
-class _CallState:
-    """The one `_propose` call currently in flight through this seam's
-    permanently assigned callbacks, threaded through `_active_call`
-    instead of a closure.
-
-    Bundled in one object, not two separate `ContextVar`s, so one
-    `.set()`/reset pair covers both -- `tracker` and `on_progress` always
-    belong to the same call and are never meaningful apart.
-    """
-
-    tracker: _RunTracker
-    on_progress: Callable[[dict[str, Any]], None] | None
-
-
-# The call this seam's callbacks read their state from. A plain instance
+# The run this seam's callbacks report to. A plain instance
 # attribute would not do: `self._agent` is shared by every conversation
 # this process serves (see `PlannerSeam.__init__`), so its callbacks are
 # assigned once and have no per-call closure to read state from. A
@@ -416,7 +334,7 @@ class _CallState:
 # observable difference, and a module-level var is what the seam's
 # callbacks -- themselves free functions in every sense but their `self`
 # argument -- need no instance to reach.
-_active_call: contextvars.ContextVar[_CallState | None] = contextvars.ContextVar(
+_active_call: contextvars.ContextVar[PlannerRun | None] = contextvars.ContextVar(
     "planner_seam_active_call", default=None
 )
 
@@ -551,24 +469,22 @@ class PlannerSeam:
         # draft as the plan being changed.
         #
         # Written through `ctx.session.state`, not `ctx.state`, and so is
-        # every other write in this method: `ctx.state[key] = value` records
-        # the write in `ctx.actions.state_delta` for the framework to attach
-        # to this *node's own* event once it finishes, which -- since this
-        # write happens before `ctx.run_node` runs the planner and the node's
-        # own event does not finish until well after -- would sit there
-        # holding this stale seed until that later event re-applies it,
-        # overwriting whatever the dynamically-run pair wrote via
-        # `ctx.run_node` in between. Writing straight to the live
-        # `Session.state` dict skips that delta entirely: visible
-        # immediately to the planner's own tool calls (the same live dict,
-        # never copied mid-run), but not on its own durable across a
-        # `Runner.run_async` boundary -- a resume included. `_persist_durable`,
-        # below, is what closes that gap without reopening the stale-seed
-        # one: it mirrors whatever this method's own writes and the planner's
-        # now-settled ones actually left in the live dict, read fresh at the
-        # very end, into `ctx.state` -- so the delta this node's own event
-        # eventually carries is never older than what `ctx.run_node` itself
-        # already produced.
+        # every other write this method makes before its `finally`.
+        # `ctx.state[key] = value` records the write in
+        # `ctx.actions.state_delta`, which the framework attaches to this
+        # *node's own* event once it finishes. This write happens before
+        # `ctx.run_node` runs the planner, so it would sit in that delta until
+        # the node's event re-applies it, over whatever the planner's own tool
+        # calls wrote in between. A write to the live `Session.state` dict
+        # skips that delta. It is visible at once to the planner's tool calls
+        # (the same live dict, not a copy), but it is not durable on its own
+        # across a `Runner.run_async` boundary, a resume included. The two
+        # writes in the `finally`, `store_searched_pin_readings` and
+        # `_persist_durable`, go through `ctx.state`, since they run after
+        # `ctx.run_node` has returned and nothing the planner writes can follow
+        # them. `_persist_durable` mirrors into `ctx.state` what this method's
+        # writes and the planner's left in the live dict, so the delta this
+        # node's event carries is as new as what `ctx.run_node` produced.
         seeded = Plan.model_validate(prior_plan) if prior_plan is not None else None
         if seeded is not None and not ctx.resume_inputs:
             save_plan(cast(SessionState, ctx.session.state), seeded)
@@ -823,29 +739,24 @@ class PlannerSeam:
     def _persist_durable(ctx: Context) -> None:
         """Mirror this call's live `ctx.session.state` writes into `ctx.state`,
         so a real event carries them and they survive past this
-        `Runner.run_async` call -- a resume included.
+        `Runner.run_async` call, a resume included.
 
-        Read fresh off `ctx.session.state` right here, at the very end of
-        `__call__` (see its own `finally`), never restated from what
-        `__call__` wrote at its own top: `ctx.run_node`, in between, may have
+        Each value is read off `ctx.session.state` here, at the end of
+        `__call__` (its `finally`). `ctx.run_node`, in between, may have
         replaced `planner:plan` and `planner:rounds` several times over with
-        the planner's own, already-durable writes (`propose_plan`, through
-        `tool_context.state`). Mirroring the live value here, instead of
-        writing through `ctx.state` at the point each one is first set, is
-        what keeps this node's own delta -- which only ever flushes onto a
-        real event once this node's own run finishes or pauses, never
-        immediately -- from reapplying a stale seed over that fresher write
-        when it finally does.
+        the planner's own durable writes (`propose_plan`, through
+        `tool_context.state`), so what `__call__` wrote at its top may be
+        stale. This node's own delta flushes onto an event only once the node
+        finishes or pauses, so a value written through `ctx.state` when first
+        set would be applied over that newer write.
 
-        `PLAN_STATE_KEY` is the one exception to "only mirror what changed":
-        `__call__`'s own first-draft clear can leave the live plan `None` on
-        a session whose *durable* `ctx.state` still holds the plan of an
-        earlier `plan` call in the same turn -- a real value there that has to be overwritten, not merely left
-        unmirrored, or a later durable flush would reapply that stale plan
-        over the clear. `PLAN_STATE_KEY in ctx.session.state` (`__contains__`
-        on the plain `dict` ADK actually hands back for `ctx.session.state`,
-        true even holding `None`) is what tells that clear apart from a
-        session that has simply never held a plan, where there is nothing to
+        `PLAN_STATE_KEY` is mirrored even when the live plan is `None`.
+        `__call__`'s first-draft clear can leave it `None` on a session whose
+        durable `ctx.state` still holds the plan of an earlier `plan` call in
+        the same turn, which a later flush would otherwise apply over the
+        clear. `PLAN_STATE_KEY in ctx.session.state` (true even holding
+        `None`, since ADK hands back a plain `dict`) tells that clear apart
+        from a session that has held no plan, where there is nothing to
         overwrite.
         """
         session_state = cast(SessionState, ctx.session.state)
@@ -924,10 +835,11 @@ class PlannerSeam:
         (`_revision_refused`), the revision recording
         a version or not; the caller restores what it keeps. A translation
         that refers the plan back refuses as an entry ending on that
-        referral does: on its closing refusal (`_closing_refusal`), on the
-        service that did not answer for a transient one, which no later round
-        proposes again (`_unanswered`), or as `SeamCode.PLAN_NOT_READY` with
-        the referral's reason (`_not_ready`), since no model is there to
+        referral does: on its closing refusal
+        (`harness.planner_run.closing_refusal`), on the service that did not
+        answer for a transient one, which no later round proposes again
+        (`_unanswered`), or as `SeamCode.PLAN_NOT_READY` with the referral's
+        reason (`harness.planner_run.not_ready`), since no model is there to
         settle it.
 
         A `resolve_definition` call this turn already made is served its
@@ -974,12 +886,10 @@ class PlannerSeam:
         if recorded.get("outcome") != Outcome.OK.value:
             return self._revision_refused(recorded, words=plan_display.plan_words(prior))
         translation = await self._translate(call)
-        referral = PlannerSeam._referral_dict(translation)
+        referral = referral_of(translation)
         if referral is not None:
             return self._revision_refused(
-                PlannerSeam._closing_refusal(referral)
-                or _unanswered(referral)
-                or _not_ready(referral),
+                closing_refusal(referral) or _unanswered(referral) or not_ready(referral),
                 words=_revision_words(load_plan(state), prior, state=state),
             )
         answer = end_run_when_ready({**recorded, "translation": translation}, call)
@@ -1027,8 +937,9 @@ class PlannerSeam:
         and no refusal of its own ends on the bound that closed one of its
         model calls (`harness.turn_budget.TurnBudget.closed`), or else on
         `SeamCode.PLAN_NOT_READY`, carrying the referral the last translation
-        answered, if any (`_not_ready`). A run that ends on an accepted ask
-        answers neither: the ask is in session state for `__call__` to return.
+        answered, if any (`harness.planner_run.not_ready`). A run that ends on
+        an accepted ask answers neither: the ask is in session state for
+        `__call__` to return.
 
         `run_id` names the run the user's answer resumes, which the default
         would put on the path of the run that asked. A `single_turn` run reads
@@ -1063,8 +974,8 @@ class PlannerSeam:
         ADK release that stops honouring it. The check runs when the run
         raises as well.
         """
-        tracker = _RunTracker()
-        token = _active_call.set(_CallState(tracker=tracker, on_progress=on_progress))
+        run = PlannerRun(agent=self._agent.name, on_progress=on_progress)
+        token = _active_call.set(run)
         budget = current_turn_budget.get()
         time_left_token = current_discovery_time_left.set(
             budget.wall_left if budget is not None else None
@@ -1094,52 +1005,44 @@ class PlannerSeam:
         # The referral the run saw last, which the brief of the run the
         # user's answer resumes shows, since that run sees none of this one's
         # calls (`_answer_text`).
-        ctx.session.state[_ASKED_REFERRAL_STATE_KEY] = tracker.last_referral if asked else None
-        if tracker.submitted is None and tracker.refused is None and not asked:
+        ctx.session.state[_ASKED_REFERRAL_STATE_KEY] = run.last_referral if asked else None
+        if run.submitted is None and run.refused is None and not asked:
             closed = budget.closed if budget is not None else None
-            tracker.refused = closed or _not_ready(tracker.last_referral)
-        return tracker.submitted, plan, tracker.refused
+            run.refused = closed or not_ready(run.last_referral)
+        return run.submitted, plan, run.refused
 
     # -- the seam's own callbacks, assigned once in __init__ ----------------
     #
-    # Each reads `_active_call` for the call it belongs to. A callback that
-    # fires with nothing set there is not this seam's own call -- there is
-    # no other source, since `__init__` is the only place these are ever
-    # assigned, but a defensive no-op is still the right answer over a bare
-    # `None` dereference: a stray or unexpected firing should drop one
-    # progress report or skip one usage log, never crash a run some other
-    # conversation is mid-turn on.
+    # Each adapts one ADK callback to the `PlannerRun` on `_active_call`. A
+    # callback that fires with nothing set there is not this seam's own call.
+    # `__init__` is the only place these are assigned, so that cannot happen
+    # in practice, and a defensive no-op beats a bare `None` dereference: a
+    # stray firing drops one progress report or skips one usage log, and a
+    # run some other conversation is mid-turn on carries on.
 
     def _after_planner_tool(
         self, tool: BaseTool, args: dict[str, Any], tool_context: Any, tool_response: dict[str, Any]
     ) -> None:
+        """The planner's `after_tool_callback`, which passes the answer to
+        `PlannerRun.tool_answered`."""
         del args, tool_context
-        call = _active_call.get()
-        if call is None:
+        run = _active_call.get()
+        if run is None:
             logger.warning("planner after_tool_callback fired with no active call")
             return
-        self._track_tool_call(
-            call.tracker,
-            call.on_progress,
-            agent_name=self._agent.name,
-            tool=tool,
-            tool_response=tool_response,
-        )
+        run.tool_answered(tool.name, tool_response)
 
     def _on_planner_tool_error(
         self, tool: BaseTool, args: dict[str, Any], tool_context: Any, error: BaseException
     ) -> dict[str, Any] | None:
         """The planner's `on_tool_error_callback`: an `Exception` one of its
         own tools raised ends the entry on `SeamCode.PLANNER_TOOL_FAILED`, a
-        final refusal, instead of failing the turn.
+        final refusal, so the turn does not fail (`PlannerRun.tool_failed`).
 
         A name that is none of the planner's tools answers `None`, so ADK's
         own tool-not-found response, which lists the tools the model can
         call, stands. The dict returned for a real tool becomes that call's
-        function response, and `_after_planner_tool` still runs on it. The
-        dict carries no `outcome`, so `_track_tool_call` reads it as neither a
-        terminal refusal nor a translation. The model never reads it, since
-        `_before_planner_model` stops the run before the next generation.
+        function response, and `_after_planner_tool` still runs on it.
 
         ADK also calls it, for cleanup only, when a tool call is cancelled
         (`flows/llm_flows/tools/_error_handler.notify_tool_cancelled`). A
@@ -1150,45 +1053,32 @@ class PlannerSeam:
             return None
         if tool.name not in {t.name for t in self._agent.tools if isinstance(t, BaseTool)}:
             return None
-        error_class = type(error).__name__
         logger.error(
             "planner tool %s raised %s session=%s invocation=%s trace_id=%s",
             tool.name,
-            error_class,
+            type(error).__name__,
             tool_context.session.id,
             tool_context.invocation_id,
             current_trace_id(),
             exc_info=error,
         )
-        call = _active_call.get()
-        if call is None:
+        run = _active_call.get()
+        if run is None:
             logger.warning("planner on_tool_error_callback fired with no active call")
-        elif call.tracker.refused is None:
-            call.tracker.ready_to_break = True
-            call.tracker.refused = {
-                "code": SeamCode.PLANNER_TOOL_FAILED,
-                "detail": {"tool": tool.name},
-            }
-        return {"error": f"{tool.name} failed inside DFO ({error_class}). Do not repeat this call."}
+            return failed_tool_answer(tool.name, error)
+        return run.tool_failed(tool.name, error)
 
     def _after_planner_model(
         self, callback_context: Any, llm_response: LlmResponse
     ) -> LlmResponse | None:
-        """Log the generation's usage, and answer a call the request's budget
-        closed (`harness.turn_budget.CLOSED_BY_KEY`) with a question to the
-        user when the last referral names sources to choose from.
+        """Log the generation's usage, and hand a call the request's budget
+        closed (`harness.turn_budget.CLOSED_BY_KEY`) to `PlannerRun.model_answered`,
+        which may answer it with a question to the user.
 
-        The question is the same `PLANNER_ASK` call the planner's model
-        makes (`ask_user_question`, `planner.specs`), built here from the
-        referral's candidates (`_pinnable_candidates`), since no model call is
-        left to compose it, and its tool accepts it as any other, ending the
-        run on it. `populate_client_function_call_id` gives the call an id,
-        so the resume pairs with the user's answer the way a model-issued ask
-        does (`planner.call.elected_spec_ids`), and the answer arrives in a
-        request of its own, with a fresh budget. With nothing pinnable (no
-        referral, or a `no_data` referral, whose nearest-series candidates
-        carry no `spec_id`) the closing text stands: the tracker refuses on
-        the bound and the run ends on it.
+        That question is a model turn with one `PLANNER_ASK` call
+        (`_ask_response`). `populate_client_function_call_id` gives the call
+        an id, so the resume pairs with the user's answer the way a
+        model-issued ask does (`planner.call.elected_spec_ids`).
 
         Answers `None` for every other response, so `drop_thought_parts`,
         listed after this callback, still runs on it.
@@ -1197,136 +1087,30 @@ class PlannerSeam:
         if llm_response.usage_metadata is not None:
             log_usage(self._agent.name, llm_response.usage_metadata)
         metadata = llm_response.custom_metadata or {}
-        call = _active_call.get()
-        if CLOSED_BY_KEY not in metadata or llm_response.partial or call is None:
+        run = _active_call.get()
+        if CLOSED_BY_KEY not in metadata or llm_response.partial or run is None:
             return None
-        tracker = call.tracker
-        candidates = _pinnable_candidates(tracker.last_referral)
-        if not candidates:
-            tracker.ready_to_break = True
-            tracker.refused = {"code": SeamCode(metadata[CLOSED_BY_KEY]), "detail": {}}
-            return None
-        return _ask_response(_clarifying_question_args(candidates, lead=_BUDGET_CLOSED_LEAD))
+        return _directive_response(run.model_answered(metadata[CLOSED_BY_KEY]))
 
     def _before_planner_model(self, callback_context: Any, llm_request: Any) -> LlmResponse | None:
-        """Substitute a synthetic response once this call's own tracker is
-        ready to break (see `_propose`'s docstring). With no active call, see
-        the class-level note above, there is nothing to check against, so
-        `None` here means "generate normally," the same as every ordinary turn
-        this callback lets through.
+        """Substitute a synthetic response for the request when
+        `PlannerRun.next_request` asks or stops (see `_propose`'s docstring).
+        With no active call, see the class-level note above, there is nothing
+        to check against, so `None` here means "generate normally," the same
+        as every ordinary turn this callback lets through.
 
-        A referral the user decides (`_user_decided_ask`) is answered first,
-        with the `PLANNER_ASK` call it asks, which ends the run on the
-        question in place of a model turn composing it. Every break carries a
-        refusal, and the substituted text is that refusal's sentence
+        An ask answers with the `PLANNER_ASK` call it carries, which ends the
+        run on the question in place of a model turn composing it. A stop
+        answers with the refusal's sentence
         (`harness.sentences.refusal_sentence`). The request's budget is kept
         by the model itself (`harness.turn_budget.BoundedGemini`).
         """
         del callback_context, llm_request
-        call = _active_call.get()
-        if call is None:
+        run = _active_call.get()
+        if run is None:
             logger.warning("planner before_model_callback fired with no active call")
             return None
-        tracker = call.tracker
-        if tracker.ask is not None:
-            ask, tracker.ask = tracker.ask, None
-            return _ask_response(ask)
-        if not tracker.ready_to_break:
-            return None
-        assert tracker.refused is not None, "every break sets the refusal it ends on"
-        return _stop_response(tracker.refused)
-
-    @staticmethod
-    def _track_tool_call(
-        tracker: _RunTracker,
-        on_progress: Callable[[dict[str, Any]], None] | None,
-        *,
-        agent_name: str,
-        tool: BaseTool,
-        tool_response: dict[str, Any] | None,
-    ) -> None:
-        """The planner's `after_tool_callback`: progress, then what the answer settles.
-
-        A terminal refusal (`_is_terminal_refusal`) ends the turn, a `translation` is the
-        verdict on the plan the call recorded, and `summary` says the call declared that plan
-        ready (`planner.tools.declare_ready`).
-        """
-        tracker.events += 1
-        if tracker.events > _MAX_EVENTS:
-            raise PlannerSeamError(
-                f"the planner seam ran past {_MAX_EVENTS} events without settling"
-            )
-        if on_progress is not None:
-            now = time.monotonic()
-            on_progress(
-                {
-                    "agent": agent_name,
-                    "tools": [tool.name],
-                    "duration_ms": int((now - tracker.last_progress) * 1000),
-                }
-            )
-            tracker.last_progress = now
-        if PlannerSeam._is_terminal_refusal(tool_response):
-            # The proposal refused with a code that records nothing and
-            # leaves nothing correctable within this entry: the round cap
-            # (`planner.plan.MAX_PLAN_ROUNDS`, `BUDGET_EXHAUSTED`), or a
-            # restart while the graph holds the question fixed
-            # (`QUESTION_FIXED`, `planner.agent`'s `question_fixed` mode --
-            # this seam's own planner is always built that way, see
-            # `PlannerSeam.__init__`). The cap bounds the proposals within
-            # one entry into the planner, since `PlannerSeam.__call__`
-            # resets the count on each entry (see `__call__`); a restart is
-            # refused however fresh that budget is. `NOTHING_TO_PLAN` declines
-            # every ask, and `PRICES_UNSERVED` needs a search the planner
-            # cannot make (`submission.prices_choice`). Stop the planner's
-            # turn here in every case.
-            tracker.ready_to_break = True
-            tracker.refused = tool_response
-        elif isinstance(tool_response, dict):
-            translation = tool_response.get("translation")
-            if isinstance(translation, dict):
-                PlannerSeam._track_translation(tracker, translation)
-            if "summary" in tool_response:
-                tracker.submitted = tool_response
-
-    @staticmethod
-    def _track_translation(tracker: _RunTracker, tool_response: dict[str, Any] | None) -> None:
-        """Read one translation, the `translation` of an accepted `propose_plan`:
-        the referral it answered, and whether it ends the entry.
-
-        `last_referral` is written from every translation that carries an
-        `outcome`, referral or not: translation runs the whole plan, so each
-        outcome-bearing verdict states what is open across it right now, and
-        replaces whatever the last one recorded. `ok` means every
-        requirement compiled, which clears a referral the same way. A response
-        with no `outcome` settles nothing and is left alone.
-        An entry that ends with no plan ready carries `last_referral`
-        whichever way it landed (`_not_ready`).
-
-        An internal, repeated, budget-spent or never-issued failure, or a
-        transient one with no discovery time left (`_closing_refusal`), ends
-        the entry on its own refusal, since the next translation would stop
-        where this one did. A referral that recurs with nothing new
-        (`_stalled_referral`) ends it on `SeamCode.PLAN_NOT_READY`, carrying
-        that referral. Either way the planner's turn stops before its next
-        generation. A referral the user decides, with candidates to pick from
-        (`_user_decided_ask`), replaces that next generation with the
-        question it asks instead.
-        """
-        if isinstance(tool_response, dict) and "outcome" in tool_response:
-            tracker.last_referral = PlannerSeam._referral_dict(tool_response)
-        closing = PlannerSeam._closing_refusal(tracker.last_referral)
-        if closing is not None:
-            tracker.ready_to_break = True
-            tracker.refused = closing
-            return
-        ask = _user_decided_ask(PlannerSeam._referral_dict(tool_response))
-        if ask is not None:
-            tracker.ask = ask
-            return
-        if PlannerSeam._stalled_referral(tool_response, tracker.referral_counts):
-            tracker.ready_to_break = True
-            tracker.refused = _not_ready(tracker.last_referral)
+        return _directive_response(run.next_request())
 
     # Refusal codes after which no other plan for the same ask can succeed
     # in this turn: a fault in the system, a plan that failed the same way
@@ -1368,109 +1152,6 @@ class PlannerSeam:
         answer = PlannerSeam._refused(refused)
         answer["refused"]["reason"] = refusal_reason(refused, words=words)
         return answer
-
-    @staticmethod
-    def _is_terminal_refusal(tool_response: dict[str, Any] | None) -> bool:
-        """Whether a tool response refuses with one of
-        `harness.sentences.TERMINAL_PROPOSE_CODES`, which only a proposal (`propose_plan`)
-        answers: an outcome that records no new version and ends the entry.
-        """
-        return (
-            isinstance(tool_response, dict)
-            and tool_response.get("outcome") == "refused"
-            and tool_response.get("code") in TERMINAL_PROPOSE_CODES
-        )
-
-    @staticmethod
-    def _referral_dict(response: dict[str, Any] | None) -> dict[str, Any] | None:
-        """The referral a translation answers with, or `None` for any
-        other answer. It is the one check `_stalled_referral` and
-        `_track_translation`'s own `last_referral` bookkeeping both need, kept
-        here so the two never drift apart. A referral is the one answer that
-        names a `kind`, and `ok` and a problem name none.
-        """
-        if not isinstance(response, dict) or "kind" not in response:
-            return None
-        return response
-
-    @staticmethod
-    def _closing_refusal(referral: dict[str, Any] | None) -> dict[str, Any] | None:
-        """The refusal a referral ends the planner entry on, or `None` when the
-        planner may still settle it in this entry.
-
-        An `internal` referral ends it with its reference. One marked
-        `budget_spent` ends it as the data service unavailable, whatever else
-        it carries. One marked `not_issued`, for a call the request's
-        wall-clock bound left no time to make, ends it as that bound spent.
-        Any other `transient` referral once no discovery time is left
-        (`planner.plan.discovery_time_left`) ends it as the data service
-        unavailable: the call was made and did not answer, and no discovery
-        can run again in this request. Each of these
-        carries the requirement the referral is about and its reason. One
-        marked `repeated` ends it with what it is about, and the compile issue
-        a `requirement_needs_repair` one names as its `constraint`.
-        """
-        if referral is None:
-            return None
-        if referral.get("outcome") == Outcome.INTERNAL.value:
-            return {
-                "code": SeamCode.TRANSLATION_INTERNAL_FAILURE,
-                "detail": {"reference": str(referral.get("reference"))},
-            }
-        requirement_id = referral.get("requirement_id")
-        reason = referral.get("reason")
-        if referral.get("not_issued") and not referral.get("budget_spent"):
-            return {
-                "code": SeamCode.TURN_WALL_TIME_SPENT,
-                "detail": {"requirement_id": requirement_id, "reason": reason},
-            }
-        time_left = discovery_time_left()
-        out_of_time = (
-            referral.get("outcome") == Outcome.TRANSIENT.value
-            and time_left is not None
-            and time_left <= 0
-        )
-        if referral.get("budget_spent") or out_of_time:
-            return {
-                "code": SeamCode.DISCOVERY_UNAVAILABLE,
-                "detail": {"requirement_id": requirement_id, "reason": reason},
-            }
-        if referral.get("repeated"):
-            return {
-                "code": SeamCode.TRANSLATION_REPEATED,
-                "detail": _referral_detail(referral),
-            }
-        return None
-
-    @staticmethod
-    def _stalled_referral(response: dict[str, Any] | None, counts: dict[StallKey, int]) -> bool:
-        """Count one referral by its kind, its requirement, the compile
-        issue it names as its `constraint` and the entities its
-        `ambiguous_entities` leave unsettled, and answer whether that exact
-        referral has now come back a second time, which stops the run. Two
-        different repairs on one requirement count apart, so a planner that
-        fixes one compile issue per round keeps going, and an
-        `entity_name_ambiguous` referral covering fewer entities counts
-        apart, so a planner that settles one end of "aid from Congo to Congo"
-        per round keeps going too. A third repetition
-        would carry nothing a model could act on that the second one did not
-        already say. A referral marked `repeated` ends the entry instead
-        (`_closing_refusal`). A transient referral is never counted: the same
-        plan is worth proposing again.
-        """
-        referral = PlannerSeam._referral_dict(response)
-        if referral is None or referral.get("outcome") == Outcome.TRANSIENT.value:
-            return False
-        kind = referral.get("kind")
-        if kind is None:
-            return False
-        unsettled = tuple(
-            (reading["entity"]["name"], reading["entity"].get("role"))
-            for reading in referral.get("ambiguous_entities") or ()
-        )
-        key = (kind, referral.get("requirement_id"), referral.get("constraint"), unsettled)
-        counts[key] = counts.get(key, 0) + 1
-        return counts[key] >= 2
 
     # -- messages -----------------------------------------------------------
 
@@ -1711,19 +1392,6 @@ def _sources_by_spec_id(state: SessionState, plan: Plan) -> dict[str, SelectedSo
     blocks = _spec_blocks(state)
     sources = SourceReadings(lambda spec_id: blocks.get(to_origin.get(spec_id, spec_id)))
     return pinned_sources(plan.evidence_requirements, sources)
-
-
-def _referral_detail(referral: Mapping[str, Any]) -> dict[str, Any]:
-    """What a refusal ending on `referral` carries for its sentence and its reader."""
-    return {key: referral.get(key) for key in ("kind", "requirement_id", "reason", "constraint")}
-
-
-def _not_ready(referral: Mapping[str, Any] | None) -> dict[str, Any]:
-    """The refusal for an entry that ended with no plan ready, carrying `referral` if any."""
-    return {
-        "code": SeamCode.PLAN_NOT_READY,
-        "detail": _referral_detail(referral) if referral is not None else {},
-    }
 
 
 def _unanswered(referral: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -2021,88 +1689,15 @@ def _check_branches(events: Sequence[Event], *, planner: str) -> None:
         )
 
 
-def _pinnable_candidates(referral: dict[str, Any] | None) -> list[dict[str, str]]:
-    """The `spec_id`-bearing candidates a referral names, shaped as the
-    `candidates` argument of `ask_user_question` (`planner.specs`):
-    `{"spec_id": ..., "label": ...}`, with `label` the candidate's `sentence`.
-
-    A `no_data` referral's candidates (`translator.discovery.compact_source
-    (selectable=False)`) carry no `spec_id`, since they describe what search
-    found nearby rather than a source pinnable without a fresh search, so
-    they never appear here. `referral` is `None`, or carries no candidates,
-    for a translation this entry never saw, or one whose kind is
-    not among `translator.referral.MAY_CARRY_CANDIDATES`.
-    """
-    if not isinstance(referral, dict):
-        return []
-    if referral.get("kind") == "source_name_ambiguous":
-        return [
-            {"spec_id": str(candidate["ref"]), "label": str(candidate["label"])}
-            for group in referral.get("ambiguous_sources") or []
-            for candidate in group.get("candidates") or []
-        ]
-    candidates = referral.get("candidates")
-    if not isinstance(candidates, list):
-        return []
-    return [
-        {
-            "spec_id": str(candidate["spec_id"]),
-            "label": _truncate(str(candidate.get("sentence") or ""), _CANDIDATE_LABEL_CAP),
-        }
-        for candidate in candidates
-        if isinstance(candidate, dict) and candidate.get("spec_id")
-    ]
-
-
-# What the question a request's closing budget asks opens with.
-_BUDGET_CLOSED_LEAD = "This request reached its limit before the plan settled on a source."
-
-
-# What the question a referral's candidates put to the user asks: which one
-# they meant, or, when the source they named holds none of the data, which
-# other source to use.
-_WHICH_MEANT = "Which of these did you mean?"
-_WHICH_INSTEAD = "Which of these should be used instead?"
-
-
-def _clarifying_question_args(
-    candidates: list[dict[str, str]], *, lead: str, question: str = _WHICH_MEANT
-) -> dict[str, Any]:
-    """The `PLANNER_ASK` call args that put a referral's pinnable
-    candidates to the user, in the shape `ask_user_question` declares
-    (`planner.specs`). It is built here from the candidates, with no model call
-    composing it. `lead` says why
-    the user is asked and `question` what they are asked. It recommends no
-    candidate, since nothing has weighed them. The message reaches the user, so
-    it names no requirement id, referral kind or spec_id; each candidate's
-    label says what it is.
-    """
-    return {"message": f"{lead} {question}", "candidates": candidates}
-
-
-def _user_decided_ask(referral: Mapping[str, Any] | None) -> dict[str, Any] | None:
-    """The `PLANNER_ASK` call args for a referral the user decides, or
-    `None` for any other answer.
-
-    A referral of a kind in `translator.referral.USER_DECIDES` carrying
-    pinnable candidates (`_pinnable_candidates`) leaves the pick to the user,
-    so the seam asks it, led by the referral's sentence
-    (`harness.sentences.referral_sentence`); one marked `source_mismatch`
-    asks which other source to use instead. One with no candidates leaves
-    the planner to say what cannot be done and ask what to change.
-    """
-    if referral is None or referral.get("kind") not in USER_DECIDES:
-        return None
-    candidates = _pinnable_candidates(dict(referral))
-    if not candidates:
-        return None
-    source_mismatch = bool(referral.get("source_mismatch"))
-    lead = referral_sentence(
-        referral.get("kind"), referral.get("constraint"), source_mismatch=source_mismatch
-    )
-    return _clarifying_question_args(
-        candidates, lead=lead, question=_WHICH_INSTEAD if source_mismatch else _WHICH_MEANT
-    )
+def _directive_response(directive: Directive | None) -> LlmResponse | None:
+    """The model turn `directive` stands for, or `None` to keep the model's own."""
+    match directive:
+        case Ask(args=args):
+            return _ask_response(args)
+        case Stop(refusal=refusal):
+            return _stop_response(refusal)
+        case None:
+            return None
 
 
 def _ask_response(args: dict[str, Any]) -> LlmResponse:
@@ -2321,12 +1916,12 @@ def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] 
             lines.append(f"- {_scalar(decision)}")
             continue
         lines.append(f"- {_scalar(decision.get('slot'))}: {_scalar(decision.get('chosen'))}")
-        description = _truncate(str(decision.get("description") or ""), _PLAN_DESCRIPTION_CAP)
+        description = truncate(str(decision.get("description") or ""), _PLAN_DESCRIPTION_CAP)
         if description:
             lines.append(f"  description: {description}")
         options = decision.get("options") or []
         lines.append("  options: " + _list_text(options))
-        rationale = _truncate(str(decision.get("rationale") or ""), _PLAN_RATIONALE_CAP)
+        rationale = truncate(str(decision.get("rationale") or ""), _PLAN_RATIONALE_CAP)
         if rationale:
             lines.append(f"  rationale: {rationale}")
         lines.append(f"  resolved_by: {_scalar(decision.get('resolved_by'))}")
@@ -2419,7 +2014,7 @@ def _workflow_lines(workflow: dict[str, Any], *, stated: Collection[str] = ()) -
             if not isinstance(source, dict):
                 named.append(_scalar(source))
                 continue
-            sentence = _truncate(str(source.get("sentence") or ""), _PLAN_SOURCE_SENTENCE_CAP)
+            sentence = truncate(str(source.get("sentence") or ""), _PLAN_SOURCE_SENTENCE_CAP)
             spec_id = _scalar(source.get("spec_id"))
             name = f"{spec_id} -- {sentence}" if sentence else spec_id
             named.append(name + _measure_choice_text(source.get("elected_measure"), stated))
@@ -2491,15 +2086,6 @@ def _list_text(values: Any) -> str:
     if not isinstance(values, list):
         return _scalar(values)
     return ", ".join(_scalar(value) for value in values) if values else "(none)"
-
-
-def _truncate(text: str, cap: int) -> str:
-    """`text` cut to `cap` chars with a trailing ellipsis, and nothing else.
-
-    Same convention as `harness.studio_translate._clipped`. The ellipsis is
-    inside the cap, so the rendered length is the cap and not the cap plus one.
-    """
-    return text if len(text) <= cap else text[: cap - 1] + "…"
 
 
 def _stops(refusal: dict[str, Any] | None) -> list[dict[str, Any]]:

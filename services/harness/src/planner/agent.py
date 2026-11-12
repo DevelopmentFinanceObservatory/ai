@@ -509,7 +509,7 @@ class AdkCall:
     `ToolContext` is `Context` (`google.adk.tools.tool_context`), so
     `tool_context.session` is the same live `Session` every other seam
     shares, `events` included. The steps are those events read as
-    `_session_steps` reads them.
+    `session_steps` reads them.
     """
 
     tool_context: ToolContext
@@ -526,10 +526,10 @@ class AdkCall:
 
     @functools.cached_property
     def _steps(self) -> tuple[Step, ...]:
-        return tuple(_session_steps(self.tool_context.session.events, serving=self.call_id))
+        return tuple(session_steps(self.tool_context.session.events, serving=self.call_id))
 
     def steps(self) -> Sequence[Step]:
-        """`_session_steps` over the call's session events, read once per call.
+        """`session_steps` over the call's session events, read once per call.
 
         An `AdkCall` serves one tool call, and ADK appends a model response's
         events only after its tool calls finish, so the events a call sees do
@@ -597,7 +597,7 @@ def _in_flight_calls(events: Sequence[Event], serving: str | None) -> frozenset[
     return frozenset(call.id for call in calls if call.id and call.id not in answered)
 
 
-def _session_steps(events: Sequence[Event], *, serving: str | None = None) -> Iterator[Step]:
+def session_steps(events: Sequence[Event], *, serving: str | None = None) -> Iterator[Step]:
     """The steps of a session's `events`, in event order (`planner.call.Step`).
 
     The only reader of ADK events in the planner. A message the user typed

@@ -24,11 +24,11 @@ import copy
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast, override
+from typing import Any, NamedTuple, cast, override
 
 import pytest
 from compiler.evidence import resolve_name
@@ -42,6 +42,7 @@ from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
+from google.adk.sessions.state import State
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.long_running_tool import LongRunningFunctionTool
@@ -60,20 +61,24 @@ from harness.graph.state import (
     ORCHESTRATOR_SPECS_KEY,
 )
 from harness.orchestrator_tools import _search_context
+from harness.planner_run import (
+    _WHICH_INSTEAD,
+    _WHICH_MEANT,
+    PlannerRun,
+    StallKey,
+    _clarifying_question_args,
+    _is_terminal_refusal,
+    _pinnable_candidates,
+    _stalled_referral,
+)
 from harness.planner_seam import (
     _ASKED_REFERRAL_INTRO,
     _PLANNER_BRANCH,
     _SHARE_UNIT_CODES,
-    _WHICH_INSTEAD,
-    _WHICH_MEANT,
     PlannerSeam,
     PlannerSeamError,
-    StallKey,
     _check_branches,
-    _clarifying_question_args,
-    _pinnable_candidates,
     _plan_context,
-    _RunTracker,
     _skills_section,
 )
 from harness.scripted import use_compiled_proposals
@@ -328,6 +333,7 @@ class _SeamHarness:
         self._sessions = InMemorySessionService()
         self._session_id: str | None = None
         self._initial_state = dict(state or {})
+        self._live_state: Mapping[str, Any] = {}
 
     async def run(
         self,
@@ -344,6 +350,7 @@ class _SeamHarness:
 
         async def _node(ctx: Context, node_input: Any) -> AsyncIterator[Any]:
             del node_input
+            self._live_state = ctx.session.state
             if resume_inputs is not None:
                 # `ctx.resume_inputs` reflects a genuine pause-and-resume of
                 # THIS node's own interrupt, the planner's ask this node
@@ -400,6 +407,11 @@ class _SeamHarness:
         )
         assert session is not None
         return session.events
+
+    def live_state(self) -> Mapping[str, Any]:
+        """The session state the last `run()` read and wrote in process, which
+        holds writes no event carried to the store."""
+        return self._live_state
 
     def seed_state(self, key: str, value: Any) -> None:
         """Write directly into the canonical stored session, for a test that
@@ -652,10 +664,8 @@ def test_a_cancelled_planner_tool_call_records_no_failure(
     the entry is left to end the way the cancellation ends it."""
     seam = _seam()
     (tool,) = [t for t in seam._agent.tools if isinstance(t, BaseTool) and t.name == "get_skill"]
-    tracker = _RunTracker()
-    token = planner_seam._active_call.set(
-        planner_seam._CallState(tracker=tracker, on_progress=None)
-    )
+    tracker = PlannerRun(agent="dfo_planner")
+    token = planner_seam._active_call.set(tracker)
     tool_context = SimpleNamespace(session=SimpleNamespace(id="s"), invocation_id="i")
     try:
         with caplog.at_level(logging.ERROR, logger=planner_seam.logger.name):
@@ -1093,7 +1103,7 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() 
     planner's run, and the seam answers the ask, which the node pauses on, so
     the node resolves no output. The call's own function-call event is on
     record afterward, in the session's own event history
-    (`planner.agent._session_steps`'s own docstring). But an offer is not an
+    (`planner.agent.session_steps`'s own docstring). But an offer is not an
     election: with no answer from the user on record, nothing the call
     offered counts as something the user chose.
     """
@@ -2839,17 +2849,17 @@ def test_an_amend_or_replan_brief_is_the_first_draft_brief_then_its_ask(
 
 
 def test_terminal_refusal_covers_budget_exhausted_and_question_fixed_but_not_invalid_plan() -> None:
-    """`_is_terminal_refusal` is what `_track_tool_call` uses to stop the
+    """`_is_terminal_refusal` is what `PlannerRun.tool_answered` uses to stop the
     planner's turn on a `propose_plan` refusal that recorded nothing and
     left nothing to correct within this entry -- `BUDGET_EXHAUSTED`,
     `QUESTION_FIXED`, `NOTHING_TO_PLAN` and `PRICES_UNSERVED` alike. `INVALID_PLAN` -- a
     question-changing amendment under `question_fixed`, say -- is not among them: it is
     correctable, so the model gets to retry rather than the turn ending on it."""
     for code in ("budget_exhausted", "question_fixed", "nothing_to_plan", "prices_unserved"):
-        assert PlannerSeam._is_terminal_refusal({"outcome": "refused", "code": code})
-    assert not PlannerSeam._is_terminal_refusal({"outcome": "refused", "code": "invalid_plan"})
-    assert not PlannerSeam._is_terminal_refusal({"outcome": "ok", "code": "question_fixed"})
-    assert not PlannerSeam._is_terminal_refusal(None)
+        assert _is_terminal_refusal({"outcome": "refused", "code": code})
+    assert not _is_terminal_refusal({"outcome": "refused", "code": "invalid_plan"})
+    assert not _is_terminal_refusal({"outcome": "ok", "code": "question_fixed"})
+    assert not _is_terminal_refusal(None)
 
 
 # -- user text in the brief is cut at the question cap ---------------------------
@@ -3142,8 +3152,8 @@ def test_stalled_referral_stops_on_the_second_identical_referral_not_the_first(
 ) -> None:
     counts: dict[tuple[str, Any, Any], int] = {}
 
-    assert PlannerSeam._stalled_referral(first, counts) is False
-    assert PlannerSeam._stalled_referral(second, counts) is stalled
+    assert _stalled_referral(first, counts) is False
+    assert _stalled_referral(second, counts) is stalled
 
 
 def _congo(*roles: str) -> dict[str, Any]:
@@ -3181,8 +3191,8 @@ def test_an_entity_referral_covering_fewer_entities_is_progress(
     counts: dict[StallKey, int] = {}
 
     *earlier, last = rounds
-    assert [PlannerSeam._stalled_referral(one, counts) for one in earlier] == [False] * len(earlier)
-    assert PlannerSeam._stalled_referral(last, counts) is stalled
+    assert [_stalled_referral(one, counts) for one in earlier] == [False] * len(earlier)
+    assert _stalled_referral(last, counts) is stalled
 
 
 @pytest.mark.parametrize("kind", ["discovery_unavailable", "surface_unavailable"])
@@ -3196,7 +3206,7 @@ def test_a_transient_referral_never_stalls(kind: str) -> None:
     }
 
     for _ in range(3):
-        assert PlannerSeam._stalled_referral(referred, counts) is False
+        assert _stalled_referral(referred, counts) is False
     assert counts == {}
 
 
@@ -3208,24 +3218,16 @@ def test_stalled_referral_ignores_a_response_that_is_not_a_referral() -> None:
         "message": "no such requirement",
     }
 
-    assert PlannerSeam._stalled_referral(problem_response, counts) is False
-    assert PlannerSeam._stalled_referral(problem_response, counts) is False
+    assert _stalled_referral(problem_response, counts) is False
+    assert _stalled_referral(problem_response, counts) is False
     assert counts == {}
 
 
-def _track_proposal(tracker: _RunTracker, translation: dict[str, Any]) -> None:
+def _track_proposal(tracker: PlannerRun, translation: dict[str, Any]) -> None:
     """Track one accepted `propose_plan` whose translation answered `translation`."""
-    PlannerSeam._track_tool_call(
-        tracker,
-        None,
-        agent_name="dfo_planner",
-        tool=cast(BaseTool, SimpleNamespace(name="propose_plan")),
-        tool_response={
-            "outcome": "ok",
-            "status": "draft",
-            "version": 1,
-            "translation": translation,
-        },
+    tracker.tool_answered(
+        "propose_plan",
+        {"outcome": "ok", "status": "draft", "version": 1, "translation": translation},
     )
 
 
@@ -3233,7 +3235,7 @@ def test_a_stalled_referral_ends_the_entry_on_plan_not_ready_carrying_its_constr
     """The second identical repair referral ends the entry with no further
     round: the refusal carries the compile issue the referral names, which
     the user's sentence states (`harness.sentences.referral_reason`)."""
-    tracker = _RunTracker()
+    tracker = PlannerRun(agent="dfo_planner")
     referred = {
         "outcome": "invalid_input",
         "kind": "requirement_needs_repair",
@@ -3302,7 +3304,7 @@ def test_a_closing_referral_ends_the_entry_on_the_proposal_carrying_it(
     before, or a data service that timed out until the discovery budget was
     spent ends the entry as a final refusal naming what stopped it, as soon
     as a proposal's translation answers with it."""
-    tracker = _RunTracker()
+    tracker = PlannerRun(agent="dfo_planner")
     _track_proposal(tracker, referral)
 
     assert tracker.ready_to_break
@@ -3355,7 +3357,7 @@ def test_a_transient_referral_ends_the_entry_as_the_wall_bound_only_for_a_call_n
         "reason": reason,
         **marks,
     }
-    tracker = _RunTracker()
+    tracker = PlannerRun(agent="dfo_planner")
     token = current_discovery_time_left.set(None if time_left is None else lambda: time_left)
     try:
         _track_proposal(tracker, referral)
@@ -3373,12 +3375,12 @@ def test_a_transient_referral_ends_the_entry_as_the_wall_bound_only_for_a_call_n
 
 
 def test_last_referral_is_cleared_once_a_later_translation_resolves_the_requirement() -> None:
-    """`_track_tool_call` writes `tracker.last_referral` from every translation
+    """`PlannerRun.tool_answered` writes `tracker.last_referral` from every translation
     carrying an `outcome`, referral or not, replacing whatever the
     last one recorded: a later `ok` response clears it, so an entry that
     ends after that clear carries no referral the plan no longer has
-    (`_not_ready`)."""
-    tracker = _RunTracker()
+    (`not_ready`)."""
+    tracker = PlannerRun(agent="dfo_planner")
     referred = {
         "outcome": "choice_required",
         "kind": "source_ambiguous",
@@ -3396,10 +3398,10 @@ def test_last_referral_is_cleared_once_a_later_translation_resolves_the_requirem
 
 def test_last_referral_survives_a_translation_carrying_no_outcome() -> None:
     """A translation missing its own `outcome` key -- not a shape
-    translation itself ever returns, but the defensive case `_referral_dict`
+    translation itself ever returns, but the defensive case `referral_of`
     already reads for -- leaves `last_referral` as it was, so an entry that
     ends right after still carries the last real referral."""
-    tracker = _RunTracker()
+    tracker = PlannerRun(agent="dfo_planner")
     referred = {
         "outcome": "choice_required",
         "kind": "source_ambiguous",
@@ -4704,6 +4706,213 @@ async def test_a_later_first_draft_reads_none_of_the_earlier_plans_alignments(
     assert alignments(state) == {}
 
 
+_ASK_A_SOURCE = (
+    PLANNER_ASK,
+    {
+        "message": "Which source did you mean?",
+        "candidates": [{"spec_id": SPEC, "label": "a candidate"}],
+        "recommended_spec_id": SPEC,
+        "rationale": "broader coverage",
+    },
+)
+
+# A translation's referral the planner's run ends on asking about.
+_NEEDS_REPAIR = {
+    "outcome": "invalid_input",
+    "kind": "requirement_needs_repair",
+    "requirement_id": "debt",
+    "constraint": "requirement_unmeetable",
+    "reason": "no source states it",
+}
+
+
+# What a key the stored session lacks reads as.
+_ABSENT = object()
+
+
+class _Drafts(NamedTuple):
+    """What a scenario proposes, and the translated plan an entry amends."""
+
+    proposal: dict[str, Any]
+    plan: Plan
+
+
+async def _assert_stored_as_live(harness: _SeamHarness) -> None:
+    """Every key the last run left in the live session state, but a `temp:`
+    one, is in the session reloaded from the store with the same value. A key
+    the live state holds as `None` may be absent from the store."""
+    stored = await harness.state()
+    lost: dict[str, tuple[Any, Any]] = {}
+    for key, value in harness.live_state().items():
+        held = stored.get(key, _ABSENT)
+        if key.startswith(State.TEMP_PREFIX) or held == value:
+            continue
+        if value is None and held is _ABSENT:
+            continue
+        lost[key] = (value, held)
+    assert lost == {}
+
+
+def _answer_to_the_last_ask(events: list[Event]) -> types.Content:
+    return types.Content(
+        role="user",
+        parts=[
+            create_request_input_response(
+                _pending_ask_interrupt_id(events), {"result": {"spec_id": SPEC}}
+            )
+        ],
+    )
+
+
+async def _first_draft_proposes(harness: _SeamHarness, drafts: _Drafts) -> None:
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(script=[[("propose_plan", drafts.proposal)], "stop"])
+    await harness.run(seam, question="kenya debt", readings=[])
+    await _assert_stored_as_live(harness)
+
+
+async def _first_draft_asks(harness: _SeamHarness, drafts: _Drafts) -> None:
+    del drafts
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(script=[[_ASK_A_SOURCE]])
+    assert await harness.run(seam, question="kenya debt", readings=[]) is None
+    await _assert_stored_as_live(harness)
+
+
+async def _asks_after_a_referral(harness: _SeamHarness, drafts: _Drafts) -> None:
+    async def referring(call: Any) -> dict[str, object]:
+        del call
+        return dict(_NEEDS_REPAIR)
+
+    seam = PlannerSeam(settings=Settings(), surface=FixtureSurface(schemas=[]), translate=referring)
+    seam._agent.model = ScriptedPlannerLlm(
+        script=[[("propose_plan", drafts.proposal)], [_ASK_A_SOURCE]]
+    )
+    assert await harness.run(seam, question="kenya debt", readings=[]) is None
+    await _assert_stored_as_live(harness)
+
+
+async def _resumed_after_an_answer(harness: _SeamHarness, drafts: _Drafts) -> None:
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(
+        script=[[_ASK_A_SOURCE], [("propose_plan", drafts.proposal)], "stop"]
+    )
+    assert await harness.run(seam, question="kenya debt", readings=[]) is None
+    answer = _answer_to_the_last_ask(await harness.events())
+    await harness.run(seam, question="kenya debt", readings=[], new_message=answer)
+    await _assert_stored_as_live(harness)
+
+
+async def _resumed_proposes_and_asks_again(harness: _SeamHarness, drafts: _Drafts) -> None:
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(
+        script=[[_ASK_A_SOURCE], [("propose_plan", drafts.proposal)], [_ASK_A_SOURCE]]
+    )
+    assert await harness.run(seam, question="kenya debt", readings=[]) is None
+    answer = _answer_to_the_last_ask(await harness.events())
+    assert await harness.run(seam, question="kenya debt", readings=[], new_message=answer) is None
+    await _assert_stored_as_live(harness)
+
+
+async def _resumed_from_a_legacy_ask(harness: _SeamHarness, drafts: _Drafts) -> None:
+    del drafts
+    seam = _seam()
+    tools = list(seam._agent.tools)
+    seam._agent.tools = [*tools, LongRunningFunctionTool(adk_request_input)]
+    seam._agent.model = ScriptedPlannerLlm(
+        script=[[("adk_request_input", {"message": "Which source did you mean?"})]]
+    )
+    assert await harness.run(seam, question="kenya debt", readings=[]) is None
+    seam._agent.tools = tools
+    seam._agent.model = ScriptedPlannerLlm(script=["stop"])
+    answer = _answer_to_the_last_ask(await harness.events())
+    await harness.run(seam, question="kenya debt", readings=[], new_message=answer)
+    await _assert_stored_as_live(harness)
+
+
+async def _opened_by_a_card_pick(harness: _SeamHarness, drafts: _Drafts) -> None:
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(script=[[_ASK_A_SOURCE]])
+    assert (
+        await harness.run(
+            seam,
+            question=drafts.plan.question,
+            readings=[],
+            prior_plan=drafts.plan.model_dump(mode="json"),
+            pick=_PICKED,
+        )
+        is None
+    )
+    await _assert_stored_as_live(harness)
+
+
+async def _amended(harness: _SeamHarness, drafts: _Drafts) -> None:
+    await _first_draft_proposes(harness, drafts)
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(script=["stop"])
+    await harness.run(seam, question="kenya debt", readings=[], amendment="one total")
+    await _assert_stored_as_live(harness)
+
+
+async def _replanned_on_a_refusal(harness: _SeamHarness, drafts: _Drafts) -> None:
+    await _first_draft_proposes(harness, drafts)
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(script=["stop"])
+    await harness.run(seam, question="kenya debt", readings=[], refusal=_rediscovery_refusal(SPEC))
+    await _assert_stored_as_live(harness)
+
+
+async def _replanned_on_a_refusal_earning_a_decline(harness: _SeamHarness, drafts: _Drafts) -> None:
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(script=["stop"])
+    await harness.run(
+        seam,
+        question=drafts.plan.question,
+        readings=[],
+        prior_plan=drafts.plan.model_dump(mode="json"),
+        refusal=_unit_refusal("cross_frame_unit_unbound"),
+    )
+    await _assert_stored_as_live(harness)
+
+
+async def _a_second_first_draft(harness: _SeamHarness, drafts: _Drafts) -> None:
+    await _first_draft_proposes(harness, drafts)
+    await _first_draft_proposes(harness, drafts)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        _first_draft_proposes,
+        _first_draft_asks,
+        _asks_after_a_referral,
+        _resumed_after_an_answer,
+        _resumed_proposes_and_asks_again,
+        _resumed_from_a_legacy_ask,
+        _opened_by_a_card_pick,
+        _amended,
+        _replanned_on_a_refusal,
+        _replanned_on_a_refusal_earning_a_decline,
+        _a_second_first_draft,
+    ],
+)
+async def test_an_entry_leaves_no_session_write_out_of_the_stored_session(
+    scenario: Callable[[_SeamHarness, _Drafts], Awaitable[None]],
+    decision: Any,
+    requirement: Any,
+    derived_requirement: Any,
+) -> None:
+    """Every key a planner entry leaves in the live session state, when it
+    pauses on an ask or finishes, holds the same value in the stored session,
+    except `temp:` keys. Nothing the seam or the planner's tools write is lost
+    at the next `Runner.run_async`."""
+    drafts = _Drafts(
+        _amendment_proposal(decision, requirement, derived_requirement),
+        _translated_plan(decision, requirement, derived_requirement),
+    )
+    await scenario(_SeamHarness(), drafts)
+
+
 async def test_a_sixth_amendment_turn_still_records_its_own_version(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
@@ -5069,10 +5278,8 @@ def _closing_response(code: SeamCode) -> LlmResponse:
     )
 
 
-def _after_model_on(seam: PlannerSeam, tracker: _RunTracker, response: LlmResponse) -> Any:
-    token = planner_seam._active_call.set(
-        planner_seam._CallState(tracker=tracker, on_progress=None)
-    )
+def _after_model_on(seam: PlannerSeam, tracker: PlannerRun, response: LlmResponse) -> Any:
+    token = planner_seam._active_call.set(tracker)
     try:
         return seam._after_planner_model(SimpleNamespace(), response)
     finally:
@@ -5123,7 +5330,7 @@ def test_a_referral_resolved_by_a_later_ok_translation_lets_the_budget_refuse_in
     stands and the entry refuses on the bound, never the `ask_user_question`
     ask a still-open referral would get."""
     seam = _seam()
-    tracker = _RunTracker()
+    tracker = PlannerRun(agent="dfo_planner")
     referred = {
         "outcome": "choice_required",
         "kind": "source_ambiguous",
@@ -5148,7 +5355,7 @@ def test_a_referral_surviving_a_malformed_translation_still_gets_asked_when_the_
     candidates and asks through `ask_user_question`, the same as if the
     malformed response had never arrived."""
     seam = _seam()
-    tracker = _RunTracker()
+    tracker = PlannerRun(agent="dfo_planner")
     referred = {
         "outcome": "choice_required",
         "kind": "source_ambiguous",
@@ -5168,6 +5375,49 @@ def test_a_referral_surviving_a_malformed_translation_still_gets_asked_when_the_
         "spec_nominal",
         "spec_per_capita",
     }
+    assert tracker.refused is None
+
+
+def test_a_closing_code_outside_seam_code_still_asks_on_a_referral_with_candidates() -> None:
+    """The closing code is read as a `SeamCode` only when the entry refuses on
+    it, so a code no member names still asks the user over a referral that
+    names sources to pin."""
+    seam = _seam()
+    tracker = PlannerRun(agent="dfo_planner")
+    _track_proposal(
+        tracker,
+        {
+            "outcome": "choice_required",
+            "kind": "source_ambiguous",
+            "requirement_id": "gdp_gtm",
+            "candidates": [{"spec_id": "spec_nominal"}, {"spec_id": "spec_per_capita"}],
+        },
+    )
+    closing = LlmResponse(
+        content=types.Content(role="model", parts=[types.Part(text="closed")]),
+        custom_metadata={CLOSED_BY_KEY: "closed_by_a_newer_bound"},
+    )
+
+    response = _after_model_on(seam, tracker, closing)
+
+    assert response is not None
+    (part,) = response.content.parts
+    assert part.function_call is not None and part.function_call.name == PLANNER_ASK
+    assert tracker.refused is None
+
+
+def test_a_closing_code_outside_seam_code_raises_when_nothing_is_pinnable() -> None:
+    """With nothing to pin the entry refuses on the closing code, so a code no
+    `SeamCode` member names raises and records no refusal."""
+    seam = _seam()
+    tracker = PlannerRun(agent="dfo_planner")
+    closing = LlmResponse(
+        content=types.Content(role="model", parts=[types.Part(text="closed")]),
+        custom_metadata={CLOSED_BY_KEY: "closed_by_a_newer_bound"},
+    )
+
+    with pytest.raises(ValueError, match="closed_by_a_newer_bound"):
+        _after_model_on(seam, tracker, closing)
     assert tracker.refused is None
 
 
