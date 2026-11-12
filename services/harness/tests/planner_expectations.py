@@ -116,20 +116,48 @@ def _dumped(value: Any) -> str:
 def shared(value: Any, name: str) -> dict[str, str]:
     """A reference to `value`, stored once as `shared/<name>.json`.
 
-    A write run fails when one session gives two different values one name.
+    Each value is checked against that file as it is given its name, so a test
+    that gives several values one name passes only when every one of them
+    equals the stored value. A write run fails when one session gives two
+    different values one name.
     """
     produced = as_json(value)
+    path = _SHARED / f"{name}.json"
     if _WRITING:
         if name in _PRODUCED and _PRODUCED[name] != produced:
             pytest.fail(f"two values named shared/{name}.json", pytrace=False)
-        path = _SHARED / f"{name}.json"
         text = _dumped(produced)
         if not path.exists() or path.read_text() != text:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
             _CHANGED.append(path)
+    else:
+        stored = _stored_shared(name)
+        if produced != stored:
+            pytest.fail(_difference(stored, produced, name=f"shared/{name}"), pytrace=False)
     _PRODUCED[name] = produced
     return {"shared": name}
+
+
+def _stored_shared(name: str) -> Any:
+    """The value `shared/<name>.json` holds."""
+    path = _SHARED / f"{name}.json"
+    if not path.exists():
+        pytest.fail(f"no shared value {path.relative_to(PLANNER_RUNS)}", pytrace=False)
+    return json.loads(path.read_text())
+
+
+def _difference(stored: Any, produced: Any, *, name: str) -> str:
+    """The unified diff of `stored` and `produced` as their files' text."""
+    return "\n".join(
+        difflib.unified_diff(
+            _dumped(stored).splitlines(),
+            _dumped(produced).splitlines(),
+            fromfile=f"{name} (stored)",
+            tofile=f"{name} (produced)",
+            lineterm="",
+        )
+    )
 
 
 def resolved(value: Any, *, produced: bool = False) -> Any:
@@ -140,10 +168,7 @@ def resolved(value: Any, *, produced: bool = False) -> Any:
             name = value["shared"]
             if produced:
                 return _PRODUCED[name]
-            path = _SHARED / f"{name}.json"
-            if not path.exists():
-                pytest.fail(f"no shared value {path.relative_to(PLANNER_RUNS)}", pytrace=False)
-            return json.loads(path.read_text())
+            return _stored_shared(name)
         return {key: resolved(item, produced=produced) for key, item in value.items()}
     if isinstance(value, list):
         return [resolved(item, produced=produced) for item in value]
@@ -169,14 +194,8 @@ def assert_json_equal(produced: Any, stored: Any, *, name: str) -> None:
     whole = resolved(produced, produced=True)
     if produced == stored and whole == resolved(stored):
         return
-    diff = difflib.unified_diff(
-        _dumped(resolved(stored)).splitlines(),
-        _dumped(whole).splitlines(),
-        fromfile=f"{name} (stored)",
-        tofile=f"{name} (produced)",
-        lineterm="",
-    )
-    pytest.fail("\n".join(diff) or f"{name}: a shared value is named differently", pytrace=False)
+    diff = _difference(resolved(stored), whole, name=name)
+    pytest.fail(diff or f"{name}: a shared value is named differently", pytrace=False)
 
 
 def expect(name: str, value: Any) -> None:
