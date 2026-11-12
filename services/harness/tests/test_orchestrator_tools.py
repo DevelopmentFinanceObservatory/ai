@@ -693,6 +693,19 @@ async def test_a_part_with_its_entities_in_another_order_is_the_part_already_sea
 _UNBOUND = {"variable": "climate finance", "status": "no_data", "reason": "qualifier_not_bound"}
 
 
+@pytest.mark.parametrize("reason", ["entity_not_resolved", "role_not_resolved"])
+async def test_a_part_refused_for_a_place_or_a_role_is_offered_a_text_search_second(reason: str):
+    refused = {"variable": "climate finance", "status": "no_data", "reason": reason}
+    tools, ctx = _tools(_resolver(_digest(refused, kind="resolution")))
+    repaired = {**_RETRY_PART, "entities": [{"text": "Kenya", "role": "from"}]}
+
+    first = await tools["search"](ctx, [_RETRY_PART])
+    second = await tools["search"](ctx, [repaired])
+
+    assert "retry_with_text" not in first["parts"][0]
+    assert "retry_with_text" in second["parts"][0]
+
+
 @pytest.mark.parametrize(
     ("earlier", "offered"),
     [

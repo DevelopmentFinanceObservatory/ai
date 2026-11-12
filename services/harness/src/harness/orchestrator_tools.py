@@ -1248,9 +1248,9 @@ _TEXT_SEARCHED_KEY = "orchestrator:text_searched"
 _TEXT_SEARCH_RAN = "*"
 # A parsed search's part reading that a search with the user's words may
 # answer carries this sentence as `retry_with_text`: every part Search found
-# no data for or could not support (`_RETRY_STATUSES`), whatever reason it
-# states. A part Search answered, definite or with candidates, offers no such
-# search, whatever it left out.
+# no data for or could not support (`_RETRY_STATUSES`), with the one delay
+# `_REPAIRED_FIRST` states. A part Search answered, definite or with
+# candidates, offers no such search, whatever it left out.
 RETRY_WITH_TEXT = (
     "Search once more for this part alone: `text` set to the user's own words for it, and "
     "this part alone in `parts`."
@@ -1259,9 +1259,11 @@ _RETRY_STATUSES = frozenset({"no_data", "unsupported"})
 # The reasons the instruction repairs with another parsed search first: a place
 # sent as the model reads it, or `role` set on every name. A part refused for
 # one of them is offered the `text` search from its second such refusal in a
-# turn, under the measure it was sent with (`_REPAIRS_KEY`).
+# turn, under the measure it was sent with.
 _REPAIRED_FIRST = frozenset({"entity_not_resolved", "role_not_resolved"})
-_REPAIRS_KEY = "orchestrator:search_repairs_due"
+# The refusals for a `_REPAIRED_FIRST` reason seen this turn, each as the JSON
+# of the part's measure, as `_words` reads it, and the reason.
+_REFUSED_ONCE_KEY = "orchestrator:search_refused_once"
 
 
 def _words(text: str) -> str:
@@ -1322,7 +1324,7 @@ def _offer_text_retries(
     searched = set(state.get(_TEXT_SEARCHED_KEY) or ())
     untied_and_searched = not tied and _TEXT_SEARCH_RAN in searched
     keys = [_part_key(part) for part in parts] if tied else None
-    due = list(state.get(_REPAIRS_KEY) or [])
+    due = list(state.get(_REFUSED_ONCE_KEY) or [])
     refused: list[str] = []
     for index, reading in enumerate(readings):
         if reading.get("status") not in _RETRY_STATUSES:
@@ -1337,7 +1339,7 @@ def _offer_text_retries(
             continue
         reading["retry_with_text"] = RETRY_WITH_TEXT
     if refused:
-        state[_REPAIRS_KEY] = [*due, *(repair for repair in refused if repair not in due)]
+        state[_REFUSED_ONCE_KEY] = [*due, *(repair for repair in refused if repair not in due)]
 
 
 def _validated_arguments(
