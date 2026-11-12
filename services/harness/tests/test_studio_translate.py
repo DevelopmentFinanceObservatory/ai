@@ -1204,12 +1204,12 @@ _LONG_WORD = "Supercalifragilistic" * 8
         (
             {"position": 1, "count": 3, "description": _KENYA_SOURCE},
             "Retrying in 7s (attempt 2 of 3)",
-            "step 1 of 3 \u00b7 Retrying in 7s (attempt 2 of 3)",
+            "Retrying in 7s (attempt 2 of 3) \u00b7 step 1 of 3",
         ),
         (
             {"position": 2, "count": 3, "description": _LONG_SOURCE},
             "Preparing the dataset (in progress, 12s)",
-            "step 2 of 3 \u00b7 Preparing the dataset (in progress, 12s)",
+            "Preparing the dataset (in progress, 12s) \u00b7 step 2 of 3",
         ),
         (
             {"position": 2, "count": 3, "description": _LONG_SOURCE},
@@ -1241,6 +1241,11 @@ _LONG_WORD = "Supercalifragilistic" * 8
             "Result received; checking it",
         ),
         ({"position": 2, "count": 3, "description": 7}, None, "step 2 of 3"),
+        (
+            {"position": 2, "count": 3, "description": _KENYA_SOURCE},
+            "  ",
+            "step 2 of 3 \u00b7 " + _KENYA_SOURCE.removesuffix("."),
+        ),
         ({"position": None, "count": None, "description": None}, "Reading", "Reading"),
         ({"position": "1", "count": 3, "description": _KENYA_SOURCE}, "Reading", "Reading"),
         ({"position": 4, "count": 3, "description": _KENYA_SOURCE}, None, None),
@@ -1248,7 +1253,7 @@ _LONG_WORD = "Supercalifragilistic" * 8
         (
             {"position": 1, "count": 3, "description": _KENYA_SOURCE},
             _LONG_MESSAGE,
-            "step 1 of 3 \u00b7 " + "Preparing dataset " * 4 + "Preparing dataset\u2026",
+            "Preparing dataset " * 4 + "Preparing dataset\u2026 \u00b7 step 1 of 3",
         ),
         (
             {"position": None, "count": None, "description": None},
@@ -1270,6 +1275,7 @@ _LONG_WORD = "Supercalifragilistic" * 8
         "result-received",
         "result-received-off-the-card",
         "no-description",
+        "blank-message",
         "off-the-card",
         "position-a-string",
         "position-past-count",
@@ -1390,7 +1396,29 @@ def test_reading_the_plans_results_names_the_step_that_gives_the_answer(
         StepStatus.RUNNING,
         detail,
     )
-    assert len(detail or "") <= 110
+    assert len(line.detail or "") <= 110
+
+
+def test_a_refused_record_of_the_answer_step_keeps_its_label_off_the_reading_line() -> None:
+    """A step can leave two records (a rolling group's anchor call and its own
+    call); a refusal on the first stays on the step when the second reads ok."""
+    translator, surface_recorder = _progress_translator()
+    surface_recorder.set_step_order("c1", ["rank"], _LABELS)
+    translator.translate(
+        Event(
+            custom_metadata={
+                STEP_PROGRESS_KEY: {"step_id": "rank", "tool": "rank", "gives_answer": True}
+            }
+        )
+    )
+    refused = {"outcome": "refusal", "refusal": {"code": "service_unavailable", "message": "m"}}
+    surface_recorder._records.append(_analysis_record("rank", refused))
+    surface_recorder._records.append(_analysis_record("rank", _RANKED))
+
+    frames = translator.translate(_node_event("execute", route="ok", output={"frame_refs": []}))
+
+    (line,) = [f for f in frames if f.tool is None]
+    assert (line.label, line.detail) == ("Reading the plan's results", None)
 
 
 def test_a_mid_run_report_leaves_a_finished_steps_record_for_the_run_to_amend() -> None:

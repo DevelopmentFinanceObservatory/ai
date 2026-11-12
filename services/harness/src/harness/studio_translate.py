@@ -1003,11 +1003,17 @@ def _chart_key(chart: Mapping[Any, Any]) -> _ChartKey:
     return (str(chart.get("frame")), str(chart.get("type")))
 
 
+def _asked_charts(args: Mapping[str, Any]) -> list[Any]:
+    """The entries of a `make_charts` call's `charts`; none when it is not a list."""
+    asked = args.get("charts")
+    return asked if isinstance(asked, list) else []
+
+
 def _listed_charts(args: Mapping[str, Any]) -> frozenset[_ChartKey]:
     """The `_chart_key` of each chart a `make_charts` call asked for."""
-    asked = args.get("charts")
-    charts = asked if isinstance(asked, list) else []
-    return frozenset(_chart_key(chart) for chart in charts if isinstance(chart, Mapping))
+    return frozenset(
+        _chart_key(chart) for chart in _asked_charts(args) if isinstance(chart, Mapping)
+    )
 
 
 def _charts_to_correct(args: Mapping[str, Any], answer: Mapping[str, Any]) -> frozenset[_ChartKey]:
@@ -1347,7 +1353,7 @@ class _Translator:
       failed step and then "Reading why no plan was made" when the planner
       made no plan, and "Reading the plan's results" when the plan ran,
       opened at the execute node's result so it covers `plan_done` too, with
-      the result of the step that gives the answer as `detail`;
+      the plan's label for the step that gives the answer as `detail`;
     - a `complete` frame on a failed step's own wire id once a later try of
       the same step succeeds (`_retry_key`): the same tool with the same
       arguments, a later hand-off the planner takes for a failed hand-off,
@@ -1388,6 +1394,7 @@ class _Translator:
         # record shows it succeeded.
         self._answer_step: str | None = None
         self._answer_detail: str | None = None
+        self._answer_refused = False
         # Each plan step whose line a progress report opened and no record
         # has closed yet, by step id: its wire step id, label, tool and the
         # monotonic time of its first report.
@@ -1758,9 +1765,13 @@ class _Translator:
             if record.step_id is not None:
                 self._running_plan_steps.pop(record.step_id, None)
                 if record.step_id == self._answer_step:
+                    # A later ok record of the step does not clear a refusal.
+                    self._answer_refused = self._answer_refused or refused
                     label = plan_labels.get(record.step_id)
                     self._answer_detail = (
-                        None if refused or not label else _cut_at_word(label, _LINE_DETAIL_CAP)
+                        None
+                        if self._answer_refused or not label
+                        else _cut_at_word(label, _LINE_DETAIL_CAP)
                     )
             frames.append(
                 ActivityStep(
@@ -2271,6 +2282,7 @@ class _Translator:
                 # A replan runs a plan of its own, whose steps may reuse these
                 # ids, so each of its steps opens a line of its own.
                 self._answer_step = self._answer_detail = None
+                self._answer_refused = False
                 self._wire_step_ids.clear()
             return frames
         records = self._take_records()
@@ -2788,7 +2800,7 @@ def _tool_call_label(name: str, args: dict[str, Any], measure: str | None = None
     if name == "fetch" and measure:
         return f"Fetching {measure}"
     if name == "make_charts":
-        count = len(args.get("charts") or [])
+        count = len(_asked_charts(args))
         return f"Making {count} chart{'s' if count != 1 else ''}"
     if _is_canvas_listing(name, args):
         return "Looking at your canvas"
@@ -2909,9 +2921,10 @@ def _charts_detail(args: Mapping[str, Any], *, again: bool) -> str | None:
     """What a `make_charts` call draws: the title of the first chart it asks
     for, or of the first chart that states one when that chart has none, and
     how many more entries its `charts` holds, led by `again: ` when it draws
-    charts a refusal in this turn asked to correct (`_Translator._unredrawn`)."""
-    asked = args.get("charts")
-    charts = asked if isinstance(asked, list) else []
+    charts a refusal asked to correct earlier on the same stream
+    (`_Translator._unredrawn`); a redraw after the turn paused for a question
+    to the user is not led by it."""
+    charts = _asked_charts(args)
     titles = _texts(charts, "title")
     if not titles:
         return None
@@ -2986,9 +2999,11 @@ def _explain_detail(answer: dict[str, Any]) -> str | None:
 
 
 def _plan_step_detail(progress: Mapping[str, Any]) -> str | None:
-    """A plan step's running detail: `step <i> of <n>`, then the report's
-    message, or the card row's description when the report has none, joined
-    with " · " and cut at a word to `_LINE_DETAIL_CAP`.
+    """A plan step's running detail: the report's message then `step <i> of
+    <n>`, or, when the report has no message, `step <i> of <n>` then the card
+    row's description, joined with " · " and cut at a word to
+    `_LINE_DETAIL_CAP`. A message leads because the chat shows only the
+    detail's opening and a message counts the seconds a dataset has taken.
 
     The executor's `RESULT_RECEIVED` says only that the call returned, so on
     a step with a place on the card it counts as no message and the
@@ -2999,18 +3014,18 @@ def _plan_step_detail(progress: Mapping[str, Any]) -> str | None:
     type counts as absent.
     """
     message = progress.get("message")
-    message = message if isinstance(message, str) and message else None
+    message = message.strip() if isinstance(message, str) else ""
+    message = message or None
     position, count = progress.get("position"), progress.get("count")
     if not (type(position) is int and type(count) is int and 1 <= position <= count):
         return _cut_at_word(message, _LINE_DETAIL_CAP) if message else None
     place = f"step {position} of {count}"
-    said = message if message != RESULT_RECEIVED else None
+    room = _LINE_DETAIL_CAP - len(place) - len(" \u00b7 ")
+    if message and message != RESULT_RECEIVED:
+        return f"{_cut_at_word(message, room)} \u00b7 {place}"
     description = progress.get("description")
-    if said is None and isinstance(description, str):
-        said = description.strip().removesuffix(".")
-    if not said:
-        return place
-    return f"{place} \u00b7 {_cut_at_word(said, _LINE_DETAIL_CAP - len(place) - len(' · '))}"
+    described = description.strip().removesuffix(".") if isinstance(description, str) else ""
+    return f"{place} \u00b7 {_cut_at_word(described, room)}" if described else place
 
 
 def _cut_at_word(text: str, cap: int) -> str:

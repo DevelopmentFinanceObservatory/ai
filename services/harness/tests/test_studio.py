@@ -1401,7 +1401,7 @@ async def test_a_polled_get_data_step_updates_one_activity_line_until_it_complet
     get_data = [step for step in steps if step[1] == "get_data"]
     source = "life expectancy at birth in Kenya, 1960 to 2023"
     assert [(status, detail) for _, _, status, detail in get_data] == [
-        ("running", f"step 1 of 2 \u00b7 {_POLLING}"),
+        ("running", f"{_POLLING} \u00b7 step 1 of 2"),
         ("running", f"step 1 of 2 \u00b7 {source}"),
         ("complete", "64 observations \u00b7 World Development Indicators"),
     ]

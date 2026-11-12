@@ -609,7 +609,7 @@ def test_the_planning_line_names_what_the_plan_is_drafted_for(asks, detail):
     )
 
     assert _reading_lines(frames) == [("Working on a plan", StepStatus.RUNNING, detail)]
-    assert len(detail or "") <= 110
+    assert all(len(line[2] or "") <= 110 for line in _reading_lines(frames))
 
 
 def test_a_failed_skill_read_shows_and_a_successful_one_does_not():
@@ -1305,7 +1305,7 @@ def test_a_part_searched_again_in_the_users_words_reads_again(earlier, args, run
         ("Searching for data", StepStatus.RUNNING, running),
         ("Searching for data", StepStatus.COMPLETE, completed),
     ]
-    assert len(running) <= 110
+    assert all(len(f.detail or "") <= 110 for f in steps if f.status is StepStatus.RUNNING)
 
 
 def test_a_fetch_names_the_measure_its_search_found_and_carries_its_summary():
@@ -1537,6 +1537,7 @@ _LONG_TITLE = (
             "sub-Saharan Africa\u2026 \u00b7 +1 more",
         ),
         (lambda: [_call("c1", "make_charts", {"charts": "Aid to Kenya"})], None),
+        (lambda: [_call("c1", "make_charts", {"charts": 5})], None),
         (
             lambda: [
                 _call("c1", "make_charts", _NAMED_CHARTS),
@@ -1560,6 +1561,7 @@ _LONG_TITLE = (
         "first-title-unstated",
         "long-title",
         "charts-a-string",
+        "charts-a-number",
         "redrawn",
         "another-chart-after-a-refusal",
     ],
@@ -1580,7 +1582,7 @@ def test_a_chart_line_names_the_first_chart_it_draws_and_the_reading_line_repeat
     running = [f for f in frames if f.tool == "make_charts" and f.status is StepStatus.RUNNING]
     assert running[-1].detail == detail
     assert _reading_lines(read) == [("Going over the charts", StepStatus.RUNNING, detail)]
-    assert len(detail or "") <= 110
+    assert len(running[-1].detail or "") <= 110
 
 
 @pytest.mark.parametrize(

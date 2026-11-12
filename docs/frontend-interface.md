@@ -473,7 +473,7 @@ Notes on specific fields:
   The Activity feed keeps a line's first label and shows a later frame's
   `detail` as its summary.
 - A plan step's line opens when the step starts. Each `running` frame of
-  a plan step carries the whole running `detail`: `step i of n`, where `i` is the step's row on the plan card and `n` the number of rows, then a progress message when there is one (dataset preparation, a retry), else the step's description from the plan card (without its closing full stop), joined with " · ", as in "step 5 of 10 · Preparing the dataset (queued, 11s)". The message that says only that the call returned counts as none, so the description returns. A step the card does not show (a rolling copy folded into another row) carries its progress message alone. A step whose line is still `running` when the plan's run hands back, with nothing recorded for it, gets a `failed` frame then, whose `detail` says why in plain words.
+  a plan step carries the whole running `detail`: a progress message when there is one (dataset preparation, a retry) then `step i of n`, as in "Preparing the dataset (queued, 11s) · step 5 of 10", else `step i of n` then the step's description from the plan card (without its closing full stop), joined with " · ". `i` is the step's row on the plan card and `n` the number of rows. The message that says only that the call returned counts as none, so the description returns. A step the card does not show (a rolling copy folded into another row) carries its progress message alone. A step whose line is still `running` when the plan's run hands back, with nothing recorded for it, gets a `failed` frame then, whose `detail` says why in plain words.
 - Every running `detail` the harness composes for these lines is at most 110 characters: a plan step's, the asks on "Working on a plan", the charts on "Making N charts" and "Going over the charts", the words on "Searching for data", and the step label on "Reading the plan's results". A longer one is cut at a word and ends in "…"; a first word longer than the limit is cut inside the word. The chat's status line shows about 43 characters of it, so each detail leads with its point. The limits a reading line states (below) are summaries of results and can run longer.
 - While a skill read runs, the open status line gets a `running` frame
   whose `detail` is "reading a method note", for the agent's reads and the
@@ -492,7 +492,7 @@ Notes on specific fields:
   step reads "Looking at your canvas"), "Going over the notes on DFO", "Working out the next step" after a hand-off
   to the planner or a question to the user that was refused, and
   "Reading the plan's results" from the moment an approved plan finishes
-  running, with the plan's label for the step that gives the answer as `detail`, the label that step's own line carries, and no `detail` when that step was refused or failed. A batch that mixes tools is named by its latest stage (charts,
+  running, with the plan's label for the step that gives the answer as `detail`, absent when the plan gave that step no label or the step was refused or failed. A batch that mixes tools is named by its latest stage (charts,
   then fetch, then search, then recall). A successful plan hand-off opens
   "Working on a plan", whose `detail` is what the plan is for: the first
   output the agent's asks name, then `· +k more` for the others. A successful ask hands over to the question, and
@@ -510,7 +510,7 @@ Notes on specific fields:
   "Fetching <measure>" (detail: the retrieval's summary), "Making N
   charts" (detail while running: the first chart title, then `· +k more`
   for the other charts, led by `again: ` when it redraws charts a
-  refusal this turn asked to correct), and one step per card written ("Line chart: <title>"). The
+  refusal asked to correct earlier on the same stream; a redraw after the turn paused for a question to the user shows no `again: `), and one step per card written ("Line chart: <title>"). The
   calls a fetch makes on its own behalf (retrieving and checking the
   data), skill reads and the hand-off to the planner are not shown when
   they succeed; each still shows as a `failed` step when it fails. A
