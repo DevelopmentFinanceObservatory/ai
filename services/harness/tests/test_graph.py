@@ -522,6 +522,7 @@ async def test_execute_relays_a_report_while_its_step_is_still_running() -> None
         "position": 1,
         "count": 2,
         "description": "life expectancy at birth in Kenya, 1960 to 2023.",
+        "gives_answer": False,
     }
     totals = {
         "step_id": "totals",
@@ -532,6 +533,7 @@ async def test_execute_relays_a_report_while_its_step_is_still_running() -> None
             "The average of life expectancy at birth, grouped by year. "
             "Result: one figure per year, 1960-2023."
         ),
+        "gives_answer": True,
     }
     assert progress == [
         {**retrieve, "message": _PREPARING},

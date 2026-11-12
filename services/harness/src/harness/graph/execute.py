@@ -301,11 +301,13 @@ async def _stop(task: asyncio.Task[Any]) -> None:
 @dataclass(frozen=True)
 class _CardPlace:
     """Where a step sits on the plan card: its row's 1-based `position` among
-    `count` rows, and the row's `description`."""
+    `count` rows, the row's `description`, and whether its result answers
+    the question (`gives_answer`)."""
 
     position: int
     count: int
     description: str
+    gives_answer: bool
 
 
 def _card_places(plan: PlannerPlan) -> dict[str, _CardPlace]:
@@ -320,7 +322,10 @@ def _card_places(plan: PlannerPlan) -> dict[str, _CardPlace]:
     rows = plan_display.card_rows(plan)
     return {
         str(row["id"]): _CardPlace(
-            position=position, count=len(rows), description=str(row["description"])
+            position=position,
+            count=len(rows),
+            description=str(row["description"]),
+            gives_answer=bool(row["gives_answer"]),
         )
         for position, row in enumerate(rows, start=1)
     }
@@ -343,6 +348,7 @@ def _step_progress_event(report: _StepReport, *, tool: str, place: _CardPlace | 
                 "position": place.position if place else None,
                 "count": place.count if place else None,
                 "description": place.description if place else None,
+                "gives_answer": place.gives_answer if place else None,
             }
         }
     )

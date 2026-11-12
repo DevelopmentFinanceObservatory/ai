@@ -1353,7 +1353,6 @@ async def test_a_planners_own_labels_and_decisions_reach_the_plan_card(
 
 
 _POLLING = "Preparing the dataset (in progress, 12s)"
-_RECEIVED = "Result received; checking it"
 
 
 def _tool_steps(frames: list[dict[str, Any]]) -> list[tuple[str, str, str, str | None]]:
@@ -1385,7 +1384,8 @@ class _PollsOnceSurface(ScriptedSurface):
 async def test_a_polled_get_data_step_updates_one_activity_line_until_it_completes() -> None:
     """While `get_data` waits on a background operation, its step streams a
     `running` frame carrying data-mcp's report; once the call answers, the
-    line says so, then completes on the same `step_id`. Studio keeps one
+    line drops the report and shows the step's source again, then completes
+    on the same `step_id`. Studio keeps one
     Activity line per step, so the plan's two steps still read as two
     lines. A plan step's surface call is the only place progress reaches
     the wire: the agent's `fetch` calls `get_data` with none."""
@@ -1402,7 +1402,7 @@ async def test_a_polled_get_data_step_updates_one_activity_line_until_it_complet
     source = "life expectancy at birth in Kenya, 1960 to 2023"
     assert [(status, detail) for _, _, status, detail in get_data] == [
         ("running", f"{source} \u00b7 {_POLLING} \u00b7 step 1 of 2"),
-        ("running", f"{source} \u00b7 {_RECEIVED} \u00b7 step 1 of 2"),
+        ("running", f"{source} \u00b7 step 1 of 2"),
         ("complete", "64 observations \u00b7 World Development Indicators"),
     ]
     assert len({step_id for step_id, *_ in get_data}) == 1

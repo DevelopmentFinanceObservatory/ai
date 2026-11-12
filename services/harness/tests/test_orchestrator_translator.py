@@ -559,6 +559,59 @@ def test_a_successful_hand_off_to_the_planner_shows_only_the_planner_status_line
     assert _steps(frames) == [("Working on a plan", StepStatus.RUNNING)]
 
 
+_LONG_ASK = (
+    "Total official development assistance from the United Kingdom to health in Kenya, "
+    "by year since 2015, as a share of its total aid"
+)
+
+
+@pytest.mark.parametrize(
+    ("asks", "detail"),
+    [
+        ([{"text": "ODA to Kenya since 2015"}], "ODA to Kenya since 2015"),
+        (
+            [{"text": "ODA to Kenya since 2015"}, {"text": "a chart"}, {"text": "the top 5"}],
+            "ODA to Kenya since 2015 \u00b7 +2 more",
+        ),
+        (
+            [{"text": _LONG_ASK}, {"text": "a chart"}],
+            "Total official development assistance from the United Kingdom to health in "
+            "Kenya, by year since\u2026 \u00b7 +1 more",
+        ),
+        ([{"text": " "}, {"text": "a chart"}], "a chart"),
+        (["ODA to Kenya"], None),
+        ("ODA to Kenya", None),
+        (None, None),
+    ],
+    ids=["one", "several", "long", "first-blank", "strings", "a-string", "none"],
+)
+def test_the_planning_line_names_what_the_plan_is_drafted_for(asks, detail):
+    """ "Working on a plan" carries the first output the hand-off asks for and
+    how many more, within 110 characters, and keeps it when the planner node
+    opens the same line."""
+    translator = _translator()
+    args = {"brief": "b", **({"asks": asks} if asks is not None else {})}
+    call = types.FunctionCall(id="call_1", name="plan", args=args)
+    taken = types.FunctionResponse(
+        id="call_1", name="plan", response={"status": "Recorded.", HANDED_OFF: "plan"}
+    )
+    planner_started = Event(
+        author="dfo_analyst_graph",
+        node_info=NodeInfo(path="dfo_analyst_graph/planner@1"),
+        custom_metadata={"planner_started": {"revising": False}},
+    )
+
+    frames = _frames(
+        translator,
+        _event(types.Part(function_call=call)),
+        _event(types.Part(function_response=taken)),
+        planner_started,
+    )
+
+    assert _reading_lines(frames) == [("Working on a plan", StepStatus.RUNNING, detail)]
+    assert len(detail or "") <= 110
+
+
 def test_a_failed_skill_read_shows_and_a_successful_one_does_not():
     translator = _translator()
     read = types.FunctionCall(id="call_1", name="get_skill", args={"skill_id": "oda-measures"})
@@ -1059,7 +1112,7 @@ def test_a_later_call_of_its_tool_that_completes_settles_a_slip(events, settled)
 @pytest.mark.parametrize(
     ("args", "led_by"),
     [
-        ({"text": "aid to Kenya", "parts": [{"variable": "ODA"}]}, "aid to Kenya"),
+        ({"text": "aid to Kenya"}, "aid to Kenya"),
         (
             {"parts": [{"variable": "ODA"}, {"variable": "GDP"}, {}]},
             "ODA, GDP",
@@ -1128,6 +1181,57 @@ def test_a_search_step_leads_with_the_words_searched_for(args, led_by):
 
     steps = [f for f in frames if f.event == "activity.step" and f.tool == "search"]
     assert [f.detail for f in steps] == [led_by, led_by]
+
+
+_RETRY_WORDS = (
+    "total official development assistance from the United Kingdom to health and education "
+    "in Kenya and Uganda since 2015"
+)
+
+
+@pytest.mark.parametrize(
+    ("args", "running", "completed"),
+    [
+        (
+            {"text": "aid to Kenya for health", "parts": [{"variable": "ODA"}]},
+            "again: aid to Kenya for health",
+            "aid to Kenya for health",
+        ),
+        (
+            {"text": _RETRY_WORDS, "parts": [{"variable": "ODA"}]},
+            "again: total official development assistance from the United Kingdom to health "
+            "and education in Kenya and\u2026",
+            _RETRY_WORDS,
+        ),
+        (
+            {"text": "aid to Kenya", "parts": [{"variable": "ODA"}, {"variable": "GDP"}]},
+            "aid to Kenya",
+            "aid to Kenya",
+        ),
+        ({"text": "aid to Kenya", "parts": {"variable": "ODA"}}, "aid to Kenya", "aid to Kenya"),
+        ({"text": " ", "parts": [{"variable": "ODA"}]}, "ODA", "ODA"),
+    ],
+    ids=["one-part", "long-words", "two-parts", "parts-a-mapping", "blank-text"],
+)
+def test_a_part_searched_again_in_the_users_words_reads_again(args, running, completed):
+    """A search with `text` beside one part tries that part again in the
+    user's words, and its running line says so first, within 110
+    characters; the completed line and the label stay as for any search."""
+    search = types.FunctionCall(id="call_1", name="search", args=args)
+    answer = types.FunctionResponse(id="call_1", name="search", response={"parts": []})
+
+    frames = _frames(
+        _translator(),
+        _event(types.Part(function_call=search)),
+        _event(types.Part(function_response=answer)),
+    )
+
+    steps = [f for f in frames if f.event == "activity.step" and f.tool == "search"]
+    assert [(f.label, f.status, f.detail) for f in steps] == [
+        ("Searching for data", StepStatus.RUNNING, running),
+        ("Searching for data", StepStatus.COMPLETE, completed),
+    ]
+    assert len(running) <= 110
 
 
 def test_a_fetch_names_the_measure_its_search_found_and_carries_its_summary():
@@ -1314,7 +1418,8 @@ def test_a_chart_call_that_drew_only_some_of_its_charts_fails(asked, answer, rea
 
     running, failed = [f for f in frames if f.event == "activity.step"][:2]
     label = f"Making {len(asked)} charts"
-    assert (running.label, running.status, running.detail) == (label, StepStatus.RUNNING, None)
+    more = f"{asked[0]} \u00b7 +{len(asked) - 1} more"
+    assert (running.label, running.status, running.detail) == (label, StepStatus.RUNNING, more)
     assert (failed.label, failed.status) == (label, StepStatus.FAILED)
     said = [
         f"{classed_sentence(code, 'do_not_retry').removesuffix('.')}: {'; '.join(titles)}"
@@ -1326,6 +1431,82 @@ def test_a_chart_call_that_drew_only_some_of_its_charts_fails(asked, answer, rea
     assert "; ".join(said).startswith(failed.detail.removesuffix("\u2026"))
     assert is_user_sentence(failed.detail)
     assert "no such column" not in failed.detail
+
+
+_LONG_TITLE = (
+    "Official development assistance from every DAC member to every recipient in "
+    "sub-Saharan Africa, 2000 to 2023"
+)
+
+
+@pytest.mark.parametrize(
+    ("events", "detail"),
+    [
+        (lambda: [_call("c1", "make_charts", _CHARTS)], "Aid to Kenya"),
+        (
+            lambda: [
+                _call(
+                    "c1",
+                    "make_charts",
+                    {"charts": [{"title": "Aid to Kenya"}, {"title": "B"}, {"title": "C"}]},
+                )
+            ],
+            "Aid to Kenya \u00b7 +2 more",
+        ),
+        (
+            lambda: [_call("c1", "make_charts", {"charts": [{"title": 7}, {"title": "B"}]})],
+            "B \u00b7 +1 more",
+        ),
+        (
+            lambda: [_call("c1", "make_charts", {"charts": [_LONG_TITLE, {"title": _LONG_TITLE}]})],
+            "Official development assistance from every DAC member to every recipient in "
+            "sub-Saharan Africa\u2026 \u00b7 +1 more",
+        ),
+        (lambda: [_call("c1", "make_charts", {"charts": "Aid to Kenya"})], None),
+        (
+            lambda: [
+                _call("c1", "make_charts", _NAMED_CHARTS),
+                _response("c1", "make_charts", _TITLE_REFUSED),
+                _call("c2", "make_charts", _CORRECTED_CHARTS),
+            ],
+            "again: Aid to Kenya",
+        ),
+        (
+            lambda: [
+                _call("c1", "make_charts", _NAMED_CHARTS),
+                _response("c1", "make_charts", _TITLE_REFUSED),
+                _call("c2", "make_charts", {"charts": [{**_BAR, "type": "table", "title": "T"}]}),
+            ],
+            "T",
+        ),
+    ],
+    ids=[
+        "one",
+        "several",
+        "first-title-unstated",
+        "long-title",
+        "charts-a-string",
+        "redrawn",
+        "another-chart-after-a-refusal",
+    ],
+)
+def test_a_chart_line_names_the_first_chart_it_draws_and_the_reading_line_repeats_it(
+    events, detail
+):
+    """The charts line and the line the model reads them under lead with the
+    first title the call states, count the other charts after it, and say
+    `again: ` for charts a refusal asked to correct; within 110 characters."""
+    translator = _translator()
+    frames = _frames(translator, *events())
+    call_id = "c2" if len(events()) > 1 else "c1"
+    answer = _response(call_id, "make_charts", _CHARTS)
+
+    read = translator.translate(answer)
+
+    running = [f for f in frames if f.tool == "make_charts" and f.status is StepStatus.RUNNING]
+    assert running[-1].detail == detail
+    assert _reading_lines(read) == [("Going over the charts", StepStatus.RUNNING, detail)]
+    assert len(detail or "") <= 110
 
 
 def test_a_failed_chart_lines_reason_survives_titles_too_long_for_the_activity_log():
@@ -1875,15 +2056,45 @@ def test_a_reading_line_closes_when_the_segment_ends():
     assert _steps(translator.finish()) == [("Reading what the search found", StepStatus.COMPLETE)]
 
 
-def test_a_skill_read_keeps_the_reading_line_running():
+_GDP_FOUND = {
+    "parts": [
+        {
+            "variable": "q",
+            "status": "definite",
+            "resolved": "GDP",
+            "window": {"start": 2000, "end": 2023},
+        }
+    ]
+}
+
+
+@pytest.mark.parametrize(
+    ("answer", "detail", "restored"),
+    [(_GDP_FOUND, "GDP, 2000\u20132023", "GDP, 2000\u20132023"), ({"parts": []}, None, "")],
+    ids=["with-a-detail", "with-none"],
+)
+def test_a_skill_read_keeps_the_reading_line_running_and_notes_itself_on_it(
+    answer, detail, restored
+):
+    """The read shows no step of its own: the line it runs under says it
+    reads a method note, then gives back its own detail when the agent's
+    next model call starts. A line with no detail gets an empty one back,
+    since Studio keeps a running line's detail when a frame carries none."""
     translator = _translator()
     frames = _frames(
         translator,
-        *_batch(("search", {"parts": [{"variable": "q"}]}, {"parts": []})),
+        *_batch(("search", {"parts": [{"variable": "q"}]}, answer)),
         *_batch(("get_skill", {"skill_id": "oda-measures"}, {"text": "notes"})),
     )
 
-    assert _reading_lines(frames) == [("Reading what the search found", StepStatus.RUNNING, None)]
+    line = "Reading what the search found"
+    assert _reading_lines(frames) == [
+        (line, StepStatus.RUNNING, detail),
+        (line, StepStatus.RUNNING, "reading a method note"),
+        (line, StepStatus.RUNNING, restored),
+    ]
+    assert len({f.step_id for f in frames if f.tool is None}) == 1
+    assert "oda-measures" not in str([f.model_dump() for f in frames])
 
 
 def test_cards_the_agent_removed_reach_the_client_as_a_composition_update():

@@ -62,7 +62,7 @@ from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from executor.artifacts import declared_ranked_before_limit
 from executor.classify import internal_fault
 from executor.outcomes import RefusalKind
-from executor.run import current_step_id
+from executor.run import RESULT_RECEIVED, current_step_id
 from google.adk.events import Event
 from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.phrasing import entities_phrase
@@ -155,9 +155,17 @@ logger = logging.getLogger(__name__)
 # including the advice sentence at the end that says scope cannot narrow it.
 _STEP_DETAIL_CAP = 400
 
-# The bound on a plan step's running detail (`_plan_step_detail`), which the
-# chat's status line shows on one line.
-_PLAN_STEP_DETAIL_CAP = 110
+# The bound on a running line's detail that says what the line works on (a
+# plan step's `_plan_step_detail`, the asks a plan is drafted for, the charts
+# being drawn, the words a search tries again, the answer a plan gave). The
+# chat's status line shows about 45 characters of it on one line, so each
+# detail leads with its point.
+_LINE_DETAIL_CAP = 110
+
+# What a running status line shows while a skill read runs beside it, for
+# the agent's and the planner's reads alike. The skill's id and description
+# are written for the model and stay off the wire.
+_READING_NOTE = "reading a method note"
 
 
 # The graph's planner states `resolved_by` as planner_default/user
@@ -1278,6 +1286,19 @@ def _planner_question(args: dict[str, Any]) -> ElicitationQuestion:
     )
 
 
+@dataclass
+class _StatusLine:
+    """The running status line: its wire id, label and monotonic start, the
+    `detail` it opened with, and the `note` a running frame shows in place of
+    that detail while a skill read runs beside the line (`_Translator._note_status`)."""
+
+    step_id: str
+    label: str
+    started: float
+    detail: str | None
+    note: str | None = None
+
+
 class _Translator:
     """One turn segment's ADK-event-to-wire-frame translation.
 
@@ -1299,13 +1320,17 @@ class _Translator:
       the earlier turn", "Going over the notes on DFO"), with the limits those
       results state as `detail`, and "Working out the next step" after a
       refused hand-off; a batch that mixes tools is named by its latest
-      stage. A successful plan hand-off opens "Working on a plan", a
+      stage. A successful plan hand-off opens "Working on a plan", with
+      what the plan is for as `detail` (`_asks_detail`), a
       successful ask hands over to the question, and neither opens a
       reading line. The line completes, with `duration_ms`, when anything else
       happens: a tool call, answer text, a hand-off, the segment's end. A skill
-      read keeps it running. Thought text never shows;
+      read, the agent's or the planner's, keeps it running and shows
+      `_READING_NOTE` as its detail until the read is answered. Thought text
+      never shows;
     - each tool call, as an `activity.step` labelled from its arguments the
-      moment the model makes it, completed when the tool returns. A
+      moment the model makes it, with what it works on as `detail`
+      (`_call_detail`), completed when the tool returns. A
       hand-off to the planner and a skill read show only when they fail:
       the planner's own lines follow a hand-off, and a skill read is
       background, not progress. A refusal of one that asks the model to
@@ -1319,7 +1344,8 @@ class _Translator:
       running step until the next thing happens; a plan hand-back shows a
       failed step and then "Reading why no plan was made" when the planner
       made no plan, and "Reading the plan's results" when the plan ran,
-      opened at the execute node's result so it covers `plan_done` too;
+      opened at the execute node's result so it covers `plan_done` too, with
+      the result of the step that gives the answer as `detail`;
     - a `complete` frame on a failed step's own wire id once a later try of
       the same step succeeds (`_retry_key`): the same tool with the same
       arguments, a later hand-off the planner takes for a failed hand-off,
@@ -1353,12 +1379,16 @@ class _Translator:
         # card (`PLANNER_STARTED_KEY`'s `"pick"`), so a question it asks
         # resumes a stoppable replan.
         self._pick_replan = False
-        # The running status line, as (wire id, label, monotonic start).
-        self._status: tuple[str, str, float] | None = None
+        # The running status line.
+        self._status: _StatusLine | None = None
+        # The step of the running plan that gives its answer, by the step id
+        # its progress reports carry, and that step's result once recorded.
+        self._answer_step: str | None = None
+        self._answer_detail: str | None = None
         self._streamed_text = False
-        # Each open call's wire step id, label, arguments and monotonic
-        # start, by call id.
-        self._open_calls: dict[str, tuple[str, str, dict[str, Any], float]] = {}
+        # Each open call's wire step id, label, arguments, monotonic start
+        # and running detail, by call id.
+        self._open_calls: dict[str, tuple[str, str, dict[str, Any], float, str | None]] = {}
         # Calls that show only if they fail, by call id: the tool's name and
         # arguments.
         self._quiet_calls: dict[str, tuple[str, dict[str, Any]]] = {}
@@ -1420,10 +1450,14 @@ class _Translator:
                 if call.name in PLAN_WRITES and place != runs:
                     continue
                 frames.extend(self._planner_call_status(call.name or ""))
-            for response in event.get_function_responses():
+            responses = event.get_function_responses()
+            for response in responses:
                 if response.name == PROPOSE_PLAN:
                     recorded = event.actions.state_delta.get(PLAN_STATE_KEY)
                     frames.extend(self._proposal_answered(response.response or {}, recorded))
+            if any(response.name in _SKILL_READS for response in responses):
+                # The skill read is over and the planner's next model call starts.
+                frames.extend(self._end_note())
             return frames
         node = _node_name(event)
         # The planner node's other `custom_metadata` events, the adapter's
@@ -1478,10 +1512,13 @@ class _Translator:
     def _planner_call_status(self, name: str) -> list[ActivityStep]:
         """The status line for one of the planner's own calls. A
         `propose_plan` call opens the checking line, since the tool translates
-        the plan it records before it answers. Any other call leaves the
-        current line running."""
+        the plan it records before it answers. A skill read notes itself on
+        the current line until its answer comes (`_note_status`), and any
+        other call leaves that line running as it is."""
         if name == PROPOSE_PLAN:
             return self._open_status(_CHECKING)
+        if name in _SKILL_READS:
+            return self._note_status(_READING_NOTE)
         return []
 
     def _proposal_answered(self, answer: dict[str, Any], recorded: object) -> list[ActivityStep]:
@@ -1510,12 +1547,12 @@ class _Translator:
     def _open_status(self, label: str, *, detail: str | None = None) -> list[ActivityStep]:
         """Start a `running` status line for `label`, completing the one
         before it. The same label again keeps its line running."""
-        if self._status is not None and self._status[1] == label:
+        if self._status is not None and self._status.label == label:
             return []
         frames = self._close_status()
         seq = self._conversation.next_seq()
         step_id = self._wire_step_id(None, seq=seq)
-        self._status = (step_id, label, time.monotonic())
+        self._status = _StatusLine(step_id, label, time.monotonic(), detail)
         frames.append(
             ActivityStep(
                 event="activity.step",
@@ -1530,7 +1567,7 @@ class _Translator:
 
     def _close_starting(self) -> list[ActivityStep]:
         """Complete "Starting the plan" ahead of the plan's first step frame."""
-        if self._status is not None and self._status[1] == _STARTING_PLAN:
+        if self._status is not None and self._status.label == _STARTING_PLAN:
             return self._close_status()
         return []
 
@@ -1540,19 +1577,49 @@ class _Translator:
         summary Studio shows for it."""
         if self._status is None:
             return []
-        step_id, label, started = self._status
-        self._status = None
+        line, self._status = self._status, None
         return [
             ActivityStep(
                 event="activity.step",
                 seq=self._conversation.next_seq(),
-                step_id=step_id,
-                label=label,
+                step_id=line.step_id,
+                label=line.label,
                 status=StepStatus.COMPLETE,
-                duration_ms=int((time.monotonic() - started) * 1000),
+                duration_ms=int((time.monotonic() - line.started) * 1000),
                 detail=detail,
             )
         ]
+
+    def _note_status(self, note: str) -> list[ActivityStep]:
+        """A `running` frame on the open status line showing `note` as its
+        detail, which the chat's line takes in place of the line's own; none
+        when no status line is open or it shows `note` already."""
+        if self._status is None or self._status.note == note:
+            return []
+        self._status.note = note
+        return [self._status_frame(note)]
+
+    def _end_note(self) -> list[ActivityStep]:
+        """A `running` frame giving the open status line its own detail back
+        once the work its note named is over; none when it shows no note.
+
+        A line that opened with no detail gets an empty one: Studio keeps a
+        running line's earlier detail when a frame carries none."""
+        if self._status is None or self._status.note is None:
+            return []
+        self._status.note = None
+        return [self._status_frame(self._status.detail or "")]
+
+    def _status_frame(self, detail: str) -> ActivityStep:
+        assert self._status is not None
+        return ActivityStep(
+            event="activity.step",
+            seq=self._conversation.next_seq(),
+            step_id=self._status.step_id,
+            label=self._status.label,
+            status=StepStatus.RUNNING,
+            detail=detail,
+        )
 
     def _wire_step_id(self, step: str | None, *, seq: int) -> str:
         """The wire `step_id` for `step`, minted from `seq`, the `seq` of its
@@ -1577,6 +1644,8 @@ class _Translator:
         (`_drain_recorder`), since the Activity feed names a line from its
         first frame."""
         tool = str(progress.get("tool") or "")
+        if progress.get("gives_answer") is True:
+            self._answer_step = str(progress.get("step_id"))
         seq = self._conversation.next_seq()
         plan_labels = (
             self._surface_recorder.step_labels(current_conversation_id.get())
@@ -1647,6 +1716,8 @@ class _Translator:
             step_id = self._wire_step_id(record.step_id, seq=seq)
             refused = record.result.get("outcome") == "refusal"
             component = record.result.get("component")
+            if record.step_id is not None and record.step_id == self._answer_step:
+                self._answer_detail = None if refused else _answer_detail(record)
             frames.append(
                 ActivityStep(
                     event="activity.step",
@@ -2139,14 +2210,15 @@ class _Translator:
             return frames
         if event.author != ORCHESTRATOR_AGENT_NAME:
             frames = self._plan_path_frames(event)
-            if (
-                _node_name(event) == "execute"
-                and event.output is not None
-                and event.actions.route == "ok"
-            ):
-                # The plan ran: `plan_done` describes its frames, then the
-                # agent reads them.
-                frames.extend(self._open_status(ORCHESTRATOR_PLAN_RAN_STATUS))
+            if _node_name(event) == "execute" and event.output is not None:
+                if event.actions.route == "ok":
+                    # The plan ran: `plan_done` describes its frames, then the
+                    # agent reads them, the answer's own result first.
+                    frames.extend(
+                        self._open_status(ORCHESTRATOR_PLAN_RAN_STATUS, detail=self._answer_detail)
+                    )
+                # A replan runs a plan of its own, whose steps may reuse these ids.
+                self._answer_step = self._answer_detail = None
             return frames
         records = self._take_records()
         frames: list[Any] = self._record_frames(records)
@@ -2175,9 +2247,12 @@ class _Translator:
         calls = event.get_function_calls()
         if calls and not self._handed_off:
             self._final_text = ""
-            # A skill read shows no step, so the line it ran under keeps running.
+            # A skill read shows no step, so the line it ran under keeps
+            # running and notes the read until its answer comes.
             if any(call.name not in _SKILL_READS for call in calls):
                 frames.extend(self._close_status())
+            else:
+                frames.extend(self._note_status(_READING_NOTE))
         for call in event.get_function_calls():
             name = call.name or ""
             args = call.args or {}
@@ -2188,18 +2263,22 @@ class _Translator:
                 continue
             measure = self._measure(args.get("spec_id")) if name == "fetch" else None
             label = _tool_call_label(name, args, measure)
-            searched = _searched_for(args) if name == "search" else None
-            frame = self._step(None, label, StepStatus.RUNNING, tool=name, detail=searched)
+            detail = self._call_detail(name, args)
+            frame = self._step(None, label, StepStatus.RUNNING, tool=name, detail=detail)
             self._open_calls[call.id or frame.step_id] = (
                 frame.step_id,
                 label,
                 args,
                 time.monotonic(),
+                detail,
             )
             frames.append(frame)
         # What the agent's next model call reads: (tool, arguments, result,
-        # failed) for each response a status line can name.
-        read: list[tuple[str, dict[str, Any], dict[str, Any], bool]] = []
+        # failed, the call's running detail) for each response a status line
+        # can name.
+        read: list[tuple[str, dict[str, Any], dict[str, Any], bool, str | None]] = []
+        # The asks of a plan hand-off this batch answered.
+        planned: str | None = None
         for response in event.get_function_responses():
             # A hand-off counts once the tool recorded it; a refused or
             # failed one leaves the model to answer, and that text shows.
@@ -2213,6 +2292,8 @@ class _Translator:
             quiet = self._quiet_calls.pop(response.id or "", None)
             if quiet is not None:
                 name, args = quiet
+                if name == "plan" and not failed:
+                    planned = _asks_detail(args)
                 if failed and _asks_correction(answer):
                     self._held.setdefault(_correction_key(name, args), []).append(
                         (self._calls, _answer_failure(answer))
@@ -2237,7 +2318,7 @@ class _Translator:
             opened = self._open_calls.get(response.id or "")
             if opened is None:
                 continue
-            step_id, label, args, started = opened
+            step_id, label, args, started, running = opened
             if failed:
                 status, detail = StepStatus.FAILED, _answer_failure(answer)
             else:
@@ -2271,21 +2352,41 @@ class _Translator:
                         corrected += self._redrawn(args, order)
                     frames.extend(self._recover(key, corrected=corrected))
             if response.name in _READING_STAGES:
-                read.append((response.name or "", args, answer, failed))
+                read.append((response.name or "", args, answer, failed, running))
         if not event.get_function_responses():
             return frames
         if self._handed_off == "plan":
             # The planner node opens this same line as it starts, which
             # keeps this one running through the hand-off.
-            frames.extend(self._open_status(_WORKING_ON_PLAN))
+            frames.extend(self._open_status(_WORKING_ON_PLAN, detail=planned))
         elif self._handed_off is None:
             responded = {response.name or "" for response in event.get_function_responses()}
             frames.extend(self._reading_status(read, records, responded))
+        # A skill read the line noted is over: the agent's next model call starts.
+        frames.extend(self._end_note())
         return frames
+
+    def _call_detail(self, name: str, args: dict[str, Any]) -> str | None:
+        """The running detail of an agent tool call, from its arguments: the
+        words a search looks for, led by `again: ` for a part searched again in
+        the user's words (`_searches_part_again`), and the charts a
+        `make_charts` call draws (`_charts_detail`)."""
+        if name == "search":
+            searched = _searched_for(args)
+            if searched and _searches_part_again(args):
+                return _cut_at_word(f"again: {searched}", _LINE_DETAIL_CAP) or None
+            return searched
+        if name == "make_charts":
+            listed = _listed_charts(args)
+            again = bool(listed) and any(
+                keys <= listed for before, keys, _ in self._unredrawn if before < self._calls
+            )
+            return _charts_detail(args, again=again)
+        return None
 
     def _reading_status(
         self,
-        read: list[tuple[str, dict[str, Any], dict[str, Any], bool]],
+        read: list[tuple[str, dict[str, Any], dict[str, Any], bool, str | None]],
         records: list[_ExecutorRecord],
         responded: set[str],
     ) -> list[ActivityStep]:
@@ -2296,7 +2397,8 @@ class _Translator:
         hand-off, works out the next step; a batch of skill reads alone opens
         none, so the line it ran under keeps running. `records` are the calls
         the batch's tools made, drained with its responses; `responded` names
-        every tool the batch answered."""
+        every tool the batch answered. The charts line carries what its
+        `make_charts` call drew, as that call's line did."""
         names = {name for name, *_ in read}
         stage = next((stage for stage in _READING_STAGES if stage in names), None)
         if stage is None:
@@ -2305,8 +2407,15 @@ class _Translator:
             if responded - _SKILL_READS:
                 return self._open_status(_WORKING_OUT_NEXT_STEP)
             return []
-        results = [(args, answer, failed) for name, args, answer, failed in read if name == stage]
-        if stage == "fetch":
+        results = [
+            (args, answer, failed) for name, args, answer, failed, _ in read if name == stage
+        ]
+        if stage == "make_charts":
+            label = _READING_LABELS[stage]
+            detail = next(
+                (running for name, *_, running in read if name == stage and running), None
+            )
+        elif stage == "fetch":
             label, detail = self._looking_at(results, records)
         elif stage == "search":
             label = _READING_LABELS[stage]
@@ -2670,6 +2779,67 @@ def _searched_part(variable: str, entities: object) -> str:
     return f"{variable} ({', '.join(texts)})" if texts else variable
 
 
+def _searches_part_again(args: Mapping[str, Any]) -> bool:
+    """Whether a `search` call sends the user's words for one part a search
+    before it found nothing for: `text` beside exactly one part, the one shape
+    `search` takes `text` and parts in together
+    (`harness.orchestrator_tools.RETRY_WITH_TEXT`)."""
+    text, parts = args.get("text"), args.get("parts")
+    return (
+        isinstance(text, str) and bool(text.strip()) and isinstance(parts, list) and len(parts) == 1
+    )
+
+
+def _first_and_more(first: str, *, more: int) -> str | None:
+    """`first`, then `+<more> more` when `more` is above zero, joined with
+    " · " within `_LINE_DETAIL_CAP`. `first` is cut at a word boundary to keep
+    the count, so a later item is dropped before the first is cut. None when
+    not one word of `first` fits."""
+    tail = f" \u00b7 +{more} more" if more > 0 else ""
+    cut = _cut_at_word(first, _LINE_DETAIL_CAP - len(tail))
+    return f"{cut}{tail}" if cut else None
+
+
+def _texts(items: object, key: str) -> list[str]:
+    """The non-blank string under `key` of each mapping in `items`, stripped,
+    in order; empty when `items` is not a list. The model's arguments are
+    read before any validation, so a value of the wrong shape counts as
+    absent."""
+    texts = (
+        item.get(key)
+        for item in (items if isinstance(items, list) else ())
+        if isinstance(item, Mapping)
+    )
+    return [text.strip() for text in texts if isinstance(text, str) and text.strip()]
+
+
+def _asks_detail(args: Mapping[str, Any]) -> str | None:
+    """What a plan is drafted for, from the agent's `plan` call: the first
+    output its `asks` name, and how many more it names."""
+    asks = _texts(args.get("asks"), "text")
+    return _first_and_more(asks[0], more=len(asks) - 1) if asks else None
+
+
+def _charts_detail(args: Mapping[str, Any], *, again: bool) -> str | None:
+    """What a `make_charts` call draws: the first chart title it states and
+    how many more charts it asks for, led by `again: ` when it draws charts a
+    refusal in this turn asked to correct (`_Translator._unredrawn`)."""
+    asked = args.get("charts")
+    charts = asked if isinstance(asked, list) else []
+    titles = _texts(charts, "title")
+    if not titles:
+        return None
+    lead = "again: " if again else ""
+    return _first_and_more(f"{lead}{titles[0]}", more=len(charts) - 1)
+
+
+def _answer_detail(record: _ExecutorRecord) -> str | None:
+    """The result of the plan step that gives the answer, as a recorded call's
+    line states it (`_record_detail`), cut to `_LINE_DETAIL_CAP`."""
+    detail = _record_detail(record)
+    return (_cut_at_word(detail, _LINE_DETAIL_CAP) or None) if detail else None
+
+
 def _search_detail(searched: str | None, answer: dict[str, Any]) -> str | None:
     """A search's result in words: what it looked for, what it found (a definite
     part by the measure it resolved to), and what it did not find with the
@@ -2740,15 +2910,19 @@ def _plan_step_detail(progress: Mapping[str, Any]) -> str | None:
     """A plan step's running detail: its card row's description, the report's
     message, and `step <i> of <n>`, joined with " · ".
 
+    The executor's `RESULT_RECEIVED` says only that the call returned, and
+    the relay sends it in place of the step's start report, so it is left out
+    and the description stays in view.
+
     Every running frame of the step carries the whole detail, since the relay
     keeps only a step's latest report and the start report often gives way to
     the next. The description leads, cut at a word boundary to keep the
-    detail within `_PLAN_STEP_DETAIL_CAP`; a step with no place on the card
+    detail within `_LINE_DETAIL_CAP`; a step with no place on the card
     (`harness.graph.execute._card_places`) shows the message alone. A field
     of the wrong type counts as absent.
     """
     message = progress.get("message")
-    message = message if isinstance(message, str) and message else None
+    message = message if isinstance(message, str) and message not in ("", RESULT_RECEIVED) else None
     position, count = progress.get("position"), progress.get("count")
     if not (type(position) is int and type(count) is int and 1 <= position <= count):
         return message
@@ -2757,7 +2931,7 @@ def _plan_step_detail(progress: Mapping[str, Any]) -> str | None:
     if not isinstance(description, str):
         return tail
     lead = _cut_at_word(
-        description.strip().removesuffix("."), _PLAN_STEP_DETAIL_CAP - len(tail) - len(" \u00b7 ")
+        description.strip().removesuffix("."), _LINE_DETAIL_CAP - len(tail) - len(" \u00b7 ")
     )
     return f"{lead} \u00b7 {tail}" if lead else tail
 

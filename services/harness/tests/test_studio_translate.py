@@ -1160,9 +1160,19 @@ _LONG_SOURCE = (
                     "Result: one figure per year, 1960-2023."
                 ),
             },
-            "Result received; checking it",
+            "Retrying in 3s (attempt 2 of 3)",
             "The average of life expectancy at birth, grouped by year\u2026 \u00b7 "
-            "Result received; checking it \u00b7 step 2 of 2",
+            "Retrying in 3s (attempt 2 of 3) \u00b7 step 2 of 2",
+        ),
+        (
+            {"position": 1, "count": 3, "description": _KENYA_SOURCE},
+            "Result received; checking it",
+            "life expectancy at birth in Kenya, 1960 to 2023 \u00b7 step 1 of 3",
+        ),
+        (
+            {"position": None, "count": None, "description": None},
+            "Result received; checking it",
+            None,
         ),
         ({"position": 2, "count": 3, "description": 7}, None, "step 2 of 3"),
         ({"position": None, "count": None, "description": None}, "Reading", "Reading"),
@@ -1175,6 +1185,8 @@ _LONG_SOURCE = (
         "retry",
         "long-source",
         "cut-at-a-sentence-end",
+        "result-received",
+        "result-received-off-the-card",
         "no-description",
         "off-the-card",
         "position-a-string",
@@ -1187,7 +1199,8 @@ def test_a_plan_step_running_line_leads_with_its_source_and_ends_with_its_place(
 ) -> None:
     """Every running frame of a plan step carries the card row's description,
     the report's message and the step's place on the card, in that order,
-    within 110 characters; a place of the wrong shape counts as absent."""
+    within 110 characters; a place of the wrong shape counts as absent, and
+    so does the message that says only that the call returned."""
     translator, _ = _progress_translator()
 
     (frame,) = translator.translate(
@@ -1206,6 +1219,85 @@ def test_a_plan_step_running_line_leads_with_its_source_and_ends_with_its_place(
     assert frame.status is StepStatus.RUNNING
     assert frame.detail == detail
     assert frame.detail is None or len(frame.detail) <= 110
+
+
+def _analysis_record(step_id: str, result: dict[str, Any]) -> _ExecutorRecord:
+    return _ExecutorRecord(
+        tool="rank", args={}, result=result, duration_ms=1, conversation="c1", step_id=step_id
+    )
+
+
+_CRS_SUMMARY = "14 observations, 2010\u20132023 \u00b7 OECD Creditor Reporting System (CRS)"
+_LONG_SUMMARY = (
+    "2982 observations, 1990\u20132024 \u00b7 OECD Creditor Reporting System (CRS) \u00b7 "
+    "2982 series across every donor and recipient"
+)
+_RANKED = {"outcome": "ok", "rows": 10, "ranked_before_limit": 54}
+
+
+@pytest.mark.parametrize(
+    ("answering", "retrieved", "ranked", "detail"),
+    [
+        ({"rank": True}, _CRS_SUMMARY, _RANKED, "The ranking keeps 10 of 54 rows."),
+        ({"debt": True}, _CRS_SUMMARY, _RANKED, _CRS_SUMMARY),
+        (
+            {"debt": True},
+            _LONG_SUMMARY,
+            _RANKED,
+            "2982 observations, 1990\u20132024 \u00b7 OECD Creditor Reporting System (CRS) "
+            "\u00b7 2982 series across every donor and\u2026",
+        ),
+        ({}, _CRS_SUMMARY, _RANKED, None),
+        ({"rank": "yes"}, _CRS_SUMMARY, _RANKED, None),
+        (
+            {"rank": True},
+            _CRS_SUMMARY,
+            {"outcome": "refusal", "refusal": {"code": "service_unavailable", "message": "m"}},
+            None,
+        ),
+    ],
+    ids=[
+        "ranking",
+        "retrieval",
+        "long-retrieval",
+        "no-answer-step",
+        "gives-answer-a-string",
+        "answer-refused",
+    ],
+)
+def test_reading_the_plans_results_leads_with_the_answers_own_result(
+    answering: dict[str, object], retrieved: str, ranked: dict[str, Any], detail: str | None
+) -> None:
+    """The line the agent reads a plan's frames under carries the result of
+    the one step that gives the answer, as that step's own line states it,
+    and nothing when no step does or that step failed, within 110 characters."""
+    translator, surface_recorder = _progress_translator()
+    for step_id in ("debt", "rank"):
+        translator.translate(
+            Event(
+                custom_metadata={
+                    STEP_PROGRESS_KEY: {
+                        "step_id": step_id,
+                        "tool": "get_data" if step_id == "debt" else "rank",
+                        "gives_answer": answering.get(step_id, False),
+                    }
+                }
+            )
+        )
+    surface_recorder._records.append(
+        _surface_record("debt", {"outcome": "ok", "summary": retrieved})
+    )
+    surface_recorder._records.append(_analysis_record("rank", ranked))
+
+    frames = translator.translate(_node_event("execute", route="ok", output={"frame_refs": []}))
+
+    (line,) = [f for f in frames if f.tool is None]
+    assert (line.label, line.status, line.detail) == (
+        "Reading the plan's results",
+        StepStatus.RUNNING,
+        detail,
+    )
+    assert len(detail or "") <= 110
 
 
 def test_a_mid_run_report_leaves_a_finished_steps_record_for_the_run_to_amend() -> None:
@@ -2867,6 +2959,42 @@ def test_a_refused_proposal_reads_reworking_the_draft_until_the_next_call() -> N
         ("s4", "Checking the plan against the data", StepStatus.COMPLETE)
     ]
     assert not any("evidence_requirements" in (f.detail or "") for f in refused + retry)
+
+
+@pytest.mark.parametrize(
+    ("opening", "detail", "restored"),
+    [
+        ([_node_event("planner", planner_started={"revising": False})], None, ""),
+        (
+            [
+                _planner_call("propose_plan", question="q"),
+                _planner_answer("propose_plan", _REFUSED_DRAFT),
+            ],
+            "a step didn't fit the plan's rules",
+            "a step didn't fit the plan's rules",
+        ),
+    ],
+    ids=["working-on-a-plan", "reworking-the-draft"],
+)
+def test_a_planner_skill_read_notes_itself_on_the_planners_line(
+    opening: list[Event], detail: str | None, restored: str
+) -> None:
+    """The planner's skill read opens no line: the line it runs under says
+    it reads a method note until the read is answered, then shows its own
+    detail again. The skill's id never reaches the wire."""
+    translator = _translator()
+    opened = [frame for event in opening for frame in translator.translate(event)]
+    line = opened[-1]
+
+    reading = translator.translate(_planner_call("get_skill", skill_id="oda-measures"))
+    answered = translator.translate(_planner_answer("get_skill", {"text": "notes"}))
+
+    assert (line.status, line.detail) == (StepStatus.RUNNING, detail)
+    assert [(f.step_id, f.label, f.status, f.detail) for f in reading + answered] == [
+        (line.step_id, line.label, StepStatus.RUNNING, "reading a method note"),
+        (line.step_id, line.label, StepStatus.RUNNING, restored),
+    ]
+    assert "oda-measures" not in str([f.model_dump() for f in reading + answered])
 
 
 _REPEATED_WRITE = {"outcome": "invalid_input", "code": "plan_write_repeated", "message": "m"}

@@ -459,6 +459,10 @@ LABELLED_REFS = 100
 # and an answer counts them as it would without the lookup.
 LABEL_ALLOWANCE_S = 5.0
 
+# The progress message a step's call reports once its result is back and the
+# executor checks it.
+RESULT_RECEIVED = "Result received; checking it"
+
 
 class StatisticsUnreachableError(Exception):
     """A manifest's statistics artifact could not be fetched this time.
@@ -2536,7 +2540,7 @@ class _Run:
                     ProgressReport(
                         progress=attempt + 1,
                         total=MAX_ATTEMPTS_PER_STEP,
-                        message="Result received; checking it",
+                        message=RESULT_RECEIVED,
                     ),
                 )
             if not result.is_error:
