@@ -47,7 +47,7 @@ from google.adk.sessions.state import State
 from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import types
-from harness import plan_display, planner_adapter, planner_node
+from harness import plan_display, planner_adapter, planner_node, planner_run
 from harness.decision_pick import DecisionPick
 from harness.graph import switch
 from harness.graph.planning import planner_ask_interrupt
@@ -1234,6 +1234,73 @@ async def test_an_ask_after_a_refused_ask_in_the_same_response_is_refused_too() 
         if response.name == PLANNER_ASK
     ]
     assert answers == [ProblemCode.INVALID_ARGUMENTS, ProblemCode.INVALID_ARGUMENTS]
+
+
+async def test_a_response_that_passes_the_event_cap_ends_the_entry_on_plan_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second answer of a response is past the run's event cap. The entry
+    answers a `plan_not_ready` refusal for the orchestrator to read, nothing
+    raises, and each call of the response has its answer stored."""
+    monkeypatch.setattr(planner_run, "_MAX_EVENTS", 1)
+    refused = {"message": "Constant or current dollars?", "options": [{"label": "unpinned"}]}
+    scripted = ScriptedGenai([_calls((PLANNER_ASK, refused), (PLANNER_ASK, refused))])
+    adapter = _scripted_planner(scripted)
+    harness = _AdapterHarness()
+
+    result = await harness.run(adapter, question="kenya debt", readings=[])
+
+    assert result is not None
+    assert result["refused"]["code"] == StopCode.PLAN_NOT_READY
+    assert len(scripted.requests) == 1
+    stored = [
+        response.id
+        for event in await harness.events()
+        for response in event.get_function_responses()
+        if response.name == PLANNER_ASK
+    ]
+    assert len(stored) == 2
+
+
+async def test_an_accepted_ask_on_the_answer_past_the_event_cap_still_pauses_the_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ask is the run's last event, so no further model request meets the
+    cap and the user's question stands."""
+    monkeypatch.setattr(planner_run, "_MAX_EVENTS", 1)
+    refused = {"message": "Constant or current dollars?", "options": [{"label": "unpinned"}]}
+    scripted = ScriptedGenai(
+        [_calls((PLANNER_ASK, refused)), _calls((PLANNER_ASK, {"message": "Which years?"}))]
+    )
+    adapter = _scripted_planner(scripted)
+    harness = _AdapterHarness()
+
+    result = await harness.run(adapter, question="kenya debt", readings=[])
+
+    assert result is None
+    assert len(scripted.requests) == 2
+    assert load_pending_ask(await harness.state()) is not None
+
+
+async def test_a_plan_declared_ready_on_the_answer_past_the_event_cap_answers_the_entry(
+    monkeypatch: pytest.MonkeyPatch, decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    """The declaration ends the run, so no further model request meets the cap and
+    the entry answers the plan."""
+    monkeypatch.setattr(planner_run, "_MAX_EVENTS", 1)
+    plan = _translated_plan(decision, requirement, derived_requirement)
+    refused = {"message": "Constant or current dollars?", "options": [{"label": "unpinned"}]}
+    scripted = ScriptedGenai([_calls((PLANNER_ASK, refused)), _calls(*_DECLARE)])
+    adapter = _scripted_planner(scripted, compiled_proposals=True)
+    harness = _AdapterHarness()
+
+    result = await harness.run(
+        adapter, question=plan.question, readings=[], prior_plan=plan.model_dump(mode="json")
+    )
+
+    assert result is not None
+    assert result["plan"]["version"] == plan.version
+    assert len(scripted.requests) == 2
 
 
 async def test_an_entry_that_raises_after_an_accepted_ask_leaves_no_ask_waiting(
@@ -5324,6 +5391,56 @@ async def test_a_referral_surviving_a_malformed_translation_still_gets_asked_whe
         "spec_nominal",
         "spec_per_capita",
     }
+
+
+def test_a_run_past_the_event_cap_stops_on_plan_not_ready_before_its_next_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(planner_run, "_MAX_EVENTS", 1)
+    tracker = PlannerRun(agent="dfo_planner")
+    tracker.tool_answered("read_skill", {"status": "ok"})
+    assert tracker.next_request() is None
+    tracker.tool_answered("read_skill", {"status": "ok"})
+
+    directive = tracker.next_request()
+
+    assert isinstance(directive, planner_run.Stop)
+    assert directive.refusal["code"] == StopCode.PLAN_NOT_READY
+
+
+def test_a_run_past_the_event_cap_stops_on_the_refusal_already_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(planner_run, "_MAX_EVENTS", 1)
+    tracker = PlannerRun(agent="dfo_planner")
+    tracker.model_answered(StopCode.TURN_MODEL_CALLS_SPENT)
+    tracker.tool_answered("read_skill", {"status": "ok"})
+    tracker.tool_answered("read_skill", {"status": "ok"})
+
+    directive = tracker.next_request()
+
+    assert isinstance(directive, planner_run.Stop)
+    assert directive.refusal["code"] == StopCode.TURN_MODEL_CALLS_SPENT
+
+
+def test_a_run_past_the_event_cap_still_asks_a_user_decided_referral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(planner_run, "_MAX_EVENTS", 1)
+    tracker = PlannerRun(agent="dfo_planner")
+    tracker.tool_answered("read_skill", {"status": "ok"})
+    _track_proposal(
+        tracker,
+        {
+            "outcome": "invalid_input",
+            "kind": "unsupported_ask",
+            "requirement_id": "gdp_gtm",
+            "candidates": [{"spec_id": "spec_nominal"}, {"spec_id": "spec_per_capita"}],
+        },
+    )
+
+    assert isinstance(tracker.next_request(), planner_run.Ask)
+    assert tracker.refused is None
 
 
 def test_a_closing_code_outside_stop_code_still_asks_on_a_referral_with_candidates() -> None:

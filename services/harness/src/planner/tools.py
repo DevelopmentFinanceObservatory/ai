@@ -30,6 +30,7 @@ import logging
 from collections.abc import (
     Callable,
     Mapping,
+    Sequence,
 )
 from typing import Any, NamedTuple
 
@@ -365,6 +366,52 @@ def _ask_beside_ask(call: PlannerCall) -> dict[str, object] | None:
     )
 
 
+# The planner tool that rejects the plan on record (`reject`).
+REJECT_PLAN = "reject_plan"
+
+
+# The planner tools that read and write `planner.plan.PLAN_STATE_KEY`, of which
+# one runs per model response (`running_plan_write`).
+PLAN_WRITES = frozenset({PROPOSE_PLAN_PROPOSER.call, REJECT_PLAN})
+
+
+def running_plan_write(names: Sequence[str]) -> int | None:
+    """The place, among one model response's call `names` in order, of the plan
+    write that runs: the first `PLAN_WRITES` call, or `None` when there is none.
+    Every later plan write of the response is refused
+    (`_plan_write_beside_plan_write`)."""
+    return next((i for i, name in enumerate(names) if name in PLAN_WRITES), None)
+
+
+def _plan_write_beside_plan_write(call: PlannerCall) -> dict[str, object] | None:
+    """The refusal for a plan write beside an earlier one in its model response, or `None`.
+
+    `propose_plan` and `reject_plan` each read and write
+    `planner.plan.PLAN_STATE_KEY`, and the calls of one response run
+    concurrently, so two of them leave whichever finished last, and a
+    proposal's translation can read the other's version. The first of the two
+    kinds in the response's call list (`PlannerCall.response_calls`) runs,
+    whatever its answer (`running_plan_write`). Every later one is refused
+    before it reads or writes any state. Deciding from the call list alone
+    gives the same answer under any order the response's calls run in. An ask
+    beside a plan write is left alone.
+    """
+    calls = call.response_calls()
+    place = next((i for i, c in enumerate(calls) if c.call_id == call.call_id), None)
+    if (
+        place is None
+        or calls[place].name not in PLAN_WRITES
+        or place == running_plan_write([c.name for c in calls])
+    ):
+        return None
+    return problem(
+        ProblemCode.PLAN_WRITE_REPEATED,
+        f"Only the first `{PROPOSE_PLAN_PROPOSER.call}` or `{REJECT_PLAN}` call of a response "
+        "runs. Make this call in your next response, if the plan still needs it.",
+        outcome=Outcome.INVALID_INPUT,
+    )
+
+
 # Where an accepted ask waits for the graph's planner node to put it to the
 # user (`AcceptedAsk`). `harness.planner_adapter.PlannerAdapter` reads it once the
 # planner's run ends and clears it when the next entry starts.
@@ -465,7 +512,11 @@ def propose(
     reads_user_words: bool,
 ) -> dict[str, object]:
     """Record the plan a `propose_plan` call's `arguments` state, or patch the one
-    on record, over `call`'s session."""
+    on record, over `call`'s session. A call after another plan write in its response
+    is refused (`_plan_write_beside_plan_write`)."""
+    refusal = _plan_write_beside_plan_write(call)
+    if refusal is not None:
+        return refusal
     return submit(
         CallSession(call),
         Proposal(**arguments),
@@ -514,8 +565,12 @@ async def propose_and_translate(
     the plan ready (`ready_and_end`). A proposal that records nothing
     translates nothing. A bare re-proposal after a transient verdict
     (`_transient_retry`) translates the recorded version again and records
-    nothing.
+    nothing. A call after another plan write in its response is refused before
+    either (`_plan_write_beside_plan_write`).
     """
+    refusal = _plan_write_beside_plan_write(call)
+    if refusal is not None:
+        return refusal
     retried = _transient_retry(arguments, call.state)
     if retried is not None:
         clear_referral(call.state)
@@ -540,7 +595,14 @@ async def propose_and_translate(
 
 
 def reject(call: PlannerCall) -> dict[str, object]:
-    """Record that the user rejected the plan on record, unless it has run."""
+    """Record that the user rejected the plan on record, unless it has run.
+
+    A call after another plan write in its response is refused
+    (`_plan_write_beside_plan_write`).
+    """
+    refusal = _plan_write_beside_plan_write(call)
+    if refusal is not None:
+        return refusal
     state = call.state
     plan = load_plan(state)
     if plan is None:

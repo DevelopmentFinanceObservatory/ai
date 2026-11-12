@@ -31,6 +31,7 @@ from planner.plan import (
 from planner.skills import DFO_FAQ_SKILL_ID, read_skill_page
 from planner.tool_spec import REQUIRED, Parameter, ToolSpec
 from planner.tools import (
+    REJECT_PLAN,
     EndRun,
     ask_user,
     propose,
@@ -351,9 +352,7 @@ def planner_tool_specs(
             body=body,
             compact=True,
         ),
-        ToolSpec(
-            name="reject_plan", description=_REJECT_PLAN_DOC, parameters=(), body=_reject_plan
-        ),
+        ToolSpec(name=REJECT_PLAN, description=_REJECT_PLAN_DOC, parameters=(), body=_reject_plan),
     ]
 
 

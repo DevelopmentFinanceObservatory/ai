@@ -69,6 +69,7 @@ from planner.plan import Plan as PlannerPlan
 from planner.settings import AGENT_NAME as PLANNER_AGENT_NAME
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
+from planner.tools import PLAN_WRITES, running_plan_write
 from planner.workflow import ToolId
 from pydantic import ValidationError
 
@@ -1405,7 +1406,13 @@ class _Translator:
             frames.extend(self._interrupt_frames(adk_id, args))
             return frames
         if event.author == PLANNER_AGENT_NAME and not event.partial:
-            for call in event.get_function_calls():
+            calls = event.get_function_calls()
+            runs = running_plan_write([call.name or "" for call in calls])
+            for place, call in enumerate(calls):
+                # A plan write after the response's first is refused unrun,
+                # so it opens no line.
+                if call.name in PLAN_WRITES and place != runs:
+                    continue
                 frames.extend(self._planner_call_status(call.name or ""))
             for response in event.get_function_responses():
                 if response.name == PROPOSE_PLAN:
@@ -1478,8 +1485,13 @@ class _Translator:
         JSON from the response's state delta), and a refused one (it recorded
         nothing, so ran no translation) makes the planner's redraft a separate
         "Reworking the draft" line. The refusal's code shows in plain words;
-        its message, which names plan fields, never reaches the wire."""
+        its message, which names plan fields, never reaches the wire. A call
+        refused for following another plan write in its response
+        (`ProblemCode.PLAN_WRITE_REPEATED`) opened no line
+        (`_plan_path_frames`), so its answer changes none."""
         outcome = answer.get("outcome")
+        if answer.get("code") == ProblemCode.PLAN_WRITE_REPEATED:
+            return []
         if outcome == Outcome.OK:
             detail = (
                 _data_phrase(PlannerPlan.model_validate_json(recorded))

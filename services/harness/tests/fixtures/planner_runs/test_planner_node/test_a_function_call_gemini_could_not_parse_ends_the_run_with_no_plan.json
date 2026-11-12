@@ -33,6 +33,30 @@
           "role": "user"
         }
       ]
+    },
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "probe"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
     }
   ],
   "events": [

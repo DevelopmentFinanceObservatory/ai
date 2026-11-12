@@ -18633,6 +18633,124 @@ def test_an_ask_after_the_first_ask_of_a_response_is_refused(
     assert (asked.call_id if asked else None) == ("first" if first_accepted else None)
 
 
+def _plan_write_response(ctx: Any, *names: str) -> None:
+    """Put one model response calling `names` in `ctx`, as ids `call-0`, `call-1`, ..."""
+    ctx.session.events.append(
+        _model_response(
+            *(SimpleNamespace(id=f"call-{i}", name=name, args={}) for i, name in enumerate(names))
+        )
+    )
+
+
+def _plan_write(
+    ctx: Any, index: int, name: str, decision: DecisionFactory, requirements: RequirementPair
+) -> dict[str, object]:
+    """Run the response's call `index`, a `name` call, as ADK does for each call in turn."""
+    ctx.function_call_id = f"call-{index}"
+    tools = _tools_by_name()
+    if name == "reject_plan":
+        return call_planner_tool(tools[name], tool_context=ctx)
+    return _propose(tools, ctx, decision(), requirements, question=f"q{index}")
+
+
+@pytest.mark.parametrize("second_runs_first", [False, True], ids=["in-order", "second-first"])
+def test_a_second_proposal_in_a_response_is_refused_and_leaves_the_first_one_recorded(
+    decision: DecisionFactory, requirements: RequirementPair, second_runs_first: bool
+) -> None:
+    ctx: Any = _FakeToolContext()
+    _plan_write_response(ctx, "propose_plan", "propose_plan")
+
+    order = [1, 0] if second_runs_first else [0, 1]
+    results = {i: _plan_write(ctx, i, "propose_plan", decision, requirements) for i in order}
+
+    assert results[0]["outcome"] == Outcome.OK.value
+    assert results[1]["code"] == ProblemCode.PLAN_WRITE_REPEATED.value
+    stored = load_plan(ctx.state)
+    assert stored is not None
+    assert (stored.question, stored.version) == ("q0", 1)
+    assert load_plan_rounds(ctx.state) == 1
+
+
+@pytest.mark.parametrize("second_runs_first", [False, True], ids=["in-order", "second-first"])
+@pytest.mark.parametrize(
+    "names",
+    [("propose_plan", "reject_plan"), ("reject_plan", "propose_plan")],
+    ids=["proposal-then-reject", "reject-then-proposal"],
+)
+def test_a_plan_write_after_another_in_a_response_is_refused_whichever_kind_comes_first(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    names: tuple[str, str],
+    second_runs_first: bool,
+) -> None:
+    ctx: Any = _FakeToolContext()
+    _propose(_tools_by_name(), ctx, decision(), requirements, question="earlier")
+    _plan_write_response(ctx, *names)
+
+    order = [1, 0] if second_runs_first else [0, 1]
+    results = {i: _plan_write(ctx, i, names[i], decision, requirements) for i in order}
+
+    assert results[1]["code"] == ProblemCode.PLAN_WRITE_REPEATED.value
+    assert results[0].get("code") != ProblemCode.PLAN_WRITE_REPEATED.value
+    stored = load_plan(ctx.state)
+    assert stored is not None
+    rejected = names[0] == "reject_plan"
+    assert (stored.status is PlanStatus.REJECTED) is rejected
+    assert stored.version == (1 if rejected else 2)
+
+
+async def test_a_second_bare_reproposal_in_a_response_translates_nothing(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """After a transient verdict, a response makes two bare re-proposals and the
+    second runs first. The transient verdict stands when it runs, so only the
+    refusal ahead of `_transient_retry` keeps it from translating. Run in order, the
+    first's retry would clear the verdict and `propose` would refuse the second.
+    The first then has the recorded version translated again."""
+    dataset, _derived = requirements
+    verdicts = [_referral_of(ReferralKind.SURFACE_UNAVAILABLE, dataset.id), None]
+    translated: list[int] = []
+
+    async def translate(call: Any) -> dict[str, object]:
+        stored = load_plan(call.state)
+        assert stored is not None
+        translated.append(stored.version)
+        referral = verdicts.pop(0)
+        if referral is None:
+            return {"outcome": Outcome.OK.value}
+        save_referral(call.state, referral)
+        return {"kind": referral.kind.value, "outcome": referral.outcome.value}
+
+    tools = _tools_by_name(translate=translate)
+    ctx: Any = _FakeToolContext()
+    await _propose_translated(tools, ctx, decision(), requirements)
+    _plan_write_response(ctx, "propose_plan", "propose_plan")
+
+    results: dict[int, dict[str, object]] = {}
+    for index in (1, 0):
+        ctx.function_call_id = f"call-{index}"
+        results[index] = await cast(
+            "Awaitable[dict[str, object]]",
+            call_planner_tool(tools["propose_plan"], amends_version=1, tool_context=ctx),
+        )
+
+    assert results[0]["translation"] == {"outcome": Outcome.OK.value}
+    assert results[1]["code"] == ProblemCode.PLAN_WRITE_REPEATED.value
+    assert translated == [1, 1]
+    assert load_plan_rounds(ctx.state) == 1
+
+
+def test_a_proposal_beside_an_ask_is_not_refused(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    ctx: Any = _FakeToolContext()
+    _plan_write_response(ctx, PLANNER_ASK, "propose_plan")
+
+    result = _plan_write(ctx, 1, "propose_plan", decision, requirements)
+
+    assert result["outcome"] == Outcome.OK.value
+
+
 @pytest.mark.parametrize("author", [AGENT_NAME, "another_planner"])
 def test_an_ask_beside_an_ask_stays_refused_when_an_interrupt_holds_its_id(author: str) -> None:
     """The graph's planner node pauses on an accepted ask with an interrupt call

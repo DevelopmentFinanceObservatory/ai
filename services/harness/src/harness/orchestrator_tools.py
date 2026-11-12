@@ -53,7 +53,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import FunctionType
-from typing import Annotated, Any, Literal, Protocol, get_args, get_type_hints
+from typing import Annotated, Any, Literal, Protocol, get_args, get_type_hints, override
 
 import httpx2
 import pyarrow as pa
@@ -80,7 +80,7 @@ from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar import FrameError
 from dfo_frame_grammar.grammar import TimeGrain
 from dfo_frame_grammar.rolling import RollingError
-from google.adk.tools import ToolContext
+from google.adk.tools import FunctionTool, ToolContext
 from mcp import MCPError
 from mcp.types import REQUEST_TIMEOUT
 from planner.parties import (
@@ -1194,6 +1194,43 @@ def _invalid_arguments(
         ),
         "invalid": [entry for entry, _ in problems],
     }
+
+
+class OrchestratorTool(FunctionTool):
+    """An orchestrator tool as ADK runs it, with a call that lacks a required
+    argument answered by `_invalid_arguments`.
+
+    ADK's `FunctionTool.run_async` answers such a call itself, before the
+    tool or its `_validated_arguments` wrapper runs, with an `{"error": ...}`
+    that states no code. This answers it first: `tool_arguments_invalid`
+    with `correct_and_retry`, one `{"loc": <name>, "type": "missing"}` entry
+    per missing argument, counted against `BUDGETS["invalid_arguments"]`.
+    The required arguments are the function's parameters without a default,
+    other than `tool_context`, which ADK supplies. The declaration is
+    `FunctionTool`'s own.
+    """
+
+    def __init__(self, func: Callable[..., Any]) -> None:
+        super().__init__(func)
+        self.required_arguments = tuple(
+            name
+            for name, parameter in inspect.signature(self.func).parameters.items()
+            if parameter.default is inspect.Parameter.empty
+            and parameter.kind
+            not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+            and name != "tool_context"
+        )
+
+    @override
+    async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
+        if missing := [name for name in self.required_arguments if name not in args]:
+            logger.warning("orchestrator %s: missing %s", self.name, ", ".join(missing))
+            return _invalid_arguments(
+                tool_context,
+                self.name,
+                [({"loc": name, "type": "missing"}, f"{name}: Field required") for name in missing],
+            )
+        return await super().run_async(args=args, tool_context=tool_context)
 
 
 def _validated_arguments(

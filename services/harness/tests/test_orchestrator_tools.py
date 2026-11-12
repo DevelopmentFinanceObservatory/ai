@@ -72,6 +72,7 @@ from harness.graph.state import (
 from harness.orchestrator_tools import (
     HANDED_OFF,
     Chart,
+    OrchestratorTool,
     build_orchestrator_tools,
 )
 from harness.reply_figures import card_result, drawn_series
@@ -388,9 +389,9 @@ def test_validating_arguments_leaves_every_declaration_as_the_model_sees_it():
 
     assert set(wrapped) == set(tools) - {"explain_dfo"}
     for fn in wrapped.values():
-        assert (
-            FunctionTool(fn)._get_declaration() == FunctionTool(fn.__wrapped__)._get_declaration()
-        )
+        declaration = FunctionTool(fn.__wrapped__)._get_declaration()
+        assert FunctionTool(fn)._get_declaration() == declaration
+        assert OrchestratorTool(fn)._get_declaration() == declaration
 
 
 # --- argument validation ----------------------------------------------------
@@ -493,13 +494,59 @@ async def test_a_malformed_argument_is_an_error_for_the_model_and_runs_nothing(
     assert any("input_value" in record.getMessage() for record in caplog.records)
 
 
-async def test_calls_with_invalid_arguments_stop_at_their_budget():
+async def _search_without_query(tools: dict[str, Any], ctx: Any) -> dict[str, Any]:
+    part = {"variable": "aid", "entities": [{"text": "Kenya"}]}
+    return await OrchestratorTool(tools["search"]).run_async(
+        args={"parts": [part]}, tool_context=ctx
+    )
+
+
+async def test_a_call_missing_a_required_argument_is_an_error_to_correct_and_runs_nothing():
+    resolver = _resolver(_digest())
+    tools, ctx = _tools(resolver)
+
+    found = await _search_without_query(tools, ctx)
+
+    assert set(found) == {"error", "invalid", "code", "retry_mode"}
+    assert _stated(found) == (HarnessCode.TOOL_ARGUMENTS_INVALID, "correct_and_retry")
+    assert found["error"].startswith("search: query: ")
+    assert found["invalid"] == [{"loc": "query", "type": "missing"}]
+    assert not resolver.calls
+    assert ctx.state[ORCHESTRATOR_CALLS_KEY] == {"invalid_arguments": 1}
+
+
+async def test_a_call_with_every_required_argument_runs_the_tool():
+    resolver = _resolver(
+        _digest(
+            {
+                "variable": "life expectancy",
+                "status": "definite",
+                "spec_id": SPEC_LIFE,
+                "spec_block": SINGLE_BLOCK,
+            },
+            kind="resolution",
+        )
+    )
+    tools, ctx = _tools(resolver)
+    part = {"variable": "life expectancy", "entities": [{"text": "Kenya"}]}
+
+    found = await OrchestratorTool(tools["search"]).run_async(
+        args={"query": "life expectancy in Kenya", "parts": [part]}, tool_context=ctx
+    )
+
+    assert found["kind"] == "resolution"
+    assert [call["question"] for call in resolver.calls] == ["life expectancy in Kenya"]
+    assert "invalid_arguments" not in ctx.state.get(ORCHESTRATOR_CALLS_KEY, {})
+
+
+@pytest.mark.parametrize("call", [_search_role_on_the_part, _search_without_query])
+async def test_calls_with_invalid_arguments_stop_at_their_budget(call):
     tools, ctx = _tools()
 
     for _ in range(BUDGETS["invalid_arguments"]):
-        rejected = await _search_role_on_the_part(tools, ctx)
+        rejected = await call(tools, ctx)
         assert "invalid" in rejected
-    spent = await _search_role_on_the_part(tools, ctx)
+    spent = await call(tools, ctx)
 
     assert "invalid" not in spent
     assert _stated(spent) == (HarnessCode.TOOL_BUDGET_SPENT, "do_not_retry")

@@ -14,6 +14,7 @@ stands for.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -26,12 +27,16 @@ from translator.referral import USER_DECIDES
 
 from harness.sentences import TERMINAL_PROPOSE_CODES, StopCode, referral_sentence
 
+logger = logging.getLogger(__name__)
+
 # What `_stalled_referral` counts a referral by: its kind, requirement,
 # constraint, and the (name, role) of each entity it leaves unsettled.
 type StallKey = tuple[str, str | None, str | None, tuple[tuple[str, str | None], ...]]
 
 # Insurance against a runaway tool loop inside one agent run. A healthy plan
-# takes well under this many tool calls (skill reads and proposals).
+# takes well under this many tool calls (skill reads and proposals). A run
+# past it ends on a refusal before its next model request
+# (`PlannerRun.next_request`).
 _MAX_EVENTS = 60
 
 # A referral candidate's `label` is the resolve's own `rendered_sentence`,
@@ -145,16 +150,14 @@ class PlannerRun:
         (`planner.tools.declare_ready`).
 
         The run's `on_tool_answered` observer is told the name and answer before
-        any of that, on every answer within `_MAX_EVENTS`: a tool's own, a
-        refusal of its arguments, and `tool_failed`'s for a tool that raised.
-        What it raises propagates, as what `on_progress` raises does.
+        any of that, on every answer: a tool's own, a refusal of its arguments,
+        and `tool_failed`'s for a tool that raised. What it raises propagates,
+        as what `on_progress` raises does.
 
-        Raises:
-            PlannerAdapterError: On the answer past `_MAX_EVENTS` in one run.
+        Every answer is recorded, however many the run has had. The cap
+        `_MAX_EVENTS` applies in `next_request`.
         """
         self._events += 1
-        if self._events > _MAX_EVENTS:
-            raise PlannerAdapterError(f"the planner ran past {_MAX_EVENTS} events without settling")
         if self._on_tool_answered is not None:
             self._on_tool_answered(name, answer)
         if self._on_progress is not None:
@@ -237,10 +240,21 @@ class PlannerRun:
         with the `PLANNER_ASK` call it asks, which ends the run on the
         question in place of a model turn composing it. Once the run is ready
         to break it stops on the refusal it recorded.
+
+        A run that has had more than `_MAX_EVENTS` tool answers and would make
+        another model request ends on `not_ready(last_referral)`, a refusal the
+        entry hands to the orchestrator. The cap sits here because only a run
+        that would go on reaches this method. A run that ended on a plan declared
+        ready or on an accepted question makes no further request, so the cap
+        never touches it.
         """
         if self._ask is not None:
             ask, self._ask = self._ask, None
             return Ask(ask)
+        if not self.ready_to_break and self._events > _MAX_EVENTS:
+            logger.warning("the planner ran past %d tool answers without settling", _MAX_EVENTS)
+            self.ready_to_break = True
+            self.refused = not_ready(self.last_referral)
         if not self.ready_to_break:
             return None
         assert self.refused is not None, "every break sets the refusal it ends on"

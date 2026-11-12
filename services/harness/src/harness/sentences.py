@@ -254,6 +254,7 @@ _NOT_DRAFTED_CODES = frozenset(
         ProblemCode.INVALID_PLAN,
         ProblemCode.INVALID_REFERRAL,
         ProblemCode.INVALID_ARGUMENTS,
+        ProblemCode.PLAN_WRITE_REPEATED,
         ProblemCode.COMPILE_FAILED,
         ProblemCode.NO_CANDIDATES_RECORDED,
         ProblemCode.SOURCE_NOT_OFFERED,

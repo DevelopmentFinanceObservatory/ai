@@ -28,6 +28,8 @@ from harness.planner_model import (
 from harness.prefix_cache import PrefixCache, PrefixCachedGemini
 from harness.sentences import StopCode, refusal_sentence
 from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from orchestrator.agent import _retrying, model_retry_options
 from planner.pydantic_agent import _without_unsigned_thoughts
 from planner.settings import without_unsigned_thoughts
@@ -47,6 +49,7 @@ from .scripted_genai import (
     ScriptedGenai,
     call_part,
     client_error,
+    malformed_call_reply,
     reply,
     text_part,
     thought_part,
@@ -367,6 +370,34 @@ async def test_before_request_answers_with_no_request_and_no_budget_spent() -> N
     assert _pai_text(response) == "Which source?"
     assert scripted.requests == []
     assert (budget.model_calls, budget.closed, after.calls) == (0, None, [])
+
+
+async def test_a_turn_put_in_place_of_a_resend_keeps_the_span_a_generation(
+    exported_spans: InMemorySpanExporter,
+) -> None:
+    """The first reply ends on a function call Gemini could not parse, and
+    `before_request` answers the resend with a turn. The turn is delivered, and the
+    span, which carries the sent call's usage, stays a generation."""
+    usage = usage_metadata(prompt=40, cached=30, candidates=5)
+    scripted = ScriptedGenai([malformed_call_reply(usage=usage)])
+    turn = types.Content(role="model", parts=[text_part("Which source?")])
+    turns = iter([None, turn])
+    model = planner_model(
+        MODEL, client=scripted.client, budget=_budget(), before_request=lambda: next(turns)
+    )
+
+    with trace.get_tracer(__name__).start_as_current_span("chat"):
+        response = await _pai(model)
+
+    (span,) = exported_spans.get_finished_spans()
+    attributes = span.attributes or {}
+    assert _pai_text(response) == "Which source?"
+    assert "langfuse.observation.type" not in attributes
+    assert json.loads(str(attributes["langfuse.observation.usage_details"])) == {
+        "input": 10,
+        "output": 5,
+        "input_cached_tokens": 30,
+    }
 
 
 async def test_after_response_sees_the_reported_usage_and_its_turn_replaces_the_response() -> None:
