@@ -1,0 +1,262 @@
+[
+  {
+    "type": "agent",
+    "name": "dfo_planner run",
+    "model": null,
+    "session": "<the session>",
+    "agent": "dfo_planner",
+    "input": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "type": "text",
+            "content": "probe"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "parts": [
+          {
+            "type": "text",
+            "content": "<brief>"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "parts": [
+          {
+            "type": "tool_call",
+            "id": "p1",
+            "name": "propose_plan",
+            "arguments": {}
+          }
+        ],
+        "finish_reason": "stop"
+      },
+      {
+        "role": "user",
+        "parts": [
+          {
+            "type": "tool_call_response",
+            "id": "p1",
+            "name": "propose_plan",
+            "result": {
+              "outcome": "invalid_input",
+              "translation": {
+                "outcome": "choice_required",
+                "kind": "source_ambiguous",
+                "requirement_id": "debt",
+                "candidates": [
+                  {
+                    "sentence": "a nearby series"
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "parts": [
+          {
+            "type": "text",
+            "content": "This request took as many model steps as it allows before it finished, so it stopped here. Your next message starts with a fresh budget."
+          }
+        ],
+        "finish_reason": "stop"
+      }
+    ],
+    "output": "This request took as many model steps as it allows before it finished, so it stopped here. Your next message starts with a fresh budget.",
+    "usage": {},
+    "level": null,
+    "status_message": null,
+    "error_type": null,
+    "completion_start": null,
+    "tool_definitions": null,
+    "budget": {}
+  },
+  {
+    "type": "generation",
+    "name": "chat gemini-3.8-flash",
+    "model": "gemini-3.8-flash",
+    "session": "<the session>",
+    "agent": "dfo_planner",
+    "input": [
+      {
+        "shared": "span_instruction"
+      },
+      [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "probe"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "<brief>"
+            }
+          ]
+        }
+      ]
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "parts": [
+          {
+            "type": "tool_call",
+            "id": "p1",
+            "name": "propose_plan",
+            "arguments": {}
+          }
+        ],
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "input": 80,
+      "output": 9,
+      "input_cached_tokens": 40,
+      "output_reasoning_tokens": 4,
+      "total": 133
+    },
+    "level": null,
+    "status_message": null,
+    "error_type": null,
+    "completion_start": "set",
+    "tool_definitions": {
+      "shared": "span_tools"
+    },
+    "budget": {
+      "dfo.model.first_chunk_s": "timed",
+      "dfo.model.thoughts_token_count": 4
+    }
+  },
+  {
+    "type": "tool",
+    "name": "propose_plan",
+    "model": null,
+    "session": "<the session>",
+    "agent": "dfo_planner",
+    "input": {},
+    "output": {
+      "outcome": "invalid_input",
+      "translation": {
+        "outcome": "choice_required",
+        "kind": "source_ambiguous",
+        "requirement_id": "debt",
+        "candidates": [
+          {
+            "sentence": "a nearby series"
+          }
+        ]
+      }
+    },
+    "usage": {},
+    "level": null,
+    "status_message": null,
+    "error_type": null,
+    "completion_start": null,
+    "tool_definitions": null,
+    "budget": {}
+  },
+  {
+    "type": "generation",
+    "name": "chat gemini-3.8-flash",
+    "model": "gemini-3.8-flash",
+    "session": "<the session>",
+    "agent": "dfo_planner",
+    "input": [
+      {
+        "shared": "span_instruction"
+      },
+      [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "probe"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "<brief>"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "tool_call",
+              "id": "p1",
+              "name": "propose_plan",
+              "arguments": {}
+            }
+          ],
+          "finish_reason": "stop"
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "tool_call_response",
+              "id": "p1",
+              "name": "propose_plan",
+              "result": {
+                "outcome": "invalid_input",
+                "translation": {
+                  "outcome": "choice_required",
+                  "kind": "source_ambiguous",
+                  "requirement_id": "debt",
+                  "candidates": [
+                    {
+                      "sentence": "a nearby series"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "parts": [
+          {
+            "type": "text",
+            "content": "This request took as many model steps as it allows before it finished, so it stopped here. Your next message starts with a fresh budget."
+          }
+        ],
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {},
+    "level": null,
+    "status_message": null,
+    "error_type": null,
+    "completion_start": "time to first chunk",
+    "tool_definitions": {
+      "shared": "span_tools"
+    },
+    "budget": {}
+  }
+]

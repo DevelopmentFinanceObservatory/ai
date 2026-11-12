@@ -1,0 +1,24 @@
+{
+  "model": "gemini-3.8-flash",
+  "config": {
+    "shared": "request_config_recorded_entry"
+  },
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "How much aid did Ghana receive?"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Context for this question: the readings."
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}

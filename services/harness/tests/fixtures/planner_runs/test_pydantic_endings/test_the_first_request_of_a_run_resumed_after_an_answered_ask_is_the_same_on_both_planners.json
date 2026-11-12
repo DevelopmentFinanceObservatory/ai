@@ -1,0 +1,66 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "How much aid did Ghana receive?"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Context for this question: the readings.\n\nThe user answered: France."
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "conversations": [
+    [
+      [
+        "part",
+        {
+          "function_call": {
+            "id": "a1",
+            "args": {
+              "message": "Which donor do you mean?"
+            },
+            "name": "ask_user_question"
+          }
+        }
+      ],
+      [
+        "answer",
+        "ask_user_question",
+        "a1",
+        {
+          "outcome": "ok",
+          "status": "asked",
+          "message": "The question is with the user. Their answer arrives with your next brief."
+        }
+      ]
+    ],
+    [
+      [
+        "part",
+        {
+          "text": "done"
+        }
+      ]
+    ]
+  ],
+  "state": {
+    "planner:pending_ask": {
+      "call_id": "a1",
+      "args": {
+        "message": "Which donor do you mean?",
+        "candidates": [],
+        "options": [],
+        "recommended_spec_id": null,
+        "rationale": null
+      }
+    }
+  }
+}

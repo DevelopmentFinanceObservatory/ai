@@ -1,0 +1,105 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Gross ODA disbursements for health from 2015 to 2024, including the population policy and reproductive health sector, total for all donors"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Gross ODA disbursements for health from 2015 to 2024, including the population policy and reproductive health sector, total for all donors.",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda_health",
+        "decision_ids": [],
+        "measure": "gross ODA disbursements for health and population policy, programme and reproductive health",
+        "entities": [],
+        "across": [
+          "donor",
+          "recipient"
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2024
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": null,
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "aggregate",
+        "id": "total",
+        "decision_ids": [],
+        "input_id": "oda_health",
+        "reduction": "sum",
+        "group_by": [
+          "period"
+        ]
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "Gross ODA disbursements for health (including population policies and reproductive health) from 2015 to 2024 for all donors"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "total"
+        ]
+      }
+    ],
+    "ask_breakdowns": [
+      {
+        "ask": 0,
+        "by": [],
+        "over": [
+          "donor"
+        ]
+      }
+    ],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

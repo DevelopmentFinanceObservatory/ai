@@ -1,0 +1,21 @@
+[
+  {
+    "parts": [
+      {
+        "text": "Kenya's debt"
+      },
+      {
+        "text": "since 2010"
+      }
+    ],
+    "role": "user"
+  },
+  {
+    "parts": [
+      {
+        "text": "<brief>"
+      }
+    ],
+    "role": "user"
+  }
+]

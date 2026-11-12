@@ -1,0 +1,415 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "What was the total of the ODA Kenya received and its external debt disbursements, added together, in each year from 2015 to 2022?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    },
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "What was the total of the ODA Kenya received and its external debt disbursements, added together, in each year from 2015 to 2022?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "function_call": {
+                "args": {
+                  "question": "What was the total of the ODA Kenya received and its external debt disbursements, added together, in each year from 2015 to 2022?",
+                  "answer_mode": "computed",
+                  "decisions": [
+                    {
+                      "slot": "combine",
+                      "description": "Whether the two flows are added into one total.",
+                      "options": [
+                        "add them",
+                        "show them separately"
+                      ],
+                      "chosen": "add them",
+                      "resolved_by": "user",
+                      "rationale": "The user chose to add them."
+                    }
+                  ],
+                  "evidence_requirements": [
+                    {
+                      "kind": "dataset",
+                      "id": "oda",
+                      "measure": "ODA",
+                      "entities": [
+                        {
+                          "name": "Kenya",
+                          "role": "recipient"
+                        },
+                        {
+                          "name": "official donors (DAC)",
+                          "role": "donor"
+                        }
+                      ],
+                      "period": {
+                        "start": 2015,
+                        "end": 2022
+                      },
+                      "source_spec_id": "spec_e511b06cd1033739fdaf8f1d028368d3"
+                    },
+                    {
+                      "kind": "aggregate",
+                      "id": "oda_total",
+                      "input_id": "oda",
+                      "reduction": "sum",
+                      "group_by": [
+                        "entity",
+                        "period"
+                      ]
+                    },
+                    {
+                      "kind": "dataset",
+                      "id": "disbursements",
+                      "measure": "external debt disbursements",
+                      "entities": [
+                        {
+                          "name": "Kenya",
+                          "role": "debtor"
+                        }
+                      ],
+                      "period": {
+                        "start": 2015,
+                        "end": 2022
+                      },
+                      "across": [
+                        "creditor"
+                      ],
+                      "source_code": "DT.DIS.DLTF.CD"
+                    },
+                    {
+                      "kind": "aggregate",
+                      "id": "disbursements_total",
+                      "input_id": "disbursements",
+                      "reduction": "sum",
+                      "group_by": [
+                        "entity",
+                        "period"
+                      ]
+                    },
+                    {
+                      "kind": "sum_of",
+                      "id": "total",
+                      "left": {
+                        "input_id": "oda_total"
+                      },
+                      "right": {
+                        "input_id": "disbursements_total"
+                      },
+                      "decision_ids": [
+                        "combine"
+                      ]
+                    }
+                  ],
+                  "answered": [
+                    {
+                      "ask": 0,
+                      "outputs": [
+                        "total"
+                      ]
+                    }
+                  ]
+                },
+                "name": "propose_plan"
+              },
+              "thought_signature": "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I="
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "function_response": {
+                "name": "propose_plan",
+                "response": {
+                  "outcome": "refused",
+                  "code": "combination_unasked",
+                  "message": "'total' adds two datasets, and whether they add up without counting a flow twice is the user's to decide: ODA loans, for one, count in both aid and debt flows. Ask the user through `ask_user_question` with this action's `options` unchanged and a `message` naming that overlap. If they pick 'add them', cite a `Decision` resolved by `user` whose `options` are those option ids and whose `chosen` is the one they picked; otherwise remove 'total' and show the two series separately.",
+                  "action": {
+                    "call": "ask_user_question",
+                    "arguments": {
+                      "options": [
+                        {
+                          "id": "add them",
+                          "label": "Add them into one total"
+                        },
+                        {
+                          "id": "show them separately",
+                          "label": "Show them side by side, without adding them"
+                        }
+                      ]
+                    },
+                    "needs": [
+                      "message"
+                    ]
+                  },
+                  "detail": {
+                    "requirement_id": "total",
+                    "datasets": [
+                      "provenance/OECDDAC2A",
+                      "requirement:disbursements:65b25eaf8573b6f027c374edf1b895010c0494ea8fc81d7cc9171740465cda3f"
+                    ]
+                  }
+                }
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    },
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "What was the total of the ODA Kenya received and its external debt disbursements, added together, in each year from 2015 to 2022?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "What was the total of the ODA Kenya received and its external debt disbursements, added together, in each year from 2015 to 2022?",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "combine",
+        "description": "Whether the two flows are added into one total.",
+        "options": [
+          "add them",
+          "show them separately"
+        ],
+        "chosen": "add them",
+        "resolved_by": "user",
+        "rationale": "The user chose to add them.",
+        "fixes": null
+      },
+      {
+        "slot": "source_spec_e511b06cd1033739fdaf8f1d028368d3",
+        "description": "How the flow is counted.",
+        "options": [
+          "gross disbursements",
+          "net disbursements"
+        ],
+        "chosen": "gross disbursements",
+        "resolved_by": "planner_default",
+        "rationale": "Search elected gross disbursements for this source.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_e511b06cd1033739fdaf8f1d028368d3",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "decision_ids": [
+          "source_spec_e511b06cd1033739fdaf8f1d028368d3"
+        ],
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          },
+          {
+            "name": "official donors (DAC)",
+            "role": "donor"
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_e511b06cd1033739fdaf8f1d028368d3",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "aggregate",
+        "id": "oda_total",
+        "decision_ids": [],
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "dataset",
+        "id": "disbursements",
+        "decision_ids": [],
+        "measure": "external debt disbursements",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "debtor"
+          }
+        ],
+        "across": [
+          "creditor"
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": "DT.DIS.DLTF.CD",
+        "source_spec_id": null,
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "aggregate",
+        "id": "disbursements_total",
+        "decision_ids": [],
+        "input_id": "disbursements",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "sum_of",
+        "id": "total",
+        "decision_ids": [
+          "combine"
+        ],
+        "left": {
+          "input_id": "oda_total",
+          "entity": null
+        },
+        "right": {
+          "input_id": "disbursements_total",
+          "entity": null
+        }
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "ODA received plus external debt disbursements for Kenya, added together, each year 2015 to 2022"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "total"
+        ]
+      }
+    ],
+    "ask_breakdowns": [
+      {
+        "ask": 0,
+        "by": [],
+        "over": [
+          "creditor"
+        ]
+      }
+    ],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

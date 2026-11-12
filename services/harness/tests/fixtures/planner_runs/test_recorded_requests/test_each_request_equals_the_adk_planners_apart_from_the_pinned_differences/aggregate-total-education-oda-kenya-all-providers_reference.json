@@ -1,0 +1,145 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Net ODA for education to Kenya, as one total across all providers"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Net ODA disbursements for education to Kenya, as one total across all providers. The user named no period.",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "source_spec_400f57d313536c3f47e2c34edc40ddad",
+        "description": "How the flow is counted.",
+        "options": [
+          "net disbursements",
+          "gross disbursements",
+          "commitments"
+        ],
+        "chosen": "net disbursements",
+        "resolved_by": "planner_default",
+        "rationale": "Search elected net disbursements for this source.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_400f57d313536c3f47e2c34edc40ddad",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "education",
+        "decision_ids": [
+          "source_spec_400f57d313536c3f47e2c34edc40ddad"
+        ],
+        "measure": "net ODA disbursements for education",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "across": [
+          "donor"
+        ],
+        "period": {
+          "start": 1990,
+          "end": 2024
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_400f57d313536c3f47e2c34edc40ddad",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "aggregate",
+        "id": "total",
+        "decision_ids": [],
+        "input_id": "education",
+        "reduction": "sum",
+        "group_by": [
+          "period"
+        ]
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "Total net ODA for education to Kenya across all providers, for each year"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "total"
+        ]
+      }
+    ],
+    "ask_breakdowns": [
+      {
+        "ask": 0,
+        "by": [],
+        "over": [
+          "donor"
+        ]
+      }
+    ],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

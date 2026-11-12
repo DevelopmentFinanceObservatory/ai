@@ -1,0 +1,455 @@
+{
+  "outputs": [],
+  "reports": [],
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "probe"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    },
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "probe"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "function_call": {
+                "id": "p1",
+                "args": {},
+                "name": "propose_plan"
+              },
+              "thought_signature": "c2NyaXB0ZWQtc2lnbmF0dXJl"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "function_response": {
+                "id": "p1",
+                "name": "propose_plan",
+                "response": {
+                  "outcome": "refused",
+                  "code": "plan_invalid",
+                  "message": "Pin a source."
+                }
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    },
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "probe"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "function_call": {
+                "id": "p1",
+                "args": {},
+                "name": "propose_plan"
+              },
+              "thought_signature": "c2NyaXB0ZWQtc2lnbmF0dXJl"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "function_response": {
+                "id": "p1",
+                "name": "propose_plan",
+                "response": {
+                  "outcome": "refused",
+                  "code": "plan_invalid",
+                  "message": "Pin a source."
+                }
+              }
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "function_call": {
+                "id": "p2",
+                "args": {},
+                "name": "propose_plan"
+              },
+              "thought_signature": "c2NyaXB0ZWQtc2lnbmF0dXJl"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "function_response": {
+                "id": "p2",
+                "name": "propose_plan",
+                "response": {
+                  "outcome": "refused",
+                  "code": "plan_invalid",
+                  "message": "Pin a source."
+                }
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "senders": [
+    "pydantic_ai",
+    "pydantic_ai",
+    "pydantic_ai"
+  ],
+  "events": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "probe"
+          }
+        ],
+        "role": "user"
+      },
+      "author": "user",
+      "actions": {
+        "state_delta": {},
+        "artifact_delta": {},
+        "requested_auth_configs": {},
+        "requested_tool_confirmations": {}
+      },
+      "node_info": {
+        "path": ""
+      },
+      "invocation": 0
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_call": {
+              "id": "p1",
+              "args": {},
+              "name": "propose_plan"
+            },
+            "thought_signature": "c2NyaXB0ZWQtc2lnbmF0dXJl"
+          }
+        ],
+        "role": "model"
+      },
+      "state_delta": {}
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_response": {
+              "id": "p1",
+              "name": "propose_plan",
+              "response": {
+                "outcome": "refused",
+                "code": "plan_invalid",
+                "message": "Pin a source."
+              }
+            }
+          }
+        ],
+        "role": "user"
+      },
+      "state_delta": {
+        "planner:elected_spec_ids": [],
+        "planner:read": {
+          "steps": [
+            [
+              "message",
+              null
+            ]
+          ],
+          "response_calls": [
+            [
+              "propose_plan",
+              "p1"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_call": {
+              "id": "p2",
+              "args": {},
+              "name": "propose_plan"
+            },
+            "thought_signature": "c2NyaXB0ZWQtc2lnbmF0dXJl"
+          }
+        ],
+        "role": "model"
+      },
+      "state_delta": {}
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_response": {
+              "id": "p2",
+              "name": "propose_plan",
+              "response": {
+                "outcome": "refused",
+                "code": "plan_invalid",
+                "message": "Pin a source."
+              }
+            }
+          }
+        ],
+        "role": "user"
+      },
+      "state_delta": {
+        "planner:elected_spec_ids": [],
+        "planner:read": {
+          "steps": [
+            [
+              "message",
+              null
+            ],
+            [
+              "response",
+              null
+            ]
+          ],
+          "response_calls": [
+            [
+              "propose_plan",
+              "p2"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_call": {
+              "id": "p3",
+              "args": {},
+              "name": "propose_plan"
+            },
+            "thought_signature": "c2NyaXB0ZWQtc2lnbmF0dXJl"
+          }
+        ],
+        "role": "model"
+      },
+      "state_delta": {}
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_response": {
+              "id": "p3",
+              "name": "propose_plan",
+              "response": {
+                "outcome": "refused",
+                "code": "plan_invalid",
+                "message": "Pin a source."
+              }
+            }
+          }
+        ],
+        "role": "user"
+      },
+      "state_delta": {
+        "planner:elected_spec_ids": [],
+        "planner:read": {
+          "steps": [
+            [
+              "message",
+              null
+            ],
+            [
+              "response",
+              null
+            ],
+            [
+              "response",
+              null
+            ]
+          ],
+          "response_calls": [
+            [
+              "propose_plan",
+              "p3"
+            ]
+          ]
+        }
+      }
+    }
+  ],
+  "steps": [
+    {
+      "kind": "message",
+      "call_id": null,
+      "args": null,
+      "body": {},
+      "name": null
+    },
+    {
+      "kind": "response",
+      "call_id": null,
+      "args": null,
+      "body": {
+        "outcome": "refused",
+        "code": "plan_invalid",
+        "message": "Pin a source."
+      },
+      "name": "propose_plan"
+    },
+    {
+      "kind": "response",
+      "call_id": null,
+      "args": null,
+      "body": {
+        "outcome": "refused",
+        "code": "plan_invalid",
+        "message": "Pin a source."
+      },
+      "name": "propose_plan"
+    },
+    {
+      "kind": "response",
+      "call_id": null,
+      "args": null,
+      "body": {
+        "outcome": "refused",
+        "code": "plan_invalid",
+        "message": "Pin a source."
+      },
+      "name": "propose_plan"
+    }
+  ],
+  "state": {
+    "planner:elected_spec_ids": [],
+    "planner:read": {
+      "steps": [
+        [
+          "message",
+          null
+        ],
+        [
+          "response",
+          null
+        ],
+        [
+          "response",
+          null
+        ]
+      ],
+      "response_calls": [
+        [
+          "propose_plan",
+          "p3"
+        ]
+      ]
+    }
+  }
+}

@@ -1,0 +1,239 @@
+{
+  "events": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "How much aid did Ghana receive?"
+          }
+        ],
+        "role": "user"
+      },
+      "author": "user",
+      "actions": {
+        "state_delta": {},
+        "artifact_delta": {},
+        "requested_auth_configs": {},
+        "requested_tool_confirmations": {}
+      },
+      "node_info": {
+        "path": ""
+      },
+      "invocation": 0
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_call": {
+              "id": "s1",
+              "args": {
+                "skill_id": "slow"
+              },
+              "name": "get_skill"
+            }
+          },
+          {
+            "function_call": {
+              "id": "s2",
+              "args": {
+                "skill_id": "fast"
+              },
+              "name": "get_skill"
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "state_delta": {}
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_response": {
+              "id": "s1",
+              "name": "get_skill",
+              "response": {
+                "result": "The slow page."
+              }
+            }
+          },
+          {
+            "function_response": {
+              "id": "s2",
+              "name": "get_skill",
+              "response": {
+                "result": "The fast page."
+              }
+            }
+          }
+        ],
+        "role": "user"
+      },
+      "state_delta": {
+        "planner:skill_page:fast::0": "The fast page.",
+        "planner:skills_read": [
+          {
+            "skill_id": "fast",
+            "path": null,
+            "offset": 0
+          },
+          {
+            "skill_id": "slow",
+            "path": null,
+            "offset": 0
+          }
+        ],
+        "planner:skill_page:slow::0": "The slow page."
+      }
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "text": "Read both."
+          }
+        ],
+        "role": "model"
+      },
+      "state_delta": {}
+    },
+    {
+      "author": "seam_test_wf",
+      "actions": {
+        "state_delta": {
+          "planner:plan": null,
+          "planner:alignments": null,
+          "planner:rounds": 0,
+          "planner:pin_sources": {},
+          "planner:unsupported": [],
+          "planner:optional_declines": [
+            "no_operation_covers"
+          ],
+          "planner:terminal_declines": [
+            "no_operation_covers"
+          ],
+          "planner:reduction_refused_asks": [],
+          "translator:compile_failures": [],
+          "planner:amendment_entry": false,
+          "planner:decision_pick": null,
+          "planner:refused_spec_ids": [],
+          "planner:refused_spec_details": {},
+          "planner:skills_read": [
+            {
+              "skill_id": "fast",
+              "path": null,
+              "offset": 0
+            },
+            {
+              "skill_id": "slow",
+              "path": null,
+              "offset": 0
+            }
+          ],
+          "planner:skills_before_entry": 0,
+          "planner:pending_ask": null,
+          "planner:asked_referral": null
+        },
+        "artifact_delta": {},
+        "requested_auth_configs": {},
+        "requested_tool_confirmations": {}
+      },
+      "output": {
+        "refused": {
+          "text": "No plan was made: the planner stopped before the plan was ready.",
+          "final": false,
+          "code": "plan_not_ready"
+        }
+      },
+      "node_info": {
+        "path": "seam_test_wf@1/seam_under_test@1",
+        "output_for": [
+          "seam_test_wf@1/seam_under_test@1",
+          "seam_test_wf@1"
+        ]
+      },
+      "invocation": 0
+    }
+  ],
+  "steps": [
+    {
+      "kind": "message",
+      "call_id": null,
+      "args": null,
+      "body": {},
+      "name": null
+    },
+    {
+      "kind": "response",
+      "call_id": null,
+      "args": null,
+      "body": {
+        "result": "The slow page."
+      },
+      "name": "get_skill"
+    },
+    {
+      "kind": "response",
+      "call_id": null,
+      "args": null,
+      "body": {
+        "result": "The fast page."
+      },
+      "name": "get_skill"
+    }
+  ],
+  "frames": [],
+  "state": {
+    "planner:skill_page:fast::0": "The fast page.",
+    "planner:skills_read": [
+      {
+        "skill_id": "fast",
+        "path": null,
+        "offset": 0
+      },
+      {
+        "skill_id": "slow",
+        "path": null,
+        "offset": 0
+      }
+    ],
+    "planner:skill_page:slow::0": "The slow page.",
+    "planner:plan": null,
+    "planner:alignments": null,
+    "planner:rounds": 0,
+    "planner:pin_sources": {},
+    "planner:unsupported": [],
+    "planner:optional_declines": [
+      "no_operation_covers"
+    ],
+    "planner:terminal_declines": [
+      "no_operation_covers"
+    ],
+    "planner:reduction_refused_asks": [],
+    "translator:compile_failures": [],
+    "planner:amendment_entry": false,
+    "planner:decision_pick": null,
+    "planner:refused_spec_ids": [],
+    "planner:refused_spec_details": {},
+    "planner:skills_before_entry": 0,
+    "planner:pending_ask": null,
+    "planner:asked_referral": null
+  }
+}

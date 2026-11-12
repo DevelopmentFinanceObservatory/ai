@@ -1,0 +1,192 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Which three sectors received the most ODA in Kenya between 2015 and 2022?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Which three sectors received the most ODA in Kenya between 2015 and 2022?",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "all_sectors",
+        "description": "Which sectors the ranking compares.",
+        "options": [
+          "every sector",
+          "a named list of sectors"
+        ],
+        "chosen": "every sector",
+        "resolved_by": "planner_default",
+        "rationale": "The question names no list, so every member is ranked.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": null,
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": "population",
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      },
+      {
+        "slot": "source_spec_639066eae7326cde2740c4e568c90dfa",
+        "description": "How the flow is counted.",
+        "options": [
+          "gross disbursements",
+          "net disbursements",
+          "commitments"
+        ],
+        "chosen": "gross disbursements",
+        "resolved_by": "planner_default",
+        "rationale": "Search elected gross disbursements for this source.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_639066eae7326cde2740c4e568c90dfa",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "decision_ids": [
+          "source_spec_639066eae7326cde2740c4e568c90dfa"
+        ],
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "across": [
+          "donor"
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_639066eae7326cde2740c4e568c90dfa",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": "separate",
+        "breakdown": {
+          "dimension": "sector",
+          "level": 0
+        }
+      },
+      {
+        "kind": "aggregate",
+        "id": "by_sector",
+        "decision_ids": [],
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "period",
+          "breakdown"
+        ]
+      },
+      {
+        "kind": "rank",
+        "id": "top_sectors",
+        "decision_ids": [
+          "all_sectors"
+        ],
+        "input_id": "by_sector",
+        "direction": "highest_first",
+        "among": "population",
+        "axis": "sector",
+        "reduction": "sum",
+        "window_start": null,
+        "window_end": null,
+        "per_period": false,
+        "limit": 3,
+        "rolling": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "The three sectors that received the most ODA in Kenya, 2015 to 2022"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "top_sectors"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [
+      0
+    ],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}
