@@ -1196,6 +1196,25 @@ def _invalid_arguments(
     }
 
 
+_SUPPLIERS_ATTRIBUTE = "missing_argument_suppliers"
+
+
+def _supplies_missing(
+    argument: str, supplier: Callable[[dict[str, Any]], Any | None]
+) -> Callable[[FunctionType], FunctionType]:
+    """Decorator marking `argument` of a tool as one `OrchestratorTool` may
+    fill when a call omits it. `supplier` receives the call's arguments and
+    returns the value, or None to leave the call refused as missing the
+    argument. The mark rides on the function, so it survives
+    `_validated_arguments`, and the declaration ADK builds is unchanged."""
+
+    def mark(tool: FunctionType) -> FunctionType:
+        vars(tool).setdefault(_SUPPLIERS_ATTRIBUTE, {})[argument] = supplier
+        return tool
+
+    return mark
+
+
 class OrchestratorTool(FunctionTool):
     """An orchestrator tool as ADK runs it, with a call that lacks a required
     argument answered by `_invalid_arguments`.
@@ -1206,8 +1225,9 @@ class OrchestratorTool(FunctionTool):
     with `correct_and_retry`, one `{"loc": <name>, "type": "missing"}` entry
     per missing argument, counted against `BUDGETS["invalid_arguments"]`.
     The required arguments are the function's parameters without a default,
-    other than `tool_context`, which ADK supplies. The declaration is
-    `FunctionTool`'s own.
+    other than `tool_context`, which ADK supplies. A tool marked with
+    `_supplies_missing` has its call run with the supplied value instead,
+    when the supplier returns one. The declaration is `FunctionTool`'s own.
     """
 
     def __init__(self, func: Callable[..., Any]) -> None:
@@ -1220,9 +1240,16 @@ class OrchestratorTool(FunctionTool):
             not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
             and name != "tool_context"
         )
+        self.suppliers: Mapping[str, Callable[[dict[str, Any]], Any | None]] = vars(self.func).get(
+            _SUPPLIERS_ATTRIBUTE, {}
+        )
 
     @override
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
+        for name, supplier in self.suppliers.items():
+            if name not in args and (value := supplier(args)) is not None:
+                logger.info("orchestrator %s: supplied missing %s", self.name, name)
+                args = args | {name: value}
         if missing := [name for name in self.required_arguments if name not in args]:
             logger.warning("orchestrator %s: missing %s", self.name, ", ".join(missing))
             return _invalid_arguments(
@@ -1231,6 +1258,24 @@ class OrchestratorTool(FunctionTool):
                 [({"loc": name, "type": "missing"}, f"{name}: Field required") for name in missing],
             )
         return await super().run_async(args=args, tool_context=tool_context)
+
+
+# The service's limit on a raw query (`data_mcp.search_tool`); a longer one is refused.
+MAX_RAW_QUERY_CHARS = 2000
+
+
+def _user_message_as_query(args: dict[str, Any]) -> str | None:
+    """The turn's user message, clipped to `MAX_RAW_QUERY_CHARS`, as the raw
+    query of a `search` call that sent `parts` and no `query`, or None.
+
+    With `parts` the service resolves from them and only echoes the raw
+    query, so the user's own words stand in for the omitted ones. A call
+    that sets `as_text` has the service read the query itself, so it must
+    send one."""
+    message = (current_user_message.get() or "").strip()
+    if not args.get("parts") or args.get("as_text") or not message:
+        return None
+    return message[:MAX_RAW_QUERY_CHARS]
 
 
 def _validated_arguments(
@@ -1858,6 +1903,7 @@ def build_orchestrator_tools(
             lock = chart_locks[tool_context.invocation_id] = asyncio.Lock()
         return lock
 
+    @_supplies_missing("query", _user_message_as_query)
     async def search(
         query: str,
         tool_context: ToolContext,
