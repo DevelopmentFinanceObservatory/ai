@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx2
 import pytest
-from analysis_mcp.execution_identity import current_execution_identity
+from analysis_mcp.execution_identity import ExecutionIdentity
 from common.apis_auth import ApisAuthError, IdTokenProvider
 from common.live_apis import LiveApisClient
 from common.materialisation import FrameRef, MintRecord
@@ -55,15 +55,27 @@ from .live_refresh_support import (
     RecordedApis,
     problem,
 )
-from .replay_support import FIRST, OPTIONS, PRINCIPAL, SECOND, SPEC, Pair
+from .replay_support import (
+    FIRST,
+    OPTIONS,
+    PRINCIPAL,
+    RUNNER_EXECUTION_IDENTITY,
+    SECOND,
+    SPEC,
+    Pair,
+)
 
 STUDIO_TOKEN = "studio-token-55d0"
 OTHER_SPEC = "spec_" + "b" * 32
 STORED: Pair = ("ops_" + "a" * 32, "ocv_" + "a" * 32)
 REPLAYED: Pair = ("ops_" + "c" * 32, "ocv_" + "c" * 32)
+# A frame an earlier replay stored under its replay key.
+STORED_REPLAY: Pair = ("ops_" + "d" * 32, "ocv_" + "d" * 32)
 NORMAL_FORM = "rnf_" + "1" * 32
 SETTINGS = Settings(live_refresh_principal=LIVE_PRINCIPAL)
 _STATUS = {row.code: row.status for row in REFRESH_CODES}
+# The runner's execution identity, as `RecordedApis`' capabilities document names it.
+RUNNER_IDENTITY = ExecutionIdentity(**RUNNER_EXECUTION_IDENTITY).canonical_string()
 
 
 def recipe_of(frame: Pair, *datasets: str) -> dict[str, Any]:
@@ -445,7 +457,7 @@ async def test_a_frame_already_replayed_from_these_root_versions_is_rendered_wit
     key = replay_key(
         normal_form_hash=NORMAL_FORM,
         root_datasets=[{"spec_id": SPEC, "content_version": SECOND}],
-        execution_identities=[current_execution_identity().canonical_string()],
+        execution_identities=[RUNNER_IDENTITY],
     )
     apis.recipes[REPLAYED] = recipe_of(REPLAYED) | {"replay_key": key}
     replayer = Replayer(apis)
@@ -459,6 +471,29 @@ async def test_a_frame_already_replayed_from_these_root_versions_is_rendered_wit
     assert apis.rendered_on() == [REPLAYED]
     assert replayer.entered == 0
     assert unavailable_definition.reads == []
+
+
+async def test_without_an_execution_identity_from_dfo_apis_no_replay_is_looked_up(
+    apis: RecordedApis,
+) -> None:
+    """An apis whose capabilities name no runner identity: no replay key can be
+    known, so a frame stored under one is not looked up and the card replays."""
+    apis.execution_identity = None
+    apis.versions[SPEC] = listed((SECOND, None), (FIRST, None))
+    key = replay_key(
+        normal_form_hash=NORMAL_FORM,
+        root_datasets=[{"spec_id": SPEC, "content_version": SECOND}],
+        execution_identities=[RUNNER_IDENTITY],
+    )
+    apis.recipes[STORED_REPLAY] = recipe_of(STORED_REPLAY) | {"replay_key": key}
+    replayer = Replayer(apis)
+    async with client_of(service_over(apis, replayer)) as client:
+        response = await refresh(client)
+
+    assert response.json() == {"status": "redrawn", "render": RECORDED_RENDER}
+    assert apis.calls("/recipes/replays/") == []
+    assert apis.rendered_on() == [REPLAYED]
+    assert replayer.entered == 1
 
 
 @pytest.mark.parametrize(
@@ -534,7 +569,7 @@ async def test_a_kind_root_on_a_standing_version_is_current_only_under_its_own_s
                 {"spec_id": SPEC, "content_version": FIRST}, enrichment_stamp=listed_stamp
             )
         ],
-        execution_identities=[current_execution_identity().canonical_string()],
+        execution_identities=[RUNNER_IDENTITY],
     )
     looked_up = [f"/api/datasets/recipes/replays/{key}"] if replayed else []
 
@@ -569,7 +604,7 @@ def kind_recipe(
                     {"spec_id": SPEC, "content_version": content_version}, enrichment_stamp=stamp
                 )
             ],
-            execution_identities=[current_execution_identity().canonical_string()],
+            execution_identities=[RUNNER_IDENTITY],
         )
     return recipe
 
@@ -771,7 +806,7 @@ def replayed_under(stamp: str, *, content_version: str = FIRST) -> dict[str, Any
                 {"spec_id": SPEC, "content_version": content_version}, enrichment_stamp=stamp
             )
         ],
-        execution_identities=[current_execution_identity().canonical_string()],
+        execution_identities=[RUNNER_IDENTITY],
     )
     return recipe_of(REPLAYED) | {"replay_key": key, "roots": [root.model_dump(mode="json")]}
 

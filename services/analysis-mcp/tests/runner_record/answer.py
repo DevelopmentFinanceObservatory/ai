@@ -16,8 +16,8 @@ with no enrichment stamp). The
 recorded frame of a groupby root is the dataset version apis summed, which a
 mint record names as the root's dataset, so it is read as recorded. A root that
 states no `columns`, such as a Spec root, takes the default enrichment the live
-root source gives a dataset whose identity names no flow role, the place type
-(`analysis_roots.mint_options`).
+root source gives the roles its frame holds, the place type for a frame of no flow
+role (`default_enrichment.with_default_enrichment`).
 
 A GET reads what the calls stored, after every call is answered, as the door
 serving its path answers it: a derived frame's manifest and its Parquet file (`doors.derived`),
@@ -50,9 +50,12 @@ from datasets_api.analysis import (
     run_analysis,
     run_anchor,
 )
-from datasets_api.analysis_roots import frame_ref_for, mint_options
+from datasets_api.analysis_roots import frame_ref_for
+from datasets_api.config import DEFAULT_GROUPBY_FOLD_MAX_ROWS
+from datasets_api.default_enrichment import with_default_enrichment
 from datasets_api.derived import (
     DerivedReads,
+    locate_derived_frame,
     manifest_body,
     read_derived_manifest,
     render_derived_file,
@@ -99,7 +102,9 @@ class _RenderedRoots(FakeRootSource):
         self, root: SpecRoot | DatasetRoot, *, latest: bool, trace_id: str | None
     ) -> ResolvedRoot:
         if root.rendering.columns is None:
-            columns = tuple(mint_options(root.rendering, identity={}).get("columns") or ())
+            columns = tuple(
+                with_default_enrichment(None, roles=self._roles(root, latest=latest)) or ()
+            )
             rendering = root.rendering.model_copy(update={"columns": columns})
             root = root.model_copy(update={"rendering": rendering})
         resolved = super().resolve(root, latest=latest, trace_id=trace_id)
@@ -130,6 +135,14 @@ class _RenderedRoots(FakeRootSource):
             rendering=root_rendering(options),
             source=columns,
         )
+
+    def _roles(self, root: SpecRoot | DatasetRoot, *, latest: bool) -> tuple[str, ...]:
+        """The columns of the frame `root` reads, as `FakeRootSource.resolve` picks its
+        version, among which `with_default_enrichment` finds the frame's roles."""
+        given = root.content_version if isinstance(root, DatasetRoot) else None
+        version = given if given is not None and not latest else self.newest.get(root.spec_id)
+        frame = self.frames.get((root.spec_id, version)) if version is not None else None
+        return () if frame is None else tuple(frame.table.column_names)
 
     def dataset_root(self, record: Mapping[str, Any]) -> DatasetRoot:
         """The dataset root a stored recipe's root `record` names, read with the
@@ -169,14 +182,16 @@ def _read(entry: dict[str, Any], *, stores: Stores) -> dict[str, Any]:
         recipe_reader=stores.recipe_store,
         enrichment=ENRICHMENT,
         now=lambda: stores.now,
+        fold_max_rows=DEFAULT_GROUPBY_FOLD_MAX_ROWS,
     )
     try:
         if derived := _DERIVED.fullmatch(path):
             spec_id, content_version, file = derived.groups()
             if file:
                 rendered = render_derived_file(
-                    spec_id=spec_id,
-                    content_version=content_version,
+                    locate_derived_frame(
+                        spec_id=spec_id, content_version=content_version, reads=reads
+                    ),
                     options=selector_options(parse_qsl(entry["query"])),
                     reads=reads,
                     site=_SITE,

@@ -11,6 +11,7 @@ services and data-mcp's real mint are in `test_recipe_replay_integration.py`.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import subprocess
 import sys
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -223,6 +224,8 @@ class Scene:
         self.dataset = Dataset(store)
         self.tools = Tools()
         self.apis = FakeApis()
+        # The verbs are analysis-mcp's in-process functions, so apis names their engine.
+        self.apis.execution_identity = dataclasses.asdict(current_execution_identity())
         self.assembler = self.apis.assembler()
         self.budget = RowBudget(max_rows=100_000)
 
@@ -510,6 +513,21 @@ async def test_a_replay_of_unmoved_data_names_the_frame_already_published(scene:
     assert replayed.newly_published is False
     assert scene.tools.calls == []
     assert len(scene.apis.published()) == posts
+
+
+async def test_without_an_execution_identity_from_dfo_apis_every_verb_is_called(
+    scene: Scene,
+) -> None:
+    """An apis whose capabilities name no runner identity: no pair is predicted, so
+    the frames the store holds are computed again."""
+    original, recipe = await scene.fixed()
+    scene.apis.execution_identity = None
+
+    replayed = await scene.replay(recipe)
+
+    assert isinstance(replayed, Replayed)
+    assert replayed.frame == original
+    assert scene.tools.names == ["filter", "growth"]
 
 
 async def test_a_replay_past_its_deadline_is_pending_and_the_next_call_skips_what_finished(
