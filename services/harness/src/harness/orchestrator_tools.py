@@ -2045,14 +2045,14 @@ def build_orchestrator_tools(
         place into one answer. A total over several categories ("health
         and education aid") stays one part.
 
-        `text` has Search read words itself, as written. Send it alone when
-        the question names no measure to put in a part. Send it with one part
-        in `parts` to search that part once more, when the part's result
-        carries `retry_with_text`. Search reads `text` and nothing in the
-        part, so the part stays as it was sent. Send one part's question at a
-        time this way: Search gives every part of the text the places and
-        years it reads, and the sources it names or excludes, so `text` keeps
-        the user's words for the part's sources.
+        `text` has Search read words itself, as written. Send it alone for a
+        question with no measure to parse, such as "what can you tell me about
+        Kenya?". Send it with one part in `parts` to search that part once
+        more, when the part's result carries `retry_with_text`. Search reads
+        `text` and nothing in the part, so the part stays as it was sent. Send
+        one part's question at a time this way: Search gives every part of the
+        text the places and years it reads, and the sources it names or
+        excludes, so `text` keeps the user's words for the part's sources.
 
         Returns the result's `kind`: a `resolution` reads each part
         separately; a `catalogue` means the question asked what data DFO
