@@ -8,8 +8,8 @@ what they answered since the translator's referral
 (`combination_picks`), whether they spoke since a plan version was recorded
 (`user_spoke_since_recorded`), and the prices they chose (`prices_chosen`).
 `CallSession` is the `submission.service.SessionView` over a call, through
-those readers. `planner.session.SessionCall` is the call either planner serves
-a tool with.
+those readers. `planner.session.SessionCall` is the call the planner serves a
+tool with.
 """
 
 from __future__ import annotations
@@ -487,7 +487,7 @@ def user_spoke_since_recorded(call: PlannerCall, version: int) -> bool:
     (`_transient_retry` answers a bare retry so) and moves no mark. After the mark, the user
     speaks with an ask's response they answered (`_is_answer`: a pick, free text),
     an amendment of the approval card (`_is_amendment`), or a message of their own
-    (a `message` step), as the ADK eval runner sends a case's later messages into one session. A
+    (a `message` step). A
     refusal, a skip, a referral and the planner seam's own messages are not.
 
     `harness.studio_state.ConversationState.session_id` opens a new ADK

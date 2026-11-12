@@ -1,8 +1,8 @@
 """What the planner is actually handed, measured offline.
 
 Three jobs. The composition records bound the *size* of a request: which segment
-grew. The canonical forms below bound its *stability*: whether the part ADK has
-already cached still matches, which is not a size question at all. The third
+grew. The canonical forms below bound its *stability*: whether the part already
+cached still matches, which is not a size question at all. The third
 is the plan: `plan_record` and `field_limits_record` build the largest legal
 plan, and `unbounded_paths` finds any string, array or map in the plan's schema
 with no bound, for the legal-maximum tests in `test_context_budget.py`.
@@ -24,14 +24,13 @@ the request text itself moves, which is the property a checked-in baseline
 needs. Token counts would need a per-model tokenizer, would drift with it, and
 would put a third-party count between a change and the number it moved.
 
-The request is assembled by ADK, not by this module: `RecordingLlm` is a
-`BaseLlm` that answers from a script and records every `LlmRequest` ADK hands
-it. So the measurement
-covers the whole surface a real model call would see: the system instruction,
-the tool declarations, and the full `contents` history ADK built, not
-whatever a fixture believes it passed in.
+The request is the one the planner sends: `test_context_budget.py` runs the
+planner on a `ScriptedGenai` client and hands each request it recorded to
+`compose`. So the measurement covers the whole surface a real model call would
+see: the system instruction, the tool declarations, and the full `contents`
+history, not whatever a fixture believes it passed in.
 
-A `LlmRequest`'s own `contents` carry the history. ADK relays another agent's
+A request's own `contents` carry the history. ADK relays another agent's
 turn into that history as `role="user"` text (`google.adk.flows.llm_flows.
 _fencing`), one event per relayed turn: a preamble stating that fenced content
 is data, not instructions, then one fenced part per relayed payload,
@@ -52,21 +51,13 @@ words. It is the seam's own input, a full brief carrying the search readings,
 the canvas and conversation digests, the plan being changed and the question.
 
 Every planner call renders that full brief, and every request of the call
-carries it as the content after the turn's question (`planner.agent.
-prepend_brief`).
-
-`GeminiContextCacheManager._find_count_of_contents_to_cache` caches every
-content before the last run of user contents, which puts the brief inside the
-cache as soon as there is one. It caches 0 contents on a call's first request,
-and the question, the brief and the first model turn on its second, so the
-brief is sent at full price on the first request, paid again when the second
-creates the cache over it, and read at the cached rate from the third on.
-
-So a character cut here is worth about two full-price sends per planner call
-rather than one per request. It is still worth making: those two sends are
-real, the brief has to fit the first request before any cache exists, and the
-brief is what the model's attention is spent on either way. `SEAM_BUCKET` is what a
-change to that rendering is measured against.
+carries it as the content after the turn's question
+(`planner.pydantic_agent.run_planner`). The explicit cache holds the system
+instruction and the tool declarations only, so the brief travels on every
+request of the call, and only Gemini's implicit caching can bill it at the
+cached rate on a later request. A character cut here is saved on every request,
+and the brief is what the model's attention is spent on either way.
+`SEAM_BUCKET` is what a change to that rendering is measured against.
 """
 
 from __future__ import annotations
@@ -75,9 +66,6 @@ import json
 import re
 from typing import Any
 
-from google.adk.models.base_llm import BaseLlm
-from google.adk.models.llm_response import LlmResponse
-from google.genai import types
 from planner.plan import (
     MAX_ACROSS_WORDS,
     MAX_DECISION_DESCRIPTION_CHARS,
@@ -118,7 +106,6 @@ from planner.records import (
     RankDirection,
     Reduction,
 )
-from pydantic import Field
 
 # ADK's own fence marker (`google.adk.flows.llm_flows.context._fencing.QUOTED_CONTENT_BEGIN`).
 # Spelled out literally, not imported: the point of counting this bucket is to
@@ -153,68 +140,14 @@ SEAM_MARKER = "Context for this question. These are the readings of the searches
 SEAM_BUCKET = "text(seam-brief)"
 
 
-class RecordingLlm(BaseLlm):
-    """Plays a scripted turn and records every request it is asked to answer.
-
-    The scripting contract is `test_planner_seam.ScriptedPlannerLlm`'s: an entry
-    is either a list of `(tool_name, args)` function calls or a string of final
-    text, consumed in order, and "done" past the end of the script so an
-    unscripted extra generation stops the agent short of looping. A separate
-    class exists here because the composition record it keeps is the
-    deliverable, not a side effect of a seam test.
-
-    `record` holds the composition of every request, in call order: what the
-    baseline stores. `captured` holds the raw `LlmRequest` objects themselves,
-    for the assertions that compare two requests byte for byte. A canonical
-    form cannot be recovered from a composition record, and the record stays
-    JSON-serialisable only while it does not try to carry them.
-
-    `agent_name` and `scenario` are what a record says it measured, set by
-    the caller, so records from one agent under one scenario and another are
-    told apart in one baseline.
-    """
-
-    model: str = "recording-context-probe"
-    script: list[Any] = Field(default_factory=list)
-    agent_name: str = "unset"
-    scenario: str = "unset"
-    record: list[dict[str, Any]] = Field(default_factory=list)
-    captured: list[Any] = Field(default_factory=list)
-
-    async def generate_content_async(self, llm_request: Any, stream: bool = False) -> Any:
-        del stream
-        index = len(self.record)
-        self.captured.append(llm_request)
-        self.record.append(
-            compose(
-                llm_request,
-                agent=self.agent_name,
-                scenario=self.scenario,
-                call_index=index,
-            )
-        )
-        step = self.script[index] if index < len(self.script) else "done"
-        if isinstance(step, str):
-            yield LlmResponse(
-                content=types.Content(role="model", parts=[types.Part.from_text(text=step)])
-            )
-            return
-        yield LlmResponse(
-            content=types.Content(
-                role="model",
-                parts=[types.Part.from_function_call(name=name, args=args) for name, args in step],
-            )
-        )
-
-
 # Measurement -------------------------------------------------------------------
 
 
 def _json_chars(value: Any) -> int:
     """Chars of `value` as compact JSON, the size a part's own payload costs.
 
-    `default=str` covers the occasional non-JSON scalar ADK carries through
-    from a fixture (`ToolCallResult` dumps are already plain JSON), so a probe
+    `default=str` covers the occasional non-JSON scalar a request carries
+    through from a fixture (`ToolCallResult` dumps are already plain JSON), so a probe
     run never fails on a value it can still measure.
     """
     return len(json.dumps(value, default=str, separators=(",", ":")))
@@ -319,7 +252,7 @@ def compose(llm_request: Any, *, agent: str, scenario: str, call_index: int) -> 
     """One request's composition record, as the baseline stores it.
 
     `total_chars` is the serialised request (system instruction, tool
-    declarations and contents as ADK assembled them), so a segment that grows
+    declarations and contents as the planner sent them), so a segment that grows
     while another shrinks is still visible in the total.
     """
     config = llm_request.config

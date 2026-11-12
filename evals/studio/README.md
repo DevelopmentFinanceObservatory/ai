@@ -48,12 +48,9 @@ its violations and rubric scores.
 
 Scripted mode (`orchestrator_scripted.py`) serves the studio routes over the real
 workflow, the real orchestrator tools and the real `PlannerSeam`, and scripts what a
-model or an upstream would answer. The planner runs on the runner `PLANNER_RUNNER`
-names (`pydantic_ai` by default, or `adk`), its model calls answered by a scripted
-google-genai client (`harness.scripted.scripted_client`), so
-`PLANNER_RUNNER=adk just eval-studio-contract` runs the battery on the ADK
-planner. It is the same battery CI runs, on both planners, via
-`services/harness/tests/test_studio_orchestrator_eval.py`. A case's `scenario`
+model or an upstream would answer. The planner's model calls are answered by a
+scripted google-genai client (`harness.scripted.scripted_client`). CI runs the same
+battery via `services/harness/tests/test_studio_orchestrator_eval.py`. A case's `scenario`
 (inline, or the name of an entry in the file's `scenarios`) holds:
 
 - `orchestrator`: the orchestrator model's replies, one per model call across every

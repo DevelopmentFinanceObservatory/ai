@@ -1,12 +1,10 @@
-"""The Pydantic AI planner: its agent (`planner_agent`) and its run (`run_planner`).
+"""The planner: its Pydantic AI agent (`planner_agent`) and its run (`run_planner`).
 
-The agent serves each `planner.tool_spec.ToolSpec` with the declaration the
-ADK planner shows for it (`function_declaration`), and a call runs the spec's
-body (`serve_tool`) over the `planner.call.PlannerCall` its run's
-`PlannerDeps` makes, with the model's arguments as sent. `run_planner` drives
-one run with `Agent.iter` from the user's message and the brief, as the ADK
-planner's `single_turn` run starts from the turn's question and the brief
-(`planner.agent.prepend_brief`), and yields each model response as it
+The agent serves each `planner.tool_spec.ToolSpec` with its declaration
+(`function_declaration`), and a call runs the spec's body (`serve_tool`) over
+the `planner.call.PlannerCall` its run's `PlannerDeps` makes, with the
+model's arguments as sent. `run_planner` drives one run with `Agent.iter`
+from the turn's question and the brief, and yields each model response as it
 arrives and then its calls' answers, with the state they wrote, once every
 call has answered. A tool that ends the run (`planner.tools.EndRun`) stops it
 before the next model request.
@@ -14,11 +12,10 @@ before the next model request.
 Pydantic AI shapes a request its own way: the system instruction as a
 `Content`, one `Tool` per declaration, an empty parameters schema on a tool
 that takes none, an explicit `AUTO` tool config and `response_modalities`.
-The planner's model (`harness.planner_model`) puts each request in the ADK
-planner's form before it is sent, so the model is sent the ADK planner's
-request for the same turn but for each framework's HTTP headers. The model
-is built with `PLANNER_PROFILE`, which sends each declaration's schema
-as given and adds nothing to the instruction.
+The planner's model (`harness.planner_model`) puts each request in one fixed
+form before it is sent. The model is built with `PLANNER_PROFILE`, which
+sends each declaration's schema as given and adds nothing to the
+instruction.
 """
 
 from __future__ import annotations
@@ -68,16 +65,16 @@ NO_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
 _NO_REQUEST_LIMIT = UsageLimits(request_limit=None)
 
 # Pydantic AI charges a call to a tool the planner lacks against the tool retry
-# budget and ends the run once it is spent. The ADK planner answers every such
-# call and goes on, so the budget is lifted and the turn budget's call cap ends
-# a run that keeps making them. The planner's own tools take their arguments
-# unvalidated, so none asks for a retry.
+# budget and ends the run once it is spent. The planner answers every such call
+# (`tool_not_found`) and goes on, so the budget is lifted and the turn budget's
+# call cap ends a run that keeps making them. The planner's own tools take
+# their arguments unvalidated, so none asks for a retry.
 _UNLIMITED_RETRIES = sys.maxsize
 
 # Carried by the request holding the user's message. Pydantic AI merges
 # consecutive requests into one content unless their `instructions` differ,
 # and the brief's request carries the agent's instruction, so this keeps the
-# user's message and the brief two contents, as the ADK planner sends them.
+# user's message and the brief two contents.
 # Only the latest request's instructions reach the model, so this text is not
 # sent.
 _QUESTION_INSTRUCTIONS = "The user's message, which opened the turn."
@@ -160,8 +157,8 @@ type PlannerItem = PlannerResponse | PlannerAnswers
 
 @dataclass(frozen=True)
 class PydanticPlanner:
-    """The Pydantic AI planner (`planner_agent`): the agent and its tools'
-    names, in the order they are declared."""
+    """The planner's Pydantic AI agent (`planner_agent`) and its tools' names,
+    in the order they are declared."""
 
     agent: Agent[PlannerDeps, str | None]
     tools: tuple[str, ...]
@@ -169,8 +166,8 @@ class PydanticPlanner:
 
 def tool_not_found(name: str, tools: Sequence[str]) -> dict[str, str]:
     """The answer to a call of `name`, a tool the planner lacks, naming the tools
-    it can call in the order they are declared. It is the ADK planner's answer,
-    word for word."""
+    it can call in the order they are declared. It is ADK's answer to a call
+    of a tool an `LlmAgent` lacks, word for word."""
     available = ", ".join(tools) or "none"
     return {
         "error": (
@@ -197,16 +194,15 @@ def planner_agent(
     Each tool is declared as `function_declaration(spec)` states it, its
     schema as it stands, and runs the spec's body over the model's arguments
     as sent (`_tool_function`). Every tool is declared not strict, which keeps
-    the request's function calling mode `AUTO`, the mode the ADK planner's
-    request leaves Gemini on. A response with no tool call ends the run, an
-    empty one included, as it ends the ADK planner's. Thinking is
-    `planner.settings.AGENT_THINKING_CONFIG`.
+    the request's function calling mode `AUTO`, Gemini's default with tools.
+    A response with no tool call ends the run, an empty one included.
+    Thinking is `planner.settings.AGENT_THINKING_CONFIG`.
 
-    A call to a tool the planner lacks is answered with `tool_not_found`, as
-    the ADK planner answers it, and the run goes on however many such calls
-    the model makes (`_UNLIMITED_RETRIES`). Each request replays the run's
-    earlier responses less their unsigned thought summaries, as the ADK
-    planner's session keeps them (`_as_the_adk_planner_replays`).
+    A call to a tool the planner lacks is answered with `tool_not_found`, and
+    the run goes on however many such calls the model makes
+    (`_UNLIMITED_RETRIES`). Each request replays the run's earlier responses
+    less their unsigned thought summaries, as the session keeps them
+    (`_as_replayed`).
 
     The agent traces through the global tracer provider: a span per run
     (`invoke_agent <name>`), per model call (`chat <model>`) and per tool call
@@ -228,7 +224,7 @@ def planner_agent(
         ),
         retries={"tools": _UNLIMITED_RETRIES},
         capabilities=[
-            ProcessHistory(_as_the_adk_planner_replays(tools)),
+            ProcessHistory(_as_replayed(tools)),
             Instrumentation(
                 InstrumentationSettings(
                     include_content=include_content, include_model_request_parameters=False
@@ -240,15 +236,15 @@ def planner_agent(
     return PydanticPlanner(agent=agent, tools=tools)
 
 
-def _as_the_adk_planner_replays(
+def _as_replayed(
     tools: Sequence[str],
 ) -> Callable[[list[ModelMessage]], Awaitable[list[ModelMessage]]]:
-    """A history processor that puts the run's messages in the form the ADK
-    planner replays them: each call to a tool not in `tools` answered with
+    """A history processor that puts the run's messages in the form the session
+    keeps them: each call to a tool not in `tools` answered with
     `tool_not_found`, in place of the retry Pydantic AI answers it with, and
-    each response less its unsigned thought summaries (`_without_unsigned_thoughts`).
-    It runs before every model request, and Pydantic AI keeps what it returns
-    as the run's messages."""
+    each response less its unsigned thought summaries
+    (`_without_unsigned_thoughts`). It runs before every model request, and
+    Pydantic AI keeps what it returns as the run's messages."""
 
     async def process(messages: list[ModelMessage]) -> list[ModelMessage]:
         return [
@@ -293,9 +289,8 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
     It runs the spec's body (`serve_tool`) over the call's `PlannerCall`, whose
     state is the view the response's calls write through. An answer that is
     no dict is wrapped under `result`, as ADK wraps one. A body that raises is
-    answered with `tool_failed`'s answer, as the ADK planner's tool error
-    callback answers it, and a cancellation propagates. An answer of the
-    body's holding an `error` key, the refusal of a call missing a required
+    answered with `tool_failed`'s answer, and a cancellation propagates. An
+    answer of the body's holding an `error` key, the refusal of a call missing a required
     argument (`planner.tool_spec.missing_arguments`), marks the call's span
     failed (`planner.tool_spec.serve_tool`). Either answer goes to
     `tool_answered` as the call finishes, and what that raises fails the run.
@@ -328,9 +323,8 @@ async def run_planner(
     """Run the planner once on the user's `question` and `brief`, yielding as it goes.
 
     The run's first request holds `question`, then `brief`, as two user
-    contents, or `brief` alone for a turn with no question, as the ADK
-    planner sends it (`planner.agent.prepend_brief`). A question given as a
-    `Content` is sent with its parts as the user sent them
+    contents, or `brief` alone for a turn with no question. A question given as
+    a `Content` is sent with its parts as the user sent them
     (`_question_prompt`). Each model response is yielded as a
     `PlannerResponse` once received, before its calls run. Once every call
     has answered, their answers are yielded as one `PlannerAnswers`, before
@@ -342,11 +336,10 @@ async def run_planner(
 
     A response Pydantic AI refuses (`UnexpectedModelBehavior`, as for a stream
     with no chunk or a blocked prompt) ends the run, as a response with no tool
-    call ends the ADK planner's, and raises nothing. A blocked prompt's
-    response is yielded first, with no parts. Any other exception is raised. A
-    run that ends either way while a response's calls run yields none of their
-    answers. Closing the iterator closes the run (`Agent.iter`) and any
-    stream it holds open.
+    call does, and raises nothing. A blocked prompt's response is yielded
+    first, with no parts. Any other exception is raised. A run that ends either
+    way while a response's calls run yields none of their answers. Closing the
+    iterator closes the run (`Agent.iter`) and any stream it holds open.
 
     `deps` holds the session's state, how a tool call reads it, and the callbacks
     (`PlannerDeps`). `model` is the model the run calls, or None for the
@@ -395,7 +388,7 @@ async def run_planner(
 
 
 class UnsentQuestionPartError(ValueError):
-    """The turn's question holds a part the Pydantic AI planner does not send
+    """The turn's question holds a part the planner does not send
     (`_question_prompt`)."""
 
 
@@ -404,7 +397,6 @@ def _question_prompt(question: types.Content | str) -> str | list[str]:
     the same parts: one text part as its text, several as a list of them.
 
     Studio sends one text part (`harness.studio`). Any other part is refused.
-    The ADK planner sends every part of the question as it is.
 
     Raises:
         UnsentQuestionPartError: A part is not text, the message naming the
@@ -417,8 +409,7 @@ def _question_prompt(question: types.Content | str) -> str | list[str]:
         if part.text is None:
             received = sorted(part.model_dump(exclude_none=True))
             raise UnsentQuestionPartError(
-                f"the question holds a part with {received}; the Pydantic AI planner "
-                "takes text parts only"
+                f"the question holds a part with {received}; the planner takes text parts only"
             )
         prompt.append(part.text)
     return prompt[0] if len(prompt) == 1 else prompt
@@ -434,7 +425,7 @@ def _without_unsigned_thoughts(response: ModelResponse) -> ModelResponse:
 
     Pydantic AI's parts manager merges a run of streamed thought chunks into
     one `ThinkingPart`, signed when any chunk of the run was, as ADK's stream
-    aggregator merges them, so the rule reads the parts both planners hold.
+    aggregator merges them.
     """
     parts = response_parts(response)
     kept = without_unsigned_thoughts(parts)

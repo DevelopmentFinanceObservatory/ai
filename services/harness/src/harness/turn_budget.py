@@ -28,7 +28,7 @@ it and the entry refuses with the code on `TurnBudget.closed`.
 A user's stop or a client disconnect cancels the call. The cancellation
 propagates and closes the stream, and the call is not retried. The span current
 around the call (ADK's `generate_content`, or Pydantic AI's `chat` on the
-Pydantic AI planner's model, `harness.planner_model`) is marked as an error
+planner's model, `harness.planner_model`) is marked as an error
 when the call is cancelled or cut. It also carries
 `langfuse.observation.completion_start_time` at the first chunk and the gaps
 between chunks (`dfo.model.chunk_gaps_s`), so an idle rule can be sized from
@@ -65,8 +65,8 @@ from harness.settings import Settings
 COMPLETION_START_TIME = "langfuse.observation.completion_start_time"
 
 # The `LlmResponse.custom_metadata` key a closing response carries, holding the
-# code of the bound that closed the call, so a callback can tell it from text
-# the model wrote (`harness.planner_seam.PlannerSeam._after_planner_model`).
+# code of the bound that closed the call, so a reader can tell it from text
+# the model wrote (`harness.planner_model`).
 CLOSED_BY_KEY = "dfo.turn_budget.closed_by"
 
 

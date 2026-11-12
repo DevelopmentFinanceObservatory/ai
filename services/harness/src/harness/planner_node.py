@@ -1,27 +1,24 @@
-"""The Pydantic AI planner as a workflow node (`planner_node`).
+"""The planner as a workflow node (`planner_node`).
 
 `harness.planner_seam.PlannerSeam` runs the planner through `ctx.run_node`.
-On the Pydantic AI planner that node is a function node named as the ADK
-planner (`planner.settings.AGENT_NAME`) that drives
+That node is a function node named `planner.settings.AGENT_NAME` that drives
 `planner.pydantic_agent.run_planner` on `harness.planner_model.planner_model`
-and yields events holding what the ADK planner's `LlmAgent` stores for the same
+and yields events holding what an ADK `LlmAgent` stores for the same
 exchange, as far as the session's readers read it (`harness.planner_events`).
 ADK's node runner stamps each with the author the node sets, the branch of the
-seam's `override_branch`, the invocation and the node's path, so the session
-the run leaves reads as the ADK planner's to `planner.session.session_steps`,
-`harness.studio_translate` and the seam.
+seam's `override_branch`, the invocation and the node's path, which
+`planner.session.session_steps`, `harness.studio_translate` and the seam read.
 
-The run traces as the ADK planner's does: its agent is named `AGENT_NAME`, its
-spans name the session as their conversation, and they carry message content
-when ADK's would (`google.adk.telemetry.TelemetryConfig`, which reads
+The run's agent is named `AGENT_NAME`, its spans name the session as their
+conversation, and they carry message content when ADK's would
+(`google.adk.telemetry.TelemetryConfig`, which reads
 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`).
 
-The node reports to the seam's `harness.planner_run.PlannerRun` as the ADK
-planner's callbacks do: each tool's answer, each tool that raised, a call the
-turn budget closed (`PlannerRun.model_answered`), and before each request
-whether the run asks or stops instead (`PlannerRun.next_request`). A directive
-is answered with the model turn `directive_turn` builds, which the ADK planner's
-callbacks answer it with too.
+The node reports to the seam's `harness.planner_run.PlannerRun`: each tool's
+answer, each tool that raised, a call the turn budget closed
+(`PlannerRun.model_answered`), and before each request whether the run asks
+or stops instead (`PlannerRun.next_request`). A directive is answered with
+the model turn `directive_turn` builds.
 """
 
 from __future__ import annotations
@@ -74,12 +71,11 @@ SKIP_THOUGHT_SIGNATURE = b"skip_thought_signature_validator"
 
 
 def pydantic_planner(specs: Sequence[ToolSpec], *, instruction: str) -> PydanticPlanner:
-    """The Pydantic AI planner on `specs` and `instruction`, which the ADK planner
-    serves too, named as the ADK planner (`planner.settings.AGENT_NAME`). It has no
-    model of its own, since each run names one (`planner_node`). Built once, it
-    serves every run. Its spans carry message content when ADK's telemetry
-    settings say the ADK planner's do (`google.adk.telemetry.TelemetryConfig`),
-    read once, here."""
+    """The planner on `specs` and `instruction`, named
+    `planner.settings.AGENT_NAME`. It has no model of its own, since each run
+    names one (`planner_node`). Built once, it serves every run. Its spans
+    carry message content when ADK's telemetry settings say an ADK agent's do
+    (`google.adk.telemetry.TelemetryConfig`), read once, here."""
     return planner_agent(
         specs,
         instruction=instruction,
@@ -98,12 +94,12 @@ def planner_node(
     prefix_cache: PrefixCache | None = None,
     brief: str,
 ) -> BaseNode:
-    """One run of the Pydantic AI planner, as the node `ctx.run_node` runs.
+    """One run of the planner, as the node `ctx.run_node` runs.
 
     Args:
         run: The run's bookkeeping, told what the run does and asked what
             replaces each request.
-        planner: The Pydantic AI planner (`pydantic_planner`).
+        planner: The planner (`pydantic_planner`).
         model_name: The Gemini model, as google-genai names it.
         client: The google-genai client the model's calls go through.
         budget: The turn's budget, or None to run every call unbounded.
@@ -116,10 +112,10 @@ def planner_node(
         `brief`, after the turn's question, and yields the run's events
         (`harness.planner_events`). Each model call the run makes is counted on
         the invocation's counter (`InvocationContext.increment_llm_call_count`),
-        with the orchestrator's and every other planner run's, as the ADK
-        planner's are. A turn put in the model's place is not counted, as ADK
-        counts no response a callback gives. ADK raises
-        `LlmCallsLimitExceededError` on the call past `RunConfig.max_llm_calls`.
+        with the orchestrator's and every other planner run's. A turn put in
+        the model's place is not counted, as ADK counts no response a callback
+        gives. ADK raises `LlmCallsLimitExceededError` on the call past
+        `RunConfig.max_llm_calls`.
         A question holding a part this planner does not send
         (`planner.pydantic_agent.UnsentQuestionPartError`) ends the run before
         any request on an `internal_error` refusal (`run.refused`). The seam
@@ -144,10 +140,12 @@ def planner_node(
             return turn
 
         def after_response(closed_by: SeamCode | None, usage: Usage | None) -> types.Content | None:
-            if closed_by is not None:
-                return directive_turn(run.model_answered(closed_by))
+            # A call a bound closed is logged with the usage its chunks
+            # reported before the cut.
             if usage is not None:
                 log_usage(AGENT_NAME, usage)
+            if closed_by is not None:
+                return directive_turn(run.model_answered(closed_by))
             return None
 
         def tool_failed(name: str, error: BaseException) -> dict[str, Any]:
@@ -200,7 +198,7 @@ def planner_node(
             # Refused before any request. The run ends on the refusal, which
             # the seam answers the entry with. An exception here would fail
             # the whole workflow, since ADK fails the root on a child node's
-            # error. The ADK planner sends the part.
+            # error.
             logger.error(
                 "planner question refused session=%s invocation=%s: %s",
                 ctx.session.id,

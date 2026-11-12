@@ -16,9 +16,8 @@ each of the task's payloads makes. `run_entry` replays them through production c
   holds those spec blocks as `harness.studio` holds a turn's
   (`planner.plan.current_recorded_identity`), and hand the brief to the real
   `PlannerSeam`, which renders the planner's first message from that state and runs
-  the planner, on the runner `planner_runner` names (`harness.settings.Settings`),
-  with production's instruction, tools and callbacks, each request under the
-  `TurnBudget` a served request gets (`harness.turn_budget`).
+  the planner, with production's instruction and tools, each request
+  under the `TurnBudget` a served request gets (`harness.turn_budget`).
 
 Two edges are replaced. The planner's `get_skill` reads the recording through
 `RecordedSurface`. The seam's translate step is the eval's own,
@@ -28,7 +27,7 @@ production's translation on that plan (`translator.tool.build_translate`), its c
 to data-mcp and the graph's resolve door answered from the recording; that is how
 `validate.py` checks each plan compiles. The planner's model calls go through a
 google-genai client the eval wraps (`Probe.client`), where it notes each request and
-answer and applies an arm's edits, on either runner alike.
+answer and applies an arm's edits.
 Every entry runs at the planner's served thinking level and model-time budget.
 The planner streams, as it does in a studio turn.
 """
@@ -679,7 +678,7 @@ class PlanRecorded(Exception):  # noqa: N818 -- a stop signal, not a fault
 
 class _DropPlanRecorded(logging.Filter):
     """Drops the planner's error log for the eval's own stop, which it reads as a tool
-    failure. The seam logs it on the ADK planner and the node on the Pydantic AI planner."""
+    failure. The node logs it."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         return not (record.exc_info and isinstance(record.exc_info[1], PlanRecorded))
@@ -705,11 +704,10 @@ GAVE_UP = "gave_up"
 class ModelRequest:
     """One request the planner's model client is sent, in google-genai's types.
 
-    Both runners send the system instruction as a string and every declaration in
-    one `Tool`, the Pydantic AI planner's request put in the ADK planner's form
-    before it reaches the client (`harness.planner_model._in_adk_planner_form`).
-    `system_text` and `declarations` read any shape google-genai takes, so an
-    edit reads a request the same way whichever form it arrives in.
+    The planner sends the system instruction as a string and every declaration in
+    one `Tool` (`harness.planner_model`). `system_text` and `declarations` read
+    any shape google-genai takes, so an edit reads a request the same way
+    whichever form it arrives in.
     """
 
     model: str
@@ -738,7 +736,7 @@ class ModelRequest:
 # The system instruction, tools and tool config travel where the request sends them:
 # on the request itself, or, on a request sent against the prefix cache
 # (`harness.prefix_cache`), on that cache's create, which the edit is handed as a
-# request with no contents. Both runners send their requests in one form
+# request with no contents. The planner sends its requests in one form
 # (`ModelRequest`). An edit reads the instruction through `ModelRequest.system_text`
 # and finds a declaration through `ModelRequest.declarations`.
 RequestEdit = Callable[[ModelRequest], None]
@@ -763,9 +761,9 @@ class Probe:
     model client was sent, each model call, with its tokens and latency once the whole
     answer arrived, and what `translator` answered for the plan when one is set.
 
-    The planner reaches the model only through the client `client` returns, on either
-    runner, so a turn the seam or the turn budget answers in the model's place is no
-    call. A call stays open from its first send until a whole answer arrives or the
+    The planner reaches the model only through the client `client` returns, so a
+    turn the seam or the turn budget answers in the model's place is no call. A
+    call stays open from its first send until a whole answer arrives or the
     entry's next request starts (`next_request`). A send while one is open is that call
     sent again (a first-chunk resend, or a resend after the prefix cache was found
     gone, at open or while its stream was read), so it is one call, timed from its
@@ -987,12 +985,11 @@ def live_client() -> Client:
 def build_seam(
     *, probe: Probe, surface: RecordedSurface, prefix_cache: PrefixCache | None, client: Client
 ) -> PlannerSeam:
-    """The seam `harness.wiring.build_planner` builds, on the runner
-    `Settings().planner_runner` names, with the probe's translate step and the
-    planner's model calls going through `client`.
+    """The seam `harness.wiring.build_planner` builds, with the probe's translate
+    step and the planner's model calls going through `client`.
 
-    The planner, its instruction, its tools and the seam's callbacks are production's
-    own.
+    The planner, its instruction, its tools and the planner node the seam runs it in
+    (`harness.planner_node`) are production's own.
     """
     return PlannerSeam(
         settings=Settings(),
@@ -1015,8 +1012,7 @@ def entry_workflow(planner: PlannerModel) -> Workflow:
 @dataclass(frozen=True)
 class EntryRun:
     """One finished entry: the planner's events and the user's answers to its asks, what
-    the probe saw, how it ended, and the planner runner it ran on
-    (`harness.settings.Settings.planner_runner`)."""
+    the probe saw, and how it ended."""
 
     events: list[Event]
     state: dict[str, Any]
@@ -1028,7 +1024,6 @@ class EntryRun:
     error: str | None
     timed_out: bool
     wall_s: float
-    planner_runner: str
 
 
 async def run_entry(
@@ -1042,8 +1037,7 @@ async def run_entry(
     answers: Sequence[Mapping[str, Any]] = (),
     translation: TranslationCalls | None = None,
 ) -> EntryRun:
-    """Run `task`'s planner entry once on a fresh session, on the planner runner
-    `Settings().planner_runner` names.
+    """Run `task`'s planner entry once on a fresh session.
 
     The planner's model calls go through `client`, a live client (`live_client`) when
     None. `edits` change each request it is sent (`RequestEdit`), and the probe notes
@@ -1148,7 +1142,6 @@ async def run_entry(
         error=error,
         timed_out=timed_out,
         wall_s=wall_s,
-        planner_runner=settings.planner_runner,
     )
 
 
@@ -1204,6 +1197,9 @@ def _entry_events(session: Session) -> list[Event]:
 
 # --- The record of one run -----------------------------------------------------------
 
+# The value of the record field and fingerprint key `planner_runner`, which stored
+# baselines carry.
+PLANNER_RUNNER = "pydantic_ai"
 RECORD_SCHEMA = 4
 
 
@@ -1352,7 +1348,7 @@ def entry_record(
     """One run's JSON record: what the planner did, what it cost, and how it ended.
 
     `experiment` identifies the treatment the run had (`run.experiment`), so a resumed
-    run directory never mixes two, and `planner_runner` names the runner it ran on.
+    run directory never mixes two, and `planner_runner` holds `PLANNER_RUNNER`.
     `period_reductions` and `period_reduction` say what the accepted plan does with
     its years.
     """
@@ -1366,7 +1362,7 @@ def entry_record(
         "task": task.id,
         "rep": rep,
         "model": model,
-        "planner_runner": run.planner_runner,
+        "planner_runner": PLANNER_RUNNER,
         "revision": revision,
         "experiment": experiment,
         "inputs": run.inputs,

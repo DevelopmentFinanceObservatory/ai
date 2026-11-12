@@ -477,9 +477,9 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
 
     `question_fixed` is `_resolve_intent`'s. `reads_user_words` says the
     planner reads the user's own words in every entry, as the standalone
-    planner and `harness_pair_v1` do; under `harness.planner_seam` it reads
-    them only in an entry the user's amendment opened
-    (`planner.plan.amendment_entry`). Only where it reads them may
+    planner does when it is True; `harness.planner_seam.PlannerSeam` passes
+    False, so the planner reads them only in an entry the user's amendment
+    opened (`planner.plan.amendment_entry`). Only where it reads them may
     `proposal.across_years` name a step, and each step it names takes a
     licence to combine its years (`planner.plan.period_licences_held`).
     `proposer` is the tool every refusal's `action` names. Writes nothing
@@ -1946,8 +1946,8 @@ def _resolve_intent(
     named there would restart the loop. A restart begins at version 1 and is
     counted like an amendment, so restarting does not escape the bound.
 
-    `question_fixed` (`harness.planner_seam` builds the planner with it
-    set; standalone and `harness_pair_v1` leave it `False`) narrows both
+    `question_fixed` (`harness.planner_seam.PlannerSeam` passes `True`;
+    `False` leaves both readings free) narrows both
     readings once a plan is recorded, against `existing.question` rather than
     the call's own wording of the question it is answering:
 

@@ -89,7 +89,6 @@ from planner.plan import (
 )
 from planner.session import SessionCall
 
-from .context_probe import RecordingLlm
 from .orchestrator_fakes import (
     CannedSearch,
     FailingPlanner,
@@ -120,6 +119,7 @@ from .orchestrator_fakes import (
     turn_body,
     visited_nodes,
 )
+from .scripted_genai import ScriptedGenai, reply, text_part
 
 
 class AskingPlanner(ScriptedPlannerModel):
@@ -2076,13 +2076,11 @@ async def test_a_hand_back_is_still_in_view_after_a_later_pause():
 
 
 async def test_a_second_plan_call_runs_a_planner_that_never_sees_the_first_hand_back():
-    # The ADK planner, whose model the test scripts.
+    # The planner's model answers each run with text, which ends it with no plan.
+    scripted = ScriptedGenai([reply(text_part("done"))] * 2)
     seam = PlannerSeam(
-        settings=Settings(planner_runner="adk"),
-        surface=FixtureSurface(schemas=[]),
+        settings=Settings(), surface=FixtureSurface(schemas=[]), client=scripted.client
     )
-    planner_llm = RecordingLlm(script=[], agent_name="planner", scenario="replan")
-    seam._agent.model = planner_llm
     runner, model = orchestrator_runner(
         call("plan", brief="Kenya's debt, first brief", asks=["Kenya's debt, first brief"]),
         call("plan", brief="Kenya's debt, second brief", asks=["Kenya's debt, second brief"]),
@@ -2094,9 +2092,13 @@ async def test_a_second_plan_call_runs_a_planner_that_never_sees_the_first_hand_
     events = await run_turn(runner, types.UserContent("Kenya's debt?"))
 
     hand_back = "The planner could not make a plan"
-    second_run = [r for r in planner_llm.captured if "second brief" in request_text(r)]
+    planner_texts = [
+        "\n".join(part.text or "" for content in r.content_list for part in content.parts or [])
+        for r in scripted.requests
+    ]
+    second_run = [text for text in planner_texts if "second brief" in text]
     assert second_run
-    assert not [r for r in second_run if hand_back in request_text(r)]
+    assert not [text for text in second_run if hand_back in text]
     assert hand_back in request_text(model.requests[-1])
     assert not quotes_another_agent(model.requests[-1])
     # The hand-back's branch stays on the hand-back: the graph's own events

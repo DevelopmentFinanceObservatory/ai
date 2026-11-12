@@ -1,17 +1,16 @@
 """The planner's reader of an ADK session: `session_steps` and `SessionCall`.
 
-Both planners store the same events in the session (`harness.planner_events`
-writes the Pydantic AI planner's as the ADK planner's `LlmAgent` stores them),
-so one reader serves a tool call on either. `SessionCall` is the
-`planner.call.PlannerCall` of a call over its session's events.
+The planner stores its run in the session as `harness.planner_events` builds
+it, the events an ADK `LlmAgent` stores for the same exchange. `SessionCall`
+is the `planner.call.PlannerCall` of a call over its session's events.
 
-The events a call reads are those of the session as its tool runs. ADK appends
-a model response's event before the response's calls run, and their answers
-in one event once every call has answered. The ADK planner's flow does so, and
-the Pydantic AI planner's node (`harness.planner_node`) yields each response's
-event before Pydantic AI runs its calls, and ADK appends each event a node
-yields before the node goes on. So a call sees the earlier events, its own
-response's call event, and no answer of its own response's calls.
+The events a call reads are those of the session as its tool runs. A model
+response's event is appended before the response's calls run, and their
+answers in one event once every call has answered: the planner's node
+(`harness.planner_node`) yields each response's event before Pydantic AI runs
+its calls, and ADK appends each event a node yields before the node goes on.
+So a call sees the earlier events, its own response's call event, and no
+answer of its own response's calls.
 """
 
 from __future__ import annotations

@@ -1,9 +1,9 @@
 """Tests for the planner the seam builds with translation attached, and `harness.agents`.
 
-Construction, plus one run through a real `Runner` for the rules ADK only
-enforces at run time. Whether the planner's model acts on the `translation`
-verdict `propose_plan` returns is a semantic judgement, which is what
-`harness-pair-v1` scores.
+Each planner test reads the planner from the model's side, through the first request
+that a scripted google-genai client (`ScriptedGenai`) receives from it. Whether the
+planner's model acts on the `translation` verdict `propose_plan` returns is a
+semantic judgement, which no test here covers.
 """
 
 from __future__ import annotations
@@ -15,17 +15,15 @@ import pytest
 import translator.tool as translator_tool
 from compiler.surface import FixtureSurface, McpSurface, ToolCallResult, ToolSurface
 from data_mcp import resolution
-from google.adk.agents import LlmAgent
-from google.adk.models.google_llm import Gemini
-from google.adk.sessions import InMemorySessionService
 from harness.agents import build_tool_surface
 from harness.planner_seam import PlannerSeam
 from harness.settings import Settings
-from planner.agent import SpecTool
 from planner.settings import AgentSettings
 from translator import discovery
 
 from .planner_tools import call_planner_tool
+from .scripted_genai import Request, ScriptedGenai, reply, text_part
+from .test_planner_seam import _SeamHarness
 
 
 @pytest.fixture(autouse=True)
@@ -34,17 +32,38 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PLANNER_MODEL_NAME", raising=False)
 
 
-def _planner(
-    surface: ToolSurface | None = None, agent_settings: AgentSettings | None = None
-) -> LlmAgent:
-    """The ADK planner the seam serves."""
-    seam = PlannerSeam(
-        settings=Settings(planner_runner="adk"),
+def _seam(
+    scripted: ScriptedGenai,
+    surface: ToolSurface | None = None,
+    agent_settings: AgentSettings | None = None,
+) -> PlannerSeam:
+    """The seam over `surface` (an empty fixture surface by default), its model
+    calls answered by `scripted`."""
+    return PlannerSeam(
+        settings=Settings(),
         agent_settings=agent_settings,
         surface=surface if surface is not None else FixtureSurface(schemas=[]),
+        client=scripted.client,
     )
-    assert seam._agent is not None
-    return seam._agent
+
+
+async def _first_request(
+    seam: PlannerSeam, scripted: ScriptedGenai, harness: _SeamHarness | None = None
+) -> Request:
+    """The first request the planner `seam` makes of its model, answered with
+    text, which ends the entry."""
+    scripted.replies.append(reply(text_part("No plan.")))
+    await (harness or _SeamHarness()).run(seam, question="kenya debt", readings=[])
+    return scripted.requests[0]
+
+
+def _declared(request: Request) -> list[str]:
+    """The names of the tools `request` declares, in order."""
+    return [
+        declaration.name or ""
+        for tool in request.generate_config.tools or []
+        for declaration in tool.function_declarations or []
+    ]
 
 
 async def test_the_served_translation_resolves_through_the_graph_and_reads_the_newest_year(
@@ -61,7 +80,7 @@ async def test_the_served_translation_resolves_through_the_graph_and_reads_the_n
 
     monkeypatch.setattr(translator_tool, "build_translator_core", spy)
 
-    _planner()
+    _seam(ScriptedGenai([]))
 
     assert built["resolve_entities"] is discovery.graph_resolve
     assert built["anchor_read"] is translator_tool.read_within_entry
@@ -71,38 +90,16 @@ async def test_the_served_translation_resolves_through_the_graph_and_reads_the_n
     assert outcomes == {"names": {"Kenya": resolution.NotFound(near_matches=[])}}
 
 
-def test_creates_a_planner_whose_propose_plan_translates_without_a_tool_of_its_own() -> None:
+async def test_creates_a_planner_whose_propose_plan_translates_without_a_tool_of_its_own() -> None:
     """Translation runs inside `propose_plan`, so the model is declared no `translate` tool."""
-    agent = _planner()
+    scripted = ScriptedGenai([])
+    harness = _SeamHarness()
 
-    assert agent.name == "dfo_planner"
-    assert agent.sub_agents == []
-    names = {tool.name for tool in agent.tools}  # type: ignore[union-attr]
+    names = _declared(await _first_request(_seam(scripted), scripted, harness))
+
     assert "propose_plan" in names
     assert "translate" not in names
-
-
-async def test_the_pair_runs_as_a_runner_root(
-    scripted_llm: type[Any], run_to_completion: Any
-) -> None:
-    """ADK rejects a root agent that is not a chat agent, and only a run finds out.
-
-    That check lives inside `Runner.run_async`, not in the constructor, so
-    building a `Runner` around a wrapped parent raises nothing and asserting on
-    `agent.mode` only restates ADK's rule. Running the pair exercises it: had
-    the composition wrapped the planner itself -- `mode="single_turn"` or
-    `"task"` -- this would raise `ValueError`. The scripted model answers with
-    text and calls nothing, so the run reaches the end with no tool surface
-    behind it.
-    """
-    agent = _planner()
-    agent.model = scripted_llm()
-
-    events = await run_to_completion(
-        agent=agent, session_service=InMemorySessionService(), app_name="pair-tests"
-    )
-
-    assert events
+    assert "dfo_planner" in {event.author for event in await harness.events()}
 
 
 async def test_the_planner_reads_skills_through_the_surface_translation_gets() -> None:
@@ -110,8 +107,10 @@ async def test_the_planner_reads_skills_through_the_surface_translation_gets() -
         schemas=[],
         responses={"get_skill": ToolCallResult(is_error=False, text="# DFO FAQ\n")},
     )
-    agent = _planner(surface)
-    tools = {tool.name: tool for tool in agent.tools if isinstance(tool, SpecTool)}
+    scripted = ScriptedGenai([])
+    seam = _seam(scripted, surface)
+    request = await _first_request(seam, scripted)
+    tools = {spec.name: spec for spec in seam._specs}
 
     answer = await call_planner_tool(
         tools["get_skill"],
@@ -122,21 +121,22 @@ async def test_the_planner_reads_skills_through_the_surface_translation_gets() -
     )
 
     assert answer == "# DFO FAQ\n"
-    assert "`get_skill`" in str(agent.instruction)
+    assert "get_skill" in _declared(request)
+    assert "`get_skill`" in str(request.generate_config.system_instruction)
 
 
-def test_the_planner_runs_the_model_its_setting_pins() -> None:
-    agent = _planner(agent_settings=AgentSettings(planner_model_name="gemini-planner"))
+async def test_the_planner_runs_the_model_its_setting_pins() -> None:
+    scripted = ScriptedGenai([])
+    seam = _seam(scripted, agent_settings=AgentSettings(planner_model_name="gemini-planner"))
 
-    assert isinstance(agent.model, Gemini)
-    assert agent.model.model == "gemini-planner"
+    assert (await _first_request(seam, scripted)).model == "gemini-planner"
 
 
-def test_defaults_to_the_pinned_model() -> None:
+async def test_defaults_to_the_pinned_model() -> None:
     """Covers the branch that reads `AgentSettings` when no settings are passed."""
-    model = _planner().model
-    assert isinstance(model, Gemini)
-    assert model.model == "gemini-3.8-flash"
+    scripted = ScriptedGenai([])
+
+    assert (await _first_request(_seam(scripted), scripted)).model == "gemini-3.8-flash"
 
 
 def test_build_tool_surface_covers_data_and_analysis_mcp_by_name() -> None:

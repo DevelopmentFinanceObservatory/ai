@@ -16,7 +16,7 @@ from compiler.surface import FixtureSurface
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.genai import Client, types
 from harness import planner_seam
-from harness.prefix_cache import PrefixCache, PrefixCachedGemini
+from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
 from harness.wiring import build_planner
 
@@ -25,7 +25,7 @@ from .test_planner_seam import _SeamHarness
 
 
 def test_threads_the_given_surface_into_the_planner_seam(monkeypatch: Any) -> None:
-    """The stub stands in for `PlannerSeam`, so no real ADK agent is built."""
+    """The stub stands in for `PlannerSeam`, so no planner is built."""
     captured: dict[str, Any] = {}
 
     class _RecordingSeam:
@@ -38,21 +38,6 @@ def test_threads_the_given_surface_into_the_planner_seam(monkeypatch: Any) -> No
     build_planner(settings=Settings(), surface=surface)
 
     assert captured["surface"] is surface
-
-
-def test_the_planner_model_reads_the_prefix_cache_it_is_given() -> None:
-    """The served ADK planner's model is built on the process's one prefix cache."""
-    prefix_cache = PrefixCache()
-
-    planner = build_planner(
-        settings=Settings(planner_runner="adk"),
-        surface=FixtureSurface(schemas=[]),
-        prefix_cache=prefix_cache,
-    )
-
-    model = planner._agent.model
-    assert isinstance(model, PrefixCachedGemini)
-    assert model.prefix_cache is prefix_cache
 
 
 class _LookupSpy(PrefixCache):
@@ -71,13 +56,11 @@ class _LookupSpy(PrefixCache):
         return None
 
 
-async def test_the_default_planner_looks_up_each_request_in_the_prefix_cache_it_is_given(
+async def test_the_planner_looks_up_each_request_in_the_prefix_cache_it_is_given(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The served planner on the default runner (Pydantic AI) sends each model
-    call through the process's one prefix cache."""
-    # The default is the code's, whatever runner the ambient environment names.
-    monkeypatch.delenv("PLANNER_RUNNER", raising=False)
+    """The served planner sends each model call through the process's one prefix
+    cache."""
     scripted = ScriptedGenai([reply(text_part("No plan."))])
     # The seam builds its google-genai client from the environment.
     monkeypatch.setattr(planner_seam, "Client", lambda: scripted.client)

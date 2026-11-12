@@ -5,10 +5,9 @@ a model or an upstream would answer:
 
 - the orchestrator agent's model answers from a script of tool calls and
   text, one entry per model call, across every turn of a case;
-- the planner is the real `harness.planner_seam.PlannerSeam`, on the
-  planner `Settings.planner_runner` names, its model calls answered by a
-  scripted google-genai client (`harness.scripted.scripted_client`). Its
-  model either proposes the canned plan `harness.scripted_plan` builds,
+- the planner is the real `harness.planner_seam.PlannerSeam`, its model
+  calls answered by a scripted google-genai client
+  (`harness.scripted.scripted_client`). Its model either proposes the canned plan `harness.scripted_plan` builds,
   through a `propose_plan` that declares the plan on record ready
   (`harness.scripted.use_compiled_proposals`), so the seam renders its real
   first message and the workflow's approval, execution and hand-back nodes
@@ -446,8 +445,8 @@ def _planner_seam(
     tools: Callable[[Sequence[ToolSpec]], Sequence[ToolSpec]] = tuple,
     on_tool_answered: Callable[[str, dict[str, Any] | None], None] | None = None,
 ) -> PlannerSeam:
-    """The real seam on the planner `settings` names, over `surface`, its model
-    calls answered by `answer`, its tools the ones the seam builds for itself
+    """The real seam, built with `settings`, over `surface`, its model calls
+    answered by `answer`, its tools the ones the seam builds for itself
     (`planner.specs.planner_specs` over `surface` and its translation) as
     `tools` changes them, and each tool's answer told to `on_tool_answered`."""
     translate = build_translate(surface=surface)

@@ -35,13 +35,11 @@ the alternatives it considered, and the evidence an acceptable answer rests on.
 It holds the plan at the user's approval, ships inside `harness` as a sibling
 top-level module, and knows nothing about execution. The DFO Studio runs the
 modules described below, adapted for its workflow by
-`harness.planner_seam.PlannerSeam`. The seam runs one of two planners, which
-`PLANNER_RUNNER` selects: the Pydantic AI planner by default, or the ADK
-planner with `PLANNER_RUNNER=adk`. The ADK planner is an `LlmAgent`. The
-Pydantic AI planner is the function node `harness.planner_node`, which yields
-the ADK events an ADK planner run stores. Both serve the one set of tool specs
-and the one instruction the seam builds, and `tests/test_planner_node.py` and
-`tests/test_planner_runners.py` in `services/harness` hold the two equal.
+`harness.planner_seam.PlannerSeam`. The planner is a Pydantic AI agent that
+runs inside the function node `harness.planner_node`. Its model calls go
+through `harness.planner_model`, and the node yields each response and tool
+answer as an ADK session event (`harness.planner_events`). The seam builds the
+tool specs and the instruction the agent serves.
 
 The plan-approve-execute workflow spans four top-level modules beside it,
 `planner`, `translator`, `compiler` and `executor`. The planner settles
@@ -59,7 +57,7 @@ dataset requirements that feed them, and the planner's tools answer with a
 typed result carrying a stable code, rather than an unstructured error string,
 so a caller can branch on what stopped a call without parsing its message.
 `harness.planner_seam.PlannerSeam` attaches the translator to the planner's
-`propose_plan` on either runner. An accepted proposal runs translation on the
+`propose_plan`. An accepted proposal runs translation on the
 plan it recorded, the plan passes through session state, and the proposal's
 answer carries a `translation` verdict, `{"outcome": "ok"}` for a compiled plan
 or the referral translation stopped on.
@@ -198,7 +196,7 @@ source out of a `describe` answer. `executor.run` keeps each server's digest
 text as its step's `StepRecord.digest`, which the workflow's `plan_done`
 node hands to the agent as `step_summaries`. The planner's model reaches
 these Python functions through the planner's tool specs (`planner.specs`),
-which `harness.planner_seam.PlannerSeam` serves on either runner. ADK's
+which `harness.planner_seam.PlannerSeam` serves. ADK's
 `McpTool` plays no part, so no `CallToolResult` dump is built for them and an
 `after_tool_callback` editing one would have nothing to edit. Where a tool
 does answer with a digest, a refusal's machine-readable detail rides the
@@ -244,12 +242,7 @@ response ends, so queued spans export while the request still has CPU.
 `POST /api/studio/cancel` calls it when it ends a paused turn's span, since no
 stream runs then.
 
-**Evals.** Evaluation runs on ADK's own eval framework. `evals/` holds one
-folder per eval set (the agent wiring, the cases, and the criteria they're
-scored against) and isn't run in CI. Each service's `tests/` directory holds
-the actual CI gates. This split exists because an eval set drives the real
-agent through the real model, so it needs a live model credential, and the
-rubric-scored cases need a judge model on top of that.
+**Evals.** `evals/` holds the planner's eval (`planner_entry`, which runs the planner one entry at a time against recorded data-mcp answers), the studio's eval (`studio`, which drives the studio's HTTP surface), the translator's fixtures (`agents/harness_translator_v1`) and the rolling-anchor counts (`rolling_anchor`). Runs that drive a real model need a live credential, and the judged cases need a judge model on top of that, so they are not run in CI. Each service's `tests/` directory holds the CI gates, which use no model, and `evals/README.md` says which part of each eval set CI runs.
 
 ## What a tool result carries
 

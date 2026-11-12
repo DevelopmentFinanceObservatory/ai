@@ -35,7 +35,6 @@ from analysis_mcp.server import mcp as analysis_mcp
 from compiler.compile import CompileIssueCode, compile_plan
 from compiler.sources import PROVIDER_ACCOUNT, DiscoveryStatus, source_from_spec_block
 from compiler.surface import (
-    FixtureSurface,
     McpSurface,
     ToolCallResult,
     ToolSurface,
@@ -46,41 +45,31 @@ from data_mcp.definition_writes import MAX_IDENTITY_BYTES, windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from data_mcp.tool_errors import ToolRefusal, to_tool_result
-from google.adk.agents import LlmAgent
 from google.adk.events import Event, EventActions, RequestInput
-from google.adk.features import FeatureName
-from google.adk.features._feature_registry import temporary_feature_override
-from google.adk.models.google_llm import Gemini
-from google.adk.models.llm_request import LlmRequest
-from google.adk.planners import BuiltInPlanner
 from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_event,
     create_request_input_response,
 )
-from google.genai import _api_client, errors, types
+from google.genai import types
 from harness.graph.planning import planner_ask_interrupt
 from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_SEARCHES_KEY, store_search
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import card_questions, plan_words, shown_decisions
-from harness.planner_seam import _PLANNER_BRANCH, PlannerSeam, _reading_pin_sources
-from harness.prefix_cache import PrefixCache
+from harness.planner_seam import (
+    _PLANNER_BRANCH,
+    PlannerSeam,
+    _reading_pin_sources,
+    end_run_when_ready,
+)
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.sentences import PlanWords, refusal_reason, refusal_sentence
 from harness.studio_state import _turn_identities
 from harness.tool_contracts import reading_facts
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import RecordedIdentity, SearchReading, _periods
-from planner import agent as planner_agent
 from planner import source_reads as planner_source_reads
 from planner import specs
 from planner import tools as planner_tools
-from planner.agent import (
-    BRIEF_STATE_KEY,
-    SpecTool,
-    create_planner_agent,
-    end_run_when_ready,
-    prepend_brief,
-)
 from planner.call import CallSession, elected_spec_ids, prices_chosen
 from planner.declaration import FIELD_DESCRIBED_ENUMS, SHARED_FIELDS, compact_schema
 from planner.instruction import planner_instruction
@@ -257,7 +246,7 @@ from translator.referral import (
     load_referral,
     save_referral,
 )
-from translator.tool import Translate, authored_answer, build_translate
+from translator.tool import Translate, authored_answer
 
 from ..basis_alignment import (
     HEALTH,
@@ -279,7 +268,7 @@ from ..basis_alignment import (
 from ..context_probe import plan_record
 from ..data_mcp_definitions import DataMcpDefinitions
 from ..decision_drafts import drafts
-from ..planner_tools import call_planner_tool, planner_tool_declaration
+from ..planner_tools import call_planner_tool, planner_tool_declaration, serve_planner_tool
 from ..session_events import response_event
 from ..split_plan import split_draft
 from ..test_studio_translate import _translator as _studio_translator
@@ -344,9 +333,9 @@ class _FakeToolContext:
     `.state` (a plain, mutable mapping), `.session` (`.events` only),
     `.actions` (where `end_run_when_ready` ends the run), and the call's
     `.invocation_id`, `.branch` and `.function_call_id` (where `_ask_beside_ask`
-    finds the call among the session's events) are all `planner.agent`'s
-    tool functions use: none of them gates on a confirmation any more, so
-    none needs `.tool_confirmation`. A tool body that tried to read it would
+    finds the call among the session's events) are all the planner's tool
+    functions use: none of them gates on a confirmation, so none needs
+    `.tool_confirmation`. A tool body that tried to read it would
     raise `AttributeError` against this stand-in, which is exactly the
     regression the tests under "Submitting" rely on.
     """
@@ -501,15 +490,15 @@ def _show(
 
 def _tools_by_name(
     *, translate: Translate | None = None, question_fixed: bool = False
-) -> dict[str, SpecTool]:
+) -> dict[str, ToolSpec]:
     return {
-        spec.name: SpecTool(spec)
+        spec.name: spec
         for spec in planner_tool_specs(translate=translate, question_fixed=question_fixed)
     }
 
 
 async def _propose_translated(
-    tools: dict[str, SpecTool],
+    tools: dict[str, ToolSpec],
     ctx: object,
     decision: Decision,
     requirements: Sequence[EvidenceRequirement],
@@ -522,7 +511,7 @@ async def _propose_translated(
 
 
 def _propose(
-    tools: dict[str, SpecTool],
+    tools: dict[str, ToolSpec],
     ctx: object,
     decision: Decision,
     requirements: Sequence[EvidenceRequirement],
@@ -933,7 +922,7 @@ def test_the_gate_sends_the_planner_to_propose_over_a_referral_it_settles_itself
         ("reject_plan", "status"),
     ],
 )
-async def test_the_other_planner_tools_run_through_run_async(
+async def test_the_other_planner_tools_run_through_serve_tool(
     tool_name: str,
     body_result_key: str,
     decision: DecisionFactory,
@@ -947,8 +936,8 @@ async def test_the_other_planner_tools_run_through_run_async(
     # `reject_plan` needs something to reject before its body can succeed.
     _propose(tools, ctx, decision(), requirements)
 
-    result = await tools[tool_name].run_async(
-        args=_tool_args(tool_name, decision(), requirements), tool_context=ctx
+    result = await serve_planner_tool(
+        tools[tool_name], args=_tool_args(tool_name, decision(), requirements), tool_context=ctx
     )
 
     assert body_result_key in result
@@ -995,10 +984,7 @@ def test_no_planner_code_names_the_transition_that_mints_pending_approval() -> N
     # its module docstring) -- a comparison, not a mint, so only a mention
     # outside a `Compare` counts against the invariant.
     tree = ast.parse(
-        "\n".join(
-            inspect.getsource(module)
-            for module in (planner_agent, planner_tools, planner_source_reads)
-        )
+        "\n".join(inspect.getsource(module) for module in (planner_tools, planner_source_reads))
     )
     parents: dict[ast.AST, ast.AST] = {
         child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
@@ -1034,8 +1020,8 @@ async def test_no_planner_tool_moves_a_draft_to_pending_approval(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
-    await tools[tool_name].run_async(
-        args=_tool_args(tool_name, decision(), requirements), tool_context=ctx
+    await serve_planner_tool(
+        tools[tool_name], args=_tool_args(tool_name, decision(), requirements), tool_context=ctx
     )
 
     stored = load_plan(ctx.state)
@@ -1437,7 +1423,7 @@ def test_propose_plan_counts_the_rounds_a_question_has_been_through(
 
 
 def _propose_up_to_the_cap(
-    tools: dict[str, SpecTool],
+    tools: dict[str, ToolSpec],
     ctx: object,
     decision: Decision,
     requirements: RequirementPair,
@@ -1534,7 +1520,7 @@ def test_a_fresh_entry_into_the_planner_starts_its_rounds_afresh(
 
 
 def _restart(
-    tools: dict[str, SpecTool],
+    tools: dict[str, ToolSpec],
     ctx: object,
     decision: Decision,
     requirements: RequirementPair,
@@ -2589,53 +2575,15 @@ def test_planner_instruction_defaults_question_fixed_to_false() -> None:
     )
 
 
-def test_create_planner_agent_threads_question_fixed_into_the_instruction() -> None:
-    fixed = create_planner_agent(model_name="m", question_fixed=True)
-    free = create_planner_agent(model_name="m", question_fixed=False)
+def test_planner_instruction_threads_question_fixed_into_the_instruction() -> None:
+    fixed = planner_instruction(has_translator=True, question_fixed=True)
+    free = planner_instruction(has_translator=True, question_fixed=False)
 
-    assert "`starts_new_plan=true` and stop there" in str(fixed.instruction)
-    assert "`starts_new_plan=true` and stop there" not in str(free.instruction)
-
-
-def test_create_planner_agent_defaults_question_fixed_to_false() -> None:
-    default = create_planner_agent(model_name="m")
-
-    assert "`starts_new_plan=true` and stop there" not in str(default.instruction)
+    assert "`starts_new_plan=true` and stop there" in fixed
+    assert "`starts_new_plan=true` and stop there" not in free
 
 
-@pytest.mark.parametrize("cached", [False, True], ids=["uncached", "prefix-cached"])
-async def test_the_planner_model_retries_a_503_before_the_turn_sees_it(
-    cached: bool, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The fault goes in under the SDK's retry loop, so the attempts counted
-    # are the ones the SDK makes.
-    attempts = 0
-
-    async def unavailable(self: Any, http_request: Any, stream: bool = False) -> Any:
-        nonlocal attempts
-        attempts += 1
-        raise errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE"}})
-
-    async def no_wait(seconds: float) -> None:
-        return None
-
-    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
-    monkeypatch.setattr(_api_client.BaseApiClient, "_async_request_once", unavailable)
-    monkeypatch.setattr(asyncio, "sleep", no_wait)
-    agent = create_planner_agent(
-        model_name="gemini-3.8-flash", prefix_cache=PrefixCache() if cached else None
-    )
-    assert isinstance(agent.model, Gemini)
-
-    with pytest.raises(errors.ServerError):
-        await agent.model.api_client.aio.models.generate_content(
-            model=agent.model.model, contents="question"
-        )
-
-    assert attempts == 3
-
-
-def _arguments(tools: dict[str, SpecTool], name: str = "propose_plan") -> dict[str, Any]:
+def _arguments(tools: dict[str, ToolSpec], name: str = "propose_plan") -> dict[str, Any]:
     declaration = planner_tool_declaration(tools[name])
     assert declaration is not None
     schema = declaration.parameters_json_schema
@@ -2828,7 +2776,7 @@ def _hand_back(ctx: _FakeToolContext, kind: ReferralKind, requirement_id: str) -
 
 def _recorded_after_a_handed_back_plan(
     decision: DecisionFactory, requirements: RequirementPair, kind: ReferralKind
-) -> tuple[dict[str, SpecTool], _FakeToolContext, str]:
+) -> tuple[dict[str, ToolSpec], _FakeToolContext, str]:
     """A recorded plan, and a referral of `kind` on its dataset requirement."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
@@ -3015,7 +2963,7 @@ def test_an_answer_given_before_the_referral_does_not_settle_it(
 
 def _unsupported_ask_handed_back(
     decision: DecisionFactory, requirements: RequirementPair
-) -> tuple[dict[str, SpecTool], _FakeToolContext]:
+) -> tuple[dict[str, ToolSpec], _FakeToolContext]:
     tools, ctx, _requirement_id = _recorded_after_a_handed_back_plan(
         decision, requirements, ReferralKind.UNSUPPORTED_ASK
     )
@@ -3925,18 +3873,6 @@ def test_an_accepted_ask_records_lists_its_call_does_not_share() -> None:
     assert second.state[PENDING_ASK_STATE_KEY]["args"]["candidates"] == []
 
 
-def test_the_ask_tool_is_not_long_running() -> None:
-    """ADK marks a long-running call an interrupt before its tool runs, so a
-    refused ask would leave the run paused. The graph's planner node pauses
-    on an accepted ask instead."""
-    tool = next(
-        tool for tool in create_planner_agent(model_name="m").tools if tool.name == PLANNER_ASK
-    )
-
-    assert isinstance(tool, SpecTool)
-    assert tool.is_long_running is False
-
-
 def test_asking_the_user_needs_no_candidates() -> None:
     """A referral that carries no candidates (`unsupported_ask`, `requirement_unmeetable`)
     is put to the user with a message alone."""
@@ -4149,7 +4085,7 @@ def aid_on_record() -> Iterator[None]:
 
 
 def _propose_pinned(
-    tools: dict[str, SpecTool],
+    tools: dict[str, ToolSpec],
     ctx: object,
     decision: Decision,
     requirements: Sequence[EvidenceRequirement],
@@ -12198,7 +12134,7 @@ def gdp_on_record() -> Iterator[None]:
 
 
 def _propose_gdp(
-    tools: dict[str, SpecTool],
+    tools: dict[str, ToolSpec],
     ctx: _FakeToolContext,
     decision: Decision,
     requirements: RequirementPair,
@@ -12923,7 +12859,7 @@ def _prices_ask_events(
 
 
 def _propose_one(
-    tools: dict[str, SpecTool],
+    tools: dict[str, ToolSpec],
     ctx: _FakeToolContext,
     decision: Decision,
     requirements: Sequence[Any],
@@ -14650,39 +14586,6 @@ def test_propose_plan_refuses_to_build_unless_each_argument_is_described_once(
     assert offending in str(refused.value)
 
 
-async def _requested_propose_plan_declaration() -> dict[str, Any]:
-    """The `propose_plan` declaration a planner's request carries, as JSON."""
-    agent = create_planner_agent(model_name="gemini-test")
-    request = LlmRequest()
-    for tool in agent.tools:
-        assert isinstance(tool, SpecTool)
-        await tool.process_llm_request(tool_context=cast(Any, None), llm_request=request)
-    (holder,) = request.config.tools or []
-    (declaration,) = [
-        declaration
-        for declaration in holder.function_declarations or []
-        if declaration.name == "propose_plan"
-    ]
-    return declaration.model_dump(mode="json", exclude_none=True)
-
-
-async def test_propose_plan_reaches_the_model_described_whatever_adks_json_schema_flag() -> None:
-    """ADK's `JSON_SCHEMA_FOR_FUNC_DECL` decides how ADK itself declares a
-    function. The planner builds its declarations without it, so with the
-    flag off the request carries `propose_plan` with every argument
-    described, byte for byte as with it on, and the planner always has
-    the patch and version rules its arguments carry."""
-    described = await _requested_propose_plan_declaration()
-
-    with temporary_feature_override(FeatureName.JSON_SCHEMA_FOR_FUNC_DECL, False):
-        flag_off = await _requested_propose_plan_declaration()
-
-    properties = flag_off["parameters_json_schema"]["properties"]
-    assert properties
-    assert all(argument.get("description") for argument in properties.values())
-    assert json.dumps(flag_off) == json.dumps(described)
-
-
 # --- Rejecting and submitting ----------------------------------------------------------
 
 
@@ -14862,21 +14765,6 @@ def test_the_instruction_asks_for_no_closing_text_after_submitting() -> None:
 # --- Construction -------------------------------------------------------------------------
 
 
-def test_create_planner_agent_wires_name_model_and_tools() -> None:
-    agent = create_planner_agent(model_name="gemini-3.8-flash")
-
-    assert isinstance(agent, LlmAgent)
-    assert agent.name == "dfo_planner"
-    assert isinstance(agent.model, Gemini)
-    assert agent.model.model == "gemini-3.8-flash"
-    assert {tool.name for tool in agent.tools} == {  # type: ignore[union-attr]
-        PLANNER_ASK,
-        "propose_plan",
-        "reject_plan",
-    }
-    assert agent.sub_agents == []
-
-
 def test_planner_instruction_treats_a_defaulted_time_window_as_settled() -> None:
     # `time_window_defaulted` is the resolve envelope's own warning code
     # (`harness.tool_contracts._wire_warnings`), and `window` is the
@@ -14917,33 +14805,16 @@ def test_planner_instruction_carries_no_sentinel_range() -> None:
     assert "source, time window" not in instruction
 
 
-def test_the_planner_thinks_at_low_and_carries_thought_summaries() -> None:
-    """The planner runs every generation at LOW, with thoughts on for the trace.
-
-    Measured directly against the real planner brief: LOW reproduces the
-    unset default's validity outcome on both a well-formed and a malformed
-    draft, at a fraction of the wall time and near-zero reasoning tokens --
-    see `planner.settings.AGENT_THINKING_CONFIG`'s own comment.
-    """
-    agent = create_planner_agent(model_name="gemini-3.8-flash")
-
-    assert isinstance(agent.planner, BuiltInPlanner)
-    assert agent.planner.thinking_config.thinking_level is types.ThinkingLevel.LOW
-    assert agent.planner.thinking_config.include_thoughts is True
-
-
 def test_only_a_planner_with_a_translator_is_told_to_read_a_translation() -> None:
-    # The standalone planner is what this package's own eval set scores, and
-    # its `propose_plan` answers with no `translation`. Neither instruction
-    # names a `translate` tool: translation is no tool of its own.
-    standalone = create_planner_agent(model_name="m")
-    paired = create_planner_agent(
-        model_name="m", translate=build_translate(surface=FixtureSurface(schemas=[]))
-    )
+    # `harness.planner_seam.PlannerSeam` passes `has_translator=True`. Without
+    # a translator `propose_plan` answers with no `translation`. Neither
+    # instruction names a `translate` tool: translation is no tool of its own.
+    standalone = planner_instruction(has_translator=False)
+    paired = planner_instruction(has_translator=True)
 
-    assert "`translation`" not in str(standalone.instruction)
-    assert "`translation`" in str(paired.instruction)
-    assert "`translate`" not in str(standalone.instruction) + str(paired.instruction)
+    assert "`translation`" not in standalone
+    assert "`translation`" in paired
+    assert "`translate`" not in standalone + paired
 
 
 async def test_an_accepted_proposal_answers_with_the_translation_and_no_translate_tool_is_declared(
@@ -14960,8 +14831,7 @@ async def test_an_accepted_proposal_answers_with_the_translation_and_no_translat
         translated.append(stored.version)
         return {"outcome": Outcome.OK.value}
 
-    agent = create_planner_agent(model_name="gemini-flash-latest", translate=translate)
-    tools = {tool.name: tool for tool in agent.tools if isinstance(tool, SpecTool)}
+    tools = _tools_by_name(translate=translate)
     ctx = _FakeToolContext()
 
     accepted = await _propose_translated(tools, ctx, decision(), requirements)
@@ -15407,7 +15277,8 @@ async def test_a_refusal_action_states_the_decline_it_needs(
     record_unsupported(ctx.state, operation)
     tools = _tools_by_name(translate=_never_translated)
 
-    answer = await tools["propose_plan"].run_async(
+    answer = await serve_planner_tool(
+        tools["propose_plan"],
         args=_drafted_arguments(decision, requirements),
         tool_context=ctx,  # type: ignore[arg-type]
     )
@@ -15425,7 +15296,8 @@ async def test_a_gate_refusal_action_calls_propose_plan_with_nothing_stated(
 ) -> None:
     tools = _tools_by_name(translate=_compiled_then_rejected)
 
-    answer = await tools["propose_plan"].run_async(
+    answer = await serve_planner_tool(
+        tools["propose_plan"],
         args=_drafted_arguments(decision, requirements),
         tool_context=_FakeToolContext(),  # type: ignore[arg-type]
     )
@@ -17922,8 +17794,8 @@ class _DefinitionReads:
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
 
 
-def _tools_reading(surface: ToolSurface) -> dict[str, SpecTool]:
-    return {spec.name: SpecTool(spec) for spec in planner_tool_specs(surface=surface)}
+def _tools_reading(surface: ToolSurface) -> dict[str, ToolSpec]:
+    return {spec.name: spec for spec in planner_tool_specs(surface=surface)}
 
 
 @pytest.fixture(params=["searched", "discovered"])
@@ -18849,7 +18721,8 @@ async def test_an_entity_ask_on_a_history_copy_offers_the_origin_picks(
     save_referral(ctx.state, _congo_both_ends("debt_history"))
     reading = _congo_both_ends(offered_for).ambiguous_entities[0]
 
-    result = await _tools_by_name()[PLANNER_ASK].run_async(
+    result = await serve_planner_tool(
+        _tools_by_name()[PLANNER_ASK],
         args={
             "message": "Which Congo gave the aid?",
             "candidates": [{"spec_id": c.pick, "label": c.label} for c in reading.candidates],
@@ -19047,7 +18920,8 @@ async def test_an_ask_under_an_entity_referral_offers_one_reading_by_its_picks(
     if referred:
         save_referral(ctx.state, _congo_both_ends(_CONGO_REQUIREMENT))
 
-    result = await _tools_by_name()[PLANNER_ASK].run_async(
+    result = await serve_planner_tool(
+        _tools_by_name()[PLANNER_ASK],
         args={
             "message": "Which Congo gave the aid?",
             "candidates": [{"spec_id": spec_id, "label": spec_id} for spec_id in spec_ids],
@@ -19471,64 +19345,6 @@ def test_a_sum_accepting_a_provider_difference_counts_flows_twice_only_where_the
     else:
         assert result["detail"]["basis"]["step_id"] == _SUM
         assert load_plan(ctx.state) is None
-
-
-def _user_text(text: str) -> types.Content:
-    return types.Content(role="user", parts=[types.Part(text=text)])
-
-
-_QUESTION = _user_text("kenya debt?")
-_ASK_CALL = types.Content(
-    role="model",
-    parts=[types.Part(function_call=types.FunctionCall(name=PLANNER_ASK, args={}))],
-)
-_ANSWER = types.Content(
-    role="user",
-    parts=[types.Part(function_response=types.FunctionResponse(name=PLANNER_ASK, response={}))],
-)
-
-
-@pytest.mark.parametrize(
-    ("contents", "at"),
-    [
-        # With another content ahead of the question, the brief still follows the question.
-        ([_user_text("today is 2026-10-31"), _QUESTION, _ASK_CALL, _ANSWER], 2),
-        # In a request without the question, the brief opens it.
-        ([_ASK_CALL, _ANSWER], 0),
-    ],
-    ids=["after-the-question", "no-question"],
-)
-def test_the_brief_follows_the_turns_question_found_by_what_it_is(
-    contents: list[types.Content], at: int
-) -> None:
-    """The question is the turn's latest user message with no node path that
-    holds text, so the user's answer to an ask, the latest user event on a
-    resume, is passed over."""
-    events = [
-        Event(invocation_id="turn", author="user", content=_QUESTION),
-        Event(invocation_id="turn", author="dfo_planner", content=_ASK_CALL),
-        Event(invocation_id="turn", author="user", content=_ANSWER),
-    ]
-    context = SimpleNamespace(
-        state={BRIEF_STATE_KEY: "the brief"},
-        session=SimpleNamespace(events=events),
-        invocation_id="turn",
-    )
-    request = LlmRequest(contents=[content.model_copy() for content in contents])
-
-    prepend_brief(cast(Any, context), request)
-
-    assert request.contents[at] == _user_text("the brief")
-    assert len(request.contents) == len(contents) + 1
-
-
-def test_no_brief_in_state_leaves_the_request_alone() -> None:
-    context = SimpleNamespace(state={}, session=SimpleNamespace(events=[]))
-    request = LlmRequest(contents=[_QUESTION])
-
-    prepend_brief(cast(Any, context), request)
-
-    assert request.contents == [_QUESTION]
 
 
 _COUNTRIES = ("ghana", "kenya", "nigeria")

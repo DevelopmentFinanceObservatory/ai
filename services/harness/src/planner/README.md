@@ -18,13 +18,11 @@ tests live in `services/harness/tests/planner/`.
 
 Four tools, each declared in `planner.specs` (`planner_tool_specs()` and
 `skill_tool_spec()`) with its body in `planner.tools` or `planner.skills`.
-`harness.planner_seam.PlannerSeam` builds the one set of specs and the one
-instruction the planner serves, on one of two runners `PLANNER_RUNNER` selects
-(`pydantic_ai` by default, or `adk`): an `LlmAgent` built by
-`create_planner_agent()` on the ADK planner, or a Pydantic AI agent built by
-`planner.pydantic_agent.planner_agent()` on the Pydantic AI planner, which `harness.planner_node` runs as a function node that
-yields the ADK events an ADK planner run stores. A tool call on either runner
-reads its steps from the session's events through `planner.session.SessionCall`.
+`harness.planner_seam.PlannerSeam` builds the set of specs and the instruction
+the planner serves, on a Pydantic AI agent built by
+`planner.pydantic_agent.planner_agent()`, which `harness.planner_node` runs as a
+function node that yields ADK session events. A tool call reads its steps from
+the session's events through `planner.session.SessionCall`.
 The tools:
 
 | Tool                | Behaviour                                                                                                                                                                                                                |
@@ -38,27 +36,23 @@ user's answer in code (`declare_ready`) and adds the approval summary to its
 answer under `summary`. `planner.tools.ready_and_end` ends the planner's run
 on that answer, so no model call follows.
 
-The planner reaches the translator directly. `create_planner_agent` takes
+The planner reaches the translator directly. `planner_tool_specs` takes
 `translator.tool`'s `build_translate` function as `translate`, which
-`harness.planner_seam.PlannerSeam` builds and serves to either runner. The
+`harness.planner_seam.PlannerSeam` builds. The
 model cannot call it. Every `propose_plan` that records a plan runs it on that
 plan and answers with the verdict under `translation`, beside its own `ok`, so
 the model spends no generation on translation. The plan travels through
-session state. Omit it and `create_planner_agent` returns the standalone
-planner, whose `propose_plan` records the plan and stops; that is what the
-planner's own eval set scores and why that set needs no reachable tool
-surface.
+session state. Without it, `propose_plan` records the plan and stops.
 
 ## Skills
 
-`create_planner_agent` takes a `surface`, the harness's
+`planner_tool_specs` takes a `surface`, the harness's
 `compiler.surface.ToolSurface`. Given one, the planner also carries
 `get_skill` from `planner.skills`, which calls data-mcp's `get_skill` through that
 surface (a skill's first page, or one file with `path`), and its instruction
 gains the paragraph that names it. `harness.planner_seam.PlannerSeam`
-passes the same surface translation discovers on. Without a surface, as the
-standalone eval agents build it, the planner has no skill tool and the
-instruction says nothing about skills.
+passes the same surface translation discovers on. Without a surface the
+planner has no skill tool and the instruction says nothing about skills.
 
 The planner loads a skill when its description bears on the question. A
 question about DFO itself starts with `get_skill`, whose `skill_id`
@@ -234,7 +228,7 @@ stated for an entity an ask offered that the user has not answered
 refers the same requirement again, since the new referral offers the same pick.
 The latest answer about a reading stands, so an answer in the user's own words
 releases an earlier pick, and a message the user types or an amendment of the
-approval card releases every pick. An ask the tool or ADK refused offered
+approval card releases every pick. An ask the tool refused offered
 nothing. An entity nobody asked about, or one
 the user answered in their own words, the planner settles.
 
@@ -358,7 +352,7 @@ The anchor a run reads is the newest year the plan states or a later one. Transl
 - A max or min by entity, matched on each entity's own year against a series that misses a year the max or min can fall in, today or as newer data moves either side, from which a filter removed such a year alone, or whose rows a value filter kept, which can leave out any such year: `invalid_plan`, from `planner.shapes._rejects_paired_picked`. A max or min over a dataset read from its first year can fall in any year back to it, so the series has to be read from its first year too, or the max or min's input bounded from the series' first year, following the newest data where the series' first year does. A series and a max or min read from the same datasets may both stay open to the newest data.
 - A year filter over a max or min by entity whose thresholds keep a year that newer data can move a picked year past. A picked year moves only later, and only while the max or min's input years move. So a fixed first year keeps every entity whose max or min falls at or after it, today and later, and a first year that follows the newest data keeps them only while the input's own first year follows it at the same offset or further ahead. A last year keeps them only while the input's last year sits at or before it today and stays there, unless the input's years do not move at all. The entity whose max or min moves past the year drops out: `invalid_plan`, from `planner.shapes._picked_year_leaves`. Filter the years before the max or min. A filter with no year threshold keeps every entity it keeps today.
 
-Where the planner reads the user's own words, a step is also admitted when the `propose_plan` call names it in `across_years`. The standalone planner and `harness_pair_v1` read them in every entry, and `harness.planner_seam` builds its planner with `reads_user_words` false, so there only an entry the user's amendment at the approval card opened reads them (`planner.plan.amendment_entry`). Elsewhere a call naming a step is refused `invalid_plan`, unless the plan it amends already licenses that step as the call states it, which grants nothing new. A call naming a step that keeps its years is refused everywhere. Each named step becomes a `PeriodLicence` in `Plan.period_licences` (step id, kind and `reduction`), which `propose_plan` writes and the model cannot (`planner.plan.period_licences_held`). `Plan.amend` clears the field, and `propose_plan` carries each licence of the plan it amends onto the new one while that step keeps its id and kind and combines its years with the licensed `reduction`, whatever its years: a replan that narrows a licensed total or ranking to one year and a later one that restores its years both keep it. The licence lies unused while a licensed rank states no `reduction`, and admits the rank again once it states the licensed one. An aggregate grouping by `period`, a rank set `per_period`, a step stating another reduction, a step of another kind, or a removed step drops the licence, since each states another figure. A step renamed in an amendment entry holds none of its old id and takes a new one when the call names it, and a restart begins with no licences. The field is hashed once it holds a licence, so a plan holding none keeps its revision.
+Where the planner reads the user's own words, a step is also admitted when the `propose_plan` call names it in `across_years`. `reads_user_words` defaults to true, so the planner reads them in every entry, and `harness.planner_seam` builds its planner with `reads_user_words` false, so there only an entry the user's amendment at the approval card opened reads them (`planner.plan.amendment_entry`). Elsewhere a call naming a step is refused `invalid_plan`, unless the plan it amends already licenses that step as the call states it, which grants nothing new. A call naming a step that keeps its years is refused everywhere. Each named step becomes a `PeriodLicence` in `Plan.period_licences` (step id, kind and `reduction`), which `propose_plan` writes and the model cannot (`planner.plan.period_licences_held`). `Plan.amend` clears the field, and `propose_plan` carries each licence of the plan it amends onto the new one while that step keeps its id and kind and combines its years with the licensed `reduction`, whatever its years: a replan that narrows a licensed total or ranking to one year and a later one that restores its years both keep it. The licence lies unused while a licensed rank states no `reduction`, and admits the rank again once it states the licensed one. An aggregate grouping by `period`, a rank set `per_period`, a step stating another reduction, a step of another kind, or a removed step drops the licence, since each states another figure. A step renamed in an amendment entry holds none of its old id and takes a new one when the call names it, and a restart begins with no licences. The field is hashed once it holds a licence, so a plan holding none keeps its revision.
 
 The `period_reduction_unstated` refusal's `detail.gaps` holds one entry per refused step, in the order `unstated_period_reductions` finds them. Each entry holds:
 
@@ -446,7 +440,7 @@ answering it. An ask left out with nothing naming it is unaccounted for.
 read as a new plan.
 
 **`question_fixed` holds the turn's question against a restart.**
-`create_planner_agent(..., question_fixed=True)`. The harness's planner
+`planner_tool_specs(..., question_fixed=True)`. The harness's planner
 seam builds the planner this way, since the orchestrator's `plan` brief fixes
 a turn's `question` before the planner ever runs, and a restart would
 silently swap the question out from under the plan the workflow holds. Under it,
@@ -456,8 +450,7 @@ how the model tells the harness the user's reply asks a different question:
 the turn ends there for the harness to tell the user to send it as its own
 message. An amendment whose own `question` states something other than the
 one recorded is refused as `invalid_plan` instead, correctable within the same
-round. Standalone and `harness_pair_v1`'s own multi-turn session leave
-`question_fixed` at its default `False`, where a restart behaves as described
+round. `question_fixed` defaults to `False`, so a restart behaves as described
 above.
 
 Rounds are capped. Every proposal opens a fresh discovery budget, so one entry
@@ -476,9 +469,9 @@ validation spends nothing.
 to hold at least two of them.** Anything else fails validation, so a plan cannot
 state a choice it never considered, and a decision whose only option is what was
 chosen records no decision at all. `propose_plan` re-validates both lists itself,
-because ADK's argument preprocessing falls back to raw dicts for a whole list
-when any one item fails, and skips conversion entirely for a value that isn't a
-list. Either would otherwise build a `Plan` from unvalidated data. A plan states
+because the planner's tools receive the model's arguments as sent, so a list
+of raw dicts, or a value that isn't a list, would otherwise build a `Plan` from
+unvalidated data. A plan states
 at least one requirement, and the plan-level rules (unique slots and ids, every
 citation naming a decision, every decision cited, and a rank that collapses its
 input) come back from `propose_plan` as

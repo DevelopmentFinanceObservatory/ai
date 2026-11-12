@@ -33,6 +33,7 @@ from harness.graph.state import (
 )
 from harness.planner_seam import PlannerSeam
 from harness.scope_choices import planner_axes
+from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.turn_records import PlanRecord, SearchReading, basis_line, loose_match_notes
 from planner.plan import (
@@ -69,6 +70,7 @@ from .planner.test_agent import (
 )
 from .planner.test_aligned_identity import _multilateral_compiles
 from .planner_tools import call_planner_tool
+from .scripted_genai import ScriptedGenai, call_part, reply, text_part
 from .test_graph import (
     APPROVE_INTERRUPT,
     _ManifestSurface,
@@ -78,7 +80,7 @@ from .test_graph import (
     _Seam,
     _start,
 )
-from .test_planner_seam import ScriptedPlannerLlm, _adk_settings, _SeamHarness
+from .test_planner_seam import _SeamHarness
 
 _FRANCE = _french_dac1(_US_MULTILATERAL)
 _MULTILATERAL = _US_MULTILATERAL["spec_id"]
@@ -111,6 +113,13 @@ def _proposal(question: str, decision: DecisionFactory, *requirements: Any) -> A
             "evidence_requirements": [r.model_dump(mode="json") for r in requirements],
         },
     )
+
+
+def _seam(surface: ToolSurface, proposal: Any) -> PlannerSeam:
+    """The seam over `surface`, its model sending the `propose_plan` call
+    `proposal` and then text."""
+    scripted = ScriptedGenai([reply(call_part(*proposal)), reply(text_part("done"))])
+    return PlannerSeam(settings=Settings(), surface=surface, client=scripted.client)
 
 
 async def _compiled(plan: Plan, blocks: dict[str, dict[str, Any]]) -> Plan:
@@ -154,19 +163,15 @@ async def _turn_one(
             ORCHESTRATOR_SPECS_KEY: {_TOTAL: _US_TOTAL, _FRANCE["spec_id"]: _FRANCE},
         }
     )
-    seam = PlannerSeam(settings=_adk_settings(), surface=surface)
-    seam._agent.model = ScriptedPlannerLlm(
-        script=[
-            [
-                _proposal(
-                    _COMPARISON,
-                    decision,
-                    _dac_countries("second", _US_TOTAL),
-                    _dac_countries("other", _FRANCE),
-                    _difference("second", "other"),
-                )
-            ]
-        ]
+    seam = _seam(
+        surface,
+        _proposal(
+            _COMPARISON,
+            decision,
+            _dac_countries("second", _US_TOTAL),
+            _dac_countries("other", _FRANCE),
+            _difference("second", "other"),
+        ),
     )
     await turn_one.run(seam, question=_COMPARISON, readings=searched)
     state = await turn_one.state()
@@ -321,20 +326,16 @@ async def test_a_turn_two_direct_pin_of_a_turn_one_compile_reads_no_planner_mark
     surface = cast(ToolSurface, _multilateral_compiles())
 
     turn_two = _SeamHarness({ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
-    seam = PlannerSeam(settings=_adk_settings(), surface=surface)
     share = "What share of US ODA goes to multilaterals?"
-    seam._agent.model = ScriptedPlannerLlm(
-        script=[
-            [
-                _proposal(
-                    share,
-                    decision,
-                    _dac_countries("first", _US_MULTILATERAL),
-                    _dac_countries("second", _US_TOTAL),
-                    _share("first", "second"),
-                )
-            ]
-        ]
+    seam = _seam(
+        surface,
+        _proposal(
+            share,
+            decision,
+            _dac_countries("first", _US_MULTILATERAL),
+            _dac_countries("second", _US_TOTAL),
+            _share("first", "second"),
+        ),
     )
     await turn_two.run(seam, question=share, readings=prior["readings"])
     state = await turn_two.state()
@@ -373,20 +374,16 @@ async def test_a_turn_two_restatement_of_the_comparison_moves_the_total_again(
     copies = {_over_period(block, year): block for block in (_US_MULTILATERAL, _FRANCE)}
     surface = _multilateral_compiles(copies, translates=True)
     turn_two = _SeamHarness({ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
-    seam = PlannerSeam(settings=_adk_settings(), surface=cast(ToolSurface, surface))
     question = "And in 2020?"
-    seam._agent.model = ScriptedPlannerLlm(
-        script=[
-            [
-                _proposal(
-                    question,
-                    decision,
-                    _dac_countries("second", _US_TOTAL).model_copy(update={"period": year}),
-                    _dac_countries("other", _FRANCE).model_copy(update={"period": year}),
-                    _difference("second", "other"),
-                )
-            ]
-        ]
+    seam = _seam(
+        cast(ToolSurface, surface),
+        _proposal(
+            question,
+            decision,
+            _dac_countries("second", _US_TOTAL).model_copy(update={"period": year}),
+            _dac_countries("other", _FRANCE).model_copy(update={"period": year}),
+            _difference("second", "other"),
+        ),
     )
     # The Studio runs each segment with the conversation's record of identities
     # (`harness.studio`), which holds turn 1's compile.

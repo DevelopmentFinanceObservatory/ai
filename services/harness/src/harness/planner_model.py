@@ -1,8 +1,8 @@
-"""The Gemini model the Pydantic AI planner runs on, kept to the turn's budget.
+"""The Gemini model the planner runs on, kept to the turn's budget.
 
 `planner_model` builds Pydantic AI's `GoogleModel` over a google-genai client
-whose streamed call is wrapped. Each request is first put in the form the ADK
-planner sends (`_in_adk_planner_form`). Each call the planner makes, in order:
+whose streamed call is wrapped. Each request is first put in one fixed form
+(`_in_canonical_form`). Each call the planner makes, in order:
 
 1. asks `before_request` for a model turn to answer with; given one, the call
    answers with it and sends nothing, so no budget is spent;
@@ -14,35 +14,35 @@ planner sends (`_in_adk_planner_form`). Each call the planner makes, in order:
 3. sends the request under the turn's `TurnBudget` (`harness.turn_budget.bounded_by`),
    with the model-time, call-cap and wall-clock bounds, the first-chunk
    resend, and the HTTP retries (`orchestrator.agent.model_retry_options`)
-   the ADK planner's model gets;
-4. holds every streamed chunk until the budget wrapper returns. ADK hands its
-   agent a function call only once the stream has ended, and Pydantic AI would
-   run a tool from the chunk that carried it, so a call the budget cuts after a
-   function call was streamed runs no tool. A call a bound closes answers with
-   the closing sentence the ADK planner's model gives;
+   the orchestrator's model gets;
+4. holds every streamed chunk until the budget wrapper returns. Pydantic AI
+   would run a tool from the chunk that carried it, so a call the budget cuts
+   after a function call was streamed runs no tool. A call a bound closes
+   answers with the closing sentence `bounded_by` gives;
 5. hands `after_response` the code of the bound that closed the call, if one
    did, and the usage the API reported for it; a model turn it returns
    replaces the response; otherwise the held chunks are delivered.
 
 A function call the model sent without an id reaches the planner with one of
-the form ADK gives it (`_with_client_call_ids`), so both planners store it
-under such an id, and each request is sent less those ids, as the ADK planner
-sends it (`_without_client_call_ids`). Every request streams. A non-streamed
-call refuses, since it would bypass all of the above.
+the form ADK gives it (`_with_client_call_ids`), so the planner stores it under
+such an id, and each request is sent less those ids, as ADK sends one
+(`_without_client_call_ids`). Every request streams. A non-streamed call
+refuses, since it would bypass all of the above.
 
 Each call's span, Pydantic AI's `chat <model>`, is current while the call runs
-and carries what Langfuse reads of the ADK planner's `generate_content` span
-that Pydantic AI leaves out (`_record_usage`). That is the reasoning tokens and
-the usage Langfuse derives from the ADK planner's span, set outright so that the
-usage details Pydantic AI adds are not summed into the call's total. A turn put
-in place of a request is no model call and the ADK planner opens no span for
-it, so its span is marked a plain span for Langfuse.
+and carries what Langfuse reads of an ADK `generate_content` span that
+Pydantic AI leaves out (`_record_usage`). That is the reasoning tokens and the
+usage Langfuse derives from such a span, set outright so that the usage
+details Pydantic AI adds are not summed into the call's total. A turn put in
+place of a request is no model call, so its span is marked a plain span for
+Langfuse.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -95,7 +95,7 @@ def planner_model(
     before_request: BeforeRequest | None = None,
     after_response: AfterResponse | None = None,
 ) -> GoogleModel:
-    """The `GoogleModel` the Pydantic AI planner runs on.
+    """The `GoogleModel` the planner runs on.
 
     Args:
         model_name: The Gemini model, as google-genai names it.
@@ -109,7 +109,7 @@ def planner_model(
             closed (`AfterResponse`).
 
     Returns:
-        A `GoogleModel` on `PLANNER_PROFILE`, the profile `_in_adk_planner_form`
+        A `GoogleModel` on `PLANNER_PROFILE`, the profile `_in_canonical_form`
         expects, whose streamed calls go through the steps above.
     """
     stream = _PlannerStream(
@@ -123,6 +123,63 @@ def planner_model(
     # `GoogleModel` reads it.
     provider = GoogleProvider(client=cast(Client, _Client(client, stream)))
     return GoogleModel(model_name, provider=provider, profile=PLANNER_PROFILE)
+
+
+def refuse_vertex_ai(model_name: str, client: Client | None = None) -> None:
+    """Refuse to build the planner when its model would call Vertex AI.
+
+    The planner's declarations are the Gemini developer API's form
+    (`planner.tool_spec.function_declaration`), and Vertex AI rejects their
+    optional `anyOf` schemas. `harness.planner_seam.PlannerSeam` calls this
+    with the planner's model name and the client it calls through.
+
+    A `projects/...` name is refused whatever the client: it is a Vertex AI
+    resource path, and the planner runs on the developer API, which serves no
+    model by that name. A given client decides by its `vertexai`. With none,
+    the planner builds a plain `google.genai.Client()`, whose backend the
+    environment decides: `GOOGLE_GENAI_USE_ENTERPRISE` when set, else
+    `GOOGLE_GENAI_USE_VERTEXAI`, each true when `true` or `1`. The rule is read
+    here without building a client, since building one without an API key or
+    credentials raises.
+
+    Args:
+        model_name: The Gemini model's name, as the client is sent it.
+        client: The client the model calls through, or None for the one the
+            planner builds.
+
+    Raises:
+        RuntimeError: The client uses Vertex AI, or the name is a Vertex AI
+            resource path.
+    """
+    if model_name.startswith("projects/"):
+        raise RuntimeError(
+            f"{model_name!r} is a Vertex AI resource path, and the planner runs on the "
+            "Gemini developer API, which serves no model by that name. Name the model "
+            "as the developer API does (models/... or its bare name)."
+        )
+    if client is not None:
+        vertexai = client.vertexai
+    else:
+        enterprise = _env_flag("GOOGLE_GENAI_USE_ENTERPRISE")
+        vertexai = enterprise if enterprise is not None else _env_flag("GOOGLE_GENAI_USE_VERTEXAI")
+    if vertexai:
+        raise RuntimeError(
+            "The planner's google-genai client uses Vertex AI, which rejects the "
+            "planner's tool declarations. Run the planner on a Gemini developer API "
+            "key (GOOGLE_API_KEY): give a client built without vertexai, or name the "
+            "model without a projects/ path and unset GOOGLE_GENAI_USE_ENTERPRISE and "
+            "GOOGLE_GENAI_USE_VERTEXAI."
+        )
+
+
+def _env_flag(name: str) -> bool | None:
+    """The environment variable `name` read as google-genai reads a flag.
+
+    `true` or `1`, in any case, is true. Any other value is false, and an unset
+    variable gives `None`.
+    """
+    value = os.environ.get(name)
+    return None if value is None else value.lower() in ("true", "1")
 
 
 @dataclass
@@ -160,7 +217,7 @@ class _PlannerStream:
             self._respond(
                 model=model,
                 contents=_without_client_call_ids(contents),
-                config=_in_adk_planner_form(config),
+                config=_in_canonical_form(config),
             )
         )
 
@@ -291,8 +348,8 @@ async def _with_client_call_ids(
     """`chunks`, each function call that arrived without an id given one as ADK
     gives it (`generate_client_function_call_id`).
 
-    The ADK planner gives such a call an `adk-` id before its tools run and
-    stores it under that id. Pydantic AI would invent an id of its own form, so
+    The planner stores such a call under an `adk-` id, given before its tools
+    run, as ADK gives one. Pydantic AI would invent an id of its own form, so
     this runs on every chunk the model hands Pydantic AI, a turn put in the
     model's place and a closing turn included. A chunk carries each call whole
     in one part, and both frameworks read each function call part as one call,
@@ -318,8 +375,8 @@ def _id_less_calls(chunk: types.GenerateContentResponse) -> list[types.FunctionC
 
 
 def _record_usage(span: trace.Span, usage: Usage | None) -> None:
-    """Put `usage`, one call's, on `span` as Langfuse reads it from the ADK
-    planner's `generate_content` span.
+    """Put `usage`, one call's, on `span` as Langfuse reads it from an ADK
+    `generate_content` span.
 
     ADK records a call's input (prompt and tool-use tokens), output (candidate
     and thought tokens), cached and thought tokens, each only when Gemini
@@ -357,9 +414,9 @@ def _without_client_call_ids(contents: Any) -> list[types.Content]:
 
     A turn put in the model's place carries such an id
     (`harness.planner_node.directive_turn`), and a later request of the run
-    replays it when the call does not end the run. The ADK planner strips those
-    ids from every request it sends (`remove_client_function_call_id`), so this
-    applies ADK's own rule to a copy of each content.
+    replays it when the call does not end the run. ADK strips those ids from
+    every request it sends (`remove_client_function_call_id`), and this applies
+    ADK's own rule to a copy of each content.
     """
     stripped = [types.Content.model_validate(content).model_copy(deep=True) for content in contents]
     for content in stripped:
@@ -369,23 +426,23 @@ def _without_client_call_ids(contents: Any) -> list[types.Content]:
 
 class UnexpectedRequestFormError(ValueError):
     """A request config `GoogleModel` built is not in a form
-    `_in_adk_planner_form` rewrites.
+    `_in_canonical_form` rewrites.
 
     Gemini's behaviour follows a request's bytes, so a form the rewrite does
     not know is refused.
     """
 
 
-def _in_adk_planner_form(config: Any) -> types.GenerateContentConfig:
-    """`config`, as `GoogleModel` built it, put in the form the ADK planner sends.
+def _in_canonical_form(config: Any) -> types.GenerateContentConfig:
+    """`config`, as `GoogleModel` built it, put in the one form every planner
+    request takes.
 
     Gemini's behaviour follows the request's bytes as well as its meaning. A
-    parameterless tool declared with an empty object schema, where the ADK
-    planner declares none, made Gemini reason for some 12,000 tokens on one
-    call in six of a live task's entries, and never without it. The prefix
-    cache is keyed on the same fields (`harness.prefix_cache.prefix_key`), so a
-    request in this form shares the ADK planner's cache. The request that
-    creates the cache is this one, so the cache holds the same form.
+    parameterless tool declared with an empty object schema, where this form
+    declares none, made Gemini reason for some 12,000 tokens on one call in six
+    of a live task's entries, and never without it. The prefix cache is keyed
+    on the same fields (`harness.prefix_cache.prefix_key`), and the request
+    that creates the cache is in this form, so the cache holds the same form.
 
     Each field Pydantic AI sends is rewritten, and a value of any other shape
     raises `UnexpectedRequestFormError`:
@@ -400,12 +457,11 @@ def _in_adk_planner_form(config: Any) -> types.GenerateContentConfig:
       dropped, as `AUTO` is Gemini's default with tools;
     - `response_modalities` of `TEXT` alone is dropped, as text is the
       default;
-    - the ADK planner's HTTP retries (`model_retry_options`) and
-      `automatic_continuation` are set, as `planner.agent.create_planner_agent`
-      sets them.
+    - the orchestrator's HTTP retries (`model_retry_options`) and
+      `automatic_continuation` are set.
 
-    Each framework's own HTTP headers stay, as does the placeholder signature
-    Pydantic AI gives an unsigned replayed call in the contents.
+    Pydantic AI's own HTTP headers stay, as does the placeholder signature it
+    gives an unsigned replayed call in the contents.
     """
     built = types.GenerateContentConfig.model_validate(config or {})
     _require_only_auto(built.tool_config)

@@ -4,7 +4,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 0,
-      "total_chars": 152509,
+      "total_chars": 152552,
       "system_instruction_chars": 20148,
       "declaration_total_chars": 40287,
       "declarations": [
@@ -45,7 +45,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 1,
-      "total_chars": 186122,
+      "total_chars": 186207,
       "system_instruction_chars": 20148,
       "declaration_total_chars": 40287,
       "declarations": [
@@ -96,7 +96,7 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 2,
-      "total_chars": 187488,
+      "total_chars": 187615,
       "system_instruction_chars": 20148,
       "declaration_total_chars": 40287,
       "declarations": [
@@ -157,7 +157,7 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 0,
-      "total_chars": 70638,
+      "total_chars": 70681,
       "system_instruction_chars": 20148,
       "declaration_total_chars": 40287,
       "declarations": [
@@ -198,7 +198,7 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 1,
-      "total_chars": 104251,
+      "total_chars": 104336,
       "system_instruction_chars": 20148,
       "declaration_total_chars": 40287,
       "declarations": [
@@ -249,7 +249,7 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 2,
-      "total_chars": 106158,
+      "total_chars": 106285,
       "system_instruction_chars": 20148,
       "declaration_total_chars": 40287,
       "declarations": [

@@ -80,19 +80,14 @@ import hashlib
 import itertools
 import json
 import os
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp.skills_client import PAGE_CHARS, continuation_line, page_of, with_closing_line
-from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
-from google.adk.models.llm_response import LlmResponse
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from harness import planner_seam, studio_state
 from harness.planner_seam import (
@@ -118,7 +113,6 @@ from harness.wire import (
     CompositionActor,
     CompositionBlock,
 )
-from planner.agent import create_planner_agent
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
     ASKS_STATE_KEY,
@@ -147,16 +141,15 @@ from planner.plan import (
     Unit,
 )
 from planner.records import GroupBy, Reduction
+from planner.specs import planner_specs
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, WorkflowStep
 from planner.workflow import Workflow as PlanWorkflow
-from pydantic import Field
 
 from .context_probe import (
     BOUNDING_PATTERNS,
     RELAY_MARKER,
     SEAM_BUCKET,
     SEAM_MARKER,
-    RecordingLlm,
     bucket_chars,
     compose,
     contents_leading,
@@ -168,7 +161,8 @@ from .context_probe import (
 from .context_probe import (
     record_chars as _record_chars,
 )
-from .test_planner_seam import _NO_DATA_SEARCH_RESPONSE, _adk_settings, _gdp_plan, _SeamHarness
+from .scripted_genai import Reply, Request, ScriptedGenai, call_part, reply, text_part
+from .test_planner_seam import _NO_DATA_SEARCH_RESPONSE, _gdp_plan, _SeamHarness
 
 # The root conftest.py chdirs every test into a tmp_path, so this must be absolute.
 _BASELINE_PATH = Path(__file__).resolve().parent / "context_baseline.json"
@@ -216,7 +210,7 @@ PLANNER_CONTENTS_CEILING = 1_220
 # The `get_skill` answer in the planner's `contents`, bucketed as
 # `functionResponse:get_skill`: one full page of a skill file
 # (`data_mcp.skills_client.PAGE_CHARS`, 32,000 chars) plus the closing line
-# naming the next call, as ADK serialises it. Measured 32,676 on a page of
+# naming the next call, as the request serialises it. Measured 32,676 on a page of
 # short Markdown lines, where escaping each line break adds a char. This bounds
 # one call. Nothing caps how many skill pages one planner entry reads besides
 # the seam's event limit and entry deadline.
@@ -256,21 +250,24 @@ RECORDED_BRIEF_CEILING = 9_460
 BOUNDED_CONTEXT = "bounded-context"
 
 
-def _seam() -> PlannerSeam:
-    """The seam the recorded round runs on, over a canned data-mcp surface.
-
-    Built here, not reused from `test_planner_seam`, whose own
-    `_translator_seam` is private to the scenarios it serves. It runs the ADK
-    planner: the budget measures the `LlmRequest` ADK assembles, and the
-    Pydantic AI planner shapes its instruction and declarations differently on
-    the wire (`assert_pinned_wire_differences` in `tests/planner/planner_pairs.py`).
-    """
+def _seam(scripted: ScriptedGenai) -> PlannerSeam:
+    """The seam the recorded round runs on, over a canned data-mcp surface, its
+    model calls answered by `scripted`."""
     return PlannerSeam(
-        settings=_adk_settings(),
+        settings=Settings(),
         surface=FixtureSurface(
             schemas=[],
             responses={"search": _NO_DATA_SEARCH_RESPONSE, "get_skill": _skill_page()},
         ),
+        client=scripted.client,
+    )
+
+
+def _as_llm_request(request: Request) -> LlmRequest:
+    """`request`, as the planner sent it to Gemini, in the `LlmRequest` shape
+    `context_probe.compose` measures."""
+    return LlmRequest(
+        model=request.model, contents=request.content_list, config=request.generate_config
     )
 
 
@@ -294,7 +291,7 @@ def _skill_page() -> ToolCallResult:
     return ToolCallResult(is_error=False, text=with_closing_line(page.text, closing))
 
 
-def _script() -> list[Any]:
+def _script() -> list[Reply]:
     """The planner's script for one round.
 
     The planner loads a skill, proposes the drafted plan again unchanged (which
@@ -302,9 +299,9 @@ def _script() -> list[Any]:
     entry.
     """
     return [
-        [("get_skill", {"skill_id": "dfo-faq"})],
-        [("propose_plan", {"amends_version": 1})],
-        "nothing to submit",
+        reply(call_part("get_skill", {"skill_id": "dfo-faq"})),
+        reply(call_part("propose_plan", {"amends_version": 1})),
+        reply(text_part("nothing to submit")),
     ]
 
 
@@ -347,13 +344,12 @@ async def _recorded_round(
     `state` is what the session holds before the round, such as the asks.
 
     Returns `{"planner": (records, requests)}`: the `context_probe.compose`
-    records in call order, and the raw `LlmRequest` objects the stability
-    assertions compare byte for byte.
+    records in call order, and the requests as `LlmRequest` objects, which the
+    stability assertions compare byte for byte.
     """
     draft = _gdp_plan(decision, requirement, derived_requirement)
-    seam = _seam()
-    planner_llm = RecordingLlm(script=_script(), agent_name="planner", scenario=scenario)
-    seam._agent.model = planner_llm
+    scripted = ScriptedGenai(_script())
+    seam = _seam(scripted)
 
     arguments: dict[str, Any] = {"question": draft.question, **context}
     output = await _SeamHarness(state).run(
@@ -361,7 +357,12 @@ async def _recorded_round(
     )
     assert output is not None and "refused" in output, output
 
-    return {"planner": (planner_llm.record, planner_llm.captured)}
+    requests = [_as_llm_request(request) for request in scripted.requests]
+    records = [
+        compose(request, agent="planner", scenario=scenario, call_index=index)
+        for index, request in enumerate(requests)
+    ]
+    return {"planner": (records, requests)}
 
 
 # Baseline -----------------------------------------------------------------------
@@ -392,28 +393,13 @@ def _write_baseline(records: list[dict[str, Any]], declaration_digests: dict[str
     _BASELINE_PATH.write_text(json.dumps(payload, indent=2) + "\n")
 
 
-class _FirstRequest(BaseLlm):
-    """A model that keeps every request it is handed and answers each with text."""
-
-    model: str = "first-request"
-    requests: list[LlmRequest] = Field(default_factory=list)
-
-    async def generate_content_async(
-        self, llm_request: LlmRequest, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse]:
-        self.requests.append(llm_request)
-        yield LlmResponse(
-            content=types.Content(role="model", parts=[types.Part.from_text(text="done")])
-        )
-
-
-def _declarations_digest(request: LlmRequest) -> str:
+def _declarations_digest(request: Request) -> str:
     """The sha256 of the SDK's JSON of each `FunctionDeclaration` `request` holds
     (`model_dump_json(exclude_none=True)`, keys in the SDK's order), in the
     order the request holds them."""
     declarations = [
         json.loads(declaration.model_dump_json(exclude_none=True))
-        for tool in request.config.tools or []
+        for tool in request.generate_config.tools or []
         for declaration in tool.function_declarations or []
     ]
     text = json.dumps(declarations, ensure_ascii=False)
@@ -422,7 +408,7 @@ def _declarations_digest(request: LlmRequest) -> str:
 
 async def _declaration_digests() -> dict[str, str]:
     """`_declarations_digest` of the first request of a planner run, for each
-    setting of `create_planner_agent` that changes a declaration (a tool
+    setting of `planner.specs.planner_specs` that changes a declaration (a tool
     surface or none, the question fixed or not).
 
     The character counts in the records cannot see a declaration reordered or
@@ -430,23 +416,20 @@ async def _declaration_digests() -> dict[str, str]:
     """
     digests: dict[str, str] = {}
     for surface, question_fixed in itertools.product([False, True], repeat=2):
-        agent = create_planner_agent(
-            model_name="m",
-            surface=cast(Any, SimpleNamespace()) if surface else None,
+        scripted = ScriptedGenai([reply(text_part("done"))])
+        specs = planner_specs(
+            surface=FixtureSurface(schemas=[]) if surface else None,
             question_fixed=question_fixed,
         )
-        agent.model = model = _FirstRequest()
-        sessions = InMemorySessionService()
-        session = await sessions.create_session(app_name="a", user_id="u")
-        runner = Runner(agent=agent, app_name="a", session_service=sessions)
-        async for _event in runner.run_async(
-            user_id="u",
-            session_id=session.id,
-            new_message=types.Content(role="user", parts=[types.Part.from_text(text="go")]),
-        ):
-            pass
+        seam = PlannerSeam(
+            settings=Settings(),
+            surface=FixtureSurface(schemas=[]),
+            specs=specs,
+            client=scripted.client,
+        )
+        await _SeamHarness().run(seam, question="go", readings=[])
         digests[f"surface={surface},question_fixed={question_fixed}"] = _declarations_digest(
-            model.requests[0]
+            scripted.requests[0]
         )
     return digests
 
@@ -735,9 +718,8 @@ def test_the_cached_prefix_is_stable_across_a_run(measured: Any) -> None:
 
     A stable prefix is what the shared explicit cache serves and what Gemini's
     implicit caching matches across requests. The change most likely to break
-    it is setting `static_instruction` or moving to an `InstructionProvider`,
-    either of which can make the instruction vary per request and destroy that
-    saving with nothing in the log to say so.
+    it is an instruction rendered per request, from session state or the
+    brief, which would destroy that saving with nothing in the log to say so.
 
     The comparison is within one run. A cache is shared between conversations
     only while every conversation builds the same prefix. A deploy that changes
@@ -772,10 +754,10 @@ def test_the_leading_contents_of_a_run_are_only_ever_appended_to(measured: Any) 
 
     Gemini's implicit caching matches a leading run of contents, so a run whose
     earlier turn was rewritten, not merely appended to, would miss the cache
-    from the rewrite onward. Every request ADK assembles here is the session's
-    whole history, so this is a real property of the served path and not an
-    artefact of the fixture: `harness.planner_seam._propose` runs every
-    generation of an entry in the same session.
+    from the rewrite onward. Every request the planner sends here carries the
+    run's whole history, so this is a real property of the served path and not
+    an artefact of the fixture: `harness.planner_seam._propose` runs every
+    generation of an entry in one planner run.
 
     The guarantee this protects: a supersession edit stays transient and is
     never persisted, and a version that persisted it would show up here as a
@@ -1743,12 +1725,12 @@ def test_the_question_and_ask_ceilings_fail_when_the_seam_stops_cutting(
     assert len(asked) > ceilings["ask"]
 
 
-# The bounded production context, through the seam and ADK --------------------------
+# The bounded production context, through the seam ---------------------------------
 #
 # The realistic round above runs with three readings and small digests. A
 # session's first planner call can carry far more of all three in the brief, and
 # each is bounded at its source, so this scenario records that call with every
-# one at its maximum, as the request ADK assembles it.
+# one at its maximum, as the planner's request carries it.
 
 
 def _bounded_context() -> dict[str, Any]:
@@ -1778,7 +1760,7 @@ BOUNDED_CONTEXT_CONTENTS_CEILING = (
 def test_the_bounded_production_context_stays_under_its_derived_ceilings(
     records: list[dict[str, Any]],
 ) -> None:
-    """A brief carrying every bounded input at its maximum, as ADK assembles it.
+    """A brief carrying every bounded input at its maximum, as the planner sends it.
 
     The brief is held to `BOUNDED_CONTEXT_BRIEF_CEILING`, and the planner's
     whole `contents` to the ceiling that adds the realistic history to it. The
@@ -1819,7 +1801,8 @@ def test_the_bounded_context_ceilings_fail_when_the_brief_grows() -> None:
 
 
 def test_the_propose_plan_declaration_carries_the_plan_limits(measured: Any) -> None:
-    """The declaration ADK sends the model states every limit, in `maxLength` and `maxItems`.
+    """The declaration the planner sends the model states every limit, in
+    `maxLength` and `maxItems`.
 
     The limits live on the schema alone, and no field description restates
     one, so the model reads them from here. The declaration is read off the

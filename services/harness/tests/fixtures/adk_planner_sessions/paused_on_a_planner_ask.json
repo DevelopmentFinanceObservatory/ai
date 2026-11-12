@@ -1,0 +1,465 @@
+{
+  "events": [
+    {
+      "actions": {
+        "agent_state": null,
+        "artifact_delta": {},
+        "compaction": null,
+        "end_of_agent": null,
+        "escalate": null,
+        "render_ui_widgets": null,
+        "requested_auth_configs": {},
+        "requested_tool_confirmations": {},
+        "rewind_before_invocation_id": null,
+        "route": null,
+        "set_model_response": null,
+        "skip_summarization": null,
+        "state_delta": {},
+        "transfer_reason": null,
+        "transfer_to_agent": null
+      },
+      "author": "user",
+      "avg_logprobs": null,
+      "branch": null,
+      "cache_metadata": null,
+      "citation_metadata": null,
+      "content": {
+        "parts": [
+          {
+            "audio_transcription": null,
+            "code_execution_result": null,
+            "executable_code": null,
+            "file_data": null,
+            "function_call": null,
+            "function_response": null,
+            "inline_data": null,
+            "media_processing": null,
+            "media_resolution": null,
+            "part_metadata": null,
+            "speech_metadata": null,
+            "text": "probe",
+            "thought": null,
+            "thought_signature": null,
+            "tool_call": null,
+            "tool_response": null,
+            "video_metadata": null
+          }
+        ],
+        "role": "user"
+      },
+      "custom_metadata": null,
+      "environment_id": null,
+      "error_code": null,
+      "error_message": null,
+      "finish_reason": null,
+      "go_away": null,
+      "grounding_metadata": null,
+      "id": "d65ae1cd-de91-404a-8aff-4b6d2565ad1a",
+      "input_transcription": null,
+      "interaction_id": null,
+      "interaction_status": null,
+      "interrupted": null,
+      "invocation_id": "e-5988d18f-10be-44e9-87aa-e9cd0dde311a",
+      "isolation_scope": null,
+      "live_session_id": null,
+      "live_session_resumption_update": null,
+      "logprobs_result": null,
+      "long_running_tool_ids": null,
+      "model_version": null,
+      "node_info": {
+        "message_as_output": null,
+        "output_for": null,
+        "path": ""
+      },
+      "output": null,
+      "output_transcription": null,
+      "partial": null,
+      "timestamp": 1794398839.1513479,
+      "turn_complete": null,
+      "turn_complete_reason": null,
+      "usage_metadata": null,
+      "voice_activity": null
+    },
+    {
+      "actions": {
+        "agent_state": null,
+        "artifact_delta": {},
+        "compaction": null,
+        "end_of_agent": null,
+        "escalate": null,
+        "render_ui_widgets": null,
+        "requested_auth_configs": {},
+        "requested_tool_confirmations": {},
+        "rewind_before_invocation_id": null,
+        "route": null,
+        "set_model_response": null,
+        "skip_summarization": null,
+        "state_delta": {},
+        "transfer_reason": null,
+        "transfer_to_agent": null
+      },
+      "author": "dfo_planner",
+      "avg_logprobs": null,
+      "branch": "dfo_planner",
+      "cache_metadata": null,
+      "citation_metadata": null,
+      "content": {
+        "parts": [
+          {
+            "audio_transcription": null,
+            "code_execution_result": null,
+            "executable_code": null,
+            "file_data": null,
+            "function_call": {
+              "args": {
+                "candidates": [
+                  {
+                    "label": "a candidate",
+                    "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  }
+                ],
+                "message": "Which source did you mean?"
+              },
+              "id": "a1",
+              "name": "ask_user_question",
+              "partial_args": null,
+              "will_continue": null
+            },
+            "function_response": null,
+            "inline_data": null,
+            "media_processing": null,
+            "media_resolution": null,
+            "part_metadata": null,
+            "speech_metadata": null,
+            "text": null,
+            "thought": null,
+            "thought_signature": "c2NyaXB0ZWQtc2lnbmF0dXJl",
+            "tool_call": null,
+            "tool_response": null,
+            "video_metadata": null
+          },
+          {
+            "audio_transcription": null,
+            "code_execution_result": null,
+            "executable_code": null,
+            "file_data": null,
+            "function_call": null,
+            "function_response": null,
+            "inline_data": null,
+            "media_processing": null,
+            "media_resolution": null,
+            "part_metadata": null,
+            "speech_metadata": null,
+            "text": "",
+            "thought": null,
+            "thought_signature": null,
+            "tool_call": null,
+            "tool_response": null,
+            "video_metadata": null
+          }
+        ],
+        "role": "model"
+      },
+      "custom_metadata": null,
+      "environment_id": null,
+      "error_code": null,
+      "error_message": null,
+      "finish_reason": "STOP",
+      "go_away": null,
+      "grounding_metadata": null,
+      "id": "0319370a-7add-4455-b77a-128a6b12f271",
+      "input_transcription": null,
+      "interaction_id": null,
+      "interaction_status": null,
+      "interrupted": null,
+      "invocation_id": "e-5988d18f-10be-44e9-87aa-e9cd0dde311a",
+      "isolation_scope": null,
+      "live_session_id": null,
+      "live_session_resumption_update": null,
+      "logprobs_result": null,
+      "long_running_tool_ids": [],
+      "model_version": null,
+      "node_info": {
+        "message_as_output": null,
+        "output_for": null,
+        "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1"
+      },
+      "output": null,
+      "output_transcription": null,
+      "partial": false,
+      "timestamp": 1794398839.180091,
+      "turn_complete": null,
+      "turn_complete_reason": null,
+      "usage_metadata": null,
+      "voice_activity": null
+    },
+    {
+      "actions": {
+        "agent_state": null,
+        "artifact_delta": {},
+        "compaction": null,
+        "end_of_agent": null,
+        "escalate": null,
+        "render_ui_widgets": null,
+        "requested_auth_configs": {},
+        "requested_tool_confirmations": {},
+        "rewind_before_invocation_id": null,
+        "route": null,
+        "set_model_response": null,
+        "skip_summarization": true,
+        "state_delta": {
+          "planner:pending_ask": {
+            "args": {
+              "candidates": [
+                {
+                  "label": "a candidate",
+                  "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ],
+              "message": "Which source did you mean?",
+              "options": [],
+              "rationale": null,
+              "recommended_spec_id": null
+            },
+            "call_id": "a1"
+          }
+        },
+        "transfer_reason": null,
+        "transfer_to_agent": null
+      },
+      "author": "dfo_planner",
+      "avg_logprobs": null,
+      "branch": "dfo_planner",
+      "cache_metadata": null,
+      "citation_metadata": null,
+      "content": {
+        "parts": [
+          {
+            "audio_transcription": null,
+            "code_execution_result": null,
+            "executable_code": null,
+            "file_data": null,
+            "function_call": null,
+            "function_response": {
+              "id": "a1",
+              "name": "ask_user_question",
+              "parts": null,
+              "response": {
+                "message": "The question is with the user. Their answer arrives with your next brief.",
+                "outcome": "ok",
+                "status": "asked"
+              },
+              "scheduling": null,
+              "will_continue": null
+            },
+            "inline_data": null,
+            "media_processing": null,
+            "media_resolution": null,
+            "part_metadata": null,
+            "speech_metadata": null,
+            "text": null,
+            "thought": null,
+            "thought_signature": null,
+            "tool_call": null,
+            "tool_response": null,
+            "video_metadata": null
+          }
+        ],
+        "role": "user"
+      },
+      "custom_metadata": null,
+      "environment_id": null,
+      "error_code": null,
+      "error_message": null,
+      "finish_reason": null,
+      "go_away": null,
+      "grounding_metadata": null,
+      "id": "c047566c-4545-4766-9922-e0dcfa0130a3",
+      "input_transcription": null,
+      "interaction_id": null,
+      "interaction_status": null,
+      "interrupted": null,
+      "invocation_id": "e-5988d18f-10be-44e9-87aa-e9cd0dde311a",
+      "isolation_scope": null,
+      "live_session_id": null,
+      "live_session_resumption_update": null,
+      "logprobs_result": null,
+      "long_running_tool_ids": null,
+      "model_version": null,
+      "node_info": {
+        "message_as_output": null,
+        "output_for": null,
+        "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1"
+      },
+      "output": null,
+      "output_transcription": null,
+      "partial": null,
+      "timestamp": 1794398839.182671,
+      "turn_complete": null,
+      "turn_complete_reason": null,
+      "usage_metadata": null,
+      "voice_activity": null
+    },
+    {
+      "actions": {
+        "agent_state": null,
+        "artifact_delta": {},
+        "compaction": null,
+        "end_of_agent": null,
+        "escalate": null,
+        "render_ui_widgets": null,
+        "requested_auth_configs": {},
+        "requested_tool_confirmations": {},
+        "rewind_before_invocation_id": null,
+        "route": null,
+        "set_model_response": null,
+        "skip_summarization": null,
+        "state_delta": {
+          "planner:amendment_entry": false,
+          "planner:asked_referral": null,
+          "planner:decision_pick": null,
+          "planner:optional_declines": [],
+          "planner:pending_ask": {
+            "args": {
+              "candidates": [
+                {
+                  "label": "a candidate",
+                  "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ],
+              "message": "Which source did you mean?",
+              "options": [],
+              "rationale": null,
+              "recommended_spec_id": null
+            },
+            "call_id": "a1"
+          },
+          "planner:pin_sources": {},
+          "planner:plan": "{\"question\":\"kenya debt\",\"answer_mode\":\"series\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to measure Kenya's dependence by.\",\"options\":[\"annual debt service\",\"total debt stock\"],\"chosen\":\"annual debt service\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is the standard measure for near-term dependence.\",\"fixes\":null}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"}],\"across\":[],\"period\":{\"start\":2015,\"end\":2024},\"period_end_open\":false,\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_ref\":null,\"source_exclude\":false,\"source_code\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"},\"stat_vars\":null,\"breakdown\":null},{\"kind\":\"aggregate\",\"id\":\"annual_totals\",\"decision_ids\":[\"measure\"],\"input_id\":\"annual_debt_service\",\"reduction\":\"sum\",\"group_by\":[\"period\"]}],\"declined\":[],\"asks\":[],\"answered\":[],\"ask_breakdowns\":[],\"asks_across_years\":[],\"period_licences\":[],\"rolling_copies\":[],\"first_years\":[],\"translation\":{\"operations\":[{\"kind\":\"retrieve\",\"id\":\"debt\",\"requirement_id\":\"annual_debt_service\",\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"kind\":\"aggregate\",\"id\":\"totals\",\"requirement_id\":\"annual_totals\",\"input\":\"debt\",\"reduction\":\"sum\",\"group_by\":[\"period\"]}],\"terminal\":[\"totals\"]},\"workflow\":{\"steps\":[{\"id\":\"debt\",\"operation_id\":\"debt\",\"tool\":{\"server\":\"data-mcp\",\"name\":\"get_data\"},\"args\":{\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"bindings\":{},\"implementation_version\":null,\"input_schema_hash\":\"hash\",\"output_schema_hash\":null,\"expected_role_keys\":[]},{\"id\":\"totals\",\"operation_id\":\"totals\",\"tool\":{\"server\":\"analysis-mcp\",\"name\":\"aggregate\"},\"args\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"bindings\":{\"frame_ref\":{\"from_step\":\"debt\",\"output\":\"frame_ref\"}},\"implementation_version\":null,\"input_schema_hash\":\"hash\",\"output_schema_hash\":null,\"expected_role_keys\":[]}],\"sources\":[{\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sentence\":\"external debt service\",\"searched_as\":null,\"confidence\":null,\"has_data\":true,\"measure_label\":null,\"stat_var_member_count\":null,\"stat_var_member_count_exact\":null,\"served_count\":null,\"shape_member_count\":null,\"shape_member_digest\":null,\"entities\":[],\"groups\":[],\"open_entity_axes\":null,\"unit_ref\":null,\"unit_label\":null,\"unit_per_series\":null,\"provenance_ref\":null,\"provenance_label\":null,\"provenance_account\":null,\"resolved_sources\":[],\"coverage_kind\":null,\"coverage_window\":null,\"identity\":null,\"definition\":null,\"open_axes\":[],\"slot_codes\":null,\"stat_var_reading\":null,\"stat_var_reading_set_by\":null}],\"evidence_bindings\":[{\"requirement_id\":\"annual_debt_service\",\"step_id\":\"debt\",\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}],\"terminal_steps\":[\"totals\"],\"warnings\":[]},\"version\":1,\"previous_version\":null,\"status\":\"pending_approval\",\"approved_revision\":null,\"approved_at\":null}",
+          "planner:reduction_refused_asks": [],
+          "planner:rounds": 0,
+          "planner:skills_before_entry": 0,
+          "planner:terminal_declines": [],
+          "planner:unsupported": [],
+          "translator:compile_failures": []
+        },
+        "transfer_reason": null,
+        "transfer_to_agent": null
+      },
+      "author": "seam_test_wf",
+      "avg_logprobs": null,
+      "branch": "dfo_interrupts",
+      "cache_metadata": null,
+      "citation_metadata": null,
+      "content": {
+        "parts": [
+          {
+            "audio_transcription": null,
+            "code_execution_result": null,
+            "executable_code": null,
+            "file_data": null,
+            "function_call": {
+              "args": {
+                "interruptId": "a1",
+                "message": "Which source did you mean?",
+                "payload": {
+                  "candidates": [
+                    {
+                      "label": "a candidate",
+                      "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }
+                  ],
+                  "message": "Which source did you mean?",
+                  "options": [],
+                  "rationale": null,
+                  "recommended_spec_id": null
+                },
+                "response_schema": null
+              },
+              "id": "a1",
+              "name": "adk_request_input",
+              "partial_args": null,
+              "will_continue": null
+            },
+            "function_response": null,
+            "inline_data": null,
+            "media_processing": null,
+            "media_resolution": null,
+            "part_metadata": null,
+            "speech_metadata": null,
+            "text": null,
+            "thought": null,
+            "thought_signature": null,
+            "tool_call": null,
+            "tool_response": null,
+            "video_metadata": null
+          }
+        ],
+        "role": "model"
+      },
+      "custom_metadata": null,
+      "environment_id": null,
+      "error_code": null,
+      "error_message": null,
+      "finish_reason": null,
+      "go_away": null,
+      "grounding_metadata": null,
+      "id": "bd5db115-a5da-42e4-af0d-8cd97c5c7f28",
+      "input_transcription": null,
+      "interaction_id": null,
+      "interaction_status": null,
+      "interrupted": null,
+      "invocation_id": "e-5988d18f-10be-44e9-87aa-e9cd0dde311a",
+      "isolation_scope": null,
+      "live_session_id": null,
+      "live_session_resumption_update": null,
+      "logprobs_result": null,
+      "long_running_tool_ids": [
+        "a1"
+      ],
+      "model_version": null,
+      "node_info": {
+        "message_as_output": null,
+        "output_for": null,
+        "path": "seam_test_wf@1/seam_under_test@1"
+      },
+      "output": null,
+      "output_transcription": null,
+      "partial": null,
+      "timestamp": 1794398839.183517,
+      "turn_complete": null,
+      "turn_complete_reason": null,
+      "usage_metadata": null,
+      "voice_activity": null
+    }
+  ],
+  "state": {
+    "planner:amendment_entry": false,
+    "planner:asked_referral": null,
+    "planner:decision_pick": null,
+    "planner:optional_declines": [],
+    "planner:pending_ask": {
+      "args": {
+        "candidates": [
+          {
+            "label": "a candidate",
+            "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "message": "Which source did you mean?",
+        "options": [],
+        "rationale": null,
+        "recommended_spec_id": null
+      },
+      "call_id": "a1"
+    },
+    "planner:pin_sources": {},
+    "planner:plan": "{\"question\":\"kenya debt\",\"answer_mode\":\"series\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to measure Kenya's dependence by.\",\"options\":[\"annual debt service\",\"total debt stock\"],\"chosen\":\"annual debt service\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is the standard measure for near-term dependence.\",\"fixes\":null}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"}],\"across\":[],\"period\":{\"start\":2015,\"end\":2024},\"period_end_open\":false,\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_ref\":null,\"source_exclude\":false,\"source_code\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"},\"stat_vars\":null,\"breakdown\":null},{\"kind\":\"aggregate\",\"id\":\"annual_totals\",\"decision_ids\":[\"measure\"],\"input_id\":\"annual_debt_service\",\"reduction\":\"sum\",\"group_by\":[\"period\"]}],\"declined\":[],\"asks\":[],\"answered\":[],\"ask_breakdowns\":[],\"asks_across_years\":[],\"period_licences\":[],\"rolling_copies\":[],\"first_years\":[],\"translation\":{\"operations\":[{\"kind\":\"retrieve\",\"id\":\"debt\",\"requirement_id\":\"annual_debt_service\",\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"kind\":\"aggregate\",\"id\":\"totals\",\"requirement_id\":\"annual_totals\",\"input\":\"debt\",\"reduction\":\"sum\",\"group_by\":[\"period\"]}],\"terminal\":[\"totals\"]},\"workflow\":{\"steps\":[{\"id\":\"debt\",\"operation_id\":\"debt\",\"tool\":{\"server\":\"data-mcp\",\"name\":\"get_data\"},\"args\":{\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"bindings\":{},\"implementation_version\":null,\"input_schema_hash\":\"hash\",\"output_schema_hash\":null,\"expected_role_keys\":[]},{\"id\":\"totals\",\"operation_id\":\"totals\",\"tool\":{\"server\":\"analysis-mcp\",\"name\":\"aggregate\"},\"args\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"bindings\":{\"frame_ref\":{\"from_step\":\"debt\",\"output\":\"frame_ref\"}},\"implementation_version\":null,\"input_schema_hash\":\"hash\",\"output_schema_hash\":null,\"expected_role_keys\":[]}],\"sources\":[{\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sentence\":\"external debt service\",\"searched_as\":null,\"confidence\":null,\"has_data\":true,\"measure_label\":null,\"stat_var_member_count\":null,\"stat_var_member_count_exact\":null,\"served_count\":null,\"shape_member_count\":null,\"shape_member_digest\":null,\"entities\":[],\"groups\":[],\"open_entity_axes\":null,\"unit_ref\":null,\"unit_label\":null,\"unit_per_series\":null,\"provenance_ref\":null,\"provenance_label\":null,\"provenance_account\":null,\"resolved_sources\":[],\"coverage_kind\":null,\"coverage_window\":null,\"identity\":null,\"definition\":null,\"open_axes\":[],\"slot_codes\":null,\"stat_var_reading\":null,\"stat_var_reading_set_by\":null}],\"evidence_bindings\":[{\"requirement_id\":\"annual_debt_service\",\"step_id\":\"debt\",\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}],\"terminal_steps\":[\"totals\"],\"warnings\":[]},\"version\":1,\"previous_version\":null,\"status\":\"pending_approval\",\"approved_revision\":null,\"approved_at\":null}",
+    "planner:reduction_refused_asks": [],
+    "planner:rounds": 0,
+    "planner:skills_before_entry": 0,
+    "planner:terminal_declines": [],
+    "planner:unsupported": [],
+    "translator:compile_failures": []
+  }
+}

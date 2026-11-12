@@ -4,8 +4,8 @@
 `reject_plan`, and `skill_tool_spec` builds `get_skill`. Each spec's body runs
 `planner.tools`' or `planner.skills`' code over the call it is given. The
 description and parameters are what the model reads. `planner_specs` lists
-them in the order the model is shown them, and `planner.agent` serves them to
-ADK.
+them in the order the model is shown them, and `planner.pydantic_agent` serves
+them to the model.
 """
 
 from __future__ import annotations

@@ -126,7 +126,7 @@ def function_declaration(spec: ToolSpec) -> types.FunctionDeclaration:
     with no parameters declares no schema. This is ADK's declaration on the
     Gemini developer API, which the harness runs on. It carries no response
     schema and keeps optional `anyOf` schemas as pydantic writes them. Vertex
-    AI rejects that form, and `planner.agent.refuse_vertex_ai` stops the
+    AI rejects that form, and `harness.planner_model.refuse_vertex_ai` stops the
     planner building when its model's google-genai client would use Vertex AI.
 
     Raises:

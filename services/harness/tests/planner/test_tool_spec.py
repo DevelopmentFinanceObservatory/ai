@@ -5,9 +5,6 @@ arguments itself. These tests hold both to what ADK's `FunctionTool` makes
 from an equivalent Python signature. The declaration is compared as JSON in the
 order the model receives it. The conversion is checked over every `propose_plan`
 call the `planner_entry` eval records, plus hand cases for each rule.
-A `SpecTool` serving a spec through an ADK run is checked as well. The request
-carries the built declarations and the instruction a tool-less agent would,
-and a refused call marks the tool's span as a `FunctionTool`'s refusal does.
 """
 
 from __future__ import annotations
@@ -21,15 +18,11 @@ from types import SimpleNamespace
 from typing import Annotated, Any
 
 import pytest
-from google.adk.agents import LlmAgent
-from google.adk.sessions import InMemorySessionService
 from google.adk.tools.function_tool import FunctionTool
+from harness.planner_model import refuse_vertex_ai
 from harness.scripted import use_compiled_proposals
-from planner.agent import SpecTool, create_planner_agent
 from planner.declaration import compact_schema
-from planner.instruction import planner_instruction
 from planner.plan import AskAnswer, Decline
-from planner.settings import AGENT_NAME
 from planner.specs import PROPOSE_PLAN, planner_tool_specs, skill_tool_spec
 from planner.tool_spec import (
     Parameter,
@@ -146,45 +139,6 @@ def test_the_scripted_proposal_declares_what_adk_builds_from_the_same_signature(
     assert function_declaration(spec).model_dump_json(exclude_none=True) == _adk_declaration(spec)
 
 
-@pytest.mark.parametrize(("translate", "surface", "question_fixed"), _VARIANTS)
-async def test_an_adk_run_carries_the_built_declarations_and_the_planner_instruction(
-    translate: bool,
-    surface: bool,
-    question_fixed: bool,
-    scripted_llm: type[Any],
-    run_to_completion: Any,
-) -> None:
-    """The first request of a planner run holds every spec's declaration, in
-    order, in one `types.Tool`, every tool under its name, and the system
-    instruction an agent with no tools and `planner_instruction` gets."""
-    agent = create_planner_agent(
-        model_name="m",
-        translate=_translate if translate else None,
-        surface=_surface() if surface else None,
-        question_fixed=question_fixed,
-    )
-    agent.model = served = scripted_llm()
-    instruction = planner_instruction(
-        has_translator=translate, has_skills=surface, question_fixed=question_fixed
-    )
-    plain = LlmAgent(name=AGENT_NAME, model=scripted_llm(), instruction=instruction)
-    reference = plain.model
-
-    await run_to_completion(agent=agent, session_service=InMemorySessionService(), app_name="a")
-    await run_to_completion(agent=plain, session_service=InMemorySessionService(), app_name="a")
-
-    request = served.captured_requests[0]
-    specs = _specs(translate=translate, surface=surface, question_fixed=question_fixed)
-    (tool,) = request.config.tools
-    assert [
-        declaration.model_dump_json(exclude_none=True) for declaration in tool.function_declarations
-    ] == [function_declaration(spec).model_dump_json(exclude_none=True) for spec in specs]
-    assert list(request.tools_dict) == [spec.name for spec in specs]
-    expected = reference.captured_requests[0].config.system_instruction
-    assert request.config.system_instruction == expected
-    assert expected.startswith(instruction)
-
-
 @pytest.mark.parametrize(
     ("environment", "model_name", "refused"),
     [
@@ -201,14 +155,13 @@ async def test_an_adk_run_carries_the_built_declarations_and_the_planner_instruc
             False,
             id="enterprise-decides-over-vertexai",
         ),
-        pytest.param({"GOOGLE_GENAI_USE_ENTERPRISE": "true"}, "m", False, id="not-a-gemini-model"),
     ],
 )
-def test_the_planner_builds_on_the_developer_api_and_refuses_vertex_ai(
+def test_the_planner_runs_on_the_developer_api_and_refuses_vertex_ai(
     monkeypatch: pytest.MonkeyPatch, environment: dict[str, str], model_name: str, refused: bool
 ) -> None:
     """The declarations are the Gemini developer API's form, which Vertex AI rejects.
-    A Gemini model's google-genai client takes Vertex AI from the environment."""
+    The planner's google-genai client takes Vertex AI from the environment."""
     for name in ("GOOGLE_GENAI_USE_ENTERPRISE", "GOOGLE_GENAI_USE_VERTEXAI"):
         monkeypatch.delenv(name, raising=False)
     for name, value in environment.items():
@@ -216,9 +169,9 @@ def test_the_planner_builds_on_the_developer_api_and_refuses_vertex_ai(
 
     if refused:
         with pytest.raises(RuntimeError):
-            create_planner_agent(model_name=model_name)
+            refuse_vertex_ai(model_name)
     else:
-        create_planner_agent(model_name=model_name)
+        refuse_vertex_ai(model_name)
 
 
 # --- Conversion ----------------------------------------------------------------------
@@ -366,42 +319,3 @@ def test_a_body_receives_every_omitted_parameter_at_its_default() -> None:
     assert received["answers"] == []
     assert received["count"] == 0
     assert received["answer"] == AskAnswer.model_validate(_ANSWER)
-
-
-# --- Telemetry -----------------------------------------------------------------------
-
-
-async def _tool_span_failure(
-    tool: Any, scripted_llm: type[Any], run_to_completion: Any, exported_spans: Any
-) -> tuple[object, object, object]:
-    """The `error.type`, status code and status description of `tool`'s span when the
-    model calls it with no arguments."""
-    agent = LlmAgent(name="a", model=scripted_llm(tool_name=tool.name, tool_args={}), tools=[tool])
-    await run_to_completion(agent=agent, session_service=InMemorySessionService(), app_name="a")
-    (span,) = [
-        span
-        for span in exported_spans.get_finished_spans()
-        if span.name == f"execute_tool {tool.name}"
-    ]
-    exported_spans.clear()
-    return (
-        (span.attributes or {}).get("error.type"),
-        span.status.status_code,
-        (span.status.description),
-    )
-
-
-async def test_a_call_missing_an_argument_marks_its_span_as_adk_marks_a_function_tools(
-    scripted_llm: type[Any], run_to_completion: Any, exported_spans: Any
-) -> None:
-    (ask,) = [spec for spec in planner_tool_specs() if spec.name == "ask_user_question"]
-
-    served = await _tool_span_failure(
-        SpecTool(ask), scripted_llm, run_to_completion, exported_spans
-    )
-    adk = await _tool_span_failure(
-        FunctionTool(_equivalent_function(ask, [])), scripted_llm, run_to_completion, exported_spans
-    )
-
-    assert adk[0] == "TOOL_ERROR"
-    assert served == adk

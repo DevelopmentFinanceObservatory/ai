@@ -34,6 +34,7 @@ import langfuse_store
 from arms import ARMS
 from entry import (
     EVAL_DIR,
+    PLANNER_RUNNER,
     Task,
     entry_record,
     load_recording,
@@ -79,7 +80,7 @@ def revision() -> str:
 def experiment(arm: str, *, model: str, revision: str, run_timeout: float) -> str:
     """A digest of everything a run of `arm` is treated with besides its task: the arm,
     the model, the code at `revision`, the turn budget each request runs under
-    (`harness.turn_budget.TurnBudget`), the prefix cache, the planner runner, and the
+    (`harness.turn_budget.TurnBudget`), the prefix cache, `PLANNER_RUNNER`, and the
     eval's own time limit. Records of one arm in one run share it."""
     settings = Settings()
     treatment = {
@@ -92,7 +93,7 @@ def experiment(arm: str, *, model: str, revision: str, run_timeout: float) -> st
         "turn_wall_s": settings.turn_wall_s,
         "model_first_chunk_s": settings.model_first_chunk_s,
         "prefix_cache": settings.studio_prefix_cache,
-        "planner_runner": settings.planner_runner,
+        "planner_runner": PLANNER_RUNNER,
     }
     return hashlib.sha256(json.dumps(treatment, sort_keys=True).encode()).hexdigest()[:16]
 

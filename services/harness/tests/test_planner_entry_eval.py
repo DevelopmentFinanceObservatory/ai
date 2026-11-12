@@ -7,10 +7,9 @@ scripted model in place of the planner's. So a change to the planner's rules, th
 seam's brief or the orchestrator's search storage that leaves a reference plan
 refused, a plan whose translation no longer compiles, or a recording that no longer
 replays or lacks a first-year read or a call the translation makes, fails here rather
-than in a paid run. No model, no network. The
-full-set test takes about 20 s on each planner runner. It runs one scripted entry for
-each of the tasks' plans, and one more per task for the datasets its seam shows the
-planner. Each test that runs an entry runs it on both runners (`planner_runner`).
+than in a paid run. No model, no network. The full-set test takes about 20 s. It runs
+one scripted entry for each of the tasks' plans, and one more per task for the datasets
+its seam shows the planner.
 
 `evals/` sits outside the workspace, so its modules are loaded by file path.
 """
@@ -66,14 +65,6 @@ run = _load("run")
 recorder = _load("record")
 
 
-@pytest.fixture(params=["adk", "pydantic_ai"])
-def planner_runner(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
-    """The planner runner an entry runs on (`harness.settings.Settings.planner_runner`)."""
-    monkeypatch.setenv("PLANNER_RUNNER", request.param)
-    return request.param
-
-
-@pytest.mark.usefixtures("planner_runner")
 async def test_every_task_validates_and_the_set_covers_every_kind() -> None:
     entry.quiet_logs()
 
@@ -118,7 +109,6 @@ def _ask_unmarked(task: Any) -> dict[str, Any]:
         (_ask_unmarked, "not accepted: invalid_input/period_reduction_unstated"),
     ],
 )
-@pytest.mark.usefixtures("planner_runner")
 async def test_a_broken_task_is_reported(change: Any, fault: str) -> None:
     entry.quiet_logs()
     task = next(task for task in entry.load_tasks() if task.id == "aggregate-total-oda-kenya")
@@ -134,7 +124,6 @@ def _task(task_id: str) -> Any:
     return next(task for task in entry.load_tasks() if task.id == task_id)
 
 
-@pytest.mark.usefixtures("planner_runner")
 async def test_a_plan_propose_plan_accepts_but_the_translation_refuses_is_reported() -> None:
     # GDP as a share of population: `propose_plan` admits it, and the compile refuses
     # dividing US dollars by a count with `share_of`. Both pins' blocks are exact, so
@@ -158,7 +147,6 @@ async def test_a_plan_propose_plan_accepts_but_the_translation_refuses_is_report
     ), faults
 
 
-@pytest.mark.usefixtures("planner_runner")
 async def test_a_translation_reads_only_the_search_recorded_under_the_arguments_it_sends_now() -> (
     None
 ):
@@ -196,7 +184,6 @@ async def test_a_translation_reads_only_the_search_recorded_under_the_arguments_
     assert calls.unasked() == [asked]
 
 
-@pytest.mark.usefixtures("planner_runner")
 async def test_a_pin_over_other_years_is_moved_to_its_copy_over_the_requirements_period() -> None:
     # `rank-top-donors-malawi` pins a search answered over every year, for a
     # requirement over 1960 to 2025. `propose_plan` moves the pin to its copy over
@@ -273,7 +260,6 @@ async def _stalled() -> Any:
         (_stalled, "ran past 0.5 s"),
     ],
 )
-@pytest.mark.usefixtures("planner_runner")
 async def test_a_live_translation_that_cannot_be_replayed_is_not_recorded(
     answer: Callable[[], Any], refusal: str
 ) -> None:
@@ -292,7 +278,6 @@ async def test_a_live_translation_that_cannot_be_replayed_is_not_recorded(
         assert client.asked[0] in raised.value.args[0]
 
 
-@pytest.mark.usefixtures("planner_runner")
 async def test_a_live_translation_records_each_call_a_replay_reads() -> None:
     entry.quiet_logs()
     task = _task("growth-gdp-kenya")
@@ -420,7 +405,6 @@ _UNKNOWN = (None, None, None, None)
         ("30", _StalledModel, ["plan"], "timeout", None, [_UNKNOWN]),
     ],
 )
-@pytest.mark.usefixtures("planner_runner")
 async def test_a_record_counts_each_model_call_and_keeps_the_seams_stop_code(
     monkeypatch: pytest.MonkeyPatch,
     calls_max: str,
@@ -488,7 +472,6 @@ _ADDED = [{"result": {"spec_id": COMBINE_OPTION}}]
         (_REFUSAL, [["plan"], [_COMBINATION_ASK]], _ADDED, "plan_not_ready", "refused"),
     ],
 )
-@pytest.mark.usefixtures("planner_runner")
 async def test_a_record_credits_the_proposal_that_recorded_the_plan_and_an_ask_left_awaiting(
     task_id: str, script: list[list[Any]], answers: list[Any], stop: str, first: str
 ) -> None:
@@ -536,7 +519,6 @@ def test_a_refusal_the_entry_ended_on_wins_over_an_ask_left_on_record(
         error=None,
         timed_out=False,
         wall_s=0.0,
-        planner_runner="adk",
     )
 
     assert entry.stop_reason(run) == stop
@@ -576,7 +558,6 @@ _COVERAGE_BRIEF = "aggregate-total-education-oda-kenya-coverage-brief"
         (_COVERAGE_BRIEF, True, [], "period_reduction_unstated", [], "none"),
     ],
 )
-@pytest.mark.usefixtures("planner_runner")
 async def test_a_record_says_what_the_accepted_plan_does_with_its_years(
     task_id: str,
     summed_first: bool,
@@ -606,35 +587,23 @@ async def test_a_record_says_what_the_accepted_plan_does_with_its_years(
     assert entry.record_period_reduction(_before_the_mark(record), task) == reduction
 
 
-def _untimed(record: dict[str, Any]) -> dict[str, Any]:
-    """`record` less the wall-clock measurements, the only fields two runs of one
-    scripted entry may differ in."""
-    calls = [{k: v for k, v in call.items() if k != "latency_s"} for call in record["calls"]]
-    return {**{k: v for k, v in record.items() if k != "wall_s"}, "calls": calls}
-
-
 # A plain task, accepted on its first proposal, and a refusal task, refused first, then
 # asking the user and accepted once they answer.
 @pytest.mark.parametrize("task_id", [_PLAIN, _REFUSAL])
-async def test_a_scripted_entry_records_the_same_on_either_runner_but_its_timings(
-    monkeypatch: pytest.MonkeyPatch, task_id: str
+async def test_a_scripted_entry_records_an_accepted_plan_and_each_model_call(
+    task_id: str,
 ) -> None:
     entry.quiet_logs()
     task = _task(task_id)
     (reference, *_) = validate.task_payloads(task)
-    records = {}
-    for runner in ("adk", "pydantic_ai"):
-        monkeypatch.setenv("PLANNER_RUNNER", runner)
-        run = await validate.accepted_run(task, entry.load_recording(task.id), reference)
-        record = entry.entry_record(
-            task=task, run=run, arm="a", rep=1, model="m", revision="r", experiment="e"
-        )
-        assert record.pop("planner_runner") == runner
-        records[runner] = _untimed(record)
 
-    assert records["adk"]["stop_reason"] == "accepted"
-    assert len(records["adk"]["calls"]) == (1 if reference.refusal is None else 3)
-    assert records["pydantic_ai"] == records["adk"]
+    run = await validate.accepted_run(task, entry.load_recording(task.id), reference)
+    record = entry.entry_record(
+        task=task, run=run, arm="a", rep=1, model="m", revision="r", experiment="e"
+    )
+
+    assert record["stop_reason"] == "accepted"
+    assert len(record["calls"]) == (1 if reference.refusal is None else 3)
 
 
 def _describe_propose_plan(request: Any) -> None:
@@ -646,34 +615,28 @@ def _propose_plan_description(request: Any) -> str | None:
     return request.declarations["propose_plan"].description
 
 
-async def test_a_request_reads_the_same_instruction_and_declarations_on_either_runner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Both runners send the instruction as a string and every declaration in one
-    `Tool`, the Pydantic AI planner's request put in the ADK planner's form before
-    the eval's probe sees it (`harness.planner_model._in_adk_planner_form`), so
-    `ModelRequest` reads the same instruction and declarations from each."""
+async def test_a_request_sends_the_instruction_as_a_string_and_every_declaration_in_one_tool() -> (
+    None
+):
+    """The planner's request reaches the eval's probe with the instruction as a
+    string and every declaration in one `Tool`
+    (`harness.planner_model._in_canonical_form`), so `ModelRequest` reads the
+    instruction and every declaration from it."""
     entry.quiet_logs()
     task = _task(_PLAIN)
-    first: dict[str, Any] = {}
-    for runner in ("adk", "pydantic_ai"):
-        monkeypatch.setenv("PLANNER_RUNNER", runner)
-        model = validate.ScriptedModel([[("propose_plan", dict(task.reference_payload))]])
-        run = await entry.run_entry(
-            task, entry.load_recording(task.id), prefix_cache=None, client=model.client
-        )
-        first[runner] = run.probe.requests[0]
-    adk, pydantic_ai = first["adk"], first["pydantic_ai"]
+    model = validate.ScriptedModel([[("propose_plan", dict(task.reference_payload))]])
 
-    for request in (adk, pydantic_ai):
-        assert isinstance(request.config.system_instruction, str)
-        assert len(request.config.tools or []) == 1
-    assert adk.system_text and pydantic_ai.system_text == adk.system_text
-    assert "propose_plan" in adk.declarations
-    assert pydantic_ai.declarations == adk.declarations
+    run = await entry.run_entry(
+        task, entry.load_recording(task.id), prefix_cache=None, client=model.client
+    )
+    (request, *_) = run.probe.requests
+
+    assert isinstance(request.config.system_instruction, str)
+    assert len(request.config.tools or []) == 1
+    assert request.system_text
+    assert "propose_plan" in request.declarations
 
 
-@pytest.mark.usefixtures("planner_runner")
 @pytest.mark.parametrize("edits", [(), (_describe_propose_plan,)], ids=["baseline", "edited"])
 async def test_an_arms_edit_reaches_the_model_and_the_probe_notes_each_request_sent(
     edits: tuple[Any, ...],
@@ -1010,7 +973,6 @@ async def _unmarked_plan(task: entry.Task, payload: dict[str, Any]) -> dict[str,
     return run.probe.plan.model_dump(mode="json", exclude={"asks_across_years"})
 
 
-@pytest.mark.usefixtures("planner_runner")
 async def test_the_summary_holds_each_accepted_plan_to_its_tasks_years() -> None:
     entry.quiet_logs()
     tasks = {task.id: task for task in entry.load_tasks()}

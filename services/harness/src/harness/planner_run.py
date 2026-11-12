@@ -6,8 +6,8 @@ closed a model call (`PlannerRun.model_answered`). Before each model request
 it says whether the run asks the user, stops, or leaves the request to the
 model (`PlannerRun.next_request`). The answer is a `Directive`: `Ask` with the
 `PLANNER_ASK` call's arguments, or `Stop` with the refusal the run ends on.
-`harness.planner_seam` drives one through the ADK planner's callbacks and
-`harness.planner_node` through the Pydantic AI planner's model hooks, and
+`harness.planner_seam` makes one for each planner run, `harness.planner_node`
+drives it through the planner's model hooks, and
 `harness.planner_node.directive_turn` builds the model turn each directive
 stands for.
 """
@@ -174,7 +174,8 @@ class PlannerRun:
             # leaves nothing correctable within this entry: the round cap
             # (`planner.plan.MAX_PLAN_ROUNDS`, `BUDGET_EXHAUSTED`), or a
             # restart while the graph holds the question fixed
-            # (`QUESTION_FIXED`, `planner.agent`'s `question_fixed` mode, which
+            # (`QUESTION_FIXED`, the `question_fixed` mode of
+            # `planner.specs.planner_specs`, which
             # the seam's own planner always uses, see
             # `harness.planner_seam.PlannerSeam.__init__`). The cap bounds the
             # proposals within one entry into the planner, since

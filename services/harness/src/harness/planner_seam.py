@@ -1,12 +1,11 @@
 """The graph's planner seam, backed by the planner agent.
 
-An adapter over the planner, which runs on the ADK planner
-(`planner.agent.create_planner_agent`) or the Pydantic AI planner
-(`harness.planner_node`) as `harness.settings.Settings.planner_runner` says,
-on one set of tools with translation attached to `propose_plan`. The planner
-runs as a dynamically-scheduled child of the graph's own node, through
-`Context.run_node`, and this module reads what it leaves in session state and
-translates it into `harness.graph.seams.PlannerModel`'s contract.
+An adapter over the planner, a Pydantic AI agent run as a workflow node
+(`harness.planner_node`), on one set of tools with translation attached to
+`propose_plan`. The planner runs as a dynamically-scheduled child of the
+graph's own node, through `Context.run_node`, and this module reads what it
+leaves in session state and translates it into
+`harness.graph.seams.PlannerModel`'s contract.
 
 The planner's own tools settle methodology and carry it to a compiled
 workflow (`propose_plan`, whose `translation` is either the compiled outcome
@@ -29,13 +28,13 @@ kept in step.
 Every call renders the full brief: the search readings, the skill pages an
 earlier call for the same plan read, the canvas and conversation digests, the
 plan being changed, the question, and the amendment or refusal ask that
-opened the call. ADK shows a `single_turn` run only the events on its own node
-path, so a call sees nothing an earlier call was sent or read, and an amend or
-replan needs the plan it changes and the skills already read in front of
-it. `_propose` runs the planner with no node input. The ADK planner reads the
-brief from `planner.agent.BRIEF_STATE_KEY`, where `_propose` writes it, and
-`planner.agent.prepend_brief` shows it after the turn's question on every
-request of the run. The Pydantic AI planner's node is given it. The entry the user's
+opened the call. The planner node sends the model only the turn's question
+(`harness.turn_events.turn_question`) and that brief, and its tools read the
+session's events through `planner.session.SessionCall.of` and `session_steps`
+for what the user was asked and answered. A call sees nothing an earlier
+call was sent or read, so an amend or replan needs the plan it changes and
+the skills already read in front of it. `_propose` runs the planner with no node input and gives its node the
+brief, which the run shows after the turn's question. The entry the user's
 answer to a planner-side ask resumes renders it again, with the question and
 the answer added (`_answer_text`), since the planner node reruns on resume.
 
@@ -50,8 +49,6 @@ above that. These are character counts of the brief alone.
 
 from __future__ import annotations
 
-import asyncio
-import contextvars
 import json
 import logging
 from collections import Counter
@@ -61,24 +58,12 @@ from datetime import UTC, datetime
 from functools import cached_property
 from typing import Any, NamedTuple, cast
 
-from common.telemetry import current_trace_id
 from compiler.compile import CompileIssueCode
 from compiler.surface import ToolSurface
 from data_mcp.skills_client import name_get_skill_in_call_lines
 from executor.classify import RECOVERABLE_SPEC_CODES
 from google.adk import Context, Event
-from google.adk.agents import LlmAgent
-from google.adk.models.base_llm import BaseLlm
-from google.adk.models.llm_response import LlmResponse
-from google.adk.tools.base_tool import BaseTool
-from google.adk.workflow import BaseNode
 from google.genai import Client
-from planner.agent import (
-    BRIEF_STATE_KEY,
-    create_planner_agent,
-    end_run_when_ready,
-    refuse_vertex_ai,
-)
 from planner.call import CallSession
 from planner.instruction import planner_instruction
 from planner.operations import OperationKind
@@ -126,7 +111,6 @@ from planner.plan import (
     warning_codes,
     windowed_pins,
 )
-from planner.pydantic_agent import PydanticPlanner
 from planner.records import Severity
 from planner.session import SessionCall
 from planner.settings import AGENT_NAME, AgentSettings
@@ -144,6 +128,7 @@ from planner.tools import (
     AcceptedAsk,
     clear_pending_ask,
     load_pending_ask,
+    ready_and_end,
 )
 from planner.workflow import ElectedMeasure, SelectedSource
 from submission.service import (
@@ -177,13 +162,12 @@ from harness.graph.state import (
     stored_mapping,
     stored_sequence,
 )
-from harness.planner_node import directive_turn, planner_node, pydantic_planner
+from harness.planner_model import refuse_vertex_ai
+from harness.planner_node import planner_node, pydantic_planner
 from harness.planner_run import (
-    Directive,
     PlannerRun,
     PlannerSeamError,
     closing_refusal,
-    failed_tool_answer,
     not_ready,
     referral_of,
 )
@@ -195,7 +179,7 @@ from harness.sentences import (
     refusal_sentence,
 )
 from harness.settings import Settings
-from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, current_turn_budget
+from harness.turn_budget import current_turn_budget
 from harness.turn_events import PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.turn_records import (
     SETTLED_STATUSES,
@@ -207,7 +191,6 @@ from harness.turn_records import (
     newest_per_spec_id,
     render_readings,
 )
-from harness.usage import log_usage
 
 logger = logging.getLogger(__name__)
 
@@ -258,9 +241,9 @@ _NO_READINGS = RenderedReadings("", ())
 
 # How many of the skill pages the planner read for this plan
 # (`planner.skills.SKILLS_READ_STATE_KEY`) it read before the current entry.
-# A `single_turn` run sees only its own calls, so those pages render in the
-# brief (`_skills_section`); a page read in this run is in the run's own
-# history already. Set on every entry and on its resume by the user's answer,
+# The planner node sends the model no earlier call's history, so those pages
+# render in the brief (`_skills_section`); a page read in this run is in the
+# run's own history already. Set on every entry and on its resume by the user's answer,
 # which runs the planner again, and a first draft clears the pages themselves.
 _SKILLS_BEFORE_ENTRY_STATE_KEY = "planner:skills_before_entry"
 # The last translation's referral the planner's run saw before it ended on an
@@ -325,26 +308,6 @@ _SHARE_UNIT_CODES = frozenset({"cross_frame_unit_unbound", "cross_frame_unit_mis
 _FACET_MISMATCH_CODE = "cross_frame_facet_mismatch"
 
 
-# The run this seam's callbacks report to. A plain instance
-# attribute would not do: `self._agent` is shared by every conversation
-# this process serves (see `PlannerSeam.__init__`), so its callbacks are
-# assigned once and have no per-call closure to read state from. A
-# `ContextVar` instead: `_propose` sets it for the
-# duration of its own `await ctx.run_node(...)` call and resets it in a
-# `finally`; the seam's node is awaited directly by the graph, with no
-# `asyncio.ensure_future` wrapper, so the callbacks ADK invokes run in the
-# same task as the `_propose` frame that set the var, and any task ADK
-# spawns beneath inherits that task's own copy -- never a sibling
-# conversation's. Module-level rather than a `PlannerSeam` attribute:
-# there is exactly one production `PlannerSeam`, so it makes no
-# observable difference, and a module-level var is what the seam's
-# callbacks -- themselves free functions in every sense but their `self`
-# argument -- need no instance to reach.
-_active_call: contextvars.ContextVar[PlannerRun | None] = contextvars.ContextVar(
-    "planner_seam_active_call", default=None
-)
-
-
 @dataclass(frozen=True)
 class _RevisionSession(CallSession):
     """The session a revision's proposal is checked against (`PlannerSeam.revise`).
@@ -380,57 +343,33 @@ class PlannerSeam:
         prefix_cache: PrefixCache | None = None,
         translate: Translate | None = None,
         specs: Sequence[ToolSpec] | None = None,
-        model: BaseLlm | None = None,
         client: Client | None = None,
         on_tool_answered: Callable[[str, dict[str, Any] | None], None] | None = None,
     ) -> None:
-        # `settings.planner_runner` names the planner `_propose` runs. The ADK
-        # planner is an `LlmAgent`. The Pydantic AI planner
-        # (`harness.planner_node`) builds none. Both serve the same tools and
-        # instruction, built here once.
-        #
         # `translate` replaces the translation `propose_plan` runs, and `specs`
         # the tools (`planner.specs.planner_specs` over the surface and that
         # translation). `client` is the google-genai client the planner's
-        # model calls go through, on either runner. None builds one from the
-        # environment. On either runner a planner whose client uses Vertex AI,
-        # the given one or the one built for the model's name, is refused
-        # (`planner.agent.refuse_vertex_ai`). The ADK planner's Gemini model
-        # uses a given client as it is, HTTP options and retries included. The
-        # Pydantic AI planner's model sets its retries on each request
+        # model calls go through. None builds one from the environment on the
+        # first run. A planner whose client uses Vertex AI, the given one or
+        # the one the environment selects, or whose model's name is a Vertex
+        # AI resource path, is refused (`harness.planner_model.refuse_vertex_ai`).
+        # The planner's model sets its retries on each request
         # (`harness.planner_model`).
         #
-        # `model` is an ADK model, so the Pydantic AI planner refuses it. It
-        # replaces the model `agent_settings` names, and takes no `client`.
-        # It runs as given, with no Vertex AI check. It calls through no
-        # client the seam builds, so a caller's model on Vertex AI is the
-        # caller's to avoid.
-        #
-        # `on_tool_answered` observes, on either runner, each planner tool's
-        # name and the answer the model reads for the call
-        # (`PlannerRun.tool_answered`).
-        runner = settings.planner_runner
-        if runner == "pydantic_ai" and model is not None:
-            raise ValueError("a model runs on the ADK planner only")
-        if model is not None and client is not None:
-            raise ValueError("a model and a client replace the same thing; give one")
+        # `on_tool_answered` observes each planner tool's name and the answer
+        # the model reads for the call (`PlannerRun.tool_answered`).
         self._client = client
         self._on_tool_answered = on_tool_answered
-        self._model_name = (
+        model_name = (
             agent_settings if agent_settings is not None else AgentSettings()
         ).planner_model_name
-        # The ADK planner resolves the name through ADK's model registry. The
-        # Pydantic AI planner runs only the Gemini model the name resolves to,
-        # and both checks run before anything is built.
-        gemini_name: str | None = None
-        if runner == "pydantic_ai":
-            gemini_name = gemini_model_name(self._model_name)
-            if gemini_name is None:
-                raise ValueError(
-                    f"the Pydantic AI planner runs a Gemini model only, and "
-                    f"{self._model_name!r} names none; set PLANNER_RUNNER=adk to run it"
-                )
-            refuse_vertex_ai(gemini_name, client, runner="pydantic_ai")
+        # The planner runs only the Gemini model the name resolves to, and
+        # both checks run before anything is built.
+        gemini_name = gemini_model_name(model_name)
+        if gemini_name is None:
+            raise ValueError(f"the planner runs a Gemini model only, and {model_name!r} names none")
+        refuse_vertex_ai(gemini_name, client)
+        self._model_name = gemini_name
         self._prefix_cache = prefix_cache
         # The surface and translation `propose_plan` runs, kept for `revise`,
         # which records a proposal of its own with no model call.
@@ -457,53 +396,13 @@ class PlannerSeam:
                 reads_user_words=False,
             )
         )
-        self._instruction = planner_instruction(
-            has_translator=True, has_skills=True, question_fixed=True
-        )
-        self._agent: LlmAgent | None = None
-        self._pydantic: tuple[str, PydanticPlanner] | None = None
-        if runner == "adk":
-            self._agent = self._adk_planner(model=model)
-            return
-        assert gemini_name is not None, "resolved above for the Pydantic AI planner"
         # Built once and shared by every run, each of which names its own model.
-        self._pydantic = (gemini_name, pydantic_planner(self._specs, instruction=self._instruction))
-
-    def _adk_planner(self, *, model: BaseLlm | None) -> LlmAgent:
-        """The ADK planner on the seam's tools, with the seam's callbacks."""
-        agent = create_planner_agent(
-            model_name=self._model_name,
-            translate=self._translate,
-            surface=self._surface,
-            question_fixed=True,
-            reads_user_words=False,
-            prefix_cache=self._prefix_cache,
-            specs=self._specs,
-            client=self._client,
-            model=model,
+        self._planner = pydantic_planner(
+            self._specs,
+            instruction=planner_instruction(
+                has_translator=True, has_skills=True, question_fixed=True
+            ),
         )
-        # The callbacks are assigned exactly once, here, as bound methods,
-        # and read the call they belong to off `_active_call` (a
-        # `ContextVar` `_propose` sets for the duration of its own
-        # `ctx.run_node` call) instead of closing over it, since one
-        # `PlannerSeam` serves every conversation this process runs.
-        agent.after_tool_callback = self._after_planner_tool
-        agent.on_tool_error_callback = self._on_planner_tool_error
-        # `drop_thought_parts` (`planner.settings`) returns a modified
-        # response whenever it drops a part, and ADK's callback list stops at
-        # the first truthy return, so the usage callback goes first: it
-        # always returns `None`, and `drop_thought_parts` still runs after it.
-        agent.after_model_callback = [
-            self._after_planner_model,
-            *agent.canonical_after_model_callbacks,
-        ]
-        # The agent's own `prepend_brief` goes first and is kept, so every
-        # later callback sees the request with the brief in it.
-        agent.before_model_callback = [
-            *agent.canonical_before_model_callbacks,
-            self._before_planner_model,
-        ]
-        return agent
 
     async def __call__(
         self,
@@ -976,22 +875,16 @@ class PlannerSeam:
         """Run the planner once through `ctx.run_node`, in the graph's own
         session.
 
-        The planner's own tool loop is opaque to this call: `ctx.run_node`
-        returns only once the whole turn has settled (ADK has no
-        streaming/async-generator variant of it). Progress, the stall
-        watchdog's counting and its early stop all happen from *inside* that
-        one turn, through `LlmAgent` callbacks that ADK runs synchronously as
-        part of the same `ctx.run_node` call: `after_tool_callback` fires
-        right after each tool call, and `before_model_callback` on the
-        planner substitutes a synthetic, terminal `LlmResponse` once a stall
-        is confirmed, ending the run cleanly rather than mid-generation.
-
-        The substitution is deliberately not a cancellation: it ends the
-        planner's current turn the way a normal turn ends (a model
-        response with no further function call), so the session it leaves
-        behind has a `FunctionResponse` recorded for every call. No
-        half-finished turn is left for a later entry's message to resume
-        instead of seeing.
+        The planner's node (`harness.planner_node.planner_node`) is given the
+        brief, shows it after the turn's question, and reports to this call's
+        `PlannerRun` as the run goes: each tool's answer, a call the turn's
+        budget closed, and before each request whether the run asks or stops
+        instead (`PlannerRun.next_request`). An ask or a stop is answered with
+        a model turn in place of a request, which ends the run the way a
+        normal turn ends (a model response with no further function call), so
+        the session it leaves behind has a `FunctionResponse` recorded for
+        every call. No half-finished turn is left for a later entry's message
+        to resume instead of seeing.
 
         Answers the declared-ready `propose_plan` answer and the plan, or the
         refusal the run ended on. A run that ends with no plan declared ready
@@ -1003,22 +896,14 @@ class PlannerSeam:
         `__call__` to return.
 
         `run_id` names the run the user's answer resumes, which the default
-        would put on the path of the run that asked. A `single_turn` run reads
-        the events on its own node path, so the resumed run would read the
-        asking run's calls beside a brief that restates what it needs of them
-        (`_answer_text`, `_skills_section`, `_plan_context`).
+        would put on the path of the run that asked. The resumed run sends the
+        model the turn's question and a brief that restates what it needs of
+        the asking run's calls (`_answer_text`, `_skills_section`,
+        `_plan_context`), with none of those calls' own history.
 
         A discovery call inside the run may take what is left of the
         request's wall-clock bound (`planner.plan.discovery_time_left`); with
         no request budget set it takes its own timeout alone.
-
-        The planner's callbacks themselves are assigned once, in `__init__`
-        (see its comment for why). What makes them
-        *this* call's own is `_active_call`, set here for the duration of
-        `ctx.run_node` and reset in a `finally` so a call that raises still
-        clears it -- never left dangling for some later call's own
-        callback firing to misread, and never visible to a sibling call
-        running in a different task in the meantime.
 
         The run carries `_PLANNER_BRANCH` (see its own comment), because a
         `ctx.run_node` call made without one leaves the planner's events
@@ -1038,26 +923,24 @@ class PlannerSeam:
         run = PlannerRun(
             agent=AGENT_NAME, on_progress=on_progress, on_tool_answered=self._on_tool_answered
         )
-        token = _active_call.set(run)
         budget = current_turn_budget.get()
         time_left_token = current_discovery_time_left.set(
             budget.wall_left if budget is not None else None
         )
         before = len(ctx.session.events)
         try:
-            # The run takes no node input: the brief reaches every request of
-            # the run, the first after a resume included. The ADK planner's
-            # `prepend_brief` reads it from state. The Pydantic AI planner's
-            # node is given it.
-            if self._agent is not None:
-                ctx.session.state[BRIEF_STATE_KEY] = message
-                planner = self._agent
-            else:
-                planner = self._pydantic_planner(run, budget, message)
+            planner = planner_node(
+                run,
+                planner=self._planner,
+                model_name=self._model_name,
+                client=self._genai_client,
+                budget=budget,
+                prefix_cache=self._prefix_cache,
+                brief=message,
+            )
             await ctx.run_node(planner, None, run_id=run_id, override_branch=_PLANNER_BRANCH)
         finally:
             current_discovery_time_left.reset(time_left_token)
-            _active_call.reset(token)
             # Also checked when the run raised.
             _check_branches(ctx.session.events[before:], planner=AGENT_NAME)
 
@@ -1080,130 +963,11 @@ class PlannerSeam:
             run.refused = closed or not_ready(run.last_referral)
         return run.submitted, plan, run.refused
 
-    def _pydantic_planner(self, run: PlannerRun, budget: TurnBudget | None, brief: str) -> BaseNode:
-        """The Pydantic AI planner's node for `run`, on the seam's tools and
-        instruction, shown `brief`."""
-        assert self._pydantic is not None, "the seam runs the Pydantic AI planner"
-        model_name, planner = self._pydantic
-        return planner_node(
-            run,
-            planner=planner,
-            model_name=model_name,
-            client=self._genai_client,
-            budget=budget,
-            prefix_cache=self._prefix_cache,
-            brief=brief,
-        )
-
     @cached_property
     def _genai_client(self) -> Client:
-        """The client the Pydantic AI planner's calls go through. It is the one given,
-        or one built from the environment as ADK's `Gemini` builds its own."""
+        """The client the planner's calls go through: the one given, or one
+        built from the environment."""
         return self._client if self._client is not None else Client()
-
-    # -- the seam's own callbacks, assigned once in __init__ ----------------
-    #
-    # Each adapts one ADK callback to the `PlannerRun` on `_active_call`. A
-    # callback that fires with nothing set there is not this seam's own call.
-    # `__init__` is the only place these are assigned, so that cannot happen
-    # in practice, and a defensive no-op beats a bare `None` dereference: a
-    # stray firing drops one progress report or skips one usage log, and a
-    # run some other conversation is mid-turn on carries on.
-
-    def _after_planner_tool(
-        self, tool: BaseTool, args: dict[str, Any], tool_context: Any, tool_response: dict[str, Any]
-    ) -> None:
-        """The planner's `after_tool_callback`, which passes the answer to
-        `PlannerRun.tool_answered`."""
-        del args, tool_context
-        run = _active_call.get()
-        if run is None:
-            logger.warning("planner after_tool_callback fired with no active call")
-            return
-        run.tool_answered(tool.name, tool_response)
-
-    def _on_planner_tool_error(
-        self, tool: BaseTool, args: dict[str, Any], tool_context: Any, error: BaseException
-    ) -> dict[str, Any] | None:
-        """The planner's `on_tool_error_callback`: an `Exception` one of its
-        own tools raised ends the entry on `SeamCode.PLANNER_TOOL_FAILED`, a
-        final refusal, so the turn does not fail (`PlannerRun.tool_failed`).
-
-        A name that is none of the planner's tools answers `None`, so ADK's
-        own tool-not-found response, which lists the tools the model can
-        call, stands. The dict returned for a real tool becomes that call's
-        function response, and `_after_planner_tool` still runs on it.
-
-        ADK also calls it, for cleanup only, when a tool call is cancelled
-        (`flows/llm_flows/tools/_error_handler.notify_tool_cancelled`). A
-        cancelled call is no tool failure, so it logs and records nothing.
-        """
-        del args
-        if isinstance(error, asyncio.CancelledError):
-            return None
-        agent = self._agent
-        if agent is None or tool.name not in {
-            t.name for t in agent.tools if isinstance(t, BaseTool)
-        }:
-            return None
-        logger.error(
-            "planner tool %s raised %s session=%s invocation=%s trace_id=%s",
-            tool.name,
-            type(error).__name__,
-            tool_context.session.id,
-            tool_context.invocation_id,
-            current_trace_id(),
-            exc_info=error,
-        )
-        run = _active_call.get()
-        if run is None:
-            logger.warning("planner on_tool_error_callback fired with no active call")
-            return failed_tool_answer(tool.name, error)
-        return run.tool_failed(tool.name, error)
-
-    def _after_planner_model(
-        self, callback_context: Any, llm_response: LlmResponse
-    ) -> LlmResponse | None:
-        """Log the generation's usage, and hand a call the request's budget
-        closed (`harness.turn_budget.CLOSED_BY_KEY`) to `PlannerRun.model_answered`,
-        which may answer it with a question to the user.
-
-        That question is a model turn with one `PLANNER_ASK` call under a
-        call id of ADK's form (`harness.planner_node.directive_turn`), so the
-        resume pairs with the user's answer the way a model-issued ask does
-        (`planner.call.elected_spec_ids`).
-
-        Answers `None` for every other response, so `drop_thought_parts`,
-        listed after this callback, still runs on it.
-        """
-        del callback_context
-        if llm_response.usage_metadata is not None:
-            log_usage(AGENT_NAME, llm_response.usage_metadata)
-        metadata = llm_response.custom_metadata or {}
-        run = _active_call.get()
-        if CLOSED_BY_KEY not in metadata or llm_response.partial or run is None:
-            return None
-        return _directive_response(run.model_answered(metadata[CLOSED_BY_KEY]))
-
-    def _before_planner_model(self, callback_context: Any, llm_request: Any) -> LlmResponse | None:
-        """Substitute a synthetic response for the request when
-        `PlannerRun.next_request` asks or stops (see `_propose`'s docstring).
-        With no active call, see the class-level note above, there is nothing
-        to check against, so `None` here means "generate normally," the same
-        as every ordinary turn this callback lets through.
-
-        An ask answers with the `PLANNER_ASK` call it carries, which ends the
-        run on the question in place of a model turn composing it. A stop
-        answers with the refusal's sentence
-        (`harness.sentences.refusal_sentence`). The request's budget is kept
-        by the model itself (`harness.turn_budget.BoundedGemini`).
-        """
-        del callback_context, llm_request
-        run = _active_call.get()
-        if run is None:
-            logger.warning("planner before_model_callback fired with no active call")
-            return None
-        return _directive_response(run.next_request())
 
     # Refusal codes after which no other plan for the same ask can succeed
     # in this turn: a fault in the system, a plan that failed the same way
@@ -1383,6 +1147,17 @@ def _ask_text(
             "requirement cited from at least one of them.\n"
         )
     return ask
+
+
+def end_run_when_ready(answer: dict[str, object], ctx: Context) -> dict[str, object]:
+    """`declare_ready` over the call `ctx` serves (`SessionCall.of`), marking
+    `ctx`'s actions `skip_summarization` once the plan is ready
+    (`planner.tools.ready_and_end`)."""
+
+    def end_run() -> None:
+        ctx.actions.skip_summarization = True
+
+    return ready_and_end(answer, SessionCall.of(ctx), end_run)
 
 
 def _forget_ask(ctx: Context) -> None:
@@ -1769,13 +1544,6 @@ def _check_branches(events: Sequence[Event], *, planner: str) -> None:
             f"stay out of other agents' requests only on exactly {_PLANNER_BRANCH!r}. The "
             f"planner's `ctx.run_node` call has to pass override_branch={_PLANNER_BRANCH!r}."
         )
-
-
-def _directive_response(directive: Directive | None) -> LlmResponse | None:
-    """The response holding the model turn `directive` stands for (`directive_turn`),
-    or `None` to keep the model's own."""
-    turn = directive_turn(directive)
-    return LlmResponse(content=turn) if turn is not None else None
 
 
 def _readings_ledger(
