@@ -298,8 +298,38 @@ async def _stop(task: asyncio.Task[Any]) -> None:
         await asyncio.wait({task})
 
 
-def _step_progress_event(report: _StepReport, *, tool: str) -> Event:
-    """A relayed progress report as its own event, carried on `custom_metadata`.
+@dataclass(frozen=True)
+class _CardPlace:
+    """Where a step sits on the plan card: its row's 1-based `position` among
+    `count` rows, and the row's `description`."""
+
+    position: int
+    count: int
+    description: str
+
+
+def _card_places(plan: PlannerPlan) -> dict[str, _CardPlace]:
+    """Each plan card row's place, by step id (`plan_display.card_rows`).
+
+    The card's rows, not the workflow's steps, give the count, so a step
+    the card folds away (a rolling copy) has no place and the count matches
+    the card the user approved.
+    """
+    if plan.translation is None or plan.workflow is None:
+        return {}
+    rows = plan_display.card_rows(plan)
+    return {
+        str(row["id"]): _CardPlace(
+            position=position, count=len(rows), description=str(row["description"])
+        )
+        for position, row in enumerate(rows, start=1)
+    }
+
+
+def _step_progress_event(report: _StepReport, *, tool: str, place: _CardPlace | None) -> Event:
+    """A relayed progress report as its own event, carried on `custom_metadata`,
+    with the step's `place` on the plan card, each of its fields `None` for
+    a step the card does not show.
 
     Never on `output`: a node run may set `output` once (`_node_runner.py`'s
     `ctx.output`), and the node's result needs it.
@@ -310,6 +340,9 @@ def _step_progress_event(report: _StepReport, *, tool: str) -> Event:
                 "step_id": report.step_id,
                 "tool": tool,
                 "message": report.report.message,
+                "position": place.position if place else None,
+                "count": place.count if place else None,
+                "description": place.description if place else None,
             }
         }
     )
@@ -551,6 +584,7 @@ def execute_node(
             yield Event(output={"unreadable_plan": True}, route="replan")
             return
         tools = {step.id: step.tool.name for step in plan.workflow.steps} if plan.workflow else {}
+        places = _card_places(plan)
         await store_run_plan(run_ledger, revision=plan_revision(plan), plan=plan)
         task, relay = _start_relayed(
             lambda on_progress: execute_approved_plan(
@@ -568,7 +602,9 @@ def execute_node(
         )
         try:
             async for report in relay.latest():
-                yield _step_progress_event(report, tool=tools.get(report.step_id, ""))
+                yield _step_progress_event(
+                    report, tool=tools.get(report.step_id, ""), place=places.get(report.step_id)
+                )
             finished, outcome = await task
         except LedgerUnavailableError as exc:
             if exc.run_id is not None:

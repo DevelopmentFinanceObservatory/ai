@@ -14,10 +14,12 @@ capture each call as it happens and the translator drains them whenever the
 next ADK event arrives. A result carrying a `"component"` member becomes a
 `component.created` frame and a composition update.
 
-While a plan step runs, `execute` relays each progress report the call
-sends as its own event (`harness.graph.state.STEP_PROGRESS_KEY` on
-`custom_metadata`), which becomes a `running` `activity.step` whose
-`detail` is the report's message. A plan step keeps one wire `step_id`
+While a plan step runs, `execute` relays the executor's report of the
+step's start and each progress report the call sends as its own event
+(`harness.graph.state.STEP_PROGRESS_KEY` on `custom_metadata`), which
+becomes a `running` `activity.step` whose `detail` names the step's source
+and period, the report's message and the step's place on the plan card
+(`_plan_step_detail`). A plan step keeps one wire `step_id`
 from its first report to its final `complete` or `failed` frame, so the
 Activity feed holds one line per step and updates it in place.
 
@@ -152,6 +154,10 @@ logger = logging.getLogger(__name__)
 # Large enough to hold a real over_ceiling/member_cardinality refusal whole,
 # including the advice sentence at the end that says scope cannot narrow it.
 _STEP_DETAIL_CAP = 400
+
+# The bound on a plan step's running detail (`_plan_step_detail`), which the
+# chat's status line shows on one line.
+_PLAN_STEP_DETAIL_CAP = 110
 
 
 # The graph's planner states `resolved_by` as planner_default/user
@@ -1566,12 +1572,11 @@ class _Translator:
 
     def _running_step(self, progress: dict[str, Any]) -> ActivityStep:
         """A step's progress report (`harness.graph.execute._step_progress_event`) as a
-        `running` frame on the step's own wire id, with the report's message
-        as `detail`. The label matches the one the step's final frame
-        carries (`_drain_recorder`), since the Activity feed names a line
-        from its first frame."""
+        `running` frame on the step's own wire id, with `_plan_step_detail` as
+        `detail`. The label matches the one the step's final frame carries
+        (`_drain_recorder`), since the Activity feed names a line from its
+        first frame."""
         tool = str(progress.get("tool") or "")
-        message = progress.get("message")
         seq = self._conversation.next_seq()
         plan_labels = (
             self._surface_recorder.step_labels(current_conversation_id.get())
@@ -1585,7 +1590,7 @@ class _Translator:
             label=_step_label(tool, plan_labels.get(str(progress.get("step_id")))),
             status=StepStatus.RUNNING,
             tool=tool or None,
-            detail=message if isinstance(message, str) else None,
+            detail=_plan_step_detail(progress),
         )
 
     def _drain_recorder(self) -> list[Any]:
@@ -2729,6 +2734,42 @@ def _explain_detail(answer: dict[str, Any]) -> str | None:
     `None` when it carries none."""
     counts = answer.get("counts")
     return None if counts in (None, COUNTS_UNAVAILABLE) else str(counts)
+
+
+def _plan_step_detail(progress: Mapping[str, Any]) -> str | None:
+    """A plan step's running detail: its card row's description, the report's
+    message, and `step <i> of <n>`, joined with " · ".
+
+    Every running frame of the step carries the whole detail, since the relay
+    keeps only a step's latest report and the start report often gives way to
+    the next. The description leads, cut at a word boundary to keep the
+    detail within `_PLAN_STEP_DETAIL_CAP`; a step with no place on the card
+    (`harness.graph.execute._card_places`) shows the message alone. A field
+    of the wrong type counts as absent.
+    """
+    message = progress.get("message")
+    message = message if isinstance(message, str) and message else None
+    position, count = progress.get("position"), progress.get("count")
+    if not (type(position) is int and type(count) is int and 1 <= position <= count):
+        return message
+    tail = " \u00b7 ".join(part for part in (message, f"step {position} of {count}") if part)
+    description = progress.get("description")
+    if not isinstance(description, str):
+        return tail
+    lead = _cut_at_word(
+        description.strip().removesuffix("."), _PLAN_STEP_DETAIL_CAP - len(tail) - len(" \u00b7 ")
+    )
+    return f"{lead} \u00b7 {tail}" if lead else tail
+
+
+def _cut_at_word(text: str, cap: int) -> str:
+    """`text` when it fits in `cap` characters, else its longest run of whole
+    words that fits with a closing "…"; empty when not one word does."""
+    if len(text) <= cap:
+        return text
+    head = text[: max(cap, 0)]
+    words = head.rsplit(" ", 1)[0].rstrip(" ,;:.") if " " in head else ""
+    return f"{words}\u2026" if words else ""
 
 
 def _cut_sentence(cut: Mapping[str, Any]) -> str:

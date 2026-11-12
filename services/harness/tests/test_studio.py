@@ -771,12 +771,14 @@ async def test_a_crash_mid_execute_reports_the_finished_steps_on_the_failing_tur
         )
         second = await _stream(client, "/api/studio/turn", _turn_body("kenya oda 2023"))
 
-    # The plan's own step; "Starting the plan" is a status line with no tool.
-    finished = [
-        frame for frame in failed if frame["event"] == "activity.step" and frame.get("tool")
-    ]
-    assert [frame["status"] for frame in finished] == ["running", "complete"]
-    assert finished[0]["step_id"] == finished[1]["step_id"]
+    # The plan's own steps; "Starting the plan" is a status line with no tool.
+    # Each step's line opens as it starts, and the step the crash cut off
+    # closes as failed.
+    lines: dict[str, list[str]] = {}
+    for frame in failed:
+        if frame["event"] == "activity.step" and frame.get("tool"):
+            lines.setdefault(frame["step_id"], []).append(frame["status"])
+    assert list(lines.values()) == [["running", "complete"], ["running", "failed"]]
     assert _events(failed)[-1] == "error"
     assert "component.created" not in _events(second)
     assert _events(second)[-1] == "done"
@@ -1397,9 +1399,10 @@ async def test_a_polled_get_data_step_updates_one_activity_line_until_it_complet
 
     steps = _tool_steps(second)
     get_data = [step for step in steps if step[1] == "get_data"]
+    source = "life expectancy at birth in Kenya, 1960 to 2023"
     assert [(status, detail) for _, _, status, detail in get_data] == [
-        ("running", _POLLING),
-        ("running", _RECEIVED),
+        ("running", f"{source} \u00b7 {_POLLING} \u00b7 step 1 of 2"),
+        ("running", f"{source} \u00b7 {_RECEIVED} \u00b7 step 1 of 2"),
         ("complete", "64 observations \u00b7 World Development Indicators"),
     ]
     assert len({step_id for step_id, *_ in get_data}) == 1

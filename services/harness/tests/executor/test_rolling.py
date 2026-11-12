@@ -493,8 +493,15 @@ async def test_the_resolution_is_retried_and_reported_like_a_steps_call(
     assert isinstance(outcome, Accepted), outcome
     assert len(_calls(surface, "resolve_anchor")) == 2
     # The retry and the answer are reported under the first rolling step,
-    # ahead of that step's own call.
-    assert heard[:4] == [("debt", 1), ("change", 2), ("change", 2), ("change", 1)]
+    # ahead of that step's own start and call.
+    assert heard[:6] == [
+        ("debt", 0),
+        ("debt", 1),
+        ("change", 2),
+        ("change", 2),
+        ("change", 0),
+        ("change", 1),
+    ]
 
 
 async def test_a_resolution_that_never_answers_stops_the_run_before_any_rolling_step(

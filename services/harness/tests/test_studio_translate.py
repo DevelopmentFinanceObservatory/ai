@@ -1124,6 +1124,90 @@ def test_a_step_keeps_one_wire_id_from_its_first_report_to_its_final_frame() -> 
     assert is_user_sentence(final[0].detail)
 
 
+_KENYA_SOURCE = "life expectancy at birth in Kenya, 1960 to 2023."
+_LONG_SOURCE = (
+    "Official development assistance from every DAC member to every recipient in "
+    "sub-Saharan Africa, net disbursements in constant 2022 USD, 2000 to 2023."
+)
+
+
+@pytest.mark.parametrize(
+    ("place", "message", "detail"),
+    [
+        (
+            {"position": 1, "count": 3, "description": _KENYA_SOURCE},
+            None,
+            "life expectancy at birth in Kenya, 1960 to 2023 \u00b7 step 1 of 3",
+        ),
+        (
+            {"position": 1, "count": 3, "description": _KENYA_SOURCE},
+            "Retrying in 7s (attempt 2 of 3)",
+            "life expectancy at birth in Kenya, 1960 to 2023 \u00b7 "
+            "Retrying in 7s (attempt 2 of 3) \u00b7 step 1 of 3",
+        ),
+        (
+            {"position": 2, "count": 3, "description": _LONG_SOURCE},
+            "Preparing the dataset (in progress, 12s)",
+            "Official development assistance from every DAC\u2026 \u00b7 "
+            "Preparing the dataset (in progress, 12s) \u00b7 step 2 of 3",
+        ),
+        (
+            {
+                "position": 2,
+                "count": 2,
+                "description": (
+                    "The average of life expectancy at birth, grouped by year. "
+                    "Result: one figure per year, 1960-2023."
+                ),
+            },
+            "Result received; checking it",
+            "The average of life expectancy at birth, grouped by year\u2026 \u00b7 "
+            "Result received; checking it \u00b7 step 2 of 2",
+        ),
+        ({"position": 2, "count": 3, "description": 7}, None, "step 2 of 3"),
+        ({"position": None, "count": None, "description": None}, "Reading", "Reading"),
+        ({"position": "1", "count": 3, "description": _KENYA_SOURCE}, "Reading", "Reading"),
+        ({"position": 4, "count": 3, "description": _KENYA_SOURCE}, None, None),
+        ({"position": True, "count": 3, "description": _KENYA_SOURCE}, None, None),
+    ],
+    ids=[
+        "start",
+        "retry",
+        "long-source",
+        "cut-at-a-sentence-end",
+        "no-description",
+        "off-the-card",
+        "position-a-string",
+        "position-past-count",
+        "position-a-bool",
+    ],
+)
+def test_a_plan_step_running_line_leads_with_its_source_and_ends_with_its_place(
+    place: dict[str, Any], message: str | None, detail: str | None
+) -> None:
+    """Every running frame of a plan step carries the card row's description,
+    the report's message and the step's place on the card, in that order,
+    within 110 characters; a place of the wrong shape counts as absent."""
+    translator, _ = _progress_translator()
+
+    (frame,) = translator.translate(
+        Event(
+            custom_metadata={
+                STEP_PROGRESS_KEY: {
+                    "step_id": "debt",
+                    "tool": "get_data",
+                    "message": message,
+                    **place,
+                }
+            }
+        )
+    )
+
+    assert frame.status is StepStatus.RUNNING
+    assert frame.detail == detail
+    assert frame.detail is None or len(frame.detail) <= 110
+
+
 def test_a_mid_run_report_leaves_a_finished_steps_record_for_the_run_to_amend() -> None:
     """A step's record is written when its call returns, before the
     executor's post-call checks; `execute` amends it once the run is over

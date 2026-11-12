@@ -439,7 +439,7 @@ async def test_a_refusal_that_names_a_delay_is_retried_after_it(
     assert sleeps.delays == [7.0]
 
 
-async def test_a_step_reports_each_answer_and_the_retry_it_is_about_to_make(
+async def test_a_step_reports_its_start_once_each_answer_and_the_retry_it_is_about_to_make(
     approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
 ) -> None:
     surface = _surface(
@@ -462,9 +462,11 @@ async def test_a_step_reports_each_answer_and_the_retry_it_is_about_to_make(
 
     assert isinstance(outcome, Accepted), outcome
     assert heard == [
+        ("debt", None),
         ("debt", "Result received; checking it"),
         ("debt", f"Retrying in 7s (attempt 2 of {MAX_ATTEMPTS_PER_STEP})"),
         ("debt", "Result received; checking it"),
+        ("totals", None),
         ("totals", "Result received; checking it"),
     ]
 
@@ -491,7 +493,7 @@ async def test_a_raising_progress_callback_never_fails_the_run(
     )
 
     assert isinstance(outcome, Accepted), outcome
-    assert heard == ["debt", "debt", "debt", "totals"]
+    assert heard == ["debt", "debt", "debt", "debt", "totals", "totals"]
 
 
 class _ReportingSurface(ScriptedSurface):
@@ -532,7 +534,9 @@ async def test_two_concurrent_steps_report_under_their_own_step_ids(
     )
 
     assert heard == [
+        ("debt", None),
         ("debt", f"{SPEC_KENYA} 0"),
+        ("pop", None),
         ("pop", f"{SPEC_POPULATION} 0"),
         ("debt", f"{SPEC_KENYA} 1"),
         ("pop", f"{SPEC_POPULATION} 1"),
