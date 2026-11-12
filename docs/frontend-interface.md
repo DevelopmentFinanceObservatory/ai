@@ -473,14 +473,8 @@ Notes on specific fields:
   The Activity feed keeps a line's first label and shows a later frame's
   `detail` as its summary.
 - A plan step's line opens when the step starts. Each `running` frame of
-  a plan step carries the whole running `detail`: the step's description
-  from the plan card (without its closing full stop), then a progress
-  message when there is one (dataset preparation, a retry), then `step i of n`, where `i` is the step's row on the plan card and `n` the number
-  of rows, joined with " · ". A step the card does not show (a rolling
-  copy folded into another row) carries its progress message alone.
-- A running line's `detail` that says what the line works on is cut at a
-  word to 110 characters, ending in "…". The chat's status line shows
-  about 45 characters of it, so each detail leads with its point.
+  a plan step carries the whole running `detail`: `step i of n`, where `i` is the step's row on the plan card and `n` the number of rows, then a progress message when there is one (dataset preparation, a retry), else the step's description from the plan card (without its closing full stop), joined with " · ", as in "step 5 of 10 · Preparing the dataset (queued, 11s)". The message that says only that the call returned counts as none, so the description returns. A step the card does not show (a rolling copy folded into another row) carries its progress message alone. A step whose line is still `running` when the plan's run hands back, with nothing recorded for it, gets a `failed` frame then, whose `detail` says why in plain words.
+- Every running `detail` the harness composes for these lines is at most 110 characters: a plan step's, the asks on "Working on a plan", the charts on "Making N charts" and "Going over the charts", the words on "Searching for data", and the step label on "Reading the plan's results". A longer one is cut at a word and ends in "…"; a first word longer than the limit is cut inside the word. The chat's status line shows about 43 characters of it, so each detail leads with its point. The limits a reading line states (below) are summaries of results and can run longer.
 - While a skill read runs, the open status line gets a `running` frame
   whose `detail` is "reading a method note", for the agent's reads and the
   planner's alike. When the read is answered the line gets a `running`
@@ -492,14 +486,13 @@ Notes on specific fields:
   "Looking at <measure>, <first>–<last>" after one fetch ("Looking at
   <measure>" when the retrieval states no years; "Looking at the data"
   after several fetches, or after one that failed or whose measure no
-  search named), "Going over the charts" (`detail`: what the "Making N charts" step
-  carries, below), "Reading the earlier turn",
+  search named), "Going over the charts" (`detail`: what the running "Making N charts" step
+  carried, below, taken from a call that drew its charts; no `detail` when every call failed), "Reading the earlier turn",
   "Going over your canvas" after the agent looked at the canvas (its tool
   step reads "Looking at your canvas"), "Going over the notes on DFO", "Working out the next step" after a hand-off
   to the planner or a question to the user that was refused, and
   "Reading the plan's results" from the moment an approved plan finishes
-  running, with the answer step's result as `detail` when that step gives
-  the answer and succeeded. A batch that mixes tools is named by its latest stage (charts,
+  running, with the plan's label for the step that gives the answer as `detail`, the label that step's own line carries, and no `detail` when that step was refused or failed. A batch that mixes tools is named by its latest stage (charts,
   then fetch, then search, then recall). A successful plan hand-off opens
   "Working on a plan", whose `detail` is what the plan is for: the first
   output the agent's asks name, then `· +k more` for the others. A successful ask hands over to the question, and
@@ -513,7 +506,7 @@ Notes on specific fields:
   hand-back that carries no plan shows a `failed` "No plan could be
   made", then "Reading why no plan was made"; the closing message
   then says what could not be calculated. No model thought text is sent.
-- The agent shows one step per tool call: "Searching for data" (detail: the user's words when the agent searched with `text`, otherwise the measures it asked for, led by `again: ` when it sends the user's words again for one part an earlier search found nothing for, then what it found, named by the reading each measure resolved to, and what it did not find),
+- The agent shows one step per tool call: "Searching for data" (detail: the user's words when the agent searched with `text`, otherwise the measures it asked for, then, on the `complete` frame, what it found, named by the reading each measure resolved to, and what it did not find; on the `running` frame alone the detail is led by `again: ` when the search sends the user's words for one part whose result earlier on the same stream carried `retry_with_text`),
   "Fetching <measure>" (detail: the retrieval's summary), "Making N
   charts" (detail while running: the first chart title, then `· +k more`
   for the other charts, led by `again: ` when it redraws charts a

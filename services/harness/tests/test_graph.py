@@ -544,6 +544,30 @@ async def test_execute_relays_a_report_while_its_step_is_still_running() -> None
     assert "plan_done" in visited_nodes(seen)
 
 
+async def test_a_plan_whose_card_places_fail_still_runs_with_unplaced_steps(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The plan card places only label the step lines, so a failure building
+    them is logged and the approved plan runs with every step unplaced."""
+
+    def fails(plan: object) -> dict[str, object]:
+        raise ValueError("no card for this plan")
+
+    monkeypatch.setattr("harness.graph.execute._card_places", fails)
+    stream = await _approval_stream(ScriptedSurface())
+
+    with caplog.at_level("ERROR", logger="harness.graph.execute"):
+        async with asyncio.timeout(10):
+            seen = [event async for event in stream]
+
+    progress = [_step_progress(event) for event in seen if _step_progress(event)]
+    assert progress
+    assert all(report["position"] is None for report in progress)
+    assert "plan_done" in visited_nodes(seen)
+    (logged,) = [r for r in caplog.records if r.name == "harness.graph.execute"]
+    assert logged.exc_info is not None
+
+
 class _HoldsGetData(ScriptedSurface):
     """`ScriptedSurface`, whose `get_data` sends no report of its own and
     answers only once `release` is set."""
@@ -567,8 +591,8 @@ class _HoldsGetData(ScriptedSurface):
 async def test_a_plan_step_opens_its_running_line_before_its_call_answers() -> None:
     """The surface sends no report and answers only once the test has seen
     the step's running frame, so that frame can come only from the start
-    the executor reports before the call. It names the step's source and
-    period first and its place on the card last."""
+    the executor reports before the call. It gives the step's place on the
+    card first, then the card row's description."""
     surface = _HoldsGetData()
     stream = await _approval_stream(surface)
     translator = _Translator(
@@ -591,7 +615,7 @@ async def test_a_plan_step_opens_its_running_line_before_its_call_answers() -> N
         (
             "get_data",
             StepStatus.RUNNING,
-            "life expectancy at birth in Kenya, 1960 to 2023 \u00b7 step 1 of 2",
+            "step 1 of 2 \u00b7 life expectancy at birth in Kenya, 1960 to 2023",
         )
     ]
 

@@ -1124,11 +1124,73 @@ def test_a_step_keeps_one_wire_id_from_its_first_report_to_its_final_frame() -> 
     assert is_user_sentence(final[0].detail)
 
 
+def test_a_replan_run_in_the_same_segment_opens_new_lines_for_its_steps() -> None:
+    """A replan's plan may reuse the step ids of the plan it replaces. Once
+    the first plan's run hands back, its lines are closed, and the replan's
+    steps open lines of their own rather than reopening the first plan's."""
+    translator, surface_recorder = _progress_translator()
+
+    (first,) = translator.translate(_progress_event("s2", "Preparing the dataset (queued, 3s)"))
+    surface_recorder._records.append(
+        _surface_record(
+            "s2",
+            {"outcome": "refusal", "refusal": {"code": "service_unavailable", "message": "busy"}},
+        )
+    )
+    handed_back = translator.translate(
+        _node_event("execute", route="replan", output={"refusal": {}, "plan_version": 1})
+    )
+    (second,) = translator.translate(_progress_event("s2", "Preparing the dataset (queued, 1s)"))
+
+    assert [(f.step_id, f.status) for f in handed_back] == [(first.step_id, StepStatus.FAILED)]
+    assert second.step_id != first.step_id
+    assert second.status is StepStatus.RUNNING
+
+
+@pytest.mark.parametrize(
+    ("output", "detail"),
+    [
+        (
+            {"frame_refs": [], "run": {"status": "unfinished", "code": "ledger_unavailable"}},
+            classed_sentence("ledger_unavailable", "do_not_retry"),
+        ),
+        ({"frame_refs": []}, failure_sentence(None, "do_not_retry")),
+    ],
+    ids=["ledger-unavailable", "no-code"],
+)
+def test_a_started_step_with_no_record_closes_as_failed_at_the_runs_hand_back(
+    output: dict[str, Any], detail: str
+) -> None:
+    """A step whose start opened its line but whose run recorded nothing for
+    it, as when the ledger could not record the call, closes as failed when
+    the execute node hands back, worded by the code the hand-back states. A
+    step its record closed gets no second frame."""
+    translator, surface_recorder = _progress_translator()
+    (done,) = translator.translate(_progress_event("debt", "Preparing the dataset (queued, 3s)"))
+    (lost,) = translator.translate(_progress_event("pop", "Preparing the dataset (queued, 1s)"))
+    surface_recorder._records.append(_surface_record("debt", {"outcome": "ok", "summary": "done"}))
+
+    frames = translator.translate(_node_event("execute", route="ok", output=output))
+
+    steps = [f for f in frames if f.tool is not None]
+    assert [(f.step_id, f.status, f.detail) for f in steps] == [
+        (done.step_id, StepStatus.COMPLETE, "done"),
+        (lost.step_id, StepStatus.FAILED, detail),
+    ]
+    assert steps[1].label == lost.label
+    assert steps[1].duration_ms is not None
+    assert is_user_sentence(steps[1].detail)
+
+
 _KENYA_SOURCE = "life expectancy at birth in Kenya, 1960 to 2023."
 _LONG_SOURCE = (
     "Official development assistance from every DAC member to every recipient in "
     "sub-Saharan Africa, net disbursements in constant 2022 USD, 2000 to 2023."
 )
+
+
+_LONG_MESSAGE = "Preparing dataset " * 10
+_LONG_WORD = "Supercalifragilistic" * 8
 
 
 @pytest.mark.parametrize(
@@ -1137,19 +1199,23 @@ _LONG_SOURCE = (
         (
             {"position": 1, "count": 3, "description": _KENYA_SOURCE},
             None,
-            "life expectancy at birth in Kenya, 1960 to 2023 \u00b7 step 1 of 3",
+            "step 1 of 3 \u00b7 life expectancy at birth in Kenya, 1960 to 2023",
         ),
         (
             {"position": 1, "count": 3, "description": _KENYA_SOURCE},
             "Retrying in 7s (attempt 2 of 3)",
-            "life expectancy at birth in Kenya, 1960 to 2023 \u00b7 "
-            "Retrying in 7s (attempt 2 of 3) \u00b7 step 1 of 3",
+            "step 1 of 3 \u00b7 Retrying in 7s (attempt 2 of 3)",
         ),
         (
             {"position": 2, "count": 3, "description": _LONG_SOURCE},
             "Preparing the dataset (in progress, 12s)",
-            "Official development assistance from every DAC\u2026 \u00b7 "
-            "Preparing the dataset (in progress, 12s) \u00b7 step 2 of 3",
+            "step 2 of 3 \u00b7 Preparing the dataset (in progress, 12s)",
+        ),
+        (
+            {"position": 2, "count": 3, "description": _LONG_SOURCE},
+            None,
+            "step 2 of 3 \u00b7 Official development assistance from every DAC member to every "
+            "recipient in sub-Saharan Africa\u2026",
         ),
         (
             {
@@ -1160,31 +1226,47 @@ _LONG_SOURCE = (
                     "Result: one figure per year, 1960-2023."
                 ),
             },
-            "Retrying in 3s (attempt 2 of 3)",
-            "The average of life expectancy at birth, grouped by year\u2026 \u00b7 "
-            "Retrying in 3s (attempt 2 of 3) \u00b7 step 2 of 2",
+            None,
+            "step 2 of 2 \u00b7 The average of life expectancy at birth, grouped by year. "
+            "Result: one figure per year, 1960-2023",
         ),
         (
             {"position": 1, "count": 3, "description": _KENYA_SOURCE},
             "Result received; checking it",
-            "life expectancy at birth in Kenya, 1960 to 2023 \u00b7 step 1 of 3",
+            "step 1 of 3 \u00b7 life expectancy at birth in Kenya, 1960 to 2023",
         ),
         (
             {"position": None, "count": None, "description": None},
             "Result received; checking it",
-            None,
+            "Result received; checking it",
         ),
         ({"position": 2, "count": 3, "description": 7}, None, "step 2 of 3"),
         ({"position": None, "count": None, "description": None}, "Reading", "Reading"),
         ({"position": "1", "count": 3, "description": _KENYA_SOURCE}, "Reading", "Reading"),
         ({"position": 4, "count": 3, "description": _KENYA_SOURCE}, None, None),
         ({"position": True, "count": 3, "description": _KENYA_SOURCE}, None, None),
+        (
+            {"position": 1, "count": 3, "description": _KENYA_SOURCE},
+            _LONG_MESSAGE,
+            "step 1 of 3 \u00b7 " + "Preparing dataset " * 4 + "Preparing dataset\u2026",
+        ),
+        (
+            {"position": None, "count": None, "description": None},
+            _LONG_MESSAGE,
+            "Preparing dataset " * 5 + "Preparing dataset\u2026",
+        ),
+        (
+            {"position": 2, "count": 3, "description": _LONG_WORD},
+            None,
+            f"step 2 of 3 \u00b7 {_LONG_WORD[:95]}\u2026",
+        ),
     ],
     ids=[
         "start",
         "retry",
+        "preparing",
         "long-source",
-        "cut-at-a-sentence-end",
+        "exactly-the-cap",
         "result-received",
         "result-received-off-the-card",
         "no-description",
@@ -1192,15 +1274,19 @@ _LONG_SOURCE = (
         "position-a-string",
         "position-past-count",
         "position-a-bool",
+        "long-message",
+        "long-message-off-the-card",
+        "one-long-word",
     ],
 )
-def test_a_plan_step_running_line_leads_with_its_source_and_ends_with_its_place(
+def test_a_plan_step_running_line_leads_with_its_place_and_then_says_what_it_does(
     place: dict[str, Any], message: str | None, detail: str | None
 ) -> None:
-    """Every running frame of a plan step carries the card row's description,
-    the report's message and the step's place on the card, in that order,
-    within 110 characters; a place of the wrong shape counts as absent, and
-    so does the message that says only that the call returned."""
+    """Every running frame of a plan step leads with the step's place on the
+    card, then carries the report's message or, with none, the card row's
+    description, within 110 characters whatever their length. A place of the
+    wrong shape counts as absent; on a step with a place, so does the
+    message that says only that the call returned."""
     translator, _ = _progress_translator()
 
     (frame,) = translator.translate(
@@ -1227,31 +1313,32 @@ def _analysis_record(step_id: str, result: dict[str, Any]) -> _ExecutorRecord:
     )
 
 
-_CRS_SUMMARY = "14 observations, 2010\u20132023 \u00b7 OECD Creditor Reporting System (CRS)"
-_LONG_SUMMARY = (
-    "2982 observations, 1990\u20132024 \u00b7 OECD Creditor Reporting System (CRS) \u00b7 "
-    "2982 series across every donor and recipient"
-)
 _RANKED = {"outcome": "ok", "rows": 10, "ranked_before_limit": 54}
+_LABELS = {"debt": "Fetch debt owed to China", "rank": "Rank the 54 creditors by debt owed"}
+_LONG_LABEL = (
+    "Fetch official development assistance from every DAC member to every recipient in "
+    "sub-Saharan Africa, 2000 to 2023"
+)
 
 
 @pytest.mark.parametrize(
-    ("answering", "retrieved", "ranked", "detail"),
+    ("answering", "labels", "ranked", "detail"),
     [
-        ({"rank": True}, _CRS_SUMMARY, _RANKED, "The ranking keeps 10 of 54 rows."),
-        ({"debt": True}, _CRS_SUMMARY, _RANKED, _CRS_SUMMARY),
+        ({"rank": True}, _LABELS, _RANKED, "Rank the 54 creditors by debt owed"),
+        ({"debt": True}, _LABELS, _RANKED, "Fetch debt owed to China"),
         (
             {"debt": True},
-            _LONG_SUMMARY,
+            {"debt": _LONG_LABEL},
             _RANKED,
-            "2982 observations, 1990\u20132024 \u00b7 OECD Creditor Reporting System (CRS) "
-            "\u00b7 2982 series across every donor and\u2026",
+            "Fetch official development assistance from every DAC member to every recipient "
+            "in sub-Saharan Africa, 2000 to\u2026",
         ),
-        ({}, _CRS_SUMMARY, _RANKED, None),
-        ({"rank": "yes"}, _CRS_SUMMARY, _RANKED, None),
+        ({"rank": True}, {}, _RANKED, None),
+        ({}, _LABELS, _RANKED, None),
+        ({"rank": "yes"}, _LABELS, _RANKED, None),
         (
             {"rank": True},
-            _CRS_SUMMARY,
+            _LABELS,
             {"outcome": "refusal", "refusal": {"code": "service_unavailable", "message": "m"}},
             None,
         ),
@@ -1259,19 +1346,25 @@ _RANKED = {"outcome": "ok", "rows": 10, "ranked_before_limit": 54}
     ids=[
         "ranking",
         "retrieval",
-        "long-retrieval",
+        "long-label",
+        "no-plan-label",
         "no-answer-step",
         "gives-answer-a-string",
         "answer-refused",
     ],
 )
-def test_reading_the_plans_results_leads_with_the_answers_own_result(
-    answering: dict[str, object], retrieved: str, ranked: dict[str, Any], detail: str | None
+def test_reading_the_plans_results_names_the_step_that_gives_the_answer(
+    answering: dict[str, object],
+    labels: dict[str, str],
+    ranked: dict[str, Any],
+    detail: str | None,
 ) -> None:
-    """The line the agent reads a plan's frames under carries the result of
-    the one step that gives the answer, as that step's own line states it,
-    and nothing when no step does or that step failed, within 110 characters."""
+    """The line the agent reads a plan's frames under carries the plan's
+    label for the one step that gives the answer, as that step's own line
+    does, and nothing when no step does, the plan names it no label, or that
+    step failed, within 110 characters."""
     translator, surface_recorder = _progress_translator()
+    surface_recorder.set_step_order("c1", ["debt", "rank"], labels)
     for step_id in ("debt", "rank"):
         translator.translate(
             Event(
@@ -1285,7 +1378,7 @@ def test_reading_the_plans_results_leads_with_the_answers_own_result(
             )
         )
     surface_recorder._records.append(
-        _surface_record("debt", {"outcome": "ok", "summary": retrieved})
+        _surface_record("debt", {"outcome": "ok", "summary": "14 observations"})
     )
     surface_recorder._records.append(_analysis_record("rank", ranked))
 

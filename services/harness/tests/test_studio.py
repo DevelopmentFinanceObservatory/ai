@@ -1384,7 +1384,7 @@ class _PollsOnceSurface(ScriptedSurface):
 async def test_a_polled_get_data_step_updates_one_activity_line_until_it_completes() -> None:
     """While `get_data` waits on a background operation, its step streams a
     `running` frame carrying data-mcp's report; once the call answers, the
-    line drops the report and shows the step's source again, then completes
+    line drops the report and shows the step's description again, then completes
     on the same `step_id`. Studio keeps one
     Activity line per step, so the plan's two steps still read as two
     lines. A plan step's surface call is the only place progress reaches
@@ -1401,8 +1401,8 @@ async def test_a_polled_get_data_step_updates_one_activity_line_until_it_complet
     get_data = [step for step in steps if step[1] == "get_data"]
     source = "life expectancy at birth in Kenya, 1960 to 2023"
     assert [(status, detail) for _, _, status, detail in get_data] == [
-        ("running", f"{source} \u00b7 {_POLLING} \u00b7 step 1 of 2"),
-        ("running", f"{source} \u00b7 step 1 of 2"),
+        ("running", f"step 1 of 2 \u00b7 {_POLLING}"),
+        ("running", f"step 1 of 2 \u00b7 {source}"),
         ("complete", "64 observations \u00b7 World Development Indicators"),
     ]
     assert len({step_id for step_id, *_ in get_data}) == 1

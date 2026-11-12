@@ -1189,39 +1189,113 @@ _RETRY_WORDS = (
 )
 
 
+_ODA = {"variable": "ODA", "entities": [{"text": "Kenya"}]}
+_GDP = {"variable": "GDP"}
+_OFFERED = {"status": "no_data", "retry_with_text": "Search once more for this part alone."}
+
+
+def _searched(*parts: dict[str, Any]) -> dict[str, Any]:
+    return {"parts": list(parts)}
+
+
 @pytest.mark.parametrize(
-    ("args", "running", "completed"),
+    ("earlier", "args", "running", "completed"),
     [
         (
-            {"text": "aid to Kenya for health", "parts": [{"variable": "ODA"}]},
+            (_searched(_ODA), _searched(_OFFERED)),
+            {"text": "aid to Kenya for health", "parts": [_ODA]},
             "again: aid to Kenya for health",
             "aid to Kenya for health",
         ),
         (
-            {"text": _RETRY_WORDS, "parts": [{"variable": "ODA"}]},
+            (_searched(_ODA), _searched(_OFFERED)),
+            {
+                "text": _RETRY_WORDS,
+                "parts": [{"variable": " oda ", "entities": [{"text": "KENYA"}]}],
+            },
             "again: total official development assistance from the United Kingdom to health "
             "and education in Kenya and\u2026",
             _RETRY_WORDS,
         ),
         (
-            {"text": "aid to Kenya", "parts": [{"variable": "ODA"}, {"variable": "GDP"}]},
+            None,
+            {"text": "aid to Kenya for health", "parts": [_ODA]},
+            "aid to Kenya for health",
+            "aid to Kenya for health",
+        ),
+        (
+            (_searched(_ODA), _searched({"status": "no_data"})),
+            {"text": "aid to Kenya for health", "parts": [_ODA]},
+            "aid to Kenya for health",
+            "aid to Kenya for health",
+        ),
+        (
+            (_searched(_GDP, _ODA), _searched(_OFFERED, {"status": "definite"})),
+            {"text": "aid to Kenya for health", "parts": [_ODA]},
+            "aid to Kenya for health",
+            "aid to Kenya for health",
+        ),
+        (
+            (_searched(_GDP, _ODA), _searched(_OFFERED)),
+            {"text": "aid to Kenya for health", "parts": [_ODA]},
+            "again: aid to Kenya for health",
+            "aid to Kenya for health",
+        ),
+        (
+            (_searched(_ODA, _GDP), _searched(_OFFERED, _OFFERED)),
+            {"text": "aid to Kenya", "parts": [_ODA, _GDP]},
             "aid to Kenya",
             "aid to Kenya",
         ),
-        ({"text": "aid to Kenya", "parts": {"variable": "ODA"}}, "aid to Kenya", "aid to Kenya"),
-        ({"text": " ", "parts": [{"variable": "ODA"}]}, "ODA", "ODA"),
+        (
+            (_searched(_ODA), _searched(_OFFERED)),
+            {"text": "aid to Kenya", "parts": _ODA},
+            "aid to Kenya",
+            "aid to Kenya",
+        ),
+        (
+            (_searched(_ODA), _searched(_OFFERED)),
+            {"text": " ", "parts": [_ODA]},
+            "ODA (Kenya)",
+            "ODA (Kenya)",
+        ),
+        (
+            None,
+            {"text": _RETRY_WORDS},
+            "total official development assistance from the United Kingdom to health and "
+            "education in Kenya and Uganda\u2026",
+            _RETRY_WORDS,
+        ),
     ],
-    ids=["one-part", "long-words", "two-parts", "parts-a-mapping", "blank-text"],
+    ids=[
+        "one-part",
+        "long-words",
+        "first-search",
+        "earlier-result-offers-none",
+        "another-part-offered",
+        "earlier-result-untied",
+        "two-parts",
+        "parts-a-mapping",
+        "blank-text",
+        "plain-long-words",
+    ],
 )
-def test_a_part_searched_again_in_the_users_words_reads_again(args, running, completed):
-    """A search with `text` beside one part tries that part again in the
-    user's words, and its running line says so first, within 110
+def test_a_part_searched_again_in_the_users_words_reads_again(earlier, args, running, completed):
+    """A search with `text` beside one part, for a part an earlier result
+    offered a search with the user's words for (`retry_with_text`), tries
+    that part again in the user's words, and its running line says so
+    first. A result whose parts do not match the parts sent one for one
+    offers it for every part sent. Every running line is within 110
     characters; the completed line and the label stay as for any search."""
+    translator = _translator()
+    if earlier is not None:
+        sent, found = earlier
+        _frames(translator, _call("call_0", "search", sent), _response("call_0", "search", found))
     search = types.FunctionCall(id="call_1", name="search", args=args)
     answer = types.FunctionResponse(id="call_1", name="search", response={"parts": []})
 
     frames = _frames(
-        _translator(),
+        translator,
         _event(types.Part(function_call=search)),
         _event(types.Part(function_response=answer)),
     )
@@ -1507,6 +1581,32 @@ def test_a_chart_line_names_the_first_chart_it_draws_and_the_reading_line_repeat
     assert running[-1].detail == detail
     assert _reading_lines(read) == [("Going over the charts", StepStatus.RUNNING, detail)]
     assert len(detail or "") <= 110
+
+
+@pytest.mark.parametrize(
+    ("answers", "detail"),
+    [
+        ((("c1", "make_charts", _TITLE_REFUSED),), None),
+        (
+            (("c1", "make_charts", _TITLE_REFUSED), ("c2", "make_charts", _OTHER_CHARTS)),
+            "Aid to Kenya by donor",
+        ),
+    ],
+    ids=["every-call-failed", "one-call-drew"],
+)
+def test_the_charts_reading_line_names_only_charts_a_call_drew(answers, detail):
+    """ "Going over the charts" takes its detail from a `make_charts` call
+    that drew its charts, and has none when every call in the batch failed."""
+    translator = _translator()
+    _frames(
+        translator,
+        _call("c1", "make_charts", _NAMED_CHARTS),
+        _call("c2", "make_charts", _OTHER_CHARTS),
+    )
+
+    read = translator.translate(_responses(*answers))
+
+    assert _reading_lines(read) == [("Going over the charts", StepStatus.RUNNING, detail)]
 
 
 def test_a_failed_chart_lines_reason_survives_titles_too_long_for_the_activity_log():

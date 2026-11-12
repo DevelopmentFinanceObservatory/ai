@@ -590,7 +590,12 @@ def execute_node(
             yield Event(output={"unreadable_plan": True}, route="replan")
             return
         tools = {step.id: step.tool.name for step in plan.workflow.steps} if plan.workflow else {}
-        places = _card_places(plan)
+        try:
+            places = _card_places(plan)
+        except Exception:
+            # The places only label the step lines, so the plan runs without them.
+            logger.exception("execute: no plan card places for plan version %s", plan.version)
+            places = {}
         await store_run_plan(run_ledger, revision=plan_revision(plan), plan=plan)
         task, relay = _start_relayed(
             lambda on_progress: execute_approved_plan(
