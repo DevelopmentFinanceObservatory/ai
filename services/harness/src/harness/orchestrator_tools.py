@@ -1256,6 +1256,12 @@ RETRY_WITH_TEXT = (
     "this part alone in `parts`."
 )
 _RETRY_STATUSES = frozenset({"no_data", "unsupported"})
+# The reasons the instruction repairs with another parsed search first: a place
+# sent as the model reads it, or `role` set on every name. A part refused for
+# one of them is offered the `text` search from its second such refusal in a
+# turn, under the measure it was sent with (`_REPAIRS_KEY`).
+_REPAIRED_FIRST = frozenset({"entity_not_resolved", "role_not_resolved"})
+_REPAIRS_KEY = "orchestrator:search_repairs_due"
 
 
 def _words(text: str) -> str:
@@ -1310,16 +1316,28 @@ def _offer_text_retries(
     When the readings are `tied` to the `parts` sent, by position, a reading
     whose part a `text` search already ran for this turn is offered none.
     When they are not, no reading is offered one once any `text` search has
-    run this turn."""
+    run this turn. A reading refused for a reason in `_REPAIRED_FIRST` is
+    offered one only when a part with its measure was already refused for
+    that reason this turn, so the parsed repair comes first."""
     searched = set(state.get(_TEXT_SEARCHED_KEY) or ())
-    if not tied and _TEXT_SEARCH_RAN in searched:
-        return
+    untied_and_searched = not tied and _TEXT_SEARCH_RAN in searched
     keys = [_part_key(part) for part in parts] if tied else None
+    due = list(state.get(_REPAIRS_KEY) or [])
+    refused: list[str] = []
     for index, reading in enumerate(readings):
-        if reading.get("status") in _RETRY_STATUSES and (
-            keys is None or keys[index] not in searched
-        ):
-            reading["retry_with_text"] = RETRY_WITH_TEXT
+        if reading.get("status") not in _RETRY_STATUSES:
+            continue
+        reason = reading.get("reason")
+        if reason in _REPAIRED_FIRST:
+            repair = json.dumps([_words(str(reading.get("variable") or "")), reason])
+            refused.append(repair)
+            if repair not in due:
+                continue
+        if untied_and_searched or (keys is not None and keys[index] in searched):
+            continue
+        reading["retry_with_text"] = RETRY_WITH_TEXT
+    if refused:
+        state[_REPAIRS_KEY] = [*due, *(repair for repair in refused if repair not in due)]
 
 
 def _validated_arguments(

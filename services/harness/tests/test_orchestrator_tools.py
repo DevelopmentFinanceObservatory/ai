@@ -623,6 +623,8 @@ _RETRY_PART = {"variable": "climate finance", "entities": [{"text": "Kenya", "ro
         ("candidates", None, False),
         ("definite", "qualifier_not_bound", False),
         ("candidates", "variable_not_resolved", False),
+        ("no_data", "role_not_resolved", False),
+        ("no_data", "entity_not_resolved", False),
     ],
 )
 async def test_a_parsed_search_offers_a_text_search_on_each_part_it_did_not_answer(
@@ -1043,9 +1045,9 @@ async def test_search_returns_a_refusal_as_an_error_and_stops_at_its_budget():
 
 @pytest.mark.parametrize("surface_name", ["studio", "download"])
 async def test_every_part_can_retry_with_text_after_a_corrected_place(surface_name):
-    """Search cannot place any part, even with the place corrected, so each
-    corrected part's result offers a `text` search, and the budget runs to
-    one for every part."""
+    """Search cannot place any part, even with the place corrected. The first
+    result offers no `text` search, each corrected part's result offers one,
+    and the budget runs to one for every part."""
     parts = [
         {"variable": f"measure {index}", "entities": [{"text": "Keyna"}]}
         for index in range(MAX_PARTS)
@@ -1068,6 +1070,8 @@ async def test_every_part_can_retry_with_text_after_a_corrected_place(surface_na
     )
 
     assert all("error" not in result for result in results)
+    # The first refusal leaves the place to correct; the second offers the user's words.
+    assert not any("retry_with_text" in reading for reading in results[0]["parts"])
     assert all("retry_with_text" in reading for reading in results[1]["parts"])
     assert len(resolver.calls) == MAX_PARTS + 2
     assert all(call["raw_text"] for call in resolver.calls[2:])
@@ -1120,13 +1124,8 @@ async def test_search_stores_a_reading_for_every_part_and_warnings_for_every_spe
 
     found = await tools["search"](ctx, [{"variable": "education aid"}])
 
-    # The model sees the part summaries, which carry none of the stored facts, and
-    # on the part Search did not answer the offer of a search with the user's words.
-    summaries = [dict(part) for part in graph_envelope(envelope)["part_digests"]]
-    for summary in summaries:
-        if summary["status"] == "no_data":
-            summary["retry_with_text"] = orchestrator_tools.RETRY_WITH_TEXT
-    assert found["parts"] == summaries
+    # The model sees the part summaries, which carry none of the stored facts.
+    assert found["parts"] == graph_envelope(envelope)["part_digests"]
     definite, no_data, candidates = (
         SearchReading.model_validate(stored) for stored in ctx.state["orchestrator:searches"]
     )
