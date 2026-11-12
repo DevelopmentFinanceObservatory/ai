@@ -5,7 +5,6 @@
   "question": "How much larger was Kenya's external debt service than the ODA it received for health in each year from 2016 to 2021?",
   "searches": [
     {
-      "query": "How much larger was Kenya's external debt service than the ODA it received for health in each year from 2016 to 2021?",
       "parts": [
         {
           "variable": "external debt service",

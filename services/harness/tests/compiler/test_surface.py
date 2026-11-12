@@ -66,7 +66,6 @@ async def test_the_real_surface_covers_retrieval_and_the_analysis_verbs() -> Non
         "filter",
         "get_data",
         "get_skill",
-        "get_skill_file",
         "growth",
         "join",
         "quotient_of",

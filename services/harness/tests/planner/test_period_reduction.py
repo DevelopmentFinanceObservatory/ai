@@ -7,7 +7,7 @@ source, which for a question naming no years is every year the source holds.
 (`planner.plan.unstated_period_reductions`) unless every answering result
 computed from the step answers asks across years, and only those, or the step
 holds a licence. Where the planner reads the user's own words, in an entry
-the user's amendment opened or in the standalone planner, a step it names in
+the user's amendment opened, a step it names in
 `across_years` takes one, and keeps it while the step keeps its kind and
 states no other reduction (`planner.plan.period_licences_held`).
 """
@@ -22,9 +22,8 @@ from typing import Any
 import pytest
 from data_mcp.definition_store import canonicalize, spec_id_for
 from google.adk.events import EventActions
-from harness.planner_seam import _reading_pin_sources
+from harness.planner_adapter import _reading_pin_sources
 from harness.turn_records import RecordedIdentity
-from planner.agent import build_planner_tools
 from planner.plan import (
     AMENDMENT_ENTRY_STATE_KEY,
     ASKS_ACROSS_YEARS_STATE_KEY,
@@ -96,11 +95,13 @@ from planner.records import (
     ValueThreshold,
 )
 from planner.shapes import VALUE_KEPT_SPAN_PAIRS
+from planner.specs import planner_tool_specs
 from planner.tool_results import Outcome, ProblemCode
 from pydantic import ValidationError
 from submission.service import OneYear, _window_pins
 
 from ..decision_drafts import drafts
+from ..planner_tools import call_planner_tool
 
 ASK = "the donors that give the most aid to Kenya"
 OTHER_ASK = "how aid to Kenya has moved"
@@ -210,7 +211,7 @@ def _context(
     """The part of ADK's `ToolContext` `propose_plan` reads.
 
     `across_years` numbers the asks the orchestrator marked, and
-    `amendment` is what the seam recorded of the entry, `None` for a session
+    `amendment` is what the adapter recorded of the entry, `None` for a session
     it recorded nothing in.
     """
     state: dict[str, Any] = {
@@ -238,19 +239,16 @@ def _propose(
     declined: Sequence[Decline] = (),
     across_years: Sequence[str] = (),
     removed_decisions: Sequence[str] = (),
-    reads_user_words: bool = False,
-    restart: bool = False,
 ) -> dict[str, Any]:
     """Propose `requirements`, the last of which answers ask 0 unless `answered` says otherwise.
 
-    A plan on record in `ctx` is the one the call amends, unless `restart`
-    begins a plan of its own. The planner is the seam's, which reads the
-    user's words only in an amendment entry, unless `reads_user_words` makes
-    it the standalone planner's.
+    A plan on record in `ctx` is the one the call amends. The planner reads the
+    user's words only in an amendment entry (`_context(amendment=True)`).
     """
-    tools = {tool.name: tool for tool in build_planner_tools(reads_user_words=reads_user_words)}
+    tools = {tool.name: tool for tool in planner_tool_specs()}
     recorded = load_plan(ctx.state)
-    return tools["propose_plan"].func(
+    return call_planner_tool(
+        tools["propose_plan"],
         question=ASK,
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts(decisions),
@@ -261,8 +259,7 @@ def _propose(
         ),
         declined=list(declined),
         across_years=list(across_years),
-        amends_version=recorded.version if recorded is not None and not restart else None,
-        starts_new_plan=restart,
+        amends_version=recorded.version if recorded is not None else None,
         tool_context=ctx,
     )
 
@@ -393,7 +390,7 @@ def test_a_first_draft_declines_no_ask_a_reduction_refusal_named(
     outcome: tuple[Outcome, str | None],
 ) -> None:
     """A first draft's permission to decline as `no_operation_covers`
-    (`harness.planner_seam`) covers no ask a `period_reduction_unstated`
+    (`harness.planner_adapter`) covers no ask a `period_reduction_unstated`
     refusal named in the entry, and still covers an ask it did not name."""
     ctx = _context(asks=(ASK, OTHER_ASK))
     record_optional_decline(ctx.state, UnsupportedOperation.NO_OPERATION_COVERS, terminal=True)
@@ -644,6 +641,23 @@ def test_a_step_named_across_years_is_licensed_where_the_planner_reads_the_users
     assert "(across years)" in result["message"]
     recorded = load_plan(ctx.state)
     assert recorded is not None and recorded.version == 1
+
+
+@pytest.mark.parametrize("step", sorted(_STEPS))
+def test_a_step_named_across_years_is_licensed_in_an_amendment_plan_with_no_asks(
+    decision: Callable[..., Decision], step: str
+) -> None:
+    """ "Total French aid to Guatemala between 2015 and 2022" amended: the plan
+    lists no asks, and naming the step in `across_years` still licenses it."""
+    build, cited, _, _ = _STEPS[step]
+    requirements = [_aid(period=Period(start=2015, end=2022)), build()]
+    ctx = _context(asks=(), amendment=True)
+
+    result = _propose(ctx, requirements, [decision(), *cited], answered=(), across_years=["result"])
+
+    assert result["outcome"] == Outcome.OK.value, result
+    recorded = load_plan(ctx.state)
+    assert recorded is not None and recorded.period_licences == (_licence(step),)
 
 
 @pytest.mark.parametrize("step", sorted(_STEPS))
@@ -994,55 +1008,6 @@ def test_naming_a_step_that_combines_no_years_is_refused(
     assert result["code"] == ProblemCode.INVALID_PLAN.value, result
     assert repr(named[0]) in result["message"]
     assert load_plan(ctx.state) is None
-
-
-@pytest.mark.parametrize("step", sorted(_STEPS))
-def test_the_standalone_planner_licenses_a_step_it_names_in_a_plan_with_no_asks(
-    decision: Callable[..., Decision], step: str
-) -> None:
-    """ "Total French aid to Guatemala between 2015 and 2022": the standalone
-    planner reads the question itself and lists no asks."""
-    build, cited, _, _ = _STEPS[step]
-    years = Period(start=2015, end=2022)
-    requirements = [_aid(period=years), build()]
-
-    refused = _propose(
-        _context(asks=()), requirements, [decision(), *cited], answered=(), reads_user_words=True
-    )
-    ctx = _context(asks=())
-    admitted = _propose(
-        ctx,
-        requirements,
-        [decision(), *cited],
-        answered=(),
-        across_years=["result"],
-        reads_user_words=True,
-    )
-
-    _refused(refused, _gap(asks=(), years=years))
-    assert "name 'result' in `across_years`" in refused["message"]
-    assert admitted["outcome"] == Outcome.OK.value, admitted
-    recorded = load_plan(ctx.state)
-    assert recorded is not None and recorded.period_licences == (_licence(step),)
-
-
-def test_a_restart_begins_with_no_licences(decision: Callable[..., Decision]) -> None:
-    ctx = _context(asks=())
-    first = _propose(
-        ctx,
-        [_aid(), _total()],
-        [decision()],
-        answered=(),
-        across_years=["result"],
-        reads_user_words=True,
-    )
-    assert first["outcome"] == Outcome.OK.value, first
-
-    result = _propose(
-        ctx, [_aid(), _total()], [decision()], answered=(), reads_user_words=True, restart=True
-    )
-
-    _refused(result, _gap(asks=(), years=EVERY_YEAR))
 
 
 def _stated(decision: Callable[..., Decision], made: Decision, **fields: Any) -> Plan:
@@ -2825,7 +2790,7 @@ def test_a_refusal_offers_no_one_year_where_the_newest_year_is_not_held(
     groups once it rolls, so no rolling year agrees with both, and a fixed
     year is passed by either first year."""
     asks = (ASK,) if answered is None else _BESIDE_A_SERIES
-    ctx = _context(asks=asks, pins=_SHOWN_OPEN)
+    ctx = _context(asks=asks, pins=_SHOWN_OPEN, amendment=bool(across_years))
     dataset = _open(period=Period(start=2020, end=2024))
 
     refused = _propose(
@@ -2834,7 +2799,6 @@ def test_a_refusal_offers_no_one_year_where_the_newest_year_is_not_held(
         [decision()],
         answered=answered,
         across_years=list(across_years),
-        reads_user_words=bool(across_years),
     )
 
     assert refused["code"] == ProblemCode.PERIOD_REDUCTION_UNSTATED.value, refused

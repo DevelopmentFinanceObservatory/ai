@@ -41,7 +41,7 @@ in.
 
 A turn is also failed when the agent hedged: a reject case that also had a
 `propose_plan` declare a plan ready (its answer carries `summary`,
-`planner.agent.declare_ready`) -- an agent cannot both record a rejection and
+`planner.tools.declare_ready`). An agent cannot both record a rejection and
 declare the same plan ready for the user's answer. A `translation` case hedges
 the same way -- a case expecting `ok` that also had a proposal's translation
 answer a referral, or a referral case that also had one answer `ok` -- since `_by_name` picks whichever response carries the stated
@@ -86,9 +86,7 @@ declare it under `criteria` (`{"workflow_outcome": 1.0}`) and under
 `test_config.json`. `_get_metric_function`
 (`google/adk/evaluation/custom_metric_evaluator.py:31-42`) imports that dotted
 path with `importlib.import_module`, which needs `evals/agents` on `sys.path`
-to resolve `harness_translator_v1` as a top-level package -- the `__init__.py`
-of every set that turns it on (`harness_pair_v1`, `harness_planner_v2`)
-inserts it for exactly this.
+to resolve `harness_translator_v1` as a top-level package.
 """
 
 from __future__ import annotations
@@ -103,7 +101,7 @@ from google.genai import types as genai_types
 
 # The tools whose response a case may state an expectation on. A
 # `tool_responses` entry naming anything else is not an expectation this
-# metric scores -- `test_eval_sets.py` imports this to refuse such a turn.
+# metric scores.
 # `translation` is the verdict an accepted proposal returns under its own
 # `translation` key: `ok` or the referral translation stopped on. No tool of
 # that name exists; `_with_translations` reads it off the proposal's response.
@@ -226,7 +224,7 @@ def _with_translations(
     """`responses` as a case names them, each proposal's verdict following it as a `translation` response.
 
     A verdict is lifted from any response carrying one, as
-    `harness.planner_seam` reads it; a proposal the planner refused ran no
+    `harness.planner_adapter` reads it; a proposal the planner refused ran no
     translation and adds nothing.
     """
     listed: list[genai_types.FunctionResponse] = []
@@ -258,7 +256,7 @@ def _answered_by(response: genai_types.FunctionResponse, name: str, *outcomes: s
 def _declared_ready(response: genai_types.FunctionResponse) -> bool:
     """Whether `response` is a `propose_plan` answer that declared the plan ready.
 
-    `planner.agent.declare_ready` adds `summary` to the answer of a proposal
+    `planner.tools.declare_ready` adds `summary` to the answer of a proposal
     whose translation compiled and whose plan the gate let through.
     """
     return (
@@ -310,10 +308,7 @@ def _turn_score(actual: Invocation, expected: Invocation) -> float | None:
     """The score for one turn, or `None` when `expected` states no expectation.
 
     `None` signals "not applicable" rather than pass or fail -- a turn this
-    metric was never meant to check, which `test_eval_sets.py`'s
-    `test_a_set_configuring_workflow_outcome_states_an_expectation_on_every_turn`
-    guards against ever actually occurring for a set that turns this metric
-    on.
+    metric was never meant to check.
     """
     expected_response = _stated_expectation(expected)
     if expected_response is None:

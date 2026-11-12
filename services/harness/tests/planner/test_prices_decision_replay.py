@@ -23,7 +23,7 @@ import pytest
 from compiler.sources import outcome_from_envelope
 from compiler.surface import ToolCallResult
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
-from harness import planner_seam
+from harness import planner_adapter
 from harness.graph.state import (
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
@@ -32,8 +32,7 @@ from harness.graph.state import (
 )
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.tool_contracts import resolver_digest
-from planner import agent as planner_agent
-from planner.agent import build_planner_tools
+from planner import source_reads as planner_source_reads
 from planner.plan import (
     ALIGNED_PINS_STATE_KEY,
     ASKS_STATE_KEY,
@@ -54,6 +53,7 @@ from planner.plan import (
     save_pin_sources,
     scope_unread,
 )
+from planner.specs import planner_tool_specs
 from planner.workflow import ToolId
 from translator.discovery import (
     DiscoveryLog,
@@ -65,6 +65,7 @@ from translator.discovery import (
 )
 from translator.referral import Referral, ReferralKind, save_referral
 
+from ..planner_tools import call_planner_tool
 from ..session_events import response_event
 from .test_agent import _clarify_answer_event, _clarify_ask_event, _FakeToolContext, _option
 
@@ -237,8 +238,7 @@ def after_hand_back(
     translation's search answered, the recorded one by default (`_handed_back`).
     `search` answers the re-pins' calls, the recorded answers by default."""
     tools = {
-        tool.name: tool
-        for tool in build_planner_tools(surface=RecordedSearch(RECORDED["resolves"]))
+        tool.name: tool for tool in planner_tool_specs(surface=RecordedSearch(RECORDED["resolves"]))
     }
     ctx = _FakeToolContext()
     _turn_so_far(ctx)
@@ -253,7 +253,7 @@ def after_hand_back(
         ctx.session.events = [*ctx.session.events, response_event("propose_plan", answer)]
     _handed_back(ctx, held=held, envelope=envelope or RECORDED["translator"])
     if search is not None:
-        tools = {tool.name: tool for tool in build_planner_tools(surface=search)}
+        tools = {tool.name: tool for tool in planner_tool_specs(surface=search)}
     return tools, ctx
 
 
@@ -261,7 +261,7 @@ def _propose(
     tools: dict[str, Any], ctx: _FakeToolContext, arguments: Mapping[str, Any]
 ) -> dict[str, Any]:
     """The answer of one `propose_plan` call stating `arguments`."""
-    return asyncio.run(tools["propose_plan"].func(**arguments, tool_context=ctx))
+    return asyncio.run(call_planner_tool(tools["propose_plan"], **arguments, tool_context=ctx))
 
 
 _PRICES_SLOT = f"user_prices_{PART}"
@@ -503,7 +503,7 @@ def test_a_read_that_leaves_a_candidate_unread_is_made_once(
         assert block is not None
         return {spec_id: block}
 
-    monkeypatch.setattr(planner_agent, "read_found_scope", unread)
+    monkeypatch.setattr(planner_source_reads, "read_found_scope", unread)
     tools, ctx = after_hand_back(envelope=as_candidates())
     (call,) = [call for call in RECORDED["calls"] if call["at"] == "11:22:56.327"]
 
@@ -619,9 +619,9 @@ def test_a_candidate_with_no_search_to_read_it_asks_for_another_pin() -> None:
     so proposing the same plan again would be refused again. The refusal
     asks for the share's input pinned otherwise."""
     _, ctx = after_hand_back(envelope=as_candidates())
-    (propose,) = [tool for tool in build_planner_tools() if tool.name == "propose_plan"]
+    (propose,) = [tool for tool in planner_tool_specs() if tool.name == "propose_plan"]
 
-    answer = propose.func(**_re_pin(), tool_context=ctx)
+    answer = call_planner_tool(propose, **_re_pin(), tool_context=ctx)
 
     assert (answer["outcome"], answer["code"]) == ("refused", "scope_unread"), answer
     assert answer["action"]["needs"] == ["evidence_requirements"]
@@ -638,8 +638,7 @@ def test_a_citation_of_the_users_prices_on_a_requirement_not_reading_the_part_is
     nothing, and code owns it as it owns the decision, so the draft is
     recorded without it, whether the draft restates the decision or not."""
     tools = {
-        tool.name: tool
-        for tool in build_planner_tools(surface=RecordedSearch(RECORDED["resolves"]))
+        tool.name: tool for tool in planner_tool_specs(surface=RecordedSearch(RECORDED["resolves"]))
     }
     ctx = _FakeToolContext()
     _turn_so_far(ctx)
@@ -777,7 +776,7 @@ def test_a_plan_sentence_reads_the_block_admission_reads() -> None:
     save_pin_sources(ctx.state, {FOUND: PinSource(block=dict(block))})
     save_found_sources(ctx.state, {FOUND: _definite_found()})
 
-    blocks = planner_seam._spec_blocks(ctx.state)
+    blocks = planner_adapter._spec_blocks(ctx.state)
 
     assert blocks[FOUND]["resolved"] == _definite_found()["resolved"]
     assert SCOPE_UNREAD_BLOCK_KEY not in blocks[FOUND]
@@ -793,7 +792,7 @@ def test_a_plan_sentence_reads_this_turns_definite_block_over_a_found_unread_one
     definite = stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY)[FOUND]
     save_found_sources(ctx.state, {FOUND: {**definite, SCOPE_UNREAD_BLOCK_KEY: True}})
 
-    blocks = planner_seam._spec_blocks(ctx.state)
+    blocks = planner_adapter._spec_blocks(ctx.state)
 
     assert blocks[FOUND] == definite
 

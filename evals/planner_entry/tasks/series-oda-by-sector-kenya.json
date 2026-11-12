@@ -5,7 +5,6 @@
   "question": "How much ODA did Kenya receive for each sector in 2022?",
   "searches": [
     {
-      "query": "How much ODA did Kenya receive for each sector in 2022?",
       "parts": [
         {
           "variable": "official development assistance by sector",

@@ -57,7 +57,7 @@ class Settings(BaseServiceSettings):
     apps mounted in-process by `harness.server.create_app`, derived from
     this service's own `port`. Setting `DATA_MCP_URL` / `ANALYSIS_MCP_URL`
     / `PRESENTATION_MCP_URL` always wins over that default -- that env
-    override is the seam for a future split back into standalone services
+    override is what lets a service split back out replace its loopback mount
     (point it at the split-out service's URL instead of the loopback path).
     `database_url` and the `session_store_*` fields together select ADK's
     session backend (`harness.session_store.build_session_service`):
@@ -209,10 +209,11 @@ class Settings(BaseServiceSettings):
       the caller. 0.61% of dev calls waited longer.
 
     A spent budget, cap or wall bound ends the request with its sentence
-    (`harness.sentences.SEAM_SENTENCES`) as the final message, with no further
+    (`harness.sentences.STOP_SENTENCES`) as the final message, with no further
     model call, unless it closes a planner call while the last referral names
     sources to choose from: the planner then asks the user to pick one
-    (`harness.planner_seam.PlannerSeam._after_planner_model`). `harness.graph.state.BUDGETS` counts tool calls apart from these.
+    (`harness.planner_run.PlannerRun.model_answered`).
+    `harness.graph.state.BUDGETS` counts tool calls apart from these.
     The Edit Card's one model call (`harness.generative.GeminiEdit`) carries
     `turn_model_time_s` as its HTTP timeout.
     """

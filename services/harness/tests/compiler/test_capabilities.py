@@ -45,7 +45,7 @@ async def _live_schemas() -> dict[str, ToolSchema]:
 async def test_every_pinned_hash_matches_the_live_schema() -> None:
     # Failing here means a server changed a tool's arguments or its declared
     # output. Re-read the schema, check the row's inputs still name the right
-    # seams, and re-pin. A row pinning no output hash is compared on its
+    # arguments, and re-pin. A row pinning no output hash is compared on its
     # input alone.
     live = await _live_schemas()
 
@@ -88,18 +88,14 @@ async def test_every_served_tool_is_either_a_capability_or_excluded() -> None:
     assert served == rows | excluded
 
 
-def test_the_skill_tools_are_excluded_from_the_translator_for_one_reason() -> None:
-    skill_tools = {
-        ToolId(server="data-mcp", name="get_skill"),
-        ToolId(server="data-mcp", name="get_skill_file"),
-    }
-    excluded = [entry for entry in EXCLUDED_TOOLS if entry.tool in skill_tools]
+def test_the_skill_tool_is_excluded_from_the_translator() -> None:
+    skill_tool = ToolId(server="data-mcp", name="get_skill")
+    excluded = [entry for entry in EXCLUDED_TOOLS if entry.tool == skill_tool]
 
-    assert {entry.tool for entry in excluded} == skill_tools
-    assert {entry.reason for entry in excluded} == {
+    assert [entry.reason for entry in excluded] == [
         "the planner reads skills through its own tools, and no workflow step takes a skill"
-    }
-    assert all(capability.tool not in skill_tools for capability in CAPABILITIES)
+    ]
+    assert all(capability.tool != skill_tool for capability in CAPABILITIES)
 
 
 def test_every_operation_kind_has_exactly_one_implementing_tool() -> None:

@@ -38,11 +38,11 @@ from harness.sentences import (
     MAX_SENTENCE_CHARS,
     REFERRAL_REASONS,
     RETRY_MODE_SENTENCES,
-    SEAM_REASONS,
-    SEAM_SENTENCES,
+    STOP_REASONS,
+    STOP_SENTENCES,
     FailureClass,
     PlanWords,
-    SeamCode,
+    StopCode,
     failure_sentence,
     referral_reason,
     refusal_reason,
@@ -62,10 +62,10 @@ from translator.referral import ReferralKind
         (REFERRAL_REASONS, set(ReferralKind)),
         (COMPILE_REASONS, set(CompileIssueCode)),
         (DECLINE_REASONS, set(UnsupportedOperation)),
-        (SEAM_SENTENCES, set(SeamCode) | set(ProblemCode)),
-        (SEAM_REASONS, set(SeamCode) | set(ProblemCode)),
+        (STOP_SENTENCES, set(StopCode) | set(ProblemCode)),
+        (STOP_REASONS, set(StopCode) | set(ProblemCode)),
     ],
-    ids=["referral", "compile", "decline", "seam", "seam-reason"],
+    ids=["referral", "compile", "decline", "stop", "stop-reason"],
 )
 def test_every_code_has_exactly_one_sentence(
     table: Mapping[StrEnum, str], codes: Collection[StrEnum]
@@ -81,8 +81,8 @@ def test_a_reason_is_a_clause_another_sentence_can_carry(clause: str) -> None:
     assert not clause.endswith(".")
 
 
-@pytest.mark.parametrize("code", [*SeamCode, *ProblemCode])
-def test_every_seam_sentence_fills_from_an_empty_detail(code: StrEnum) -> None:
+@pytest.mark.parametrize("code", [*StopCode, *ProblemCode])
+def test_every_stop_sentence_fills_from_an_empty_detail(code: StrEnum) -> None:
     text = refusal_sentence({"code": code})
 
     assert "{" not in text
@@ -93,7 +93,7 @@ def test_a_code_no_table_names_claims_no_budget() -> None:
     text = refusal_sentence({"code": "no_such_code", "detail": {"rounds": 4}})
 
     assert "budget" not in text
-    assert text not in {refusal_sentence({"code": code}) for code in SEAM_SENTENCES}
+    assert text not in {refusal_sentence({"code": code}) for code in STOP_SENTENCES}
 
 
 def test_a_repair_referral_reads_the_compile_issue_it_names() -> None:
@@ -131,7 +131,7 @@ def test_a_prices_unserved_sentence_names_the_reading_the_orchestrator_searches(
 def test_a_plan_not_ready_sentence_carries_the_referral_it_ended_on() -> None:
     text = refusal_sentence(
         {
-            "code": SeamCode.PLAN_NOT_READY,
+            "code": StopCode.PLAN_NOT_READY,
             "detail": {
                 "kind": "requirement_needs_repair",
                 "requirement_id": "aid_by_donor",
@@ -148,7 +148,7 @@ _REQUIREMENT_ID = "total_aid_dac1"
 _STEP_ID = "share_health"
 
 
-@pytest.mark.parametrize("code", [*SeamCode, *ProblemCode])
+@pytest.mark.parametrize("code", [*StopCode, *ProblemCode])
 @pytest.mark.parametrize(
     "where",
     [
@@ -173,11 +173,11 @@ def test_a_reason_names_a_requirement_by_its_readers_name_and_never_by_its_id(
 
     assert _REQUIREMENT_ID not in text
     assert not {_STEP_ID, "health_crs"} & set(re.findall(r"[\w']+", text))
-    if named and any(f"{{{slot}}}" in SEAM_REASONS[code] for slot in ("at", "about", "lead")):
+    if named and any(f"{{{slot}}}" in STOP_REASONS[code] for slot in ("at", "about", "lead")):
         assert "official development assistance" in text
 
 
-@pytest.mark.parametrize("code", [*SeamCode, *ProblemCode])
+@pytest.mark.parametrize("code", [*StopCode, *ProblemCode])
 def test_a_reason_is_one_sentence_saying_why_alone(code: StrEnum) -> None:
     reason = refusal_reason({"code": code})
 
@@ -250,8 +250,8 @@ def test_the_budget_refusal_is_stated_as_a_per_entry_budget_in_the_user_s_terms(
 
     The plan's own version can read higher than the count (it climbs across
     entries), so the sentence names the budget. It makes no claim about what
-    can still be approved: the seam has no view of the graph's record, and the
-    graph adds that claim where its record supports it.
+    can still be approved: the adapter that writes it has no view of the graph's
+    record, and the graph adds that claim where its record supports it.
     """
     text = refusal_sentence(
         {"code": "budget_exhausted", "detail": {"scope": "plan_rounds", "rounds": 4, "version": 9}}
@@ -299,7 +299,7 @@ _FAILURE_SOURCES: tuple[Collection[str], ...] = (
     STOP_CODES,
     _spec_kit_presentation_codes(),
     # The codes a refused plan's step is worded from.
-    SeamCode,
+    StopCode,
     ProblemCode,
 )
 _TEXTS = {**{str(c): FAILURE_SENTENCES[FAILURE_CLASS[c]] for c in FAILURE_CLASS}, **CODE_SENTENCES}
@@ -319,17 +319,17 @@ def test_every_enumerable_failure_code_has_a_class() -> None:
 def test_a_failure_code_sits_in_one_class_and_in_no_other_table() -> None:
     """A compile issue reaches the user as a referral's `constraint`, read from
     `COMPILE_REASONS`, so a name the compiler shares with a service is no
-    second sentence for one code. Only a code of `SEAM_SENTENCES` has a class
+    second sentence for one code. Only a code of `STOP_SENTENCES` has a class
     beside its template. The class words the step, and the template the agent's
     reading."""
     classed = set(FAILURE_CLASS)
-    seam = {str(code) for code in SEAM_SENTENCES}
+    stop_codes = {str(code) for code in STOP_SENTENCES}
     sentenced = {str(code) for enum in (ReferralKind, UnsupportedOperation) for code in enum}
 
     assert sum(len(codes) for codes in _CLASS_CODES.values()) == len(classed)
     assert set(FAILURE_SENTENCES) == set(FailureClass) == set(_CLASS_CODES)
-    assert seam <= classed
-    assert not (classed - seam) & (sentenced | {str(code) for code in ProblemCode})
+    assert stop_codes <= classed
+    assert not (classed - stop_codes) & (sentenced | {str(code) for code in ProblemCode})
     assert classed & {str(code) for code in CompileIssueCode} == {
         "entity_ambiguous",
         "unknown_tool",

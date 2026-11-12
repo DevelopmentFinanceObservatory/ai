@@ -42,7 +42,7 @@ Every studio request carries:
   shared-secret comparison when the `STUDIO_API_TOKEN` setting is present.
   **This is placeholder access control.** A server with the setting absent
   accepts any non-empty token and logs a warning at startup. The
-  verification seam is one function in `harness/auth.py`, where full JWT
+  verification check is one function in `harness/auth.py`, where full JWT
   validation plugs in later without touching routes.
 - `conversation_id` in the body: client-minted, stable for one
   conversation. `session_id`, its earlier name, parses as a

@@ -5,7 +5,6 @@
   "question": "By how many US dollars did Ghana's GDP exceed its external debt stock in each year from 2015 to 2022?",
   "searches": [
     {
-      "query": "By how many US dollars did Ghana's GDP exceed its external debt stock in each year from 2015 to 2022?",
       "parts": [
         {
           "variable": "external debt stock",

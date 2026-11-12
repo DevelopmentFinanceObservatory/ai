@@ -6,12 +6,13 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 
+from data_mcp.skills_client import name_get_skill_in_call_lines
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.google_llm import Gemini
 from google.adk.models.llm_request import LlmRequest
-from google.adk.tools import FunctionTool
 from google.genai import types
+from harness.orchestrator_tools import OrchestratorTool
 from harness.prefix_cache import gemini_model_name
 from harness.settings import DEFAULT_ORCHESTRATOR_THINKING_LEVEL
 from harness.turn_budget import BoundedGemini
@@ -104,18 +105,19 @@ search once more with the place as you read it, before any other retry. A
 part refused as role_not_resolved goes again first with `role` set on every
 name, from the side the user or an earlier turn gave it.
 
-When search finds nothing for a part, refuses it, or leaves out something
-the user asked for in it, search once more for that part alone: `as_text`
-set, the part alone in `parts`, and `query` set to the user's own words for
-it. Rephrase only to fill in what an earlier turn supplied ("that" becomes
-the measure it meant). Use what that search returns. When it says it
+When a part's result carries `retry_with_text`, search once more for that
+part alone: `text` set to the user's own words for it, and the part alone in
+`parts`. Rephrase only to fill in what an earlier turn supplied ("that"
+becomes the measure it meant). Use what that search returns. When it says it
 defaulted, dropped or changed part of the question, tell the user so in
 their terms. When it answers more broadly than the user asked, say that the
-user's limit was not applied.
+user's limit was not applied. A part with no `retry_with_text` is not
+searched again with `text`.
 
-When that search still finds nothing, tell the user in a sentence what
-search returned for that part. Ask with ask_user how to go on, offering the
-closest measures search named and answering without that part as options.
+When a part still has nothing after the searches above, tell the user in a
+sentence what search returned for that part. Ask with ask_user how to go on,
+offering the closest measures search named and answering without that part
+as options.
 
 Load a skill a result names when its description bears on the question.
 
@@ -335,6 +337,28 @@ def prepend_digests(callback_context: CallbackContext, llm_request: LlmRequest) 
         )
 
 
+def name_get_skill_in_history(callback_context: CallbackContext, llm_request: LlmRequest) -> None:
+    """Render the call lines of a skill page the turn's events already hold as
+    `get_skill` calls.
+
+    A turn paused on an `ask_user` or an approval and resumed after a deploy
+    replays its own earlier `get_skill` and `get_skill_file` answers, whose
+    printed `get_skill_file(` call lines name a tool the agent no longer holds
+    (`data_mcp.skills_client.name_get_skill_in_call_lines`).
+    """
+    del callback_context
+    for content in llm_request.contents:
+        for part in content.parts or ():
+            response = part.function_response
+            if response is None or not isinstance(response.response, dict):
+                continue
+            text = response.response.get("skill")
+            if isinstance(text, str) and (renamed := name_get_skill_in_call_lines(text)) != text:
+                part.function_response = response.model_copy(
+                    update={"response": {**response.response, "skill": renamed}}
+                )
+
+
 def _without_adk_identity(name: str) -> Callable[[CallbackContext, LlmRequest], None]:
     """A before-model callback that takes out of the system instruction the
     line ADK appends to a chat-mode agent's
@@ -358,6 +382,13 @@ def _without_adk_identity(name: str) -> Callable[[CallbackContext, LlmRequest], 
     return drop
 
 
+def model_retry_options(*, attempts: int = 3, max_delay: float = 2.0) -> types.HttpRetryOptions:
+    """The HTTP retries a Gemini model call makes: up to `attempts` attempts on a
+    transient error (408, 429, 5xx), the first wait one second, no wait longer
+    than `max_delay` seconds."""
+    return types.HttpRetryOptions(attempts=attempts, initial_delay=1.0, max_delay=max_delay)
+
+
 def _retrying(
     model_name: str,
     *,
@@ -365,15 +396,13 @@ def _retrying(
     attempts: int = 3,
     max_delay: float = 2.0,
 ) -> str | Gemini:
-    """`model_name` with retries when ADK resolves it to Gemini: ADK's Gemini
-    makes one attempt unless told otherwise, so a transient 503 or 429 would
-    fail the turn. Every call keeps to the request's budget
-    (`harness.turn_budget.BoundedGemini`). On `prefix_cache`, each call reads
-    the system instruction and tools from the shared cache. Any other model
-    name is returned as it is, for ADK to resolve."""
-    retry_options = types.HttpRetryOptions(
-        attempts=attempts, initial_delay=1.0, max_delay=max_delay
-    )
+    """`model_name` with retries (`model_retry_options`) when ADK resolves it
+    to Gemini: ADK's Gemini makes one attempt unless told otherwise, so a
+    transient 503 or 429 would fail the turn. Every call keeps to the
+    request's budget (`harness.turn_budget.BoundedGemini`). On `prefix_cache`,
+    each call reads the system instruction and tools from the shared cache.
+    Any other model name is returned as it is, for ADK to resolve."""
+    retry_options = model_retry_options(attempts=attempts, max_delay=max_delay)
     if prefix_cache is not None:
         return prefix_cache.model_for(model_name, retry_options=retry_options)
     gemini = gemini_model_name(model_name)
@@ -410,8 +439,10 @@ def create_orchestrator_agent(
     static prefix from `prefix_cache` when one is given. `today` is the clock
     whose UTC date opens each request's contents. `thinking_level` caps the
     model's reasoning effort. A tool that raises answers the model with an
-    error (`answering_tool_failures`) and the turn goes on."""
-    agent_tools = [FunctionTool(tool) for tool in tools]
+    error (`answering_tool_failures`) and the turn goes on. Each tool runs as
+    an `OrchestratorTool`, which answers a call missing a required argument as
+    one to correct."""
+    agent_tools = [OrchestratorTool(tool) for tool in tools]
     return LlmAgent(
         name=AGENT_NAME,
         model=_retrying(model_name, prefix_cache=prefix_cache),
@@ -431,7 +462,11 @@ def create_orchestrator_agent(
         # single_turn node run reads only the events on its own node path,
         # which leaves out every hand-back (`harness.graph.orchestrate`).
         mode="chat",
-        before_model_callback=[_without_adk_identity(AGENT_NAME), prepend_digests],
+        before_model_callback=[
+            _without_adk_identity(AGENT_NAME),
+            name_get_skill_in_history,
+            prepend_digests,
+        ],
         # Thought summaries are requested for the traces. The studio stream
         # does not carry them. A stream cut off mid-response resumes from a
         # continuation token, one extra hop instead of a full retry.

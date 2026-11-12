@@ -1,0 +1,142 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Show Kenya's and Nigeria's external debt as a share of GDP over time"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Kenya and Nigeria external debt as a share of GDP over time, using external debt stocks and GDP",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "debt",
+        "decision_ids": [],
+        "measure": "external debt",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "debtor"
+          },
+          {
+            "name": "Nigeria",
+            "role": "debtor"
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 1970,
+          "end": 2024
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_048f5011c2347c1da6524c8fd30b06fb",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "dataset",
+        "id": "gdp",
+        "decision_ids": [],
+        "measure": "GDP",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": null
+          },
+          {
+            "name": "Nigeria",
+            "role": null
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 1960,
+          "end": 2025
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_104b3986b41c12dab4a5eec7ed5821f9",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "quotient_of",
+        "id": "debt_to_gdp",
+        "decision_ids": [],
+        "numerator": {
+          "input_id": "debt",
+          "entity": null
+        },
+        "denominator": {
+          "input_id": "gdp",
+          "entity": null
+        },
+        "axis": "debtor",
+        "denominator_axis": "country"
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "External debt as a share of GDP for Kenya and Nigeria over time"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "debt_to_gdp"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

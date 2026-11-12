@@ -1,0 +1,135 @@
+[
+  {
+    "type": "function",
+    "name": "get_skill",
+    "description": "Returns the SKILL.md of the skill with the given id and the list of its files, or one file of the skill, verbatim, when `path` is given.",
+    "parameters": {
+      "properties": {
+        "skill_id": {
+          "description": "A skill id, or `dfo-faq` for DFO itself.",
+          "title": "Skill Id",
+          "type": "string"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A file's path exactly as the list gives it.",
+          "title": "Path"
+        },
+        "offset": {
+          "default": 0,
+          "description": "Where a page starts: 0, or the offset a closing line names.",
+          "title": "Offset",
+          "type": "integer"
+        },
+        "digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The digest a closing line names, on a continuation.",
+          "title": "Digest"
+        }
+      },
+      "required": [
+        "skill_id"
+      ],
+      "title": "get_skillParams",
+      "type": "object"
+    }
+  },
+  {
+    "type": "function",
+    "name": "ask_user_question",
+    "description": "Ask the user a question a referral or a refusal leaves to them, ending your turn.\n\nThe user's answer arrives with your next brief, after the question it\nanswers, naming the candidate or option they picked, or in their own\nwords if they answered outside them. The choices offered come from the\nreferral's candidates, or from the `options` a refusal's action carries;\nwith neither, the question says what cannot be done and asks what to\nchange.\n\nArgs:\n    message: The question to show the user, naming what is\n        ambiguous and, briefly, what each candidate is, in plain\n        words: never a requirement id, spec_id or code.\n    candidates: The referral's own candidates, each\n        `{\"spec_id\": ..., \"label\": ...}` -- `label` is the\n        candidate's own `sentence`, not invented text. Omit it for\n        a referral that carries none.\n    options: The `options` a refusal's action carries, unchanged.\n        Omit it otherwise.\n    recommended_spec_id: The candidate you favour, when you favour\n        one -- must name one of `candidates`.\n    rationale: Why you favour it, for the user to read, when\n        `recommended_spec_id` is given.",
+    "parameters": {
+      "properties": {
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "candidates": {
+          "default": [],
+          "items": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "title": "Candidates",
+          "type": "array"
+        },
+        "options": {
+          "default": [],
+          "items": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "title": "Options",
+          "type": "array"
+        },
+        "recommended_spec_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recommended Spec Id"
+        },
+        "rationale": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rationale"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "title": "ask_user_questionParams",
+      "type": "object"
+    }
+  },
+  {
+    "type": "function",
+    "name": "propose_plan",
+    "description": "Propose the plan.",
+    "parameters": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "type": "function",
+    "name": "reject_plan",
+    "description": "Record that the user rejected the current plan.\n\nNothing in the plan may run afterwards. Call `propose_plan` again if\nthe user wants a revision rather than an outright stop.",
+    "parameters": {
+      "type": "object",
+      "properties": {}
+    }
+  }
+]

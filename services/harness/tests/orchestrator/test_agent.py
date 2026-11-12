@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from google.adk.apps import App
 from google.adk.events import Event
+from google.adk.models.llm_request import LlmRequest
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -14,7 +15,12 @@ from harness.orchestrator_tools import build_orchestrator_tools
 from harness.prefix_cache import PrefixCache, PrefixCachedGemini
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.turn_budget import BoundedGemini
-from orchestrator.agent import AGENT_NAME, INSTRUCTION, create_orchestrator_agent
+from orchestrator.agent import (
+    AGENT_NAME,
+    INSTRUCTION,
+    create_orchestrator_agent,
+    name_get_skill_in_history,
+)
 
 from ..data_mcp_definitions import DataMcpDefinitions
 from ..orchestrator_fakes import (
@@ -318,3 +324,31 @@ async def test_a_stored_submit_analysis_call_replays_to_a_model_that_is_not_offe
     assert "submit_analysis" not in declared
     answers = [e.content.parts[0].text for e in events if e.author == AGENT_NAME and e.content]
     assert answers[-1] == "Kenya's figure stands."
+
+
+def test_a_skill_answer_the_turn_stored_with_the_old_call_lines_is_shown_naming_get_skill():
+    """A turn paused before a deploy and resumed after it replays its stored answers."""
+    stored = (
+        "# FAQ\nSee get_skill_file in prose.\n\nRead the rest with "
+        'get_skill_file(skill_id="dfo-faq", path="SKILL.md", offset=9, digest="d").'
+    )
+    answer = types.Part(
+        function_response=types.FunctionResponse(
+            id="1", name="get_skill_file", response={"skill": stored}
+        )
+    )
+    other = types.Part(
+        function_response=types.FunctionResponse(
+            id="2", name="search", response={"note": 'get_skill_file(skill_id="x")'}
+        )
+    )
+    request = LlmRequest(contents=[types.Content(role="user", parts=[answer, other])])
+
+    name_get_skill_in_history(None, request)  # ty: ignore[invalid-argument-type]
+
+    parts = request.contents[0].parts
+    assert parts[0].function_response.response == {
+        "skill": stored.replace('get_skill_file(skill_id="dfo-faq"', 'get_skill(skill_id="dfo-faq"')
+    }
+    assert "See get_skill_file in prose." in parts[0].function_response.response["skill"]
+    assert parts[1].function_response.response == {"note": 'get_skill_file(skill_id="x")'}

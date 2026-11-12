@@ -3,8 +3,8 @@
 `search` asks data-mcp's `search` once for every part of a question;
 `fetch` retrieves one dataset and describes its frames; `make_charts`
 draws on the canvas through the graph's own presentation checks;
-`get_skill` loads a skill a search result named and `get_skill_file`
-reads on through it; `recall` returns an earlier turn's plan record,
+`get_skill` loads a skill a search result named, and a file it links
+with `path`; `recall` returns an earlier turn's plan record,
 readings or a canvas component in full; `explain_dfo` reads dfo-faq, DFO's
 own description of itself, beside the live counts of what DFO holds
 (`harness.dfo_faq`). `ask_user` and `plan` record one pending action for
@@ -53,7 +53,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import FunctionType
-from typing import Any, Literal, Protocol, get_args, get_type_hints
+from typing import Annotated, Any, Literal, Protocol, get_args, get_type_hints, override
 
 import httpx2
 import pyarrow as pa
@@ -75,12 +75,12 @@ from compiler.sources import (
 )
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.get_data_tool import Breakdown, GetDataScope
-from data_mcp.search_tool import SearchContext, SearchPart
+from data_mcp.search_tool import MAX_RAW_QUERY_CHARS, SearchContext, SearchPart
 from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar import FrameError
 from dfo_frame_grammar.grammar import TimeGrain
 from dfo_frame_grammar.rolling import RollingError
-from google.adk.tools import ToolContext
+from google.adk.tools import FunctionTool, ToolContext
 from mcp import MCPError
 from mcp.types import REQUEST_TIMEOUT
 from planner.parties import (
@@ -101,8 +101,7 @@ from planner.plan import (
     scope_unread,
     with_blocks,
 )
-from planner.skills import GET_SKILL, GET_SKILL_FILE
-from planner.workflow import ToolId
+from planner.skills import GET_SKILL
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
 from submission.prices_choice import measure_key
 from translator.discovery import (
@@ -135,7 +134,7 @@ from harness.dfo_faq import (
     read_catalogue_counts,
     read_dfo_faq,
 )
-from harness.graph.seams import Executor
+from harness.graph.interfaces import Executor
 from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
@@ -213,7 +212,6 @@ TOOL_NAMES = (
     "ask_user",
     "plan",
     "get_skill",
-    "get_skill_file",
     "explain_dfo",
     "recall",
     "remove_cards",
@@ -1110,13 +1108,16 @@ def _figures_unread() -> dict[str, Any]:
     }
 
 
-def _spend(tool_context: ToolContext, tool: str) -> dict[str, Any] | None:
-    """Count one call of `tool`; the failed answer when its budget is spent."""
+def _spend(
+    tool_context: ToolContext, tool: str, *, named: str | None = None
+) -> dict[str, Any] | None:
+    """Count one call under the budget `tool`; the failed answer when it is
+    spent. The answer names the call as `named`, which defaults to `tool`."""
     used = _used(tool_context, tool)
     if used >= _budgets(tool_context)[tool]:
         return _failed(
             HarnessCode.TOOL_BUDGET_SPENT,
-            f"{tool} has been called {used} time(s) this turn, its limit. {_ANSWER_NOW}",
+            f"{named or tool} has been called {used} time(s) this turn, its limit. {_ANSWER_NOW}",
         )
     count_call(tool_context.state, tool)
     return None
@@ -1193,6 +1194,152 @@ def _invalid_arguments(
         ),
         "invalid": [entry for entry, _ in problems],
     }
+
+
+class OrchestratorTool(FunctionTool):
+    """An orchestrator tool as ADK runs it, with a call that lacks a required
+    argument answered by `_invalid_arguments`.
+
+    ADK's `FunctionTool.run_async` answers such a call itself, before the
+    tool or its `_validated_arguments` wrapper runs, with an `{"error": ...}`
+    that states no code. This answers it first: `tool_arguments_invalid`
+    with `correct_and_retry`, one `{"loc": <name>, "type": "missing"}` entry
+    per missing argument, counted against `BUDGETS["invalid_arguments"]`.
+    The required arguments are the function's parameters without a default,
+    other than `tool_context`, which ADK supplies. The declaration is
+    `FunctionTool`'s own.
+    """
+
+    def __init__(self, func: Callable[..., Any]) -> None:
+        super().__init__(func)
+        self.required_arguments = tuple(
+            name
+            for name, parameter in inspect.signature(self.func).parameters.items()
+            if parameter.default is inspect.Parameter.empty
+            and parameter.kind
+            not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+            and name != "tool_context"
+        )
+
+    @override
+    async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
+        if missing := [name for name in self.required_arguments if name not in args]:
+            logger.warning("orchestrator %s: missing %s", self.name, ", ".join(missing))
+            return _invalid_arguments(
+                tool_context,
+                self.name,
+                [({"loc": name, "type": "missing"}, f"{name}: Field required") for name in missing],
+            )
+        return await super().run_async(args=args, tool_context=tool_context)
+
+
+# `search`'s refusals of a call that sends nothing to search, `text` beside
+# more than one part, or `text` over the search service's limit on words it reads.
+_NOTHING_TO_SEARCH = "parts: Field required; send parts, or text"
+_TEXT_WITH_PARTS = (
+    "parts: with text, send at most one part; send the parts alone, or text with the one part "
+    "whose result carries retry_with_text"
+)
+_TEXT_TOO_LONG = f"text: String should have at most {MAX_RAW_QUERY_CHARS} characters"
+
+# The parts a `text` search ran for this turn, each as `_part_key` reads it,
+# and `_TEXT_SEARCH_RAN` once any `text` search has run.
+_TEXT_SEARCHED_KEY = "orchestrator:text_searched"
+_TEXT_SEARCH_RAN = "*"
+# A parsed search's part reading that a search with the user's words may
+# answer carries this sentence as `retry_with_text`: every part Search found
+# no data for or could not support (`_RETRY_STATUSES`), with the one delay
+# `_REPAIRED_FIRST` states. A part Search answered, definite or with
+# candidates, offers no such search, whatever it left out.
+RETRY_WITH_TEXT = (
+    "Search once more for this part alone: `text` set to the user's own words for it, and "
+    "this part alone in `parts`."
+)
+_RETRY_STATUSES = frozenset({"no_data", "unsupported"})
+# The reasons the instruction repairs with another parsed search first: a place
+# sent as the model reads it, or `role` set on every name. A part refused for
+# one of them is offered the `text` search from its second such refusal in a
+# turn, under the measure it was sent with.
+_REPAIRED_FIRST = frozenset({"entity_not_resolved", "role_not_resolved"})
+# The refusals for a `_REPAIRED_FIRST` reason seen this turn, each as the JSON
+# of the part's measure, as `_words` reads it, and the reason.
+_REFUSED_ONCE_KEY = "orchestrator:search_refused_once"
+
+
+def _words(text: str) -> str:
+    """`text` in lower case with each run of whitespace one space."""
+    return " ".join(text.lower().split())
+
+
+def _normalised(value: Any) -> Any:
+    """`value`, a JSON value, with every string in it as `_words` reads it."""
+    if isinstance(value, str):
+        return _words(value)
+    if isinstance(value, list):
+        return [_normalised(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _normalised(item) for key, item in value.items()}
+    return value
+
+
+def _part_key(part: SearchPart) -> str:
+    """`part` as `_TEXT_SEARCHED_KEY` holds it. That is the whole part as sent,
+    every string as `_words` reads it, as canonical JSON, with its entities in
+    the order of their own canonical JSON. Two parts that differ in any field
+    other than wording, case and the order of their entities are two keys."""
+    dumped = _normalised(part.model_dump(mode="json", exclude_none=True))
+    if "entities" in dumped:
+        dumped["entities"] = sorted(
+            dumped["entities"], key=lambda entity: json.dumps(entity, sort_keys=True)
+        )
+    return json.dumps(dumped, sort_keys=True)
+
+
+def _record_text_searched(state: SessionState, parts: Sequence[SearchPart]) -> None:
+    """Record in the turn's `_TEXT_SEARCHED_KEY` that a `text` search ran, and
+    for `parts`, the one part it was sent with or none."""
+    searched = list(state.get(_TEXT_SEARCHED_KEY) or [])
+    added = [_part_key(part) for part in parts]
+    if _TEXT_SEARCH_RAN not in searched:
+        added.append(_TEXT_SEARCH_RAN)
+    state[_TEXT_SEARCHED_KEY] = [*searched, *added]
+
+
+def _offer_text_retries(
+    state: SessionState,
+    parts: Sequence[SearchPart],
+    readings: Sequence[dict[str, Any]],
+    *,
+    tied: bool,
+) -> None:
+    """Add `retry_with_text` to each of a parsed search's `readings` a search
+    with the user's words may answer.
+
+    When the readings are `tied` to the `parts` sent, by position, a reading
+    whose part a `text` search already ran for this turn is offered none.
+    When they are not, no reading is offered one once any `text` search has
+    run this turn. A reading refused for a reason in `_REPAIRED_FIRST` is
+    offered one only when a part with its measure was already refused for
+    that reason this turn, so the parsed repair comes first."""
+    searched = set(state.get(_TEXT_SEARCHED_KEY) or ())
+    untied_and_searched = not tied and _TEXT_SEARCH_RAN in searched
+    keys = [_part_key(part) for part in parts] if tied else None
+    due = list(state.get(_REFUSED_ONCE_KEY) or [])
+    refused: list[str] = []
+    for index, reading in enumerate(readings):
+        if reading.get("status") not in _RETRY_STATUSES:
+            continue
+        reason = reading.get("reason")
+        if reason in _REPAIRED_FIRST:
+            repair = json.dumps([_words(str(reading.get("variable") or "")), reason])
+            refused.append(repair)
+            if repair not in due:
+                continue
+        if untied_and_searched or (keys is not None and keys[index] in searched):
+            continue
+        reading["retry_with_text"] = RETRY_WITH_TEXT
+    if refused:
+        state[_REFUSED_ONCE_KEY] = [*due, *(repair for repair in refused if repair not in due)]
 
 
 def _validated_arguments(
@@ -1738,14 +1885,16 @@ class Resolver(Protocol):
     """Stands in for data-mcp `search`: the question and its search parts ->
     the search digest (`harness.tool_contracts.resolver_digest`).
 
-    `context` is the conversation a parsed search is made in
+    A parsed search sends its parts and `question=None`. A raw-text search
+    (`raw_text=True`) sends the words Search reads as `question` and no
+    parts. `context` is the conversation a parsed search is made in
     (`_search_context`); a raw-text search is sent none.
     """
 
     async def __call__(
         self,
         *,
-        question: str,
+        question: str | None,
         parts: list[dict[str, Any]],
         raw_text: bool = False,
         context: SearchContext | None = None,
@@ -1798,13 +1947,13 @@ def build_orchestrator_tools(
     record through (`_recorded_block`), the bare one, off the Activity feed,
     as the graph's `seed` node stores definitions. Left unset, such a fetch
     is refused.
-    `recall_part` is `harness.studio_state.make_recall_part`'s seam. Left
-    unset, `recall` says there is nothing to recall from. `canvas_series` is
-    `harness.studio_state.make_canvas_series`'s seam; left unset, no series
-    counts as on the canvas. `canvas_cards` is
-    `harness.studio_state.make_canvas_cards`' seam; left unset, only the
-    cards drawn this turn are known to be on the canvas. `remove_cards` is
-    `harness.studio_state.make_remove_cards`'s seam; left unset, the tool
+    `recall_part` is the callable `harness.studio_state.make_recall_part` returns. Left
+    unset, `recall` says there is nothing to recall from. `canvas_series` is the callable
+    `harness.studio_state.make_canvas_series` returns; left unset, no series
+    counts as on the canvas. `canvas_cards` is the callable
+    `harness.studio_state.make_canvas_cards` returns; left unset, only the
+    cards drawn this turn are known to be on the canvas. `remove_cards` is the callable
+    `harness.studio_state.make_remove_cards` returns; left unset, the tool
     says it is not available.
     """
     # One lock per invocation, held by a make_charts call from its budget
@@ -1821,19 +1970,18 @@ def build_orchestrator_tools(
         return lock
 
     async def search(
-        query: str,
         tool_context: ToolContext,
         parts: list[SearchPart] | None = None,
-        as_text: bool = False,
+        text: str | None = None,
     ) -> dict[str, Any]:
         """Search DFO's data for every measured thing a question asks for.
 
-        `query` is the question in the user's words. A follow-up that leans
-        on earlier turns ("the same for Ghana", "show those over time") is
-        sent as one self-contained question naming the measure, places and
-        period. `parts` is one entry per measured variable in it, each with
+        `parts` is one entry per measured variable in the question, each with
         the entities, time, unit or sources the question gives for that
-        variable, as spoken. If Search reports an ambiguous source, ask the
+        variable, as spoken. A follow-up that leans on earlier turns ("the
+        same for Ghana", "show those over time") fills its parts from them:
+        what the follow-up changes comes from it, and the rest (measure,
+        places, period, roles and operations) from the turn it leans on. If Search reports an ambiguous source, ask the
         user which candidate they mean, then set that source entry's `ref`
         to the chosen candidate's reference, keeping its text and exclusion.
         A publisher's indicator code that the user or a skill gives
@@ -1897,12 +2045,14 @@ def build_orchestrator_tools(
         place into one answer. A total over several categories ("health
         and education aid") stays one part.
 
-        Set `as_text` to have Search read `query` itself, as written, with
-        the one part it asks about in `parts`, so the answer can be held
-        against what that part asked. Send one part's question at a time
-        this way: Search gives every part of the text the places and years
-        it reads, and the sources it names or excludes, so `query` keeps
-        the user's words for the part's sources.
+        `text` has Search read words itself, as written. Send it alone for a
+        question with no measure to parse, such as "what can you tell me about
+        Kenya?". Send it with one part in `parts` to search that part once
+        more, when the part's result carries `retry_with_text`. Search reads
+        `text` and nothing in the part, so the part stays as it was sent. Send
+        one part's question at a time this way: Search gives every part of the
+        text the places and years it reads, and the sources it names or
+        excludes, so `text` keeps the user's words for the part's sources.
 
         Returns the result's `kind`: a `resolution` reads each part
         separately; a `catalogue` means the question asked what data DFO
@@ -1915,7 +2065,7 @@ def build_orchestrator_tools(
         `reason` code saying why; a part refused because search could not
         apply a phrase of it adds those phrases as `unbound_qualifiers` and,
         as `flagged_match`, the sentence of the match it found without
-        them, which answers a broader question), what
+        them, which answers a broader question), a part worth one more search with the user's words says so in `retry_with_text`, what
         it resolved to in words, its
         warnings, its `departures` from what was asked when search states
         any, its `group_readings` when it reads a named group as the
@@ -1932,27 +2082,35 @@ def build_orchestrator_tools(
         description, loaded with get_skill, and `more_skills`, how many
         more the result names.
         """
-        if as_text and parts and len(parts) > 1:
+        if text is not None and not text.strip():
+            text = None
+        if text is None and not parts:
+            logger.warning("orchestrator search: neither parts nor text")
+            return _invalid_arguments(
+                tool_context, "search", [({"loc": "parts", "type": "missing"}, _NOTHING_TO_SEARCH)]
+            )
+        if text is not None and parts and len(parts) > 1:
+            logger.warning("orchestrator search: text with %d parts", len(parts))
+            return _invalid_arguments(
+                tool_context, "search", [({"loc": "parts", "type": "too_long"}, _TEXT_WITH_PARTS)]
+            )
+        if text is not None and len(text) > MAX_RAW_QUERY_CHARS:
+            logger.warning("orchestrator search: text of %d characters", len(text))
             return _invalid_arguments(
                 tool_context,
                 "search",
-                [
-                    (
-                        {"loc": "parts", "type": "too_long"},
-                        "parts: with as_text, send at most one part; retry each part separately",
-                    )
-                ],
+                [({"loc": "text", "type": "string_too_long"}, _TEXT_TOO_LONG)],
             )
         spent = _spend(tool_context, "search")
         if spent:
             return spent
         parts = parts or []
         try:
-            if as_text or not parts:
-                digest = await resolver(question=query, parts=[], raw_text=True)
+            if text is not None:
+                digest = await resolver(question=text, parts=[], raw_text=True)
             else:
                 digest = await resolver(
-                    question=query,
+                    question=None,
                     parts=[part.model_dump(exclude_none=True) for part in parts],
                     context=_search_context(tool_context.state),
                 )
@@ -1972,6 +2130,10 @@ def build_orchestrator_tools(
             held_open=[_open_roles(part) for part in parts] if tied else [],
             share_sides=[_share_sides(part) for part in parts] if tied else [],
         )
+        if text is not None:
+            _record_text_searched(tool_context.state, parts)
+        else:
+            _offer_text_retries(tool_context.state, parts, readings, tied=tied)
         found: dict[str, Any] = {"kind": digest.get("kind") or "resolution", "parts": readings}
         if not readings:
             found["status"] = digest.get("status")
@@ -2604,17 +2766,20 @@ def build_orchestrator_tools(
             ),
         )
 
-    async def read_skill(
-        tool: ToolId, arguments: dict[str, Any], tool_context: ToolContext
-    ) -> dict[str, Any]:
-        """data-mcp's skill text for one call, or the refusal's message.
+    async def read_skill(arguments: dict[str, Any], tool_context: ToolContext) -> dict[str, Any]:
+        """data-mcp's `get_skill` text for one call, or the refusal's message.
 
         A call that does not complete, `compiler.surface`'s per-tool timeout or
         an unreachable data-mcp, is an error the model may retry, as
         `planner.skills` answers the planner, so the turn goes on. One its
         raise site marked not `retryable` answers as a server with no skills.
         """
-        spent = _spend(tool_context, tool.name)
+        reads_file = "path" in arguments
+        spent = _spend(
+            tool_context,
+            "get_skill_file" if reads_file else "get_skill",
+            named="get_skill reading a file" if reads_file else "get_skill reading a first page",
+        )
         if spent:
             return spent
         if surface is None:
@@ -2622,10 +2787,10 @@ def build_orchestrator_tools(
                 HarnessCode.TOOL_NOT_CONFIGURED, "skills are not available on this server"
             )
         try:
-            result = await surface.call_tool(tool=tool, arguments=arguments)
+            result = await surface.call_tool(tool=GET_SKILL, arguments=arguments)
         except ToolSurfaceUnavailableError as exc:
             logger.warning(
-                "orchestrator %s(%s) did not complete: %s", tool.name, dict(arguments), exc
+                "orchestrator %s(%s) did not complete: %s", GET_SKILL.name, dict(arguments), exc
             )
             if not exc.retryable:
                 return _failed(
@@ -2633,7 +2798,7 @@ def build_orchestrator_tools(
                 )
             return _failed(
                 HarnessCode.TRANSIENT_UNAVAILABLE,
-                f"{tool.name} could not reach data-mcp just now. Call it again, or answer "
+                f"{GET_SKILL.name} could not reach data-mcp just now. Call it again, or answer "
                 "without this skill.",
                 retry_mode=RetryMode.RETRY_AFTER_DELAY,
             )
@@ -2644,31 +2809,35 @@ def build_orchestrator_tools(
             )
         return {"skill": result.text}
 
-    async def get_skill(skill_id: str, tool_context: ToolContext) -> dict[str, Any]:
+    async def get_skill(
+        skill_id: Annotated[str, Field(description="The id of a skill a search result named.")],
+        tool_context: ToolContext,
+        path: Annotated[
+            str | None,
+            Field(
+                description="A file's path exactly as the list gives it, or SKILL.md. A file "
+                "refused as not found is not retried under a guessed path."
+            ),
+        ] = None,
+        offset: Annotated[
+            int, Field(description="Where a page starts: 0, or the offset a closing line names.")
+        ] = 0,
+        digest: Annotated[
+            str | None, Field(description="The digest a closing line names, on a continuation.")
+        ] = None,
+    ) -> dict[str, Any]:
         """Load a skill a search result named: the definitions, caveats and
         methods an answer in its domain rests on. Returns the first page of
-        the skill's text, then the files it links. A page that stops short
-        closes with the get_skill_file call that reads on."""
-        return await read_skill(GET_SKILL, {"skill_id": skill_id}, tool_context)
-
-    async def get_skill_file(
-        skill_id: str,
-        path: str,
-        tool_context: ToolContext,
-        offset: int = 0,
-        digest: str | None = None,
-    ) -> dict[str, Any]:
-        """Read one file of a skill get_skill loaded, or the next page of one.
-
-        `path` is a file exactly as get_skill lists it, or SKILL.md. A page
-        that stops short of the end closes with a line naming the next call,
-        with its `offset` and `digest`; make that call to read on. A file
-        refused as not found is not retried under a guessed path.
-        """
-        arguments: dict[str, Any] = {"skill_id": skill_id, "path": path, "offset": offset}
+        the skill's text and the files it links, or with `path` one of those
+        files, a page at a time."""
+        arguments: dict[str, Any] = {"skill_id": skill_id}
+        if path is not None:
+            arguments["path"] = path
+        if offset:
+            arguments["offset"] = offset
         if digest is not None:
             arguments["digest"] = digest
-        return await read_skill(GET_SKILL_FILE, arguments, tool_context)
+        return await read_skill(arguments, tool_context)
 
     async def explain_dfo() -> dict[str, Any]:
         """What the Development Finance Observatory is and what this assistant
@@ -2798,7 +2967,6 @@ def build_orchestrator_tools(
                 ask_user,
                 plan,
                 get_skill,
-                get_skill_file,
                 explain_dfo,
                 recall,
                 remove_cards_tool,

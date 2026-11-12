@@ -118,13 +118,6 @@ def test_the_time_description_lists_exactly_the_forms_the_door_binds() -> None:
     assert all(f"'{form}'" in description for form in TIME_FORMS)
 
 
-def test_the_unit_description_leaves_the_measure_to_search() -> None:
-    description = SearchPart.model_json_schema()["properties"]["unit"]["description"]
-
-    assert "only if the user named it" in description
-    assert not {"gross", "net", "commitments", "disbursements"} & set(description.lower().split())
-
-
 def test_to_wire_request_with_no_parts_sends_the_raw_text_door() -> None:
     wire = to_wire_request(None, raw_query="ODA to Kenya from all official donors")
 

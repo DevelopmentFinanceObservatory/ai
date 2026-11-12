@@ -77,8 +77,8 @@ from harness.graph.answer import (
     stored_run_plan,
 )
 from harness.graph.delivery import Delivery, deliver
+from harness.graph.interfaces import Executor
 from harness.graph.plan_done import HandBack, StepSummary
-from harness.graph.seams import Executor
 from harness.plan_display import share_wholes
 from harness.tool_contracts import HarnessCode
 

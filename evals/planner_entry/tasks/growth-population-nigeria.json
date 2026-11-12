@@ -5,7 +5,6 @@
   "question": "How many people did Nigeria's population grow by between 2000 and 2023?",
   "searches": [
     {
-      "query": "How many people did Nigeria's population grow by between 2000 and 2023?",
       "parts": [
         {
           "variable": "population",

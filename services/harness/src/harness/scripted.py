@@ -1,18 +1,23 @@
-"""Deterministic stand-ins for the studio's seams, for tests and the scripted eval.
+"""Deterministic stand-ins for the studio's injected dependencies, for tests and the scripted eval.
 
 Each answers from fixed data with no LLM, no MCP call and no upstream:
 `ScriptedExecutor` (the agent's and the canvas's tool calls),
 `ScriptedPlannerModel` (the planner), `ScriptedSurface` (an approved
 plan's steps) and `scripted_publish_result` (the completion gate's
 publisher). Every frame is the one Kenyan life-expectancy series.
-`use_compiled_proposals` gives a real planner a `propose_plan` that declares
-the plan already on record ready, for a scripted planner model that drives no
+
+A real planner runs on a scripted model through `scripted_client`, a
+google-genai client whose streamed calls answer from a script, which
+`harness.planner_adapter.PlannerAdapter` takes as its `client`.
+`use_compiled_proposals` gives the planner's tools a `propose_plan` that
+declares the plan already on record ready, for a script that drives no
 translation.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from common.materialisation import FrameRef
@@ -27,12 +32,13 @@ from compiler.surface import (
 )
 from executor.completion import FramePublished
 from google.adk import Context
-from google.adk.agents import LlmAgent
-from google.adk.tools.function_tool import FunctionTool
-from google.adk.tools.tool_context import ToolContext
-from planner.agent import AdkCall, end_run_when_ready
+from google.genai import Client, types
+from planner.call import PlannerCall
 from planner.plan import load_plan, plan_revision
+from planner.specs import PROPOSE_PLAN
 from planner.tool_results import ok
+from planner.tool_spec import ToolSpec
+from planner.tools import EndRun, ready_and_end
 from planner.workflow import ToolId
 
 from harness.decision_pick import DecisionPick
@@ -243,35 +249,119 @@ class ScriptedExecutor:
         raise ValueError(f"no scripted answer for {tool!r}")
 
 
-def use_compiled_proposals(agent: LlmAgent) -> None:
-    """Replace `agent`'s `propose_plan` with one that records nothing and
+def _compiled_proposal(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
+    del arguments
+    plan = load_plan(call.state)
+    assert plan is not None, "use_compiled_proposals needs a plan on record"
+    answer = ok(
+        status=plan.status.value,
+        version=plan.version,
+        previous_version=plan.previous_version,
+        question=plan.question,
+        translation=ok(),
+    )
+    return ready_and_end(answer, call, end_run)
+
+
+def use_compiled_proposals(specs: Sequence[ToolSpec]) -> tuple[ToolSpec, ...]:
+    """`specs` with `propose_plan` replaced by one that records nothing and
     answers as a proposal whose translation compiled the plan on record.
 
-    The answer goes through `planner.agent.end_run_when_ready`, so a plan on
-    record that is `PENDING_APPROVAL` is declared ready and ends the run, as
-    a compiled proposal does, and any other is refused under `submission`.
+    The replacement declares no arguments and no description. Its answer goes
+    through `planner.tools.ready_and_end`, so a plan on record that is
+    `PENDING_APPROVAL` is declared ready and ends the run, as a compiled
+    proposal does, and any other is refused under `submission`.
     """
+    compiled = ToolSpec(name=PROPOSE_PLAN, description="", parameters=(), body=_compiled_proposal)
+    return tuple(compiled if spec.name == PROPOSE_PLAN else spec for spec in specs)
 
-    def propose_plan(tool_context: ToolContext) -> dict[str, object]:
-        plan = load_plan(tool_context.state)
-        assert plan is not None, "use_compiled_proposals needs a plan on record"
-        answer = ok(
-            status=plan.status.value,
-            version=plan.version,
-            previous_version=plan.previous_version,
-            question=plan.question,
-            translation=ok(),
+
+@dataclass(frozen=True)
+class ModelRequest:
+    """One streamed model call as `scripted_client` received it."""
+
+    model: str
+    contents: list[types.Content]
+    config: types.GenerateContentConfig
+
+    @property
+    def system_text(self) -> str:
+        """The system instruction's text, in whichever shape it was sent. The
+        planner sends a string (`harness.planner_model._in_canonical_form`)."""
+        return instruction_text(self.config.system_instruction)
+
+
+def instruction_text(instruction: object) -> str:
+    """The text of a request's system instruction, in any shape google-genai
+    takes it: a string, a `Content` or a `Part`, each also as the plain dict
+    google-genai validates into one (Pydantic AI builds its instruction as a
+    dict), or a list of them. The parts' texts are joined with nothing
+    between them, as the model reads one part after the next. Anything else
+    reads as no text."""
+    match instruction:
+        case str():
+            return instruction
+        case types.Content() | types.Part():
+            return instruction_text(instruction.model_dump(exclude_none=True))
+        case {"parts": list() as parts}:
+            return instruction_text(parts)
+        case {"text": str() as text}:
+            return text
+        case list():
+            return "".join(instruction_text(item) for item in instruction)
+        case _:
+            return ""
+
+
+# What a scripted client answers a model call with.
+type ScriptedAnswer = Callable[[ModelRequest], types.Part]
+
+
+def scripted_client(answer: ScriptedAnswer) -> Client:
+    """A google-genai client whose every streamed call answers with `answer(request)`.
+
+    The answer streams as one chunk, a model turn of that one part finished with
+    `STOP` and no usage. Everything else a model class reads off a client is a
+    real `Client`'s, so the planner takes it as `harness.planner_adapter.PlannerAdapter`'s
+    `client`, and an ADK model as `Gemini(client=...)`, each driven by one
+    script over the requests it puts on the wire.
+    """
+    client = Client(api_key="scripted")
+
+    async def stream(
+        *,
+        model: str,
+        contents: types.ContentListUnion | types.ContentListUnionDict,
+        config: types.GenerateContentConfigOrDict | None = None,
+    ) -> AsyncIterator[types.GenerateContentResponse]:
+        # The planner sends a list of contents. Any other form fails validation here.
+        listed = contents if isinstance(contents, list) else [contents]
+        request = ModelRequest(
+            model=model,
+            contents=[types.Content.model_validate(content) for content in listed],
+            config=types.GenerateContentConfig.model_validate(config or {}),
         )
-        return end_run_when_ready(answer, AdkCall(tool_context))
+        return _one_chunk(answer(request))
 
-    agent.tools = [
-        FunctionTool(propose_plan) if getattr(tool, "name", None) == "propose_plan" else tool
-        for tool in agent.tools
-    ]
+    # The client is this function's own, so its one streaming method is replaced
+    # outright. ty reads the assignment as one over the unbound method.
+    client.aio.models.generate_content_stream = stream  # ty: ignore[invalid-assignment]
+    return client
+
+
+async def _one_chunk(part: types.Part) -> AsyncIterator[types.GenerateContentResponse]:
+    yield types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                content=types.Content(role="model", parts=[part]),
+                finish_reason=types.FinishReason.STOP,
+            )
+        ]
+    )
 
 
 class ScriptedPlannerModel:
-    """A `PlannerModel` seam with no model.
+    """A `PlannerModel` with no model.
 
     Drafts the canned plan `harness.scripted_plan.scripted_plan` builds. A
     re-entry -- a replan after a refusal, or a user amendment -- redrafts the
@@ -294,7 +384,7 @@ class ScriptedPlannerModel:
         pick: DecisionPick | None = None,
     ) -> dict[str, Any]:
         # Nothing to report and nothing to run through the workflow's
-        # session: this seam has no model round trips to relay and no
+        # session: this planner has no model round trips to relay and no
         # agent to host via `ctx.run_node`. It drafts the same canned plan
         # whatever the readings name.
         del ctx, readings, refusal, amendment, canvas_digest, conversation_digest, on_progress

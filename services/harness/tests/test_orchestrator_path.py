@@ -66,7 +66,7 @@ from harness.graph.state import (
 )
 from harness.graph.workflow import planner_entry
 from harness.orchestrator_tools import HANDED_OFF, build_orchestrator_tools
-from harness.planner_seam import PlannerSeam, PlannerSeamError
+from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
 from harness.provenance import ProvenanceStore
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface, scripted_publish_result
 from harness.sentences import DECLINE_REASONS
@@ -75,7 +75,6 @@ from harness.studio_translate import _RecordingSurface
 from harness.tool_contracts import HarnessCode
 from harness.turn_records import PlanAsk, PlanRecord, SearchReading, WindowReading
 from harness.wiring import handing_back_planner_failures
-from planner.agent import AdkCall
 from planner.call import CallSession
 from planner.plan import (
     ASK_BREAKDOWNS_STATE_KEY,
@@ -88,8 +87,8 @@ from planner.plan import (
     UnsupportedOperation,
     load_asks,
 )
+from planner.session import SessionCall
 
-from .context_probe import RecordingLlm
 from .orchestrator_fakes import (
     CannedSearch,
     FailingPlanner,
@@ -120,6 +119,7 @@ from .orchestrator_fakes import (
     turn_body,
     visited_nodes,
 )
+from .scripted_genai import ScriptedGenai, reply, text_part
 
 
 class AskingPlanner(ScriptedPlannerModel):
@@ -660,7 +660,7 @@ async def test_a_count_and_prices_picked_together_name_the_one_reading_with_both
     session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
     assert session is not None
     tool_context = SimpleNamespace(state=session.state, function_call_id=None, session=session)
-    chosen = CallSession(AdkCall(cast(Any, tool_context))).elected_spec_ids()
+    chosen = CallSession(SessionCall.of(cast(Any, tool_context))).elected_spec_ids()
     assert {spec_id for spec_id in chosen if spec_id.startswith("spec_")} == elected
 
 
@@ -931,7 +931,7 @@ async def test_each_plan_call_holds_the_planner_to_its_own_asks_alone():
     assert session.state.get(ASKS_ACROSS_YEARS_STATE_KEY) is None
 
 
-async def test_a_planner_seam_failure_is_handed_back_when_wrapped_and_fatal_when_not():
+async def test_a_planner_adapter_failure_is_handed_back_when_wrapped_and_fatal_when_not():
     runner, model = orchestrator_runner(
         call("plan", brief="Kenya's debt", asks=["Kenya's debt"]),
         types.Part.from_text(text="Could not be calculated."),
@@ -942,8 +942,8 @@ async def test_a_planner_seam_failure_is_handed_back_when_wrapped_and_fatal_when
     events = await run_turn(runner, types.UserContent("Kenya's debt?"))
 
     assert (
-        "The planner could not make a plan: the planner seam ran past 60 events without settling"
-        in request_text(model.requests[-1])
+        "The planner could not make a plan: a plan that is draft was declared ready, not "
+        "pending_approval; refusing to report it ready" in request_text(model.requests[-1])
     )
     assert not [e for e in events if e.error_code]
     # The failure's code travels with the status that fails the plan's step.
@@ -958,7 +958,7 @@ async def test_a_planner_seam_failure_is_handed_back_when_wrapped_and_fatal_when
         call("plan", brief="Kenya's debt", asks=["Kenya's debt"]), planner=FailingPlanner()
     )
     await open_session(bare)
-    with pytest.raises(PlannerSeamError):
+    with pytest.raises(PlannerAdapterError):
         await run_turn(bare, types.UserContent("Kenya's debt?"))
 
 
@@ -1083,7 +1083,7 @@ async def test_an_answer_no_call_waits_on_is_refused_and_not_read_as_a_seed(answ
 
 async def test_a_tool_that_raises_answers_the_agent_with_its_class_and_the_turn_goes_on(caplog):
     runner, model = orchestrator_runner(
-        call("search", query="Kenya's GDP?", parts=[{"variable": "GDP"}]),
+        call("search", parts=[{"variable": "GDP"}]),
         types.Part.from_text(text="Search failed, so I cannot give Kenya's GDP."),
         resolver=_breaking_resolver,
     )
@@ -1178,7 +1178,7 @@ async def test_a_searched_and_approved_turn_copies_no_large_container_it_reads(
 
     monkeypatch.setattr(State, "_take_snapshot", spy)
     runner, _ = orchestrator_runner(
-        search_call("Kenya debt service", "debt service"),
+        search_call("debt service"),
         call(
             "plan",
             brief="Kenya's debt service since 2015",
@@ -2076,26 +2076,29 @@ async def test_a_hand_back_is_still_in_view_after_a_later_pause():
 
 
 async def test_a_second_plan_call_runs_a_planner_that_never_sees_the_first_hand_back():
-    seam = PlannerSeam(
-        settings=Settings(),
-        surface=FixtureSurface(schemas=[]),
+    # The planner's model answers each run with text, which ends it with no plan.
+    scripted = ScriptedGenai([reply(text_part("done"))] * 2)
+    adapter = PlannerAdapter(
+        settings=Settings(), surface=FixtureSurface(schemas=[]), client=scripted.client
     )
-    planner_llm = RecordingLlm(script=[], agent_name="planner", scenario="replan")
-    seam._agent.model = planner_llm
     runner, model = orchestrator_runner(
         call("plan", brief="Kenya's debt, first brief", asks=["Kenya's debt, first brief"]),
         call("plan", brief="Kenya's debt, second brief", asks=["Kenya's debt, second brief"]),
         types.Part.from_text(text="Could not be calculated."),
-        planner=handing_back_planner_failures(seam),
+        planner=handing_back_planner_failures(adapter),
     )
     await open_session(runner)
 
     events = await run_turn(runner, types.UserContent("Kenya's debt?"))
 
     hand_back = "The planner could not make a plan"
-    second_run = [r for r in planner_llm.captured if "second brief" in request_text(r)]
+    planner_texts = [
+        "\n".join(part.text or "" for content in r.content_list for part in content.parts or [])
+        for r in scripted.requests
+    ]
+    second_run = [text for text in planner_texts if "second brief" in text]
     assert second_run
-    assert not [r for r in second_run if hand_back in request_text(r)]
+    assert not [text for text in second_run if hand_back in text]
     assert hand_back in request_text(model.requests[-1])
     assert not quotes_another_agent(model.requests[-1])
     # The hand-back's branch stays on the hand-back: the graph's own events
@@ -2629,7 +2632,7 @@ async def test_a_plain_text_turn_streams_the_agents_answer_over_the_studio_route
 async def test_a_search_fetch_and_chart_turn_lands_a_card_over_the_studio_routes():
     search = CannedSearch(definite_envelope())
     app, model = orchestrator_app(
-        search_call("life expectancy in Kenya", "life expectancy"),
+        search_call("life expectancy"),
         fetch_call(),
         make_charts_call(chart(frame_for())),
         types.Part.from_text(text="Life expectancy in Kenya rose to 62 years."),
@@ -2639,7 +2642,9 @@ async def test_a_search_fetch_and_chart_turn_lands_a_card_over_the_studio_routes
     async with studio_client(app) as client:
         frames = await stream(client, "/api/studio/turn", turn_body("Life expectancy in Kenya?"))
 
-    assert [c["question"] for c in search.calls] == ["life expectancy in Kenya"]
+    assert [(c["question"], c["parts"]) for c in search.calls] == [
+        (None, [{"variable": "life expectancy"}])
+    ]
     tools = [f.get("tool") for f in frames if f["event"] == "activity.step"]
     assert {"search", "fetch", "make_charts", "write_component"} <= set(tools)
     created = [f for f in frames if f["event"] == "component.created"]

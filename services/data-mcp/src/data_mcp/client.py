@@ -581,7 +581,7 @@ class UpstreamClient:
 
         `headers` carries the call's own auth headers, so the probe
         authenticates as the call it diagnoses. An unauthenticated probe would
-        answer 401 rather than 404 once the auth seam is filled, and read as
+        answer 401 rather than 404 once the auth provider is set, and read as
         "the surface is fine".
 
         A failed probe returns the original error untouched. This exists to

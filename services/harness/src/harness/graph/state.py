@@ -406,8 +406,8 @@ _PENDING_ACTION = TypeAdapter(Annotated[PendingAsk | PendingPlan, Field(discrimi
 # `invalid_arguments` counts the calls of any tool refused for malformed
 # arguments, which spend nothing of the tool's own budget.
 BUDGETS = {
-    # The first search, a corrected place, and one raw-text search for each
-    # part the first left unanswered.
+    # The first search, a corrected place, and one `text` search for each
+    # part whose result carried `retry_with_text`.
     "search": MAX_PARTS + 2,
     "fetch": 6,
     "make_charts": 5,
@@ -415,7 +415,7 @@ BUDGETS = {
     "ask_user": 2,
     "plan": 1,
     "get_skill": 2,
-    # A file a skill links, or the next page of a long one.
+    # `get_skill` with a `path`: a file a skill links, or the next page of a long one.
     "get_skill_file": 4,
     "recall": 3,
     # recall(part="canvas") with no component: the canvas listing.
@@ -562,7 +562,7 @@ def store_search(
 
     A spec_id a part holds as its own keeps that part's block and warnings
     against a later part offering it as a candidate, since a pin of it is
-    one of the search that settled on it (`harness.planner_seam`, which
+    one of the search that settled on it (`harness.planner_adapter`, which
     reads both for the pin). Between blocks no search settled, or two
     searches that each settled it, `planner.plan.with_blocks` decides.
     """

@@ -1,0 +1,24 @@
+[
+  [
+    [
+      "part",
+      {
+        "function_call": {
+          "id": "p1",
+          "args": {},
+          "name": "propose_plan"
+        }
+      }
+    ],
+    [
+      "answer",
+      "propose_plan",
+      "p1",
+      {
+        "outcome": "invalid_input",
+        "code": "invalid_plan",
+        "message": "Invalid plan data: a first draft states the `question` it answers and the `answer_mode` it answers under"
+      }
+    ]
+  ]
+]

@@ -23,7 +23,7 @@ manifest and the turn records persist across turns in the store. Cross-turn
 context reaches the models as DIGESTS seeded into each turn's session
 state: the canvas digest (block titles + fact summaries) and the
 conversation digest (the newest turn records); anything past their bounds
-is served on demand by the recall seam (`make_recall_part`). Interrupts resume
+is served on demand by the recall function (`make_recall_part`). Interrupts resume
 the current turn's session.
 """
 
@@ -65,7 +65,7 @@ from harness.conversation import (
 )
 from harness.decision_pick import is_decision_choice
 from harness.early_mint import EarlyMints
-from harness.graph.seams import Executor
+from harness.graph.interfaces import Executor
 from harness.graph.state import (
     AGENT_NAME,
     APPLY_CHOICE_STATE_KEY,

@@ -37,7 +37,7 @@ compiler, translator and executor suites alike.
 the root-agent mode check, or the contents a second turn would carry -- rather
 than restating ADK's rules and hoping they hold. `running_lifespan` and
 `mounted_mcp_transport` drive the composed FastAPI app's lifespan by hand and
-reach a mounted MCP server through it, for tests that cross the seam between
+reach a mounted MCP server through it, for tests that cross the boundary between
 services. All are fixtures rather than importable helpers because a test module
 importing its own conftest by name is ambiguous when the workspace root has one
 too.

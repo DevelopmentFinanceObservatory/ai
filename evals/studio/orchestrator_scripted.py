@@ -1,14 +1,15 @@
-"""The studio, scripted: real workflow, real planner seam, no model.
+"""The studio, scripted: real workflow, real planner adapter, no model.
 
 This module builds the studio `harness.server` serves and replaces only what
 a model or an upstream would answer:
 
 - the orchestrator agent's model answers from a script of tool calls and
   text, one entry per model call, across every turn of a case;
-- the planner is the real `harness.planner_seam.PlannerSeam`. Its model
-  either proposes the canned plan `harness.scripted_plan` builds, through a
-  `propose_plan` that declares the plan on record ready
-  (`harness.scripted.use_compiled_proposals`), so the seam renders its real
+- the planner is the real `harness.planner_adapter.PlannerAdapter`, its model
+  calls answered by a scripted google-genai client
+  (`harness.scripted.scripted_client`). Its model either proposes the canned plan `harness.scripted_plan` builds,
+  through a `propose_plan` that declares the plan on record ready
+  (`harness.scripted.use_compiled_proposals`), so the adapter renders its real
   first message and the workflow's approval, execution and hand-back nodes
   run as served, or, when the case scripts it (`planner`),
   answers from that script and drives the real `propose_plan`, whose
@@ -28,7 +29,7 @@ routes (`create_studio_router`), the surface a browser uses.
 from __future__ import annotations
 
 import copy
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -41,19 +42,19 @@ from data_mcp.server import mcp as data_mcp
 from executor.ledger import InMemoryRunLedger
 from executor.run import no_label_refs
 from fastapi import FastAPI
-from google.adk import Context
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
 from google.adk.sessions import InMemorySessionService
-from google.adk.tools.base_tool import BaseTool
 from google.genai import types
 from harness.graph.workflow import create_root_workflow
 from harness.orchestrator_tools import build_orchestrator_tools
-from harness.planner_seam import PlannerSeam
+from harness.planner_adapter import PlannerAdapter
 from harness.scripted import (
     SCRIPTED_SPEC,
+    ModelRequest,
     ScriptedExecutor,
     ScriptedSurface,
+    scripted_client,
     scripted_publish_result,
     use_compiled_proposals,
 )
@@ -64,7 +65,10 @@ from harness.tool_contracts import ResolverError, resolver_digest
 from harness.wiring import handing_back_planner_failures
 from orchestrator.agent import create_orchestrator_agent
 from planner.plan import Plan, SessionState, save_plan
+from planner.specs import planner_specs
+from planner.tool_spec import ToolSpec
 from pydantic import Field
+from translator.tool import build_translate
 
 # What a model says once its script runs out. The run records the exhaustion
 # (`Log.exhausted`) and reports the case as under-scripted, so a turn nothing
@@ -80,10 +84,11 @@ class Log:
     A request entry is `{"kind": "request", "agent": ..., "system": str,
     "contents": [Content as JSON]}`; a call entry is `{"kind": "call",
     "layer": "step" | "executor", "tool": ..., "arguments": ..., "outcome":
-    "ok" | "refused", "code": ...}`, and one from a scripted planner's own tool
-    call carries `"layer": "planner"`, the tool's own `outcome` and its whole
-    `response`; a `{"kind": "turn", "index": n}` marker opens each message
-    turn.
+    "ok" | "refused", "code": ...}`, and one from a scripted planner's tool
+    call carries `"layer": "planner"`, no arguments, and the `outcome`, `code`
+    and whole `response` of the answer the model receives
+    (`planner_tool_answered`); a `{"kind": "turn", "index": n}` marker opens
+    each message turn.
     """
 
     def __init__(self) -> None:
@@ -93,16 +98,30 @@ class Log:
     def mark_turn(self, index: int) -> None:
         self.entries.append({"kind": "turn", "index": index})
 
-    def record_request(self, agent: str, request: Any) -> None:
-        instruction = request.config.system_instruction if request.config else None
+    def planner_tool_answered(self, tool: str, answer: dict[str, Any] | None) -> None:
+        """Record a planner tool call by the answer the model receives for it: the
+        tool's own, an argument refusal, or the adapter's answer for a tool that
+        raised (`PlannerAdapter`'s `on_tool_answered`)."""
+        response = answer or {}
+        self.entries.append(
+            {
+                "kind": "call",
+                "layer": "planner",
+                "tool": tool,
+                "outcome": response.get("outcome"),
+                "code": response.get("code"),
+                "response": copy.deepcopy(response),
+            }
+        )
+
+    def record_request(self, agent: str, *, system: str, contents: Sequence[types.Content]) -> None:
         self.entries.append(
             {
                 "kind": "request",
                 "agent": agent,
-                "system": instruction if isinstance(instruction, str) else "",
+                "system": system,
                 "contents": [
-                    content.model_dump(mode="json", exclude_none=True)
-                    for content in request.contents
+                    content.model_dump(mode="json", exclude_none=True) for content in contents
                 ],
             }
         )
@@ -126,7 +145,12 @@ class OrchestratorLlm(BaseLlm):
         self, llm_request: Any, stream: bool = False
     ) -> AsyncGenerator[LlmResponse]:
         del stream
-        self.log.record_request("orchestrator", llm_request)
+        instruction = llm_request.config.system_instruction if llm_request.config else None
+        self.log.record_request(
+            "orchestrator",
+            system=instruction if isinstance(instruction, str) else "",
+            contents=llm_request.contents,
+        )
         if self.script:
             part = self.script.pop(0)
         else:
@@ -135,8 +159,9 @@ class OrchestratorLlm(BaseLlm):
         yield LlmResponse(content=types.Content(role="model", parts=[part]))
 
 
-class PlannerLlm(BaseLlm):
-    """The planner's model: it proposes the plan it was handed, once per entry.
+class OfferedPlans:
+    """The planner's model when the case scripts none: it proposes the plan it
+    was handed, once per entry.
 
     The plan is written into the session's planner state the way a translated
     `propose_plan` leaves a compiled plan there, then a `propose_plan` call
@@ -144,85 +169,50 @@ class PlannerLlm(BaseLlm):
     generation closes the run.
     """
 
-    model: str = "planner-script"
-    log: Any = None
-    state: Any = None
-    offered: Any = None
+    def __init__(self, *, log: Log) -> None:
+        self._log = log
+        self._state: SessionState | None = None
+        self._offered: Plan | None = None
 
     def offer(self, state: SessionState, plan: Plan) -> None:
-        self.state = state
-        self.offered = plan
+        self._state = state
+        self._offered = plan
 
-    async def generate_content_async(
-        self, llm_request: Any, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse]:
-        del stream
-        self.log.record_request("planner", llm_request)
-        plan, self.offered = self.offered, None
-        if plan is None:
-            part = types.Part.from_text(text=_EXHAUSTED_TEXT)
-        else:
-            save_plan(self.state, plan)
-            part = types.Part.from_function_call(name="propose_plan", args={})
-        yield LlmResponse(content=types.Content(role="model", parts=[part]))
+    def __call__(self, request: ModelRequest) -> types.Part:
+        self._log.record_request("planner", system=request.system_text, contents=request.contents)
+        plan, self._offered = self._offered, None
+        if plan is None or self._state is None:
+            return types.Part.from_text(text=_EXHAUSTED_TEXT)
+        save_plan(self._state, plan)
+        return types.Part.from_function_call(name="propose_plan", args={})
 
 
-class ScriptedPlannerLlm(BaseLlm):
+class PlannerScript:
     """The planner's model from the case's `planner` script, one part per model call."""
 
-    model: str = "planner-script"
-    script: list[types.Part] = Field(default_factory=list)
-    log: Any = None
+    def __init__(self, *, script: list[types.Part], log: Log) -> None:
+        self._script = script
+        self._log = log
 
-    async def generate_content_async(
-        self, llm_request: Any, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse]:
-        del stream
-        self.log.record_request("planner", llm_request)
-        if self.script:
-            part = self.script.pop(0)
-        else:
-            self.log.exhausted.append("planner")
-            part = types.Part.from_text(text=_EXHAUSTED_TEXT)
-        yield LlmResponse(content=types.Content(role="model", parts=[part]))
-
-
-def planner_tool_log(
-    log: Log,
-) -> Callable[[BaseTool, dict[str, Any], Context, dict[str, Any]], None]:
-    """An `after_tool_callback` recording each planner tool call and its response in `log`."""
-
-    def record(
-        tool: BaseTool, args: dict[str, Any], tool_context: Context, tool_response: dict[str, Any]
-    ) -> None:
-        del tool_context
-        response = tool_response if isinstance(tool_response, dict) else {}
-        log.entries.append(
-            {
-                "kind": "call",
-                "layer": "planner",
-                "tool": tool.name,
-                "arguments": copy.deepcopy(dict(args)),
-                "outcome": response.get("outcome"),
-                "code": response.get("code"),
-                "response": copy.deepcopy(response),
-            }
-        )
-
-    return record
+    def __call__(self, request: ModelRequest) -> types.Part:
+        self._log.record_request("planner", system=request.system_text, contents=request.contents)
+        if self._script:
+            return self._script.pop(0)
+        self._log.exhausted.append("planner")
+        return types.Part.from_text(text=_EXHAUSTED_TEXT)
 
 
 class ScriptedPairPlanner:
-    """`harness.graph.seams.PlannerModel` over the real `PlannerSeam` and a `PlannerLlm`.
+    """`harness.graph.interfaces.PlannerModel` over the real `PlannerAdapter` and `OfferedPlans`.
 
     A first draft offers `scripted_plan`; an amendment or a replan offers the
     next version of the plan the graph holds, as `harness.scripted.
     ScriptedPlannerModel` does.
     """
 
-    def __init__(self, *, seam: PlannerSeam, llm: PlannerLlm, spec_id: str) -> None:
-        self._seam = seam
-        self._llm = llm
+    def __init__(self, *, adapter: PlannerAdapter, plans: OfferedPlans, spec_id: str) -> None:
+        self._adapter = adapter
+        self._plans = plans
         self._spec_id = spec_id
 
     async def __call__(
@@ -234,8 +224,8 @@ class ScriptedPairPlanner:
             plan = plan.model_copy(
                 update={"version": prior_version + 1, "previous_version": prior_version}
             )
-        self._llm.offer(ctx.session.state, plan)
-        return await self._seam(ctx=ctx, question=question, prior_plan=prior_plan, **kwargs)
+        self._plans.offer(ctx.session.state, plan)
+        return await self._adapter(ctx=ctx, question=question, prior_plan=prior_plan, **kwargs)
 
 
 def search_envelope(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -309,11 +299,9 @@ class CannedResolver:
 
     def __init__(self, results: list[Mapping[str, Any]]) -> None:
         self._results = list(results)
-        self.questions: list[str] = []
 
-    async def __call__(self, *, question: str, **kwargs: Any) -> dict[str, Any]:
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
         del kwargs
-        self.questions.append(question)
         if not self._results:
             raise ResolverError("the case scripted no further search result")
         return resolver_digest(search_envelope(self._results.pop(0)))
@@ -447,6 +435,30 @@ async def _real_schemas() -> list[ToolSchema]:
     return _REAL_SCHEMAS
 
 
+def _planner_adapter(
+    settings: Settings,
+    *,
+    surface: ScriptedSurface,
+    answer: OfferedPlans | PlannerScript,
+    tools: Callable[[Sequence[ToolSpec]], Sequence[ToolSpec]] = tuple,
+    on_tool_answered: Callable[[str, dict[str, Any] | None], None] | None = None,
+) -> PlannerAdapter:
+    """The real adapter, built with `settings`, over `surface`, its model calls
+    answered by `answer`, its tools the ones the adapter builds for itself
+    (`planner.specs.planner_specs` over `surface` and its translation) as
+    `tools` changes them, and each tool's answer told to `on_tool_answered`."""
+    translate = build_translate(surface=surface)
+    specs = planner_specs(translate=translate, surface=surface)
+    return PlannerAdapter(
+        settings=settings,
+        surface=surface,
+        translate=translate,
+        specs=tools(specs),
+        client=scripted_client(answer),
+        on_tool_answered=on_tool_answered,
+    )
+
+
 def build_studio(
     scenario: Mapping[str, Any], *, log: Log
 ) -> tuple[FastAPI, OrchestratorLlm, CannedResolver]:
@@ -465,30 +477,26 @@ def build_studio(
         real_schemas=planner_script is not None,
     )
     if planner_script is None:
-        planner_llm = PlannerLlm(log=log)
-        seam = PlannerSeam(
-            settings=settings,
-            surface=surface,
+        plans = OfferedPlans(log=log)
+        adapter = _planner_adapter(
+            settings, surface=surface, answer=plans, tools=use_compiled_proposals
         )
-        seam._agent.model = planner_llm
-        use_compiled_proposals(seam._agent)
         planner = handing_back_planner_failures(
             ScriptedPairPlanner(
-                seam=seam, llm=planner_llm, spec_id=scenario.get("plan_spec_id", SCRIPTED_SPEC)
+                adapter=adapter, plans=plans, spec_id=scenario.get("plan_spec_id", SCRIPTED_SPEC)
             )
         )
     else:
-        seam = PlannerSeam(
-            settings=settings,
+        script = PlannerScript(script=[_part_from_step(step) for step in planner_script], log=log)
+        adapter = _planner_adapter(
+            settings,
             surface=CannedDataSurface(
                 log=log, searches=copy.deepcopy(scenario.get("translator_search") or [])
             ),
+            answer=script,
+            on_tool_answered=log.planner_tool_answered,
         )
-        seam._agent.model = ScriptedPlannerLlm(
-            script=[_part_from_step(step) for step in planner_script], log=log
-        )
-        seam._agent.after_tool_callback = [seam._after_planner_tool, planner_tool_log(log)]
-        planner = handing_back_planner_failures(seam)
+        planner = handing_back_planner_failures(adapter)
 
     def create_workflow(recorder: Any, surface_recorder: Any) -> Any:
         agent = create_orchestrator_agent(

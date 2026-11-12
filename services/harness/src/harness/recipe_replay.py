@@ -30,13 +30,16 @@ again on the data apis holds now:
    returned `anchor_key`. A tree of fixed periods makes no such call.
 4. The tree is walked from its roots up. Each node's verb is called with its
    recorded arguments and its inputs' new pairs. Before a call, the pair it would
-   mint is computed with analysis-mcp's own identity functions, and the call is
-   skipped when the store already holds that pair, as it does for a frame an
-   in-process verb computed. The store holds no frame dfo-apis' analysis runner
-   computed, so each such step is called, and the runner answers a step it
-   stored before from what it holds. Either way, a replay cut short is resumed
-   by the next one. Inputs of one node run at once,
-   at most `MAX_CONCURRENT_STEPS` calls at a time. Roots are minted one at a time.
+   mint is computed with analysis-mcp's own identity functions under the execution
+   identity apis' capabilities document names for its runner
+   (`runner_execution_identity`), and the call is skipped when the store already
+   holds that pair, as it does for a frame an in-process verb computed. Under an
+   apis that names no identity, no pair is computed and every verb is called. The
+   store holds no frame dfo-apis' analysis runner computed, so each such step is
+   called, and the runner answers a step it stored before from what it holds.
+   Either way, a replay cut short is resumed by the next one. Inputs of one node
+   run at once, at most `MAX_CONCURRENT_STEPS` calls at a time. Roots are minted
+   one at a time.
 5. The final frame's recipe is the one the runner stored with it, read from apis
    (`LiveApisClient.read_recipe`). A frame the store holds, which an in-process
    verb computed, has its recipe built from the store (`common.recipe.build_recipe`):
@@ -77,7 +80,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 import rfc8785
-from analysis_mcp.execution_identity import current_execution_identity
+from analysis_mcp.execution_identity import ExecutionIdentity
 from analysis_mcp.identity import (
     OpSpecIdentityError,
     mint_toolkit_content_version,
@@ -121,6 +124,7 @@ __all__ = [
     "ToolAnswer",
     "refusal_outcome",
     "replay_recipe",
+    "runner_execution_identity",
 ]
 
 logger = logging.getLogger(__name__)
@@ -381,6 +385,7 @@ class _Replay:
         store: MaterialisationStore,
         apis: LiveApisClient,
         row_budget: RowBudget,
+        execution_identity: ExecutionIdentity | None,
     ) -> None:
         self.tree = tree
         self.roots = roots
@@ -389,6 +394,7 @@ class _Replay:
         self.store = store
         self.apis = apis
         self.row_budget = row_budget
+        self.execution_identity = execution_identity
         self.root_frames: list[_Frame] = []
         # By each root's new pair: the options its mint sent, and the options the
         # stored recipe recorded for it.
@@ -674,9 +680,11 @@ class _Replay:
     ) -> FrameRef | None:
         """The pair calling `verb` with `arguments` would mint: the `ops_` id of the
         op-spec the arguments state, and the `ocv_` of that id, the inputs' content
-        versions and this build's execution identity. `None` when the arguments
-        state no valid op-spec, or an input's trace has left the store; the verb is
-        then called, and answers for itself."""
+        versions and the runner's execution identity. `None` when apis named no
+        identity, the arguments state no valid op-spec, or an input's trace has left
+        the store; the verb is then called, and answers for itself."""
+        if self.execution_identity is None:
+            return None
         versions: set[str] = set()
         for frame in inputs.values():
             version = frame.frame_content_version
@@ -694,7 +702,7 @@ class _Replay:
             content_version = mint_toolkit_content_version(
                 op_spec_hash=spec_id,
                 input_content_versions=versions,
-                execution_identity=current_execution_identity(),
+                execution_identity=self.execution_identity,
             )
         except (ValidationError, OpSpecIdentityError):
             return None
@@ -894,7 +902,8 @@ async def replay_recipe(
             `resolve_anchor`.
         store: The process's materialisation store, `common.materialisation.get_store()`.
         apis: The apis client. `find_replay` and `read_recipe` are called under
-            the datasets principal, and `list_versions`, which needs none.
+            the datasets principal, and `list_versions` and
+            `analysis_execution_identity`, which need none.
         publish: Publishes the final frame with its recipe.
         row_budget: The rows replays may hold at once. Each verb call claims its
             inputs' rows, `resolve_anchor` the roots', and the publish the final
@@ -931,6 +940,7 @@ async def replay_recipe(
             store=store,
             apis=apis,
             row_budget=row_budget,
+            execution_identity=await runner_execution_identity(apis),
         )
         return await _replayed(
             recipe,
@@ -942,6 +952,24 @@ async def replay_recipe(
         )
     except _Stopped as stopped:
         return stopped.outcome
+
+
+async def runner_execution_identity(apis: LiveApisClient) -> ExecutionIdentity | None:
+    """The execution identity dfo-apis' analysis runner computes with, as apis'
+    capabilities document names it (`LiveApisClient.analysis_execution_identity`).
+
+    `None` when apis names none, cannot be read, or names one that is not an
+    `ExecutionIdentity`, which is logged. A caller then predicts no pair or replay
+    key the runner would mint.
+    """
+    named = await apis.analysis_execution_identity()
+    if named is None:
+        return None
+    try:
+        return ExecutionIdentity(**named)
+    except ValidationError:
+        logger.warning("dfo-apis names an execution identity of fields %s", sorted(named))
+        return None
 
 
 def _names_its_groupby(record: MintRecord) -> bool:

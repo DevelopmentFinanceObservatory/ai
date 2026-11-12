@@ -11,9 +11,8 @@ that count. This module
 reads `planner.plan`, `planner.operations`, `planner.records`,
 `planner.shapes`, `planner.workflow` and `harness.sentences` only, so it can
 be written and tested before `harness.wire` carries the fields these rows
-fill, and it stays usable from `harness.wire`, `harness.studio_translate`
-and `planner.agent` alike without any of them importing each other through
-here.
+fill, and it stays usable from `harness.wire` and `harness.studio_translate`
+alike without either importing the other through here.
 
 The plan card reads its own shorter text: `card_rows` gives each step a
 short label naming its work and the steps it reads, keeps the detail in its

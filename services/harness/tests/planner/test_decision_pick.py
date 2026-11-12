@@ -1,6 +1,6 @@
 """A replan for the option the user picked on the plan card holds that pick.
 
-The planner seam records the pick for the entry (`planner.plan.
+The planner adapter records the pick for the entry (`planner.plan.
 DECISION_PICK_STATE_KEY`), with the scope the card gave the replan
 (`DecisionPick.on_card`, as `harness.decision_pick.decision_pick` reads it off the card). `propose_plan` admits a plan only when it keeps
 every other requirement exactly as the card had it, ids and citations
@@ -15,6 +15,7 @@ records of the user's words, since a pick is none.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
@@ -31,7 +32,6 @@ from google.genai import types
 from harness.decision_pick import decision_pick
 from harness.plan_display import decision_option_id
 from harness.studio_state import _turn_identities
-from planner.agent import build_planner_tools
 from planner.plan import (
     ASKS_STATE_KEY,
     DECISION_PICK_STATE_KEY,
@@ -53,11 +53,13 @@ from planner.plan import (
     windowed_pins,
 )
 from planner.records import GroupBy, RankAmong, RankDirection, Reduction
+from planner.specs import planner_tool_specs
 from planner.tool_results import Outcome, ProblemCode
 from translator.mechanical import build_translation
 
 from ..basis_alignment import HEALTH, TOTAL, provider_block
 from ..decision_drafts import drafts
+from ..planner_tools import call_planner_tool
 from ..session_events import response_event
 from .test_agent import (
     _CONSTANT_GROSS,
@@ -189,8 +191,8 @@ def _context() -> Any:
 
 
 def _propose_plan(ctx: Any, **arguments: Any) -> dict[str, Any]:
-    tools = {tool.name: tool for tool in build_planner_tools(reads_user_words=False)}
-    return tools["propose_plan"].func(**arguments, tool_context=ctx)
+    tools = {tool.name: tool for tool in planner_tool_specs()}
+    return call_planner_tool(tools["propose_plan"], **arguments, tool_context=ctx)
 
 
 def _recorded_dac_total(ctx: Any, decision: Callable[..., Decision]) -> dict[str, Any]:
@@ -914,7 +916,7 @@ def test_a_pick_replacing_a_shares_input_keeps_the_share_whatever_admission_deri
     )
     ctx = _FakeToolContext()
     _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL)
-    propose = _tools_by_name()["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
     card = propose(
         question="q",
         answer_mode=AnswerMode.COMPUTED,
@@ -982,7 +984,8 @@ def test_the_picked_share_proposed_with_no_pick_held_is_refused() -> None:
     ctx = _FakeToolContext()
     _show_blocks(ctx, _US_TOTAL)
 
-    result = _tools_by_name()["propose_plan"].func(
+    result = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="q",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([measure, part]),
@@ -1025,7 +1028,7 @@ def test_a_pick_both_sides_cite_leaves_no_share_of_itself_admitted() -> None:
     cited = {"decision_ids": ("measure", "year")}
     ctx = _FakeToolContext()
     _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL)
-    propose = _tools_by_name()["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
     card = propose(
         question="q",
         answer_mode=AnswerMode.COMPUTED,
@@ -1110,7 +1113,7 @@ def test_a_pick_on_another_decision_keeps_a_share_an_earlier_pick_made() -> None
     fourth = _dac_countries("fourth", _US_TOTAL).model_copy(update=cites_year)
     ctx = _FakeToolContext()
     _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL)
-    propose = _tools_by_name()["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
     card = propose(
         question="q",
         answer_mode=AnswerMode.COMPUTED,
@@ -1222,7 +1225,7 @@ def test_a_pick_rewriting_a_step_beneath_a_share_onto_its_denominator_is_refused
     )
     ctx = _FakeToolContext()
     _show_blocks(ctx, _US_MULTILATERAL, _US_TOTAL)
-    propose = _tools_by_name()["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
     card = propose(
         question="q",
         answer_mode=AnswerMode.COMPUTED,
@@ -1386,7 +1389,7 @@ async def test_a_pick_over_a_windowed_pin_cites_the_users_year_and_still_compile
     )
     ctx = _FakeToolContext()
     _show_block(ctx, _FRANCE_KENYA)
-    propose = _tools_by_name()["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
     token = current_recorded_identity.set(_turn_identities({_GROSS: _FRANCE_KENYA}, ()).get)
     try:
         card = propose(
@@ -1495,7 +1498,7 @@ def test_a_pick_asks_no_citation_of_a_scope_choice_admission_writes(pin: str) ->
         provider_block(HEALTH, narrow=True, active="provider:bilateral", provenance="explicit"),
         provider_block(TOTAL, narrow=False, active="provider:inclusive"),
     )
-    propose = _tools_by_name()["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
     card = propose(
         question="q",
         answer_mode=AnswerMode.SERIES,
@@ -1931,7 +1934,7 @@ def test_a_pick_replan_keeps_the_users_prices_choice(
     ctx = _FakeToolContext()
     _show_blocks(ctx, _offering_constant(), _constant_block())
     ctx.session.events = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
-    propose = _tools_by_name()["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
     card = propose(
         question="q",
         answer_mode=AnswerMode.SERIES,
@@ -2078,7 +2081,7 @@ def test_a_switch_of_the_prices_row_is_the_users_new_prices(
         if constant
         else aid("first")
     )
-    propose = _tools_by_name()["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
     card = propose(
         question="q",
         answer_mode=AnswerMode.SERIES,
@@ -2127,7 +2130,8 @@ def test_no_pick_is_built_for_a_scope_choice_admission_writes() -> None:
         ctx,
         provider_block(HEALTH, narrow=True, active="provider:bilateral", provenance="explicit"),
     )
-    card = _tools_by_name()["propose_plan"].func(
+    card = call_planner_tool(
+        _tools_by_name()["propose_plan"],
         question="q",
         answer_mode=AnswerMode.SERIES,
         decisions=drafts(
@@ -2210,7 +2214,7 @@ def test_a_refused_prices_switch_leaves_the_card_s_prices_for_the_next_pick() ->
     ctx = _FakeToolContext()
     _show_blocks(ctx, _FRANCE_KENYA)
     ctx.session.events = _prices_ask_events(pick="o1")
-    propose = _tools_by_name()["propose_plan"].func
+    propose = functools.partial(call_planner_tool, _tools_by_name()["propose_plan"])
     card = propose(
         question="q",
         answer_mode=AnswerMode.SERIES,

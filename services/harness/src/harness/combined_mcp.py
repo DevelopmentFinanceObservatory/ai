@@ -180,8 +180,8 @@ COMBINED_MCP_INSTRUCTIONS = (
 # harness calls both at `DATA_MCP_URL`
 # (`translator.discovery.resolve_definition`,
 # `harness.dfo_faq.read_catalogue_counts`). The harness also calls
-# `sum_of`, `quotient_of` and `get_skill_file`, whose work an outside client
-# reaches through `compare`, `share_of` and `get_skill` (`_MERGED_NAMES`), and
+# `sum_of` and `quotient_of`, whose work an outside client
+# reaches through `compare` and `share_of` (`_MERGED_NAMES`), and
 # `resolve_anchor`, which writes the `rolling` and `anchor_key` arguments the
 # public list leaves out (`analysis_mcp.server.PUBLIC_SHAPES`).
 HARNESS_ONLY_TOOLS = frozenset(
@@ -190,14 +190,13 @@ HARNESS_ONLY_TOOLS = frozenset(
         "catalogue_counts",
         "sum_of",
         "quotient_of",
-        "get_skill_file",
         "resolve_anchor",
     }
 )
 
-# Each harness-only name whose work a listed tool does, with that tool and the
-# `operation` that picks the form. A call to one refuses `tool_not_found` naming
-# the listed call.
+# Each name no tool carries whose work a listed tool does, with that tool and the
+# `operation` that picks the form, or `None` for `get_skill_file`, which `get_skill`
+# does with a `path`. A call to one refuses `tool_not_found` naming the listed call.
 _MERGED_NAMES: dict[str, tuple[str, str | None]] = {
     "sum_of": ("compare", "sum"),
     "quotient_of": ("share_of", "quotient"),

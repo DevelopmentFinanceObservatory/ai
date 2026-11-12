@@ -87,6 +87,13 @@ SECOND = version_of(SECOND_VALUES)
 
 _DESCRIPTION_PATH = re.compile(r"/api/datasets/[^/]+/[^/]+/description")
 DATASETS_CAPABILITIES = GATED_PREFIXES[DATASETS_PREFIX]
+# The execution identity of the runner `fixtures/runner_replies.json` was recorded
+# from, as apis' capabilities document names it.
+RUNNER_EXECUTION_IDENTITY = {
+    "engine_version": "0.9.1",
+    "frame_grammar_version": "1.2.0",
+    "reduction_policy_version": "0.2.0",
+}
 
 
 def problem(status: int, code: str, **members: object) -> httpx2.Response:
@@ -131,7 +138,8 @@ class FakeApis:
     every frame a verb of this test returned with its recipe: a recipe or replay
     key these dicts do not hold is read from it (`held_recipe`, `held_replay`),
     and a recipe it holds is kept in `recipes`. A pair `withhold` names holds no
-    recipe.
+    recipe. The capabilities document names `execution_identity` as its runner's,
+    and no identity when it is `None`.
     """
 
     def __init__(self, runner: Any = None) -> None:
@@ -143,6 +151,7 @@ class FakeApis:
         self.publish_answer: httpx2.Response | None = None
         self.runner = runner
         self.withheld: set[Pair] = set()
+        self.execution_identity: dict[str, str] | None = dict(RUNNER_EXECUTION_IDENTITY)
 
     def withhold(self, key: Pair) -> None:
         """Answer `key` as a frame stored without a recipe."""
@@ -174,24 +183,11 @@ class FakeApis:
     async def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(request)
         path = request.url.path
-        # The versions route is open to every caller and answers in one page here.
+        # The capabilities and versions routes are open to every caller.
+        if path == DATASETS_CAPABILITIES:
+            return self._capabilities()
         if path.endswith("/versions"):
-            spec_id = path.split("/")[-2]
-            return httpx2.Response(
-                200,
-                json={
-                    "schema_version": 1,
-                    "spec_id": spec_id,
-                    "versions": self.versions.get(spec_id, []),
-                    "next_cursor": None,
-                    "complete": True,
-                }
-                | (
-                    {}
-                    if self.enrichment_stamp is None
-                    else {"enrichment_stamp": self.enrichment_stamp}
-                ),
-            )
+            return self._versions(path.split("/")[-2])
         if request.headers.get(PRINCIPAL_HEADER) != PRINCIPAL:
             return problem(403, "publish_not_permitted")
         if path == "/api/datasets/frames/publish":
@@ -199,22 +195,52 @@ class FakeApis:
                 json.loads(gzip.decompress(request.content))
             )
         if path.startswith("/api/datasets/recipes/replays/"):
-            replayed = await self.held_replay(path.rsplit("/", 1)[1])
-            if replayed is None:
-                return problem(404, "recipe_not_found")
-            return httpx2.Response(
-                200, json={"spec_id": replayed[0], "content_version": replayed[1]}
-            )
+            return await self._replay(path.rsplit("/", 1)[1])
         if path.startswith("/api/datasets/frames/") and path.endswith("/recipe"):
             spec_id, content_version = path.split("/")[-3:-1]
             return await self._recipe((spec_id, content_version))
         raise AssertionError(f"unexpected call to {path}")
+
+    async def _replay(self, replay_key: str) -> httpx2.Response:
+        replayed = await self.held_replay(replay_key)
+        if replayed is None:
+            return problem(404, "recipe_not_found")
+        return httpx2.Response(200, json={"spec_id": replayed[0], "content_version": replayed[1]})
 
     async def _recipe(self, key: Pair) -> httpx2.Response:
         held = await self.held_recipe(key)
         if held is None:
             return problem(404, "recipe_not_found")
         return httpx2.Response(200, json=held)
+
+    def _versions(self, spec_id: str) -> httpx2.Response:
+        """The versions answer of `spec_id`, in one page."""
+        return httpx2.Response(
+            200,
+            json={
+                "schema_version": 1,
+                "spec_id": spec_id,
+                "versions": self.versions.get(spec_id, []),
+                "next_cursor": None,
+                "complete": True,
+            }
+            | (
+                {} if self.enrichment_stamp is None else {"enrichment_stamp": self.enrichment_stamp}
+            ),
+        )
+
+    def _capabilities(self) -> httpx2.Response:
+        """The capabilities document, as public and as long-lived as apis serves it."""
+        named = (
+            {}
+            if self.execution_identity is None
+            else {"analysis_execution_identity": self.execution_identity}
+        )
+        return httpx2.Response(
+            200,
+            json={"capability_version": "test", **named},
+            headers={"cache-control": "public, max-age=300"},
+        )
 
     def _publish(self, body: dict[str, Any]) -> httpx2.Response:
         key = (body["spec_id"], body["content_version"])

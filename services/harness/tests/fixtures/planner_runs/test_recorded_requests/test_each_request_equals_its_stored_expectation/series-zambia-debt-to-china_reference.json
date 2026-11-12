@@ -1,0 +1,93 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "What external debt stock did Zambia owe to China at the end of each year from 2010 to 2022?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "What external debt stock did Zambia owe to China at the end of each year from 2010 to 2022?",
+    "answer_mode": "series",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "debt",
+        "decision_ids": [],
+        "measure": "external debt stock",
+        "entities": [
+          {
+            "name": "China",
+            "role": "creditor"
+          },
+          {
+            "name": "Zambia",
+            "role": "debtor"
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2010,
+          "end": 2022
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": null,
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "Zambia's external debt stock owed to China, each year 2010 to 2022"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "debt"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

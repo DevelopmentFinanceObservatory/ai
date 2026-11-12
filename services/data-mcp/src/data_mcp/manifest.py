@@ -10,7 +10,7 @@ apis'. Reuse isn't an option regardless: upstream's `ArtifactEntryModel`
 requires `url` with no default and sets `extra="forbid"`, so there is no way
 to express "the same shape minus the URL" as a subset of it.
 
-`strip_manifest` is the public seam: validate a raw mint response through
+`strip_manifest` is the public entry point: validate a raw mint response through
 it and get back a `Manifest` with every artifact's URL gone and
 `artifact_digest` intact.
 """

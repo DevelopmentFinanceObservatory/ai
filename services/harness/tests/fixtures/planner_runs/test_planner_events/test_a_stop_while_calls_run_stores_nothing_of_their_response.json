@@ -1,0 +1,146 @@
+{
+  "events": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "How much aid did Ghana receive?"
+          }
+        ],
+        "role": "user"
+      },
+      "author": "user",
+      "actions": {
+        "state_delta": {},
+        "artifact_delta": {},
+        "requested_auth_configs": {},
+        "requested_tool_confirmations": {}
+      },
+      "node_info": {
+        "path": ""
+      },
+      "invocation": 0
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "adapter_test_wf@1/adapter_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_call": {
+              "id": "s1",
+              "args": {
+                "skill_id": "oda-dac2a"
+              },
+              "name": "get_skill"
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "state_delta": {}
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "adapter_test_wf@1/adapter_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_response": {
+              "id": "s1",
+              "name": "get_skill",
+              "response": {
+                "result": "The oda-dac2a page."
+              }
+            }
+          }
+        ],
+        "role": "user"
+      },
+      "state_delta": {
+        "planner:skill_page:oda-dac2a::0": "The oda-dac2a page.",
+        "planner:skills_read": [
+          {
+            "skill_id": "oda-dac2a",
+            "path": null,
+            "offset": 0
+          }
+        ]
+      }
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "adapter_test_wf@1/adapter_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "function_call": {
+              "id": "p1",
+              "args": {},
+              "name": "propose_plan"
+            }
+          },
+          {
+            "function_call": {
+              "id": "h1",
+              "args": {},
+              "name": "stuck"
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "state_delta": {}
+    }
+  ],
+  "steps": [
+    {
+      "kind": "message",
+      "call_id": null,
+      "args": null,
+      "body": {},
+      "name": null
+    },
+    {
+      "kind": "response",
+      "call_id": null,
+      "args": null,
+      "body": {
+        "result": "The oda-dac2a page."
+      },
+      "name": "get_skill"
+    }
+  ],
+  "frames": [
+    {
+      "event": "activity.step",
+      "seq": 0,
+      "step_id": "s0",
+      "label": "Checking the plan against the data",
+      "status": "running",
+      "detail": null,
+      "tool": null,
+      "produced": null,
+      "progress": null
+    }
+  ],
+  "state": {
+    "planner:skill_page:oda-dac2a::0": "The oda-dac2a page.",
+    "planner:skills_read": [
+      {
+        "skill_id": "oda-dac2a",
+        "path": null,
+        "offset": 0
+      }
+    ]
+  }
+}

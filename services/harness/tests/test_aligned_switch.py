@@ -9,6 +9,7 @@ the input that row is for alone.
 
 from __future__ import annotations
 
+import functools
 import json
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
@@ -27,7 +28,7 @@ from harness.graph import switch as switch_module
 from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY
 from harness.graph.switch import SwitchFailedError
 from harness.plan_display import choice_id, shown_decisions
-from harness.planner_seam import PlannerSeam
+from harness.planner_adapter import PlannerAdapter
 from harness.settings import Settings
 from harness.turn_records import SearchReading
 from planner.plan import (
@@ -94,6 +95,7 @@ from .planner.test_aligned_identity import (
     _gross_compiles,
     _left_on_net,
 )
+from .planner_tools import call_planner_tool
 
 _GRANT_EQUIVALENT = f"spec_{'9' * 32}"
 
@@ -187,18 +189,18 @@ class _Resubmits:
 
 
 class _RevisingPlanner:
-    """A `harness.graph.PlannerModel` whose revision runs `PlannerSeam.revise` over
+    """A `harness.graph.PlannerModel` whose revision runs `PlannerAdapter.revise` over
     `surface` and records its arguments in `revisions` and the plan admission
     recorded in `admitted`, before translation answers."""
 
     def __init__(self, surface: ToolSurface) -> None:
-        self._seam = PlannerSeam(settings=Settings(), surface=surface)
+        self._adapter = PlannerAdapter(settings=Settings(), surface=surface)
         self.revisions: list[dict[str, Any]] = []
         self.admitted: list[Plan] = []
 
     async def revise(self, **kwargs: Any) -> dict[str, Any]:
         self.revisions.append(kwargs)
-        revised = await self._seam.revise(**kwargs)
+        revised = await self._adapter.revise(**kwargs)
         plan = load_plan(kwargs["ctx"].state)
         assert plan is not None
         self.admitted.append(plan)
@@ -378,7 +380,8 @@ async def test_a_switch_of_the_aligned_row_holds_when_another_input_pins_its_sta
             for spec_id in (_GROSS["spec_id"], _NET)
         }
     ):
-        result = await _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"].func(
+        result = await call_planner_tool(
+            _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"],
             question=question,
             answer_mode=AnswerMode.COMPUTED,
             decisions=drafts([decision()]),
@@ -481,7 +484,8 @@ async def _bilateral_share(ctx: _FakeToolContext, decision: DecisionFactory) -> 
     _show_blocks(ctx, health, total)
     question = "What share of US bilateral aid goes to health?"
     ctx.state[ASKS_STATE_KEY] = [question]
-    result = await _tools_reading(cast(ToolSurface, ProviderCompiles()))["propose_plan"].func(
+    result = await call_planner_tool(
+        _tools_reading(cast(ToolSurface, ProviderCompiles()))["propose_plan"],
         question=question,
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -582,7 +586,8 @@ async def _pinning_the_compile(
     Returns the plan on record."""
     plan = await _bilateral_share(ctx, decision)
     ids = [f"bilateral{index}" if index else "bilateral" for index in range(len(measures))]
-    amended = await _tools_reading(cast(ToolSurface, ProviderCompiles()))["propose_plan"].func(
+    amended = await call_planner_tool(
+        _tools_reading(cast(ToolSurface, ProviderCompiles()))["propose_plan"],
         answered=[AskAnswer(ask=0, outputs=("share", *(f"of_{rid}" for rid in ids)))],
         evidence_requirements=[
             requirement
@@ -799,10 +804,10 @@ def _closed_share(kind: str) -> _ClosedShare:
     and read over 2024; alignment compiles the total gross and bilateral in one
     resubmit. `basis`: US health aid counted gross over the total in grant
     equivalents, compiled gross. `searched-total`: `basis` with the total pinned to
-    nothing, which `propose_plan` searches for (`planner.agent.pin_by_search`) and
+    nothing, which `propose_plan` searches for (`planner.source_reads.pin_by_search`) and
     Search answers with the total. `whole`: US health aid Search found over 2023, read
     over 2022, as a share of its whole over every sector, compiled from it
-    (`planner.agent.compile_whole`)."""
+    (`planner.source_reads.compile_whole`)."""
     ctx = _FakeToolContext()
     if kind == "whole":
         part = us_2023_block("health")
@@ -886,7 +891,9 @@ async def _propose(
     """Propose `share`'s requirements, as an amendment of `amends` when given, with
     its searches' definitions on record, and return the plan admission recorded."""
     share.ctx.state[ASKS_STATE_KEY] = [share.question]
-    propose = _tools_reading(cast(ToolSurface, share.surface))["propose_plan"].func
+    propose = functools.partial(
+        call_planner_tool, _tools_reading(cast(ToolSurface, share.surface))["propose_plan"]
+    )
     stated: dict[str, Any] = (
         {"amends_version": amends.version}
         if amends is not None
@@ -1007,7 +1014,9 @@ async def _pinning_the_basis_compile(
     direct = _us_dataset("direct", "US total ODA", compiled.spec_id).model_copy(
         update={"period": share.period}
     )
-    propose = _tools_reading(cast(ToolSurface, share.surface))["propose_plan"].func
+    propose = functools.partial(
+        call_planner_tool, _tools_reading(cast(ToolSurface, share.surface))["propose_plan"]
+    )
     with definitions_on_record(share.recorded):
         result = await propose(
             answered=[AskAnswer(ask=0, outputs=("share", "of_direct"))],
@@ -1436,7 +1445,9 @@ async def test_the_kenya_share_reads_its_compiled_total_over_the_year_it_asks_fo
         for block in blocks.values()
     }
     surface = _KenyaCompiles()
-    propose = _tools_reading(cast(ToolSurface, surface))["propose_plan"].func
+    propose = functools.partial(
+        call_planner_tool, _tools_reading(cast(ToolSurface, surface))["propose_plan"]
+    )
 
     with definitions_on_record(recorded):
         result = await propose(**_KENYA_PLAN, tool_context=ctx)

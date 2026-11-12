@@ -72,6 +72,10 @@ class ProblemCode(StrEnum):
     INVALID_PLAN = "invalid_plan"
     INVALID_REFERRAL = "invalid_referral"
     INVALID_ARGUMENTS = "invalid_arguments"
+    # A `propose_plan` or `reject_plan` call after the first of the two in its
+    # model response, refused before it reads or writes any state
+    # (`planner.tools._plan_write_beside_plan_write`).
+    PLAN_WRITE_REPEATED = "plan_write_repeated"
     COMPILE_FAILED = "compile_failed"
     BUDGET_EXHAUSTED = "budget_exhausted"
     QUESTION_FIXED = "question_fixed"

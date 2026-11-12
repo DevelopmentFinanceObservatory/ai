@@ -1,16 +1,16 @@
 [project]
 name = "data_mcp"
 version = "0.1.0"
-description = "Thin FastMCP wrapper over the apis Data seam: the Search API today, the Datasets API next."
+description = "Thin FastMCP wrapper over the apis' Search and Datasets APIs."
 requires-python = ">=3.13"
 dependencies = [
     "common",
     "dfo-spec-kit",
     "dfo-spec-kit-frame-grammar",
-    "fastmcp>=4.0.10,<5",
+    "fastmcp>=4.1.2,<5",
     "google-cloud-storage>=2.18",
     "httpx2>=2.13.0",
-    "opentelemetry-api>=1.42",
+    "opentelemetry-api>=1.45.1",
     "pyarrow>=18.0",
     "pydantic-settings>=2.14.2",
     "rfc8785>=0.1.4",
@@ -46,5 +46,5 @@ precision = 2
 
 [tool.uv.sources]
 common = { workspace = true }
-dfo-spec-kit = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "2dd2400a36d592bd3ca814aa2eff30bd016433e3", subdirectory = "python/spec-kit" }
-dfo-spec-kit-frame-grammar = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "2dd2400a36d592bd3ca814aa2eff30bd016433e3", subdirectory = "python/frame-grammar" }
+dfo-spec-kit = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "5589a728308902adf9a32ef8f3ed2c3d2b1e92de", subdirectory = "python/spec-kit" }
+dfo-spec-kit-frame-grammar = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "5589a728308902adf9a32ef8f3ed2c3d2b1e92de", subdirectory = "python/frame-grammar" }

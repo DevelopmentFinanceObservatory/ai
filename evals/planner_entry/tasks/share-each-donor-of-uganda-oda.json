@@ -5,7 +5,6 @@
   "question": "What share of all ODA to Uganda did each donor provide from 2015 to 2023?",
   "searches": [
     {
-      "query": "What share of all ODA to Uganda did each donor provide from 2015 to 2023?",
       "parts": [
         {
           "variable": "official development assistance",

@@ -39,7 +39,7 @@ from google.genai import types
 from harness.graph.state import AGENT_NAME, frame_id_for
 from harness.graph.workflow import create_root_workflow
 from harness.orchestrator_tools import build_orchestrator_tools
-from harness.planner_seam import PlannerSeamError
+from harness.planner_adapter import PlannerAdapterError
 from harness.scripted import (
     SCRIPTED_CV,
     SCRIPTED_SPEC,
@@ -86,19 +86,23 @@ class ScriptLlm(BaseLlm):
 
 
 class FailingPlanner:
-    """A planner seam that raises `PlannerSeamError`, the way `PlannerSeam` fails."""
+    """A fake planner that raises `PlannerAdapterError`, the way `PlannerAdapter` fails."""
 
     def __init__(
-        self, message: str = "the planner seam ran past 60 events without settling"
+        self,
+        message: str = (
+            "a plan that is draft was declared ready, not pending_approval; "
+            "refusing to report it ready"
+        ),
     ) -> None:
         self.message = message
 
     async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        raise PlannerSeamError(self.message)
+        raise PlannerAdapterError(self.message)
 
 
 class RefusingPlanner:
-    """A planner seam that refuses to draft, as `PlannerSeam` does at its round cap."""
+    """A fake planner that refuses to draft, as `PlannerAdapter` does at its round cap."""
 
     def __init__(self, *, final: bool = False) -> None:
         self.questions: list[str] = []
@@ -185,9 +189,12 @@ def call(name: str, **args: Any) -> types.Part:
     return types.Part.from_function_call(name=name, args=args)
 
 
-def search_call(query: str, *variables: str) -> types.Part:
-    """A `search` call with one part per variable, or one part reading `query`."""
-    return call("search", query=query, parts=[{"variable": v} for v in variables or (query,)])
+def search_call(*variables: str, text: str | None = None) -> types.Part:
+    """A parsed `search` call with one part per variable; `text` makes it a retry."""
+    args: dict[str, Any] = {"parts": [{"variable": v} for v in variables]}
+    if text is not None:
+        args["text"] = text
+    return call("search", **args)
 
 
 def fetch_call(spec_id: str = SCRIPTED_SPEC, **args: Any) -> types.Part:
@@ -414,7 +421,7 @@ def orchestrator_app(
     resolved_settings = settings or Settings()
     model = ScriptLlm(script=list(script))
     resolver = resolver or no_resolver
-    seam = handing_back_planner_failures(planner or ScriptedPlannerModel())
+    planner_model = handing_back_planner_failures(planner or ScriptedPlannerModel())
 
     def create_workflow(recorder: Any, surface_recorder: Any) -> Any:
         agent = create_orchestrator_agent(
@@ -427,7 +434,7 @@ def orchestrator_app(
             ),
         ).model_copy(update={"model": model})
         return create_root_workflow(
-            planner=seam,
+            planner=planner_model,
             orchestrator=agent,
             executor=recorder,
             tool_surface=surface_recorder,

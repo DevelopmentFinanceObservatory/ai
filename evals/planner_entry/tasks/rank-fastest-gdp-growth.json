@@ -5,7 +5,6 @@
   "question": "Which five countries had the fastest GDP growth between 2015 and 2022?",
   "searches": [
     {
-      "query": "Which five countries had the fastest GDP growth between 2015 and 2022?",
       "parts": [
         {
           "variable": "GDP",

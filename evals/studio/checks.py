@@ -1601,7 +1601,7 @@ def translation_stops_on_a_repeated_failure(evidence: Evidence) -> list[str]:
     translated again in that planner entry. The plan did not change where it
     failed, so a further attempt reaches the same stop. A translation is the
     `translation` a `propose_plan` answer carries, read off the response as
-    `harness.planner_seam` reads it."""
+    `harness.planner_adapter` reads it."""
     if missing := _need_log(evidence, "translation_stops_on_a_repeated_failure"):
         return missing
     translations = [

@@ -1,0 +1,200 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Gross ODA disbursements to Kenya for health, including the population policy and reproductive health sector, 2020 to 2024"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Gross ODA disbursements to Kenya for health, including the population policy, programme, and reproductive health sector, from all providers between 2020 and 2024 in current US dollars from the OECD Creditor Reporting System (CRS).",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "source_spec_f0dd68bae2abc685668382b756b7d7c6",
+        "description": "How the flow is counted.",
+        "options": [
+          "gross disbursements",
+          "net disbursements",
+          "commitments"
+        ],
+        "chosen": "gross disbursements",
+        "resolved_by": "planner_default",
+        "rationale": "Search elected gross disbursements for this source.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_f0dd68bae2abc685668382b756b7d7c6",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "combined",
+        "decision_ids": [
+          "source_spec_f0dd68bae2abc685668382b756b7d7c6"
+        ],
+        "measure": "gross ODA disbursements for health and population policy, programme and reproductive health",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "across": [
+          "donor"
+        ],
+        "period": {
+          "start": 2020,
+          "end": 2024
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_f0dd68bae2abc685668382b756b7d7c6",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": "sum",
+        "breakdown": null
+      },
+      {
+        "kind": "dataset",
+        "id": "split",
+        "decision_ids": [
+          "source_spec_f0dd68bae2abc685668382b756b7d7c6"
+        ],
+        "measure": "gross ODA disbursements for health and population policy, programme and reproductive health",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "across": [
+          "donor"
+        ],
+        "period": {
+          "start": 2020,
+          "end": 2024
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_f0dd68bae2abc685668382b756b7d7c6",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": "separate",
+        "breakdown": {
+          "dimension": "sector",
+          "level": 1
+        }
+      },
+      {
+        "kind": "aggregate",
+        "id": "yearly",
+        "decision_ids": [],
+        "input_id": "combined",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "by_sector",
+        "decision_ids": [],
+        "input_id": "split",
+        "reduction": "sum",
+        "group_by": [
+          "period",
+          "breakdown"
+        ]
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "Total gross ODA disbursements to Kenya for health (including population policy, programme, and reproductive health) for each year from 2020 to 2024",
+      "Combined total gross ODA disbursements to Kenya for both sectors across the full 2020 to 2024 period",
+      "Yearly breakdown between health and population policy/reproductive health from 2020 to 2024"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "yearly"
+        ]
+      },
+      {
+        "ask": 1,
+        "outputs": [
+          "yearly"
+        ]
+      },
+      {
+        "ask": 2,
+        "outputs": [
+          "by_sector"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

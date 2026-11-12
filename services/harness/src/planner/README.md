@@ -16,8 +16,14 @@ tests live in `services/harness/tests/planner/`.
 
 ## What it does
 
-Four tools, built by `build_planner_tools()` and wired into an `LlmAgent` by
-`create_planner_agent()`:
+Four tools, each declared in `planner.specs` (`planner_tool_specs()` and
+`skill_tool_spec()`) with its body in `planner.tools` or `planner.skills`.
+`harness.planner_adapter.PlannerAdapter` builds the set of specs and the instruction
+the planner serves, on a Pydantic AI agent built by
+`planner.pydantic_agent.planner_agent()`, which `harness.planner_node` runs as a
+function node that yields ADK session events. A tool call reads its steps from
+the session's events through `planner.session.SessionCall`.
+The tools:
 
 | Tool                | Behaviour                                                                                                                                                                                                                |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -27,35 +33,36 @@ Four tools, built by `build_planner_tools()` and wired into an `LlmAgent` by
 
 A `propose_plan` whose translation compiles declares the plan ready for the
 user's answer in code (`declare_ready`) and adds the approval summary to its
-answer under `summary`. `end_run_when_ready` ends the planner's run on that
-answer, so no model call follows.
+answer under `summary`. `planner.tools.ready_and_end` ends the planner's run
+on that answer, so no model call follows.
 
-The planner reaches the translator directly. `create_planner_agent` takes
+The planner reaches the translator directly. `planner_tool_specs` takes
 `translator.tool`'s `build_translate` function as `translate`, which
-`harness.agents` builds. The model cannot call it: every `propose_plan` that
-records a plan runs it on that plan and answers with the verdict under
-`translation`, beside its own `ok`, so the model spends no generation on
-translation. The plan travels through session state. Omit it and
-`create_planner_agent` returns the standalone planner, whose `propose_plan`
-records the plan and stops; that is what the planner's own eval set scores
-and why that set needs no reachable tool surface.
+`harness.planner_adapter.PlannerAdapter` builds. The
+model cannot call it. Every `propose_plan` that records a plan runs it on that
+plan and answers with the verdict under `translation`, beside its own `ok`, so
+the model spends no generation on translation. The plan travels through
+session state. `planner_specs`, the list a model is shown, requires both
+`translate` and `surface`; `planner_tool_specs` leaves both optional, and
+without `translate` `propose_plan` records the plan and stops.
 
 ## Skills
 
-`create_planner_agent` takes a `surface`, the harness's
-`compiler.surface.ToolSurface`. Given one, the planner also carries
-`get_skill` and `get_skill_file` from `planner.skills`, each calling data-mcp's
-tool of the same name through that surface, and its instruction gains the
-paragraph that names them. `harness.agents.create_planner_with_translator`
-passes the same surface translation discovers on. Without a surface, as the
-standalone eval agents build it, the planner has neither tool and the
-instruction says nothing about skills.
+`planner_specs` takes a `surface`, the harness's
+`compiler.surface.ToolSurface`, and lists `get_skill` from `planner.skills`
+ahead of `planner_tool_specs`' tools. `get_skill` calls data-mcp's `get_skill`
+through that surface (a skill's first page, or one file with `path`), and the
+instruction (`planner.instruction.planner_instruction`) carries the paragraph
+that names it. `harness.planner_adapter.PlannerAdapter` passes the same surface
+translation discovers on. `planner_tool_specs` takes a `surface` too, which
+`propose_plan` reads a pinned dataset's first year through, and lists no skill
+tool.
 
 The planner loads a skill when its description bears on the question. A
 question about DFO itself starts with `get_skill`, whose `skill_id`
-description names the one skill no search result carries, `dfo-faq`. Both tools answer with data-mcp's text, a refusal
-included, so a deployment with no Skills API answers `capability_unavailable`
-and the planner drafts without the skill.
+description names the one skill no search result carries, `dfo-faq`. The tool
+answers with data-mcp's text, a refusal included, so a deployment with no Skills
+API answers `capability_unavailable` and the planner drafts without the skill.
 
 ## Typed results
 
@@ -149,7 +156,7 @@ recorded. The check reads the pins the planner wrote, before `propose_plan`
 moves a pin to its copy over the requirement's period. A `user` decision a
 `SumOfRequirement` cites needs the user's pick on a combination ask: the
 `combination_unasked` refusal's action carries the ask's options
-(`planner.agent.COMBINATION_OPTIONS`), Studio shows them with no free-text
+(`submission.service.COMBINATION_OPTIONS`), Studio shows them with no free-text
 box, and the pick comes back as the option's id. A combination ask asks about
 the sum the `combination_unasked` refusal before it names in its `detail`:
 the requirement id and the datasets its sides read. Each refusal binds the
@@ -196,7 +203,7 @@ settles on for a calculation input the planner pins nothing for
 steer, so the same words settle on the refused spec_id again. The planner
 pins another source or changes what the input asks for. `detail` names the
 requirement as the planner states it and any pin it states, and for a
-recorded pin adds that pin as `retrieved`. `harness.planner_seam` leaves
+recorded pin adds that pin as `retrieved`. `harness.planner_adapter` leaves
 those spec_ids out of the pin sources and names them in the brief.
 
 An entity's words can name more than one graph node, as "Congo" names both
@@ -225,7 +232,7 @@ stated for an entity an ask offered that the user has not answered
 refers the same requirement again, since the new referral offers the same pick.
 The latest answer about a reading stands, so an answer in the user's own words
 releases an earlier pick, and a message the user types or an amendment of the
-approval card releases every pick. An ask the tool or ADK refused offered
+approval card releases every pick. An ask the tool refused offered
 nothing. An entity nobody asked about, or one
 the user answered in their own words, the planner settles.
 
@@ -349,7 +356,7 @@ The anchor a run reads is the newest year the plan states or a later one. Transl
 - A max or min by entity, matched on each entity's own year against a series that misses a year the max or min can fall in, today or as newer data moves either side, from which a filter removed such a year alone, or whose rows a value filter kept, which can leave out any such year: `invalid_plan`, from `planner.shapes._rejects_paired_picked`. A max or min over a dataset read from its first year can fall in any year back to it, so the series has to be read from its first year too, or the max or min's input bounded from the series' first year, following the newest data where the series' first year does. A series and a max or min read from the same datasets may both stay open to the newest data.
 - A year filter over a max or min by entity whose thresholds keep a year that newer data can move a picked year past. A picked year moves only later, and only while the max or min's input years move. So a fixed first year keeps every entity whose max or min falls at or after it, today and later, and a first year that follows the newest data keeps them only while the input's own first year follows it at the same offset or further ahead. A last year keeps them only while the input's last year sits at or before it today and stays there, unless the input's years do not move at all. The entity whose max or min moves past the year drops out: `invalid_plan`, from `planner.shapes._picked_year_leaves`. Filter the years before the max or min. A filter with no year threshold keeps every entity it keeps today.
 
-Where the planner reads the user's own words, a step is also admitted when the `propose_plan` call names it in `across_years`. The standalone planner and `harness_pair_v1` read them in every entry, and `harness.planner_seam` builds its planner with `reads_user_words` false, so there only an entry the user's amendment at the approval card opened reads them (`planner.plan.amendment_entry`). Elsewhere a call naming a step is refused `invalid_plan`, unless the plan it amends already licenses that step as the call states it, which grants nothing new. A call naming a step that keeps its years is refused everywhere. Each named step becomes a `PeriodLicence` in `Plan.period_licences` (step id, kind and `reduction`), which `propose_plan` writes and the model cannot (`planner.plan.period_licences_held`). `Plan.amend` clears the field, and `propose_plan` carries each licence of the plan it amends onto the new one while that step keeps its id and kind and combines its years with the licensed `reduction`, whatever its years: a replan that narrows a licensed total or ranking to one year and a later one that restores its years both keep it. The licence lies unused while a licensed rank states no `reduction`, and admits the rank again once it states the licensed one. An aggregate grouping by `period`, a rank set `per_period`, a step stating another reduction, a step of another kind, or a removed step drops the licence, since each states another figure. A step renamed in an amendment entry holds none of its old id and takes a new one when the call names it, and a restart begins with no licences. The field is hashed once it holds a licence, so a plan holding none keeps its revision.
+Where the planner reads the user's own words, a step is also admitted when the `propose_plan` call names it in `across_years`. The planner reads them only in an entry the user's amendment at the approval card opened (`planner.plan.amendment_entry`). Elsewhere a call naming a step is refused `invalid_plan`, unless the plan it amends already licenses that step as the call states it, which grants nothing new. A call naming a step that keeps its years is refused everywhere. Each named step becomes a `PeriodLicence` in `Plan.period_licences` (step id, kind and `reduction`), which `propose_plan` writes and the model cannot (`planner.plan.period_licences_held`). `Plan.amend` clears the field, and `propose_plan` carries each licence of the plan it amends onto the new one while that step keeps its id and kind and combines its years with the licensed `reduction`, whatever its years: a replan that narrows a licensed total or ranking to one year and a later one that restores its years both keep it. The licence lies unused while a licensed rank states no `reduction`, and admits the rank again once it states the licensed one. An aggregate grouping by `period`, a rank set `per_period`, a step stating another reduction, a step of another kind, or a removed step drops the licence, since each states another figure. A step renamed in an amendment entry holds none of its old id and takes a new one when the call names it. The field is hashed once it holds a licence, so a plan holding none keeps its revision.
 
 The `period_reduction_unstated` refusal's `detail.gaps` holds one entry per refused step, in the order `unstated_period_reductions` finds them. Each entry holds:
 
@@ -411,7 +418,7 @@ proposal supersedes whatever the translator referred back about the version it
 replaces. For an `unsupported_ask` or `requirement_unmeetable` referral,
 `propose_plan` refuses until the user has answered an `ask_user_question` call
 made after the referral, since a patch replaces a requirement whole and would
-otherwise drop what the referral names. Under `harness.planner_seam` that ask
+otherwise drop what the referral names. Under `harness.planner_adapter` that ask
 is made in code for a referral the user decides that carries candidates (a
 `requirement_unmeetable` marked `source_mismatch`, or a `source_name_ambiguous`),
 led by the referral's sentence from `harness.sentences`, so no model turn
@@ -432,30 +439,23 @@ declines. A dropped ask stays dropped through later patches. A replan's brief
 marks it "(removed by the user)", and admission refuses a replan that answers
 or declines it. Only a later amendment of the user's restores it, by
 answering it. An ask left out with nothing naming it is unaccounted for.
-`starts_new_plan` begins a plan at version 1 instead. The wording of
-`question` plays no part in that choice, so a reworded question cannot be
-read as a new plan.
+The wording of `question` plays no part in which plan a call means, so a
+reworded question cannot be read as a new plan.
 
-**`question_fixed` holds the turn's question against a restart.**
-`create_planner_agent(..., question_fixed=True)`. The harness's planner
-seam builds the planner this way, since the orchestrator's `plan` brief fixes
-a turn's `question` before the planner ever runs, and a restart would
-silently swap the question out from under the plan the workflow holds. Under it,
+**The turn's question is fixed.** The orchestrator's `plan` brief fixes a
+turn's `question` before the planner ever runs, and a restart would silently
+swap the question out from under the plan the workflow holds. So
 `starts_new_plan` with a plan already recorded is refused with
-`question_fixed` rather than beginning a fresh plan, records nothing, and is
-how the model tells the harness the user's reply asks a different question:
-the turn ends there for the harness to tell the user to send it as its own
-message. An amendment whose own `question` states something other than the
-one recorded is refused as `invalid_plan` instead, correctable within the same
-round. Standalone and `harness_pair_v1`'s own multi-turn session leave
-`question_fixed` at its default `False`, where a restart behaves as described
-above.
+`question_fixed`, records nothing, and is how the model tells the harness the
+user's reply asks a different question: the turn ends there for the harness to
+tell the user to send it as its own message. An amendment whose own `question`
+states something other than the one recorded is refused as `invalid_plan`
+instead, correctable within the same round (`submission.service._resolve_intent`).
 
 Rounds are capped. Every proposal opens a fresh discovery budget, so one entry
-into the planner may make `MAX_PLAN_ROUNDS` proposals, an amendment or a
-restart alike (counted under `PLAN_ROUNDS_STATE_KEY`, beside the plan rather
-than on it, since a count on the plan would enter the revision it counts), and
-a proposal past that is `budget_exhausted` with
+into the planner may make `MAX_PLAN_ROUNDS` proposals (counted under
+`PLAN_ROUNDS_STATE_KEY`, beside the plan rather than on it, since a count on
+the plan would enter the revision it counts), and a proposal past that is `budget_exhausted` with
 `detail.scope == "plan_rounds"`, no `action`, and nothing touched; the last
 version that compiled stays approvable. Every entry into the planner (a new
 message, an answer that amends, a replan after a refused run) starts the count
@@ -467,9 +467,9 @@ validation spends nothing.
 to hold at least two of them.** Anything else fails validation, so a plan cannot
 state a choice it never considered, and a decision whose only option is what was
 chosen records no decision at all. `propose_plan` re-validates both lists itself,
-because ADK's argument preprocessing falls back to raw dicts for a whole list
-when any one item fails, and skips conversion entirely for a value that isn't a
-list. Either would otherwise build a `Plan` from unvalidated data. A plan states
+because the planner's tools receive the model's arguments as sent, so a list
+of raw dicts, or a value that isn't a list, would otherwise build a `Plan` from
+unvalidated data. A plan states
 at least one requirement, and the plan-level rules (unique slots and ids, every
 citation naming a decision, every decision cited, and a rank that collapses its
 input) come back from `propose_plan` as

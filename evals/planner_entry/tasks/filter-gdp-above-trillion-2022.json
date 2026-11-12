@@ -5,7 +5,6 @@
   "question": "Which countries had a GDP above 1 trillion US dollars in 2022?",
   "searches": [
     {
-      "query": "Which countries had a GDP above 1 trillion US dollars in 2022?",
       "parts": [
         {
           "variable": "GDP",

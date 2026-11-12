@@ -419,7 +419,7 @@ async def test_backoff_delays_use_full_jitter_up_to_the_exponential_cap(
     assert delays == [1.0, 2.0]
 
 
-async def test_auth_seam_adds_header_default_adds_none() -> None:
+async def test_auth_callable_adds_header_default_adds_none() -> None:
     requests, handler = _counting_handler(httpx2.Response(200, json={"ok": True}))
 
     async with _client(handler) as client:

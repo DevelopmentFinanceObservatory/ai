@@ -1518,12 +1518,12 @@ def chip_kept(applied: Mapping[str, Any], readings: Sequence[Mapping[str, Any]])
 
 def part_name(reading: SearchReading, block: Mapping[str, Any] | None) -> str:
     """The part's name, for a basis line naming several parts and for a
-    sentence naming a requirement that pins it (`harness.planner_seam`).
+    sentence naming a requirement that pins it (`harness.planner_adapter`).
 
     The part's own words, quoted, while they describe the pin it was served
     from. They do not once the pin was compiled again from one of its scope
     choices, by a switch on the plan card (`harness.graph.switch`) or onto
-    its calculation's basis (`planner.agent.compile_on_basis`), each an
+    its calculation's basis (`planner.source_reads.compile_on_basis`), each an
     explicit entry from a choice (`ChoiceOrigin`): the reading keeps the
     words written for the pin it replaced. Nor do they when an option they
     stated is not the one the part's choice on that axis holds. Then the

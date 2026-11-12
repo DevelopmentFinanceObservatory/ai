@@ -8,7 +8,7 @@ results with their replay recipes (`publish_result`, the completion gate's
 analysis-mcp through the execute node's `ToolSurface` (see
 `harness.agents.build_tool_surface`); this module never sees them. Both
 speak MCP over streamable HTTP to the mounts `harness.server.create_app`
-hosts in-process -- the same seam a split-out deployment would use, just
+hosts in-process -- the same interface a split-out deployment would use, just
 loopback.
 Every `Client(...)` construction below goes through `self._policy`
 (`harness.mcp_deadlines.McpTimeoutPolicy`), which carries `auth=self._token`
@@ -359,19 +359,23 @@ class McpResolver:
     async def __call__(
         self,
         *,
-        question: str,
+        question: str | None,
         parts: list[dict[str, Any]],
         raw_text: bool = False,
         context: SearchContext | None = None,
     ) -> dict[str, Any]:
         """Call data-mcp `search` and digest the envelope it returns.
 
+        A raw-text search (`raw_text`) sends `question` alone, for Search to
+        read itself. A parsed search sends `parts` alone and no raw query;
+        `question` is None for it.
+
         `context` rides in the request's `_meta` under
         `SEARCH_CONTEXT_META_KEY`, where data-mcp reads it and the tool's
         input schema, which outside clients see, does not name it.
         """
         if raw_text:
-            # The orchestrator's second search: Search reads `question` itself
+            # The orchestrator's `text` search: Search reads `question` itself
             # through its raw-text door, so no decomposition is sent.
             arguments: dict[str, Any] = {"raw_query": question}
         elif not parts:
@@ -387,7 +391,7 @@ class McpResolver:
                 },
             )
         else:
-            arguments = {"parts": parts, "raw_query": question}
+            arguments = {"parts": parts}
         client = await self._clients.get()
         try:
             result = await _call_held(

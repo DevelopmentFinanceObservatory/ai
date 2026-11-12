@@ -5,7 +5,6 @@
   "question": "Which three sectors received the most ODA in Kenya between 2015 and 2022?",
   "searches": [
     {
-      "query": "Which three sectors received the most ODA in Kenya between 2015 and 2022?",
       "parts": [
         {
           "variable": "official development assistance by sector",

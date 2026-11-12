@@ -17,6 +17,7 @@ from translator.discovery import build_discover_source
 from translator.mechanical import build_translation
 
 from ..decision_drafts import drafts
+from ..planner_tools import call_planner_tool
 from .test_agent import (
     _SHARE,
     _SUM_BLOCKS,
@@ -93,7 +94,8 @@ async def test_the_share_of_us_oda_going_to_multilaterals_compiles_on_each_rows_
     ctx = _FakeToolContext()
     _show_blocks(ctx, *blocks.values())
 
-    result = await _tools_reading(cast(ToolSurface, _SearchRefused()))["propose_plan"].func(
+    result = await call_planner_tool(
+        _tools_reading(cast(ToolSurface, _SearchRefused()))["propose_plan"],
         question="What share of US ODA goes to multilaterals?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),

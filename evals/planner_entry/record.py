@@ -57,11 +57,11 @@ from fastmcp import Client
 from harness.settings import Settings
 from harness.tool_contracts import ResolverError, resolver_digest
 from mcp.types import TextContent
-from planner.agent import read_full_history
 from planner.plan import SessionState
 from planner.skills import DFO_FAQ_SKILL_ID
+from planner.source_reads import read_full_history
 from submission.service import first_year_reads
-from validate import ScriptedLlm, accepted_run, task_payloads, tool_schemas
+from validate import ScriptedModel, accepted_run, task_payloads, tool_schemas
 
 
 class RecordingResolver:
@@ -76,14 +76,13 @@ class RecordingResolver:
     async def __call__(
         self,
         *,
-        question: str,
+        question: str | None,
         parts: list[dict[str, Any]],
         raw_text: bool = False,
         context: SearchContext | None = None,
     ) -> dict[str, Any]:
-        arguments: dict[str, Any] = (
-            {"raw_query": question} if raw_text else {"parts": parts, "raw_query": question}
-        )
+        # A raw-text search sends its words alone, and a parsed search sends its parts alone.
+        arguments: dict[str, Any] = {"raw_query": question} if raw_text else {"parts": parts}
         meta = search_context_meta(context)
         result = await self._client.call_tool(
             "search",
@@ -97,7 +96,8 @@ class RecordingResolver:
             raise ResolverError(f"search refused: {refusal}", refusal=refusal)
         envelope = (result.meta or {}).get(SEARCH_ENVELOPE_META_KEY)
         if not isinstance(envelope, dict):
-            raise RuntimeError(f"search answered no envelope for {question!r}")
+            asked = repr(question) if raw_text else f"parts {parts!r}"
+            raise RuntimeError(f"search answered no envelope for {asked}")
         self.calls.append(
             {
                 "question": question,
@@ -124,8 +124,9 @@ def _result(result: Any) -> dict[str, Any]:
 
 async def _skill_results(client: Any, skill_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
     """Each skill, and every page of `SKILL.md` and of each file it lists, by the key
-    `entry.RecordedSurface` looks it up under. The arguments are the ones
-    `planner.skills.build_skill_tools` sends."""
+    `entry.RecordedSurface` looks it up under: `get_skill` for a skill's first page,
+    `get_skill_file` for a file, which it maps the planner's `get_skill` calls with a
+    `path` onto. Both are read with data-mcp's `get_skill`."""
     results: dict[str, dict[str, Any]] = {}
     for skill_id in dict.fromkeys(skill_ids):
         arguments: dict[str, Any] = {"skill_id": skill_id}
@@ -144,9 +145,7 @@ async def _skill_results(client: Any, skill_ids: Sequence[str]) -> dict[str, dic
         for path in dict.fromkeys(paths):
             page: dict[str, Any] | None = {"skill_id": skill_id, "path": path, "offset": 0}
             while page is not None:
-                answer = _result(
-                    await client.call_tool("get_skill_file", page, raise_on_error=False)
-                )
+                answer = _result(await client.call_tool("get_skill", page, raise_on_error=False))
                 results[surface_key("get_skill_file", page)] = answer
                 content = answer["structured_content"] or {}
                 following = content.get("next_offset")
@@ -159,8 +158,8 @@ async def _skill_results(client: Any, skill_ids: Sequence[str]) -> dict[str, dic
 
 
 # How long a first-year read may take while recording. Production allows
-# `planner.agent.FIRST_YEAR_READ_DEADLINE_SECONDS`; a replay answers at once, so a recording
-# keeps whatever Search answers, however long it takes.
+# `planner.source_reads.FIRST_YEAR_READ_DEADLINE_SECONDS`. A replay answers at
+# once, so a recording keeps whatever Search answers, however long it takes.
 RECORDING_READ_SECONDS = 180.0
 
 
@@ -193,8 +192,8 @@ async def _first_year_results(
 ) -> dict[str, dict[str, Any]]:
     """The answers to each first-year read an entry over `recording` can make that the
     recording does not hold, read now. A scripted entry with no plan leaves the datasets
-    the seam showed the planner in its state, and those are read."""
-    entry = await run_entry(task, recording, prefix_cache=None, model=ScriptedLlm())
+    the adapter showed the planner in its state, and those are read."""
+    entry = await run_entry(task, recording, prefix_cache=None, client=ScriptedModel().client)
     surface = _RecordingSurface(client, recording["tools"])
     for identity in first_year_reads(cast(SessionState, entry.state)):
         await read_full_history(surface, identity, deadline_s=RECORDING_READ_SECONDS)
