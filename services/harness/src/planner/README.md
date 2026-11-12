@@ -16,8 +16,9 @@ tests live in `services/harness/tests/planner/`.
 
 ## What it does
 
-Four tools, built by `build_planner_tools()` and wired into an `LlmAgent` by
-`create_planner_agent()`:
+Four tools, each declared in `planner.specs` (`planner_tool_specs()` and
+`skill_tool_spec()`) with its body in `planner.tools` or `planner.skills`, and
+served to an `LlmAgent` by `create_planner_agent()`:
 
 | Tool                | Behaviour                                                                                                                                                                                                                |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -27,8 +28,8 @@ Four tools, built by `build_planner_tools()` and wired into an `LlmAgent` by
 
 A `propose_plan` whose translation compiles declares the plan ready for the
 user's answer in code (`declare_ready`) and adds the approval summary to its
-answer under `summary`. `end_run_when_ready` ends the planner's run on that
-answer, so no model call follows.
+answer under `summary`. `planner.tools.ready_and_end` ends the planner's run
+on that answer, so no model call follows.
 
 The planner reaches the translator directly. `create_planner_agent` takes
 `translator.tool`'s `build_translate` function as `translate`, which
@@ -149,7 +150,7 @@ recorded. The check reads the pins the planner wrote, before `propose_plan`
 moves a pin to its copy over the requirement's period. A `user` decision a
 `SumOfRequirement` cites needs the user's pick on a combination ask: the
 `combination_unasked` refusal's action carries the ask's options
-(`planner.agent.COMBINATION_OPTIONS`), Studio shows them with no free-text
+(`submission.service.COMBINATION_OPTIONS`), Studio shows them with no free-text
 box, and the pick comes back as the option's id. A combination ask asks about
 the sum the `combination_unasked` refusal before it names in its `detail`:
 the requirement id and the datasets its sides read. Each refusal binds the

@@ -90,7 +90,7 @@ from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded, current_turn
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from harness.wiring import handing_back_planner_failures
-from planner.agent import AdkCall, load_pending_ask
+from planner.agent import AdkCall
 from planner.call import elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
@@ -155,6 +155,7 @@ from planner.settings import (
 )
 from planner.skills import SKILLS_READ_STATE_KEY, skill_page_key
 from planner.tool_results import ProblemCode, ok
+from planner.tools import load_pending_ask
 from planner.workflow import (
     EvidenceBinding,
     ResolvedEntity,
@@ -4841,7 +4842,7 @@ async def test_a_refused_loop_leaves_the_last_recorded_version_on_record(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """The fifth `propose_plan` call's own refusal writes nothing
-    (`planner.agent.propose_plan` returns its `problem(...)` before ever
+    (`planner.tools.propose` returns its `problem(...)` before ever
     calling `save_plan`), so whatever the fourth call actually recorded
     stays exactly as it was -- proven here directly against session state
     rather than inferred from the refusal text.

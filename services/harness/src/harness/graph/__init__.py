@@ -44,7 +44,7 @@ Behavioral guarantees the topology encodes:
 
 One approval gate: the workflow's own `approve` interrupt. The planner's
 `propose_plan` declares a compiled plan ready for the user's answer
-(`planner.agent.declare_ready`) and gates nothing itself. Only this
+(`planner.tools.declare_ready`) and gates nothing itself. Only this
 workflow's `execute` node, reached downstream of `approve`, runs a step
 against a real server.
 """

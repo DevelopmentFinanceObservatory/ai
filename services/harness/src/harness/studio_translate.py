@@ -64,10 +64,10 @@ from executor.run import current_step_id
 from google.adk.events import Event
 from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.agent import AGENT_NAME as PLANNER_AGENT_NAME
-from planner.agent import PROPOSE_PLAN
 from planner.phrasing import entities_phrase
 from planner.plan import PLAN_STATE_KEY, DatasetRequirement, Decision
 from planner.plan import Plan as PlannerPlan
+from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ToolId
 from pydantic import ValidationError
@@ -158,7 +158,7 @@ _STEP_DETAIL_CAP = 400
 _RESOLVED_BY_TO_WIRE = {"planner_default": "default", "user": "user"}
 
 # The line a `propose_plan` call opens and its response closes. The call
-# runs the translation (`planner.agent`'s `propose_plan_translating`), so
+# runs the translation (`planner.tools.propose_and_translate`), so
 # the line's duration covers it. The label stays generic: a call's arguments
 # are a patch on the recorded plan, so they name only the datasets the patch
 # changes, and the recorded plan is not yet the one being checked. The
@@ -1239,11 +1239,11 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
 
 def _planner_question(args: dict[str, Any]) -> ElicitationQuestion:
     """The planner's ask as the frame's one question, `q1`. Its call's
-    arguments, which its tool accepted (`planner.agent.ask_refusal`) and
+    arguments, which its tool accepted (`planner.tools.ask_refusal`) and
     carries as its `RequestInput`'s `payload`, are the question directly:
     `message`, `candidates`, `options`, `recommended_spec_id` and `rationale`.
     `options` are fixed choices that are no source, such as whether to add
-    two datasets (`planner.agent.COMBINATION_OPTIONS`); the planner reads
+    two datasets (`submission.service.COMBINATION_OPTIONS`). The planner reads
     only a pick of one, so they take no free text."""
     candidates = args.get("candidates") or []
     fixed = args.get("options") or []

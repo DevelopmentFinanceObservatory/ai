@@ -10,8 +10,8 @@ The planner's own tools settle methodology and carry it to a compiled
 workflow (`propose_plan`, whose `translation` is either the compiled outcome
 or the `Referral` translation stopped on); a translation that compiles
 declares the plan ready for the user's answer in code
-(`planner.agent.declare_ready`), and ends the planner's run. This module never
-constructs a `Plan` itself. An entry that ends without a plan ready ends on a
+(`planner.tools.declare_ready`), and ends the planner's run. This module builds no
+`Plan` itself. An entry that ends without a plan ready ends on a
 refusal whose sentence comes from `harness.sentences`.
 
 `ctx.run_node` shares one session both directions with the graph's own
@@ -70,17 +70,7 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
 from google.genai import types
-from planner.agent import (
-    BRIEF_STATE_KEY,
-    PENDING_ASK_STATE_KEY,
-    PROPOSE_PLAN,
-    AcceptedAsk,
-    AdkCall,
-    clear_pending_ask,
-    end_run_when_ready,
-    load_pending_ask,
-    with_source_reads,
-)
+from planner.agent import BRIEF_STATE_KEY, AdkCall, end_run_when_ready
 from planner.call import CallSession
 from planner.operations import OperationKind
 from planner.plan import (
@@ -134,7 +124,15 @@ from planner.skills import (
     skill_page_key,
     skills_read,
 )
+from planner.source_reads import with_source_reads
+from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
+from planner.tools import (
+    PENDING_ASK_STATE_KEY,
+    AcceptedAsk,
+    clear_pending_ask,
+    load_pending_ask,
+)
 from planner.workflow import ElectedMeasure, SelectedSource
 from submission.service import (
     ALIGNED_PIN_WARNINGS_STATE_KEY,
@@ -331,7 +329,7 @@ class PlannerSeamError(RuntimeError):
     """The planner produced no plan ready for the user's answer.
 
     Raised so that a plan the user approves is a plan
-    `planner.agent.declare_ready` declared ready.
+    `planner.tools.declare_ready` declared ready.
 
     `refusal` is the shape `harness.studio_translate._stream_fatal` reads
     (`code`, `retry_mode`), so the user reads the sentence of its code. The
@@ -771,10 +769,10 @@ class PlannerSeam:
                     return self._refused(refused)
                 assert submitted is not None and plan is not None, (
                     "_propose answers a refusal unless a proposal declared the plan on record "
-                    "ready (see planner.agent.declare_ready)"
+                    "ready (see planner.tools.declare_ready)"
                 )
                 if plan.status is not PlanStatus.PENDING_APPROVAL:
-                    # `declare_ready` enforces this (`planner.agent.
+                    # `declare_ready` enforces this (`planner.tools.
                     # _execution_blocked`); repeated here so a future gap in that
                     # allowlist reaches this seam as a loud `PlannerSeamError`
                     # instead of a plan the graph shows the user as approvable.
@@ -912,8 +910,9 @@ class PlannerSeam:
         `harness.graph.PlannerModel.revise`'s contract. The proposal runs
         the chain `propose_plan` runs (`submission.service.submit`), reading
         each first year it needs and compiling each input a calculation needs
-        on another basis or provider scope (`planner.agent.with_source_reads`), then
-        the translation, and the plan is ready when `declare_ready` says so.
+        on another basis or provider scope
+        (`planner.source_reads.with_source_reads`), then the translation, and
+        the plan is ready when `declare_ready` says so.
         A dataset requirement re-pinned to another spec_id cites the
         decisions that pin states and drops those of the one it left, which
         go with it. The proposal opens its own round count, as a planner
@@ -1180,7 +1179,7 @@ class PlannerSeam:
         user when the last referral names sources to choose from.
 
         The question is the same `PLANNER_ASK` call the planner's model
-        makes (`planner.agent.ask_user_question`), built here from the
+        makes (`ask_user_question`, `planner.specs`), built here from the
         referral's candidates (`_pinnable_candidates`), since no model call is
         left to compose it, and its tool accepts it as any other, ending the
         run on it. `populate_client_function_call_id` gives the call an id,
@@ -1250,7 +1249,7 @@ class PlannerSeam:
 
         A terminal refusal (`_is_terminal_refusal`) ends the turn, a `translation` is the
         verdict on the plan the call recorded, and `summary` says the call declared that plan
-        ready (`planner.agent.declare_ready`).
+        ready (`planner.tools.declare_ready`).
         """
         tracker.events += 1
         if tracker.events > _MAX_EVENTS:
@@ -2023,9 +2022,9 @@ def _check_branches(events: Sequence[Event], *, planner: str) -> None:
 
 
 def _pinnable_candidates(referral: dict[str, Any] | None) -> list[dict[str, str]]:
-    """The `spec_id`-bearing candidates a referral names, shaped as
-    `planner.agent.ask_user_question`'s own `candidates` argument
-    (`{"spec_id": ..., "label": ...}`, `label` the candidate's `sentence`).
+    """The `spec_id`-bearing candidates a referral names, shaped as the
+    `candidates` argument of `ask_user_question` (`planner.specs`):
+    `{"spec_id": ..., "label": ...}`, with `label` the candidate's `sentence`.
 
     A `no_data` referral's candidates (`translator.discovery.compact_source
     (selectable=False)`) carry no `spec_id`, since they describe what search
@@ -2070,8 +2069,9 @@ def _clarifying_question_args(
     candidates: list[dict[str, str]], *, lead: str, question: str = _WHICH_MEANT
 ) -> dict[str, Any]:
     """The `PLANNER_ASK` call args that put a referral's pinnable
-    candidates to the user: the shape `planner.agent.ask_user_question` declares, built
-    here from the candidates with no model call composing it. `lead` says why
+    candidates to the user, in the shape `ask_user_question` declares
+    (`planner.specs`). It is built here from the candidates, with no model call
+    composing it. `lead` says why
     the user is asked and `question` what they are asked. It recommends no
     candidate, since nothing has weighed them. The message reaches the user, so
     it names no requirement id, referral kind or spec_id; each candidate's

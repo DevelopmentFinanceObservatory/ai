@@ -69,7 +69,6 @@ if str(_AGENTS_DIR) not in sys.path:
 from data_mcp.node_lookup import described_variable_text  # noqa: E402
 from harness_translator_v1.discovery_stub import EvalSurface  # noqa: E402
 from harness_translator_v1.outcome_metric import matches_subset  # noqa: E402
-from planner.agent import build_planner_tools  # noqa: E402
 from planner.operations import (  # noqa: E402
     AggregateOperation,
     CompareOperation,
@@ -94,12 +93,14 @@ from planner.plan import (  # noqa: E402
     ShareOfRequirement,
     inputs_of,
 )
+from planner.specs import planner_tool_specs  # noqa: E402
 from planner.workflow import ArtifactKind, Binding, ToolId, WorkflowStep  # noqa: E402
 from translator.mechanical import TranslatorCore  # noqa: E402
 from translator.referral import ReferralKind  # noqa: E402
 from translator.tool import build_translate, build_translator_core  # noqa: E402
 
 from .decision_drafts import drafts  # noqa: E402
+from .planner_tools import call_planner_tool  # noqa: E402
 from .translator.conftest import FakeCall  # noqa: E402
 
 _TRANSLATOR_DIR = REPO_ROOT / "evals" / "agents" / "harness_translator_v1"
@@ -515,7 +516,7 @@ def test_the_planner_sets_expected_outcomes_are_reachable() -> None:
     # question is the amend turn, which the case pins at version 2; a
     # rejection is the reject turn.
     plan = _plan_from(_TRANSLATOR_CASES["maps-an-annual-total-onto-aggregate"])
-    tools = {tool.name: tool for tool in build_planner_tools()}
+    tools = {tool.name: tool for tool in planner_tool_specs()}
     context = FakeToolContext()
 
     def propose(amends_version: int | None = None) -> dict[str, Any]:
@@ -524,7 +525,8 @@ def test_the_planner_sets_expected_outcomes_are_reachable() -> None:
         # to state the version it patches -- the version the call before it
         # answered with. A patch that restates the plan's own decisions and
         # requirements by key leaves the plan exactly as the case seeded it.
-        return tools["propose_plan"].func(
+        return call_planner_tool(
+            tools["propose_plan"],
             question=plan.question,
             answer_mode=plan.answer_mode,
             decisions=drafts(plan.decisions),
@@ -535,7 +537,7 @@ def test_the_planner_sets_expected_outcomes_are_reachable() -> None:
 
     first = propose()
     amended = propose(amends_version=first["version"])
-    rejected = tools["reject_plan"].func(tool_context=context)
+    rejected = call_planner_tool(tools["reject_plan"], tool_context=context)
 
     def expected(case_id: str, turn: int) -> dict[str, Any]:
         return _expected_response(_PLANNER_CASES[case_id], turn)["response"]
@@ -556,9 +558,10 @@ def test_a_seeded_plan_is_one_propose_plan_records(case_id: str) -> None:
     # an entity's `role` takes. Each case's plan is proposed as the model
     # would state it, so a case rests on no plan the planner could not write.
     plan = _plan_from(_TRANSLATOR_CASES[case_id])
-    tools = {tool.name: tool for tool in build_planner_tools()}
+    tools = {tool.name: tool for tool in planner_tool_specs()}
 
-    proposed = tools["propose_plan"].func(
+    proposed = call_planner_tool(
+        tools["propose_plan"],
         question=plan.question,
         answer_mode=plan.answer_mode,
         decisions=drafts(plan.decisions),

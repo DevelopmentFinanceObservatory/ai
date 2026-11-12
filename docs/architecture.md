@@ -59,7 +59,7 @@ verdict, `{"outcome": "ok"}` for a compiled plan or the referral translation
 stopped on.
 Nothing runs until the user approves. A `propose_plan` whose translation
 compiles declares the plan ready for the user's answer in code
-(`planner.agent.declare_ready`); it approves nothing and executes nothing.
+(`planner.tools.declare_ready`). It approves nothing and executes nothing.
 The gate is the workflow's approval interrupt, raised by its `approve` node and answered through `POST /api/studio/interrupt`, keyed
 on the plan's revision rather than its version integer, so what runs is
 exactly what was approved. The executor, also code, takes the

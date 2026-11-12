@@ -28,11 +28,13 @@ from compiler.surface import (
 from executor.completion import FramePublished
 from google.adk import Context
 from google.adk.agents import LlmAgent
-from google.adk.tools.function_tool import FunctionTool
-from google.adk.tools.tool_context import ToolContext
-from planner.agent import AdkCall, end_run_when_ready
+from planner.agent import SpecTool
+from planner.call import PlannerCall
 from planner.plan import load_plan, plan_revision
+from planner.specs import PROPOSE_PLAN
 from planner.tool_results import ok
+from planner.tool_spec import ToolSpec
+from planner.tools import EndRun, ready_and_end
 from planner.workflow import ToolId
 
 from harness.decision_pick import DecisionPick
@@ -243,30 +245,34 @@ class ScriptedExecutor:
         raise ValueError(f"no scripted answer for {tool!r}")
 
 
+def _compiled_proposal(call: PlannerCall, end_run: EndRun, arguments: dict[str, Any]) -> object:
+    del arguments
+    plan = load_plan(call.state)
+    assert plan is not None, "use_compiled_proposals needs a plan on record"
+    answer = ok(
+        status=plan.status.value,
+        version=plan.version,
+        previous_version=plan.previous_version,
+        question=plan.question,
+        translation=ok(),
+    )
+    return ready_and_end(answer, call, end_run)
+
+
 def use_compiled_proposals(agent: LlmAgent) -> None:
     """Replace `agent`'s `propose_plan` with one that records nothing and
     answers as a proposal whose translation compiled the plan on record.
 
-    The answer goes through `planner.agent.end_run_when_ready`, so a plan on
-    record that is `PENDING_APPROVAL` is declared ready and ends the run, as
-    a compiled proposal does, and any other is refused under `submission`.
+    The replacement declares no arguments and no description. Its answer goes
+    through `planner.tools.ready_and_end`, so a plan on record that is
+    `PENDING_APPROVAL` is declared ready and ends the run, as a compiled
+    proposal does, and any other is refused under `submission`.
     """
-
-    def propose_plan(tool_context: ToolContext) -> dict[str, object]:
-        plan = load_plan(tool_context.state)
-        assert plan is not None, "use_compiled_proposals needs a plan on record"
-        answer = ok(
-            status=plan.status.value,
-            version=plan.version,
-            previous_version=plan.previous_version,
-            question=plan.question,
-            translation=ok(),
-        )
-        return end_run_when_ready(answer, AdkCall(tool_context))
-
+    compiled = SpecTool(
+        ToolSpec(name=PROPOSE_PLAN, description="", parameters=(), body=_compiled_proposal)
+    )
     agent.tools = [
-        FunctionTool(propose_plan) if getattr(tool, "name", None) == "propose_plan" else tool
-        for tool in agent.tools
+        compiled if getattr(tool, "name", None) == PROPOSE_PLAN else tool for tool in agent.tools
     ]
 
 

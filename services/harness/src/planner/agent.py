@@ -1,19 +1,16 @@
-"""The planner agent: plan-lifecycle tool functions plus `create_planner_agent`.
+"""The planner agent (`create_planner_agent`) and the ADK tool that serves a planner tool.
 
-A `propose_plan` whose translation compiles declares the plan ready for the
-user's answer in code (`declare_ready`), with no model call. It runs
-`_execution_blocked`'s checks (a rejected plan, a pending referral, an
-uncompiled workflow, a status other than `PENDING_APPROVAL`) and, past those,
-answers `_approval_summary(plan)` (the version and revision that tie the
-answer to one content hash, and the compiler's warnings, the one thing on it a
-caller cannot read off the plan record) under `summary`. `end_run_when_ready`
-ends the ADK run on an answer carrying `summary`.
-Declaring a plan ready approves nothing. `harness.studio_translate` builds the
-plan card the user reads from the plan record itself, through `harness.plan_display`, so nothing here restates a
-decision, a requirement, a source or a step. Whatever runs this agent is what
-actually withholds execution until that answer arrives; for the served path
-that is the harness's own graph, keyed on the plan's revision rather than on
-an ADK tool confirmation this agent would have to carry across its own
+Each planner tool is a `planner.tool_spec.ToolSpec` (`planner.specs`), whose
+body runs `planner.tools`' or `planner.skills`' code over a
+`planner.call.PlannerCall` and no framework. Here `SpecTool` serves a spec to
+ADK, and `AdkCall` is the `PlannerCall` an ADK tool call is. A `propose_plan`
+whose translation compiles declares the plan ready for the user's answer in
+code (`planner.tools.declare_ready`), and the run ends on it
+(`skip_summarization`) with no model call after. `end_run_when_ready` does the
+same for an answer the harness builds itself. Declaring a plan ready approves
+nothing. Whatever runs this agent withholds execution until that answer
+arrives, which for the served path is the harness's own graph, keyed on the
+plan's revision, so no ADK tool confirmation has to cross this agent's own
 nested `Runner`.
 
 Built with a tool surface, the planner also carries `planner.skills`'
@@ -33,155 +30,54 @@ requires a plan that has been through that step. The checks a proposal passes
 before it is recorded are `submission.service`'s, which `propose_plan` runs
 over its call's session (`planner.call.CallSession` over `AdkCall`).
 
-Every tool below answers with `planner.tool_results`' typed shape -- `ok`,
-`problem`, with a stable `code` and, where the next step is known, an
-`action` -- rather than an unstructured `{"error": ...}` a caller has to
-parse. When translation cannot carry a plan out, `propose_plan`'s
+Every planner tool answers with `planner.tool_results`' typed shape, `ok` or
+`problem` with a stable `code` and, where the next step is known, an
+`action`. When translation cannot carry a plan out, `propose_plan`'s
 `translation` is the `Referral` itself: this agent's instruction reads it
 straight off that answer, with nothing here to fetch it back a second time.
 """
 
 from __future__ import annotations
 
-import asyncio
-import copy
 import functools
+import inspect
 import logging
+import os
 from collections.abc import (
-    Awaitable,
-    Callable,
-    Collection,
     Iterable,
     Iterator,
-    Mapping,
     Sequence,
 )
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, override
 
-from compiler.sources import block_group, party_class, readable_wire_groups
-from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
-from data_mcp.definition_store import canonicalize, spec_id_for
-from data_mcp.definition_writes import windowed_identity
-from data_mcp.scope import ChoiceOrigin, ScopeEntry
-from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from compiler.surface import ToolSurface
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.events import Event
+from google.adk.models import Gemini
 from google.adk.models.llm_request import LlmRequest
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.base_tool import BaseTool
-from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
-from harness.scope_choices import (
-    PROVIDER_AXIS,
-    EntitiesBinding,
-    PartScope,
-    ScopeChoice,
-    mark_planner_axes,
-    mark_searched_axes,
-    option_axis,
-    planner_axes,
-    switch_entries,
-)
-from harness.tool_contracts import resolver_digest
 from harness.turn_events import PLANNER_ASK, REQUEST_INPUT_FUNCTION_CALL_NAME, after_turn_question
+from opentelemetry import trace
+from opentelemetry.semconv.attributes.error_attributes import ERROR_TYPE
+from opentelemetry.trace import Status, StatusCode
 from orchestrator.agent import _retrying
-from pydantic import JsonValue
-from submission.prices_choice import PRICES_OPTIONS
-from submission.service import (
-    COMBINATION_OPTIONS,
-    WHOLE_COLUMNS,
-    AlignedPin,
-    Proposal,
-    Realignment,
-    ScopeRead,
-    SearchedPin,
-    Unpinned,
-    aligned_pins,
-    axis_slot,
-    basis_unservable,
-    block_parties,
-    bound_parties,
-    first_year_identity,
-    part_scope,
-    realignments_wanted,
-    save_aligned_pin,
-    save_searched_pin,
-    scopes_wanted,
-    share_whole_underivable,
-    submit,
-    unpinned_wanted,
-    unread_part,
-    whole_axis_held,
-)
-from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
-from translator.discovery import (
-    SEARCH,
-    DefinitionNotResolvedError,
-    PartNotResolvedError,
-    answered_once_at,
-    call_within_entry,
-    pin_warnings,
-    read_found_scope,
-    refusal_retryable,
-    resolve_definition,
-    resolve_definition_at,
-    resolved_spec,
-)
-from translator.referral import (
-    USER_DECIDES,
-    Referral,
-    ReferralKind,
-    clear_referral,
-    load_referral,
-)
-from translator.tool import Translate, authored_answer
+from translator.tool import Translate
 
 from planner.call import (
-    CallSession,
-    PlannerCall,
+    ResponseCall,
     Step,
-    answered_since_referral,
-    candidate_ids,
 )
-from planner.declaration import PlanTool
-from planner.plan import (
-    MAX_PLAN_DECISIONS,
-    MAX_PLAN_REQUIREMENTS,
-    AnswerMode,
-    AskAnswer,
-    DecisionDraft,
-    Decline,
-    EvidenceRequirement,
-    FullHistory,
-    PinSource,
-    Plan,
-    PlanStatus,
-    SessionState,
-    compile_warnings,
-    full_histories,
-    full_history,
-    held_sources,
-    load_plan,
-    pin_sources,
-    plan_revision,
-    record_spec_searched,
-    record_unsupported,
-    save_found_sources,
-    save_full_history,
-    save_pin_sources,
-    save_plan,
-    split_of,
-    warning_codes,
-)
-from planner.records import (
-    OpenPeriodFault,
-)
+from planner.plan import SessionState
 from planner.settings import AGENT_THINKING_CONFIG, drop_thought_parts
-from planner.skills import build_skill_tools
-from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
+from planner.specs import planner_tool_specs, skill_tool_spec
+from planner.tool_results import Outcome
+from planner.tool_spec import ToolSpec, function_declaration, run_tool
+from planner.tools import EndRun, ready_and_end
 
 if TYPE_CHECKING:
     from harness.prefix_cache import PrefixCache
@@ -189,9 +85,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 AGENT_NAME = "dfo_planner"
-
-# The tool the planner proposes a plan through.
-PROPOSE_PLAN = PROPOSE_PLAN_PROPOSER.call
 
 _PLANNING = (
     "You are the Planner Agent for the Development Finance Observatory. "
@@ -594,161 +487,19 @@ def planner_instruction(
     )
 
 
-_NO_PLAN = "No plan has been proposed yet."
+def _end_run(tool_context: ToolContext) -> EndRun:
+    """The `EndRun` for the tool `tool_context` serves: ADK ends the run on its
+    response (`skip_summarization`), with no model call after."""
 
+    def end_run() -> None:
+        tool_context.actions.skip_summarization = True
 
-def _approval_summary(plan: Plan) -> dict[str, object]:
-    """Return what a next call needs to know about the compiled `plan`.
-
-    The version and revision, which tie a later answer to one content hash,
-    and every warning the compiler let through (`Workflow.warnings`). The
-    plan's own decisions, requirements, sources and steps are deliberately
-    absent. `harness.studio_translate` builds the card the user approves from
-    the plan record, through `harness.plan_display`, and translation and
-    `declare_ready` both read the record out of session state, so a copy here is
-    a second description of one plan that can disagree with the first.
-
-    Requires a plan that carries a workflow.
-    """
-    workflow = plan.workflow
-    assert workflow is not None
-    return {
-        "version": plan.version,
-        "revision": plan_revision(plan),
-        "warnings": [warning.model_dump(mode="json") for warning in workflow.warnings],
-    }
-
-
-def _execution_blocked(plan: Plan, call: PlannerCall) -> dict[str, object] | None:
-    """Return the problem that stops `declare_ready` on `plan`, or `None` to let it proceed.
-
-    Checked in order: a rejected plan; a pending referral, which the planner settles by
-    proposing again, after asking the user where the referral is of a kind in `USER_DECIDES`
-    (the refusal's `action` names `PLANNER_ASK` until they answer, `propose_plan`
-    otherwise); a plan not yet translated and compiled; and, last, an allowlist on `plan.status`
-    itself. Only `PENDING_APPROVAL` may be declared ready, so a plan already `APPROVED`,
-    `EXECUTING`, `COMPLETED` or `FAILED` is refused too, even though none of those carries a
-    message of its own above. A plan seeded back from a failed run (see `harness.graph`) still
-    carries a workflow and the version it failed at, so it would otherwise pass every check
-    above and reach the user as though it were still approvable.
-    """
-    if plan.status is PlanStatus.REJECTED:
-        return problem(
-            ProblemCode.PLAN_REJECTED,
-            "The current plan was rejected. Propose a new one before executing.",
-            outcome=Outcome.REFUSED,
-            action=PROPOSE_PLAN_PROPOSER.action(),
-        )
-    referral = load_referral(call.state)
-    if referral is not None:
-        asks_user = referral.kind in USER_DECIDES and not answered_since_referral(call)
-        return problem(
-            ProblemCode.REFERRAL_PENDING,
-            "The translator referred this plan back; settle the referral with the user "
-            "and propose again before executing.",
-            outcome=Outcome.REFUSED,
-            detail={"referral": authored_answer(referral.model_dump(mode="json"), split_of(plan))},
-            action=Action(call=PLANNER_ASK) if asks_user else PROPOSE_PLAN_PROPOSER.action(),
-        )
-    if plan.status is PlanStatus.DRAFT or plan.workflow is None:
-        # A draft states the methodology; what runs arrives with
-        # translation, so approving one would approve nothing to run.
-        return problem(
-            ProblemCode.WORKFLOW_MISSING,
-            "This plan has not compiled into a workflow, so nothing can execute yet. "
-            "Propose it again, with its `version` as `amends_version`, to have it "
-            "translated.",
-            outcome=Outcome.REFUSED,
-            action=PROPOSE_PLAN_PROPOSER.action(),
-        )
-    if plan.status is not PlanStatus.PENDING_APPROVAL:
-        return problem(
-            ProblemCode.TRANSITION_REFUSED,
-            f"This plan is {plan.status.value}, not awaiting approval, so it cannot be "
-            "declared ready. Propose a new plan before executing.",
-            outcome=Outcome.REFUSED,
-            detail={"status": plan.status.value},
-            action=PROPOSE_PLAN_PROPOSER.action(),
-        )
-    return None
-
-
-def declare_ready(
-    answer: dict[str, object],
-    call: PlannerCall,
-) -> dict[str, object]:
-    """Declare the plan on record ready for the user's answer, when `answer`'s translation compiled.
-
-    `answer` is an accepted `propose_plan` answer carrying its `translation`. A verdict other
-    than `ok` leaves it unchanged. Past `_execution_blocked`, it gains `summary`
-    (`_approval_summary`), and the run ends there (`end_run_when_ready`). The harness asks the
-    user, so no model call follows to restate the plan the user already sees. A plan the gate
-    blocks gains the gate's problem under `submission` instead, its `action` naming
-    `propose_plan`, and the run goes on. Approves nothing. Whatever runs this agent gates on the
-    user's answer, keyed on the summary's revision.
-    """
-    translation = answer.get("translation")
-    if not isinstance(translation, dict) or translation.get("outcome") != Outcome.OK.value:
-        return answer
-    plan = load_plan(call.state)
-    assert plan is not None, "a translation answers ok only for the plan on record"
-    blocked = _execution_blocked(plan, call)
-    if blocked is not None:
-        return {**answer, "submission": blocked}
-    return {**answer, "summary": _approval_summary(plan)}
+    return end_run
 
 
 def end_run_when_ready(answer: dict[str, object], call: AdkCall) -> dict[str, object]:
-    """`declare_ready` over the ADK `call`, ending the run once it is ready.
-
-    An answer carrying `summary` is a plan declared ready, so ADK ends the run on it
-    (`skip_summarization`) with no model call after. Any other answer leaves the run going.
-    """
-    declared = declare_ready(answer, call)
-    if "summary" in declared:
-        call.tool_context.actions.skip_summarization = True
-    return declared
-
-
-# The `propose_plan` arguments that patch a plan. A call naming none of them
-# changes nothing about the version it amends.
-_PATCH_ARGUMENTS = (
-    "decisions",
-    "evidence_requirements",
-    "removed_decisions",
-    "removed_evidence_requirements",
-    "declined",
-    "answered",
-    "removed_asks",
-)
-
-
-def _transient_retry(arguments: Mapping[str, Any], state: SessionState) -> Plan | None:
-    """The recorded plan a `propose_plan` call asks to have translated again, or `None`.
-
-    A transient referral (the data service did not answer) leaves the
-    recorded plan as it was. A call amending that version and changing
-    nothing (`amends_version` alone, any restated `question` or
-    `answer_mode` equal to the recorded one) asks only for that version to
-    be translated again, so it records no new version and spends no plan
-    round. Any other call is a proposal.
-    """
-    referral = load_referral(state)
-    plan = load_plan(state)
-    if (
-        referral is None
-        or referral.outcome is not Outcome.TRANSIENT
-        or plan is None
-        or arguments.get("amends_version") != plan.version
-        or arguments.get("starts_new_plan")
-        or any(arguments.get(name) for name in _PATCH_ARGUMENTS)
-    ):
-        return None
-    if arguments.get("question") not in (None, plan.question):
-        return None
-    if arguments.get("answer_mode") not in (None, plan.answer_mode):
-        return None
-    return plan
+    """`declare_ready` over the ADK `call`, ending the run once it is ready (`ready_and_end`)."""
+    return ready_and_end(answer, call, _end_run(call.tool_context))
 
 
 @dataclass(frozen=True)
@@ -787,12 +538,38 @@ class AdkCall:
         """
         return self._steps
 
+    def response_calls(self) -> Sequence[ResponseCall]:
+        """The calls of the planner model's response that holds the call's own
+        (`_response_holding`)."""
+        if self.call_id is None:
+            return ()
+        calls = _response_holding(self.tool_context.session.events, self.call_id)
+        return tuple(ResponseCall(call.name, call.id) for call in calls)
+
 
 def _function_calls(event: Any) -> list[Any]:
     """The function calls of `event`'s parts, in order."""
     if not (event.content and event.content.parts):
         return []
     return [part.function_call for part in event.content.parts if part.function_call]
+
+
+def _response_holding(events: Sequence[Event], call_id: str) -> list[Any]:
+    """The function calls of the latest model response in `events` that holds a
+    call with `call_id`, in order, or none.
+
+    The graph's planner node pauses on an accepted ask with an interrupt call
+    (`REQUEST_INPUT_FUNCTION_CALL_NAME`) under the ask's own id, so a later
+    event can hold the id without being the response that made the call. A
+    call of that name under `call_id` is skipped.
+    """
+    for event in reversed(events):
+        calls = _function_calls(event)
+        if any(
+            call.id == call_id and call.name != REQUEST_INPUT_FUNCTION_CALL_NAME for call in calls
+        ):
+            return calls
+    return []
 
 
 def _in_flight_calls(events: Sequence[Event], serving: str | None) -> frozenset[str]:
@@ -814,11 +591,10 @@ def _in_flight_calls(events: Sequence[Event], serving: str | None) -> frozenset[
         for part in (event.content.parts if event.content and event.content.parts else ())
         if part.function_response is not None
     }
-    for event in reversed(events):
-        calls = _function_calls(event)
-        if any(call.id == serving and call.name != PLANNER_ASK for call in calls):
-            return frozenset(call.id for call in calls if call.id and call.id not in answered)
-    return frozenset()
+    calls = _response_holding(events, serving)
+    if not any(call.id == serving and call.name != PLANNER_ASK for call in calls):
+        return frozenset()
+    return frozenset(call.id for call in calls if call.id and call.id not in answered)
 
 
 def _session_steps(events: Sequence[Event], *, serving: str | None = None) -> Iterator[Step]:
@@ -923,1498 +699,101 @@ def _user_message(event: Any) -> bool:
     )
 
 
-# What each `propose_plan` argument means, as the model reads it on the
-# argument itself (`planner.declaration.PlanTool`). `question` and
-# `starts_new_plan` read differently under `question_fixed`, the way
-# `submission.service._resolve_intent` enforces them; `_FIXED_ARGUMENTS`
-# replaces those two.
-_PROPOSE_PLAN_ARGUMENTS = {
-    "question": (
-        "The question this plan answers. Required on a first draft and with "
-        "`starts_new_plan`, which starts at version 1 under it. A patch that "
-        "states one records it; one that omits it keeps the recorded question."
-    ),
-    "answer_mode": (
-        "What kind of answer the requirements add up to. `series` answers a "
-        "question that asks to see a level or a trend: a lone dataset "
-        "requirement, unread by anything else, is itself the answer, its frame "
-        "carrying one series per entity for a chart to draw. `computed` answers "
-        "a question that asks for a figure the series does not state on its "
-        "own (a difference, growth, share, quotient, rank or total), so every "
-        "dataset requirement has to feed a calculation, since one left unread "
-        "would leave the plan without the figure the question asked for. "
-        "Either way, `answered` may name a dataset requirement a calculation "
-        "reads. "
-        "Required on a first draft and with `starts_new_plan`. A patch that "
-        "states one switches the plan's mode and re-validates its requirements "
-        "under it; one that omits it keeps the recorded mode."
-    ),
-    "decisions": (
-        "The decisions this call adds or replaces, keyed by `slot`: a slot the "
-        "plan already states replaces that decision, and a new one adds it. A "
-        f"first draft states every decision the plan makes, at most "
-        f"{MAX_PLAN_DECISIONS}. Every decision is cited by at least one "
-        "requirement."
-    ),
-    "evidence_requirements": (
-        "The requirements this call adds or replaces, keyed by `id`, unique "
-        "within the plan and tagged by `kind`: an id the plan already states "
-        "replaces that requirement whole, so restate every field it keeps, "
-        "its entities' roles included, and a new id adds one. A derived "
-        "requirement names the requirement it reads in `input_id`. Each cites "
-        "in `decision_ids` the decisions that fixed its fields, and none when "
-        "the question or your instruction states them outright. A plan states "
-        f"at most {MAX_PLAN_REQUIREMENTS} requirements."
-    ),
-    "removed_decisions": (
-        "The `slot` of each decision this call deletes. Leaving a decision out of a patch keeps it."
-    ),
-    "removed_evidence_requirements": (
-        "The `id` of each requirement this call deletes. Leaving a requirement "
-        "out of a patch keeps it."
-    ),
-    "declined": (
-        "Each part of the question no operation computes, one per `code` and "
-        "`ask_ref`. An `unsupported` answer earns a decline, with that "
-        "answer's code: one `propose_plan` answered, itself or in its `translation`, "
-        "or a run-time refusal the plan is replanned from that names the code. A "
-        "`requirement_unmeetable` translation whose `reason` says it earns a "
-        "decline earns that code too, which the plan may make or leave out. "
-        "`breakdown_not_kept` is earned when an `ask_role_dropped` problem names "
-        "the ask and the source its answer pins cannot hold that party open. A "
-        "first plan may also decline as `no_operation_covers` an ask no "
-        "requirement kind or chain of them states."
-    ),
-    "answered": (
-        "When the brief lists asks, the requirements that answer each one, "
-        "keyed by `ask`. Every ask is answered here or declined in `declined` "
-        "with its number as `ask_ref`, exactly once, or both when the plan "
-        "computes part of it, unless `removed_asks` names it."
-    ),
-    "removed_asks": (
-        "The number of each ask the user's amendment removes from the plan. Leave it out "
-        "of `answered` and `declined`, and narrow or remove what answered it. Only the "
-        "user's amendment removes an ask, and only a later one restores it, by answering it."
-    ),
-    "across_years": (
-        "The `id` of each step that combines its years, an `aggregate` whose `group_by` "
-        "leaves out `period` or a `rank` with a `reduction` and `per_period` false, because "
-        "the user's own words ask for one figure or one ranking over them: a change to the "
-        "plan the user asks for, or, when no asks are listed, the question itself. A step "
-        "named once keeps that standing in later patches while its kind and `reduction` "
-        "stay, and loses it when an `aggregate`'s `group_by` gains `period` or a `rank` "
-        "sets `per_period`. Leave it empty for a step that answers an ask marked "
-        "(across years)."
-    ),
-    "amends_version": (
-        "The `version` this call patches, as the last `propose_plan` call "
-        'answered it and as the brief\'s own "version N" line states it. '
-        "Required once a plan is recorded, unless `starts_new_plan` is set: "
-        "a call stating neither is refused, and `question` never stands in "
-        "for the choice."
-    ),
-    "starts_new_plan": (
-        "True begins a plan of its own, at version 1, for a different question "
-        "while a plan is recorded."
-    ),
-}
-
-_FIXED_ARGUMENTS = {
-    "question": (
-        "The question this plan answers. Required on a first draft. This "
-        "turn's question is fixed, so a patch either omits it or restates it "
-        "unchanged: it has to match the one already recorded."
-    ),
-    "starts_new_plan": (
-        "True says the user's reply asks a different question from the one "
-        "fixed for this turn. Refused, recording nothing: the harness ends the "
-        "turn and tells the user to send that question as its own message."
-    ),
-}
+# The `error.type` ADK records on a `FunctionTool`'s span when its answer holds
+# an `error` key.
+_TOOL_ERROR = "TOOL_ERROR"
 
 
-def _first_year_wanted(result: Mapping[str, object]) -> str | None:
-    """The pinned dataset a refusal says no first year is on record for; `None` for any other answer."""
-    detail = result.get("detail")
-    if (
-        not isinstance(detail, Mapping)
-        or detail.get("fault") != OpenPeriodFault.FIRST_YEAR_UNKNOWN.value
-    ):
-        return None
-    spec_id = detail.get("spec_id")
-    return spec_id if isinstance(spec_id, str) else None
+def _env_flag(name: str) -> bool | None:
+    """The environment variable `name` read as google-genai reads a flag.
+
+    `true` or `1`, in any case, is true. Any other value is false, and an unset
+    variable gives `None`.
+    """
+    value = os.environ.get(name)
+    return None if value is None else value.lower() in ("true", "1")
 
 
-# The seconds one first-year read may take (`read_full_history`). It runs
-# inside a `propose_plan` call, so inside the planner entry's remaining time,
-# which `translator.discovery.resolve_definition` already holds it to; this
-# keeps a slow Search from spending that whole remainder on one read.
-FIRST_YEAR_READ_DEADLINE_SECONDS = 10.0
+def refuse_vertex_ai() -> None:
+    """Refuse to build the planner when its model's client would use Vertex AI.
 
+    The planner's declarations are the Gemini developer API's form
+    (`planner.tool_spec.function_declaration`). Vertex AI rejects their
+    optional `anyOf` schemas, which ADK rewrites only for its own function
+    tools. `create_planner_agent` calls this once, when the planner's model
+    is ADK's `Gemini`. Any other model calls through no google-genai client.
 
-async def read_full_history(
-    surface: ToolSurface,
-    identity: Mapping[str, Any],
-    *,
-    deadline_s: float = FIRST_YEAR_READ_DEADLINE_SECONDS,
-) -> FullHistory | None:
-    """What Search states about every year the dataset of `identity` holds, read now.
-
-    One `resolve_definition` call for `identity` over no window, the same
-    read the translator makes for a pin's copy
-    (`translator.discovery.resolve_definition`): data-mcp posts the identity
-    to Search once and stores the definition it answers. `None` when Search
-    does not answer with that one dataset, or its answer states no first
-    year (`planner.plan.full_history`). The window is read for its first
-    year only and is never retrieved.
+    The harness builds its Gemini models with no client options, so their
+    `google.genai.Client` takes `vertexai` from the environment, as
+    google-genai resolves it. `GOOGLE_GENAI_USE_ENTERPRISE` applies when set,
+    and otherwise `GOOGLE_GENAI_USE_VERTEXAI`, each true when `true` or `1`. The
+    rule is read here without building a client, since building one without an
+    API key or credentials raises.
 
     Raises:
-        DefinitionNotResolvedError: If the call did not complete, or did not
-            answer within `deadline_s`, and can succeed later (`retryable`).
+        RuntimeError: That resolution gives Vertex AI.
     """
-    spec_id, unwindowed = windowed_identity(identity, {"kind": "all"})
-    try:
-        async with asyncio.timeout(deadline_s):
-            part = await resolve_definition(surface, spec_id=spec_id, identity=unwindowed)
-        return full_history(resolved_spec(part, spec_id=spec_id))
-    except TimeoutError as exc:
-        raise DefinitionNotResolvedError(
-            f"Search did not answer in {deadline_s:.0f} s", retryable=True
-        ) from exc
-    except DefinitionNotResolvedError as exc:
-        if exc.retryable:
-            raise
-        return None
-    except PartNotResolvedError:
-        return None
-
-
-def _first_year_unreadable(
-    refused: Mapping[str, object], exc: DefinitionNotResolvedError
-) -> dict[str, object]:
-    """Return the `SURFACE_UNAVAILABLE` problem for a first-year read that did not complete.
-
-    `refused` is the `first_year_unknown` refusal the read was made for; its
-    requirements and dataset carry over, under the fault
-    `first_year_read_failed`. The same proposal can succeed later, so
-    nothing in it needs changing.
-    """
-    detail = dict(cast("Mapping[str, JsonValue]", refused["detail"]))
-    detail["fault"] = OpenPeriodFault.FIRST_YEAR_READ_FAILED.value
-    return problem(
-        ProblemCode.SURFACE_UNAVAILABLE,
-        f"The first year {detail['spec_id']} holds could not be read: {exc}. The plan is "
-        "sound and nothing was recorded; propose it again, or, where the window covers "
-        "several years, state the start as a fixed year and roll only the end; a window of "
-        "one year cannot, so drop `rolling` and `period_end_open` there for fixed years.",
-        outcome=Outcome.REFUSED,
-        detail=detail,
-    )
-
-
-# A read of a source, made: applied to the session state, it makes the read's
-# writes and answers the refusal the proposal is given, or `None` once the
-# read is held. `with_source_reads` makes the reads one refusal asks for at
-# once and applies them in order, so a read after a refused one writes nothing.
-type SourceRead = Callable[[SessionState], dict[str, object] | None]
-
-
-def _refusing(refused: dict[str, object]) -> SourceRead:
-    """The read answering `refused`, writing nothing."""
-    return lambda _: refused
-
-
-async def compile_on_basis(  # noqa: PLR0911 -- one distinct refusal per way the compile fails
-    surface: ToolSurface,
-    realignment: Realignment,
-    *,
-    state: SessionState,
-) -> SourceRead:
-    """Compile `realignment`'s pin on its calculation's options and hold the pin Search answers.
-
-    Posts the pin's base identity with its scope entries and each option, on
-    the axis it names (`harness.scope_choices.option_axis`), as an explicit
-    entry from its choice in place of the entry on that axis, the resubmit
-    a switch on the plan card posts (`harness.scope_choices.switch_entries`)
-    once per option, with what the resubmit posts of the part's entity groups
-    (`compiler.sources.block_wire_groups`), through data-mcp's
-    `resolve_definition`, which stores the definition it answers. One
-    resubmit carries every option, so an input moving on the measure basis
-    and the provider scope is compiled once. The answer is held as a
-    `planner.plan.AlignedPin` with the answer's digest
-    (`harness.tool_contracts.resolver_digest`), its block marking those
-    axes as the planner's, beside any axis the origin's block marks
-    (`harness.scope_choices.mark_planner_axes`). The datasets the planner was
-    shown (`planner.plan.pin_sources`) are left as shown, so a requirement
-    pinning the answer's spec_id directly takes none of the origin's
-    `planner.plan.PinSource` fields (settled, warnings, asked roles,
-    provenance ref). Where it was not shown that spec_id it reads the
-    compile's block (`planner.plan.held_sources`), choice provenance and
-    planner marks included. The next proposal pins the input to it
-    (`submission.service.admit`).
-
-    The compile takes the time a resubmit has
-    (`translator.discovery.call_within_entry`): the capability row's call
-    timeout, above data-mcp's resubmit budget, within the planner entry's
-    time left.
-
-    `state` is read; the writes are made when the read returned is applied
-    (`SourceRead`). It answers `None` once the pin is held, or the refusal
-    the proposal answers: `SURFACE_UNAVAILABLE` when Search did not answer
-    and can later, `OPERATION_UNSUPPORTED` when it refuses the options or
-    answers with no one dataset, or when what it posts of the part's entity
-    groups is not readable, since a resubmit posted without them can bind
-    another population.
-
-    A declared whole (`Realignment.whole_axis`) is compiled by `compile_whole`.
-    """
-    if realignment.whole_axis is not None:
-        return await compile_whole(surface, realignment, state=state)
-    source = held_sources(state).get(realignment.spec_id)
-    block = source.spec_block(realignment.spec_id) if source is not None else None
-    scope = part_scope(realignment.spec_id, block)
-    choices: dict[str, ScopeChoice] = (
-        {choice.axis: choice for choice in scope.choices} if scope is not None else {}
-    )
-    axes = [option_axis(option_id) for option_id in realignment.option_ids]
-
-    def unservable(reason: str) -> SourceRead:
-        return lambda into: basis_unservable(
-            spec_id=realignment.spec_id,
-            option_ids=realignment.option_ids,
-            requirement_id=realignment.requirement_id,
-            step_id=realignment.step_id,
-            reason=reason,
-            record=lambda operation: record_unsupported(into, operation),
-            proposer=PROPOSE_PLAN_PROPOSER,
+    enterprise = _env_flag("GOOGLE_GENAI_USE_ENTERPRISE")
+    vertexai = enterprise if enterprise is not None else _env_flag("GOOGLE_GENAI_USE_VERTEXAI")
+    if vertexai:
+        raise RuntimeError(
+            "GOOGLE_GENAI_USE_ENTERPRISE, or GOOGLE_GENAI_USE_VERTEXAI when it is unset, "
+            "points google-genai at Vertex AI, which rejects the planner's tool "
+            "declarations. Unset GOOGLE_GENAI_USE_ENTERPRISE and GOOGLE_GENAI_USE_VERTEXAI "
+            "and run the planner on a Gemini developer API key (GOOGLE_API_KEY)."
         )
 
-    missing = [axis for axis in axes if axis not in choices]
-    if block is None or scope is None or missing:
-        return unservable(
-            f"{realignment.requirement_id!r}'s dataset has no "
-            f"{' or '.join(missing or axes)} choice on record"
-        )
-    switched = scope.entries
-    for option_id in realignment.option_ids:
-        switched = tuple(
-            switch_entries(
-                scope.model_copy(update={"entries": switched}),
-                choice=choices[option_axis(option_id)],
-                option_id=option_id,
-            )
-        )
-    entries = [entry.model_dump(mode="json", exclude_none=True) for entry in switched]
-    groups = readable_wire_groups(block)
-    if groups is None:
-        return unservable(
-            f"Search's named sets for {realignment.requirement_id!r}'s dataset are not readable"
-        )
-    try:
-        part, resolved_at = await resolve_definition_at(
-            surface,
-            spec_id=scope.base.spec_id,
-            identity=scope.base.identity,
-            groups=groups,
-            scope_entries=entries,
-        )
-    except DefinitionNotResolvedError as exc:
-        if exc.retryable:
-            return _refusing(_basis_uncompiled(realignment, str(exc)))
-        return unservable(
-            f"Search does not count {realignment.requirement_id!r}'s dataset the way its "
-            f"calculation's other inputs share ({exc.code or 'refused'})"
-        )
-    spec = part.get("spec") if part.get("status") == "definite" else None
-    spec_id = spec.get("spec_id") if isinstance(spec, Mapping) else None
-    if not isinstance(spec, Mapping) or not isinstance(spec_id, str):
-        return unservable(
-            f"Search holds no one dataset counting {realignment.requirement_id!r} the way "
-            "its calculation's other inputs share"
-        )
-    digest = resolver_digest({"parts": [dict(part)]})
-    mark_planner_axes(digest, planner_axes(block) | set(axes))
 
-    def hold(into: SessionState) -> None:
-        save_aligned_pin(
-            into,
-            AlignedPin(
-                origin=realignment.spec_id,
-                option_ids=realignment.option_ids,
-                spec_id=spec_id,
-                digest=digest,
-            ),
-            warnings=_origin_warnings(into, realignment.spec_id),
-        )
-        record_spec_searched(into, spec_id, resolved_at)
-
-    return hold
-
-
-async def read_scope(
-    surface: ToolSurface, read: ScopeRead, *, held: Mapping[str, PinSource], state: SessionState
-) -> SourceRead:
-    """Read how `read`'s pin, a candidate Search offered with no scope choices,
-    is counted, and hold the block Search answers in its place.
-
-    `held` is the blocks on record (`planner.plan.held_sources`), taken
-    before any read of the refusal waits. Resolves the pin's identity once
-    (`translator.discovery.read_found_scope`) and holds the definite block
-    Search answers with its scope choices (`planner.plan.save_found_sources`),
-    so the next proposal aligns the input as any other
-    (`submission.service._aligned_bases`). It answers `None` once the block
-    is held, or the refusal the proposal answers: `SURFACE_UNAVAILABLE` when
-    Search did not answer and can later, and `OPERATION_UNSUPPORTED` when it
-    refuses the identity or answers with no one dataset, since the input
-    cannot then be counted as its calculation's other inputs are
-    (`_scope_unservable`).
-    """
-    source = held.get(read.spec_id)
-    block = source.spec_block(read.spec_id) if source is not None else None
-    if block is None:
-        return _refusing(
-            _scope_unservable(read, f"{read.requirement_id!r}'s dataset has no block on record")
-        )
-    try:
-        found = await read_found_scope(surface, read.spec_id, held=held, state=state)
-    except DefinitionNotResolvedError as exc:
-        if exc.retryable:
-            return _refusing(_scope_not_read(read, str(exc)))
-        return _refusing(
-            _scope_unservable(
-                read,
-                f"Search does not say how {read.requirement_id!r}'s dataset is counted "
-                f"({exc.code or 'refused'})",
-            )
-        )
-    except (PartNotResolvedError, ValueError) as exc:
-        return _refusing(
-            _scope_unservable(
-                read, f"Search does not say how {read.requirement_id!r}'s dataset is counted: {exc}"
-            )
-        )
-    return lambda into: save_found_sources(into, found)
-
-
-def _scope_unservable(read: ScopeRead, reason: str) -> dict[str, object]:
-    """Return the `OPERATION_UNSUPPORTED` problem for `read`'s input, whose scope
-    Search does not state, so it cannot be counted as its calculation's other
-    inputs are. `reason` says why, as a clause.
-
-    It refuses this proposal alone and records nothing: the pin cannot be
-    aligned, and another series of the input, or a plan leaving it out of
-    the calculation, can be, so the ask stays answerable.
-    `detail.basis` names the input as `submission.service.basis_unservable`
-    does, for the refusal's sentence (`harness.sentences`).
-    """
-    return problem(
-        ProblemCode.OPERATION_UNSUPPORTED,
-        f"{reason}, so {read.step_id!r} would mix figures counted different ways. Pin "
-        f"{read.requirement_id!r} to another series a search answered in full, or leave it "
-        f"out of {read.step_id!r}.",
-        outcome=Outcome.UNSUPPORTED,
-        action=PROPOSE_PLAN_PROPOSER.action(needs=("evidence_requirements",)),
-        detail={
-            "basis": {
-                "spec_id": read.spec_id,
-                "option_ids": [],
-                "requirement_id": read.requirement_id,
-                "step_id": read.step_id,
-            }
-        },
-    )
-
-
-def _origin_warnings(state: SessionState, origin: str) -> tuple[str, ...]:
-    """The warning codes on the record of `origin`, a pin a compile is made from (`translator.discovery.pin_warnings`), which the compile keeps."""
-    return pin_warnings(
-        origin,
-        entry=None,
-        shown=pin_sources(state),
-        compiled=aligned_pins(state),
-        recorded=compile_warnings(state),
-    )
-
-
-async def compile_whole(  # noqa: PLR0911 -- one distinct refusal per way the compile fails
-    surface: ToolSurface,
-    realignment: Realignment,
-    *,
-    state: SessionState,
-) -> SourceRead:
-    """Compile the declared whole `realignment` names from its part, and hold it as a pin.
-
-    The part is the pin `realignment.spec_id` and the axis left open
-    `realignment.whole_axis` (`planner.plan.WholeOf.axis`). Posts the part's
-    base identity with that axis opened, under the spec_id that identity
-    hashes to, the part's entity groups, and one explicit entry from each of
-    its other choices holding its active option, with the concept of the
-    part's entry on that axis (`_opened`). The sector is opened by
-    unbinding the slot the part's sector choice binds
-    (`submission.service.axis_slot`). A donor or recipient is opened by
-    dropping that role's column from the identity
-    (`submission.service.WHOLE_COLUMNS`), with the set named on it and the
-    choice adding entities to it, the region, so Search answers with the
-    total over every party there that holds the part, and what population
-    that is stays Search's answer. Search keeps the part's measure basis,
-    and its region on another role, which an option the whole cannot serve
-    would otherwise leave to Search's default. The provider scope of a
-    donor whole is posted as a carried entry: Search counts the whole on it
-    where the whole offers it, and otherwise drops it and counts the whole
-    on its own default, since the scope names whose spending a named donor
-    counts and Search offers the inclusive scope on no total naming no
-    donor. The part keeps its own scope, and the whole's caveat says what
-    each side counts (`submission.service._whole_shares`). A recipient
-    whole names the part's donor, so Search can count it on the part's
-    scope, and its provider scope is posted as an explicit entry that
-    Search refuses where it cannot hold it, as the other choices are.
-    No model call is made. The part is read off the blocks on record
-    (`planner.plan.held_sources`), so a part alignment moved reads its
-    compile. The whole takes its choices
-    from its part. Each the whole holds on the part's option carries the
-    part's provenance, and the block marks as the planner's
-    (`harness.scope_choices.mark_planner_axes`) those of them the part's
-    block marks, so the whole reads as settled the way the part was and a
-    later search carries what the part's carries. It is held as a
-    `planner.plan.AlignedPin` from the part on that axis, which every
-    whole declaring the part and the axis pins. Like a compile from
-    `compile_on_basis`, it is held there alone.
-
-    `state` is read; the writes are made when the read returned is applied
-    (`SourceRead`). It answers `None` once the pin is held,
-    `SURFACE_UNAVAILABLE` when Search did not answer and can later, or
-    `SHARE_WHOLE_UNDERIVABLE` under a cause
-    naming why: the part's pin is not among the datasets shown
-    (`part_not_shown`), is shown with no block (`part_block_missing`), holds
-    scope choices this release cannot read (`scope_unreadable`), binds
-    nothing on the axis to leave open (`axis_not_held`), or names a set on a
-    role the whole keeps whose posted identity (`compiler.sources.block_wire_groups`)
-    is not readable, which the whole would otherwise be posted without
-    (`groups_unreadable`); or Search refuses
-    the whole (as `requested_option_unavailable` where it cannot hold an
-    option the part holds), or answers with no one dataset (`whole_refused`),
-    or with a donor or recipient whole that Search shows does not hold a party
-    the part names on that role (`part_outside_whole`), or bound to one total
-    that states neither its members nor a whole class of party, so nothing
-    shows it does (`whole_members_unstated`) (`_parties_outside`).
-    """
-    part_pin, axis = realignment.spec_id, cast(str, realignment.whole_axis)
-
-    def underivable(reason: str, cause: str = "whole_refused") -> SourceRead:
-        return _refusing(
-            share_whole_underivable(
-                whole_id=realignment.requirement_id,
-                part_spec_id=part_pin,
-                reason=reason,
-                cause=cause,
-            )
-        )
-
-    source = held_sources(state).get(part_pin)
-    block = source.spec_block(part_pin) if source is not None else None
-    scope = part_scope(part_pin, block)
-    if source is None or block is None or scope is None or not whole_axis_held(scope, axis):
-        return underivable(*unread_part(part_pin, axis, source=source, block=block, scope=scope))
-    column = WHOLE_COLUMNS.get(axis)
-    groups = readable_wire_groups(block, leaving_out=column)
-    if groups is None:
-        return underivable(
-            f"Search's named sets for {part_pin} are not readable", "groups_unreadable"
-        )
-    identity, choices = _opened(scope, axis)
-    concepts = {entry.axis: entry.concept for entry in scope.entries}
-    entries = [
-        ScopeEntry(
-            axis=choice.axis,
-            option_id=choice.active,
-            provenance="carried"
-            if axis == "donor" and choice.axis == PROVIDER_AXIS
-            else "explicit",
-            concept=concepts.get(choice.axis),
-            origin=ChoiceOrigin(choice_id=choice.id),
-        )
-        for choice in choices
-    ]
-    try:
-        part, resolved_at = await resolve_definition_at(
-            surface,
-            spec_id=spec_id_for(canonicalize(identity)),
-            identity=identity,
-            groups=groups,
-            scope_entries=[entry.model_dump(mode="json", exclude_none=True) for entry in entries],
-        )
-    except DefinitionNotResolvedError as exc:
-        if exc.retryable:
-            return _refusing(_basis_uncompiled(realignment, str(exc)))
-        return underivable(
-            f"Search does not count {part_pin}'s dataset over every {axis} the way the part is "
-            f"counted ({exc.code or 'refused'}): {exc}"
-        )
-    spec = part.get("spec") if part.get("status") == "definite" else None
-    spec_id = spec.get("spec_id") if isinstance(spec, Mapping) else None
-    if not isinstance(spec, Mapping) or not isinstance(spec_id, str):
-        return underivable(f"Search holds no one dataset counting every {axis} of {part_pin}")
-    held = (
-        _parties_outside(scope, spec, column, part_block=block)
-        if column is not None
-        else _Containment()
-    )
-    if held.outside or held.unshown:
-        return underivable(*_uncontained(part_pin, axis, held))
-    answered = _answered_options(spec_id, spec)
-    inherited: dict[str, str] = {
-        choice.axis: choice.provenance
-        for choice in choices
-        if answered.get(choice.axis) == choice.active
-    }
-    digest = resolver_digest({"parts": [_as_whole(part, inherited, entries, answered)]})
-    mark_planner_axes(digest, planner_axes(block) & inherited.keys())
-
-    def hold(into: SessionState) -> None:
-        save_aligned_pin(
-            into,
-            AlignedPin(
-                origin=part_pin,
-                option_ids=(),
-                spec_id=spec_id,
-                digest=digest,
-                whole_axis=axis,
-            ),
-            warnings=_origin_warnings(into, part_pin),
-        )
-        record_spec_searched(into, spec_id, resolved_at)
-
-    return hold
-
-
-async def run_together[T](calls: Iterable[Awaitable[T]]) -> list[T]:
-    """Each of `calls`' results in order, run at once.
-
-    The first to raise cancels the rest, which are waited for before it is
-    raised, so none is left running.
-    """
-    tasks = [asyncio.ensure_future(call) for call in calls]
-    try:
-        return list(await asyncio.gather(*tasks))
-    finally:
-        await _cancel_and_drain(tasks)
-
-
-async def _cancel_and_drain(tasks: Sequence[asyncio.Future[Any]]) -> None:
-    """Cancel each of `tasks` still running, wait for every one, and retrieve each
-    exception, so none is reported as never retrieved."""
-    running = [task for task in tasks if not task.done()]
-    for task in running:
-        task.cancel()
-    if running:
-        await asyncio.wait(running)
-    for task in tasks:
-        if not task.cancelled():
-            task.exception()
-
-
-def _opened(scope: PartScope, axis: str) -> tuple[dict[str, Any], list[ScopeChoice]]:
-    """The identity and scope choices the whole of the part `scope` records over
-    every member of `axis` posts (`compile_whole`).
-
-    On the sector, the base identity with the slot the sector choice binds
-    unbound (`axis_slot`), and every choice but the sector. On a donor or
-    recipient, the base identity without that role's column
-    (`WHOLE_COLUMNS`), and every choice but one adding entities to that role,
-    the region's. The whole posts the part's groups on other roles
-    (`compiler.sources.block_wire_groups`).
-    """
-    identity = copy.deepcopy(scope.base.identity)
-    column = WHOLE_COLUMNS.get(axis)
-    if column is None:
-        slot = axis_slot(scope, axis)
-        for held in identity.get("slots") or ():
-            if held.get("property") == slot:
-                held["binding"] = {"state": "unbound"}
-        return identity, [choice for choice in scope.choices if choice.axis != axis]
-    identity["entities"] = {
-        role: refs for role, refs in (identity.get("entities") or {}).items() if role != column
-    }
-    return identity, [
-        choice
-        for choice in scope.choices
-        if not any(
-            isinstance(option.binding, EntitiesBinding) and option.binding.role == column
-            for option in choice.options
-        )
-    ]
-
-
-def _answered_options(spec_id: str, spec: Mapping[str, Any]) -> dict[str, str]:
-    """The option each scope choice of `spec`, the Search spec block of `spec_id`,
-    holds active, by axis (`compile_whole`). Empty where it records no choices this
-    release reads (`submission.service.part_scope`)."""
-    scope = part_scope(spec_id, spec)
-    return {choice.axis: choice.active for choice in scope.choices} if scope is not None else {}
-
-
-class _Containment(NamedTuple):
-    """The parties a part names on a donor or recipient whole's role that Search's
-    answer shows are outside the whole (`outside`), and those it does not show are
-    inside or outside (`unshown`) (`_parties_outside`)."""
-
-    outside: tuple[str, ...] = ()
-    unshown: tuple[str, ...] = ()
-
-
-def _uncontained(part_pin: str, axis: str, held: _Containment) -> tuple[str, str]:
-    """Why the whole over every `axis` of the part pinned `part_pin` does not contain
-    it, `held` its containment (`_parties_outside`), as a clause and its
-    `share_whole_underivable` cause: `part_outside_whole` where Search shows a
-    party the part names is outside, else `whole_members_unstated`."""
-    if held.outside:
-        return (
-            f"Search counts {part_pin}'s dataset over a {axis} total that does not hold "
-            f"{', '.join(held.outside)}, which the part names, so the total would not "
-            "contain it",
-            "part_outside_whole",
-        )
-    return (
-        f"Search counts {part_pin}'s dataset over a {axis} total that lists no members "
-        f"and no class of party holding {', '.join(held.unshown)}, which the part "
-        "names, so nothing shows the total holds it",
-        "whole_members_unstated",
-    )
-
-
-# Search's cause for an entry dropped because the part has no choice on its axis.
-_AXIS_ABSENT = "axis_absent"
-
-# The class of party a total holding a whole population can leave out and still
-# hold every party the part names: a residual names no party (`common.place_type`).
-_NOT_A_PARTY_CLASS = "residual"
-
-
-def _parties_outside(
-    scope: PartScope, spec: Mapping[str, Any], column: str, *, part_block: Mapping[str, Any]
-) -> _Containment:
-    """Whether the whole Search answered with, `spec`, holds each party the part
-    `scope` records names on the role `column` (`compile_whole`), `part_block`
-    the part's spec block.
-
-    A whole binding nothing on `column` counts every party its dataset holds
-    there, the part's own dataset, so it holds every party the part names.
-    One binding parties there holds those it binds, and of a total it binds,
-    the members Search lists for the group naming it on `column`
-    (`ResolvedGroup.members`, DAC countries' total). A total holding a whole
-    population (`ResolvedGroup.whole_of`) holds every party of its classes and
-    no other: the part's party where its ref shows it is of one
-    (`compiler.sources.party_class`, a country official), and not where its
-    ref shows another. It holds a party whose ref shows no class where its
-    classes are every class the side publishes (`ResolvedGroup.side_classes`),
-    residuals aside; where the side publishes another class, or Search states
-    no classes for the side but residuals, nothing here says which class that
-    party is, so it is unshown.
-    Any other party is outside where Search binds parties or lists a total's
-    members there, and unshown where the total it binds states neither its
-    members nor a whole class. Where Search's group on `column` is not
-    readable (`compiler.sources.block_group`), as one naming a class of party
-    outside `PartyClass`, every party it does not bind is unshown; a group on
-    another role is not read. The parties the part and the whole bind on
-    `column` are those their scope records bind
-    (`submission.service.bound_parties`), a choice's among them; where the
-    whole's record does not read, those its definition binds
-    (`submission.service.block_parties`).
-
-    A party of the part the whole neither binds nor lists is read through the
-    part's own group on `column` where it is that group's total (the G7's): the
-    whole holds it where it holds every member Search lists for the group, does
-    not where one is outside, and nothing shows it does where Search lists no
-    members, or the part's group there is not readable.
-    """
-    named = bound_parties(scope, column)
-    bound = block_parties(spec, column, scope=part_scope(str(spec.get("spec_id")), spec))
-    if not bound:
-        return _Containment()
-    try:
-        group = block_group(spec, column)
-    except ValueError:
-        return _Containment(unshown=tuple(party for party in named if party not in bound))
-    members = set(group.members) if group is not None else set()
-
-    def holds(party: str) -> bool | None:
-        """Whether the whole holds `party` as itself, `None` where nothing shows it."""
-        if party in bound or party in members:
-            return True
-        if group is not None and group.whole_of:
-            if (held := party_class(party)) is not None:
-                return held in group.whole_of
-            classes = set(group.side_classes) - {_NOT_A_PARTY_CLASS}
-            return True if classes and classes <= set(group.whole_of) else None
-        if members or group is None or group.total not in bound:
-            return False
-        return None
-
-    try:
-        part_group = block_group(part_block, column)
-    except ValueError:
-        part_group, part_readable = None, False
-    else:
-        part_readable = True
-    outside: list[str] = []
-    unshown: list[str] = []
-    for party in named:
-        held = holds(party)
-        if held:
-            continue
-        if not part_readable:
-            # The party may be the total of a group nothing here reads.
-            held = None
-        elif part_group is not None and party == part_group.total:
-            each = [holds(member) for member in part_group.members]
-            if not each:
-                held = None
-            elif all(each):
-                continue
-            else:
-                held = False if False in each else None
-        (outside if held is False else unshown).append(party)
-    return _Containment(outside=tuple(outside), unshown=tuple(unshown))
-
-
-def _as_whole(
-    part: Mapping[str, Any],
-    provenance: Mapping[str, str],
-    posted: Iterable[ScopeEntry],
-    answered: Mapping[str, str],
-) -> dict[str, Any]:
-    """A copy of `part`, the `definite` Search part answering a whole, whose scope
-    choice on each axis of `provenance` carries the provenance given for that axis,
-    and whose dropped entries leave out each carried entry of `posted`, the entries
-    the whole was posted with, that changed nothing (`compile_whole`). `answered` is
-    the option the whole holds on each axis (`_answered_options`).
-
-    A carried entry the harness posted changed nothing where the whole holds its
-    option all the same, or where Search dropped it because the whole has no
-    choice on its axis (`axis_absent`), as a DAC2a total naming no donor has no
-    provider axis, so the user chose nothing there that failed to apply. One Search
-    dropped for a whole that counts another option, as DAC countries' total ODA
-    beside a part on bilateral ODA, stays, so the whole's reading says it did not
-    apply. The whole's caveat says what each side counts
-    (`submission.service._whole_shares`). Any other dropped entry stays."""
-    copied = copy.deepcopy(dict(part))
-    resolved = copied["spec"].get("resolved")
-    scope = resolved.get("scope_choices") if isinstance(resolved, dict) else None
-    if not isinstance(scope, dict):
-        return copied
-    for choice in scope.get("choices") or ():
-        if isinstance(choice, dict) and choice.get("axis") in provenance:
-            choice["provenance"] = provenance[choice["axis"]]
-    carried = {
-        (entry.axis, entry.option_id, entry.origin.choice_id)
-        for entry in posted
-        if entry.provenance == "carried" and isinstance(entry.origin, ChoiceOrigin)
-    }
-    if carried and isinstance(scope.get("dropped_entries"), list):
-        scope["dropped_entries"] = [
-            dropped
-            for dropped in scope["dropped_entries"]
-            if not _changed_nothing(dropped, carried, answered)
-        ]
-    return copied
-
-
-def _changed_nothing(
-    dropped: object, carried: Collection[tuple[str, str, str]], answered: Mapping[str, str]
-) -> bool:
-    """Whether `dropped`, one of Search's dropped entries, is a carried entry the
-    harness posted, `carried` keying each by axis, option and choice, that changed
-    nothing because the whole holds its option on its axis (`answered`) or has no
-    choice there (`_as_whole`)."""
-    if not isinstance(dropped, Mapping):
-        return False
-    entry = dropped.get("entry")
-    if not isinstance(entry, Mapping) or entry.get("provenance") != "carried":
-        return False
-    origin = entry.get("origin")
-    choice_id = origin.get("choice_id") if isinstance(origin, Mapping) else None
-    axis, option_id = entry.get("axis"), entry.get("option_id")
-    if (axis, option_id, choice_id) not in carried:
-        return False
-    return dropped.get("cause") == _AXIS_ABSENT or answered.get(str(axis)) == option_id
-
-
-async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
-    """Search for `unpinned`, a calculation's input the planner pinned no dataset for, and hold what Search settles on.
-
-    Posts the `search` part the translator's own discovery sends for the
-    requirement (`translator.discovery.search_part`), in the planner's words
-    and with no message of the user's, so every axis an entry settled on
-    Search's answer is marked as the planner's
-    (`harness.scope_choices.mark_planner_axes`). A `definite` answer is
-    shown to the planner as a source of its own, with the codes of its
-    part's warnings and the request's
-    (`harness.tool_contracts.graph_envelope`; `planner.plan.save_pin_sources`),
-    and held as a
-    `submission.service.SearchedPin` with its digest, and the time the
-    search was made as one settling on its spec_id
-    (`planner.plan.record_spec_searched`), so the next proposal
-    pins it and the planner seam stores it as a reading of the conversation
-    (`harness.planner_seam.store_searched_pin_readings`). Any other answer is
-    held as a search that settled on nothing, under Search's part status, or
-    `refused` for a refusal, and the next proposal is refused
-    (`submission.service._aligned_bases`). The search takes the time the
-    translator's own discovery gives one
-    (`translator.discovery.call_within_entry`), and is made once an
-    invocation (`translator.discovery.answered_once_at`), so a read the
-    proposal's other refused search discarded (`with_source_reads`) is not
-    repeated.
-
-    The holds are made when the read returned is applied (`SourceRead`). It
-    answers `None` once the search is held, or `SURFACE_UNAVAILABLE` when
-    Search did not answer, or refused in a way that can succeed later
-    (`translator.discovery.refusal_retryable`); nothing is held then, so the
-    next proposal searches again. A call that failed for a reason no retry
-    changes (a `ToolSurfaceUnavailableError` not marked `retryable`) is held
-    as a refused search.
-    """
-    arguments = {"parts": [unpinned.part]}
-    try:
-        answer, searched_at = await answered_once_at(
-            SEARCH,
-            arguments,
-            lambda: call_within_entry(surface, tool=SEARCH, arguments=arguments),
-        )
-    except ToolSurfaceUnavailableError as exc:
-        if exc.retryable:
-            return _refusing(_search_unavailable(unpinned, str(exc)))
-        # A search no later attempt can make is held as a refused one.
-        refused = SearchedPin(
-            requirement_key=unpinned.requirement_key,
-            status="refused",
-            asked_roles=unpinned.asked_roles,
-            open_roles=unpinned.open_roles,
-        )
-        return lambda into: save_searched_pin(into, refused)
-    if answer.is_error and refusal_retryable(answer):
-        refusal = answer.structured_content or {}
-        cause = refusal.get("message") or answer.text or "Search refused it for now"
-        return _refusing(_search_unavailable(unpinned, str(cause)))
-    envelope = None if answer.is_error else (answer.meta or {}).get(SEARCH_ENVELOPE_META_KEY)
-    parts = envelope.get("parts") if isinstance(envelope, dict) else None
-    part = parts[0] if isinstance(parts, list) and len(parts) == 1 else None
-    status = part.get("status") if isinstance(part, dict) else None
-    spec = part.get("spec") if isinstance(part, dict) and status == "definite" else None
-    spec_id = spec.get("spec_id") if isinstance(spec, dict) else None
-    searched = SearchedPin(
-        requirement_key=unpinned.requirement_key,
-        status="refused"
-        if answer.is_error
-        else status
-        if isinstance(status, str)
-        else "unreadable",
-        asked_roles=unpinned.asked_roles,
-        open_roles=unpinned.open_roles,
-    )
-    if not isinstance(spec_id, str) or not isinstance(envelope, dict):
-        return lambda into: save_searched_pin(into, searched)
-    digest = resolver_digest(cast(dict[str, Any], envelope))
-    mark_searched_axes(digest, spec_id=spec_id)
-    shown = PinSource(
-        block=digest["spec_block"],
-        warnings=warning_codes(digest["warnings"]),
-        settled=True,
-        asked_roles=unpinned.asked_roles,
-    )
-
-    def hold(into: SessionState) -> None:
-        save_pin_sources(into, {**pin_sources(into), spec_id: shown})
-        save_searched_pin(into, searched.model_copy(update={"spec_id": spec_id, "digest": digest}))
-        record_spec_searched(into, spec_id, searched_at)
-
-    return hold
-
-
-def _search_unavailable(unpinned: Unpinned, cause: str) -> dict[str, object]:
-    """Return the `SURFACE_UNAVAILABLE` problem for a search of `unpinned` that can succeed later.
-
-    The same proposal can succeed later, so nothing in it needs changing.
-    """
-    return problem(
-        ProblemCode.SURFACE_UNAVAILABLE,
-        f"{unpinned.requirement_id!r}, an input of {unpinned.step_id!r}, pins no dataset, "
-        f"and Search could not be asked for one: {cause}. The plan is sound and nothing was "
-        "recorded; propose it again.",
-        outcome=Outcome.REFUSED,
-        detail={"search": unpinned.model_dump(mode="json")},
-    )
-
-
-def _scope_not_read(read: ScopeRead, cause: str) -> dict[str, object]:
-    """Return the `SURFACE_UNAVAILABLE` problem for a read of a candidate's scope that did not complete.
-
-    The same proposal can succeed later, so nothing in it needs changing.
-    """
-    return problem(
-        ProblemCode.SURFACE_UNAVAILABLE,
-        f"How {read.requirement_id!r} is counted could not be read from Search: {cause}. "
-        "The plan is sound and nothing was recorded; propose it again.",
-        outcome=Outcome.REFUSED,
-        detail={"read": read._asdict()},
-    )
-
-
-def _basis_uncompiled(realignment: Realignment, cause: str) -> dict[str, object]:
-    """Return the `SURFACE_UNAVAILABLE` problem for a compile on another basis or provider scope that did not complete.
-
-    The same proposal can succeed later, so nothing in it needs changing.
-    """
-    return problem(
-        ProblemCode.SURFACE_UNAVAILABLE,
-        f"{realignment.requirement_id!r} could not be counted the way the other inputs of "
-        f"{realignment.step_id!r} are: {cause}. The plan is sound and nothing was recorded; "
-        "propose it again.",
-        outcome=Outcome.REFUSED,
-        detail={"basis": realignment.detail()},
-    )
-
-
-async def with_source_reads(  # noqa: PLR0911 -- one return per kind of read a refusal asks for
-    propose: Callable[[], dict[str, object]], *, state: SessionState, surface: ToolSurface
-) -> dict[str, object]:
-    """`propose`'s answer, once every read of a source it was refused for is made.
-
-    A refusal records nothing, so `propose` runs again once the read is held.
-    Two refusals ask for one. A plan rolling from a dataset's first year
-    needs that first year (`read_full_history`, held by
-    `planner.plan.save_full_history`): one read serves every requirement, and
-    every later proposal of the turn, that pins the dataset; an answer
-    stating no first year is held too, and the next refusal says so
-    (`first_year_read_failed`). A calculation one of whose inputs pins no
-    dataset while another carries a basis choice needs that input searched
-    for and pinned (`BASIS_UNKNOWN`, `pin_by_search`), as does the part of
-    a declared whole; a search held
-    for the requirement's content is made once. A calculation whose inputs are
-    counted on different measure bases or provider scopes needs each input
-    it names compiled on their shared options, every option of one input in
-    one compile (`BASES_UNALIGNED`, `compile_on_basis`), and a declared
-    whole needs its part compiled with the axis left open (`compile_whole`).
-    An input pinned to a candidate Search offered with no scope choices needs
-    them read first (`SCOPE_UNREAD`, `read_scope`), once a pin, however many
-    inputs pin it, and once a call: a refusal naming a pin already read
-    answers `OPERATION_UNSUPPORTED`, since Search's answer left it unread;
-    a pin already compiled on a set of options, or a whole already compiled,
-    is asked for once, so a refusal naming one
-    is answered as it stands, and inputs sharing a pin and a set of options
-    compile it once (`_alignment_key`).
-
-    The reads one refusal asks for run at once. Their writes are made in the
-    order the refusal names them, up to the first read refused, whose
-    refusal is answered as soon as it and every read before it are made,
-    and the reads after it are cancelled (`_held_in_order`), so the state is
-    the one reading them one after another leaves. A search the refused read's writes discarded keeps
-    its answer for the invocation (`pin_by_search`), so the next proposal
-    searches only for what was refused.
-    """
-    scopes_read: set[str] = set()
-    while True:
-        result = propose()
-        pin = _first_year_wanted(result)
-        if pin is not None:
-            if pin in full_histories(state):
-                return result
-            identity = first_year_identity(pin, state)
-            if identity is None:
-                return result
-            try:
-                history = await read_full_history(surface, identity)
-            except DefinitionNotResolvedError as exc:
-                return _first_year_unreadable(result, exc)
-            save_full_history(state, pin, history)
-            continue
-        unpinned = unpinned_wanted(result)
-        if unpinned:
-            refused = await _held_in_order(
-                (pin_by_search(surface, item) for item in unpinned), state=state
-            )
-            if refused is not None:
-                return refused
-            continue
-        reads = scopes_wanted(result)
-        if reads:
-            # A pin is read once a call: Search answered a read that left it
-            # unread, and will answer it so again.
-            again = next((item for item in reads if item.spec_id in scopes_read), None)
-            if again is not None:
-                return _scope_unservable(
-                    again,
-                    f"Search's answer does not say how {again.requirement_id!r}'s dataset "
-                    "is counted",
-                )
-            by_pin: dict[str, ScopeRead] = {}
-            for item in reads:
-                by_pin.setdefault(item.spec_id, item)
-            held = held_sources(state)
-            refused = await _held_in_order(
-                (read_scope(surface, item, held=held, state=state) for item in by_pin.values()),
-                state=state,
-            )
-            scopes_read.update(by_pin)
-            if refused is not None:
-                return refused
-            continue
-        wanted = realignments_wanted(result)
-        done = {
-            _alignment_key(pin.origin, pin.option_ids, pin.whole_axis)
-            for pin in aligned_pins(state)
-        }
-        keys = [_alignment_key(item.spec_id, item.option_ids, item.whole_axis) for item in wanted]
-        if not wanted or any(key in done for key in keys):
-            return result
-        compiles: dict[tuple[str, tuple[str, ...], str | None], Realignment] = {}
-        for key, item in zip(keys, wanted, strict=True):
-            compiles.setdefault(key, item)
-        refused = await _held_in_order(
-            (compile_on_basis(surface, item, state=state) for item in compiles.values()),
-            state=state,
-        )
-        if refused is not None:
-            return refused
-
-
-async def _held_in_order(
-    reads: Iterable[Awaitable[SourceRead]], *, state: SessionState
-) -> dict[str, object] | None:
-    """Run `reads` at once and apply each to `state` in order, answering the first refused.
-
-    Each read is applied once it and every read before it are made, so a
-    refusal is answered without waiting for the reads after it, which are
-    cancelled. A read that raises raises once every read before it is
-    applied without a refusal, and cancels the reads after it. Every read
-    takes `state` before its first wait, so none reads what another wrote.
-    """
-    tasks = [asyncio.ensure_future(read) for read in reads]
-    try:
-        for task in tasks:
-            refused = (await task)(state)
-            if refused is not None:
-                return refused
-        return None
-    finally:
-        await _cancel_and_drain(tasks)
-
-
-def _alignment_key(
-    spec_id: str, option_ids: Iterable[str], whole_axis: str | None
-) -> tuple[str, tuple[str, ...], str | None]:
-    """The compile that puts the pin `spec_id` on the options `option_ids`, or leaves its choice on `whole_axis` open, as a key.
-
-    The options are sorted and deduplicated, so one compile naming the same
-    options in another order is the same work.
-    """
-    return spec_id, tuple(sorted(set(option_ids))), whole_axis
-
-
-def ask_refusal(args: Mapping[str, Any]) -> dict[str, object] | None:
-    """The refusal the planner's ask earns on its arguments alone, or `None` for one that pauses.
-
-    ADK hands the model's arguments over unchecked. A refusal answers the
-    call at once, so the run goes on and Studio asks nothing; an ask this
-    accepts ends the planner's run, and the graph's planner node pauses on
-    it with these arguments as its `RequestInput`'s `payload`, from which
-    Studio builds its question (`harness.studio_translate._planner_question`).
-    `message` is the question as text. Each of `candidates` is a
-    mapping, read by its `spec_id` and `label`. `options` are
-    `COMBINATION_OPTIONS` or `PRICES_OPTIONS` exactly, as a refusal's action
-    carries them, offered without `candidates`. A `recommended_spec_id` names
-    one of `candidates`.
-    """
-    if not isinstance(args.get("message"), str):
-        return problem(
-            ProblemCode.INVALID_ARGUMENTS,
-            "`message` must be the question to show the user, as text.",
-            outcome=Outcome.INVALID_INPUT,
-        )
-    candidates = args.get("candidates") or []
-    if not isinstance(candidates, list) or not all(isinstance(c, dict) for c in candidates):
-        return problem(
-            ProblemCode.INVALID_ARGUMENTS,
-            '`candidates` must be a list of `{"spec_id": ..., "label": ...}`.',
-            outcome=Outcome.INVALID_INPUT,
-        )
-    options = args.get("options") or []
-    fixed = ([dict(o) for o in COMBINATION_OPTIONS], [dict(o) for o in PRICES_OPTIONS])
-    if options and (candidates or options not in fixed):
-        return problem(
-            ProblemCode.INVALID_ARGUMENTS,
-            "`options` must be the ones a refusal's action carries, unchanged, "
-            "and offered without `candidates`. With no such refusal, leave `options` "
-            "out and ask in `message` alone.",
-            outcome=Outcome.INVALID_INPUT,
-        )
-    offered = [str(c["spec_id"]) for c in candidates if c.get("spec_id")]
-    recommended_spec_id = args.get("recommended_spec_id")
-    if recommended_spec_id and recommended_spec_id not in offered:
-        return problem(
-            ProblemCode.INVALID_ARGUMENTS,
-            f"recommended_spec_id {recommended_spec_id!r} names no candidate in {offered!r}",
-            outcome=Outcome.INVALID_INPUT,
-        )
-    return None
-
-
-def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[str, object] | None:
-    """The refusal for an ask offering anything but one reading's picks under an entity referral, or `None`.
-
-    While an `entity_name_ambiguous` referral is pending, an ask that offers
-    candidates offers those of one reading in its `ambiguous_entities`, each
-    under its `pick` (`planner.records.entity_pick`), and offers all of them.
-    Studio shows an ask as one single-select question, so one answer settles
-    one entity, an id that names no pick would come back as an answer nothing
-    reads, and an ask leaving a candidate out would make the planner's choice
-    the user's. An ask with no candidates, as for free text or a combination,
-    passes.
-    """
-    if referral is None or referral.kind is not ReferralKind.ENTITY_NAME_AMBIGUOUS:
-        return None
-    offered = candidate_ids(candidates)
-    readings = {
-        candidate.pick: reading.entity
-        for reading in referral.ambiguous_entities
-        for candidate in reading.candidates
-    }
-    unknown = sorted(offered - readings.keys())
-    if unknown:
-        return problem(
-            ProblemCode.INVALID_ARGUMENTS,
-            f"spec_id {unknown[0]!r} is no candidate's `pick` in the pending referral's "
-            "`ambiguous_entities`. Offer one reading's candidates, each under its `pick` "
-            "unchanged.",
-            outcome=Outcome.INVALID_INPUT,
-        )
-    touched = {readings[spec_id] for spec_id in offered}
-    if len(touched) > 1:
-        return problem(
-            ProblemCode.INVALID_ARGUMENTS,
-            "These candidates come from more than one reading in `ambiguous_entities`. Ask "
-            f"about one reading per `{PLANNER_ASK}` call, and the next once the user has "
-            "answered.",
-            outcome=Outcome.INVALID_INPUT,
-        )
-    if touched and offered != {pick for pick, entity in readings.items() if entity in touched}:
-        return problem(
-            ProblemCode.INVALID_ARGUMENTS,
-            "These candidates leave out some of their reading's candidates in "
-            "`ambiguous_entities`. Offer every candidate of the reading, each under its `pick`.",
-            outcome=Outcome.INVALID_INPUT,
-        )
-    return None
-
-
-def _ask_check(args: Mapping[str, Any], state: SessionState) -> dict[str, object] | None:
-    """The refusal an ask with `args` earns on its arguments and the pending
-    referral, or `None` for one its tool accepts unless it follows another ask
-    in the same response (`_ask_beside_ask`).
-
-    A history copy's referral is read as the model wrote the plan
-    (`translator.tool.authored_answer`), so its picks are the origin's.
-    """
-    refusal = ask_refusal(args)
-    if refusal is not None:
-        return refusal
-    referral = load_referral(state)
-    plan = load_plan(state)
-    if referral is not None and plan is not None and plan.rolling_copies:
-        referral = Referral.model_validate(
-            authored_answer(referral.model_dump(mode="json"), split_of(plan))
-        )
-    return _entity_ask_unbound(referral, args.get("candidates"))
-
-
-def _ask_beside_ask(tool_context: ToolContext) -> dict[str, object] | None:
-    """The refusal for an ask that is not the first ask of its model response, or `None`.
-
-    The user answers one question at a time. The calls of one response run
-    concurrently, and an accepted ask ends the run before the model is
-    called again, so the only way two asks can wait together is two in one
-    response. The first ask in the response's call list is the only one that
-    may reach the user; every later one is refused, whatever became of the
-    first. Deciding from the call list rather than from the earlier asks'
-    outcomes gives the same answer under any order the response's calls run
-    in. `tool_context.session.events` holds the call's own model response by
-    the time its tool runs.
-    """
-    own = tool_context.function_call_id
-    for event in reversed(tool_context.session.events):
-        asks = [call.id for call in event.get_function_calls() if call.name == PLANNER_ASK]
-        if own not in asks:
-            continue
-        if asks[0] == own:
-            return None
-        return problem(
-            ProblemCode.INVALID_ARGUMENTS,
-            f"This response calls `{PLANNER_ASK}` more than once, and the user answers one "
-            "question at a time. Ask this one in your next response, if it still needs "
-            "asking.",
-            outcome=Outcome.INVALID_INPUT,
-        )
-    return None
-
-
-# Where an accepted ask waits for the graph's planner node to put it to the
-# user (`AcceptedAsk`). `harness.planner_seam.PlannerSeam` reads it once the
-# planner's run ends and clears it when the next entry starts.
-PENDING_ASK_STATE_KEY = "planner:pending_ask"
-
-
-class AcceptedAsk(NamedTuple):
-    """An ask the planner made and its tool accepted, waiting for the user.
-
-    `call_id` is the id of the planner's `PLANNER_ASK` call, which the graph's
-    planner node pauses on as the interrupt id, so the user's answer carries
-    it. `args` are the call's arguments, the question as Studio shows it
-    (`harness.studio_translate._planner_question`).
+class SpecTool(BaseTool):
+    """A `planner.tool_spec.ToolSpec` served to an ADK `LlmAgent`.
+
+    The model is shown `function_declaration(spec)`, and a call runs the
+    spec's body over the call's `AdkCall` (`run_tool`), ending the run through
+    `skip_summarization`. `_get_declaration` is the hook `BaseTool` reads the
+    declaration through. Its `process_llm_request` adds the declaration to the
+    request's one `types.Tool` of function declarations, creating it when the
+    request has none, and registers the tool under its name.
+
+    The declaration is the Gemini developer API's form, which Vertex AI
+    rejects (`refuse_vertex_ai`).
     """
 
-    call_id: str
-    args: dict[str, Any]
+    def __init__(self, spec: ToolSpec) -> None:
+        super().__init__(name=spec.name, description=spec.description)
+        self.spec = spec
 
+    @functools.cached_property
+    def declaration(self) -> types.FunctionDeclaration:
+        """The declaration the model is shown for the spec, built once."""
+        return function_declaration(self.spec)
 
-def load_pending_ask(state: SessionState) -> AcceptedAsk | None:
-    """The ask waiting for the user, or `None`."""
-    held = state.get(PENDING_ASK_STATE_KEY)
-    return AcceptedAsk(held["call_id"], dict(held["args"])) if isinstance(held, dict) else None
+    @override
+    def _get_declaration(self) -> types.FunctionDeclaration:
+        # Return a copy, since the request holds what this returns and later
+        # request processing may edit it in place.
+        return self.declaration.model_copy(deep=True)
 
+    def invoke(self, args: dict[str, Any], tool_context: ToolContext) -> object:
+        """The spec's answer to a call with `args`, awaitable when its body is async."""
+        return run_tool(self.spec, args, call=AdkCall(tool_context), end_run=_end_run(tool_context))
 
-def clear_pending_ask(state: SessionState) -> None:
-    """Forget the ask waiting for the user."""
-    state[PENDING_ASK_STATE_KEY] = None
+    @override
+    async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
+        """The spec's answer to a call with `args`.
 
-
-# What an accepted ask answers. Its call has a response, and the user's answer
-# reaches the planner in the brief of the entry that resumes it.
-ASK_ACCEPTED = ok(
-    status="asked",
-    message="The question is with the user. Their answer arrives with your next brief.",
-)
-
-
-def ask_user_question(
-    tool_context: ToolContext,
-    message: str,
-    candidates: list[dict[str, str]] = [],  # noqa: B006
-    options: list[dict[str, str]] = [],  # noqa: B006
-    recommended_spec_id: str | None = None,
-    rationale: str | None = None,
-) -> dict[str, object]:
-    """Ask the user a question a referral or a refusal leaves to them, ending your turn.
-
-    The user's answer arrives with your next brief, after the question it
-    answers, naming the candidate or option they picked, or in their own
-    words if they answered outside them. The choices offered come from the
-    referral's candidates, or from the `options` a refusal's action carries;
-    with neither, the question says what cannot be done and asks what to
-    change.
-
-    Args:
-        message: The question to show the user, naming what is
-            ambiguous and, briefly, what each candidate is, in plain
-            words: never a requirement id, spec_id or code.
-        candidates: The referral's own candidates, each
-            `{"spec_id": ..., "label": ...}` -- `label` is the
-            candidate's own `sentence`, not invented text. Omit it for
-            a referral that carries none.
-        options: The `options` a refusal's action carries, unchanged.
-            Omit it otherwise.
-        recommended_spec_id: The candidate you favour, when you favour
-            one -- must name one of `candidates`.
-        rationale: Why you favour it, for the user to read, when
-            `recommended_spec_id` is given.
-    """
-    # `= []` defaults keep the declaration's arrays flat, as `propose_plan`'s
-    # do. Copied here, so the durable record shares no list with the defaults
-    # or the model's call.
-    args: dict[str, Any] = {
-        "message": message,
-        "candidates": copy.deepcopy(candidates),
-        "options": copy.deepcopy(options),
-        "recommended_spec_id": recommended_spec_id,
-        "rationale": rationale,
-    }
-    state = tool_context.state
-    refusal = _ask_check(args, state) or _ask_beside_ask(tool_context)
-    if refusal is not None:
-        return refusal
-    call_id = tool_context.function_call_id
-    assert call_id is not None, "ADK gives every function call an id"
-    state[PENDING_ASK_STATE_KEY] = {"call_id": call_id, "args": args}
-    # The run ends on this response, as on a plan declared ready
-    # (`end_run_when_ready`), once the calls made beside it have answered.
-    tool_context.actions.skip_summarization = True
-    return dict(ASK_ACCEPTED)
-
-
-def build_planner_tools(
-    *,
-    translate: Translate | None = None,
-    question_fixed: bool = False,
-    reads_user_words: bool = True,
-    surface: ToolSurface | None = None,
-) -> list[BaseTool]:
-    """Build the planner's tool set.
-
-    `translate` is the translation (`translator.tool.build_translate`) a
-    `propose_plan` that records a plan runs on it, answering with the verdict
-    under `translation` alongside its own `ok`. Given, `propose_plan` is a
-    coroutine function, and a translation that compiles declares the plan
-    ready (`end_run_when_ready`). Omitted, `propose_plan` records the plan and
-    stops, and nothing declares a plan ready.
-
-    `surface` is the tool surface `propose_plan` reads a pinned dataset's
-    first year through, when a start that follows the newest data needs one
-    no answer on record states (`read_full_history`). Given, `propose_plan`
-    is a coroutine function. Omitted, it reads nothing and refuses such a
-    plan `first_year_unknown`.
-
-    `question_fixed` closes over into `propose_plan`, which passes it straight
-    to `submission.service.submit` on every call, and selects `_FIXED_ARGUMENTS`'
-    descriptions of `question` and `starts_new_plan`, so those two arguments
-    describe the mode this tool set actually enforces.
-
-    `reads_user_words` closes over into `propose_plan` the same way, for
-    `submission.service.admit`. It says whether the planner reads the
-    user's own words in every entry, so `propose_plan`'s `across_years` may
-    name a step in any of them.
-    """
-
-    # `= []` rather than `None`. ADK builds this tool's declaration from the
-    # signature, and an optional list declared `list[X] | None` reaches the
-    # model as `anyOf: [array, null]`, which is not the flat array a patch is
-    # written into. Nothing mutates these defaults.
-    def propose_plan(
-        tool_context: ToolContext,
-        question: str | None = None,
-        answer_mode: AnswerMode | None = None,
-        decisions: list[DecisionDraft] = [],  # noqa: B006
-        evidence_requirements: list[EvidenceRequirement] = [],  # noqa: B006
-        removed_decisions: list[str] = [],  # noqa: B006
-        removed_evidence_requirements: list[str] = [],  # noqa: B006
-        declined: list[Decline] = [],  # noqa: B006
-        answered: list[AskAnswer] = [],  # noqa: B006
-        removed_asks: list[int] = [],  # noqa: B006
-        across_years: list[str] = [],  # noqa: B006
-        amends_version: int | None = None,
-        starts_new_plan: bool = False,
-    ) -> dict[str, object]:
-        """Record a plan, or patch the one already recorded.
-
-        Returns `ok` with `status` `"draft"`; the new `version`, which a
-        patch passes as `amends_version`; the `previous_version` it amended,
-        `None` on a first draft; and the `question` as stored.
+        An answer holding an `error` key, the refusal of a call missing a
+        required argument (`planner.tool_spec.missing_arguments`), marks the
+        tool's span, which ADK makes current while the tool runs, failed with
+        `error.type` `TOOL_ERROR`, as ADK marks a `FunctionTool`'s.
         """
-        return submit(
-            CallSession(AdkCall(tool_context)),
-            Proposal(
-                question=question,
-                answer_mode=answer_mode,
-                decisions=decisions,
-                evidence_requirements=evidence_requirements,
-                removed_decisions=removed_decisions,
-                removed_evidence_requirements=removed_evidence_requirements,
-                declined=declined,
-                answered=answered,
-                removed_asks=removed_asks,
-                across_years=across_years,
-                amends_version=amends_version,
-                starts_new_plan=starts_new_plan,
-            ),
-            question_fixed=question_fixed,
-            reads_user_words=reads_user_words,
-            proposer=PROPOSE_PLAN_PROPOSER,
-        )
-
-    def reject_plan(tool_context: ToolContext) -> dict[str, object]:
-        """Record that the user rejected the current plan.
-
-        Nothing in the plan may run afterwards. Call `propose_plan` again if
-        the user wants a revision rather than an outright stop.
-        """
-        state = tool_context.state
-        plan = load_plan(state)
-        if plan is None:
-            return problem(ProblemCode.PLAN_MISSING, _NO_PLAN, outcome=Outcome.STATE_MISSING)
-        try:
-            plan = plan.reject()
-        except ValueError as exc:
-            # A run that has started or finished cannot be withdrawn.
-            return problem(
-                ProblemCode.TRANSITION_REFUSED,
-                str(exc),
-                outcome=Outcome.REFUSED,
-                detail={"status": plan.status.value},
-            )
-        save_plan(state, plan)
-        clear_referral(state)
-        return ok(status=plan.status.value)
-
-    @functools.wraps(propose_plan)
-    async def propose_plan_reading(**arguments: Any) -> dict[str, object]:
-        """`propose_plan`, making each source read it refuses for want of (`with_source_reads`).
-
-        A refusal records nothing, so the proposal is made again once the
-        read is held: a dataset's first year, or a calculation's input
-        compiled on the basis its other inputs share.
-        """
-        assert surface is not None
-        return await with_source_reads(
-            lambda: propose_plan(**arguments),
-            state=arguments["tool_context"].state,
-            surface=surface,
-        )
-
-    @functools.wraps(propose_plan)
-    async def propose_plan_translating(**arguments: Any) -> dict[str, object]:
-        """`propose_plan`, translating the plan it records.
-
-        Translation runs once, on the version the proposal recorded, after
-        any first-year reads (`propose_plan_reading`). The proposal's own
-        `outcome` stays `ok` whatever the verdict, since the version is
-        recorded either way, and a verdict of `ok` declares the plan ready
-        (`end_run_when_ready`). A proposal that records nothing translates
-        nothing. A bare re-proposal after a transient verdict
-        (`_transient_retry`) translates the recorded version again and
-        records nothing.
-        """
-        assert translate is not None
-        call = AdkCall(arguments["tool_context"])
-        retried = _transient_retry(arguments, call.state)
-        if retried is not None:
-            clear_referral(call.state)
-            answer = ok(
-                status=retried.status.value,
-                version=retried.version,
-                previous_version=retried.previous_version,
-                question=retried.question,
-                translation=await translate(call),
-            )
-            return end_run_when_ready(answer, call)
-        result = (
-            propose_plan(**arguments)
-            if surface is None
-            else await propose_plan_reading(**arguments)
-        )
-        if result.get("outcome") != Outcome.OK.value:
-            return result
-        return end_run_when_ready({**result, "translation": await translate(call)}, call)
-
-    proposing: Callable[..., Any] = propose_plan
-    if translate is not None:
-        proposing = propose_plan_translating
-    elif surface is not None:
-        proposing = propose_plan_reading
-    arguments = (
-        _PROPOSE_PLAN_ARGUMENTS | _FIXED_ARGUMENTS if question_fixed else _PROPOSE_PLAN_ARGUMENTS
-    )
-    return [
-        FunctionTool(ask_user_question),
-        PlanTool(proposing, arguments=arguments),
-        FunctionTool(reject_plan),
-    ]
+        answer = self.invoke(args, tool_context)
+        if inspect.isawaitable(answer):
+            answer = await answer
+        if isinstance(answer, dict) and answer.get("error"):
+            span = trace.get_current_span()
+            span.set_attribute(ERROR_TYPE, _TOOL_ERROR)
+            span.set_status(Status(StatusCode.ERROR, _TOOL_ERROR))
+        return answer
 
 
 # The brief for the planner's current run, which `prepend_brief` shows the model.
@@ -2490,23 +869,33 @@ def create_planner_agent(
 
     Returns:
         The configured `LlmAgent`.
+
+    Raises:
+        RuntimeError: The model is ADK's `Gemini` and its google-genai client
+            would use Vertex AI (`refuse_vertex_ai`).
     """
+    model = _retrying(model_name, prefix_cache=prefix_cache)
+    if isinstance(model, Gemini):
+        refuse_vertex_ai()
     return LlmAgent(
         name=AGENT_NAME,
-        model=_retrying(model_name, prefix_cache=prefix_cache),
+        model=model,
         instruction=planner_instruction(
             has_translator=translate is not None,
             has_skills=surface is not None,
             question_fixed=question_fixed,
         ),
         tools=[
-            *(build_skill_tools(surface) if surface is not None else []),
-            *build_planner_tools(
-                translate=translate,
-                question_fixed=question_fixed,
-                reads_user_words=reads_user_words,
-                surface=surface,
-            ),
+            SpecTool(spec)
+            for spec in [
+                *([skill_tool_spec(surface)] if surface is not None else []),
+                *planner_tool_specs(
+                    translate=translate,
+                    question_fixed=question_fixed,
+                    reads_user_words=reads_user_words,
+                    surface=surface,
+                ),
+            ]
         ],
         # Run as a workflow node (`harness.planner_seam.PlannerSeam._propose`'s
         # `ctx.run_node`), ADK runs an agent with no explicit `mode` as

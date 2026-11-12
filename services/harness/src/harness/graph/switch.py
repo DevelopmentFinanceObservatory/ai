@@ -80,7 +80,6 @@ from compiler.sources import readable_wire_groups
 from compiler.surface import ToolSurface
 from data_mcp.scope import ScopeEntry
 from google.adk import Context, Event
-from planner.agent import run_together
 from planner.plan import (
     AlignedInput,
     DatasetRequirement,
@@ -100,6 +99,7 @@ from planner.plan import (
     windowed_pins,
 )
 from planner.plan import Plan as PlannerPlan
+from planner.source_reads import run_together
 from planner.tool_results import ProblemCode
 from planner.workflow import ResolvedGroup
 from pydantic import ValidationError
@@ -834,7 +834,7 @@ async def _resubmit(
     reading names, the block's the switch read it from (`_Target`), and
     `entries` the switch's (`switch_entries`). The same
     resubmit a compile on another basis posts
-    (`planner.agent.compile_on_basis`), through
+    (`planner.source_reads.compile_on_basis`), through
     `translator.discovery.resolve_definition`: the part's entity groups
     beside it, as every resubmit posts them (`compiler.sources.wire_groups`),
     so Search names them again (`_groups`).

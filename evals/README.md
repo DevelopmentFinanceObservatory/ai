@@ -30,9 +30,9 @@ just eval-pair         # 1b. score harness-pair-v1
 just eval-web          # 2.  read the results at http://127.0.0.1:8000
 ```
 
-Score in the CLI, read in the web UI, in that order. You need a model credential
-in the repo-root `.env`, either `GOOGLE_API_KEY` or the Vertex AI triple from
-`deploy/README.md`.
+Score in the CLI, read in the web UI, in that order. You need a Gemini developer
+API key, `GOOGLE_API_KEY`, in the repo-root `.env`. The planner refuses to build
+when its Gemini model would call Vertex AI.
 
 For a live turn rather than an eval run, start `just studio-live` in one
 terminal and send a question with `just ask "<question>"` from another.

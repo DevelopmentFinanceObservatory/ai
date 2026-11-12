@@ -76,16 +76,23 @@ brief, the skill page and the referral.
 from __future__ import annotations
 
 import copy
+import hashlib
+import itertools
 import json
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp.skills_client import PAGE_CHARS, continuation_line, page_of, with_closing_line
+from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from harness import planner_seam, studio_state
 from harness.planner_seam import (
@@ -111,6 +118,7 @@ from harness.wire import (
     CompositionActor,
     CompositionBlock,
 )
+from planner.agent import create_planner_agent
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
     ASKS_STATE_KEY,
@@ -141,6 +149,7 @@ from planner.plan import (
 from planner.records import GroupBy, Reduction
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, WorkflowStep
 from planner.workflow import Workflow as PlanWorkflow
+from pydantic import Field
 
 from .context_probe import (
     BOUNDING_PATTERNS,
@@ -355,12 +364,16 @@ async def _recorded_round(
 # Baseline -----------------------------------------------------------------------
 
 
-def _compose_baseline(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """The baseline payload: every record, ordered so a diff reads by scenario."""
+def _compose_baseline(
+    records: list[dict[str, Any]], declaration_digests: dict[str, str]
+) -> dict[str, Any]:
+    """The baseline payload holds every record, ordered so a diff reads by scenario,
+    and the digest of each planner variant's declarations (`_declaration_digests`)."""
     return {
         "records": sorted(
             records, key=lambda item: (item["scenario"], item["agent"], item["call_index"])
-        )
+        ),
+        "declaration_digests": declaration_digests,
     }
 
 
@@ -368,11 +381,71 @@ def _baseline_key(record: dict[str, Any]) -> str:
     return f"{record['scenario']}/{record['agent']}[{record['call_index']}]"
 
 
-def _write_baseline(records: list[dict[str, Any]]) -> None:
+def _write_baseline(records: list[dict[str, Any]], declaration_digests: dict[str, str]) -> None:
     # `indent=2` plus a trailing newline matches the `pretty-format-json`
     # pre-commit hook's own formatting (`--indent=2 --no-sort-keys`), so it
     # leaves this file alone, the same way `digest_baseline.json` relies on.
-    _BASELINE_PATH.write_text(json.dumps(_compose_baseline(records), indent=2) + "\n")
+    payload = _compose_baseline(records, declaration_digests)
+    _BASELINE_PATH.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+class _FirstRequest(BaseLlm):
+    """A model that keeps every request it is handed and answers each with text."""
+
+    model: str = "first-request"
+    requests: list[LlmRequest] = Field(default_factory=list)
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse]:
+        self.requests.append(llm_request)
+        yield LlmResponse(
+            content=types.Content(role="model", parts=[types.Part.from_text(text="done")])
+        )
+
+
+def _declarations_digest(request: LlmRequest) -> str:
+    """The sha256 of the SDK's JSON of each `FunctionDeclaration` `request` holds
+    (`model_dump_json(exclude_none=True)`, keys in the SDK's order), in the
+    order the request holds them."""
+    declarations = [
+        json.loads(declaration.model_dump_json(exclude_none=True))
+        for tool in request.config.tools or []
+        for declaration in tool.function_declarations or []
+    ]
+    text = json.dumps(declarations, ensure_ascii=False)
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+async def _declaration_digests() -> dict[str, str]:
+    """`_declarations_digest` of the first request of a planner run, for each
+    setting of `create_planner_agent` that changes a declaration (a tool
+    surface or none, the question fixed or not).
+
+    The character counts in the records cannot see a declaration reordered or
+    edited at the same length. These digests can.
+    """
+    digests: dict[str, str] = {}
+    for surface, question_fixed in itertools.product([False, True], repeat=2):
+        agent = create_planner_agent(
+            model_name="m",
+            surface=cast(Any, SimpleNamespace()) if surface else None,
+            question_fixed=question_fixed,
+        )
+        agent.model = model = _FirstRequest()
+        sessions = InMemorySessionService()
+        session = await sessions.create_session(app_name="a", user_id="u")
+        runner = Runner(agent=agent, app_name="a", session_service=sessions)
+        async for _event in runner.run_async(
+            user_id="u",
+            session_id=session.id,
+            new_message=types.Content(role="user", parts=[types.Part.from_text(text="go")]),
+        ):
+            pass
+        digests[f"surface={surface},question_fixed={question_fixed}"] = _declarations_digest(
+            model.requests[0]
+        )
+    return digests
 
 
 @pytest.fixture
@@ -412,7 +485,10 @@ async def measured(
         measured[(scenario, "planner")] = round_measured["planner"]
 
     if os.environ.get("CONTEXT_BASELINE_UPDATE") == "1":
-        _write_baseline([record for records, _requests in measured.values() for record in records])
+        _write_baseline(
+            [record for records, _requests in measured.values() for record in records],
+            await _declaration_digests(),
+        )
     return measured
 
 
@@ -468,6 +544,29 @@ def test_the_checked_in_baseline_matches_today_s_measurement(
             f"{key}: contents buckets changed. "
             f"before={before['contents']['buckets']} after={after['contents']['buckets']}. "
             f"Run {_REGENERATE}."
+        )
+
+
+async def test_the_checked_in_declaration_digests_match_today_s_requests(measured: Any) -> None:
+    """The declarations every planner variant sends hash as the baseline records.
+
+    A declaration reordered, or edited at the same length, moves its variant's
+    digest while every character count stays put. `measured` is requested so
+    `just context-baseline` has rewritten the file before it is read.
+    """
+    declaration_digests = await _declaration_digests()
+    baseline = json.loads(_BASELINE_PATH.read_text())
+    expected = baseline.get("declaration_digests", {})
+
+    assert sorted(expected) == sorted(declaration_digests), (
+        f"declaration digests recorded for {sorted(expected)}, measured for "
+        f"{sorted(declaration_digests)}. Run {_REGENERATE}."
+    )
+    for key in sorted(declaration_digests):
+        assert expected[key] == declaration_digests[key], (
+            f"{key}: the planner's declarations changed "
+            f"(sha256 {expected[key]} -> {declaration_digests[key]}). "
+            f"Run {_REGENERATE} to record a deliberate change."
         )
 
 

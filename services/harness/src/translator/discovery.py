@@ -2570,7 +2570,7 @@ async def _recorded_source(
     """The source of the dataset `requirement` pins, read from Search's answer for its identity on record.
 
     The identity is the copy over the requirement's period that
-    `planner.agent.propose_plan` pinned (`planner.plan.windowed_pins`), or
+    `propose_plan` (`planner.tools.propose`) pinned (`planner.plan.windowed_pins`), or
     the one on record for the pin itself (`planner.plan.identity_on_record`:
     a search in the conversation, this session's discovery, or the block of
     the pin the planner was shown) when its window is that period, or
@@ -3506,7 +3506,8 @@ def found_blocks(outcome: DiscoveryOutcome) -> dict[str, dict[str, Any]]:
     Discovery searches the planner's own words, so each axis a block's scope
     choices settled other than by default is marked as the planner's
     (`harness.scope_choices.mark_searched_axes`), as for a search the planner
-    makes itself (`planner.agent.pin_by_search`). A block whose scope choices this release cannot read marks none.
+    makes itself (`planner.source_reads.pin_by_search`). A block whose scope
+    choices this release cannot read marks none.
     A block of an answer that is not definite, a candidate or a nearest
     series, is marked unread as any such block is (`planner.plan.scope_unread`).
     """
@@ -3528,7 +3529,7 @@ async def read_found_scope(
 
     `held` is the blocks on record (`planner.plan.held_sources`), and both it
     and `state` are read before the call waits on Search, so reads made at
-    once read none of each other's writes (`planner.agent._held_in_order`).
+    once read none of each other's writes (`planner.source_reads._held_in_order`).
 
     Search states a part's scope choices on a definite answer to a resubmit
     posting scope entries, so the resolve posts none (`compile_scope`) and

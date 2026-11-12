@@ -24,7 +24,6 @@ from data_mcp.definition_store import canonicalize, spec_id_for
 from google.adk.events import EventActions
 from harness.planner_seam import _reading_pin_sources
 from harness.turn_records import RecordedIdentity
-from planner.agent import build_planner_tools
 from planner.plan import (
     AMENDMENT_ENTRY_STATE_KEY,
     ASKS_ACROSS_YEARS_STATE_KEY,
@@ -96,11 +95,13 @@ from planner.records import (
     ValueThreshold,
 )
 from planner.shapes import VALUE_KEPT_SPAN_PAIRS
+from planner.specs import planner_tool_specs
 from planner.tool_results import Outcome, ProblemCode
 from pydantic import ValidationError
 from submission.service import OneYear, _window_pins
 
 from ..decision_drafts import drafts
+from ..planner_tools import call_planner_tool
 
 ASK = "the donors that give the most aid to Kenya"
 OTHER_ASK = "how aid to Kenya has moved"
@@ -248,9 +249,10 @@ def _propose(
     user's words only in an amendment entry, unless `reads_user_words` makes
     it the standalone planner's.
     """
-    tools = {tool.name: tool for tool in build_planner_tools(reads_user_words=reads_user_words)}
+    tools = {tool.name: tool for tool in planner_tool_specs(reads_user_words=reads_user_words)}
     recorded = load_plan(ctx.state)
-    return tools["propose_plan"].func(
+    return call_planner_tool(
+        tools["propose_plan"],
         question=ASK,
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts(decisions),

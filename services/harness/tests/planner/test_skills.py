@@ -21,10 +21,12 @@ from compiler.surface import (
     ToolCallResult,
     ToolSurfaceUnavailableError,
 )
-from google.adk.tools.function_tool import FunctionTool
-from planner.agent import create_planner_agent
-from planner.skills import SKILLS_READ_STATE_KEY, build_skill_tools, skill_page_key
+from planner.agent import SpecTool, create_planner_agent
+from planner.skills import SKILLS_READ_STATE_KEY, skill_page_key
+from planner.specs import skill_tool_spec
 from planner.workflow import ToolId
+
+from ..planner_tools import call_planner_tool, planner_tool_declaration
 
 
 class _RecordingSurface:
@@ -55,8 +57,8 @@ def _tools(surface: _RecordingSurface, state: dict[str, Any] | None = None) -> d
     """Each tool's function, called with a tool context over `state`."""
     tool_context = SimpleNamespace(state={} if state is None else state)
     return {
-        tool.name: functools.partial(tool.func, tool_context=tool_context)
-        for tool in build_skill_tools(surface)
+        tool.name: functools.partial(call_planner_tool, tool, tool_context=tool_context)
+        for tool in [skill_tool_spec(surface)]
     }
 
 
@@ -65,9 +67,9 @@ _SKILL_TEXT = "---\nname: oda-concepts\n---\n\n# ODA concepts\n"
 
 def _get_skill_declaration(agent: Any) -> Any:
     get_skill = next(
-        tool for tool in agent.tools if isinstance(tool, FunctionTool) and tool.name == "get_skill"
+        tool for tool in agent.tools if isinstance(tool, SpecTool) and tool.name == "get_skill"
     )
-    declaration = get_skill._get_declaration()
+    declaration = planner_tool_declaration(get_skill)
     assert declaration is not None
     return declaration
 
@@ -77,7 +79,7 @@ def test_a_planner_built_with_a_surface_carries_one_skill_tool_and_names_dfo_faq
         model_name="m", surface=_RecordingSurface(ToolCallResult(is_error=False))
     )
 
-    names = {tool.name for tool in agent.tools if isinstance(tool, FunctionTool)}
+    names = {tool.name for tool in agent.tools if isinstance(tool, SpecTool)}
     assert "get_skill" in names
     assert "get_skill_file" not in names
     instruction = str(agent.instruction)
@@ -105,7 +107,7 @@ def test_the_skill_tools_description_stays_short() -> None:
 def test_a_planner_built_without_a_surface_has_no_skill_tools_and_no_skill_paragraph() -> None:
     agent = create_planner_agent(model_name="m")
 
-    names = {tool.name for tool in agent.tools if isinstance(tool, FunctionTool)}
+    names = {tool.name for tool in agent.tools if isinstance(tool, SpecTool)}
     assert names.isdisjoint({"get_skill", "get_skill_file"})
     instruction = str(agent.instruction)
     assert "get_skill" not in instruction

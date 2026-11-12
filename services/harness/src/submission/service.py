@@ -25,7 +25,8 @@ rolling from their start (`planner.plan.split_of`), the pins it windows
 (`_window_pins`), and what a built plan may not record
 (`_unrecordable`). It answers the refusal that stops the chain first, or an
 `Admission` carrying the plan to record. `submit` records an admission and
-answers `ok`, which is all `planner.agent.propose_plan` does with its call.
+answers `ok`, which is all `propose_plan`
+(`planner.tools.propose`) does with its call.
 A `Proposer` names the tool the proposal came through, so every `action` a
 refusal carries calls a tool the model was given.
 
@@ -400,7 +401,7 @@ class Proposer:
         return Action(call=self.call, arguments=arguments or None, needs=needs)
 
 
-# `planner.agent.propose_plan`'s proposer.
+# The proposer of `propose_plan`, which `planner.specs` declares.
 PROPOSE_PLAN = Proposer(call="propose_plan")
 
 
@@ -3526,7 +3527,7 @@ def _first_year_refusal(
     names no dataset whose years can be read
     (`OpenPeriodFault.NO_SOURCE_ON_RECORD`). Otherwise the first year is
     unknown before the dataset was read over no window (`refused` as it
-    is, which `planner.agent.propose_plan_reading` answers by reading it),
+    is, which `planner.source_reads.with_source_reads` answers by reading it),
     `FIRST_YEAR_READ_FAILED` when that read's answer stated none (`read`
     holds the pin with `None`), and `RollingIssue.FRAME_TOO_LARGE` when the
     history is past the rows one frame may hold
@@ -3615,7 +3616,7 @@ def first_year_reads(state: SessionState) -> list[Mapping[str, Any]]:
     can still read in `state`, read through the lookups `first_year_identity` reads.
 
     `propose_plan` reads a pinned dataset's first year
-    (`planner.agent.read_full_history`) when a requirement rolls from its start and
+    (`planner.source_reads.read_full_history`) when a requirement rolls from its start and
     nothing on record states that year (`_first_year_refusal`), once per dataset. Which dataset
     it reads depends on the plan, so this is every dataset whose block `state` holds
     (`planner.plan.held_sources`) that has an identity on record
@@ -4473,7 +4474,7 @@ def save_aligned_pin(state: SessionState, pin: AlignedPin, *, warnings: tuple[st
 
 # The session slot holding each search code made for a calculation's input
 # the planner pinned no dataset for (`SearchedPin`), which `_aligned_bases`
-# reads and `planner.agent.with_source_reads` writes.
+# reads and `planner.source_reads.with_source_reads` writes.
 SEARCHED_PINS_STATE_KEY = "planner:searched_pins"
 
 
@@ -4965,10 +4966,10 @@ def _provider_read_in_words(scope: PartScope, choice: ScopeChoice) -> bool:
     (`ChoiceOrigin`) holds on its axis.
 
     Such a row is the one the words picked ("multilateral ODA"), so it counts as
-    stated even on a pin the planner searched for (`planner.agent.pin_by_search`),
+    stated even on a pin the planner searched for (`planner.source_reads.pin_by_search`),
     whose block marks the axis as the planner's and so carries nothing to a later
     search (`harness.scope_choices.carried_entries`). An entry from a choice is one
-    the planner posted to align the pin (`planner.agent.compile_on_basis`) or a
+    the planner posted to align the pin (`planner.source_reads.compile_on_basis`) or a
     carried one. A basis read in the planner's words stays the planner's.
     """
     return (
@@ -5072,7 +5073,7 @@ def _aligned_bases(
     unknown until a dataset is pinned. An input of a calculation another of
     whose inputs carries a basis or provider choice, with no search of it
     held yet, answers `BASIS_UNKNOWN`, naming each to search for
-    (`Unpinned`). `planner.agent.with_source_reads` searches for them and
+    (`Unpinned`). `planner.source_reads.with_source_reads` searches for them and
     proposes again.
     One whose search settled on no one dataset answers
     `OPERATION_UNSUPPORTED`, since one basis or provider scope cannot be
@@ -5150,7 +5151,7 @@ def _aligned_bases(
     plan this call amends states it, on the pin it states. `admit`
     derives its decisions there and pins it to the compile last. An input
     with no such compile yet answers `BASES_UNALIGNED`, naming each to
-    compile with every option it moves to (`Realignment`). `planner.agent.with_source_reads`
+    compile with every option it moves to (`Realignment`). `planner.source_reads.with_source_reads`
     compiles them and proposes again. An input whose choice does not offer
     the provider scope its calculation counts, or offers it unavailable,
     answers `PROVIDERS_UNALIGNED` (`_providers_unaligned`); the same on the
@@ -5286,7 +5287,7 @@ def _scope_unread(
     another input that carries one (`by_axis`) or is a candidate too: a share
     of two candidates aligns once both are read. A candidate whose group holds
     no other input with a choice on any such axis is left unread, as alignment
-    would leave it as it stands. `planner.agent.read_scope` makes each read.
+    would leave it as it stands. `planner.source_reads.read_scope` makes each read.
     """
     pins = {
         requirement.id: requirement.source_spec_id
@@ -6500,7 +6501,7 @@ def _declared_wholes(
 
     A declared whole is its part's final pin, the one alignment moved the
     part to (`realigned`) else its own, with the declared axis left open
-    (`whole_axis_held`, `planner.agent.compile_whole`) and every other choice
+    (`whole_axis_held`, `planner.source_reads.compile_whole`) and every other choice
     held. `compiled` holds the wholes compiled so far
     (`AlignedPin.key`), so wholes declaring one part and axis share one
     compile.
@@ -7230,7 +7231,7 @@ def unread_part(
     missing of its pin source (`part_not_shown`), that source's block
     (`part_block_missing`), the block's scope choices (`scope_unreadable`) and
     what the whole leaves open on `axis` (`whole_axis_held`, `axis_not_held`).
-    `_declared_wholes` and `planner.agent.compile_whole` both name a failure by it."""
+    `_declared_wholes` and `planner.source_reads.compile_whole` both name a failure by it."""
     if source is None:
         return f"{part_pin} is not among the datasets Search showed this turn", "part_not_shown"
     if block is None:
@@ -7267,12 +7268,12 @@ def share_whole_underivable(
       holds), or answers with no one dataset.
     - `part_outside_whole`, `whole_members_unstated`: Search's whole does not
       hold, or does not show it holds, a party the part names
-      (`planner.agent._uncontained`).
+      (`planner.source_reads._uncontained`).
     - `whole_names_another_total`: the whole names an entity on the side it
       leaves open other than the total Search bound there (`_misnamed_total`).
 
     `_declared_wholes` answers the first two kinds and the last, and
-    `planner.agent.compile_whole` every kind but the first and the last.
+    `planner.source_reads.compile_whole` every kind but the first and the last.
     `detail.requirement_id` names the whole for the refusal's sentence
     (`harness.sentences`).
     """
@@ -7322,7 +7323,7 @@ def _with_found(
 def _basis_unknown(unpinned: Sequence[Unpinned]) -> dict[str, object]:
     """Return the `BASIS_UNKNOWN` problem naming each unpinned input of a calculation to search for.
 
-    `planner.agent.with_source_reads` answers it by searching for each and
+    `planner.source_reads.with_source_reads` answers it by searching for each and
     proposing again, so the planner sees it only where no tool surface
     reaches Search.
     """
@@ -7340,8 +7341,8 @@ def _basis_unknown(unpinned: Sequence[Unpinned]) -> dict[str, object]:
 def _scope_unread_problem(reads: Sequence[ScopeRead], proposer: Proposer) -> dict[str, object]:
     """Return the `SCOPE_UNREAD` problem naming each candidate pin to read before alignment.
 
-    `planner.agent.with_source_reads` answers it by reading each
-    (`planner.agent.read_scope`) and proposing again, and answers a read
+    `planner.source_reads.with_source_reads` answers it by reading each
+    (`planner.source_reads.read_scope`) and proposing again, and answers a read
     that leaves a pin unread as `OPERATION_UNSUPPORTED`, so the planner sees
     it only where no tool surface reaches Search. No read can be made there,
     so the same plan would be refused again, and the refusal asks for each
@@ -7372,7 +7373,7 @@ def _bases_unaligned(
 ) -> dict[str, object]:
     """Return the `BASES_UNALIGNED` problem naming each input to compile on its calculation's basis or provider scope.
 
-    `by_axis` holds each input's choice by axis. `planner.agent.with_source_reads`
+    `by_axis` holds each input's choice by axis. `planner.source_reads.with_source_reads`
     answers it by compiling each and proposing again, so the planner sees it
     only where no tool surface reaches Search. `detail.requirement_id` names
     the first input for the refusal's sentence (`harness.sentences`).

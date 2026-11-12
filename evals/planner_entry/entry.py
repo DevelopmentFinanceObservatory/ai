@@ -83,7 +83,6 @@ from harness.tool_contracts import resolver_digest
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, current_turn_budget
 from harness.wiring import handing_back_planner_failures
 from planner.agent import AGENT_NAME as PLANNER_AGENT
-from planner.agent import load_pending_ask, read_full_history
 from planner.call import PlannerCall
 from planner.plan import (
     Plan,
@@ -92,7 +91,9 @@ from planner.plan import (
     load_plan,
     unstated_period_reductions,
 )
+from planner.source_reads import read_full_history
 from planner.tool_results import ProblemCode
+from planner.tools import load_pending_ask
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from submission.service import first_year_reads
 from translator.discovery import DefinitionNotResolvedError, graph_describe, graph_resolve

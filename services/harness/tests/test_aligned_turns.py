@@ -8,6 +8,7 @@ US multilateral ODA as a share of the total, pinning that spec_id directly.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from collections.abc import Mapping
@@ -68,6 +69,7 @@ from .planner.test_agent import (
     _us_2023,
 )
 from .planner.test_aligned_identity import _multilateral_compiles
+from .planner_tools import call_planner_tool
 from .test_graph import (
     APPROVE_INTERRUPT,
     _ManifestSurface,
@@ -438,7 +440,9 @@ async def test_a_declared_wholes_dataset_reaches_a_later_turn_under_the_wholes_o
     whole = us_2023_block("whole")
     _show_blocks(ctx, health)
     result = await _us_2023(
-        _tools_reading(cast(ToolSurface, WholeCompiles()))["propose_plan"].func,
+        functools.partial(
+            call_planner_tool, _tools_reading(cast(ToolSurface, WholeCompiles()))["propose_plan"]
+        ),
         ctx,
         decision(),
         part="health",

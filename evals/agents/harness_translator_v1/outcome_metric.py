@@ -41,7 +41,7 @@ in.
 
 A turn is also failed when the agent hedged: a reject case that also had a
 `propose_plan` declare a plan ready (its answer carries `summary`,
-`planner.agent.declare_ready`) -- an agent cannot both record a rejection and
+`planner.tools.declare_ready`). An agent cannot both record a rejection and
 declare the same plan ready for the user's answer. A `translation` case hedges
 the same way -- a case expecting `ok` that also had a proposal's translation
 answer a referral, or a referral case that also had one answer `ok` -- since `_by_name` picks whichever response carries the stated
@@ -258,7 +258,7 @@ def _answered_by(response: genai_types.FunctionResponse, name: str, *outcomes: s
 def _declared_ready(response: genai_types.FunctionResponse) -> bool:
     """Whether `response` is a `propose_plan` answer that declared the plan ready.
 
-    `planner.agent.declare_ready` adds `summary` to the answer of a proposal
+    `planner.tools.declare_ready` adds `summary` to the answer of a proposal
     whose translation compiled and whose plan the gate let through.
     """
     return (

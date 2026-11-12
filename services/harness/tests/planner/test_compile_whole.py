@@ -1,7 +1,7 @@
 """The resubmits the planner posts to compile a pin on another basis or as a declared
-whole (`planner.agent.compile_on_basis`, `planner.agent.compile_whole`), where what a
-resubmit posts of the part's named sets cannot be read, or reads though the rest of
-the set does not."""
+whole (`planner.source_reads.compile_on_basis`, `planner.source_reads.compile_whole`),
+where what a resubmit posts of the part's named sets cannot be read, or reads though
+the rest of the set does not."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import pytest
 from compiler.surface import ToolSurface
-from planner import agent as planner_agent
+from planner import source_reads as planner_source_reads
 from planner.plan import PinSource, SessionState, save_pin_sources
 from planner.tool_results import ProblemCode
 from submission.service import Realignment
@@ -67,7 +67,7 @@ async def test_a_whole_whose_kept_sets_cannot_be_read_is_refused_unposted(
     block = _with_groups(us_2023_block("health"), {role: group})
     save_pin_sources(state, {block["spec_id"]: PinSource(block=block, settled=True)})
 
-    read = await planner_agent.compile_whole(
+    read = await planner_source_reads.compile_whole(
         cast(ToolSurface, surface),
         Realignment(block["spec_id"], (), _WHOLE, _WHOLE, whole_axis=axis),
         state=state,
@@ -109,7 +109,7 @@ async def test_a_basis_compile_whose_sets_cannot_be_read_is_refused_unposted(
     )
     save_pin_sources(state, {TOTAL: PinSource(block=block, settled=True)})
 
-    read = await planner_agent.compile_on_basis(
+    read = await planner_source_reads.compile_on_basis(
         cast(ToolSurface, surface),
         Realignment(TOTAL, ("measure_basis:gross",), "total", "share"),
         state=state,

@@ -13,7 +13,7 @@ from compiler.sources import outcome_from_envelope
 from compiler.surface import ToolCallResult
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
-from planner import agent as planner_agent
+from planner import source_reads as planner_source_reads
 from planner.plan import pin_sources
 from submission.service import Unpinned
 from translator.discovery import found_blocks
@@ -56,7 +56,7 @@ async def test_both_searches_mark_the_same_axes_for_the_same_part(
         async def call_tool(self, **_: Any) -> ToolCallResult:
             return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: envelope})
 
-    read = await planner_agent.pin_by_search(
+    read = await planner_source_reads.pin_by_search(
         cast(Any, _Searches()),
         Unpinned(
             requirement_id="r",
