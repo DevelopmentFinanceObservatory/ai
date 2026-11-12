@@ -2013,8 +2013,8 @@ _QUESTION_FIXED_STILL_APPROVABLE_TEXT = (
 
 class _RestartRefusingPlanner(_RefusingAmendPlanner):
     """`_RefusingAmendPlanner`, refusing every later call the way a real
-    `PlannerAdapter` -- its pair always built with `question_fixed=True`
-    (`harness.planner_adapter.PlannerAdapter.__init__`) -- refuses an amendment
+    `PlannerAdapter`, which holds the turn's question fixed
+    (`submission.service._resolve_intent`), refuses an amendment
     that tries to restart for a different question: `QUESTION_FIXED`, not
     `BUDGET_EXHAUSTED`. Records every call's own `question`, so a test can
     prove `ctx.state["question"]` reached the second call unchanged from
@@ -2035,7 +2035,7 @@ class _RestartRefusingPlanner(_RefusingAmendPlanner):
 async def test_an_amend_that_restarts_is_refused_with_no_version_regression_or_duplicate_id(
     real_schemas: list[ToolSchema],
 ) -> None:
-    """A restart the planner's `question_fixed` pair refuses (`QUESTION_FIXED`)
+    """A restart the planner refuses (`QUESTION_FIXED`)
     reaches the wire exactly like a `BUDGET_EXHAUSTED` refusal (see
     `test_a_refused_amendment_still_offers_the_pending_version_for_approval`,
     just above): the same pending plan is re-offered, under the same

@@ -28,7 +28,7 @@ from planner.pydantic_agent import (
 )
 from planner.session import SessionCall
 from planner.settings import AGENT_NAME
-from planner.specs import planner_specs
+from planner.specs import planner_tool_specs, skill_tool_spec
 from planner.tool_spec import ToolSpec
 from translator.tool import Translate
 
@@ -47,12 +47,14 @@ type Turn = tuple[Any, ...]
 
 
 def adapter_specs(*, surface: ToolSurface | None, translate: Translate | None) -> list[ToolSpec]:
-    """The planner's tools as `harness.planner_adapter.PlannerAdapter` builds them over
-    `surface` and `translate`, for a test that changes them before handing them
-    to the adapter as `specs`."""
-    return planner_specs(
-        translate=translate, surface=surface, question_fixed=True, reads_user_words=False
-    )
+    """The planner's tools over `surface` and `translate`, either of which a test
+    may leave out, for a test that changes them before handing them to the
+    adapter as `specs`. `get_skill` leads when there is a `surface`, as in
+    `planner.specs.planner_specs`."""
+    return [
+        *([skill_tool_spec(surface)] if surface is not None else []),
+        *planner_tool_specs(translate=translate, surface=surface),
+    ]
 
 
 @dataclass
@@ -81,11 +83,7 @@ async def pydantic_run(
     scripted = ScriptedGenai(replies)
     planner = planner_agent(
         adapter_specs(surface=surface, translate=translate),
-        instruction=planner_instruction(
-            has_translator=translate is not None,
-            has_skills=surface is not None,
-            question_fixed=True,
-        ),
+        instruction=planner_instruction(),
         model=planner_model(
             MODEL,
             client=scripted.client,

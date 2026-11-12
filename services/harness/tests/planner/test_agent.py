@@ -488,13 +488,8 @@ def _show(
     save_pin_sources(ctx.state, sources)
 
 
-def _tools_by_name(
-    *, translate: Translate | None = None, question_fixed: bool = False
-) -> dict[str, ToolSpec]:
-    return {
-        spec.name: spec
-        for spec in planner_tool_specs(translate=translate, question_fixed=question_fixed)
-    }
+def _tools_by_name(*, translate: Translate | None = None) -> dict[str, ToolSpec]:
+    return {spec.name: spec for spec in planner_tool_specs(translate=translate)}
 
 
 async def _propose_translated(
@@ -1112,39 +1107,6 @@ def test_propose_plan_after_translation_returns_to_a_draft(
     assert stored.translation is None
 
 
-def test_propose_plan_for_a_different_question_starts_a_fresh_plan(
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    requirements: RequirementPair,
-) -> None:
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    _propose(
-        tools, ctx, decision(), requirements, question="How dependent is Kenya on Chinese lending?"
-    )
-
-    # A genuinely different question, not a revision of the first -- this
-    # must not amend the first plan onto the second question's methodology.
-    # The call says so with `starts_new_plan`. Its wording alone decides
-    # nothing.
-    second = _propose(
-        tools,
-        ctx,
-        decision(slot="measure", options=["total ODA", "bilateral ODA"], chosen="total ODA"),
-        (
-            requirement(id="total_oda", measure="total ODA received"),
-            derived_requirement(id="total_oda_totals", input_id="total_oda"),
-        ),
-        question="What was Kenya's total ODA in 2023?",
-        starts_new_plan=True,
-    )
-
-    assert second["version"] == 1
-    assert second["previous_version"] is None
-    assert second["question"] == "What was Kenya's total ODA in 2023?"
-
-
 def test_a_defaulted_time_window_needs_no_period_decision(
     decision: DecisionFactory,
     requirement: RequirementFactory,
@@ -1169,80 +1131,6 @@ def test_a_defaulted_time_window_needs_no_period_decision(
     (stored_dataset,) = [r for r in stored.evidence_requirements if is_dataset(r)]
     assert stored_dataset.period == Period(start=1960, end=2023)
     assert all(d.fixes is None or d.fixes.period is None for d in stored.decisions)
-
-
-def test_a_reworded_question_with_the_amendment_stated_still_patches(
-    decision: DecisionFactory, requirements: RequirementPair
-) -> None:
-    """The regression the explicit signal exists for.
-
-    A model that means to amend and rewords the `question` while it does so
-    must still patch. The call's own `amends_version` says which it is, and
-    the wording decides nothing. Without that, the reworded question read as
-    a fresh draft and every item the patch did not restate was dropped. A
-    self-consistent partial patch validated, so nothing reported the loss.
-    """
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    _propose(
-        tools, ctx, decision(), requirements, question="How dependent is Kenya on Chinese lending?"
-    )
-
-    patched = _propose(
-        tools,
-        ctx,
-        decision(chosen="total debt stock", resolved_by=ResolvedBy.USER),
-        (),
-        question="How dependent is Kenya on lending from China?",
-    )
-
-    assert patched["outcome"] == Outcome.OK.value, patched
-    assert patched["version"] == 2
-    assert patched["previous_version"] == 1
-    stored = load_plan(ctx.state)
-    assert stored is not None
-    # The patch restated no requirement, and every one is still there.
-    assert [r.id for r in stored.evidence_requirements] == [r.id for r in requirements]
-    assert [d.slot for d in stored.decisions] == ["measure"]
-    assert stored.decisions[0].chosen == "total debt stock"
-
-
-def test_an_amendment_records_the_question_it_states(
-    decision: DecisionFactory, requirements: RequirementPair
-) -> None:
-    """The stored question follows the amendment that rewords it.
-
-    The planner reads the recorded question back next to the requirements it
-    is about to patch, so a question left at its first wording contradicts an
-    amendment that moved the period. The same reworded question with no
-    `amends_version` is refused and records nothing.
-    """
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    _propose(tools, ctx, decision(), requirements, question="Kenya's debt service since 1990")
-
-    unstated = call_planner_tool(
-        tools["propose_plan"],
-        question="Kenya's debt service, 2000 to 2023",
-        decisions=drafts([decision(rationale="Reconsidered.")]),
-        tool_context=ctx,
-    )
-    amended = _propose(
-        tools,
-        ctx,
-        decision(rationale="Reconsidered."),
-        (),
-        question="Kenya's debt service, 2000 to 2023",
-    )
-
-    assert unstated["code"] == ProblemCode.INVALID_PLAN.value
-    assert amended["outcome"] == Outcome.OK.value, amended
-    assert (amended["version"], amended["previous_version"]) == (2, 1)
-    assert amended["question"] == "Kenya's debt service, 2000 to 2023"
-    stored = load_plan(ctx.state)
-    assert stored is not None
-    assert stored.question == "Kenya's debt service, 2000 to 2023"
-    assert [r.id for r in stored.evidence_requirements] == [r.id for r in requirements]
 
 
 def test_an_amendment_that_states_no_question_keeps_the_recorded_one(
@@ -1339,29 +1227,6 @@ def test_an_entity_role_outside_the_party_words_is_refused_and_records_nothing(
     assert PLAN_STATE_KEY not in ctx.state
 
 
-def test_a_restart_without_a_question_is_refused_and_leaves_the_plan_alone(
-    decision: DecisionFactory, requirements: RequirementPair
-) -> None:
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    _propose(tools, ctx, decision(), requirements)
-
-    refused = call_planner_tool(
-        tools["propose_plan"],
-        decisions=drafts([decision()]),
-        evidence_requirements=list(requirements),
-        starts_new_plan=True,
-        tool_context=ctx,
-    )
-
-    assert refused["code"] == ProblemCode.INVALID_PLAN.value
-    assert "starts_new_plan" in str(refused["message"])
-    stored = load_plan(ctx.state)
-    assert stored is not None
-    assert (stored.question, stored.version) == ("q", 1)
-    assert load_plan_rounds(ctx.state) == 1
-
-
 def test_a_first_draft_without_an_answer_mode_is_refused_and_records_nothing(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
@@ -1380,31 +1245,6 @@ def test_a_first_draft_without_an_answer_mode_is_refused_and_records_nothing(
     assert refused["outcome"] == Outcome.INVALID_INPUT.value
     assert "answer_mode" in str(refused["message"])
     assert PLAN_STATE_KEY not in ctx.state
-
-
-def test_a_restart_without_an_answer_mode_is_refused_and_leaves_the_plan_alone(
-    decision: DecisionFactory, requirements: RequirementPair
-) -> None:
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    _propose(tools, ctx, decision(), requirements)
-
-    refused = call_planner_tool(
-        tools["propose_plan"],
-        question="q",
-        decisions=drafts([decision()]),
-        evidence_requirements=list(requirements),
-        starts_new_plan=True,
-        tool_context=ctx,
-    )
-
-    assert refused["code"] == ProblemCode.INVALID_PLAN.value
-    assert "starts_new_plan" in str(refused["message"])
-    assert "answer_mode" in str(refused["message"])
-    stored = load_plan(ctx.state)
-    assert stored is not None
-    assert (stored.question, stored.version) == ("q", 1)
-    assert load_plan_rounds(ctx.state) == 1
 
 
 def test_propose_plan_counts_the_rounds_a_question_has_been_through(
@@ -1484,38 +1324,21 @@ def test_the_last_version_that_compiled_stays_declarable_past_the_cap(
 
 
 def test_a_fresh_entry_into_the_planner_starts_its_rounds_afresh(
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    requirements: RequirementPair,
+    decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
     # The allowance is per entry into the planner, so a spent one does not stop
-    # the user asking something else. `PlannerAdapter.__call__` zeroes the count
-    # on that entry (`save_plan_rounds` below stands in for it), and the new
-    # question gets a full allowance.
+    # the user's next message amending the plan. `PlannerAdapter.__call__`
+    # zeroes the count on that entry (`save_plan_rounds` below stands in for
+    # it), and the entry gets a full allowance while the version keeps climbing.
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose_up_to_the_cap(tools, ctx, decision(), requirements)
     save_plan_rounds(ctx.state, 0)
-    oda = (
-        requirement(id="total_oda", measure="total ODA received"),
-        derived_requirement(id="total_oda_totals", input_id="total_oda"),
-    )
-    oda_decision = decision(
-        slot="measure", options=["total ODA", "bilateral ODA"], chosen="total ODA"
-    )
 
-    first = _propose(
-        tools,
-        ctx,
-        oda_decision,
-        oda,
-        question="What was Kenya's ODA in 2023?",
-        starts_new_plan=True,
-    )
-    second = _propose(tools, ctx, oda_decision, oda, question="What was Kenya's ODA in 2023?")
+    first = _propose(tools, ctx, decision(rationale="Reconsidered."), requirements)
+    second = _propose(tools, ctx, decision(), requirements)
 
-    assert (first["version"], second["version"]) == (1, 2)
+    assert (first["version"], second["version"]) == (MAX_PLAN_ROUNDS + 1, MAX_PLAN_ROUNDS + 2)
     assert load_plan_rounds(ctx.state) == 2
 
 
@@ -1531,57 +1354,6 @@ def _restart(
     return _propose(tools, ctx, decision, requirements, question=question, starts_new_plan=True)
 
 
-def test_the_fifth_call_is_refused_when_the_first_four_were_a_draft_and_three_restarts(
-    decision: DecisionFactory, requirements: RequirementPair
-) -> None:
-    """`starts_new_plan` spends a proposal like an amendment does.
-
-    A first draft and `MAX_PLAN_ROUNDS - 1` restarts use the whole allowance
-    (calls one to four), so the next restart, the fifth call, is refused with
-    nothing recorded. Restarts share the allowance with amendments, so a model
-    cannot restart without bound inside one entry into the planner.
-    """
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    _propose(tools, ctx, decision(), requirements, question="Q0")
-    for n in range(1, MAX_PLAN_ROUNDS):
-        recorded = _restart(tools, ctx, decision(), requirements, question=f"Q{n}")
-        assert recorded["outcome"] == Outcome.OK.value, recorded
-        assert recorded["version"] == 1
-
-    refused = _restart(tools, ctx, decision(), requirements, question="Q-refused")
-
-    assert refused["outcome"] == Outcome.REFUSED.value
-    assert refused["code"] == ProblemCode.BUDGET_EXHAUSTED.value
-    assert refused["detail"] == {"scope": "plan_rounds", "rounds": MAX_PLAN_ROUNDS, "version": 1}
-    assert "action" not in refused
-    stored = load_plan(ctx.state)
-    assert stored is not None
-    assert stored.question == f"Q{MAX_PLAN_ROUNDS - 1}"
-    assert load_plan_rounds(ctx.state) == MAX_PLAN_ROUNDS
-
-
-def test_a_refused_restart_says_what_to_do_instead_of_asking_for_a_new_question(
-    decision: DecisionFactory, requirements: RequirementPair
-) -> None:
-    # A call that has just claimed to be a new question is told what remains
-    # possible (approve the last version that compiled, or wait for the next
-    # message). Telling it to ask a new question reads as an instruction to
-    # make the same call again.
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    _propose_up_to_the_cap(tools, ctx, decision(), requirements)
-    _translate(ctx)
-
-    refused = _restart(tools, ctx, decision(), requirements, question="Another question")
-
-    message = str(refused["message"])
-    assert "restart" in message
-    assert "new question" not in message
-    assert "last version that compiled can still be approved" in message
-    assert "fresh budget" in message
-
-
 def test_the_refusal_at_the_cap_offers_an_approval_only_where_a_plan_compiled(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
@@ -1590,20 +1362,16 @@ def test_the_refusal_at_the_cap_offers_an_approval_only_where_a_plan_compiled(
     ctx = _FakeToolContext()
     _propose_up_to_the_cap(tools, ctx, decision(), requirements)
 
-    uncompiled_amendment = _propose(tools, ctx, decision(), requirements)
-    uncompiled_restart = _restart(tools, ctx, decision(), requirements, question="Another")
+    uncompiled = _propose(tools, ctx, decision(), requirements)
     _translate(ctx)
-    compiled_amendment = _propose(tools, ctx, decision(), requirements)
-    compiled_restart = _restart(tools, ctx, decision(), requirements, question="Another")
+    compiled = _propose(tools, ctx, decision(), requirements)
 
-    for refused in (uncompiled_amendment, uncompiled_restart):
-        assert refused["code"] == ProblemCode.BUDGET_EXHAUSTED.value
-        assert "approved" not in str(refused["message"])
-        assert "fresh budget" in str(refused["message"])
-    for refused in (compiled_amendment, compiled_restart):
-        assert refused["code"] == ProblemCode.BUDGET_EXHAUSTED.value
-        assert "last version that compiled can still be approved" in str(refused["message"])
-        assert "fresh budget" in str(refused["message"])
+    assert uncompiled["code"] == ProblemCode.BUDGET_EXHAUSTED.value
+    assert "approved" not in str(uncompiled["message"])
+    assert "fresh budget" in str(uncompiled["message"])
+    assert compiled["code"] == ProblemCode.BUDGET_EXHAUSTED.value
+    assert "last version that compiled can still be approved" in str(compiled["message"])
+    assert "fresh budget" in str(compiled["message"])
 
 
 def test_the_refusal_at_the_cap_counts_proposals_in_this_run_not_versions_of_the_question(
@@ -1624,45 +1392,6 @@ def test_the_refusal_at_the_cap_counts_proposals_in_this_run_not_versions_of_the
     assert "This question has been through" not in message
     assert "new question" not in message
     assert "fresh budget" in message
-
-
-def test_an_amendment_between_restarts_still_counts_against_the_cap(
-    decision: DecisionFactory, requirements: RequirementPair
-) -> None:
-    # Draft, restart, amendment, restart: four proposals. The fifth call is
-    # refused whichever way it is stated.
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    _propose(tools, ctx, decision(), requirements, question="Q0")
-    _restart(tools, ctx, decision(), requirements, question="Q1")
-    amended = _propose(tools, ctx, decision(rationale="Reconsidered."), requirements)
-    _restart(tools, ctx, decision(), requirements, question="Q2")
-
-    restart = _restart(tools, ctx, decision(), requirements, question="Q3")
-    amendment = _propose(tools, ctx, decision(), requirements)
-
-    assert (amended["outcome"], amended["version"]) == (Outcome.OK.value, 2)
-    assert restart["code"] == ProblemCode.BUDGET_EXHAUSTED.value
-    assert amendment["code"] == ProblemCode.BUDGET_EXHAUSTED.value
-    assert load_plan_rounds(ctx.state) == MAX_PLAN_ROUNDS
-
-
-def test_a_restart_inside_the_cap_still_begins_version_one_under_the_question_it_states(
-    decision: DecisionFactory, requirements: RequirementPair
-) -> None:
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    _propose(tools, ctx, decision(), requirements, question="How dependent is Kenya on lending?")
-
-    restarted = _restart(
-        tools, ctx, decision(), requirements, question="What was Kenya's ODA in 2023?"
-    )
-
-    assert restarted["outcome"] == Outcome.OK.value, restarted
-    assert restarted["version"] == 1
-    assert restarted["previous_version"] is None
-    assert restarted["question"] == "What was Kenya's ODA in 2023?"
-    assert load_plan_rounds(ctx.state) == 2
 
 
 def test_a_first_draft_is_never_refused_by_the_round_count() -> None:
@@ -2384,13 +2113,13 @@ def test_propose_plan_refuses_a_patch_summing_two_datasets_on_a_users_source_pic
     assert recorded.version == 1
 
 
-# --- question_fixed ------------------------------------------------------------------
+# --- the turn's fixed question ------------------------------------------------------
 
 
-def test_question_fixed_refuses_a_restart_and_records_nothing(
+def test_the_fixed_question_refuses_a_restart_and_records_nothing(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
-    tools = _tools_by_name(question_fixed=True)
+    tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements, question="Kenya's debt service since 1990")
 
@@ -2407,10 +2136,10 @@ def test_question_fixed_refuses_a_restart_and_records_nothing(
     assert load_plan_rounds(ctx.state) == 1
 
 
-def test_question_fixed_restart_refusal_says_what_happened_and_needs_nothing_further(
+def test_the_fixed_question_restart_refusal_says_what_happened_and_needs_nothing_further(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
-    tools = _tools_by_name(question_fixed=True)
+    tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
 
@@ -2422,12 +2151,12 @@ def test_question_fixed_restart_refusal_says_what_happened_and_needs_nothing_fur
     assert "nothing further is needed from you" in message
 
 
-def test_question_fixed_leaves_starts_new_plan_alone_on_a_first_draft(
+def test_the_fixed_question_leaves_starts_new_plan_alone_on_a_first_draft(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
     # Nothing recorded means there is no restart to refuse: the flag it
-    # states is beside the point on a first draft, fixed mode or not.
-    tools = _tools_by_name(question_fixed=True)
+    # states is beside the point on a first draft.
+    tools = _tools_by_name()
     ctx = _FakeToolContext()
 
     first = call_planner_tool(
@@ -2444,10 +2173,10 @@ def test_question_fixed_leaves_starts_new_plan_alone_on_a_first_draft(
     assert first["version"] == 1
 
 
-def test_question_fixed_refuses_an_amendment_that_changes_the_question(
+def test_the_fixed_question_refuses_an_amendment_that_changes_the_question(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
-    tools = _tools_by_name(question_fixed=True)
+    tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements, question="Kenya's debt service since 1990")
 
@@ -2465,10 +2194,10 @@ def test_question_fixed_refuses_an_amendment_that_changes_the_question(
     assert stored.question == "Kenya's debt service since 1990"
 
 
-def test_question_fixed_accepts_an_amendment_that_omits_the_question(
+def test_the_fixed_question_accepts_an_amendment_that_omits_the_question(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
-    tools = _tools_by_name(question_fixed=True)
+    tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements, question="Kenya's debt service since 1990")
 
@@ -2485,10 +2214,10 @@ def test_question_fixed_accepts_an_amendment_that_omits_the_question(
     assert patched["question"] == "Kenya's debt service since 1990"
 
 
-def test_question_fixed_accepts_an_amendment_restating_the_same_question(
+def test_the_fixed_question_accepts_an_amendment_restating_the_same_question(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
-    tools = _tools_by_name(question_fixed=True)
+    tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements, question="Kenya's debt service since 1990")
 
@@ -2500,14 +2229,14 @@ def test_question_fixed_accepts_an_amendment_restating_the_same_question(
     assert patched["version"] == 2
 
 
-def test_question_fixed_restart_takes_precedence_over_budget_exhausted(
+def test_the_fixed_question_restart_takes_precedence_over_budget_exhausted(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
     # Both refusals record nothing, so nothing is lost by naming the
     # structural reason first: a restart can never succeed under a fixed
     # question, however fresh the next budget is, so leading with a budget
     # message would misleadingly suggest otherwise.
-    tools = _tools_by_name(question_fixed=True)
+    tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose_up_to_the_cap(tools, ctx, decision(), requirements)
 
@@ -2517,14 +2246,14 @@ def test_question_fixed_restart_takes_precedence_over_budget_exhausted(
     assert load_plan_rounds(ctx.state) == MAX_PLAN_ROUNDS
 
 
-def test_question_fixed_amendment_question_check_still_yields_to_budget_exhausted(
+def test_the_fixed_question_amendment_question_check_still_yields_to_budget_exhausted(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
     # A correctly-shaped amendment (its own `amends_version` names the recorded
     # version) that only lost the race for the last round is exactly what the
     # round cap exists to stop, so budget still wins here, the opposite
     # ordering from the restart case.
-    tools = _tools_by_name(question_fixed=True)
+    tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose_up_to_the_cap(tools, ctx, decision(), requirements)
 
@@ -2533,7 +2262,7 @@ def test_question_fixed_amendment_question_check_still_yields_to_budget_exhauste
     assert refused["code"] == ProblemCode.BUDGET_EXHAUSTED.value
 
 
-def test_resolve_intent_question_fixed_restart_precedes_the_round_cap() -> None:
+def test_resolve_intent_refuses_a_restart_before_the_round_cap() -> None:
     plan = Plan(question="q", decisions=[], evidence_requirements=[])
 
     resolved = _resolve_intent(
@@ -2542,45 +2271,16 @@ def test_resolve_intent_question_fixed_restart_precedes_the_round_cap() -> None:
         starts_new_plan=True,
         rounds_so_far=MAX_PLAN_ROUNDS,
         question="a different question",
-        question_fixed=True,
     )
 
     assert isinstance(resolved, dict)
     assert resolved["code"] == ProblemCode.QUESTION_FIXED.value
 
 
-def test_unfixed_mode_restart_is_unaffected_by_question_fixed_defaulting_false() -> None:
-    plan = Plan(question="q", decisions=[], evidence_requirements=[])
+def test_the_instruction_tells_the_planner_to_stop_on_a_different_question() -> None:
+    instruction = planner_instruction()
 
-    resolved = _resolve_intent(
-        plan, amends_version=None, starts_new_plan=True, rounds_so_far=0, question="a new one"
-    )
-
-    assert resolved == (None, 1)
-
-
-def test_the_instruction_varies_with_question_fixed() -> None:
-    free = planner_instruction(has_translator=True, question_fixed=False)
-    fixed = planner_instruction(has_translator=True, question_fixed=True)
-
-    assert "different question that needs a plan of its own" in free
-    assert "different question that needs a plan of its own" not in fixed
-    assert "`starts_new_plan=true` and stop there" in fixed
-    assert "`starts_new_plan=true` and stop there" not in free
-
-
-def test_planner_instruction_defaults_question_fixed_to_false() -> None:
-    assert planner_instruction(has_translator=True) == planner_instruction(
-        has_translator=True, question_fixed=False
-    )
-
-
-def test_planner_instruction_threads_question_fixed_into_the_instruction() -> None:
-    fixed = planner_instruction(has_translator=True, question_fixed=True)
-    free = planner_instruction(has_translator=True, question_fixed=False)
-
-    assert "`starts_new_plan=true` and stop there" in fixed
-    assert "`starts_new_plan=true` and stop there" not in free
+    assert "`starts_new_plan=true` and stop there" in instruction
 
 
 def _arguments(tools: dict[str, ToolSpec], name: str = "propose_plan") -> dict[str, Any]:
@@ -2591,15 +2291,9 @@ def _arguments(tools: dict[str, ToolSpec], name: str = "propose_plan") -> dict[s
     return schema["properties"]
 
 
-def test_question_fixed_changes_propose_plans_declaration_for_question_and_starts_new_plan() -> (
-    None
-):
-    free = _arguments(_tools_by_name())
-    fixed = _arguments(_tools_by_name(question_fixed=True))
+def test_propose_plans_question_and_starts_new_plan_say_the_question_is_fixed() -> None:
+    fixed = _arguments(_tools_by_name())
 
-    changed = {name for name in free if free[name] != fixed[name]}
-
-    assert changed == {"question", "starts_new_plan"}
     assert "has to match the one already recorded" in fixed["question"]["description"]
     assert "Refused, recording nothing" in fixed["starts_new_plan"]["description"]
 
@@ -2829,22 +2523,6 @@ def test_propose_plan_is_allowed_once_the_user_has_answered(
     assert load_referral(ctx.state) is None
 
 
-def test_propose_plan_refuses_a_restart_over_an_unanswered_referral(
-    decision: DecisionFactory, requirements: RequirementPair
-) -> None:
-    tools, ctx, _requirement_id = _recorded_after_a_handed_back_plan(
-        decision, requirements, ReferralKind.REQUIREMENT_UNMEETABLE
-    )
-
-    refused = _restart(tools, ctx, decision(), requirements, question="Another question")
-
-    assert refused["code"] == ProblemCode.REFERRAL_PENDING.value
-    stored = load_plan(ctx.state)
-    assert stored is not None
-    assert (stored.question, stored.version) == ("q", 1)
-    assert load_plan_rounds(ctx.state) == 1
-
-
 def test_a_pending_referral_on_a_copy_names_its_origin_to_the_model(
     decision: DecisionFactory,
 ) -> None:
@@ -2856,10 +2534,11 @@ def test_a_pending_referral_on_a_copy_names_its_origin_to_the_model(
     """
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    save_plan(ctx.state, split_draft(decision))
+    draft = split_draft(decision)
+    save_plan(ctx.state, draft)
     _hand_back(ctx, ReferralKind.REQUIREMENT_UNMEETABLE, "debt_history")
 
-    refused = _propose(tools, ctx, decision(rationale="Reconsidered."), ())
+    refused = _propose(tools, ctx, decision(rationale="Reconsidered."), (), question=draft.question)
     gated = cast("dict[str, Any]", _declare(ctx)["submission"])
 
     assert refused["code"] == ProblemCode.REFERRAL_PENDING.value
@@ -3437,50 +3116,6 @@ def test_a_call_with_no_plan_recorded_needs_no_statement_of_intent(
     assert result["outcome"] == Outcome.OK.value, result
     assert result["version"] == 1
     assert result["previous_version"] is None
-
-
-def test_starts_new_plan_begins_a_plan_of_its_own(
-    decision: DecisionFactory, requirements: RequirementPair
-) -> None:
-    # A different question under a spent plan gets version 1 of a new lineage,
-    # and the recorded plan's items do not ride along.
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    _propose(tools, ctx, decision(), requirements)
-
-    result = call_planner_tool(
-        tools["propose_plan"],
-        question="What was Kenya's total ODA in 2023?",
-        answer_mode=AnswerMode.COMPUTED,
-        decisions=drafts(
-            [decision(slot="oda", options=["total ODA", "net ODA"], chosen="total ODA")]
-        ),
-        evidence_requirements=[
-            DatasetRequirement(
-                id="oda",
-                decision_ids=["oda"],
-                measure="total ODA received",
-                entities=[Entity(name="Kenya")],
-                period=Period(start=2023, end=2023),
-            ),
-            AggregateRequirement(
-                id="oda_totals",
-                decision_ids=["oda"],
-                input_id="oda",
-                reduction=Reduction.SUM,
-                group_by=(GroupBy.PERIOD,),
-            ),
-        ],
-        starts_new_plan=True,
-        tool_context=ctx,
-    )
-
-    assert result["outcome"] == Outcome.OK.value, result
-    assert result["version"] == 1
-    assert result["previous_version"] is None
-    stored = load_plan(ctx.state)
-    assert stored is not None
-    assert [d.slot for d in stored.decisions] == ["oda"]
 
 
 def test_an_amendment_stating_both_reads_as_the_amendment(
@@ -14637,7 +14272,7 @@ def test_declaring_a_plan_ready_twice_changes_nothing(
 
 # The instruction the served planner carries: the translator attached, the
 # skill tools built and the question held by the planner adapter.
-_SERVED_INSTRUCTION = planner_instruction(has_translator=True, has_skills=True, question_fixed=True)
+_SERVED_INSTRUCTION = planner_instruction()
 
 
 def test_the_instruction_names_every_referral_kind_the_translator_can_send() -> None:
@@ -14755,7 +14390,7 @@ def test_the_summary_carries_nothing_the_plan_record_already_states(
 def test_the_instruction_asks_for_no_closing_text_after_submitting() -> None:
     # The plan card is on the user's screen and a compiled proposal ends the run, so
     # the instruction asks for no closing turn to present the plan.
-    instruction = planner_instruction(has_translator=True)
+    instruction = planner_instruction()
 
     assert "none left out" not in instruction
     assert "each decision by its slot" not in instruction
@@ -14772,7 +14407,7 @@ def test_planner_instruction_treats_a_defaulted_time_window_as_settled() -> None
     # (`harness.tool_contracts.graph_envelope`). The instruction names
     # both verbatim, so the model can recognise them in the rendered
     # envelope.
-    instruction = planner_instruction(has_translator=True)
+    instruction = planner_instruction()
     assert "time_window_defaulted" in instruction
     assert "`window`" in instruction
 
@@ -14797,7 +14432,7 @@ def test_planner_instruction_carries_no_sentinel_range() -> None:
     # unlike the window, a verbatim source pin needs no `Decision`, so the
     # instruction states its own carve-out for it separately, not grouped
     # with the window's.
-    instruction = planner_instruction(has_translator=True)
+    instruction = planner_instruction()
     assert "1900 through 2100" not in instruction
     assert "1900" not in instruction
     assert "2100" not in instruction
@@ -14805,16 +14440,13 @@ def test_planner_instruction_carries_no_sentinel_range() -> None:
     assert "source, time window" not in instruction
 
 
-def test_only_a_planner_with_a_translator_is_told_to_read_a_translation() -> None:
-    # `harness.planner_adapter.PlannerAdapter` passes `has_translator=True`. Without
-    # a translator `propose_plan` answers with no `translation`. Neither
-    # instruction names a `translate` tool: translation is no tool of its own.
-    standalone = planner_instruction(has_translator=False)
-    paired = planner_instruction(has_translator=True)
+def test_the_instruction_tells_the_planner_to_read_a_translation() -> None:
+    # `propose_plan` answers with a `translation`. The instruction names no
+    # `translate` tool: translation is no tool of its own.
+    instruction = planner_instruction()
 
-    assert "`translation`" not in standalone
-    assert "`translation`" in paired
-    assert "`translate`" not in standalone + paired
+    assert "`translation`" in instruction
+    assert "`translate`" not in instruction
 
 
 async def test_an_accepted_proposal_answers_with_the_translation_and_no_translate_tool_is_declared(
@@ -14882,7 +14514,10 @@ async def test_a_referred_translation_leaves_the_proposed_version_recorded(
         ),
         pytest.param(ReferralKind.NO_DATA, {}, 2, id="not-transient"),
         pytest.param(
-            ReferralKind.SURFACE_UNAVAILABLE, {"question": "q2"}, 2, id="transient-with-a-change"
+            ReferralKind.SURFACE_UNAVAILABLE,
+            {"answer_mode": AnswerMode.SERIES},
+            2,
+            id="transient-with-a-change",
         ),
     ],
 )
@@ -18645,12 +18280,15 @@ def _plan_write_response(ctx: Any, *names: str) -> None:
 def _plan_write(
     ctx: Any, index: int, name: str, decision: DecisionFactory, requirements: RequirementPair
 ) -> dict[str, object]:
-    """Run the response's call `index`, a `name` call, as ADK does for each call in turn."""
+    """Run the response's call `index`, a `name` call, as ADK does for each call in turn.
+    A proposal amends the plan on record under its question, or drafts `q<index>`."""
     ctx.function_call_id = f"call-{index}"
     tools = _tools_by_name()
     if name == "reject_plan":
         return call_planner_tool(tools[name], tool_context=ctx)
-    return _propose(tools, ctx, decision(), requirements, question=f"q{index}")
+    recorded = load_plan(ctx.state)
+    question = recorded.question if recorded is not None else f"q{index}"
+    return _propose(tools, ctx, decision(), requirements, question=question)
 
 
 @pytest.mark.parametrize("second_runs_first", [False, True], ids=["in-order", "second-first"])

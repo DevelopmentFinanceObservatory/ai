@@ -22,7 +22,6 @@ import json
 from collections.abc import Callable, Mapping
 from typing import Any, cast
 
-import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from compiler.compile import compile_plan
 from compiler.surface import McpSurface, ToolCallResult, ToolSurface
@@ -397,7 +396,6 @@ async def test_a_direct_pin_sharing_an_aligned_compiles_spec_id_keeps_its_own_ro
     assert dict(_pins(ctx))["second"] == _US_MULTILATERAL["spec_id"]
 
     result = await propose(
-        question="What share of US ODA goes to multilaterals?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
         evidence_requirements=[
@@ -545,19 +543,17 @@ async def test_an_amendment_dropping_the_comparison_reads_the_average_on_its_own
     ] == [(f"scope_measure_basis_{_NET}", "measure_basis:net")]
 
 
-@pytest.mark.parametrize("fresh", ["replan", "first-draft"])
 async def test_a_new_plan_reads_a_pin_on_an_old_compile_as_its_own(
-    decision: DecisionFactory, fresh: str
+    decision: DecisionFactory,
 ) -> None:
     """The replaced plan moved its `second` onto the gross pin. A new plan whose own
     `second` pins gross directly reads gross, through its amendments too: the old
     plan's alignment of an input with that id says nothing of the new plan's pin.
-    The new plan is a replan, or the first draft of a later `plan` call of the turn,
-    which finds the plan state cleared (`harness.planner_adapter`)."""
+    The new plan is the first draft of a later `plan` call of the turn, which finds
+    the plan state cleared (`harness.planner_adapter`)."""
     ctx = _FakeToolContext()
     await _gross_compared_with_net_average(ctx, decision)
-    if fresh == "first-draft":
-        ctx.state[PLAN_STATE_KEY] = None
+    ctx.state[PLAN_STATE_KEY] = None
     propose = functools.partial(
         call_planner_tool, _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"]
     )
@@ -578,7 +574,6 @@ async def test_a_new_plan_reads_a_pin_on_an_old_compile_as_its_own(
                 source_spec_id=_GROSS["spec_id"],
             ),
         ],
-        starts_new_plan=fresh == "replan",
         tool_context=ctx,
     )
     assert result["outcome"] == Outcome.OK.value, result

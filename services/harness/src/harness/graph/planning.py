@@ -96,8 +96,8 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         the `approve` node, for a drafted plan; `"pending_refusal"`, also to
         the `approve` node, for a planner that refuses to draft one at all -- either
         `PlannerAdapter`'s own `MAX_PLAN_ROUNDS` cap, or `starts_new_plan`
-        refused as `QUESTION_FIXED` because this adapter's pair is built with
-        the question fixed (`harness.planner_adapter.PlannerAdapter.__init__`) --
+        refused as `QUESTION_FIXED` because the turn's question is fixed
+        (`submission.service._resolve_intent`) --
         surfaced as `{"refused": {"text": ...}}` rather than a raised
         `PlannerAdapterError` -- while `ctx.state["plan"]` still holds a plan
         `PENDING_APPROVAL`; and `"refused"`, to `plan_done`, for the same
@@ -191,8 +191,8 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         # first draft and clear its own `planner:plan` and briefed-flag
         # state for it (see that module's docstring), rather than reading
         # as a continuing call on an already-briefed session that would
-        # need `starts_new_plan` -- refused, this adapter's pair being built
-        # with the question fixed -- to draft anything but an amendment to
+        # need `starts_new_plan` (refused, the turn's question being
+        # fixed) to draft anything but an amendment to
         # that stale plan.
         existing = readable_plan(ctx, raw)
         is_first_draft = "plan" not in payload and "refusal" not in payload

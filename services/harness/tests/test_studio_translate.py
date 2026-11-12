@@ -1714,10 +1714,9 @@ def test_the_checking_line_is_open_before_the_proposal_is_answered() -> None:
 
 @pytest.mark.parametrize("recorded", ["none", "no_datasets"])
 def test_an_accepted_proposal_without_a_translation_still_closes_its_line(recorded: str) -> None:
-    """The standalone planner (no translator) answers an accepted proposal
-    with no `translation`; the response opens nothing and ends the call's
-    line. A response that carries no plan, or a plan with no dataset, leaves
-    the closing frame without a `detail`."""
+    """An accepted proposal whose answer carries no `translation` opens nothing and
+    ends the call's line. A response that carries no plan, or a plan with no dataset,
+    leaves the closing frame without a `detail`."""
     state = (
         {PLAN_STATE_KEY: Plan(question="q").model_dump_json()} if recorded == "no_datasets" else {}
     )

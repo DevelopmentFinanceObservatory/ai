@@ -191,7 +191,7 @@ def _context() -> Any:
 
 
 def _propose_plan(ctx: Any, **arguments: Any) -> dict[str, Any]:
-    tools = {tool.name: tool for tool in planner_tool_specs(reads_user_words=False)}
+    tools = {tool.name: tool for tool in planner_tool_specs()}
     return call_planner_tool(tools["propose_plan"], **arguments, tool_context=ctx)
 
 

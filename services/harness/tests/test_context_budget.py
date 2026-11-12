@@ -77,7 +77,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import itertools
 import json
 import os
 from collections.abc import Callable, Mapping, Sequence
@@ -144,6 +143,7 @@ from planner.records import GroupBy, Reduction
 from planner.specs import planner_specs
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, WorkflowStep
 from planner.workflow import Workflow as PlanWorkflow
+from translator.tool import build_translate
 
 from .context_probe import (
     BOUNDING_PATTERNS,
@@ -373,7 +373,7 @@ def _compose_baseline(
     records: list[dict[str, Any]], declaration_digests: dict[str, str]
 ) -> dict[str, Any]:
     """The baseline payload holds every record, ordered so a diff reads by scenario,
-    and the digest of each planner variant's declarations (`_declaration_digests`)."""
+    and the digest of the planner's declarations (`_declaration_digests`)."""
     return {
         "records": sorted(
             records, key=lambda item: (item["scenario"], item["agent"], item["call_index"])
@@ -408,31 +408,22 @@ def _declarations_digest(request: Request) -> str:
 
 
 async def _declaration_digests() -> dict[str, str]:
-    """`_declarations_digest` of the first request of a planner run, for each
-    setting of `planner.specs.planner_specs` that changes a declaration (a tool
-    surface or none, the question fixed or not).
+    """`_declarations_digest` of the first request of the served planner,
+    under the key `served`.
 
     The character counts in the records cannot see a declaration reordered or
-    edited at the same length. These digests can.
+    edited at the same length. This digest can.
     """
-    digests: dict[str, str] = {}
-    for surface, question_fixed in itertools.product([False, True], repeat=2):
-        scripted = ScriptedGenai([reply(text_part("done"))])
-        specs = planner_specs(
-            surface=FixtureSurface(schemas=[]) if surface else None,
-            question_fixed=question_fixed,
-        )
-        adapter = PlannerAdapter(
-            settings=Settings(),
-            surface=FixtureSurface(schemas=[]),
-            specs=specs,
-            client=scripted.client,
-        )
-        await _AdapterHarness().run(adapter, question="go", readings=[])
-        digests[f"surface={surface},question_fixed={question_fixed}"] = _declarations_digest(
-            scripted.requests[0]
-        )
-    return digests
+    surface = FixtureSurface(schemas=[])
+    scripted = ScriptedGenai([reply(text_part("done"))])
+    adapter = PlannerAdapter(
+        settings=Settings(),
+        surface=surface,
+        specs=planner_specs(translate=build_translate(surface=surface), surface=surface),
+        client=scripted.client,
+    )
+    await _AdapterHarness().run(adapter, question="go", readings=[])
+    return {"served": _declarations_digest(scripted.requests[0])}
 
 
 @pytest.fixture

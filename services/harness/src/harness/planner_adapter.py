@@ -393,16 +393,12 @@ class PlannerAdapter:
             else planner_specs(
                 translate=self._translate,
                 surface=self._surface,
-                question_fixed=True,
-                reads_user_words=False,
             )
         )
         # Built once and shared by every run, each of which names its own model.
         self._planner = pydantic_planner(
             self._specs,
-            instruction=planner_instruction(
-                has_translator=True, has_skills=True, question_fixed=True
-            ),
+            instruction=planner_instruction(),
         )
 
     async def __call__(
@@ -517,9 +513,9 @@ class PlannerAdapter:
                 # Each turn opens a brand-new ADK session, so a turn's
                 # first entry has nothing to clear. A later `plan` call in
                 # the same turn does: without this, its first-draft entry
-                # would find the earlier entry's plan still on record and,
-                # with this adapter's pair built with `question_fixed=True`,
-                # could only amend it, since `starts_new_plan` is refused.
+                # would find the earlier entry's plan still on record and
+                # could only amend it, since `starts_new_plan` is refused
+                # (`submission.service._resolve_intent`).
                 # The plan's alignments go with it (`clear_plan`), so no
                 # amendment of the new draft reads an input the old plan
                 # moved. The spec_ids the earlier plan's runs refused go too.
@@ -836,8 +832,6 @@ class PlannerAdapter:
             lambda: submit(
                 view,
                 proposal,
-                question_fixed=True,
-                reads_user_words=False,
                 proposer=PROPOSE_PLAN_PROPOSER,
             ),
             state=state,
