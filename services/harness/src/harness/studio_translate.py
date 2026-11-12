@@ -767,7 +767,9 @@ class _RecordingSurface:
             for record in self._records
             if record.conversation == conversation and record.step_id == step_id
         ]
-        for record in records:
+        # The latest complete record is the step's own call; an earlier one
+        # can be a call made for it (a rolling group's anchor lookup).
+        for record in reversed(records):
             if record.result.get("outcome") == "ok":
                 record.result = failed
                 return
@@ -1394,7 +1396,6 @@ class _Translator:
         # record shows it succeeded.
         self._answer_step: str | None = None
         self._answer_detail: str | None = None
-        self._answer_refused = False
         # Each plan step whose line a progress report opened and no record
         # has closed yet, by step id: its wire step id, label, tool and the
         # monotonic time of its first report.
@@ -1765,13 +1766,12 @@ class _Translator:
             if record.step_id is not None:
                 self._running_plan_steps.pop(record.step_id, None)
                 if record.step_id == self._answer_step:
-                    # A later ok record of the step does not clear a refusal.
-                    self._answer_refused = self._answer_refused or refused
+                    # The step's latest record decides: a retry that
+                    # succeeded follows its failed attempt, and
+                    # `mark_step_failed` amends the latest complete record.
                     label = plan_labels.get(record.step_id)
                     self._answer_detail = (
-                        None
-                        if self._answer_refused or not label
-                        else _cut_at_word(label, _LINE_DETAIL_CAP)
+                        None if refused or not label else _cut_at_word(label, _LINE_DETAIL_CAP)
                     )
             frames.append(
                 ActivityStep(
@@ -2282,7 +2282,6 @@ class _Translator:
                 # A replan runs a plan of its own, whose steps may reuse these
                 # ids, so each of its steps opens a line of its own.
                 self._answer_step = self._answer_detail = None
-                self._answer_refused = False
                 self._wire_step_ids.clear()
             return frames
         records = self._take_records()

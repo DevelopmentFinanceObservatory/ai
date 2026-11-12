@@ -1399,9 +1399,20 @@ def test_reading_the_plans_results_names_the_step_that_gives_the_answer(
     assert len(line.detail or "") <= 110
 
 
-def test_a_refused_record_of_the_answer_step_keeps_its_label_off_the_reading_line() -> None:
-    """A step can leave two records (a rolling group's anchor call and its own
-    call); a refusal on the first stays on the step when the second reads ok."""
+@pytest.mark.parametrize(
+    ("amended", "detail"),
+    [
+        pytest.param(False, _LABELS["rank"], id="a-retry-that-succeeded"),
+        pytest.param(True, None, id="its-own-call-amended-to-failed"),
+    ],
+)
+def test_the_answer_steps_latest_record_decides_the_reading_lines_detail(
+    amended: bool, detail: str | None
+) -> None:
+    """A step can leave two records: a failed attempt then the retry that
+    succeeded, or a call made for it (a rolling group's anchor lookup) then
+    its own. `mark_step_failed` amends the step's own, so the label shows
+    after a recovered retry and stays off a step the run failed."""
     translator, surface_recorder = _progress_translator()
     surface_recorder.set_step_order("c1", ["rank"], _LABELS)
     translator.translate(
@@ -1412,13 +1423,20 @@ def test_a_refused_record_of_the_answer_step_keeps_its_label_off_the_reading_lin
         )
     )
     refused = {"outcome": "refusal", "refusal": {"code": "service_unavailable", "message": "m"}}
-    surface_recorder._records.append(_analysis_record("rank", refused))
+    first = {"outcome": "ok", "summary": "anchor"} if amended else refused
+    surface_recorder._records.append(_analysis_record("rank", first))
     surface_recorder._records.append(_analysis_record("rank", _RANKED))
+    if amended:
+        surface_recorder.mark_step_failed(
+            step_id="rank", tool="rank", code="source_drift", detail="drifted"
+        )
 
     frames = translator.translate(_node_event("execute", route="ok", output={"frame_refs": []}))
 
+    steps = [f for f in frames if f.tool is not None]
     (line,) = [f for f in frames if f.tool is None]
-    assert (line.label, line.detail) == ("Reading the plan's results", None)
+    assert steps[-1].status is (StepStatus.FAILED if amended else StepStatus.COMPLETE)
+    assert (line.label, line.detail) == ("Reading the plan's results", detail)
 
 
 def test_a_mid_run_report_leaves_a_finished_steps_record_for_the_run_to_amend() -> None:
