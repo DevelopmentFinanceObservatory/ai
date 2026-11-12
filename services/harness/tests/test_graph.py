@@ -114,9 +114,12 @@ from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
 from harness.sentences import FAILURE_SENTENCES, FailureClass, StopCode
 from harness.settings import Settings
-from harness.studio_translate import _node_name, failure_detail
+from harness.studio_state import ConversationState, StudioStore
+from harness.studio_translate import _node_name, _Translator, failure_detail
+from harness.studio_translate import _RecordingExecutor as _TranslatorRecorder
 from harness.tool_contracts import HarnessCode, reading_facts
 from harness.turn_records import CHIP_STALE_NOTE, SearchReading, basis_line
+from harness.wire import ActivityStep, StepStatus
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from planner.operations import AggregateOperation, GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
@@ -513,13 +516,112 @@ async def test_execute_relays_a_report_while_its_step_is_still_running() -> None
                 surface.release.set()
 
     progress = [_step_progress(event) for event in seen if _step_progress(event)]
+    retrieve = {
+        "step_id": "retrieve",
+        "tool": "get_data",
+        "position": 1,
+        "count": 2,
+        "description": "life expectancy at birth in Kenya, 1960 to 2023.",
+        "gives_answer": False,
+    }
+    totals = {
+        "step_id": "totals",
+        "tool": "aggregate",
+        "position": 2,
+        "count": 2,
+        "description": (
+            "The average of life expectancy at birth, grouped by year. "
+            "Result: one figure per year, 1960-2023."
+        ),
+        "gives_answer": True,
+    }
     assert progress == [
-        {"step_id": "retrieve", "tool": "get_data", "message": _PREPARING},
-        {"step_id": "retrieve", "tool": "get_data", "message": _RECEIVED},
-        {"step_id": "totals", "tool": "aggregate", "message": _RECEIVED},
+        {**retrieve, "message": _PREPARING},
+        {**retrieve, "message": _RECEIVED},
+        {**totals, "message": _RECEIVED},
     ]
     assert _node_name(next(e for e in seen if _step_progress(e))) == "execute"
     assert "plan_done" in visited_nodes(seen)
+
+
+async def test_a_plan_whose_card_places_fail_still_runs_with_unplaced_steps(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The plan card places only label the step lines, so a failure building
+    them is logged and the approved plan runs with every step unplaced."""
+
+    def fails(plan: object) -> dict[str, object]:
+        raise ValueError("no card for this plan")
+
+    monkeypatch.setattr("harness.graph.execute._card_places", fails)
+    stream = await _approval_stream(ScriptedSurface())
+
+    with caplog.at_level("ERROR", logger="harness.graph.execute"):
+        async with asyncio.timeout(10):
+            seen = [event async for event in stream]
+
+    progress = [_step_progress(event) for event in seen if _step_progress(event)]
+    assert progress
+    assert all(report["position"] is None for report in progress)
+    assert "plan_done" in visited_nodes(seen)
+    (logged,) = [r for r in caplog.records if r.name == "harness.graph.execute"]
+    assert logged.exc_info is not None
+
+
+class _HoldsGetData(ScriptedSurface):
+    """`ScriptedSurface`, whose `get_data` sends no report of its own and
+    answers only once `release` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Mapping[str, Any],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        if tool.name == "get_data":
+            await self.release.wait()
+        return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+
+
+async def test_a_plan_step_opens_its_running_line_before_its_call_answers() -> None:
+    """The surface sends no report and answers only once the test has seen
+    the step's running frame, so that frame can come only from the start
+    the executor reports before the call. It gives the step's place on the
+    card first, then the card row's description."""
+    surface = _HoldsGetData()
+    stream = await _approval_stream(surface)
+    translator = _Translator(
+        conversation=ConversationState(conversation_id="s"),
+        recorder=_TranslatorRecorder(_no_executor, store=StudioStore(InMemorySessionService())),
+    )
+    held: list[ActivityStep] = []
+
+    async with asyncio.timeout(10):
+        async for event in stream:
+            if _step_progress(event) is not None and not surface.release.is_set():
+                held = [
+                    frame
+                    for frame in translator.translate(event)
+                    if isinstance(frame, ActivityStep) and frame.tool
+                ]
+                surface.release.set()
+
+    assert [(frame.tool, frame.status, frame.detail) for frame in held] == [
+        (
+            "get_data",
+            StepStatus.RUNNING,
+            "step 1 of 2 \u00b7 life expectancy at birth in Kenya, 1960 to 2023",
+        )
+    ]
+
+
+async def _no_executor(*, tool: str, args: dict[str, object]) -> dict[str, object]:
+    raise AssertionError(f"no agent tool runs in a plan's run, not {tool!r} with {args!r}")
 
 
 async def test_stopping_a_turn_mid_step_cancels_the_run_and_leaves_no_task_behind() -> None:

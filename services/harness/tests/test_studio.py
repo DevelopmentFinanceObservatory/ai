@@ -771,12 +771,14 @@ async def test_a_crash_mid_execute_reports_the_finished_steps_on_the_failing_tur
         )
         second = await _stream(client, "/api/studio/turn", _turn_body("kenya oda 2023"))
 
-    # The plan's own step; "Starting the plan" is a status line with no tool.
-    finished = [
-        frame for frame in failed if frame["event"] == "activity.step" and frame.get("tool")
-    ]
-    assert [frame["status"] for frame in finished] == ["running", "complete"]
-    assert finished[0]["step_id"] == finished[1]["step_id"]
+    # The plan's own steps; "Starting the plan" is a status line with no tool.
+    # Each step's line opens as it starts, and the step the crash cut off
+    # closes as failed.
+    lines: dict[str, list[str]] = {}
+    for frame in failed:
+        if frame["event"] == "activity.step" and frame.get("tool"):
+            lines.setdefault(frame["step_id"], []).append(frame["status"])
+    assert list(lines.values()) == [["running", "complete"], ["running", "failed"]]
     assert _events(failed)[-1] == "error"
     assert "component.created" not in _events(second)
     assert _events(second)[-1] == "done"
@@ -1351,7 +1353,6 @@ async def test_a_planners_own_labels_and_decisions_reach_the_plan_card(
 
 
 _POLLING = "Preparing the dataset (in progress, 12s)"
-_RECEIVED = "Result received; checking it"
 
 
 def _tool_steps(frames: list[dict[str, Any]]) -> list[tuple[str, str, str, str | None]]:
@@ -1383,7 +1384,8 @@ class _PollsOnceSurface(ScriptedSurface):
 async def test_a_polled_get_data_step_updates_one_activity_line_until_it_completes() -> None:
     """While `get_data` waits on a background operation, its step streams a
     `running` frame carrying data-mcp's report; once the call answers, the
-    line says so, then completes on the same `step_id`. Studio keeps one
+    line drops the report and shows the step's description again, then completes
+    on the same `step_id`. Studio keeps one
     Activity line per step, so the plan's two steps still read as two
     lines. A plan step's surface call is the only place progress reaches
     the wire: the agent's `fetch` calls `get_data` with none."""
@@ -1397,9 +1399,10 @@ async def test_a_polled_get_data_step_updates_one_activity_line_until_it_complet
 
     steps = _tool_steps(second)
     get_data = [step for step in steps if step[1] == "get_data"]
+    source = "life expectancy at birth in Kenya, 1960 to 2023"
     assert [(status, detail) for _, _, status, detail in get_data] == [
-        ("running", _POLLING),
-        ("running", _RECEIVED),
+        ("running", f"{_POLLING} \u00b7 step 1 of 2"),
+        ("running", f"step 1 of 2 \u00b7 {source}"),
         ("complete", "64 observations \u00b7 World Development Indicators"),
     ]
     assert len({step_id for step_id, *_ in get_data}) == 1
