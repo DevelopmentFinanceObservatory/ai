@@ -2100,7 +2100,7 @@ class CutCalls:
     has one. A call is kept from the moment it is issued until it finishes,
     so a caller cancelled mid-await leaves it here too. `close` cancels
     whatever is still kept, so no call outlives the entry.
-    `harness.planner_seam.PlannerSeam.__call__` opens one per entry through
+    `harness.planner_adapter.PlannerAdapter.__call__` opens one per entry through
     `current_cut_calls`.
     """
 
@@ -3450,7 +3450,7 @@ def _unavailable(
 
     A call the planner entry had no time left to issue (`not_issued`)
     refers the requirement back as `discovery_unavailable` marked
-    `not_issued`, which the planner seam takes as the request's wall-clock
+    `not_issued`, which the planner adapter takes as the request's wall-clock
     bound spent and ends the entry on. Any other failure names no `action`, and `translator.mechanical` refers
     it back as `discovery_unavailable` unmarked.
     """

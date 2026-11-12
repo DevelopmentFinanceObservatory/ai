@@ -214,9 +214,9 @@ def _refused_asks(events: Iterable[Event]) -> frozenset[str]:
 def _user_message(event: Any) -> bool:
     """Whether `event` is a message the user typed into the session.
 
-    A user-authored event with text and no `branch`. The planner seam sends
+    A user-authored event with text and no `branch`. The planner adapter sends
     its own messages (the brief, an amendment's or a refusal's ask) as
-    user-role content under `harness.planner_seam._PLANNER_BRANCH`, so they
+    user-role content under `harness.planner_adapter._PLANNER_BRANCH`, so they
     are not the user's.
     """
     return (

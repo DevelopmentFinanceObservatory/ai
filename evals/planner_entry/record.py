@@ -192,7 +192,7 @@ async def _first_year_results(
 ) -> dict[str, dict[str, Any]]:
     """The answers to each first-year read an entry over `recording` can make that the
     recording does not hold, read now. A scripted entry with no plan leaves the datasets
-    the seam showed the planner in its state, and those are read."""
+    the adapter showed the planner in its state, and those are read."""
     entry = await run_entry(task, recording, prefix_cache=None, client=ScriptedModel().client)
     surface = _RecordingSurface(client, recording["tools"])
     for identity in first_year_reads(cast(SessionState, entry.state)):

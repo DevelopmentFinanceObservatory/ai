@@ -562,7 +562,7 @@ def store_search(
 
     A spec_id a part holds as its own keeps that part's block and warnings
     against a later part offering it as a candidate, since a pin of it is
-    one of the search that settled on it (`harness.planner_seam`, which
+    one of the search that settled on it (`harness.planner_adapter`, which
     reads both for the pin). Between blocks no search settled, or two
     searches that each settled it, `planner.plan.with_blocks` decides.
     """

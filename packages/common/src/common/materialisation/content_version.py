@@ -7,7 +7,7 @@ import time, passing this module the function object -- `common` and
 
 There is exactly one deriver, not a `trace_codec`-style registry keyed by
 several kinds: only one process component (`analysis_mcp`) ever has
-frame-grammar available to derive from, so the seam only needs to answer
+frame-grammar available to derive from, so the registry only needs to answer
 "has it registered one yet," not "which one."
 """
 

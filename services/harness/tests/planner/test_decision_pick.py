@@ -1,6 +1,6 @@
 """A replan for the option the user picked on the plan card holds that pick.
 
-The planner seam records the pick for the entry (`planner.plan.
+The planner adapter records the pick for the entry (`planner.plan.
 DECISION_PICK_STATE_KEY`), with the scope the card gave the replan
 (`DecisionPick.on_card`, as `harness.decision_pick.decision_pick` reads it off the card). `propose_plan` admits a plan only when it keeps
 every other requirement exactly as the card had it, ids and citations

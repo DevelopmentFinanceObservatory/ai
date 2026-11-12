@@ -1,9 +1,9 @@
-"""`PlannerSeam` on the Pydantic AI planner produces each entry's stored expectation.
+"""`PlannerAdapter` on the Pydantic AI planner produces each entry's stored expectation.
 
 Each entry runs on one script of a scripted google-genai client, through the
-workflow node `tests.test_planner_seam._SeamHarness` drives, in a session of its
+workflow node `tests.test_planner_adapter._AdapterHarness` drives, in a session of its
 own, under Studio's streaming run config, and is checked against the entry's
-stored expectation (`tests.planner_expectations`) on what the seam answers, the
+stored expectation (`tests.planner_expectations`) on what the adapter answers, the
 progress it reports, the requests the model received, the events the session
 stores, the steps `session_steps` reads from them, and the stored state. The
 The Studio tests run a whole turn through
@@ -36,12 +36,12 @@ from google.adk.runners import Runner as AdkRunner
 from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import errors, types
+from harness import planner_adapter, planner_run, usage
 from harness import planner_node as planner_node_module
-from harness import planner_run, planner_seam, usage
-from harness.planner_run import PlannerRun, PlannerSeamError
-from harness.planner_seam import PlannerSeam
+from harness.planner_adapter import PlannerAdapter
+from harness.planner_run import PlannerAdapterError, PlannerRun
 from harness.scripted import _compiled_proposal
-from harness.sentences import SeamCode, refusal_sentence
+from harness.sentences import StopCode, refusal_sentence
 from harness.settings import Settings
 from harness.turn_budget import TurnBudget, current_turn_budget
 from harness.turn_events import PLANNER_ASK
@@ -66,7 +66,7 @@ from submission.service import scope_choice_decisions
 from translator.tool import Translate, build_translate
 
 from .orchestrator_fakes import plan_call, stream, studio_client, turn_body
-from .planner.planner_pairs import seam_specs
+from .planner.planner_pairs import adapter_specs
 from .planner_expectations import (
     BRIEF_OPENING,
     expect,
@@ -93,15 +93,15 @@ from .scripted_planner import SIGNED as _SIGNED
 from .scripted_planner import SSE as _SSE
 from .scripted_planner import Tools, scripted_planner
 from .scripted_planner import numbered_call_ids as _numbered_call_ids
-from .test_planner_model import _HangingGenai
-from .test_planner_seam import (
+from .test_planner_adapter import (
     _APP,
     _USER,
+    _AdapterHarness,
     _pending_ask_interrupt_id,
-    _SeamHarness,
     _sector_switched,
     _translated_plan,
 )
+from .test_planner_model import _HangingGenai
 from .test_studio import _app, _interrupt_body, _pick, _text
 from .test_turn_records import _switchable_scope
 
@@ -130,7 +130,7 @@ def _proposals(*answers: dict[str, Any], records: Plan | None = None) -> Tools:
     (`harness.scripted.use_compiled_proposals`), recording `records` first when
     the session holds no plan. Every call records the spec_ids the user picked,
     read from its steps, under `_ELECTED_KEY`, and the steps and response calls
-    it read under `_READ_KEY`. Each seam built gets `answers` afresh."""
+    it read under `_READ_KEY`. Each adapter built gets `answers` afresh."""
 
     def tools(specs: Sequence[ToolSpec]) -> list[ToolSpec]:
         left = list(answers)
@@ -173,8 +173,8 @@ class _Entry:
 
 @dataclass
 class _Script:
-    """An entry's script: the model's replies, the seam's arguments for each run,
-    which the user's `answer` to the pending ask resumes, how the seam is set up,
+    """An entry's script: the model's replies, the adapter's arguments for each run,
+    which the user's `answer` to the pending ask resumes, how the adapter is set up,
     and the budget each run is given."""
 
     replies: Sequence[Reply]
@@ -187,17 +187,17 @@ class _Script:
 async def _entry(
     script: _Script,
     *,
-    then: Callable[[PlannerSeam, _SeamHarness], Any] | None = None,
+    then: Callable[[PlannerAdapter, _AdapterHarness], Any] | None = None,
 ) -> _Entry:
-    """Run `script`'s runs in one session on one seam, ADK's call ids numbered
+    """Run `script`'s runs in one session on one adapter, ADK's call ids numbered
     (`_numbered_call_ids`)."""
     scripted = ScriptedGenai(script.replies)
-    seam = scripted_planner(
+    adapter = scripted_planner(
         scripted,
         translate=script.translate,
         tools=script.setup,
     )
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
     reports: list[dict[str, Any]] = []
     outputs: list[dict[str, Any] | None] = []
     with _numbered_call_ids():
@@ -212,12 +212,14 @@ async def _entry(
             token = current_turn_budget.set(script.budget() if script.budget is not None else None)
             try:
                 outputs.append(
-                    await harness.run(seam, on_progress=reports.append, run_config=_SSE, **kwargs)
+                    await harness.run(
+                        adapter, on_progress=reports.append, run_config=_SSE, **kwargs
+                    )
                 )
             finally:
                 current_turn_budget.reset(token)
         if then is not None:
-            outputs.append(await then(seam, harness))
+            outputs.append(await then(adapter, harness))
     return _Entry(
         outputs=outputs,
         reports=[{k: v for k, v in report.items() if k != "duration_ms"} for report in reports],
@@ -230,7 +232,7 @@ async def _entry(
 def _read(events: Sequence[Event]) -> list[dict[str, Any]]:
     """What the session's readers read of `events`, in order.
 
-    `planner.session.session_steps`, Studio's translator and the seam read a
+    `planner.session.session_steps`, Studio's translator and the adapter read a
     planner event's author, branch, invocation, node path, whether it is
     partial, its content (role and parts: text, thought and signature, each
     call's name, arguments and id, each answer's name, id and response) and
@@ -288,7 +290,7 @@ def _request_dumped(request: Request) -> dict[str, Any]:
 
 
 def _briefs(request: Request) -> list[str]:
-    """The text of each part of `request` that holds the seam's brief."""
+    """The text of each part of `request` that holds the planner brief."""
     return [
         part.text
         for content in request.content_list
@@ -440,9 +442,9 @@ async def test_a_question_in_two_parts_is_sent_in_two_parts(
         role="user", parts=[types.Part(text="Kenya's debt"), types.Part(text="since 2010")]
     )
     scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
-    seam = scripted_planner(scripted, tools=_proposals())
-    await _SeamHarness().run(
-        seam, new_message=question, run_config=_SSE, readings=[], **_planned(plan)
+    adapter = scripted_planner(scripted, tools=_proposals())
+    await _AdapterHarness().run(
+        adapter, new_message=question, run_config=_SSE, readings=[], **_planned(plan)
     )
     (sent,) = scripted.requests
 
@@ -454,7 +456,7 @@ async def test_a_question_part_the_planner_cannot_send_ends_the_entry_refused(
     plan: Plan,
 ) -> None:
     """A question holding a file by URI ends the entry before any request on a
-    refusal the seam answers with, as it answers any refusal the run ends on."""
+    refusal the adapter answers with, as it answers any refusal the run ends on."""
     question = types.Content(
         role="user",
         parts=[
@@ -463,10 +465,10 @@ async def test_a_question_part_the_planner_cannot_send_ends_the_entry_refused(
         ],
     )
     scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
-    seam = scripted_planner(scripted, tools=_proposals())
+    adapter = scripted_planner(scripted, tools=_proposals())
 
-    output = await _SeamHarness().run(
-        seam,
+    output = await _AdapterHarness().run(
+        adapter,
         new_message=question,
         run_config=_SSE,
         readings=[],
@@ -764,7 +766,7 @@ async def test_a_budget_closing_a_call_with_nothing_to_pin_refuses(
         ),
     )
 
-    code = SeamCode.TURN_MODEL_CALLS_SPENT
+    code = StopCode.TURN_MODEL_CALLS_SPENT
     assert entry.outputs == [
         {"refused": {"text": refusal_sentence({"code": code}), "final": True, "code": code}}
     ]
@@ -779,16 +781,16 @@ async def test_a_call_a_bound_closes_logs_the_usage_its_chunks_reported(
     so the closed call logs the usage it reported."""
     unfinished = Reply(chunks=[[text_part("Partly")]], usage=_USAGE, finish_reason=None)
     scripted = _HangingGenai([unfinished], hang_after=1)
-    seam = scripted_planner(scripted, tools=_proposals())
+    adapter = scripted_planner(scripted, tools=_proposals())
     budget = TurnBudget(model_time_s=0.05, model_calls_max=30, wall_s=60.0, first_chunk_s=30.0)
     token = current_turn_budget.set(budget)
     try:
         with caplog.at_level(logging.INFO, logger=usage.logger.name):
-            output = await _SeamHarness().run(seam, readings=[], **_planned(plan))
+            output = await _AdapterHarness().run(adapter, readings=[], **_planned(plan))
     finally:
         current_turn_budget.reset(token)
 
-    code = SeamCode.TURN_MODEL_TIME_SPENT
+    code = StopCode.TURN_MODEL_TIME_SPENT
     assert output is not None and output["refused"]["code"] == code
     assert [record.args for record in caplog.records if record.name == usage.logger.name] == [
         (AGENT_NAME, 120, 40, 9, 4, 133)
@@ -819,7 +821,7 @@ async def test_a_response_that_errs_or_holds_nothing_ends_the_run_with_no_plan(
 
     assert (
         entry.outputs[0] is not None
-        and entry.outputs[0]["refused"]["code"] == SeamCode.PLAN_NOT_READY
+        and entry.outputs[0]["refused"]["code"] == StopCode.PLAN_NOT_READY
     )
     _assert_expected(request, entry)
 
@@ -828,7 +830,7 @@ async def test_a_function_call_gemini_could_not_parse_ends_the_run_with_no_plan(
     plan: Plan, request: pytest.FixtureRequest
 ) -> None:
     """A reply streamed as live Gemini streams a function call it could not
-    parse (`malformed_call_reply`) ends the run on `SeamCode.PLAN_NOT_READY`
+    parse (`malformed_call_reply`) ends the run on `StopCode.PLAN_NOT_READY`
     with no further model call. The response is stored as its signed empty text
     part."""
     entry = await _entry(
@@ -841,7 +843,7 @@ async def test_a_function_call_gemini_could_not_parse_ends_the_run_with_no_plan(
 
     assert (
         entry.outputs[0] is not None
-        and entry.outputs[0]["refused"]["code"] == SeamCode.PLAN_NOT_READY
+        and entry.outputs[0]["refused"]["code"] == StopCode.PLAN_NOT_READY
     )
     assert len(entry.requests) == 1
     _assert_expected(request, entry)
@@ -853,14 +855,14 @@ async def _raising(plan: Plan) -> _Entry:
     scripted = ScriptedGenai(
         [reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED), _ask_call("a1"))]
     )
-    seam = scripted_planner(scripted, tools=_proposals(_REFUSED))
-    harness = _SeamHarness()
+    adapter = scripted_planner(scripted, tools=_proposals(_REFUSED))
+    harness = _AdapterHarness()
     with (
         _numbered_call_ids(),
         mock.patch.object(planner_run, "_MAX_EVENTS", 1),
-        pytest.raises(PlannerSeamError),
+        pytest.raises(PlannerAdapterError),
     ):
-        await harness.run(seam, run_config=_SSE, readings=[], **_planned(plan))
+        await harness.run(adapter, run_config=_SSE, readings=[], **_planned(plan))
     return _Entry(
         outputs=[],
         reports=[],
@@ -883,23 +885,23 @@ async def test_a_run_that_raises_while_calls_run_stores_none_of_the_responses_an
     assert [r.id for event in events for r in event.get_function_responses()] == []
 
 
-async def _stored(harness: _SeamHarness) -> _Entry:
+async def _stored(harness: _AdapterHarness) -> _Entry:
     return _Entry(outputs=[], reports=[], requests=[], events=await harness.events(), state={})
 
 
 @dataclass
 class _SpentFirst:
-    """`seam`, called after `spent` model calls of the invocation, as the
+    """`adapter`, called after `spent` model calls of the invocation, as the
     orchestrator's calls before the planner's spend the invocation's allowance."""
 
-    seam: PlannerSeam
+    adapter: PlannerAdapter
     spent: int
 
     async def __call__(self, *, ctx: Context, **kwargs: Any) -> dict[str, Any]:
         invocation = ctx.get_invocation_context()
         for _ in range(self.spent):
             invocation.increment_llm_call_count()
-        return await self.seam(ctx=ctx, **kwargs)
+        return await self.adapter(ctx=ctx, **kwargs)
 
 
 async def _capped(plan: Plan, *, spent: int) -> _Entry:
@@ -912,12 +914,12 @@ async def _capped(plan: Plan, *, spent: int) -> _Entry:
             for n in (1, 2, 3, 4)
         ]
     )
-    seam = scripted_planner(scripted, tools=_proposals(_REFUSED, _REFUSED, _REFUSED))
-    harness = _SeamHarness()
+    adapter = scripted_planner(scripted, tools=_proposals(_REFUSED, _REFUSED, _REFUSED))
+    harness = _AdapterHarness()
     capped = RunConfig(streaming_mode=StreamingMode.SSE, max_llm_calls=3)
     with pytest.raises(LlmCallsLimitExceededError):
         await harness.run(
-            cast(PlannerSeam, _SpentFirst(seam, spent)),
+            cast(PlannerAdapter, _SpentFirst(adapter, spent)),
             run_config=capped,
             readings=[],
             **_planned(plan),
@@ -945,10 +947,10 @@ async def test_a_run_past_the_invocations_model_call_cap_stores_the_error_event(
     _assert_expected(request, entry)
 
 
-async def test_two_entries_at_once_on_one_pydantic_ai_seam_keep_to_their_own_runs(
+async def test_two_entries_at_once_on_one_pydantic_ai_adapter_keep_to_their_own_runs(
     plan: Plan,
 ) -> None:
-    """One seam's Pydantic AI planner serves two entries running at once, each in
+    """One adapter's Pydantic AI planner serves two entries running at once, each in
     its own session. The planner is built once, each request carries its own
     entry's question and answers, and each session stores the same events as
     the other."""
@@ -971,15 +973,15 @@ async def test_two_entries_at_once_on_one_pydantic_ai_seam_keep_to_their_own_run
         ]
     )
     questions = ("kenya debt", "ghana aid")
-    harnesses = [_SeamHarness() for _ in questions]
+    harnesses = [_AdapterHarness() for _ in questions]
     with mock.patch.object(
         planner_node_module, "planner_agent", wraps=planner_node_module.planner_agent
     ) as built:
-        seam = scripted_planner(scripted, tools=lambda specs: _serving_proposals(specs, body))
+        adapter = scripted_planner(scripted, tools=lambda specs: _serving_proposals(specs, body))
         outputs = await asyncio.gather(
             *(
                 harness.run(
-                    seam,
+                    adapter,
                     new_message=types.Content(role="user", parts=[types.Part(text=question)]),
                     run_config=_SSE,
                     readings=[],
@@ -1035,9 +1037,11 @@ async def _stopped(plan: Plan) -> _Entry:
             reply(call_part(PROPOSE_PLAN, {}, id="p2", signature=_SIGNED), _ask_call("a1")),
         ]
     )
-    seam = scripted_planner(scripted, tools=lambda specs: _serving_proposals(specs, body))
-    harness = _SeamHarness()
-    running = asyncio.create_task(harness.run(seam, run_config=_SSE, readings=[], **_planned(plan)))
+    adapter = scripted_planner(scripted, tools=lambda specs: _serving_proposals(specs, body))
+    harness = _AdapterHarness()
+    running = asyncio.create_task(
+        harness.run(adapter, run_config=_SSE, readings=[], **_planned(plan))
+    )
     await asyncio.wait_for(started.wait(), timeout=5)
     running.cancel()
     with contextlib.suppress(asyncio.CancelledError):
@@ -1065,7 +1069,7 @@ async def test_a_stop_while_a_planner_tool_hangs_stores_the_answered_call_and_no
         runs.append(PlannerRun(**kwargs))
         return runs[-1]
 
-    monkeypatch.setattr(planner_seam, "PlannerRun", recorded)
+    monkeypatch.setattr(planner_adapter, "PlannerRun", recorded)
     with caplog.at_level(logging.ERROR):
         entry = await _stopped(plan)
 
@@ -1086,8 +1090,8 @@ async def test_a_stop_while_the_node_waits_on_its_event_closes_the_run_in_its_ta
     suspended at its yield, closes the Pydantic AI run in the node's task. Its
     spans and context variables end where they began, with nothing logged."""
     scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
-    seam = scripted_planner(scripted, tools=_proposals())
-    harness = _SeamHarness()
+    adapter = scripted_planner(scripted, tools=_proposals())
+    harness = _AdapterHarness()
     storing = asyncio.Event()
     append = harness._sessions.append_event
 
@@ -1099,7 +1103,7 @@ async def test_a_stop_while_the_node_waits_on_its_event_closes_the_run_in_its_ta
 
     with mock.patch.object(harness._sessions, "append_event", append_event):
         running = asyncio.create_task(
-            harness.run(seam, run_config=_SSE, readings=[], **_planned(plan))
+            harness.run(adapter, run_config=_SSE, readings=[], **_planned(plan))
         )
         await asyncio.wait_for(storing.wait(), timeout=5)
         running.cancel()
@@ -1155,11 +1159,11 @@ async def test_a_revision_after_an_entry_reads_the_steps_of_its_stored_ask_and_a
     answer."""
     pinned, repinned, shown = _pinned_plan(plan)
 
-    async def revise(seam: PlannerSeam, harness: _SeamHarness) -> dict[str, Any]:
+    async def revise(adapter: PlannerAdapter, harness: _AdapterHarness) -> dict[str, Any]:
         async def _node(ctx: Context, node_input: Any) -> Any:
             del node_input
             save_pin_sources(cast(SessionState, ctx.state), shown)
-            return await seam.revise(
+            return await adapter.revise(
                 ctx=ctx,
                 prior_plan=pinned.model_dump(mode="json"),
                 evidence_requirements=[repinned.model_dump(mode="json")],
@@ -1244,8 +1248,8 @@ async def _studio(
     """The frames of a Studio turn whose orchestrator hands the question to the
     planner, and of the answer that resumes it when `answer` is given."""
     scripted = ScriptedGenai(replies)
-    seam = scripted_planner(scripted, tools=_proposals(records=plan))
-    app = _app(plan_call(_QUESTION), _text("Planned."), planner=seam)
+    adapter = scripted_planner(scripted, tools=_proposals(records=plan))
+    app = _app(plan_call(_QUESTION), _text("Planned."), planner=adapter)
     async with studio_client(app) as client:
         with _numbered_call_ids():
             first = await stream(client, "/api/studio/turn", turn_body(_QUESTION))
@@ -1406,14 +1410,14 @@ async def test_a_stream_google_genai_resumed_over_a_repeated_call_ends_the_turn_
 
     surface = FixtureSurface(schemas=[])
     translate = build_translate(surface=surface)
-    seam = PlannerSeam(
+    adapter = PlannerAdapter(
         settings=Settings(),
         surface=surface,
         translate=translate,
-        specs=_serving_proposals(seam_specs(surface=surface, translate=translate), body),
+        specs=_serving_proposals(adapter_specs(surface=surface, translate=translate), body),
         client=client,
     )
-    app = _app(plan_call(_QUESTION), _text("Planned."), planner=seam)
+    app = _app(plan_call(_QUESTION), _text("Planned."), planner=adapter)
     async with studio_client(app) as studio:
         frames = await stream(studio, "/api/studio/turn", turn_body(_QUESTION))
 

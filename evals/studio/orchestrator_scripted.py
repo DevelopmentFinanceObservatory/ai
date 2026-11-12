@@ -1,15 +1,15 @@
-"""The studio, scripted: real workflow, real planner seam, no model.
+"""The studio, scripted: real workflow, real planner adapter, no model.
 
 This module builds the studio `harness.server` serves and replaces only what
 a model or an upstream would answer:
 
 - the orchestrator agent's model answers from a script of tool calls and
   text, one entry per model call, across every turn of a case;
-- the planner is the real `harness.planner_seam.PlannerSeam`, its model
+- the planner is the real `harness.planner_adapter.PlannerAdapter`, its model
   calls answered by a scripted google-genai client
   (`harness.scripted.scripted_client`). Its model either proposes the canned plan `harness.scripted_plan` builds,
   through a `propose_plan` that declares the plan on record ready
-  (`harness.scripted.use_compiled_proposals`), so the seam renders its real
+  (`harness.scripted.use_compiled_proposals`), so the adapter renders its real
   first message and the workflow's approval, execution and hand-back nodes
   run as served, or, when the case scripts it (`planner`),
   answers from that script and drives the real `propose_plan`, whose
@@ -48,7 +48,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from harness.graph.workflow import create_root_workflow
 from harness.orchestrator_tools import build_orchestrator_tools
-from harness.planner_seam import PlannerSeam
+from harness.planner_adapter import PlannerAdapter
 from harness.scripted import (
     SCRIPTED_SPEC,
     ModelRequest,
@@ -100,8 +100,8 @@ class Log:
 
     def planner_tool_answered(self, tool: str, answer: dict[str, Any] | None) -> None:
         """Record a planner tool call by the answer the model receives for it: the
-        tool's own, an argument refusal, or the seam's answer for a tool that
-        raised (`PlannerSeam`'s `on_tool_answered`)."""
+        tool's own, an argument refusal, or the adapter's answer for a tool that
+        raised (`PlannerAdapter`'s `on_tool_answered`)."""
         response = answer or {}
         self.entries.append(
             {
@@ -203,15 +203,15 @@ class PlannerScript:
 
 
 class ScriptedPairPlanner:
-    """`harness.graph.seams.PlannerModel` over the real `PlannerSeam` and `OfferedPlans`.
+    """`harness.graph.interfaces.PlannerModel` over the real `PlannerAdapter` and `OfferedPlans`.
 
     A first draft offers `scripted_plan`; an amendment or a replan offers the
     next version of the plan the graph holds, as `harness.scripted.
     ScriptedPlannerModel` does.
     """
 
-    def __init__(self, *, seam: PlannerSeam, plans: OfferedPlans, spec_id: str) -> None:
-        self._seam = seam
+    def __init__(self, *, adapter: PlannerAdapter, plans: OfferedPlans, spec_id: str) -> None:
+        self._adapter = adapter
         self._plans = plans
         self._spec_id = spec_id
 
@@ -225,7 +225,7 @@ class ScriptedPairPlanner:
                 update={"version": prior_version + 1, "previous_version": prior_version}
             )
         self._plans.offer(ctx.session.state, plan)
-        return await self._seam(ctx=ctx, question=question, prior_plan=prior_plan, **kwargs)
+        return await self._adapter(ctx=ctx, question=question, prior_plan=prior_plan, **kwargs)
 
 
 def search_envelope(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -437,23 +437,23 @@ async def _real_schemas() -> list[ToolSchema]:
     return _REAL_SCHEMAS
 
 
-def _planner_seam(
+def _planner_adapter(
     settings: Settings,
     *,
     surface: ScriptedSurface,
     answer: OfferedPlans | PlannerScript,
     tools: Callable[[Sequence[ToolSpec]], Sequence[ToolSpec]] = tuple,
     on_tool_answered: Callable[[str, dict[str, Any] | None], None] | None = None,
-) -> PlannerSeam:
-    """The real seam, built with `settings`, over `surface`, its model calls
-    answered by `answer`, its tools the ones the seam builds for itself
+) -> PlannerAdapter:
+    """The real adapter, built with `settings`, over `surface`, its model calls
+    answered by `answer`, its tools the ones the adapter builds for itself
     (`planner.specs.planner_specs` over `surface` and its translation) as
     `tools` changes them, and each tool's answer told to `on_tool_answered`."""
     translate = build_translate(surface=surface)
     specs = planner_specs(
         translate=translate, surface=surface, question_fixed=True, reads_user_words=False
     )
-    return PlannerSeam(
+    return PlannerAdapter(
         settings=settings,
         surface=surface,
         translate=translate,
@@ -482,15 +482,17 @@ def build_studio(
     )
     if planner_script is None:
         plans = OfferedPlans(log=log)
-        seam = _planner_seam(settings, surface=surface, answer=plans, tools=use_compiled_proposals)
+        adapter = _planner_adapter(
+            settings, surface=surface, answer=plans, tools=use_compiled_proposals
+        )
         planner = handing_back_planner_failures(
             ScriptedPairPlanner(
-                seam=seam, plans=plans, spec_id=scenario.get("plan_spec_id", SCRIPTED_SPEC)
+                adapter=adapter, plans=plans, spec_id=scenario.get("plan_spec_id", SCRIPTED_SPEC)
             )
         )
     else:
         script = PlannerScript(script=[_part_from_step(step) for step in planner_script], log=log)
-        seam = _planner_seam(
+        adapter = _planner_adapter(
             settings,
             surface=CannedDataSurface(
                 log=log, searches=copy.deepcopy(scenario.get("translator_search") or [])
@@ -498,7 +500,7 @@ def build_studio(
             answer=script,
             on_tool_answered=log.planner_tool_answered,
         )
-        planner = handing_back_planner_failures(seam)
+        planner = handing_back_planner_failures(adapter)
 
     def create_workflow(recorder: Any, surface_recorder: Any) -> Any:
         agent = create_orchestrator_agent(

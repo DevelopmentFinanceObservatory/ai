@@ -11,7 +11,7 @@ whole is an error.
 
 Every node renders its heading (`label (ref)`), its kind, its description
 when it has one, the lines of its kind's block, and the gaps the node door
-names. `render_describe_digest` is the public seam.
+names. `render_describe_digest` is the public entry point.
 """
 
 from __future__ import annotations

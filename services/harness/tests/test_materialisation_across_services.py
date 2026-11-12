@@ -1,4 +1,4 @@
-"""The cross-service seam this test proves: a frame `data_mcp.get_data`
+"""The cross-service boundary this test proves: a frame `data_mcp.get_data`
 registers is resolvable by a mounted `analysis_mcp` verb, through the real
 composed ASGI app -- not two services' own unit tests asserting compatible
 shapes in isolation.
@@ -143,7 +143,7 @@ def _mint_response() -> dict[str, Any]:
             "spec_id": _SPEC_ID,
             "identity": {
                 "identity_version": "spec1",
-                "shape": {"id": "SeamTestShape", "kind": "stat_var"},
+                "shape": {"id": "AcrossServicesShape", "kind": "stat_var"},
                 "entities": {"reporter": ["country/KEN"]},
                 "facets": {},
                 "requested_window": {"kind": "all"},
@@ -152,7 +152,7 @@ def _mint_response() -> dict[str, Any]:
         },
         "content_version": _CONTENT_VERSION,
         "coverage": {"rows": 1, "dimensions": []},
-        "citation": {"text": "seam test fixture", "sources": []},
+        "citation": {"text": "across-services test fixture", "sources": []},
         "trace": {"graph_revision": "g1", "facets": []},
         "warnings": [],
         "artifacts": [
@@ -187,14 +187,14 @@ async def test_a_frame_data_mcp_registers_resolves_through_a_mounted_analysis_mc
     """`get_data`, called through the mounted `data_mcp` app, fetches and registers a
     frame in the shared `common.materialisation` store; a `filter` call through the
     mounted `analysis_mcp` app then resolves that exact `{spec_id, content_version}`
-    pair -- the actual seam this test proves, through the real streamable-HTTP wire
+    pair -- the actual boundary this test proves, through the real streamable-HTTP wire
     and the real ASGI composition, not two services' own unit tests asserting
     compatible shapes in isolation.
 
     The bare signed-URL GET is the one hop nothing in `data_mcp.get_data_tool`
     threads a test transport into (see `frame_materialisation.materialise_and_register`'s
-    own `transport` parameter, a seam only `data_mcp`'s own suite exercises directly);
-    patched here at `_fetch_artifact_bytes`, the same seam `data-mcp`'s own
+    own `transport` parameter, which only `data_mcp`'s own suite exercises directly);
+    patched here at `_fetch_artifact_bytes`, the same function `data-mcp`'s own
     `test_get_data_tool.py::test_successful_get_data_call_registers_a_frame_end_to_end`
     uses to prove the tool-to-store wiring without opening a real socket.
     """
@@ -241,7 +241,7 @@ async def test_a_frame_data_mcp_registers_resolves_through_a_mounted_analysis_mc
                 raise_on_error=False,
             )
 
-    # The one assertion that is the seam: a genuine `frame_not_held` would mean the
+    # The one assertion that proves the boundary: a genuine `frame_not_held` would mean the
     # store `data_mcp.get_data` wrote into and the store this mounted `filter` call
     # resolved against were never actually the same store.
     assert filter_result.is_error is False

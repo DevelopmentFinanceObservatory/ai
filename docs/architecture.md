@@ -35,10 +35,10 @@ the alternatives it considered, and the evidence an acceptable answer rests on.
 It holds the plan at the user's approval, ships inside `harness` as a sibling
 top-level module, and knows nothing about execution. The DFO Studio runs the
 modules described below, adapted for its workflow by
-`harness.planner_seam.PlannerSeam`. The planner is a Pydantic AI agent that
+`harness.planner_adapter.PlannerAdapter`. The planner is a Pydantic AI agent that
 runs inside the function node `harness.planner_node`. Its model calls go
 through `harness.planner_model`, and the node yields each response and tool
-answer as an ADK session event (`harness.planner_events`). The seam builds the
+answer as an ADK session event (`harness.planner_events`). The adapter builds the
 tool specs and the instruction the agent serves.
 
 The plan-approve-execute workflow spans four top-level modules beside it,
@@ -56,7 +56,7 @@ requirement (an aggregate, a growth, a comparison, and so on), alongside the
 dataset requirements that feed them, and the planner's tools answer with a
 typed result carrying a stable code, rather than an unstructured error string,
 so a caller can branch on what stopped a call without parsing its message.
-`harness.planner_seam.PlannerSeam` attaches the translator to the planner's
+`harness.planner_adapter.PlannerAdapter` attaches the translator to the planner's
 `propose_plan`. An accepted proposal runs translation on the
 plan it recorded, the plan passes through session state, and the proposal's
 answer carries a `translation` verdict, `{"outcome": "ok"}` for a compiled plan
@@ -82,7 +82,7 @@ See `services/harness/src/planner/README.md`,
 `services/harness/src/compiler/README.md` and
 `services/harness/src/executor/README.md`.
 
-**`services/data-mcp`** is a FastMCP server over the Data seam of the
+**`services/data-mcp`** is a FastMCP server over the Data API of the
 `apis` repo: the Search API (served at `/api/search/*`) today, the
 Datasets API (`/api/datasets/*`) next, both reading from the `dcp`
 graph. Only agent-facing tool definitions belong here; the search and
@@ -196,7 +196,7 @@ source out of a `describe` answer. `executor.run` keeps each server's digest
 text as its step's `StepRecord.digest`, which the workflow's `plan_done`
 node hands to the agent as `step_summaries`. The planner's model reaches
 these Python functions through the planner's tool specs (`planner.specs`),
-which `harness.planner_seam.PlannerSeam` serves. ADK's
+which `harness.planner_adapter.PlannerAdapter` serves. ADK's
 `McpTool` plays no part, so no `CallToolResult` dump is built for them and an
 `after_tool_callback` editing one would have nothing to edit. Where a tool
 does answer with a digest, a refusal's machine-readable detail rides the

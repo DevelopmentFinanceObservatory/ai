@@ -26,7 +26,7 @@ from harness.planner_model import (
     planner_model,
 )
 from harness.prefix_cache import PrefixCache, PrefixCachedGemini
-from harness.sentences import SeamCode, refusal_sentence
+from harness.sentences import StopCode, refusal_sentence
 from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
 from orchestrator.agent import _retrying, model_retry_options
 from planner.pydantic_agent import _without_unsigned_thoughts
@@ -180,10 +180,10 @@ class _After:
     """An `after_response` hook that records its calls and answers with `replace`."""
 
     def __init__(self, replace: types.Content | None = None) -> None:
-        self.calls: list[tuple[SeamCode | None, Usage | None]] = []
+        self.calls: list[tuple[StopCode | None, Usage | None]] = []
         self._replace = replace
 
-    def __call__(self, closed_by: SeamCode | None, usage: Usage | None) -> types.Content | None:
+    def __call__(self, closed_by: StopCode | None, usage: Usage | None) -> types.Content | None:
         self.calls.append((closed_by, usage))
         return self._replace
 
@@ -203,7 +203,7 @@ async def test_a_cut_after_a_function_call_chunk_delivers_only_the_closing_sente
         BoundedGemini(model=MODEL, client=orchestrator_scripted.client), orchestrator_budget
     )
 
-    sentence = refusal_sentence({"code": SeamCode.TURN_MODEL_TIME_SPENT})
+    sentence = refusal_sentence({"code": StopCode.TURN_MODEL_TIME_SPENT})
     assert not any(isinstance(part, ToolCallPart) for part in response.parts)
     assert not any(
         part.function_call
@@ -214,8 +214,8 @@ async def test_a_cut_after_a_function_call_chunk_delivers_only_the_closing_sente
     assert _pai_text(response) == _text(_final(orchestrator)) == sentence
     assert pai_budget.closed == orchestrator_budget.closed
     assert pai_budget.closed is not None
-    assert pai_budget.closed["code"] == SeamCode.TURN_MODEL_TIME_SPENT
-    assert after.calls == [(SeamCode.TURN_MODEL_TIME_SPENT, None)]
+    assert pai_budget.closed["code"] == StopCode.TURN_MODEL_TIME_SPENT
+    assert after.calls == [(StopCode.TURN_MODEL_TIME_SPENT, None)]
 
 
 async def test_a_first_chunk_stall_is_resent_once_and_the_second_answer_delivered() -> None:
@@ -239,18 +239,18 @@ async def test_a_first_chunk_stall_is_resent_once_and_the_second_answer_delivere
 @pytest.mark.parametrize(
     ("budget", "code", "sent"),
     [
-        pytest.param({"model_calls_max": 0}, SeamCode.TURN_MODEL_CALLS_SPENT, 0, id="call-cap"),
-        pytest.param({"wall_s": 0.0}, SeamCode.TURN_WALL_TIME_SPENT, 0, id="wall"),
+        pytest.param({"model_calls_max": 0}, StopCode.TURN_MODEL_CALLS_SPENT, 0, id="call-cap"),
+        pytest.param({"wall_s": 0.0}, StopCode.TURN_WALL_TIME_SPENT, 0, id="wall"),
         pytest.param(
             {"model_time_s": 0.05, "first_chunk_s": 0.01},
-            SeamCode.TURN_MODEL_TIME_SPENT,
+            StopCode.TURN_MODEL_TIME_SPENT,
             2,
             id="model-time",
         ),
     ],
 )
 async def test_each_bound_closes_the_call_with_the_same_code_on_both_models(
-    budget: dict[str, Any], code: SeamCode, sent: int
+    budget: dict[str, Any], code: StopCode, sent: int
 ) -> None:
     # Each stream stalls past every bound. The first stall spends the resend.
     script = [Reply(chunks=[[text_part("x")]], stall_s=5.0)] * 2

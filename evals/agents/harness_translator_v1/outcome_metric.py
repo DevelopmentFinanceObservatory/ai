@@ -224,7 +224,7 @@ def _with_translations(
     """`responses` as a case names them, each proposal's verdict following it as a `translation` response.
 
     A verdict is lifted from any response carrying one, as
-    `harness.planner_seam` reads it; a proposal the planner refused ran no
+    `harness.planner_adapter` reads it; a proposal the planner refused ran no
     translation and adds nothing.
     """
     listed: list[genai_types.FunctionResponse] = []

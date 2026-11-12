@@ -1,8 +1,8 @@
 """The events the planner stores equal the conversation's stored expectation.
 
 Each conversation runs on one script of a scripted google-genai client, through
-`harness.planner_seam.PlannerSeam` as `tests.test_planner_node` runs it. The
-seam serves the real `ask_user_question` and `get_skill`, and a `propose_plan`
+`harness.planner_adapter.PlannerAdapter` as `tests.test_planner_node` runs it. The
+adapter serves the real `ask_user_question` and `get_skill`, and a `propose_plan`
 whose answers the script sets. Each stored session is then checked against the
 conversation's stored expectation (`tests.planner_expectations`) on what its
 readers read: each event as `tests.test_planner_node._read` reads it, what
@@ -23,7 +23,7 @@ from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.events import Event
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
-from harness.planner_seam import PlannerSeam
+from harness.planner_adapter import PlannerAdapter
 from harness.scripted_plan import scripted_plan
 from harness.settings import Settings
 from harness.studio_state import ConversationState, StudioStore
@@ -47,9 +47,9 @@ from .scripted_genai import (
     thought_part,
     usage_metadata,
 )
+from .test_planner_adapter import _AdapterHarness
 from .test_planner_node import _frames as _numbered_frames
 from .test_planner_node import _read, _steps
-from .test_planner_seam import _SeamHarness
 
 _QUESTION = "How much aid did Ghana receive?"
 _USAGE = usage_metadata(prompt=120, cached=40, candidates=9, thoughts=4)
@@ -65,7 +65,7 @@ _PLAN_JSON = scripted_plan(_QUESTION, spec_id=None).model_dump_json()
 @dataclass
 class _Skills:
     """A tool surface serving `get_skill`: each page's text, after its delay. It
-    lists no tools, so a translation the seam runs finds no schema."""
+    lists no tools, so a translation the adapter runs finds no schema."""
 
     delays: Mapping[str, float]
 
@@ -139,13 +139,13 @@ class _Stored:
     state: dict[str, Any]
 
 
-async def _conversation(seam: PlannerSeam, *, stop: asyncio.Event | None = None) -> _Stored:
-    """Run one planner entry of `seam` in a session of its own, and read the
+async def _conversation(adapter: PlannerAdapter, *, stop: asyncio.Event | None = None) -> _Stored:
+    """Run one planner entry of `adapter` in a session of its own, and read the
     stored session. With `stop`, the entry is cancelled once it is set, as the
     hanging tool sets it."""
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
     entry = harness.run(
-        seam,
+        adapter,
         new_message=types.Content(role="user", parts=[types.Part(text=_QUESTION)]),
         run_config=RunConfig(streaming_mode=StreamingMode.SSE),
         question=_QUESTION,
@@ -168,17 +168,17 @@ async def _on(
     delays: Mapping[str, float] | None = None,
     stop: bool = False,
 ) -> _Stored:
-    """The entry on `replies` through `PlannerSeam`, serving `_specs`."""
+    """The entry on `replies` through `PlannerAdapter`, serving `_specs`."""
     scripted = ScriptedGenai(replies)
     surface = cast(ToolSurface, _Skills(delays or {}))
     started = asyncio.Event() if stop else None
-    seam = PlannerSeam(
+    adapter = PlannerAdapter(
         settings=Settings(),
         surface=surface,
         specs=_specs(surface, *proposals, stuck=started),
         client=scripted.client,
     )
-    return await _conversation(seam, stop=started)
+    return await _conversation(adapter, stop=started)
 
 
 # --- What is compared ------------------------------------------------------------------

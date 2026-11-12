@@ -66,7 +66,7 @@ from harness.graph.state import (
 )
 from harness.graph.workflow import planner_entry
 from harness.orchestrator_tools import HANDED_OFF, build_orchestrator_tools
-from harness.planner_seam import PlannerSeam, PlannerSeamError
+from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
 from harness.provenance import ProvenanceStore
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface, scripted_publish_result
 from harness.sentences import DECLINE_REASONS
@@ -931,7 +931,7 @@ async def test_each_plan_call_holds_the_planner_to_its_own_asks_alone():
     assert session.state.get(ASKS_ACROSS_YEARS_STATE_KEY) is None
 
 
-async def test_a_planner_seam_failure_is_handed_back_when_wrapped_and_fatal_when_not():
+async def test_a_planner_adapter_failure_is_handed_back_when_wrapped_and_fatal_when_not():
     runner, model = orchestrator_runner(
         call("plan", brief="Kenya's debt", asks=["Kenya's debt"]),
         types.Part.from_text(text="Could not be calculated."),
@@ -942,7 +942,7 @@ async def test_a_planner_seam_failure_is_handed_back_when_wrapped_and_fatal_when
     events = await run_turn(runner, types.UserContent("Kenya's debt?"))
 
     assert (
-        "The planner could not make a plan: the planner seam ran past 60 events without settling"
+        "The planner could not make a plan: the planner ran past 60 events without settling"
         in request_text(model.requests[-1])
     )
     assert not [e for e in events if e.error_code]
@@ -958,7 +958,7 @@ async def test_a_planner_seam_failure_is_handed_back_when_wrapped_and_fatal_when
         call("plan", brief="Kenya's debt", asks=["Kenya's debt"]), planner=FailingPlanner()
     )
     await open_session(bare)
-    with pytest.raises(PlannerSeamError):
+    with pytest.raises(PlannerAdapterError):
         await run_turn(bare, types.UserContent("Kenya's debt?"))
 
 
@@ -2078,14 +2078,14 @@ async def test_a_hand_back_is_still_in_view_after_a_later_pause():
 async def test_a_second_plan_call_runs_a_planner_that_never_sees_the_first_hand_back():
     # The planner's model answers each run with text, which ends it with no plan.
     scripted = ScriptedGenai([reply(text_part("done"))] * 2)
-    seam = PlannerSeam(
+    adapter = PlannerAdapter(
         settings=Settings(), surface=FixtureSurface(schemas=[]), client=scripted.client
     )
     runner, model = orchestrator_runner(
         call("plan", brief="Kenya's debt, first brief", asks=["Kenya's debt, first brief"]),
         call("plan", brief="Kenya's debt, second brief", asks=["Kenya's debt, second brief"]),
         types.Part.from_text(text="Could not be calculated."),
-        planner=handing_back_planner_failures(seam),
+        planner=handing_back_planner_failures(adapter),
     )
     await open_session(runner)
 

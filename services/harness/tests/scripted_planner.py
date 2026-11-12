@@ -1,7 +1,7 @@
-"""`PlannerSeam` with its model calls answered by a `ScriptedGenai`.
+"""`PlannerAdapter` with its model calls answered by a `ScriptedGenai`.
 
-`scripted_planner` builds the seam's planner (`harness.planner_node`) over the
-scripted client. `SSE` is Studio's streaming run config, which a seam on the
+`scripted_planner` builds the adapter's planner (`harness.planner_node`) over the
+scripted client. `SSE` is Studio's streaming run config, which an adapter on the
 scripted client runs under: `ScriptedGenai` scripts the streamed call only.
 """
 
@@ -15,13 +15,13 @@ from unittest import mock
 from compiler.surface import FixtureSurface, ToolSurface
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.flows.llm_flows import functions as adk_functions
-from harness.planner_seam import PlannerSeam
+from harness.planner_adapter import PlannerAdapter
 from harness.settings import Settings
 from planner.settings import AgentSettings
 from planner.tool_spec import ToolSpec
 from translator.tool import Translate, build_translate
 
-from .planner.planner_pairs import seam_specs
+from .planner.planner_pairs import adapter_specs
 from .scripted_genai import ScriptedGenai
 
 # Maps the planner's tool specs to the specs it serves.
@@ -50,15 +50,15 @@ def scripted_planner(
     surface: ToolSurface | None = None,
     translate: Translate | None = None,
     tools: Tools | None = None,
-) -> PlannerSeam:
-    """The seam over `surface` (an empty `FixtureSurface` by default), its model
+) -> PlannerAdapter:
+    """The adapter over `surface` (an empty `FixtureSurface` by default), its model
     calls answered by `scripted`, serving the planner's tools as `tools` changes
     them."""
     surface = surface if surface is not None else FixtureSurface(schemas=[])
     translate = translate if translate is not None else build_translate(surface=surface)
-    specs = seam_specs(surface=surface, translate=translate)
+    specs = adapter_specs(surface=surface, translate=translate)
     served = tools(specs) if tools is not None else specs
-    return PlannerSeam(
+    return PlannerAdapter(
         settings=Settings(),
         surface=surface,
         translate=translate,

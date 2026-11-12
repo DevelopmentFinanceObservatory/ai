@@ -2,7 +2,7 @@
 
 The session's planner events are the one stored record of a planner run:
 `planner.session.session_steps`, `harness.studio_translate` and the planner
-seam read them. They read each event's author, branch, invocation, node path,
+adapter read them. They read each event's author, branch, invocation, node path,
 content and state delta, so the node that drives
 `planner.pydantic_agent.run_planner` yields, for each item the run makes, an
 event holding the content and state delta an ADK `LlmAgent` stores for the
@@ -19,7 +19,7 @@ ADK's node runner sets the rest of each event: its id and timestamp,
 `invocation_id`, `node_info.path`, `author`, which it takes from the node's
 `Context.event_author`, so the node sets that to `planner.settings.AGENT_NAME`,
 and `branch`, which it takes from the `override_branch` the node is run with
-(`harness.planner_seam`'s planner branch).
+(`harness.planner_adapter`'s planner branch).
 
 A run stopped or failed while a response's calls are running leaves no event
 for that response's answers, so the state its calls wrote, answered or not,

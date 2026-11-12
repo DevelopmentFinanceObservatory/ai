@@ -19,9 +19,9 @@ each meters):
 request, starting the clock before genai's own HTTP retries so it covers
 them. The budget cuts a call that is still streaming. A call that finds a
 bound spent, or that a bound cuts, makes no further request and answers with
-that bound's sentence (`harness.sentences.SEAM_SENTENCES`) as the model's
+that bound's sentence (`harness.sentences.STOP_SENTENCES`) as the model's
 final text, so the orchestrator ends the turn on it. In the planner,
-`harness.planner_seam` turns that response into a question to the user when
+`harness.planner_adapter` turns that response into a question to the user when
 the last referral names sources to choose from, and otherwise the run ends on
 it and the entry refuses with the code on `TurnBudget.closed`.
 
@@ -56,7 +56,7 @@ from google.genai import types
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
-from harness.sentences import SeamCode, refusal_sentence
+from harness.sentences import StopCode, refusal_sentence
 from harness.settings import Settings
 
 # `langfuse.LangfuseOtelSpanAttributes.OBSERVATION_COMPLETION_START_TIME`: Langfuse
@@ -122,17 +122,17 @@ class TurnBudget:
         """The seconds of model time left, counting the waits of a call in flight."""
         return self.model_time_s - self.model_time_spent
 
-    def spent_bound(self) -> SeamCode | None:
+    def spent_bound(self) -> StopCode | None:
         """The bound that leaves no room for another model call, if one does."""
         if self.wall_left() <= 0:
-            return SeamCode.TURN_WALL_TIME_SPENT
+            return StopCode.TURN_WALL_TIME_SPENT
         if self.model_time_left() <= 0:
-            return SeamCode.TURN_MODEL_TIME_SPENT
+            return StopCode.TURN_MODEL_TIME_SPENT
         if self.model_calls >= self.model_calls_max:
-            return SeamCode.TURN_MODEL_CALLS_SPENT
+            return StopCode.TURN_MODEL_CALLS_SPENT
         return None
 
-    def close(self, code: SeamCode) -> None:
+    def close(self, code: StopCode) -> None:
         """Record `code` as the bound that closed a call, unless one already has."""
         if self.closed is None:
             self.closed = {"code": code, "detail": {}}
@@ -213,7 +213,7 @@ async def bounded_by(
         delivered_thought = False
         streamed = 0.0
         gaps: list[float] = []
-        cut: SeamCode | None = None
+        cut: StopCode | None = None
         retry = False
         try:
             async with aclosing(request()) as responses:
@@ -242,9 +242,9 @@ async def bounded_by(
                             retry = True
                         else:
                             cut = (
-                                SeamCode.TURN_WALL_TIME_SPENT
+                                StopCode.TURN_WALL_TIME_SPENT
                                 if wall_left <= model_left
-                                else SeamCode.TURN_MODEL_TIME_SPENT
+                                else StopCode.TURN_MODEL_TIME_SPENT
                             )
                         break
                     finally:
@@ -284,7 +284,7 @@ async def bounded_by(
         return
 
 
-def _closing(code: SeamCode, *, stream: bool, after_text: bool) -> list[LlmResponse]:
+def _closing(code: StopCode, *, stream: bool, after_text: bool) -> list[LlmResponse]:
     """The model's final text for a call the bound `code` closed: its sentence,
     marked with `code` under `CLOSED_BY_KEY`.
 

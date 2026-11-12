@@ -1,10 +1,10 @@
-"""`PlannerSeam`'s planner on a scripted google-genai client: its model, its
+"""`PlannerAdapter`'s planner on a scripted google-genai client: its model, its
 requests and its sessions over turns that amend, replan and switch, and its
 resume of the sessions in `fixtures/adk_planner_sessions`.
 
-Each test runs a script on a scripted google-genai client through the seam. An
+Each test runs a script on a scripted google-genai client through the adapter. An
 entry is checked against the stored expectation of its test
-(`tests.planner_expectations`) on what the seam answers, the progress it reports,
+(`tests.planner_expectations`) on what the adapter answers, the progress it reports,
 the requests the model received, the events the session stores, the steps
 `session_steps` reads from them and the stored state, as `tests.test_planner_node`
 checks them.
@@ -34,16 +34,16 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import Client, types
-from harness import planner_seam
+from harness import planner_adapter
 from harness import studio as studio_module
 from harness.graph import switch as switch_module
 from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_SEARCHES_KEY
+from harness.planner_adapter import PlannerAdapter
 from harness.planner_node import SKIP_THOUGHT_SIGNATURE
 from harness.planner_run import failed_tool_answer
-from harness.planner_seam import PlannerSeam
 from harness.prefix_cache import PrefixCache, prefix_key
 from harness.scripted import _compiled_proposal, instruction_text
-from harness.sentences import SeamCode
+from harness.sentences import StopCode
 from harness.settings import Settings
 from harness.turn_budget import TurnBudget
 from harness.turn_events import PLANNER_ASK
@@ -66,7 +66,7 @@ from translator.tool import build_translate
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .orchestrator_fakes import open_session, orchestrator_runner, plan_call
-from .planner.planner_pairs import seam_specs
+from .planner.planner_pairs import adapter_specs
 from .planner_expectations import expect, expectation_name, expected, shared
 from .scripted_genai import Request, ScriptedGenai, call_part, reply
 from .scripted_planner import scripted_planner
@@ -83,6 +83,17 @@ from .test_graph import (
     _scoped_plan,
     _session_state,
     _switched_answer,
+)
+from .test_planner_adapter import (
+    _APP,
+    _PICKED,
+    _USER,
+    SPEC,
+    _AdapterHarness,
+    _brief_follows_the_question,
+    _pending_ask_interrupt_id,
+    _rediscovery_refusal,
+    _translated_plan,
 )
 from .test_planner_model import CACHE_NAME, _Caches, _with_caches
 from .test_planner_node import (
@@ -108,17 +119,6 @@ from .test_planner_node import (
     _Script,
     _serving_proposals,
     _steps,
-)
-from .test_planner_seam import (
-    _APP,
-    _PICKED,
-    _USER,
-    SPEC,
-    _brief_follows_the_question,
-    _pending_ask_interrupt_id,
-    _rediscovery_refusal,
-    _SeamHarness,
-    _translated_plan,
 )
 from .test_studio import (
     _CHOICE_ID,
@@ -151,20 +151,22 @@ async def test_the_planner_calls_the_gemini_model_adks_registry_resolves(
     names the same model in every request."""
     scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
     surface = FixtureSurface(schemas=[])
-    seam = PlannerSeam(
+    adapter = PlannerAdapter(
         settings=Settings(),
         agent_settings=AgentSettings(planner_model_name=named),
         surface=surface,
-        specs=_proposals()(seam_specs(surface=surface, translate=build_translate(surface=surface))),
+        specs=_proposals()(
+            adapter_specs(surface=surface, translate=build_translate(surface=surface))
+        ),
         client=scripted.client,
     )
-    await _SeamHarness().run(seam, run_config=_SSE, readings=[], **_planned(plan))
+    await _AdapterHarness().run(adapter, run_config=_SSE, readings=[], **_planned(plan))
 
     assert [request.model for request in scripted.requests] == [_MODEL]
 
 
 async def test_two_planned_turns_over_one_prefix_cache_create_it_once(plan: Plan) -> None:
-    """A planned turn, then the same turn on a seam built afresh over one
+    """A planned turn, then the same turn on an adapter built afresh over one
     `PrefixCache`: the first creates the cache, the second finds it by the same
     key and sends against it."""
     caches = _Caches()
@@ -176,16 +178,16 @@ async def test_two_planned_turns_over_one_prefix_cache_create_it_once(plan: Plan
     )
     cache = PrefixCache()
     surface = FixtureSurface(schemas=[])
-    specs = _proposals()(seam_specs(surface=surface, translate=build_translate(surface=surface)))
+    specs = _proposals()(adapter_specs(surface=surface, translate=build_translate(surface=surface)))
     for _ in range(2):
-        seam = PlannerSeam(
+        adapter = PlannerAdapter(
             settings=Settings(),
             surface=surface,
             specs=specs,
             prefix_cache=cache,
             client=scripted.client,
         )
-        await _SeamHarness().run(seam, run_config=_SSE, readings=[], **_planned(plan))
+        await _AdapterHarness().run(adapter, run_config=_SSE, readings=[], **_planned(plan))
 
     assert len(caches.created) == 1
     assert [request.generate_config.cached_content for request in scripted.requests] == [
@@ -212,20 +214,20 @@ async def test_a_planned_turns_config_is_sent_in_wire_order(
     the order, since the key sorts. The stored config is compared as the text it
     dumps to, which keeps its order."""
     surface = FixtureSurface(schemas=[])
-    specs = _proposals()(seam_specs(surface=surface, translate=build_translate(surface=surface)))
+    specs = _proposals()(adapter_specs(surface=surface, translate=build_translate(surface=surface)))
     caches = _Caches()
     scripted = _with_caches(
         ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))]),
         caches,
     )
-    seam = PlannerSeam(
+    adapter = PlannerAdapter(
         settings=Settings(),
         surface=surface,
         specs=specs,
         prefix_cache=PrefixCache() if cached else None,
         client=scripted.client,
     )
-    await _SeamHarness().run(seam, run_config=_SSE, readings=[], **_planned(plan))
+    await _AdapterHarness().run(adapter, run_config=_SSE, readings=[], **_planned(plan))
     (sent, *_) = scripted.requests
     if cached:
         (created,) = caches.created
@@ -251,7 +253,7 @@ async def test_a_planned_turns_config_is_sent_in_wire_order(
 
 def test_the_planner_refuses_a_model_that_is_not_gemini() -> None:
     with pytest.raises(ValueError, match="Gemini model only"):
-        PlannerSeam(
+        PlannerAdapter(
             settings=Settings(),
             agent_settings=AgentSettings(planner_model_name="claude-3-5-sonnet"),
             surface=FixtureSurface(schemas=[]),
@@ -307,8 +309,8 @@ def test_the_planner_refuses_a_model_that_would_call_vertex_ai(
         monkeypatch.setenv(name, value)
     client = _genai_client(vertexai=vertexai) if vertexai is not None else None
 
-    def build() -> PlannerSeam:
-        return PlannerSeam(
+    def build() -> PlannerAdapter:
+        return PlannerAdapter(
             settings=Settings(),
             agent_settings=AgentSettings(planner_model_name=model_name),
             surface=FixtureSurface(schemas=[]),
@@ -327,15 +329,15 @@ def test_the_planner_refuses_a_model_that_would_call_vertex_ai(
     [("claude-3-5-sonnet", ValueError), (_VERTEX_MODEL, RuntimeError)],
     ids=["not-gemini", "vertex-resource-path"],
 )
-def test_the_planners_model_is_refused_before_the_seam_builds_anything(
+def test_the_planners_model_is_refused_before_the_adapter_builds_anything(
     model_name: str, refused: type[Exception]
 ) -> None:
     with (
-        mock.patch.object(planner_seam, "build_tool_surface") as surface,
-        mock.patch.object(planner_seam, "planner_specs") as specs,
+        mock.patch.object(planner_adapter, "build_tool_surface") as surface,
+        mock.patch.object(planner_adapter, "planner_specs") as specs,
         pytest.raises(refused),
     ):
-        PlannerSeam(
+        PlannerAdapter(
             settings=Settings(),
             agent_settings=AgentSettings(planner_model_name=model_name),
         )
@@ -362,7 +364,7 @@ def test_an_instructions_text_reads_the_same_in_every_shape(instruction: object)
     assert instruction_text(instruction) == "Plan. Then propose."
 
 
-async def test_the_seams_observer_sees_each_answer_the_model_reads(plan: Plan) -> None:
+async def test_the_adapters_observer_sees_each_answer_the_model_reads(plan: Plan) -> None:
     """`on_tool_answered` is told each planner tool's name and answer once: a
     refused proposal, an ask refused for a missing argument, a proposal whose
     body raised and, in the next entry, an accepted one. Each is the function
@@ -390,9 +392,9 @@ async def test_the_seams_observer_sees_each_answer_the_model_reads(plan: Plan) -
         ]
     )
     surface = FixtureSurface(schemas=[])
-    specs = seam_specs(surface=surface, translate=build_translate(surface=surface))
+    specs = adapter_specs(surface=surface, translate=build_translate(surface=surface))
     observed: list[tuple[str, dict[str, Any] | None]] = []
-    seam = PlannerSeam(
+    adapter = PlannerAdapter(
         settings=Settings(),
         surface=surface,
         specs=_serving_proposals(specs, body),
@@ -401,8 +403,8 @@ async def test_the_seams_observer_sees_each_answer_the_model_reads(plan: Plan) -
     )
     stored: list[tuple[str | None, dict[str, Any] | None]] = []
     for _ in range(2):
-        harness = _SeamHarness()
-        await harness.run(seam, run_config=_SSE, readings=[], **_planned(plan))
+        harness = _AdapterHarness()
+        await harness.run(adapter, run_config=_SSE, readings=[], **_planned(plan))
         stored += [
             (response.name, response.response)
             for event in _planner_events(_Entry([], [], [], await harness.events(), {}))
@@ -464,16 +466,16 @@ async def test_a_session_the_adk_planner_paused_on_an_ask_resumes_to_the_plan(
     reads the ask and its answer from the stored events, puts the question in
     the brief, replays no empty text part, and lands the plan."""
     stored = json.loads((_ADK_SESSIONS / f"{recording}.json").read_text())
-    harness = _SeamHarness()
+    harness = _AdapterHarness()
     await harness.restore(
         [Event.model_validate(event) for event in stored["events"]], stored["state"]
     )
     scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
-    seam = scripted_planner(scripted, tools=_proposals())
+    adapter = scripted_planner(scripted, tools=_proposals())
     assert _pending_ask_interrupt_id(await harness.events()) == call_id
     resume = types.Content(role="user", parts=[create_request_input_response(call_id, answer)])
 
-    output = await harness.run(seam, new_message=resume, readings=[], **_planned(plan))
+    output = await harness.run(adapter, new_message=resume, readings=[], **_planned(plan))
 
     assert (
         output is not None
@@ -557,15 +559,15 @@ async def _replanned(plan: Plan, opened_by: Mapping[str, Any]) -> _Entry:
             reply(call_part(PROPOSE_PLAN, {}, id="p2", signature=_SIGNED)),
         ]
     )
-    seam = scripted_planner(scripted, tools=_proposals())
+    adapter = scripted_planner(scripted, tools=_proposals())
     reports: list[dict[str, Any]] = []
     outputs: list[dict[str, Any] | None] = []
 
     async def entries(ctx: Context, node_input: Any) -> AsyncIterator[Event]:
         del node_input
         entry = {"ctx": ctx, "readings": [], "on_progress": reports.append, **_planned(plan)}
-        first = await seam(**entry)
-        outputs.extend([first, await seam(**entry, **opened_by)])
+        first = await adapter(**entry)
+        outputs.extend([first, await adapter(**entry, **opened_by)])
         yield Event(output={"entries": len(outputs)})
 
     sessions = InMemorySessionService()
@@ -576,7 +578,7 @@ async def _replanned(plan: Plan, opened_by: Mapping[str, Any]) -> _Entry:
     # The refusal's time is recorded with it (`_record_refusal`).
     clock = mock.Mock(wraps=datetime)
     clock.now.return_value = datetime(2026, 11, 11, tzinfo=UTC)
-    with _numbered_call_ids(), mock.patch.object(planner_seam, "datetime", clock):
+    with _numbered_call_ids(), mock.patch.object(planner_adapter, "datetime", clock):
         async for _ in AdkRunner(node=workflow, app_name=_APP, session_service=sessions).run_async(
             user_id=_USER,
             session_id=session.id,
@@ -647,8 +649,8 @@ async def test_a_second_bound_closing_in_the_same_request_refuses_with_its_own_c
     entry = await _entry(script())
 
     assert [output["refused"]["code"] for output in entry.outputs if output is not None] == [
-        SeamCode.TURN_MODEL_CALLS_SPENT,
-        SeamCode.TURN_WALL_TIME_SPENT,
+        StopCode.TURN_MODEL_CALLS_SPENT,
+        StopCode.TURN_WALL_TIME_SPENT,
     ]
     _assert_expected(request, entry)
 
@@ -793,8 +795,8 @@ async def _stopped_switch(
     monkeypatch.setattr(switch_module, "_switched_plan", revising)
     monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.2)
     scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
-    seam = scripted_planner(scripted, tools=_proposals(records=plan))
-    app = _app(plan_call(_QUESTION), planner=seam)
+    adapter = scripted_planner(scripted, tools=_proposals(records=plan))
+    app = _app(plan_call(_QUESTION), planner=adapter)
     stop = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
     async with _client(app) as client:
         with _numbered_call_ids():
@@ -869,7 +871,7 @@ async def _switched_after_an_entry(
     """A turn whose planner asks which source the user means, is
     answered with the scope's pin, and drafts the plan pinning it; the plan card
     then takes a sector switch through the graph's real `switch` node, which
-    re-pins the plan through `PlannerSeam.revise` with no model call. Returns the
+    re-pins the plan through `PlannerAdapter.revise` with no model call. Returns the
     switch's events, the session as stored, its state with each time it records
     put as `<time>`, and the pin the revised plan reads, which is the copy, over the
     plan's years, of the one Search answered the switch with."""
@@ -907,16 +909,16 @@ async def _switched_after_an_entry(
         ]
     )
     surface = FixtureSurface(schemas=[])
-    seam = PlannerSeam(
+    adapter = PlannerAdapter(
         settings=Settings(),
         surface=surface,
         translate=translate,
-        specs=_proposals(records=plan)(seam_specs(surface=surface, translate=translate)),
+        specs=_proposals(records=plan)(adapter_specs(surface=surface, translate=translate)),
         client=scripted.client,
     )
     graph, _ = orchestrator_runner(
         plan_call(_GRAPH_BRIEF),
-        planner=seam,
+        planner=adapter,
         executor=ScriptedExecutor(),
         definition_surface=DataMcpDefinitions(
             InMemoryDefinitionStore(), search=SearchStub(answer={scope["id"]: envelope})
@@ -969,7 +971,7 @@ async def test_a_switch_after_an_entry_revises_the_plan(
     real_schemas: list[ToolSchema], request: pytest.FixtureRequest
 ) -> None:
     """The switch node's revision reads the entry's stored ask and answer
-    (`PlannerSeam.revise`), so the sector decision it makes is the user's and
+    (`PlannerAdapter.revise`), so the sector decision it makes is the user's and
     the revised plan, the turn's events and the session's state are the stored
     ones."""
     switched, events, state, copy_pin = await _switched_after_an_entry(real_schemas)

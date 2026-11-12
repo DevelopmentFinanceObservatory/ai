@@ -23,7 +23,7 @@ import pytest
 from compiler.sources import outcome_from_envelope
 from compiler.surface import ToolCallResult
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
-from harness import planner_seam
+from harness import planner_adapter
 from harness.graph.state import (
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
@@ -776,7 +776,7 @@ def test_a_plan_sentence_reads_the_block_admission_reads() -> None:
     save_pin_sources(ctx.state, {FOUND: PinSource(block=dict(block))})
     save_found_sources(ctx.state, {FOUND: _definite_found()})
 
-    blocks = planner_seam._spec_blocks(ctx.state)
+    blocks = planner_adapter._spec_blocks(ctx.state)
 
     assert blocks[FOUND]["resolved"] == _definite_found()["resolved"]
     assert SCOPE_UNREAD_BLOCK_KEY not in blocks[FOUND]
@@ -792,7 +792,7 @@ def test_a_plan_sentence_reads_this_turns_definite_block_over_a_found_unread_one
     definite = stored_mapping(ctx.state, ORCHESTRATOR_SPECS_KEY)[FOUND]
     save_found_sources(ctx.state, {FOUND: {**definite, SCOPE_UNREAD_BLOCK_KEY: True}})
 
-    blocks = planner_seam._spec_blocks(ctx.state)
+    blocks = planner_adapter._spec_blocks(ctx.state)
 
     assert blocks[FOUND] == definite
 

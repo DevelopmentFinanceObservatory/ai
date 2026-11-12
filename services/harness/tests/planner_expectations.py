@@ -11,7 +11,7 @@ holds `{"shared": "<name>"}` in its place (`shared`). Comparisons put each such
 value back first, so they stay whole.
 
 Two kinds of value are stored in a fixed form, so that an edit to them moves no
-file (`as_json`): the seam's brief, harness prose with tests of its own, is
+file (`as_json`): the planner brief, harness prose with tests of its own, is
 stored as `BRIEF`, and a package version in a request's HTTP headers as
 `<version>` (`versionless_headers`).
 
@@ -42,13 +42,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from harness.planner_seam import _READINGS_CONTEXT
+from harness.planner_adapter import _READINGS_CONTEXT
 
 PLANNER_RUNS = Path(__file__).parent / "fixtures" / "planner_runs"
 _SHARED = PLANNER_RUNS / "shared"
 _WRITING = os.environ.get("PLANNER_EXPECTATIONS") == "write"
 
-# What a stored value holds in place of the seam's brief, the text the planner is
+# What a stored value holds in place of the planner brief, the text the planner is
 # shown after the turn's question (`planner.pydantic_agent.run_planner`), which opens
 # with `BRIEF_OPENING`.
 BRIEF = "<brief>"

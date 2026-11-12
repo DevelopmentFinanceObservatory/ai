@@ -28,7 +28,7 @@ from harness.graph import switch as switch_module
 from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY
 from harness.graph.switch import SwitchFailedError
 from harness.plan_display import choice_id, shown_decisions
-from harness.planner_seam import PlannerSeam
+from harness.planner_adapter import PlannerAdapter
 from harness.settings import Settings
 from harness.turn_records import SearchReading
 from planner.plan import (
@@ -189,18 +189,18 @@ class _Resubmits:
 
 
 class _RevisingPlanner:
-    """A `harness.graph.PlannerModel` whose revision runs `PlannerSeam.revise` over
+    """A `harness.graph.PlannerModel` whose revision runs `PlannerAdapter.revise` over
     `surface` and records its arguments in `revisions` and the plan admission
     recorded in `admitted`, before translation answers."""
 
     def __init__(self, surface: ToolSurface) -> None:
-        self._seam = PlannerSeam(settings=Settings(), surface=surface)
+        self._adapter = PlannerAdapter(settings=Settings(), surface=surface)
         self.revisions: list[dict[str, Any]] = []
         self.admitted: list[Plan] = []
 
     async def revise(self, **kwargs: Any) -> dict[str, Any]:
         self.revisions.append(kwargs)
-        revised = await self._seam.revise(**kwargs)
+        revised = await self._adapter.revise(**kwargs)
         plan = load_plan(kwargs["ctx"].state)
         assert plan is not None
         self.admitted.append(plan)

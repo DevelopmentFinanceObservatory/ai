@@ -47,7 +47,7 @@ from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar import Frame
 from google.adk.sessions.state import State
 from google.adk.tools import FunctionTool
-from harness import chart_binding, orchestrator_tools, planner_seam
+from harness import chart_binding, orchestrator_tools, planner_adapter
 from harness.chart_binding import (
     LINE_CHART_MAX_VALUES,
     MAX_SERIES_PER_COMPONENT,
@@ -1707,7 +1707,7 @@ async def test_a_redraw_of_a_series_on_the_canvas_as_the_turn_began_states_no_fi
     tools, ctx = _tools(
         executor=executor,
         canvas_series=state.canvas_series_ids,
-        remove_cards=_remove_seam(state),
+        remove_cards=_remove_callable(state),
     )
     await tools["fetch"](SPEC_LIFE, ctx)
     chart = _one_chart(frame_id_for(REF))[0]
@@ -3116,14 +3116,14 @@ class Landing:
 
 def _landing_tools(executor: FakeExecutor) -> tuple[Landing, dict[str, Any], SimpleNamespace]:
     """The tools over `executor`, its cards landing on one conversation's
-    canvas, which the tools read through the Studio seams."""
+    canvas, which the tools read through the Studio interfaces."""
     state = ConversationState(conversation_id="c1")
     landing = Landing(executor, state)
     tools, ctx = _tools(
         executor=landing,
         canvas_series=state.canvas_series_ids,
         canvas_cards=state.canvas_cards,
-        remove_cards=_remove_seam(state),
+        remove_cards=_remove_callable(state),
     )
     return landing, tools, ctx
 
@@ -4291,7 +4291,7 @@ async def test_a_fetched_sibling_states_the_measure_search_elected(
     gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
     shown = [gross, FRANCE_KENYA_NET] if gross_first else [FRANCE_KENYA_NET, gross]
 
-    pins = planner_seam._reading_pin_sources(
+    pins = planner_adapter._reading_pin_sources(
         ctx.state["orchestrator:searches"],
         shown,
         blocks=ctx.state["orchestrator:specs"],
@@ -4883,7 +4883,7 @@ async def test_explain_dfo_says_plainly_when_dfo_faq_cannot_be_read(
 # --- recall -----------------------------------------------------------------
 
 
-def _recall_seam(state: ConversationState):
+def _recall_callable(state: ConversationState):
     async def recall_part(**target: Any) -> dict[str, Any]:
         return state.recall_part(**target)
 
@@ -4893,7 +4893,7 @@ def _recall_seam(state: ConversationState):
 # --- remove_cards -------------------------------------------------------------
 
 
-def _remove_seam(state: ConversationState):
+def _remove_callable(state: ConversationState):
     async def remove(*, component_ids: list[str], all_cards: bool) -> tuple[list[str], list[str]]:
         return remove_cards(state, component_ids, all_cards=all_cards)
 
@@ -4912,7 +4912,7 @@ def _two_card_canvas() -> ConversationState:
 
 async def test_remove_cards_takes_named_cards_off_and_says_which_it_never_held():
     state = _two_card_canvas()
-    tools, ctx = _tools(remove_cards=_remove_seam(state))
+    tools, ctx = _tools(remove_cards=_remove_callable(state))
 
     answer = await tools["remove_cards"](ctx, ["cmp_01", "cmp_99"])
 
@@ -4923,7 +4923,7 @@ async def test_remove_cards_takes_named_cards_off_and_says_which_it_never_held()
 
 async def test_remove_cards_clears_the_canvas_and_refuses_a_call_that_names_nothing():
     state = _two_card_canvas()
-    tools, ctx = _tools(remove_cards=_remove_seam(state))
+    tools, ctx = _tools(remove_cards=_remove_callable(state))
 
     nothing = await tools["remove_cards"](ctx)
     cleared = await tools["remove_cards"](ctx, all_cards=True)
@@ -4938,7 +4938,7 @@ async def test_removing_a_card_already_off_the_canvas_is_done_not_refused():
     """A hidden or removed card is already where the user asked; refusing it
     showed raw ids in Activity (UAT A6)."""
     state = _two_card_canvas()
-    tools, ctx = _tools(remove_cards=_remove_seam(state))
+    tools, ctx = _tools(remove_cards=_remove_callable(state))
     await tools["remove_cards"](ctx, ["cmp_01"])
 
     again = await tools["remove_cards"](ctx, ["cmp_01"])
@@ -4949,7 +4949,7 @@ async def test_removing_a_card_already_off_the_canvas_is_done_not_refused():
     assert "cmp_99" not in unknown["error"]
 
 
-async def test_remove_cards_is_unavailable_without_a_conversation_seam():
+async def test_remove_cards_is_unavailable_without_a_conversation():
     tools, ctx = _tools()
 
     unavailable = ("tool_not_configured", "do_not_retry")
@@ -4964,7 +4964,7 @@ async def test_recall_returns_an_earlier_turns_plan_record_and_refuses_a_turn_wi
         {"user": "q1", "assistant": "a1", "plans": [plan.model_dump(mode="json")]},
         {"user": "q2", "assistant": "a2"},
     ]
-    tools, ctx = _tools(recall_part=_recall_seam(state))
+    tools, ctx = _tools(recall_part=_recall_callable(state))
 
     found = await tools["recall"]("plan", ctx, turn=1)
     refused = await tools["recall"]("plan", ctx, turn=2)
@@ -4983,7 +4983,7 @@ async def test_a_canvas_listing_does_not_spend_the_detail_reads():
         state,
         {"component_id": "cmp_01", "revision": 1, "type": "line_chart", "title": "Aid"},
     )
-    tools, ctx = _tools(recall_part=_recall_seam(state))
+    tools, ctx = _tools(recall_part=_recall_callable(state))
 
     listing = await tools["recall"]("canvas", ctx)
     reads = [await tools["recall"]("canvas", ctx, component_id="cmp_01") for _ in range(3)]
@@ -4995,7 +4995,7 @@ async def test_a_canvas_listing_does_not_spend_the_detail_reads():
     assert "limit" in (await tools["recall"]("canvas", ctx))["error"]
 
 
-async def test_recall_is_limited_per_turn_and_unavailable_without_a_conversation_seam():
+async def test_recall_is_limited_per_turn_and_unavailable_without_a_conversation():
     tools, ctx = _tools()
     unavailable = await tools["recall"]("plan", ctx)
 
@@ -5110,7 +5110,7 @@ async def test_fetch_refusal_carries_the_platforms_details_and_retry_mode():
 
 async def test_remove_cards_stops_at_its_turn_budget():
     state = _two_card_canvas()
-    tools, ctx = _tools(remove_cards=_remove_seam(state))
+    tools, ctx = _tools(remove_cards=_remove_callable(state))
     for _ in range(BUDGETS["remove_cards"]):
         await tools["remove_cards"](ctx, all_cards=True)
     land_component(state, {"component_id": "cmp_new", "revision": 1, "type": "table"})

@@ -1,20 +1,20 @@
 """The planner as a workflow node (`planner_node`).
 
-`harness.planner_seam.PlannerSeam` runs the planner through `ctx.run_node`.
+`harness.planner_adapter.PlannerAdapter` runs the planner through `ctx.run_node`.
 That node is a function node named `planner.settings.AGENT_NAME` that drives
 `planner.pydantic_agent.run_planner` on `harness.planner_model.planner_model`
 and yields events holding what an ADK `LlmAgent` stores for the same
 exchange, as far as the session's readers read it (`harness.planner_events`).
 ADK's node runner stamps each with the author the node sets, the branch of the
-seam's `override_branch`, the invocation and the node's path, which
-`planner.session.session_steps`, `harness.studio_translate` and the seam read.
+adapter's `override_branch`, the invocation and the node's path, which
+`planner.session.session_steps`, `harness.studio_translate` and the adapter read.
 
 The run's agent is named `AGENT_NAME`, its spans name the session as their
 conversation, and they carry message content when ADK's would
 (`google.adk.telemetry.TelemetryConfig`, which reads
 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`).
 
-The node reports to the seam's `harness.planner_run.PlannerRun`: each tool's
+The node reports to the adapter's `harness.planner_run.PlannerRun`: each tool's
 answer, each tool that raised, a call the turn budget closed
 (`PlannerRun.model_answered`), and before each request whether the run asks
 or stops instead (`PlannerRun.next_request`). A directive is answered with
@@ -56,7 +56,7 @@ from harness.planner_model import (
 )
 from harness.planner_run import Ask, Directive, PlannerRun, Stop
 from harness.prefix_cache import PrefixCache
-from harness.sentences import SeamCode, refusal_sentence
+from harness.sentences import StopCode, refusal_sentence
 from harness.turn_budget import TurnBudget
 from harness.turn_events import PLANNER_ASK, turn_question
 from harness.usage import log_usage
@@ -118,9 +118,9 @@ def planner_node(
         `RunConfig.max_llm_calls`.
         A question holding a part this planner does not send
         (`planner.pydantic_agent.UnsentQuestionPartError`) ends the run before
-        any request on an `internal_error` refusal (`run.refused`). The seam
+        any request on an `internal_error` refusal (`run.refused`). The adapter
         answers the entry with that refusal, marked not final
-        (`PlannerSeam._FINAL_CODES`), so the orchestrator may ask for a plan
+        (`PlannerAdapter._FINAL_CODES`), so the orchestrator may ask for a plan
         again and meet the same refusal. Studio sends only text.
         A stream google-genai resumed over output no continuation token
         covers (`harness.planner_model.resumed_over_output`) raises
@@ -139,7 +139,7 @@ def planner_node(
                 invocation.increment_llm_call_count()
             return turn
 
-        def after_response(closed_by: SeamCode | None, usage: Usage | None) -> types.Content | None:
+        def after_response(closed_by: StopCode | None, usage: Usage | None) -> types.Content | None:
             # A call a bound closed is logged with the usage its chunks
             # reported before the cut.
             if usage is not None:
@@ -196,7 +196,7 @@ def planner_node(
                         yield model_response_event(item)
         except UnsentQuestionPartError as exc:
             # Refused before any request. The run ends on the refusal, which
-            # the seam answers the entry with. An exception here would fail
+            # the adapter answers the entry with. An exception here would fail
             # the whole workflow, since ADK fails the root on a child node's
             # error.
             logger.error(

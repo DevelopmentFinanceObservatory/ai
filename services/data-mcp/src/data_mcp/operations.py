@@ -11,12 +11,12 @@ have returned, or a refusal if the operation fails, disappears, or does not fini
 before the call deadline leaves only its post-mint reserve
 (`CallBudget.post_mint_reserve_s`).
 
-`resolve_operation_response` is the module's public seam: `get_data_tool
+`resolve_operation_response` is the module's public entry point: `get_data_tool
 ._mint_payload_or_refusal` calls it once, immediately after a mint POST comes back
 202, and reads its `ResolvedOperation.manifest_payload` the same way a 200
 response's own parsed body is treated -- ready for `data_mcp.manifest.strip_manifest`.
 
-`operation_without_waiting` is the same seam for a caller that must not wait:
+`operation_without_waiting` is the same entry point for a caller that must not wait:
 it returns a `QueuedOperation` at once for an operation still pending or running,
 and fetches the manifest of one already done. `get_data_tool.mint_recorded_root`
 calls it.

@@ -17,7 +17,7 @@ import pytest
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import Client, types
-from harness.sentences import SeamCode, refusal_sentence
+from harness.sentences import StopCode, refusal_sentence
 from harness.turn_budget import (
     COMPLETION_START_TIME,
     BoundedGemini,
@@ -97,7 +97,7 @@ async def _texts(calls: _Calls, *, stream: bool = True) -> list[str]:
     ]
 
 
-def _closed(code: SeamCode) -> str:
+def _closed(code: StopCode) -> str:
     return refusal_sentence({"code": code})
 
 
@@ -131,11 +131,11 @@ async def test_a_call_that_delivered_a_chunk_is_not_resent_and_the_budget_cuts_i
 
     assert calls.opened == 1
     assert not budget.retry_spent
-    sentence = _closed(SeamCode.TURN_MODEL_TIME_SPENT)
+    sentence = _closed(StopCode.TURN_MODEL_TIME_SPENT)
     # A partial chunk shows the sentence after the streamed text; the final
     # response is the sentence alone.
     assert texts == ["thinking", f"\n\n{sentence}", sentence]
-    assert budget.closed == {"code": SeamCode.TURN_MODEL_TIME_SPENT, "detail": {}}
+    assert budget.closed == {"code": StopCode.TURN_MODEL_TIME_SPENT, "detail": {}}
     assert span.status.status_code is StatusCode.ERROR
 
 
@@ -151,7 +151,7 @@ async def test_a_second_call_in_the_request_gets_no_retry() -> None:
     # The second call's stall outlasts its first-chunk deadline, so only the
     # budget ends it.
     assert second.opened == 1
-    assert texts[-1] == _closed(SeamCode.TURN_MODEL_TIME_SPENT)
+    assert texts[-1] == _closed(StopCode.TURN_MODEL_TIME_SPENT)
     assert budget.model_time_spent >= 0.2
 
 
@@ -163,19 +163,19 @@ async def test_a_non_streamed_call_has_no_first_chunk_deadline() -> None:
         texts = await _texts(calls, stream=False)
 
     assert calls.opened == 1
-    assert texts == [_closed(SeamCode.TURN_MODEL_TIME_SPENT)]
+    assert texts == [_closed(StopCode.TURN_MODEL_TIME_SPENT)]
 
 
 @pytest.mark.parametrize(
     ("spend", "code"),
     [
-        ({"model_time_spent": 0.5}, SeamCode.TURN_MODEL_TIME_SPENT),
-        ({"model_calls": 30}, SeamCode.TURN_MODEL_CALLS_SPENT),
+        ({"model_time_spent": 0.5}, StopCode.TURN_MODEL_TIME_SPENT),
+        ({"model_calls": 30}, StopCode.TURN_MODEL_CALLS_SPENT),
     ],
     ids=["model-time", "call-cap"],
 )
 async def test_a_spent_budget_ends_on_its_sentence_with_no_model_call(
-    spend: dict[str, float], code: SeamCode
+    spend: dict[str, float], code: StopCode
 ) -> None:
     budget = _budget()
     for name, value in spend.items():
@@ -222,7 +222,7 @@ async def test_the_wall_bound_counts_time_outside_model_calls() -> None:
         texts = await _texts(calls, stream=False)
 
     assert calls.opened == 1
-    assert texts == [_closed(SeamCode.TURN_WALL_TIME_SPENT)]
+    assert texts == [_closed(StopCode.TURN_WALL_TIME_SPENT)]
 
 
 async def test_the_wall_bound_cuts_a_streaming_call_when_it_comes_first() -> None:
@@ -232,8 +232,8 @@ async def test_the_wall_bound_cuts_a_streaming_call_when_it_comes_first() -> Non
     with _current(budget):
         texts = await _texts(calls)
 
-    assert texts[-1] == _closed(SeamCode.TURN_WALL_TIME_SPENT)
-    assert budget.closed == {"code": SeamCode.TURN_WALL_TIME_SPENT, "detail": {}}
+    assert texts[-1] == _closed(StopCode.TURN_WALL_TIME_SPENT)
+    assert budget.closed == {"code": StopCode.TURN_WALL_TIME_SPENT, "detail": {}}
 
 
 async def test_a_user_cancel_propagates_and_is_never_retried() -> None:

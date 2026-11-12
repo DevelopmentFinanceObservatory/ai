@@ -25,7 +25,7 @@
       "author": "dfo_planner",
       "branch": "dfo_planner",
       "invocation": 0,
-      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "path": "adapter_test_wf@1/adapter_under_test@1/dfo_planner@1",
       "partial": false,
       "content": {
         "parts": [
@@ -47,7 +47,7 @@
       "author": "dfo_planner",
       "branch": "dfo_planner",
       "invocation": 0,
-      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "path": "adapter_test_wf@1/adapter_under_test@1/dfo_planner@1",
       "partial": false,
       "content": {
         "parts": [
@@ -102,7 +102,7 @@
         ],
         "role": "model"
       },
-      "author": "seam_test_wf",
+      "author": "adapter_test_wf",
       "actions": {
         "state_delta": {
           "planner:plan": null,
@@ -141,7 +141,7 @@
         "requested_tool_confirmations": {}
       },
       "node_info": {
-        "path": "seam_test_wf@1/seam_under_test@1"
+        "path": "adapter_test_wf@1/adapter_under_test@1"
       },
       "long_running_tool_ids": [
         "a1"

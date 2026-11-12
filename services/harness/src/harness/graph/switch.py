@@ -16,8 +16,8 @@ window (`submission.service._window_pins`) and the translation resolves
 the copy. The turn keeps Search's answers
 (`translator.discovery.resolving_once`), so a switch repeating one the
 turn made posts nothing. The
-plan is then revised by the planner seam with no model call
-(`harness.graph.seams.PlannerModel.revise`): each requirement pinning a
+plan is then revised by the planner adapter with no model call
+(`harness.graph.interfaces.PlannerModel.revise`): each requirement pinning a
 switched source pins the compiled one, the decisions follow their pins,
 and the plan compiles again. The node stores each new reading, so later
 searches carry the switch, and offers the revised plan back to `approve`
@@ -114,7 +114,7 @@ from translator.discovery import (
 )
 
 from harness.decision_pick import picks_the_chosen_option
-from harness.graph.seams import PlannerModel
+from harness.graph.interfaces import PlannerModel
 from harness.graph.state import (
     ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -135,7 +135,7 @@ from harness.scope_choices import (
     planner_axes,
     switch_entries,
 )
-from harness.sentences import SeamCode
+from harness.sentences import StopCode
 from harness.tool_contracts import resolver_digest
 from harness.turn_records import CHIP_STALE_NOTE, SearchReading, stored_choice
 
@@ -151,13 +151,13 @@ _SCOPE_REFUSALS = frozenset({_OPTION_UNAVAILABLE, "conflicting_requested_options
 # revision, which calls no model, repeats.
 _RETRYABLE_REVISION_CODES = frozenset(
     {
-        SeamCode.TURN_WALL_TIME_SPENT.value,
-        SeamCode.DISCOVERY_UNAVAILABLE.value,
+        StopCode.TURN_WALL_TIME_SPENT.value,
+        StopCode.DISCOVERY_UNAVAILABLE.value,
         ProblemCode.SURFACE_UNAVAILABLE.value,
     }
 )
 
-# The state the planner seam and the translator keep while drafting, which a
+# The state the planner adapter and the translator keep while drafting, which a
 # revision that fails leaves as it found. The parts Search answered this turn
 # (`RESOLVED_STATE_PREFIX`) and the times they were answered
 # (`RESOLVED_AT_STATE_PREFIX`) are not drafting state. Each holds whatever the
@@ -166,7 +166,7 @@ _DRAFTING_PREFIXES = ("planner:", "translator:")
 # The other state a revision writes, which a switch that fails or is stopped
 # puts back too: the plan, and the readings `store_search` stores for the
 # switched sources and for the datasets the revision searches
-# (`harness.planner_seam.store_searched_pin_readings`), with their blocks. Each
+# (`harness.planner_adapter.store_searched_pin_readings`), with their blocks. Each
 # maps to the value it is put back as when unset, since the studio reads the
 # readings and blocks as a list and a mapping (`harness.studio`).
 _RESTORED_KEYS: Mapping[str, Any] = {
@@ -337,7 +337,7 @@ async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> 
     stands unchanged. A cancellation of the node itself,
     while the revision unwinds, still cancels the node. A pick's replan
     that ended on the planner's question to the user (`{"asked": ...}`,
-    `harness.graph.seams.PlannerModel`) stays paused though the Stop came in
+    `harness.graph.interfaces.PlannerModel`) stays paused though the Stop came in
     the same wait: the question is the user's to answer, so its payload is
     answered and the node pauses on it, offering no plan beside it.
 

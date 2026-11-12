@@ -61,7 +61,7 @@
       "author": "dfo_planner",
       "branch": "dfo_planner",
       "invocation": 0,
-      "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1",
+      "path": "adapter_test_wf@1/adapter_under_test@1/dfo_planner@1",
       "partial": false,
       "content": {
         "parts": [
@@ -74,7 +74,7 @@
       "state_delta": {}
     },
     {
-      "author": "seam_test_wf",
+      "author": "adapter_test_wf",
       "actions": {
         "state_delta": {
           "planner:plan": "{\"question\":\"kenya debt\",\"answer_mode\":\"series\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to measure Kenya's dependence by.\",\"options\":[\"annual debt service\",\"total debt stock\"],\"chosen\":\"annual debt service\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is the standard measure for near-term dependence.\",\"fixes\":null}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"}],\"across\":[],\"period\":{\"start\":2015,\"end\":2024},\"period_end_open\":false,\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_ref\":null,\"source_exclude\":false,\"source_code\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"},\"stat_vars\":null,\"breakdown\":null},{\"kind\":\"aggregate\",\"id\":\"annual_totals\",\"decision_ids\":[\"measure\"],\"input_id\":\"annual_debt_service\",\"reduction\":\"sum\",\"group_by\":[\"period\"]}],\"declined\":[],\"asks\":[],\"answered\":[],\"ask_breakdowns\":[],\"asks_across_years\":[],\"period_licences\":[],\"rolling_copies\":[],\"first_years\":[],\"translation\":{\"operations\":[{\"kind\":\"retrieve\",\"id\":\"debt\",\"requirement_id\":\"annual_debt_service\",\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"kind\":\"aggregate\",\"id\":\"totals\",\"requirement_id\":\"annual_totals\",\"input\":\"debt\",\"reduction\":\"sum\",\"group_by\":[\"period\"]}],\"terminal\":[\"totals\"]},\"workflow\":{\"steps\":[{\"id\":\"debt\",\"operation_id\":\"debt\",\"tool\":{\"server\":\"data-mcp\",\"name\":\"get_data\"},\"args\":{\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"bindings\":{},\"implementation_version\":null,\"input_schema_hash\":\"hash\",\"output_schema_hash\":null,\"expected_role_keys\":[]},{\"id\":\"totals\",\"operation_id\":\"totals\",\"tool\":{\"server\":\"analysis-mcp\",\"name\":\"aggregate\"},\"args\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"bindings\":{\"frame_ref\":{\"from_step\":\"debt\",\"output\":\"frame_ref\"}},\"implementation_version\":null,\"input_schema_hash\":\"hash\",\"output_schema_hash\":null,\"expected_role_keys\":[]}],\"sources\":[{\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sentence\":\"external debt service\",\"searched_as\":null,\"confidence\":null,\"has_data\":true,\"measure_label\":null,\"stat_var_member_count\":null,\"stat_var_member_count_exact\":null,\"served_count\":null,\"shape_member_count\":null,\"shape_member_digest\":null,\"entities\":[],\"groups\":[],\"open_entity_axes\":null,\"unit_ref\":null,\"unit_label\":null,\"unit_per_series\":null,\"provenance_ref\":null,\"provenance_label\":null,\"provenance_account\":null,\"resolved_sources\":[],\"coverage_kind\":null,\"coverage_window\":null,\"identity\":null,\"definition\":null,\"open_axes\":[],\"slot_codes\":null,\"stat_var_reading\":null,\"stat_var_reading_set_by\":null}],\"evidence_bindings\":[{\"requirement_id\":\"annual_debt_service\",\"step_id\":\"debt\",\"spec_id\":\"spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}],\"terminal_steps\":[\"totals\"],\"warnings\":[]},\"version\":1,\"previous_version\":null,\"status\":\"pending_approval\",\"approved_revision\":null,\"approved_at\":null}",
@@ -103,10 +103,10 @@
         }
       },
       "node_info": {
-        "path": "seam_test_wf@1/seam_under_test@1",
+        "path": "adapter_test_wf@1/adapter_under_test@1",
         "output_for": [
-          "seam_test_wf@1/seam_under_test@1",
-          "seam_test_wf@1"
+          "adapter_test_wf@1/adapter_under_test@1",
+          "adapter_test_wf@1"
         ]
       },
       "invocation": 0

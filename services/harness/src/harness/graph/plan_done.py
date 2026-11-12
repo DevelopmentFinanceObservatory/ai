@@ -35,10 +35,10 @@ from planner.plan import (
 from harness import plan_display
 from harness.chart_binding import MAX_SERIES_PER_COMPONENT
 from harness.graph.delivery import Delivery, deliver, frame_read
-from harness.graph.orchestrate import AgentHandBack
-from harness.graph.seams import (
+from harness.graph.interfaces import (
     Executor,
 )
+from harness.graph.orchestrate import AgentHandBack
 from harness.graph.state import (
     ORCHESTRATOR_ALIGNED_SERVED_KEY,
     ORCHESTRATOR_AMENDMENTS_KEY,

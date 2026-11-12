@@ -134,7 +134,7 @@ from harness.dfo_faq import (
     read_catalogue_counts,
     read_dfo_faq,
 )
-from harness.graph.seams import Executor
+from harness.graph.interfaces import Executor
 from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
@@ -1799,13 +1799,13 @@ def build_orchestrator_tools(
     record through (`_recorded_block`), the bare one, off the Activity feed,
     as the graph's `seed` node stores definitions. Left unset, such a fetch
     is refused.
-    `recall_part` is `harness.studio_state.make_recall_part`'s seam. Left
-    unset, `recall` says there is nothing to recall from. `canvas_series` is
-    `harness.studio_state.make_canvas_series`'s seam; left unset, no series
-    counts as on the canvas. `canvas_cards` is
-    `harness.studio_state.make_canvas_cards`' seam; left unset, only the
-    cards drawn this turn are known to be on the canvas. `remove_cards` is
-    `harness.studio_state.make_remove_cards`'s seam; left unset, the tool
+    `recall_part` is the callable `harness.studio_state.make_recall_part` returns. Left
+    unset, `recall` says there is nothing to recall from. `canvas_series` is the callable
+    `harness.studio_state.make_canvas_series` returns; left unset, no series
+    counts as on the canvas. `canvas_cards` is the callable
+    `harness.studio_state.make_canvas_cards` returns; left unset, only the
+    cards drawn this turn are known to be on the canvas. `remove_cards` is the callable
+    `harness.studio_state.make_remove_cards` returns; left unset, the tool
     says it is not available.
     """
     # One lock per invocation, held by a make_charts call from its budget

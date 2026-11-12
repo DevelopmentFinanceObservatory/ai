@@ -1,4 +1,4 @@
-"""Deterministic stand-ins for the studio's seams, for tests and the scripted eval.
+"""Deterministic stand-ins for the studio's injected dependencies, for tests and the scripted eval.
 
 Each answers from fixed data with no LLM, no MCP call and no upstream:
 `ScriptedExecutor` (the agent's and the canvas's tool calls),
@@ -8,7 +8,7 @@ publisher). Every frame is the one Kenyan life-expectancy series.
 
 A real planner runs on a scripted model through `scripted_client`, a
 google-genai client whose streamed calls answer from a script, which
-`harness.planner_seam.PlannerSeam` takes as its `client`.
+`harness.planner_adapter.PlannerAdapter` takes as its `client`.
 `use_compiled_proposals` gives the planner's tools a `propose_plan` that
 declares the plan already on record ready, for a script that drives no
 translation.
@@ -322,7 +322,7 @@ def scripted_client(answer: ScriptedAnswer) -> Client:
 
     The answer streams as one chunk, a model turn of that one part finished with
     `STOP` and no usage. Everything else a model class reads off a client is a
-    real `Client`'s, so the planner takes it as `harness.planner_seam.PlannerSeam`'s
+    real `Client`'s, so the planner takes it as `harness.planner_adapter.PlannerAdapter`'s
     `client`, and an ADK model as `Gemini(client=...)`, each driven by one
     script over the requests it puts on the wire.
     """
@@ -334,7 +334,7 @@ def scripted_client(answer: ScriptedAnswer) -> Client:
         contents: types.ContentListUnion | types.ContentListUnionDict,
         config: types.GenerateContentConfigOrDict | None = None,
     ) -> AsyncIterator[types.GenerateContentResponse]:
-        # Both planners send a list of contents. Any other form fails validation here.
+        # The planner sends a list of contents. Any other form fails validation here.
         listed = contents if isinstance(contents, list) else [contents]
         request = ModelRequest(
             model=model,
@@ -361,7 +361,7 @@ async def _one_chunk(part: types.Part) -> AsyncIterator[types.GenerateContentRes
 
 
 class ScriptedPlannerModel:
-    """A `PlannerModel` seam with no model.
+    """A `PlannerModel` with no model.
 
     Drafts the canned plan `harness.scripted_plan.scripted_plan` builds. A
     re-entry -- a replan after a refusal, or a user amendment -- redrafts the
@@ -384,7 +384,7 @@ class ScriptedPlannerModel:
         pick: DecisionPick | None = None,
     ) -> dict[str, Any]:
         # Nothing to report and nothing to run through the workflow's
-        # session: this seam has no model round trips to relay and no
+        # session: this planner has no model round trips to relay and no
         # agent to host via `ctx.run_node`. It drafts the same canned plan
         # whatever the readings name.
         del ctx, readings, refusal, amendment, canvas_digest, conversation_digest, on_progress

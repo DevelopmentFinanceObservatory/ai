@@ -1,4 +1,4 @@
-"""The studio auth seam: one function between the routes and the token.
+"""The studio auth check: one function between the routes and the token.
 
 v1 treats the bearer token as opaque (contract delta 5): presence is
 required on every studio request, and when the `STUDIO_API_TOKEN` setting

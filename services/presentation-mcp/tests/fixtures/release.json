@@ -338,7 +338,7 @@
               ],
               "properties": {
                 "kind": {
-                  "$comment": "Closed vocabulary drawn from the contract's own examples (\"provisional status, estimates, imputations, coverage gaps, comparability breaks\"); the taxonomy is seam-owed to the Datasets/Analysis layers that populate it.",
+                  "$comment": "Closed vocabulary drawn from the contract's own examples (\"provisional status, estimates, imputations, coverage gaps, comparability breaks\"); the taxonomy is owed to the Datasets/Analysis layers that populate it.",
                   "enum": [
                     "provisional",
                     "estimated",
@@ -515,7 +515,7 @@
           }
         },
         "unit": {
-          "$comment": "Pass-through unit slot: null, an opaque graph-ref string, or a structured object. No conversion happens in Presentation; the structured object's own field set is seam-owed to the upstream unit design.",
+          "$comment": "Pass-through unit slot: null, an opaque graph-ref string, or a structured object. No conversion happens in Presentation; the structured object's own field set is owed to the upstream unit design.",
           "oneOf": [
             {
               "type": "null"
@@ -1011,7 +1011,7 @@
           }
         },
         "unit": {
-          "$comment": "Pass-through unit slot: null, an opaque graph-ref string, or a structured object. No conversion happens in Presentation; the structured object's own field set is seam-owed to the upstream unit design.",
+          "$comment": "Pass-through unit slot: null, an opaque graph-ref string, or a structured object. No conversion happens in Presentation; the structured object's own field set is owed to the upstream unit design.",
           "oneOf": [
             {
               "type": "null"
@@ -1236,7 +1236,7 @@
           }
         },
         "unit": {
-          "$comment": "Pass-through unit slot: null, an opaque graph-ref string, or a structured object. No conversion happens in Presentation; the structured object's own field set is seam-owed to the upstream unit design.",
+          "$comment": "Pass-through unit slot: null, an opaque graph-ref string, or a structured object. No conversion happens in Presentation; the structured object's own field set is owed to the upstream unit design.",
           "oneOf": [
             {
               "type": "null"

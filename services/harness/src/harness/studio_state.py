@@ -529,7 +529,7 @@ class ConversationState:
     # (`recorded_identity`). Every key but `user` and `assistant` is
     # optional, and a record without `plans`, `readings`, `specs` or
     # `identities` holds none. Feeds the conversation digest (newest
-    # window), the recall seam (everything older) and the planner's ledger
+    # window), the recall function (everything older) and the planner's ledger
     # (`prior_ledger_state`). None of them reads `identities`.
     turns: list[dict[str, Any]] = field(default_factory=list)
     # MCP calls that have timed out at least once in this conversation, keyed
@@ -2197,7 +2197,7 @@ class RecallRefusedError(Exception):
 
 
 def make_recall_part(store: StudioStore) -> Any:
-    """The orchestrator's `recall` seam, bound to a store and resolved to the
+    """The orchestrator's `recall` function, bound to a store and resolved to the
     conversation at CALL time through the request-scoped contextvar, because
     the workflow is built once and shared across every conversation."""
 
@@ -2215,7 +2215,7 @@ def make_recall_part(store: StudioStore) -> Any:
 
 
 def make_canvas_series(store: StudioStore) -> Any:
-    """The seam `make_charts` and `remove_cards` read the canvas's series ids
+    """The callable `make_charts` and `remove_cards` read the canvas's series ids
     through (`ConversationState.canvas_series_ids`), bound to a store and
     resolved to the conversation at CALL time, as `make_recall_part` is.
     Empty when there is no conversation."""
@@ -2229,7 +2229,7 @@ def make_canvas_series(store: StudioStore) -> Any:
 
 
 def make_canvas_cards(store: StudioStore) -> Any:
-    """The seam `make_charts` reads the cards it drew on the canvas through
+    """The callable `make_charts` reads the cards it drew on the canvas through
     (`ConversationState.canvas_cards`), bound to a store and resolved to the
     conversation at CALL time, as `make_recall_part` is. Empty when there is
     no conversation."""
@@ -2243,7 +2243,7 @@ def make_canvas_cards(store: StudioStore) -> Any:
 
 
 def make_remove_cards(store: StudioStore) -> Any:
-    """The orchestrator's `remove_cards` seam, bound to a store and resolved
+    """The orchestrator's `remove_cards` function, bound to a store and resolved
     to the conversation at CALL time, as `make_recall_part` is."""
 
     async def remove(*, component_ids: list[str], all_cards: bool) -> tuple[list[str], list[str]]:

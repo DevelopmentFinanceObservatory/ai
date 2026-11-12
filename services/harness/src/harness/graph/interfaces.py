@@ -1,4 +1,4 @@
-"""The seams the root workflow is built from: the `Executor` its nodes' own
+"""The interfaces the root workflow is built from: the `Executor` its nodes' own
 calls run through, and the `PlannerModel` the `planner` node drafts with.
 """
 
@@ -60,12 +60,12 @@ class PlannerModel(Protocol):
 
     Returns `{"plan": <planner.plan.Plan as JSON>, "summary": <approval summary>}`
     on a draft, or `{"refused": {"text": <plain sentence>, "final": <bool>,
-    "code": <refusal code>}}` when the seam ends the entry without one
-    (`harness.planner_seam.PlannerSeam._refused`); `final` says no other plan
+    "code": <refusal code>}}` when the planner ends the entry without one
+    (`harness.planner_adapter.PlannerAdapter._refused`); `final` says no other plan
     for the same ask can succeed, and `code` names the refusal for a caller
     that tells refusals apart. It returns `{"asked": {"call_id", "args"}}`
     when the planner's run ended on a question for the user, which the node
-    pauses on under `call_id`; the resume calls the seam again with the
+    pauses on under `call_id`; the resume calls the planner again with the
     answer in `ctx.resume_inputs`. The node validates a drafted
     plan itself, so a malformed one fails here rather than at the approve
     gate; a refusal never writes `ctx.state["plan"]`, so whatever plan was
@@ -77,7 +77,7 @@ class PlannerModel(Protocol):
     `PENDING_APPROVAL` on record (the cap hit on a first draft, or on a
     replan against an already-approved plan) goes to `plan_done`, which
     hands the refusal back to the orchestrator.
-    `prior_plan` is the record the graph holds, which the seam seeds its
+    `prior_plan` is the record the graph holds, which the planner seeds its
     own session from before drafting. `refusal` / `amendment` are set on
     the replan and amend re-entries. `pick` is set on the amend re-entry a
     switch of a planner decision on the plan card opens: the option the user
@@ -88,19 +88,19 @@ class PlannerModel(Protocol):
     `on_progress`, when given, may be called any number of times before this
     returns, each call naming one round trip the underlying model pair made
     (a shape this protocol treats as opaque -- the node only forwards it as
-    an activity update). A seam with nothing to report simply never calls
+    an activity update). A planner with nothing to report simply never calls
     it.
 
-    `ctx` is the planner node's own `Context`, passed through so a seam
+    `ctx` is the planner node's own `Context`, passed through so a planner
     that hosts its models as a dynamically-scheduled child of this node
     (`ctx.run_node`) can do so in the graph's own session, rather than
     building a second `Runner`/session service of its own
-    (`harness.planner_seam.PlannerSeam`). A seam with nothing to run
+    (`harness.planner_adapter.PlannerAdapter`). A planner with nothing to run
     through it simply never touches it.
 
     `readings` are the search readings of the conversation's earlier turns
     (`ORCHESTRATOR_PRIOR_LEDGER_KEY`) and then this turn's
-    (`ORCHESTRATOR_SEARCHES_KEY`), oldest first, which a seam shows its
+    (`ORCHESTRATOR_SEARCHES_KEY`), oldest first, which the adapter shows its
     planner.
     """
 
@@ -134,7 +134,7 @@ class PlannerModel(Protocol):
         restated, and every decision the pins state follows its pin.
         `inherits` maps each new spec_id to the one it replaces. Answers as
         `__call__` does: the revised plan, `PENDING_APPROVAL`, with its
-        summary, or a refusal. A refusal may leave the seam's own drafting
+        summary, or a refusal. A refusal may leave the planner's own drafting
         state changed, which the caller restores.
         """
         ...

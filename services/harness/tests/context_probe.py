@@ -45,9 +45,9 @@ Grouping by the marker, not by the author tag, is what makes this bucket
 the exact text a fix has to remove: a change that silenced the payloads but left
 the framing behind would still read as a non-zero bucket.
 
-`harness.planner_seam.PlannerSeam._message` is the other text part on the
-planner path, and it buckets separately as `text(seam-brief)` on its own opening
-words. It is the seam's own input, a full brief carrying the search readings,
+`harness.planner_adapter.PlannerAdapter._message` is the other text part on the
+planner path, and it buckets separately as `text(planner-brief)` on its own opening
+words. It is the adapter's own input, a full brief carrying the search readings,
 the canvas and conversation digests, the plan being changed and the question.
 
 Every planner call renders that full brief, and every request of the call
@@ -57,7 +57,7 @@ instruction and the tool declarations only, so the brief travels on every
 request of the call, and only Gemini's implicit caching can bill it at the
 cached rate on a later request. A character cut here is saved on every request,
 and the brief is what the model's attention is spent on either way.
-`SEAM_BUCKET` is what a change to that rendering is measured against.
+`BRIEF_BUCKET` is what a change to that rendering is measured against.
 """
 
 from __future__ import annotations
@@ -130,14 +130,14 @@ _RELAY_AUTHOR = re.compile(r"^\[([^\]]+)\]")
 RELAY_BUCKET = "text(fenced-relay)"
 RELAY_BUCKET_PREFIX = RELAY_BUCKET + ":"
 
-# The seam's own brief, bucketed on the opening words of `harness.planner_seam.
-# _READINGS_CONTEXT`: the one part of a planner request this seam assembles itself, not ADK relaying or
-# a tool answering. Spelled out, not imported from `planner_seam`, for the same
+# The planner brief, bucketed on the opening words of `harness.planner_adapter.
+# _READINGS_CONTEXT`: the one part of a planner request this adapter assembles
+# itself, not ADK relaying or a tool answering. Spelled out, not imported from `planner_adapter`, for the same
 # reason `RELAY_MARKER` is: importing it would hide the fact that the text
 # moved, which is the thing this bucket exists to measure. It is the one input
 # on the planner path that varies with the plan, the readings and the digests.
-SEAM_MARKER = "Context for this question. These are the readings of the searches"
-SEAM_BUCKET = "text(seam-brief)"
+BRIEF_MARKER = "Context for this question. These are the readings of the searches"
+BRIEF_BUCKET = "text(planner-brief)"
 
 
 # Measurement -------------------------------------------------------------------
@@ -209,7 +209,7 @@ def _part_bucket(part: Any) -> tuple[str, str | None]:
         match = _RELAY_AUTHOR.match(text)
         author = match.group(1) if match else _UNTAGGED
         return f"{RELAY_BUCKET_PREFIX}{author}", author
-    return (SEAM_BUCKET, None) if SEAM_MARKER in text else ("text", None)
+    return (BRIEF_BUCKET, None) if BRIEF_MARKER in text else ("text", None)
 
 
 def _part_chars(part: Any) -> int:
@@ -329,7 +329,7 @@ def bucket_chars(record: dict[str, Any], bucket: str) -> int:
 #
 # `Plan` limits every string and collection it holds (`planner.plan.MAX_*`) and
 # the serialised size of the model-authored part as a whole
-# (`MAX_PLAN_RECORD_CHARS`). `harness.planner_seam._plan_context` renders the
+# (`MAX_PLAN_RECORD_CHARS`). `harness.planner_adapter._plan_context` renders the
 # fields it does not truncate in full, so the largest plan the schema accepts
 # fixes how large that section can get. Three builders here: the record with
 # every field at its own limit, which is over the size limit and so is not a
@@ -373,7 +373,7 @@ def field_limits_record() -> dict[str, Any]:
     decisions: eight datasets with `MAX_ENTITIES` entities and
     `MAX_ACROSS_WORDS` `across` words apiece, nine filters with eight predicates apiece, and one of every other kind (aggregate,
     growth, rank, share_of, quotient_of, comparison, join). Every string is at its limit;
-    those the seam renders as JSON are made of `ASTRAL_CHAR`, and a predicate
+    those the adapter renders as JSON are made of `ASTRAL_CHAR`, and a predicate
     lists every entity name. Each decision and requirement validates on its
     own. The record as a plan does not: it serialises to far more than
     `MAX_PLAN_RECORD_CHARS`, and `Plan` refuses it for that alone.

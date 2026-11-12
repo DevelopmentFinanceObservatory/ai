@@ -178,7 +178,7 @@
       "node_info": {
         "message_as_output": null,
         "output_for": null,
-        "path": "seam_test_wf@1/seam_under_test@1/dfo_planner@1"
+        "path": "adapter_test_wf@1/adapter_under_test@1/dfo_planner@1"
       },
       "output": null,
       "output_transcription": null,
@@ -221,7 +221,7 @@
         "transfer_reason": null,
         "transfer_to_agent": null
       },
-      "author": "seam_test_wf",
+      "author": "adapter_test_wf",
       "avg_logprobs": null,
       "branch": null,
       "cache_metadata": null,
@@ -249,7 +249,7 @@
       "node_info": {
         "message_as_output": null,
         "output_for": null,
-        "path": "seam_test_wf@1/seam_under_test@1"
+        "path": "adapter_test_wf@1/adapter_under_test@1"
       },
       "output": null,
       "output_transcription": null,

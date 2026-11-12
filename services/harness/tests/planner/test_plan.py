@@ -5219,7 +5219,7 @@ def _chars_without_escapes(record: dict[str, Any]) -> int:
 
 
 def test_the_size_limit_counts_characters_and_not_their_json_escapes() -> None:
-    # The seam writes free text into the brief as it is, so an accented letter is one
+    # The adapter writes free text into the brief as it is, so an accented letter is one
     # character there and six once JSON-escaped. Six decisions and the question at their
     # limits are under the limit as written and over it as escaped.
     record = plan_record()

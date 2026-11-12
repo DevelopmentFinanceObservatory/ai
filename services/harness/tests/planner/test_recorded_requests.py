@@ -4,7 +4,7 @@
 proposes for it (a reference plan and, for some tasks, alternatives) and a recording
 of the data-mcp answers its entry reads. Each case here runs one such plan through
 the eval's own entry (`entry.run_entry`: the orchestrator's tools, the graph nodes and
-`PlannerSeam`) over the recording, with a scripted google-genai client playing the
+`PlannerAdapter`) over the recording, with a scripted google-genai client playing the
 model. A plan the real `propose_plan` refuses first, as the recording of a task with a
 `first_proposal_refusal` says, is followed by the planner's ask and the user's answer,
 which resumes the run.
@@ -12,7 +12,7 @@ which resumes the run.
 Every request the model receives, and the plan the entry lands, equal the case's
 stored expectation (`tests.planner_expectations`). That covers the first request of
 each entry, built from the recorded readings, skills and asks, and, for an entry with
-an ask, the request after the ask is answered. The stored requests hold the seam's
+an ask, the request after the ask is answered. The stored requests hold the adapter's
 brief as a marker (`planner_expectations.BRIEF`). No model or network is involved,
 since the recorded answers replay from files.
 """

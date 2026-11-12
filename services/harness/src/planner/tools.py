@@ -366,7 +366,7 @@ def _ask_beside_ask(call: PlannerCall) -> dict[str, object] | None:
 
 
 # Where an accepted ask waits for the graph's planner node to put it to the
-# user (`AcceptedAsk`). `harness.planner_seam.PlannerSeam` reads it once the
+# user (`AcceptedAsk`). `harness.planner_adapter.PlannerAdapter` reads it once the
 # planner's run ends and clears it when the next entry starts.
 PENDING_ASK_STATE_KEY = "planner:pending_ask"
 

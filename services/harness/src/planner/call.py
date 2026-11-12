@@ -68,7 +68,7 @@ class Step(NamedTuple):
     """One step of a session's history, as the readers of what the user answered walk it.
 
     `message` is a message the user typed into the session, which the
-    planner seam's own messages are not (`planner.session._user_message`).
+    planner adapter's own messages are not (`planner.session._user_message`).
     `call` is an ask, the planner's own (`PLANNER_ASK`) or a workflow
     interrupt's `adk_request_input`, with its id and `args`. `answer` is a
     response to one, with its id, the `args` of the nearest preceding call
@@ -488,14 +488,14 @@ def user_spoke_since_recorded(call: PlannerCall, version: int) -> bool:
     speaks with an ask's response they answered (`_is_answer`: a pick, free text),
     an amendment of the approval card (`_is_amendment`), or a message of their own
     (a `message` step). A
-    refusal, a skip, a referral and the planner seam's own messages are not.
+    refusal, a skip, a referral and the planner adapter's own messages are not.
 
     `harness.studio_state.ConversationState.session_id` opens a new ADK
     session for every Studio turn, and every turn starts with the user's
     message. A plan this session holds no recording response for was
-    recorded before that message, so this answers `True`. The planner seam
+    recorded before that message, so this answers `True`. The planner adapter
     seeds such a plan from the graph's record
-    (`harness.planner_seam.PlannerSeam`).
+    (`harness.planner_adapter.PlannerAdapter`).
     """
     last: object = None
     recorded = False

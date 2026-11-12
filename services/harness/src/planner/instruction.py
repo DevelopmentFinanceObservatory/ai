@@ -230,7 +230,7 @@ _PLANNING = (
 # What each `propose_plan` call states about which plan it means. Held apart
 # from `_PLANNING` because it is the one paragraph `question_fixed` rewrites:
 # `question_fixed=False` selects `_VERSIONING_FREE`, where a restart is a
-# normal way to begin a second plan; `harness.planner_seam.PlannerSeam`
+# normal way to begin a second plan; `harness.planner_adapter.PlannerAdapter`
 # passes `question_fixed=True`, where the orchestrator's brief fixes the
 # turn's question. What each argument does is on the argument.
 _VERSIONING_FREE = (
@@ -266,7 +266,7 @@ _SKILLS = (
 
 # What to do once a plan is recorded, when a translator is attached to carry it
 # out and `propose_plan` answers with its verdict under `translation`. Held
-# apart because `PlannerSeam` passes `has_translator=True`; with `False` the
+# apart because `PlannerAdapter` passes `has_translator=True`; with `False` the
 # agent's `propose_plan` answers with no translation to read.
 _TRANSLATING = (
     "`source_name_ambiguous` means Search could not choose which "
@@ -399,7 +399,7 @@ def planner_instruction(
     `_VERSIONING_FREE` where a restart begins a second plan of its own, or
     `_VERSIONING_FIXED`, where the turn's question is held and a restart is
     how the model tells it the user asked a different one.
-    `harness.planner_seam.PlannerSeam` passes True. False, the default,
+    `harness.planner_adapter.PlannerAdapter` passes True. False, the default,
     selects `_VERSIONING_FREE`.
     """
     return (

@@ -1518,7 +1518,7 @@ def chip_kept(applied: Mapping[str, Any], readings: Sequence[Mapping[str, Any]])
 
 def part_name(reading: SearchReading, block: Mapping[str, Any] | None) -> str:
     """The part's name, for a basis line naming several parts and for a
-    sentence naming a requirement that pins it (`harness.planner_seam`).
+    sentence naming a requirement that pins it (`harness.planner_adapter`).
 
     The part's own words, quoted, while they describe the pin it was served
     from. They do not once the pin was compiled again from one of its scope
