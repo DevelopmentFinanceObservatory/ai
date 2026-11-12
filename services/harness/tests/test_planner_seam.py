@@ -340,6 +340,12 @@ def _last_amended_version(request: Any, *, default: int) -> int:
     return default
 
 
+def _adk_settings() -> Settings:
+    """Settings naming the ADK planner, for the seams whose tests script its model
+    with `ScriptedPlannerLlm` or read its agent through `seam._agent`."""
+    return Settings(planner_runner="adk")
+
+
 def _seam(
     *,
     agent_settings: AgentSettings | None = None,
@@ -350,13 +356,13 @@ def _seam(
     record ready (`harness.scripted.use_compiled_proposals`)."""
     surface = FixtureSurface(schemas=[])
     if not compiled_proposals:
-        return PlannerSeam(settings=Settings(), surface=surface, agent_settings=agent_settings)
+        return PlannerSeam(settings=_adk_settings(), surface=surface, agent_settings=agent_settings)
     translate = build_translate(surface=surface)
     specs = planner_specs(
         translate=translate, surface=surface, question_fixed=True, reads_user_words=False
     )
     return PlannerSeam(
-        settings=Settings(),
+        settings=_adk_settings(),
         surface=surface,
         agent_settings=agent_settings,
         translate=translate,
@@ -3603,7 +3609,7 @@ def _translator_seam(
     agent_settings: AgentSettings | None = None,
 ) -> PlannerSeam:
     return PlannerSeam(
-        settings=Settings(),
+        settings=_adk_settings(),
         surface=_SkillPagesSurface(schemas=[], responses=responses),
         agent_settings=agent_settings,
     )
@@ -6518,7 +6524,7 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_no_reading_and_its_row_swit
 
     surface = BasisCompiles()
     seam = PlannerSeam(
-        settings=Settings(),
+        settings=_adk_settings(),
         surface=cast(Any, surface),
         translate=translate,
         model=ScriptedPlannerLlm(script=[]),
@@ -6707,7 +6713,7 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
 
     surface = BasisCompiles()
     seam = PlannerSeam(
-        settings=Settings(),
+        settings=_adk_settings(),
         surface=cast(Any, surface),
         translate=translate,
         model=ScriptedPlannerLlm(script=[]),

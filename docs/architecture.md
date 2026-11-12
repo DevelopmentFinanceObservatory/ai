@@ -36,10 +36,11 @@ It holds the plan at the user's approval, ships inside `harness` as a sibling
 top-level module, and knows nothing about execution. The DFO Studio runs the
 modules described below, adapted for its workflow by
 `harness.planner_seam.PlannerSeam`. The seam runs one of two planners, which
-`PLANNER_RUNNER` selects. The ADK planner is an `LlmAgent`. The Pydantic AI
-planner is the function node `harness.planner_node`, which yields the ADK
-events an ADK planner run stores. Both serve the one set of tool specs and
-the one instruction the seam builds, and `tests/test_planner_node.py` and
+`PLANNER_RUNNER` selects: the Pydantic AI planner by default, or the ADK
+planner with `PLANNER_RUNNER=adk`. The ADK planner is an `LlmAgent`. The
+Pydantic AI planner is the function node `harness.planner_node`, which yields
+the ADK events an ADK planner run stores. Both serve the one set of tool specs
+and the one instruction the seam builds, and `tests/test_planner_node.py` and
 `tests/test_planner_runners.py` in `services/harness` hold the two equal.
 
 The plan-approve-execute workflow spans four top-level modules beside it,

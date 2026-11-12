@@ -242,10 +242,10 @@ class Settings(BaseServiceSettings):
     # Unset means any non-empty token is accepted (the token stays required
     # either way -- contract delta 5).
     studio_api_token: str | None = None
-    # The framework the planner runs on (`PLANNER_RUNNER`): `adk`, the ADK
-    # planner, or `pydantic_ai`, the Pydantic AI planner
-    # (`harness.planner_seam.PlannerSeam`).
-    planner_runner: Literal["adk", "pydantic_ai"] = "adk"
+    # The framework the planner runs on (`PLANNER_RUNNER`, read by
+    # `harness.planner_seam.PlannerSeam`): `pydantic_ai`, the default, runs
+    # the Pydantic AI planner, and `adk` the ADK planner.
+    planner_runner: Literal["adk", "pydantic_ai"] = "pydantic_ai"
     # The orchestrator's reasoning effort (`ORCHESTRATOR_THINKING_LEVEL`),
     # read case-insensitively. Unset or blank means the default.
     orchestrator_thinking_level: ThinkingLevelName = DEFAULT_ORCHESTRATOR_THINKING_LEVEL

@@ -142,7 +142,7 @@ Before the first real deploy, infra needs to set up, per environment:
   otherwise from the deprecated `GOOGLE_GENAI_USE_VERTEXAI`, read the same way.
 - `PLANNER_RUNNER` on that service, optional: the framework the planner
   runs on, `adk` for the ADK planner or `pydantic_ai` for the Pydantic AI
-  planner. Unset, it is `adk`. Both store the same session events, so a turn
+  planner. Unset, it is `pydantic_ai`. Both store the same session events, so a turn
   paused under one resumes under the other on the next revision.
 - `DFO_APIS_URL` on that service, pointing at apis, the FastAPI app that
   serves both the Search and Datasets surfaces. The data-mcp component
