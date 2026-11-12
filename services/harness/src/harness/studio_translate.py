@@ -1620,8 +1620,8 @@ class _Translator:
         """A `running` frame giving the open status line its own detail back
         once the work its note named is over; none when it shows no note.
 
-        A line that opened with no detail gets an empty one: Studio keeps a
-        running line's earlier detail when a frame carries none."""
+        A line that opened with no detail gets an empty one, since Studio keeps
+        a running line's earlier detail when a frame carries none."""
         if self._status is None or self._status.note is None:
             return []
         self._status.note = None

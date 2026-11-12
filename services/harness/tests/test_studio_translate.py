@@ -1126,8 +1126,8 @@ def test_a_step_keeps_one_wire_id_from_its_first_report_to_its_final_frame() -> 
 
 def test_a_replan_run_in_the_same_segment_opens_new_lines_for_its_steps() -> None:
     """A replan's plan may reuse the step ids of the plan it replaces. Once
-    the first plan's run hands back, its lines are closed, and the replan's
-    steps open lines of their own rather than reopening the first plan's."""
+    the first plan's run hands back, its lines are closed and the replan's
+    steps open lines of their own."""
     translator, surface_recorder = _progress_translator()
 
     (first,) = translator.translate(_progress_event("s2", "Preparing the dataset (queued, 3s)"))
@@ -3100,9 +3100,9 @@ def test_a_refused_proposal_reads_reworking_the_draft_until_the_next_call() -> N
 def test_a_planner_skill_read_notes_itself_on_the_planners_line(
     opening: list[Event], detail: str | None, restored: str
 ) -> None:
-    """The planner's skill read opens no line: the line it runs under says
-    it reads a method note until the read is answered, then shows its own
-    detail again. The skill's id never reaches the wire."""
+    """The planner's skill read opens no line of its own. The line it runs under
+    says it reads a method note until the read is answered, then shows its own
+    detail. The skill's id stays off the wire."""
     translator = _translator()
     opened = [frame for event in opening for frame in translator.translate(event)]
     line = opened[-1]

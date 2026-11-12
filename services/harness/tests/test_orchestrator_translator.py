@@ -2178,7 +2178,7 @@ _GDP_FOUND = {
 def test_a_skill_read_keeps_the_reading_line_running_and_notes_itself_on_it(
     answer, detail, restored
 ):
-    """The read shows no step of its own: the line it runs under says it
+    """The read shows no step of its own. The line it runs under says it
     reads a method note, then gives back its own detail when the agent's
     next model call starts. A line with no detail gets an empty one back,
     since Studio keeps a running line's detail when a frame carries none."""
