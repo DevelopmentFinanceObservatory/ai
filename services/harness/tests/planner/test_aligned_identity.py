@@ -17,11 +17,11 @@ pins the same spec_id directly.
 
 from __future__ import annotations
 
+import functools
 import json
 from collections.abc import Callable, Mapping
 from typing import Any, cast
 
-import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from compiler.compile import compile_plan
 from compiler.surface import McpSurface, ToolCallResult, ToolSurface
@@ -56,6 +56,7 @@ from translator.referral import Referral, ReferralKind, save_referral
 
 from ..basis_alignment import us_2023_block
 from ..decision_drafts import drafts
+from ..planner_tools import call_planner_tool
 from .test_agent import (
     _COMPARE,
     _GHANA_DEBT_IDENTITY,
@@ -212,7 +213,8 @@ async def _gross_compared_with_net_average(
             source_spec_id=pin,
         )
 
-    result = await _tools_reading(cast(ToolSurface, surface))["propose_plan"].func(
+    result = await call_planner_tool(
+        _tools_reading(cast(ToolSurface, surface))["propose_plan"],
         question=question,
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
@@ -359,7 +361,10 @@ def _multilateral_compiles(
 def _proposing() -> Callable[..., Any]:
     """`propose_plan` over a Search that compiles the US total onto the multilateral
     row (`_multilateral_compiles`)."""
-    return _tools_reading(cast(ToolSurface, _multilateral_compiles()))["propose_plan"].func
+    return functools.partial(
+        call_planner_tool,
+        _tools_reading(cast(ToolSurface, _multilateral_compiles()))["propose_plan"],
+    )
 
 
 async def test_a_direct_pin_sharing_an_aligned_compiles_spec_id_keeps_its_own_row(
@@ -391,7 +396,6 @@ async def test_a_direct_pin_sharing_an_aligned_compiles_spec_id_keeps_its_own_ro
     assert dict(_pins(ctx))["second"] == _US_MULTILATERAL["spec_id"]
 
     result = await propose(
-        question="What share of US ODA goes to multilaterals?",
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts([decision()]),
         evidence_requirements=[
@@ -463,7 +467,8 @@ def test_propose_plan_reads_a_carried_sum_s_earlier_datasets_off_the_plan_it_ame
         pinning_decision=pinning_decision,
         requirement=requirement,
     )
-    first = tools["propose_plan"].func(
+    first = call_planner_tool(
+        tools["propose_plan"],
         question=summed.question,
         answer_mode=summed.answer_mode,
         decisions=drafts(summed.decisions),
@@ -491,7 +496,8 @@ def test_propose_plan_reads_a_carried_sum_s_earlier_datasets_off_the_plan_it_ame
     )
     debt = summed.requirement("debt").model_copy(update={"source_spec_id": other_spec})
 
-    result = tools["propose_plan"].func(
+    result = call_planner_tool(
+        tools["propose_plan"],
         answer_mode=summed.answer_mode,
         decisions=[],
         evidence_requirements=[debt],
@@ -512,7 +518,8 @@ async def test_an_amendment_dropping_the_comparison_reads_the_average_on_its_own
     ctx = _FakeToolContext()
     plan = await _gross_compared_with_net_average(ctx, decision)
 
-    result = await _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"].func(
+    result = await call_planner_tool(
+        _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"],
         question=plan.question,
         removed_evidence_requirements=["first", "one", _COMPARE],
         answered=[AskAnswer(ask=0, outputs=("two",))],
@@ -536,20 +543,20 @@ async def test_an_amendment_dropping_the_comparison_reads_the_average_on_its_own
     ] == [(f"scope_measure_basis_{_NET}", "measure_basis:net")]
 
 
-@pytest.mark.parametrize("fresh", ["replan", "first-draft"])
 async def test_a_new_plan_reads_a_pin_on_an_old_compile_as_its_own(
-    decision: DecisionFactory, fresh: str
+    decision: DecisionFactory,
 ) -> None:
     """The replaced plan moved its `second` onto the gross pin. A new plan whose own
     `second` pins gross directly reads gross, through its amendments too: the old
     plan's alignment of an input with that id says nothing of the new plan's pin.
-    The new plan is a replan, or the first draft of a later `plan` call of the turn,
-    which finds the plan state cleared (`harness.planner_seam`)."""
+    The new plan is the first draft of a later `plan` call of the turn, which finds
+    the plan state cleared (`harness.planner_adapter`)."""
     ctx = _FakeToolContext()
     await _gross_compared_with_net_average(ctx, decision)
-    if fresh == "first-draft":
-        ctx.state[PLAN_STATE_KEY] = None
-    propose = _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"].func
+    ctx.state[PLAN_STATE_KEY] = None
+    propose = functools.partial(
+        call_planner_tool, _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"]
+    )
 
     result = await propose(
         question="What was US gross ODA in 2023?",
@@ -567,7 +574,6 @@ async def test_a_new_plan_reads_a_pin_on_an_old_compile_as_its_own(
                 source_spec_id=_GROSS["spec_id"],
             ),
         ],
-        starts_new_plan=fresh == "replan",
         tool_context=ctx,
     )
     assert result["outcome"] == Outcome.OK.value, result
@@ -608,7 +614,8 @@ async def test_a_pending_source_choice_admits_its_offered_pin_alignment_moves(
     )
     ctx.session.events.append(_referred_event(ReferralKind.SOURCE_AMBIGUOUS, "second"))
 
-    result = await _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"].func(
+    result = await call_planner_tool(
+        _tools_reading(cast(ToolSurface, _gross_compiles()))["propose_plan"],
         question=plan.question,
         evidence_requirements=[
             plan.requirement("second").model_copy(update={"source_spec_id": _NET})

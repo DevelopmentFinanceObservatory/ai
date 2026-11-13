@@ -15,17 +15,19 @@ each of the task's payloads makes. `run_entry` replays them through production c
   wires them (`harness.graph.workflow.planner_entry`), run inside a conversation that
   holds those spec blocks as `harness.studio` holds a turn's
   (`planner.plan.current_recorded_identity`), and hand the brief to the real
-  `PlannerSeam`, which renders the planner's first message from that state and runs
-  the planner with production's instruction, tools and callbacks, each request
+  `PlannerAdapter`, which renders the planner's first message from that state and runs
+  the planner, with production's instruction and tools, each request
   under the `TurnBudget` a served request gets (`harness.turn_budget`).
 
-Two edges are replaced. The planner's `get_skill` and `get_skill_file` read the
-recording through `RecordedSurface`. The seam's translate step is the eval's own,
+Two edges are replaced. The planner's `get_skill` reads the recording through
+`RecordedSurface`. The adapter's translate step is the eval's own,
 which ends the entry once a plan is recorded (`PlanRecorded`), so a run measures the
 draft up to its first accepted plan. Given `TranslationCalls`, it first runs
 production's translation on that plan (`translator.tool.build_translate`), its calls
 to data-mcp and the graph's resolve door answered from the recording; that is how
-`validate.py` checks each plan compiles.
+`validate.py` checks each plan compiles. The planner's model calls go through a
+google-genai client the eval wraps (`Probe.client`), where it notes each request and
+answer and applies an arm's edits.
 Every entry runs at the planner's served thinking level and model-time budget.
 The planner streams, as it does in a studio turn.
 """
@@ -40,12 +42,21 @@ import json
 import logging
 import time
 import traceback
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Mapping,
+    Sequence,
+)
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Self, cast
 
 from compiler.surface import ToolCallResult, ToolId, ToolSchema, ToolSurfaceUnavailableError
 from data_mcp import resolution
@@ -53,19 +64,17 @@ from data_mcp.errors import UpstreamError
 from data_mcp.graph_wire import NodesResponse
 from data_mcp.node_lookup import NodeOutcome
 from data_mcp.search_tool import SearchContext
+from data_mcp.skills_client import name_get_skill_in_call_lines
 from google.adk import Event
-from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.events import EventActions
-from google.adk.models.base_llm import BaseLlm
-from google.adk.models.llm_request import LlmRequest
-from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService, Session
 from google.adk.workflow import START, Workflow
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
-from google.genai import types
-from harness.graph.seams import PlannerModel
+from google.genai import Client, types
+from google.genai.client import AsyncClient
+from harness.graph.interfaces import PlannerModel
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, GraphState
 from harness.graph.workflow import planner_entry
 from harness.orchestrator_tools import (
@@ -74,15 +83,15 @@ from harness.orchestrator_tools import (
     Resolver,
     build_orchestrator_tools,
 )
-from harness.planner_seam import PlannerSeam, PlannerSeamError
+from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
 from harness.prefix_cache import PrefixCache
+from harness.scripted import instruction_text
 from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import resolver_digest
-from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, current_turn_budget
+from harness.turn_budget import TurnBudget, current_turn_budget
 from harness.wiring import handing_back_planner_failures
-from planner.agent import AGENT_NAME as PLANNER_AGENT
-from planner.agent import load_pending_ask, read_full_history
+from orchestrator.agent import model_retry_options
 from planner.call import PlannerCall
 from planner.plan import (
     Plan,
@@ -91,8 +100,11 @@ from planner.plan import (
     load_plan,
     unstated_period_reductions,
 )
+from planner.settings import AGENT_NAME as PLANNER_AGENT
+from planner.source_reads import read_full_history
 from planner.tool_results import ProblemCode
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from planner.tools import load_pending_ask
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from submission.service import first_year_reads
 from translator.discovery import DefinitionNotResolvedError, graph_describe, graph_resolve
 from translator.tool import Translate, build_translate
@@ -134,9 +146,14 @@ class _Strict(BaseModel):
 class Search(_Strict):
     """One `search` call the orchestrator made, with the arguments it sent."""
 
-    query: str
     parts: list[dict[str, Any]] = []
-    as_text: bool = False
+    text: str | None = None
+
+    @model_validator(mode="after")
+    def _says_what_it_searched(self) -> Self:
+        if not self.parts and not self.text:
+            raise ValueError("a search sends `parts`, `text`, or both")
+        return self
 
 
 class Neighbour(_Strict):
@@ -534,7 +551,8 @@ class RecordedResolver:
 
     A call whose arguments differ from the recorded call's is refused
     (`RecordingMismatchError`), so a task edited after recording cannot replay stale
-    answers.
+    answers. The question is compared only for a raw-text search, as a parsed
+    search is read from its parts and context alone.
     """
 
     def __init__(self, calls: Sequence[Mapping[str, Any]]) -> None:
@@ -543,20 +561,21 @@ class RecordedResolver:
     async def __call__(
         self,
         *,
-        question: str,
+        question: str | None,
         parts: list[dict[str, Any]],
         raw_text: bool = False,
         context: SearchContext | None = None,
     ) -> dict[str, Any]:
         if not self._calls:
-            raise RecordingMismatchError(f"no recorded search left for {question!r}")
+            raise RecordingMismatchError(f"no recorded search left for {question or parts!r}")
         call = self._calls.pop(0)
         asked = {
-            "question": question,
             "parts": parts,
             "raw_text": raw_text,
             "context": search_context_meta(context),
         }
+        if raw_text:
+            asked["question"] = question
         recorded = {key: call.get(key) for key in asked}
         if asked != recorded:
             raise RecordingMismatchError(f"search {asked} was recorded as {recorded}")
@@ -574,10 +593,14 @@ def surface_key(tool: str, arguments: Mapping[str, object]) -> str:
 class RecordedSurface:
     """The planner's `ToolSurface`, answering calls from a recording.
 
-    The planner reaches data-mcp for `get_skill` and `get_skill_file`, and for a pinned
-    dataset's first year. A call the recording lacks is answered as an unreachable
-    server is (`ToolSurfaceUnavailableError`), which the planner's tools turn into a
-    sentence saying the call did not complete, and is listed in `misses`.
+    The planner reaches data-mcp for `get_skill` and for a pinned dataset's first year.
+    A recording files a skill's first page under the key `get_skill` and each file's
+    pages under the key `get_skill_file`, with the call's arguments after it
+    (`surface_key`). A `get_skill` call is looked up under whichever of the two its
+    `path` selects, and the call lines a recorded page prints, which name
+    `get_skill_file`, are rewritten to name `get_skill`. A call the recording lacks is answered as an
+    unreachable server is (`ToolSurfaceUnavailableError`), which the planner's tool
+    turns into a sentence saying the call did not complete, and is listed in `misses`.
     """
 
     def __init__(self, results: Mapping[str, Mapping[str, Any]]) -> None:
@@ -595,13 +618,20 @@ class RecordedSurface:
         on_progress: Any = None,
     ) -> ToolCallResult:
         del on_progress
-        key = surface_key(tool.name, arguments)
+        name, arguments = tool.name, dict(arguments)
+        if name == "get_skill" and "path" in arguments:
+            name = "get_skill_file"
+            arguments.setdefault("offset", 0)
+        key = surface_key(name, arguments)
         if key not in self._results:
             self.misses.append(key)
             raise ToolSurfaceUnavailableError(
                 f"the recording holds no answer for {key}", retryable=False
             )
-        return ToolCallResult.model_validate(self._results[key])
+        result = ToolCallResult.model_validate(self._results[key])
+        if tool.name == "get_skill":
+            result = result.model_copy(update={"text": name_get_skill_in_call_lines(result.text)})
+        return result
 
 
 # --- The orchestrator's hand-off -----------------------------------------------------
@@ -627,13 +657,12 @@ async def orchestrator_state(task: Task, resolver: Resolver) -> dict[str, Any]:
     context = SimpleNamespace(state={}, actions=EventActions())
     for search in task.searches:
         found = await tools["search"](
-            query=search.query,
-            tool_context=context,
-            parts=search.parts or None,
-            as_text=search.as_text,
+            tool_context=context, parts=search.parts or None, text=search.text
         )
         if "error" in found:
-            raise TaskStateError(f"{task.id}: search {search.query!r}: {found['error']}")
+            raise TaskStateError(
+                f"{task.id}: search {search.parts or search.text!r}: {found['error']}"
+            )
     handed = tools["plan"](brief=task.brief, asks=list(task.asks), tool_context=context)
     if handed.get(HANDED_OFF) != "plan":
         raise TaskStateError(f"{task.id}: plan answered {handed}")
@@ -647,35 +676,76 @@ async def orchestrator_state(task: Task, resolver: Resolver) -> dict[str, Any]:
 class PlanRecorded(Exception):  # noqa: N818 -- a stop signal, not a fault
     """Raised by the eval's translate step once `propose_plan` has recorded a plan.
 
-    The seam answers a planner tool that raises with a final refusal
+    The adapter answers a planner tool that raises with a final refusal
     (`planner_tool_failed`) and makes no further model call, so the entry ends on the
     first accepted proposal.
     """
 
 
 class _DropPlanRecorded(logging.Filter):
-    """Drops the seam's error log for the eval's own stop, which it reads as a tool failure."""
+    """Drops the planner's error log for the eval's own stop, which it reads as a tool
+    failure. The node logs it."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         return not (record.exc_info and isinstance(record.exc_info[1], PlanRecorded))
 
 
-logging.getLogger("harness.planner_seam").addFilter(_DropPlanRecorded())
+for _logger in ("harness.planner_adapter", "harness.planner_node"):
+    logging.getLogger(_logger).addFilter(_DropPlanRecorded())
 
 
 def quiet_logs() -> None:
     """Silence what a run's record already holds: ADK's traceback for a failed node and
-    the wiring's line for an entry the seam gave up on."""
+    the wiring's line for an entry the adapter gave up on."""
     for name in ("google_adk", "harness.wiring"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
 
 
-# The stop reason of an entry the seam gave up on (`PlannerSeamError`): the planner
+# The stop reason of an entry the adapter gave up on (`PlannerAdapterError`): the planner
 # ended its turns with no accepted plan and no ask, and corrections did not change that.
 GAVE_UP = "gave_up"
 
 
-RequestEdit = Callable[[LlmRequest], None]
+@dataclass
+class ModelRequest:
+    """One request the planner's model client is sent, in google-genai's types.
+
+    The planner sends the system instruction as a string and every declaration in
+    one `Tool` (`harness.planner_model`). `system_text` and `declarations` read
+    any shape google-genai takes, so an edit reads a request the same way
+    whichever form it arrives in.
+    """
+
+    model: str
+    contents: list[types.Content]
+    config: types.GenerateContentConfig
+
+    @property
+    def system_text(self) -> str:
+        """The system instruction's text, whichever shape it was sent in."""
+        return instruction_text(self.config.system_instruction)
+
+    @property
+    def declarations(self) -> dict[str, types.FunctionDeclaration]:
+        """Every function declaration the request sends, by name, whichever `Tool`
+        holds it. Each is the request's own object, so an edit may change it in place."""
+        return {
+            declaration.name: declaration
+            for tool in self.config.tools or []
+            if isinstance(tool, types.Tool)
+            for declaration in tool.function_declarations or []
+            if declaration.name is not None
+        }
+
+
+# An arm's change to each request the planner's model client is sent, made in place.
+# The system instruction, tools and tool config travel where the request sends them:
+# on the request itself, or, on a request sent against the prefix cache
+# (`harness.prefix_cache`), on that cache's create, which the edit is handed as a
+# request with no contents. The planner sends its requests in one form
+# (`ModelRequest`). An edit reads the instruction through `ModelRequest.system_text`
+# and finds a declaration through `ModelRequest.declarations`.
+RequestEdit = Callable[[ModelRequest], None]
 
 
 # A model call's usage before its whole answer arrives: unknown, and left so when the
@@ -693,21 +763,29 @@ _UNFINISHED_CALL: dict[str, Any] = {
 class Probe:
     """What one entry did that its session's events do not carry: the plan the first
     accepted proposal recorded and the id of the `propose_plan` call that recorded it,
-    the code of the refusal an entry with no plan ended on, each model call it
-    started, with its tokens and latency once the whole answer arrived, and what
-    `translator` answered for the plan when one is set."""
+    the code of the refusal an entry with no plan ended on, each request the planner's
+    model client was sent, each model call, with its tokens and latency once the whole
+    answer arrived, and what `translator` answered for the plan when one is set.
+
+    The planner reaches the model only through the client `client` returns, so a
+    turn the adapter or the turn budget answers in the model's place is no call. A
+    call stays open from its first send until a whole answer arrives or the
+    entry's next request starts (`next_request`). A send while one is open is that call
+    sent again (a first-chunk resend, or a resend after the prefix cache was found
+    gone, at open or while its stream was read), so it is one call, timed from its
+    first send. A call whose answer never arrived keeps its usage unknown."""
 
     plan: Plan | None = None
     plan_call: str | None = None
     refused_code: str | None = None
+    requests: list[ModelRequest] = field(default_factory=list)
     calls: list[dict[str, Any]] = field(default_factory=list)
     # Production's translation, run on the recorded plan before the entry ends, and
     # what it answered.
     translator: Translate | None = None
     translation: dict[str, object] | None = None
     _started: float = 0.0
-    # The requests the current turn budget had sent before the call in flight.
-    _requests_before: int | None = None
+    _answering: bool = False
 
     async def translate(self, call: PlannerCall) -> dict[str, object]:
         self.plan = load_plan(call.state)
@@ -716,16 +794,16 @@ class Probe:
             self.translation = await self.translator(call)
         raise PlanRecorded
 
-    def watch(self, seam: PlannerModel) -> PlannerModel:
-        """`seam`, noting the code of each refusal it answers, and `GAVE_UP` when it
-        raises `PlannerSeamError`."""
-        return _Watched(seam, self)
+    def watch(self, planner: PlannerModel) -> PlannerModel:
+        """`planner`, noting the code of each refusal it answers, and `GAVE_UP` when it
+        raises `PlannerAdapterError`."""
+        return _Watched(planner, self)
 
     async def note(self, answering: Awaitable[dict[str, Any]]) -> dict[str, Any]:
         """`answering`'s answer, its refusal code noted as `watch` describes."""
         try:
             answer = await answering
-        except PlannerSeamError:
+        except PlannerAdapterError:
             self.refused_code = GAVE_UP
             raise
         if "refused" in answer:
@@ -733,88 +811,198 @@ class Probe:
             self.refused_code = None if code is None else str(code)
         return answer
 
-    def before_model(
-        self, callback_context: CallbackContext, llm_request: LlmRequest
-    ) -> LlmResponse | None:
-        """Note a call about to go to the model. It runs after the seam's own callbacks,
-        so a request the seam answers itself is no call."""
-        del callback_context, llm_request
-        budget = current_turn_budget.get()
-        self._requests_before = None if budget is None else budget.model_calls
+    def client(self, client: Client, *, edits: Sequence[RequestEdit] = ()) -> Client:
+        """`client`, each streamed request it is sent edited by `edits` and noted, and
+        each answer's usage and latency noted. `client` itself is left unchanged."""
+        return _ProbedClient(client, _ProbedModels(client.aio.models, self, edits), edits)
+
+    def next_request(self) -> None:
+        """Start a request of the entry. No call stays open across two requests."""
+        self._answering = False
+
+    def _sent(self, request: ModelRequest) -> None:
+        self.requests.append(request)
+        if self._answering:
+            return
+        self._answering = True
         self._started = time.perf_counter()
         self.calls.append(dict(_UNFINISHED_CALL))
-        return None
 
-    def after_model(
-        self, callback_context: CallbackContext, llm_response: LlmResponse
-    ) -> LlmResponse | None:
-        del callback_context
-        budget = current_turn_budget.get()
-        if (
-            budget is not None
-            and budget.model_calls == self._requests_before
-            and CLOSED_BY_KEY in (llm_response.custom_metadata or {})
-        ):
-            # The budget answered this call itself, with no request to the model.
-            self.calls.pop()
-            self._requests_before = None
-            return None
-        usage = llm_response.usage_metadata
-        # A streamed call answers in chunks and then once whole; count the whole answer.
-        if usage is not None and not llm_response.partial and self.calls:
-            self.calls[-1] = {
-                "prompt_tokens": usage.prompt_token_count or 0,
-                "cached_tokens": usage.cached_content_token_count or 0,
-                "output_tokens": usage.candidates_token_count or 0,
-                "thinking_tokens": usage.thoughts_token_count or 0,
-                "latency_s": round(time.perf_counter() - self._started, 3),
-            }
-        return None
+    def _answered(self, usage: types.GenerateContentResponseUsageMetadata | None) -> None:
+        self._answering = False
+        if usage is None:
+            return
+        self.calls[-1] = {
+            "prompt_tokens": usage.prompt_token_count or 0,
+            "cached_tokens": usage.cached_content_token_count or 0,
+            "output_tokens": usage.candidates_token_count or 0,
+            "thinking_tokens": usage.thoughts_token_count or 0,
+            "latency_s": round(time.perf_counter() - self._started, 3),
+        }
+
+    async def _watched(
+        self, stream: AsyncIterator[types.GenerateContentResponse]
+    ) -> AsyncIterator[types.GenerateContentResponse]:
+        """`stream`'s chunks, the last usage any carried noted once it ends. A stream
+        that raised or that its reader cut leaves the call open for a resend."""
+        usage = None
+        async with aclosing(cast(AsyncGenerator[types.GenerateContentResponse], stream)) as chunks:
+            async for chunk in chunks:
+                usage = chunk.usage_metadata or usage
+                yield chunk
+        self._answered(usage)
+
+
+def _edited(
+    model: str,
+    contents: list[types.Content],
+    config: types.GenerateContentConfig,
+    edits: Sequence[RequestEdit],
+) -> ModelRequest:
+    """A copy of the request, with `edits` made to it."""
+    request = ModelRequest(
+        model=model,
+        contents=[content.model_copy(deep=True) for content in contents],
+        config=config.model_copy(deep=True),
+    )
+    for edit in edits:
+        edit(request)
+    return request
+
+
+class _ProbedModels:
+    """`client.aio.models` with its streamed call edited and noted by a `Probe`."""
+
+    def __init__(self, models: Any, probe: Probe, edits: Sequence[RequestEdit]) -> None:
+        self._models = models
+        self._probe = probe
+        self._edits = tuple(edits)
+
+    async def generate_content_stream(
+        self, *, model: str, contents: Any, config: Any = None
+    ) -> AsyncIterator[types.GenerateContentResponse]:
+        request = _edited(
+            model,
+            [types.Content.model_validate(content) for content in contents],
+            types.GenerateContentConfig.model_validate(config or {}),
+            self._edits,
+        )
+        self._probe._sent(request)
+        if self._edits:
+            model, contents, config = request.model, request.contents, request.config
+        stream = await self._models.generate_content_stream(
+            model=model, contents=contents, config=config
+        )
+        return self._probe._watched(stream)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._models, name)
+
+
+class _ProbedCaches:
+    """`client.aio.caches` with each create's system instruction, tools and tool config
+    edited by `edits`."""
+
+    def __init__(self, caches: Any, edits: Sequence[RequestEdit]) -> None:
+        self._caches = caches
+        self._edits = tuple(edits)
+
+    async def create(self, *, model: str, config: Any = None) -> types.CachedContent:
+        if self._edits:
+            created = types.CreateCachedContentConfig.model_validate(config or {})
+            prefix = types.GenerateContentConfig(
+                system_instruction=created.system_instruction,
+                tools=created.tools,
+                tool_config=created.tool_config,
+            )
+            request = _edited(model, [], prefix, self._edits)
+            model = request.model
+            config = created.model_copy(
+                update={
+                    "system_instruction": request.config.system_instruction,
+                    "tools": request.config.tools,
+                    "tool_config": request.config.tool_config,
+                }
+            )
+        return await self._caches.create(model=model, config=config)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._caches, name)
+
+
+class _ProbedAsyncClient:
+    """`client.aio` with `_ProbedModels` and `_ProbedCaches` in place of its own."""
+
+    def __init__(
+        self, aio: AsyncClient, models: _ProbedModels, edits: Sequence[RequestEdit]
+    ) -> None:
+        self._aio = aio
+        self.models = models
+        self.caches = _ProbedCaches(aio.caches, edits)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._aio, name)
+
+
+class _ProbedClient(Client):
+    """`client` with `_ProbedAsyncClient` as its `aio`.
+
+    A `Client`, since ADK's `Gemini` takes nothing else, built without
+    `Client.__init__`. Every other attribute is `client`'s own, and the wrapped client
+    stays open when this one is collected.
+    """
+
+    def __init__(self, client: Client, models: _ProbedModels, edits: Sequence[RequestEdit]) -> None:
+        self._client = client
+        self._probed_aio = _ProbedAsyncClient(client.aio, models, edits)
+
+    @property
+    def aio(self) -> AsyncClient:
+        return cast(AsyncClient, self._probed_aio)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+    def __del__(self) -> None:
+        pass
 
 
 class _Watched:
     """The `PlannerModel` `Probe.watch` returns."""
 
-    def __init__(self, seam: PlannerModel, probe: Probe) -> None:
-        self._seam = seam
+    def __init__(self, planner: PlannerModel, probe: Probe) -> None:
+        self._planner = planner
         self._probe = probe
 
     async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        return await self._probe.note(self._seam(**kwargs))
+        return await self._probe.note(self._planner(**kwargs))
 
     async def revise(self, **kwargs: Any) -> dict[str, Any]:
-        return await self._probe.note(self._seam.revise(**kwargs))
+        return await self._probe.note(self._planner.revise(**kwargs))
 
 
-def build_seam(
-    *,
-    probe: Probe,
-    surface: RecordedSurface,
-    prefix_cache: PrefixCache | None,
-    edits: Sequence[RequestEdit] = (),
-    model: BaseLlm | None = None,
-) -> PlannerSeam:
-    """The seam `harness.wiring.build_planner` builds, with the probe's translate step.
+def live_client() -> Client:
+    """The google-genai client a live entry's planner calls go through, built from the
+    environment with the HTTP retries the served planner's model makes
+    (`orchestrator.agent.model_retry_options`)."""
+    return Client(http_options=types.HttpOptions(retry_options=model_retry_options()))
 
-    The planner, its instruction, its tools and the seam's callbacks are production's
-    own. `edits` change each request the planner sends its model (`arms.Arm`), and the
-    probe notes each one and its answer. `model` stands in for the planner's model, as
-    `validate.py`'s scripted model does.
+
+def build_adapter(
+    *, probe: Probe, surface: RecordedSurface, prefix_cache: PrefixCache | None, client: Client
+) -> PlannerAdapter:
+    """The adapter `harness.wiring.build_planner` builds, with the probe's translate
+    step and the planner's model calls going through `client`.
+
+    The planner, its instruction, its tools and the planner node the adapter runs it in
+    (`harness.planner_node`) are production's own.
     """
-
-    def edit_request(callback_context: CallbackContext, llm_request: LlmRequest) -> None:
-        del callback_context
-        for edit in edits:
-            edit(llm_request)
-
-    return PlannerSeam(
+    return PlannerAdapter(
         settings=Settings(),
         surface=surface,
         prefix_cache=prefix_cache,
         translate=probe.translate,
-        model=model,
-        before_model_callbacks=[edit_request, probe.before_model],
-        after_model_callbacks=[probe.after_model],
+        client=client,
     )
 
 
@@ -849,22 +1037,25 @@ async def run_entry(
     recording: Mapping[str, Any],
     *,
     prefix_cache: PrefixCache | None,
+    client: Client | None = None,
     edits: Sequence[RequestEdit] = (),
-    model: BaseLlm | None = None,
     timeout_s: float = 300.0,
     answers: Sequence[Mapping[str, Any]] = (),
     translation: TranslationCalls | None = None,
 ) -> EntryRun:
     """Run `task`'s planner entry once on a fresh session.
 
-    The entry ends at the first plan `propose_plan` records, at an ask of the user, or
-    wherever the seam ends it (a bound of its request's budget, its round budget, a
-    correction it gave up on), or after `timeout_s`. The planner streams, as a studio
-    turn runs it. `answers` are the user's replies to the entry's asks, in order; each
-    resumes the paused entry, as the studio's interrupt route does, in a request of its
-    own with a fresh budget. A live run passes none, so an ask ends it. With
-    `translation`, production's translation runs on the recorded plan over those calls,
-    and `probe.translation` holds its answer.
+    The planner's model calls go through `client`, a live client (`live_client`) when
+    None. `edits` change each request it is sent (`RequestEdit`), and the probe notes
+    each one and its answer. The entry ends at the first plan `propose_plan` records,
+    at an ask of the user, or wherever the adapter ends it (a bound of its request's
+    budget, its round budget, a correction it gave up on), or after `timeout_s`. The
+    planner streams, as a studio turn runs it. `answers` are the user's replies to
+    the entry's asks, in order. Each resumes the paused entry, as the studio's
+    interrupt route does, in a request of its own with a fresh budget. A live run
+    passes none, so an ask ends it. With `translation`, production's translation
+    runs on the recorded plan over those calls, and `probe.translation` holds its
+    answer.
     """
     probe = Probe()
     if translation is not None:
@@ -879,13 +1070,16 @@ async def run_entry(
     state = await orchestrator_state(task, resolver)
     if resolver.left():
         raise RecordingMismatchError(f"{task.id}: {resolver.left()} recorded searches went unasked")
-    seam = build_seam(
-        probe=probe, surface=surface, prefix_cache=prefix_cache, edits=edits, model=model
+    adapter = build_adapter(
+        probe=probe,
+        surface=surface,
+        prefix_cache=prefix_cache,
+        client=probe.client(client if client is not None else live_client(), edits=edits),
     )
     sessions = InMemorySessionService()
     session = await sessions.create_session(app_name=_APP, user_id=_USER, state=state)
-    # The seam wrapped as `harness.server.create_app` wraps it.
-    planner = handing_back_planner_failures(probe.watch(seam))
+    # The adapter wrapped as `harness.server.create_app` wraps it.
+    planner = handing_back_planner_failures(probe.watch(adapter))
     runner = Runner(node=entry_workflow(planner), app_name=_APP, session_service=sessions)
     message = types.Content(role="user", parts=[types.Part.from_text(text=task.question)])
     # The conversation a studio turn runs in, holding the spec blocks the orchestrator's
@@ -905,6 +1099,7 @@ async def run_entry(
         content: types.Content | None = message
         while content is not None:
             budgets.append(TurnBudget.from_settings(settings))
+            probe.next_request()
             token = current_turn_budget.set(budgets[-1])
             identities = current_recorded_identity.set(conversation.recorded_identity)
             try:
@@ -960,7 +1155,9 @@ def inputs_digest(task: Task, recording: Mapping[str, Any]) -> str:
     """A digest of what a run of `task` shows the planner: the question, the searches,
     the brief and asks, and the recorded search envelopes and tool answers. Runs pair
     only where their digests agree. An ask not marked `across_years` digests without
-    that field, so a baseline stored before asks carried the mark still pairs on it."""
+    that field, so a baseline stored before asks carried the mark still pairs on it. The
+    searches are digested as `Search` models, so a baseline stored before they took `parts`
+    and `text` pairs with no task."""
     asks = [
         ask
         if isinstance(ask, str)
@@ -1008,6 +1205,9 @@ def _entry_events(session: Session) -> list[Event]:
 
 # --- The record of one run -----------------------------------------------------------
 
+# The value of the record field and fingerprint key `planner_runner`, which stored
+# baselines carry.
+PLANNER_RUNNER = "pydantic_ai"
 RECORD_SCHEMA = 4
 
 
@@ -1047,7 +1247,7 @@ def _requirement_kinds(arguments: Mapping[str, Any]) -> list[str]:
 def proposals(calls: Sequence[Mapping[str, Any]], *, recorded: str | None) -> list[dict[str, Any]]:
     """Each `propose_plan` call: what it sent and what the tool answered.
 
-    The call `recorded`, which recorded the entry's plan, answers with the seam's
+    The call `recorded`, which recorded the entry's plan, answers with the adapter's
     tool-error text, since the eval's translate step stops inside it, so it is marked
     `ok`. A model response can hold several proposals, so the call is found by its id.
     """
@@ -1127,7 +1327,7 @@ def record_period_reduction(record: Mapping[str, Any], task: Task) -> PeriodRedu
 
 def stop_reason(run: EntryRun) -> str:
     """How the entry ended: `accepted`, `timeout` (the eval's own limit), `error`, the
-    seam's refusal code, or `asked_user` (an ask the tool took, which the entry paused
+    adapter's refusal code, or `asked_user` (an ask the tool took, which the entry paused
     on, still awaiting the user's answer). A refusal wins over an ask, since the entry
     it ends pauses on nothing."""
     if run.probe.plan is not None:
@@ -1156,8 +1356,9 @@ def entry_record(
     """One run's JSON record: what the planner did, what it cost, and how it ended.
 
     `experiment` identifies the treatment the run had (`run.experiment`), so a resumed
-    run directory never mixes two. `period_reductions` and `period_reduction` say
-    what the accepted plan does with its years.
+    run directory never mixes two, and `planner_runner` holds `PLANNER_RUNNER`.
+    `period_reductions` and `period_reduction` say what the accepted plan does with
+    its years.
     """
     calls = tool_calls(run.events)
     proposed = proposals(calls, recorded=run.probe.plan_call)
@@ -1169,6 +1370,7 @@ def entry_record(
         "task": task.id,
         "rep": rep,
         "model": model,
+        "planner_runner": PLANNER_RUNNER,
         "revision": revision,
         "experiment": experiment,
         "inputs": run.inputs,
@@ -1198,18 +1400,21 @@ __all__ = [
     "KINDS",
     "PERIOD_REFUSAL",
     "EntryRun",
+    "ModelRequest",
     "PeriodReduction",
     "Probe",
     "RecordedResolver",
     "RecordedSurface",
     "RecordingMismatchError",
+    "RequestEdit",
     "Task",
     "TaskStateError",
     "answer_id",
-    "build_seam",
+    "build_adapter",
     "entry_record",
     "first_year_gaps",
     "inputs_digest",
+    "live_client",
     "load_recording",
     "load_tasks",
     "orchestrator_state",

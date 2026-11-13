@@ -4,9 +4,9 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 0,
-      "total_chars": 153450,
-      "system_instruction_chars": 20138,
-      "declaration_total_chars": 41163,
+      "total_chars": 152552,
+      "system_instruction_chars": 20148,
+      "declaration_total_chars": 40287,
       "declarations": [
         {
           "name": "propose_plan",
@@ -17,12 +17,8 @@
           "chars": 1908
         },
         {
-          "name": "get_skill_file",
-          "chars": 1084
-        },
-        {
           "name": "get_skill",
-          "chars": 660
+          "chars": 868
         },
         {
           "name": "reject_plan",
@@ -33,7 +29,7 @@
         "total_chars": 87572,
         "buckets": [
           {
-            "bucket": "text(seam-brief)",
+            "bucket": "text(planner-brief)",
             "count": 1,
             "chars": 87567
           },
@@ -49,9 +45,9 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 1,
-      "total_chars": 187063,
-      "system_instruction_chars": 20138,
-      "declaration_total_chars": 41163,
+      "total_chars": 186207,
+      "system_instruction_chars": 20148,
+      "declaration_total_chars": 40287,
       "declarations": [
         {
           "name": "propose_plan",
@@ -62,12 +58,8 @@
           "chars": 1908
         },
         {
-          "name": "get_skill_file",
-          "chars": 1084
-        },
-        {
           "name": "get_skill",
-          "chars": 660
+          "chars": 868
         },
         {
           "name": "reject_plan",
@@ -78,7 +70,7 @@
         "total_chars": 120293,
         "buckets": [
           {
-            "bucket": "text(seam-brief)",
+            "bucket": "text(planner-brief)",
             "count": 1,
             "chars": 87567
           },
@@ -104,9 +96,9 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 2,
-      "total_chars": 188429,
-      "system_instruction_chars": 20138,
-      "declaration_total_chars": 41163,
+      "total_chars": 187615,
+      "system_instruction_chars": 20148,
+      "declaration_total_chars": 40287,
       "declarations": [
         {
           "name": "propose_plan",
@@ -117,12 +109,8 @@
           "chars": 1908
         },
         {
-          "name": "get_skill_file",
-          "chars": 1084
-        },
-        {
           "name": "get_skill",
-          "chars": 660
+          "chars": 868
         },
         {
           "name": "reject_plan",
@@ -133,7 +121,7 @@
         "total_chars": 120767,
         "buckets": [
           {
-            "bucket": "text(seam-brief)",
+            "bucket": "text(planner-brief)",
             "count": 1,
             "chars": 87567
           },
@@ -169,9 +157,9 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 0,
-      "total_chars": 71579,
-      "system_instruction_chars": 20138,
-      "declaration_total_chars": 41163,
+      "total_chars": 70681,
+      "system_instruction_chars": 20148,
+      "declaration_total_chars": 40287,
       "declarations": [
         {
           "name": "propose_plan",
@@ -182,12 +170,8 @@
           "chars": 1908
         },
         {
-          "name": "get_skill_file",
-          "chars": 1084
-        },
-        {
           "name": "get_skill",
-          "chars": 660
+          "chars": 868
         },
         {
           "name": "reject_plan",
@@ -198,7 +182,7 @@
         "total_chars": 7657,
         "buckets": [
           {
-            "bucket": "text(seam-brief)",
+            "bucket": "text(planner-brief)",
             "count": 1,
             "chars": 7652
           },
@@ -214,9 +198,9 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 1,
-      "total_chars": 105192,
-      "system_instruction_chars": 20138,
-      "declaration_total_chars": 41163,
+      "total_chars": 104336,
+      "system_instruction_chars": 20148,
+      "declaration_total_chars": 40287,
       "declarations": [
         {
           "name": "propose_plan",
@@ -227,12 +211,8 @@
           "chars": 1908
         },
         {
-          "name": "get_skill_file",
-          "chars": 1084
-        },
-        {
           "name": "get_skill",
-          "chars": 660
+          "chars": 868
         },
         {
           "name": "reject_plan",
@@ -248,7 +228,7 @@
             "chars": 32671
           },
           {
-            "bucket": "text(seam-brief)",
+            "bucket": "text(planner-brief)",
             "count": 1,
             "chars": 7652
           },
@@ -269,9 +249,9 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 2,
-      "total_chars": 107099,
-      "system_instruction_chars": 20138,
-      "declaration_total_chars": 41163,
+      "total_chars": 106285,
+      "system_instruction_chars": 20148,
+      "declaration_total_chars": 40287,
       "declarations": [
         {
           "name": "propose_plan",
@@ -282,12 +262,8 @@
           "chars": 1908
         },
         {
-          "name": "get_skill_file",
-          "chars": 1084
-        },
-        {
           "name": "get_skill",
-          "chars": 660
+          "chars": 868
         },
         {
           "name": "reject_plan",
@@ -303,7 +279,7 @@
             "chars": 32671
           },
           {
-            "bucket": "text(seam-brief)",
+            "bucket": "text(planner-brief)",
             "count": 1,
             "chars": 7652
           },
@@ -330,5 +306,8 @@
         ]
       }
     }
-  ]
+  ],
+  "declaration_digests": {
+    "served": "5459ca281bff6523280ce27bf8e8782677d67ab4e0cd66babd7422ae188370e0"
+  }
 }

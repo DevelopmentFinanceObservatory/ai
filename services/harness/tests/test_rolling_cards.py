@@ -113,7 +113,7 @@ async def scene() -> AsyncIterator[Scene]:
 
 
 class Replays:
-    """`RollingCards`' replay seam over the scene, keeping each call's populations."""
+    """`RollingCards`' replay interface over the scene, keeping each call's populations."""
 
     def __init__(self, scene: Scene) -> None:
         self._scene = scene

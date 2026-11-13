@@ -1,4 +1,4 @@
-"""Tests for the node lookup seam: fixture round-trips, batching, dedup, errors, and the
+"""Tests for the node lookup client: fixture round-trips, batching, dedup, errors, and the
 planner line."""
 
 from __future__ import annotations

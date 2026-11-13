@@ -125,7 +125,7 @@ class TranslatorCore:
 
 # The session-state slot holding `_failure_fingerprint` of every translation
 # that failed to compile with no fix this loop applies itself, in the
-# planner's current entry. `harness.planner_seam` clears it when an entry
+# planner's current entry. `harness.planner_adapter` clears it when an entry
 # starts (`clear_compile_failures`), so an ask-the-user resume keeps it.
 COMPILE_FAILURES_STATE_KEY = "translator:compile_failures"
 

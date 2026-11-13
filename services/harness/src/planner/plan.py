@@ -30,12 +30,10 @@ is a patch. It names the decisions and requirements that change, by `slot` and
 by `id`, and carries forward every item it does not mention. `removed_decisions`
 and `removed_evidence_requirements` are the deletion channel, since an item
 absent from a patch means unchanged. Whether a given revision amends at all is
-`planner.agent`'s call: a call that states the version it amends routes through
-`amend()`, while a call stating `starts_new_plan` begins a fresh `Plan` at
-version 1 (see `_resolve_intent` there) -- unless the planner was built with
-`question_fixed=True`, where a restart is refused instead of ever reaching
-this module, and an amendment's own `question` is held to the one already
-recorded.
+`submission.service`'s call (see `_resolve_intent` there). A call that states the
+version it amends routes through `amend()`, and its own `question` is held to the
+one already recorded. A call stating `starts_new_plan` while a plan is recorded is
+refused before it reaches this module.
 """
 
 from __future__ import annotations
@@ -161,14 +159,14 @@ UNSUPPORTED_STATE_KEY = "planner:unsupported"
 
 # The session-state slot saying whether the planner's current entry opened
 # with the user's own amendment of the plan at the approval card.
-# `harness.planner_seam.PlannerSeam` writes it with `PLAN_ROUNDS_STATE_KEY`
+# `harness.planner_adapter.PlannerAdapter` writes it with `PLAN_ROUNDS_STATE_KEY`
 # when an entry starts, so an ask-the-user resume inside one entry keeps it.
 # Unset, the entry carries no amendment.
 AMENDMENT_ENTRY_STATE_KEY = "planner:amendment_entry"
 
 # The session-state slot holding the option the user picked for a planner
 # decision on the plan card, as a `DecisionPick` dump, when the planner's
-# current entry replans to hold that pick. `harness.planner_seam.PlannerSeam`
+# current entry replans to hold that pick. `harness.planner_adapter.PlannerAdapter`
 # writes it, or clears it, with `AMENDMENT_ENTRY_STATE_KEY` when an entry
 # starts, so an ask-the-user resume inside one entry keeps it. Admission
 # refuses a plan that does not state the pick (`submission.service.admit`).
@@ -193,7 +191,7 @@ TERMINAL_DECLINES_STATE_KEY = "planner:terminal_declines"
 REDUCTION_REFUSED_ASKS_STATE_KEY = "planner:reduction_refused_asks"
 
 # Every spec_id the executor refused since the session's last first-draft
-# entry, as a list of bare spec_ids. `harness.planner_seam.PlannerSeam` writes
+# entry, as a list of bare spec_ids. `harness.planner_adapter.PlannerAdapter` writes
 # it on each entry and clears it on a first draft, and admission refuses a plan
 # pinning one still in force (`submission.service.refused_in_force`,
 # `submission.service.admit`).
@@ -205,18 +203,19 @@ REFUSED_SPECS_STATE_KEY = "planner:refused_spec_ids"
 REFUSAL_DETAILS_STATE_KEY = "planner:refused_spec_details"
 # The time of the latest Search call made that settled on each spec_id, by
 # spec_id: the search for an input the planner pinned no dataset for
-# (`planner.agent.pin_by_search`) and each compile (`planner.agent.
-# compile_on_basis`, `compile_whole`). An answer served again keeps the time
-# of the call that made it (`translator.discovery.answered_once_at`), so it
+# (`planner.source_reads.pin_by_search`) and each compile
+# (`planner.source_reads.compile_on_basis`, `compile_whole`). An answer served
+# again keeps the time of the call that made it
+# (`translator.discovery.answered_once_at`), so it
 # moves nothing (`record_spec_searched`). Kept beside the pins, whose stored
 # shape it leaves as it was.
 SPEC_SEARCHED_STATE_KEY = "planner:spec_searched_at"
 
 # The session-state slot holding a `PinSource` for every spec_id the
 # planner was shown this entry, keyed by spec_id in the order it was shown
-# (`pin_sources`). `harness.planner_seam` writes it from the search
+# (`pin_sources`). `harness.planner_adapter` writes it from the search
 # readings its first message renders, one entry per spec_id they name.
-# `propose_plan` (`planner.agent`) reads a settled entry's measure choice and
+# `propose_plan` (`planner.tools`) reads a settled entry's measure choice and
 # the identity its block carries, and `translator.discovery.discover_source`
 # builds a pinned requirement's source from an entry with no `search` call.
 PIN_SOURCES_STATE_KEY = "planner:pin_sources"
@@ -230,7 +229,7 @@ SEEDS_STATE_KEY = "seeds"
 
 # The session-state slot holding a `WindowedPin` for every pin of a dataset
 # whose identity a search in the conversation recorded
-# (`recorded_identity`), that the plan `planner.agent.propose_plan` last
+# (`recorded_identity`), that the plan `propose_plan` (`planner.tools.propose`) last
 # recorded moves to that identity over a dataset requirement's own period.
 # `translator.discovery.discover_source` takes such a requirement's source
 # from Search's answer for the copy's identity, with no `search` call. Each
@@ -241,12 +240,13 @@ WINDOWED_PINS_STATE_KEY = "planner:windowed_pins"
 # The session-state slot holding each pin compiled to put a calculation's
 # inputs on one measure basis or provider scope, or a declared whole over its
 # part (`AlignedPin`), which `submission.service._aligned_bases` reads and
-# `planner.agent.with_source_reads` writes (`submission.service.save_aligned_pin`).
+# `planner.source_reads.with_source_reads` writes
+# (`submission.service.save_aligned_pin`).
 ALIGNED_PINS_STATE_KEY = "planner:aligned_pins"
 
 # The session-state slot holding the spec block of each source a referral
 # offers the planner in place of a pin (`translator.discovery.discover_source`),
-# or that a scope read answered (`planner.agent.read_scope`), by spec_id.
+# or that a scope read answered (`planner.source_reads.read_scope`), by spec_id.
 # `held_sources` reads it. Recording a plan drops each block it
 # cannot pin (`keep_found_sources`).
 FOUND_SOURCES_STATE_KEY = "planner:found_sources"
@@ -267,21 +267,23 @@ SCOPE_UNREAD_BLOCK_KEY = "_scope_unread"
 ALIGNED_PIN_WARNINGS_STATE_KEY = "planner:aligned_pin_warnings"
 
 # The session-state slot holding an `AlignedInput` for every dataset
-# requirement of the plan `planner.agent.propose_plan` last recorded that
+# requirement of the plan `propose_plan` (`planner.tools.propose`) last recorded that
 # admission pinned to a compiled pin (`AlignedPin`) in place of the pin it
 # states. Unset until a plan holds one.
 ALIGNMENTS_STATE_KEY = "planner:alignments"
 
 # The session-state slot holding a `PinVerdict` for every pinned dataset
-# requirement of the plan `planner.agent.propose_plan` last recorded: whether
-# admission judged its pin to answer a narrower question than the one asked
+# requirement of the plan `propose_plan` (`planner.tools.propose`) last
+# recorded: whether admission judged its pin to answer a narrower question
+# than the one asked
 # (`submission.service._pin_verdicts`), which the translator reads in place
 # of judging it again. Unset until a plan is recorded with them.
 PIN_VERDICTS_STATE_KEY = "planner:pin_verdicts"
 
-# The session-state slot holding what `planner.agent.propose_plan` read about
-# every year a pinned dataset holds, by the pin's spec_id, as its first year and
-# its rows, or null when Search's answer over no window stated no first year.
+# The session-state slot holding what `propose_plan` (`planner.tools.propose`)
+# read about every year a pinned dataset holds, by the pin's spec_id, as its
+# first year and its rows, or null when Search's answer over no window stated
+# no first year.
 # One read answers every requirement and every later proposal of the turn that
 # pins the dataset. Unset until a start that follows the newest data needs one.
 FULL_HISTORIES_STATE_KEY = "planner:full_histories"
@@ -291,8 +293,8 @@ FULL_HISTORIES_STATE_KEY = "planner:full_histories"
 # `MAX_ASK_CHARS` characters each (`load_asks`). The orchestrator's
 # `plan_start` node writes it beside the brief on every plan call, and the
 # `plan` tool refuses a call that lists none
-# (`harness.orchestrator_tools._asks_refusal`). `harness.planner_seam` lists the asks in the
-# planner's first message, and `planner.agent.propose_plan` copies them onto
+# (`harness.orchestrator_tools._asks_refusal`). `harness.planner_adapter` lists the asks in the
+# planner's first message, and `propose_plan` (`planner.tools.propose`) copies them onto
 # every plan it records, so `Plan` refuses one that does not account for each
 # exactly once. Unset, a plan carries no asks and no ask is accounted for.
 ASKS_STATE_KEY = "orchestrator:asks"
@@ -312,7 +314,7 @@ ASK_BREAKDOWNS_STATE_KEY = "orchestrator:ask_breakdowns"
 ASKS_ACROSS_YEARS_STATE_KEY = "orchestrator:asks_across_years"
 
 # How many plans one entry into the planner may propose -- a first draft and
-# three more, whether each patches the recorded plan or restarts. Each proposal
+# three more, each patching the recorded plan. Each proposal
 # opens a fresh discovery budget, so without a cap a refer-and-repropose loop
 # is unbounded in calls and spend. The count starts over on every entry into
 # the planner (a new turn, a user amendment, a replan), while `Plan.version`
@@ -330,7 +332,7 @@ MAX_PLAN_DECISIONS = 24
 # The most evidence requirements one plan may state. A plan that spends
 # `translator.discovery.DISCOVERY_CALL_BUDGET` (8, one search per dataset
 # requirement) carries about eight dataset requirements and about as many
-# calculations over them; the realistic upper end the seam brief is sized
+# calculations over them; the realistic upper end the planner brief is sized
 # from is nine requirements in total. Sixteen dataset requirements with their
 # calculations is roughly twice the budget, so a plan at the cap is refused
 # for its size rather than for a discovery budget it can never spend.
@@ -380,7 +382,7 @@ MAX_GROUP_BY = 2
 # The most characters the model-authored part of one plan may serialise to: its
 # `question`, `decisions` and `evidence_requirements`, as compact JSON with
 # non-ASCII characters left as written. The count is raw characters, which is
-# what `harness.planner_seam` renders: free text as it is, and entities,
+# what `harness.planner_adapter` renders: free text as it is, and entities,
 # predicates and a decision's `fixes` as JSON in the same encoding. The brief
 # renders these fields in full, so this is what bounds the plan section to this
 # many characters plus the render's own line framing. The largest plan in the
@@ -406,6 +408,17 @@ def cut_user_text(text: str, cap: int) -> str:
     if len(text) <= cap:
         return text
     return (text[: max(cap - len(CUT_MARKER), 0)] + CUT_MARKER)[:cap]
+
+
+def truncate(text: str, cap: int) -> str:
+    """Return `text` when it is at most `cap` characters, else a prefix of it ending in "…".
+
+    The ellipsis is inside `cap`, so for a positive `cap` the result is never
+    longer than `cap`, and every caller passes a positive constant. Use it for
+    text the harness renders for a model, such as a candidate's label or a
+    decision's prose. `cut_user_text` marks a cut of the user's own words.
+    """
+    return text if len(text) <= cap else text[: cap - 1] + "…"
 
 
 # One word of a requirement's `across`, a party as the party word alone. A
@@ -812,7 +825,7 @@ def search_pin_slot(spec_id: str) -> str:
 
     `propose_plan` writes that decision itself when a requirement pins a
     measure offered by a source a search settled on
-    (`planner.agent._measure_decisions`).
+    (`submission.service._measure_decisions`).
     Derived from `spec_id`, so two pins never collide; `spec_id` already
     matches `Identifier`'s pattern, so the prefixed slot does too.
     """
@@ -1834,8 +1847,8 @@ MAX_DECLINES = len(UnsupportedOperation) * (MAX_PLAN_ASKS + 1)
 class UnsupportedPlanError(ValueError):
     """A plan rule refused a calculation the system cannot carry out.
 
-    Distinct from a malformed draft: no reshaping of the plan states the
-    calculation, so `planner.agent.propose_plan` answers with the
+    Distinct from a malformed draft. No reshaping of the plan states the
+    calculation, so `propose_plan` (`planner.tools.propose`) answers with the
     `unsupported` outcome and requires a `Decline` naming `operation`.
     """
 
@@ -1967,7 +1980,7 @@ class FirstYear(StrictModel):
 class AsksUnaccountedError(ValueError):
     """A plan leaves an ask the brief lists unaccounted for, or answers or declines one twice.
 
-    `planner.agent.propose_plan` answers it with a typed problem naming the
+    `propose_plan` (`planner.tools.propose`) answers it with a typed problem naming the
     asks, so the model adds the missing `answered` or `declined` entry
     rather than reshaping requirements.
     """
@@ -2056,8 +2069,9 @@ class WholeIsItsMemberError(ValueError):
     `party` the party the ask totals across, `denominator_id` the dataset
     requirement its denominator reads, and `named` the entities that
     requirement names alone on that side, each of which the numerator names
-    too (`check_wholes_span_their_totals`). `planner.agent.propose_plan`
-    answers it with a typed problem naming the ways out.
+    too (`check_wholes_span_their_totals`). `propose_plan`
+    (`planner.tools.propose`) answers it with a typed problem naming the ways
+    out.
     """
 
     def __init__(
@@ -2089,7 +2103,7 @@ class AskRoleDroppedError(ValueError):
     `dropped` holds each such ask's dropped parties (`roles_not_kept`) and
     `together` every party of each of those asks that breaks down by both
     parties of a flow, which one output keeps at once, each in the word its
-    `AskBreakdown.by` holds. `planner.agent.propose_plan` answers
+    `AskBreakdown.by` holds. `propose_plan` (`planner.tools.propose`) answers
     it with a typed problem naming each ask and party, so the model keeps
     the party or declines that part.
     """
@@ -4295,7 +4309,8 @@ _MODEL_AUTHORED = {"question", "answer_mode", "decisions", "evidence_requirement
 
 
 def _serialised_chars(value: Any) -> int:
-    """Characters of `value` as compact JSON with non-ASCII left as written, as the seam renders it."""
+    """Characters of `value` as compact JSON with non-ASCII left as written, as
+    the adapter renders it."""
     return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False))
 
 
@@ -4318,7 +4333,7 @@ class Plan(StrictModel):
             "default, and what a plan persisted before this field existed means) leaves an "
             "unread dataset requirement as the answer in its own right; `computed` requires "
             "every dataset requirement to feed a calculation. The planner's proposal tool requires the "
-            "model to pass this explicitly on a first draft or a restart, so the default "
+            "model to pass this explicitly on a first draft, so the default "
             "only governs a plan built another way, such as a legacy record deserialising "
             "without the field."
         ),
@@ -4855,8 +4870,8 @@ class Plan(StrictModel):
     def reject(self) -> Plan:
         """Return a new `Plan` marked `REJECTED`.
 
-        Nothing in this plan may run afterwards. `planner.agent`'s
-        `declare_ready` checks the status and refuses. The planner's own tools
+        Nothing in this plan may run afterwards. `planner.tools.declare_ready`
+        checks the status and refuses. The planner's own tools
         stay callable, so the user can ask for a revision.
 
         Raises:
@@ -5639,8 +5654,8 @@ def period_licences_held(
     step stating another reduction, a step of another kind and a removed
     step drop it, since each states another figure. A step
     renamed together with its decisions holds no licence of its old id, and
-    one named again in the same call takes a new one. A restart (`previous`
-    `None`) holds only the steps it names.
+    one named again in the same call takes a new one. A first draft
+    (`previous` `None`) holds only the steps it names.
 
     Raises:
         ValueError: If `named` names a step `plan` does not state, or one
@@ -6280,10 +6295,10 @@ def identity_or_refusal(
     each source the translator offered. Otherwise it is the one `pin`'s
     block in `shown` carries, when data-mcp would take it
     (`shown_definition`). A pin compiled in code is on record through that
-    block alone: a scope choice switched on the plan card
+    block alone. A scope choice switched on the plan card
     (`harness.graph.switch`) or an input put on its calculation's basis
-    (`planner.agent.compile_on_basis`, `planner.agent.compile_whole`) is
-    held in `held_sources` and in no search record.
+    (`planner.source_reads.compile_on_basis`, `planner.source_reads.compile_whole`)
+    is held in `held_sources` and in no search record.
 
     The reason is `None` with a definition, and when none is on record
     because no search recorded one and `pin`'s block, if any, carries none.
@@ -6313,7 +6328,7 @@ def identity_on_record(
 
 # The seconds a discovery call made now may take inside a planner entry. That is
 # what remains of the request's wall-clock bound (`harness.turn_budget.TurnBudget`).
-# Set by `harness.planner_seam` for each planner run inside a request. Unset
+# Set by `harness.planner_adapter` for each planner run inside a request. Unset
 # otherwise, where a call takes its capability row's own timeout.
 current_discovery_time_left: ContextVar[Callable[[], float] | None] = ContextVar(
     "discovery_time_left", default=None
@@ -6430,7 +6445,7 @@ class AlignedPin(StrictModel):
     `option_ids` holds one option per axis moved, measure basis or provider
     scope, sorted (`submission.service.Realignment.option_ids`). `digest` is
     Search's answer as a search's digest
-    (`harness.tool_contracts.resolver_digest`), which the planner seam stores
+    (`harness.tool_contracts.resolver_digest`), which the planner adapter stores
     as a reading of the conversation.
 
     A declared whole (`whole_axis` set, `DatasetRequirement.whole_of`) is

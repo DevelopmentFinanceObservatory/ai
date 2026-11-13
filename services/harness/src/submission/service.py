@@ -25,7 +25,8 @@ rolling from their start (`planner.plan.split_of`), the pins it windows
 (`_window_pins`), and what a built plan may not record
 (`_unrecordable`). It answers the refusal that stops the chain first, or an
 `Admission` carrying the plan to record. `submit` records an admission and
-answers `ok`, which is all `planner.agent.propose_plan` does with its call.
+answers `ok`, which is all `propose_plan`
+(`planner.tools.propose`) does with its call.
 A `Proposer` names the tool the proposal came through, so every `action` a
 refusal carries calls a tool the model was given.
 
@@ -400,7 +401,7 @@ class Proposer:
         return Action(call=self.call, arguments=arguments or None, needs=needs)
 
 
-# `planner.agent.propose_plan`'s proposer.
+# The proposer of `propose_plan`, which `planner.specs` declares.
 PROPOSE_PLAN = Proposer(call="propose_plan")
 
 
@@ -429,8 +430,6 @@ def submit(
     view: SessionView,
     proposal: Proposal,
     *,
-    question_fixed: bool,
-    reads_user_words: bool,
     proposer: Proposer,
 ) -> dict[str, object]:
     """Check `proposal` against `view` and record it, answering as `propose_plan` does.
@@ -441,13 +440,7 @@ def submit(
     nothing but an `unsupported` answer. `proposer` is the tool `proposal`
     came through.
     """
-    admitted = admit(
-        view,
-        proposal,
-        question_fixed=question_fixed,
-        reads_user_words=reads_user_words,
-        proposer=proposer,
-    )
+    admitted = admit(view, proposal, proposer=proposer)
     if not isinstance(admitted, Admission):
         return admitted
     view.record_admission(admitted)
@@ -468,17 +461,12 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     view: SessionView,
     proposal: Proposal,
     *,
-    question_fixed: bool,
-    reads_user_words: bool,
     proposer: Proposer,
 ) -> Admission | dict[str, object]:
     """Run the chain over `proposal`, answering the plan to record or the refusal that stops it.
 
-    `question_fixed` is `_resolve_intent`'s. `reads_user_words` says the
-    planner reads the user's own words in every entry, as the standalone
-    planner and `harness_pair_v1` do; under `harness.planner_seam` it reads
-    them only in an entry the user's amendment opened
-    (`planner.plan.amendment_entry`). Only where it reads them may
+    The planner reads the user's own words only in an entry the user's
+    amendment opened (`planner.plan.amendment_entry`). Only there may
     `proposal.across_years` name a step, and each step it names takes a
     licence to combine its years (`planner.plan.period_licences_held`).
     `proposer` is the tool every refusal's `action` names. Writes nothing
@@ -527,7 +515,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             ),
             propose=proposer.call,
         ) or _invalid_data(exc, proposer)
-    reads_user_words = reads_user_words or amendment_entry(view.state)
+    in_amendment_entry = amendment_entry(view.state)
     question = proposal.question
     answer_mode = proposal.answer_mode
     removed_evidence_requirements = patch.removed_evidence_requirements
@@ -539,7 +527,6 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         starts_new_plan=proposal.starts_new_plan,
         rounds_so_far=load_plan_rounds(view.state),
         question=question,
-        question_fixed=question_fixed,
     )
     if isinstance(resolved, dict):
         return resolved
@@ -601,7 +588,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             patch.across_years,
             requirements=written,
             previous=previous,
-            reads_user_words=reads_user_words,
+            in_amendment_entry=in_amendment_entry,
         )
         or _removed_asks_refused(patch, previous, view)
         or _refused_spec_pinned(written, refused)
@@ -827,11 +814,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 )
                 if absent
             )
-            raise ValueError(
-                f"a first draft states {missing}"
-                if existing is None
-                else f"a `starts_new_plan` call states {missing}, for its new plan"
-            )
+            raise ValueError(f"a first draft states {missing}")
         else:
             plan = Plan(
                 question=question,
@@ -889,8 +872,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         # a decision, every decision cited, the length and count limits on
         # each field, a non-blank question, and the size limit on the whole. A removal naming an item
         # the plan does not state is a `ValueError` from `Plan.amend` itself,
-        # and a first draft or restart with no `question`/`answer_mode` is
-        # one raised above.
+        # and a first draft with no `question`/`answer_mode` is one raised
+        # above.
         cause = _unsupported_cause(exc)
         if cause is not None:
             view.record_unsupported(cause.operation)
@@ -907,7 +890,6 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         stated=stated,
         statement=statement(stated, to_origin={}, alignments=entries),
         previous=previous,
-        reads_user_words=reads_user_words,
         proposer=proposer,
         sources=sources,
     )
@@ -1385,9 +1367,9 @@ def _decline_unearned(
     A decline this plan adds needs its code among the `unsupported` answers
     recorded in this planner entry (`load_unsupported`): `propose_plan`'s or
     its translation's, or one a replan's run-time refusal stands for
-    (`harness.planner_seam._earned_by_refusal`); or among its optional
+    (`harness.planner_adapter._earned_by_refusal`); or among its optional
     declines (`load_optional_declines`), which hold `no_operation_covers`
-    in a first-draft entry (`harness.planner_seam`), for an ask no
+    in a first-draft entry (`harness.planner_adapter`), for an ask no
     `PERIOD_REDUCTION_UNSTATED` refusal named (`_declinable`). A decline carried
     unchanged from `previous`, the plan this one amends, was earned when it
     was recorded; one restated with the same `Decline.key` in other words is
@@ -1881,15 +1863,7 @@ _BUDGET_EXHAUSTED = (
     "discovery budget; no further version will be recorded."
 )
 
-# The same refusal for a `starts_new_plan` call. The call already claims to be a
-# different question, so the text says a restart counts against the same bound.
-_BUDGET_EXHAUSTED_RESTART = (
-    f"A restart is a proposal like any other, and {MAX_PLAN_ROUNDS} have been made in this "
-    "planner run, each with its own discovery budget; no further plan will be recorded, "
-    "however the call is stated."
-)
-
-# What follows either refusal. The approval is offered only where the recorded plan
+# What follows that refusal. The approval is offered only where the recorded plan
 # compiled, since a plan that never did has no card for the user to approve.
 _BUDGET_APPROVABLE = (
     "The last version that compiled can still be approved, and the user's next message "
@@ -1897,10 +1871,10 @@ _BUDGET_APPROVABLE = (
 )
 _BUDGET_FRESH = "The user's next message opens a fresh budget."
 
-# The refusal for a `starts_new_plan` call while `question_fixed`. The call is
+# The refusal for a `starts_new_plan` call while a plan is recorded. The call is
 # how the model tells the harness the user's reply asks a different question,
 # so the message says what happened and that nothing further is needed from
-# it. `harness.planner_seam` ends the turn on this code as it does on
+# it. `harness.planner_adapter` ends the turn on this code as it does on
 # `BUDGET_EXHAUSTED`.
 _QUESTION_FIXED_RESTART = (
     "This turn's question is fixed, so `starts_new_plan` cannot open a plan for a "
@@ -1918,7 +1892,6 @@ def _resolve_intent(
     starts_new_plan: bool,
     rounds_so_far: int,
     question: str | None = None,
-    question_fixed: bool = False,
 ) -> tuple[Plan | None, int] | dict[str, object]:
     """Which plan a `propose_plan` call means, from what the call states.
 
@@ -1931,24 +1904,21 @@ def _resolve_intent(
     read as starting a fresh plan and drop every item it did not restate.
 
     With nothing recorded, the call is a first draft. With a plan recorded,
-    an `amends_version` naming that same version patches it. `starts_new_plan`
-    begins a plan of its own. Anything else is refused, naming the version to
-    pass so the next call is correct.
+    an `amends_version` naming that same version patches it. Anything else is
+    refused, naming the version to pass so the next call is correct.
 
     `amends_version` and `starts_new_plan` are read in that order, so a call
     stating both is treated as an amendment, since a payload shaped as a
     patch is read as one. `rounds_so_far` counts the proposals made in this
-    entry into the planner. `PlannerSeam` zeroes it on every entry that is not
-    a mid-turn resume. An amendment or a restart increments it, since every
-    version opens a fresh discovery budget, and past `MAX_PLAN_ROUNDS` the call
-    is refused rather than recorded, with no `action` named, since any tool
-    named there would restart the loop. A restart begins at version 1 and is
-    counted like an amendment, so restarting does not escape the bound.
+    entry into the planner. `PlannerAdapter` zeroes it on every entry that is not
+    a mid-turn resume. An amendment increments it, since every version opens a
+    fresh discovery budget, and past `MAX_PLAN_ROUNDS` the call is refused
+    rather than recorded, with no `action` named, since any tool named there
+    would restart the loop.
 
-    `question_fixed` (`harness.planner_seam` builds the planner with it
-    set; standalone and `harness_pair_v1` leave it `False`) narrows both
-    readings once a plan is recorded, against `existing.question` rather than
-    the call's own wording of the question it is answering:
+    The turn's question is fixed, so once a plan is recorded both readings are
+    held to `existing.question` rather than the call's own wording of the
+    question it is answering:
 
     - A restart (`starts_new_plan` with no `amends_version`) is refused with
       `QUESTION_FIXED` before the round cap is even checked, ahead of
@@ -1967,40 +1937,28 @@ def _resolve_intent(
     """
     if existing is None:
         return None, 1
-    blocked = _question_fixed_restart_blocked(
-        existing,
-        amends_version=amends_version,
-        starts_new_plan=starts_new_plan,
-        question_fixed=question_fixed,
-    ) or _round_cap_blocked(
-        existing,
-        amends_version=amends_version,
-        starts_new_plan=starts_new_plan,
-        rounds_so_far=rounds_so_far,
-    )
+    blocked = _restart_blocked(
+        existing, amends_version=amends_version, starts_new_plan=starts_new_plan
+    ) or _round_cap_blocked(existing, rounds_so_far=rounds_so_far)
     if blocked is not None:
         return blocked
-    if amends_version is None and starts_new_plan:
-        return None, rounds_so_far + 1
-    invalid = _amendment_version_invalid(
-        existing, amends_version
-    ) or _question_fixed_amendment_invalid(
-        existing, question=question, question_fixed=question_fixed
+    invalid = _amendment_version_invalid(existing, amends_version) or _question_changed(
+        existing, question=question
     )
     if invalid is not None:
         return invalid
     return existing, rounds_so_far + 1
 
 
-def _question_fixed_restart_blocked(
-    existing: Plan, *, amends_version: int | None, starts_new_plan: bool, question_fixed: bool
+def _restart_blocked(
+    existing: Plan, *, amends_version: int | None, starts_new_plan: bool
 ) -> dict[str, object] | None:
-    """Return the `QUESTION_FIXED` refusal for a restart while `question_fixed`, or `None`.
+    """Return the `QUESTION_FIXED` refusal for a restart, or `None`.
 
     Split out of `_resolve_intent` to keep its own branch count within this
     project's `PLR0911` budget.
     """
-    if not (question_fixed and amends_version is None and starts_new_plan):
+    if not (amends_version is None and starts_new_plan):
         return None
     return problem(
         ProblemCode.QUESTION_FIXED,
@@ -2010,20 +1968,17 @@ def _question_fixed_restart_blocked(
     )
 
 
-def _round_cap_blocked(
-    existing: Plan, *, amends_version: int | None, starts_new_plan: bool, rounds_so_far: int
-) -> dict[str, object] | None:
+def _round_cap_blocked(existing: Plan, *, rounds_so_far: int) -> dict[str, object] | None:
     """Return the `BUDGET_EXHAUSTED` refusal past `MAX_PLAN_ROUNDS`, or `None`.
 
     Split out of `_resolve_intent` for the same reason as
-    `_question_fixed_restart_blocked`, above.
+    `_restart_blocked`, above.
     """
     if rounds_so_far + 1 <= MAX_PLAN_ROUNDS:
         return None
-    restart = amends_version is None and starts_new_plan
     return problem(
         ProblemCode.BUDGET_EXHAUSTED,
-        f"{_BUDGET_EXHAUSTED_RESTART if restart else _BUDGET_EXHAUSTED} "
+        f"{_BUDGET_EXHAUSTED} "
         f"{_BUDGET_APPROVABLE if existing.translation is not None else _BUDGET_FRESH}",
         outcome=Outcome.REFUSED,
         detail={
@@ -2041,35 +1996,34 @@ def _amendment_version_invalid(
     one, or `None` when `amends_version` is exactly `existing.version`.
 
     Split out of `_resolve_intent` for the same reason as
-    `_question_fixed_restart_blocked`, above.
+    `_restart_blocked`, above.
     """
     if amends_version is None:
         return _invalid_plan(
             f"A plan is already recorded (version {existing.version}), so this call has "
             "to say which it is: pass "
             f"`amends_version={existing.version}` to patch that plan, or "
-            "`starts_new_plan=true` to begin a plan of its own for a different question. "
-            "A patch states only what changes; everything it does not mention is carried "
-            "forward.",
+            "`starts_new_plan=true` if the user's reply asks a different question, which "
+            "ends the turn and records no plan for it. A patch states only what changes; "
+            "everything it does not mention is carried forward.",
         )
     if amends_version != existing.version:
         return _invalid_plan(
             f"This call amends version {amends_version}, but version {existing.version} is "
             f"the one recorded. Pass `amends_version={existing.version}`, or "
-            "`starts_new_plan=true` to begin a plan of its own for a different question.",
+            "`starts_new_plan=true` if the user's reply asks a different question, which "
+            "ends the turn and records no plan for it.",
         )
     return None
 
 
-def _question_fixed_amendment_invalid(
-    existing: Plan, *, question: str | None, question_fixed: bool
-) -> dict[str, object] | None:
+def _question_changed(existing: Plan, *, question: str | None) -> dict[str, object] | None:
     """Return the `INVALID_PLAN` refusal for an amendment that rewords a fixed question, or `None`.
 
     Split out of `_resolve_intent` for the same reason as
-    `_question_fixed_restart_blocked`, above.
+    `_restart_blocked`, above.
     """
-    if not (question_fixed and question is not None and question != existing.question):
+    if question is None or question == existing.question:
         return None
     return _invalid_plan(
         f"This call amends version {existing.version}, but its `question` "
@@ -2782,7 +2736,6 @@ def _unrecordable(
     stated: Plan,
     statement: Plan,
     previous: Plan | None,
-    reads_user_words: bool,
     proposer: Proposer,
     sources: SourceReadings,
 ) -> dict[str, object] | None:
@@ -2811,7 +2764,7 @@ def _unrecordable(
     per member of a party nobody named that no decision states
     (`_result_scope_unstated`), and for a step reducing across years for a
     result no ask across years asks for (`_period_reduction_unstated`,
-    against `stated`, read with `reads_user_words`).
+    against `stated`).
     """
     if not plan.evidence_requirements:
         return (
@@ -2834,7 +2787,7 @@ def _unrecordable(
         or _breakdown_decline_unearned(statement, view)
         or _decline_missing(plan, view, proposer)
         or _result_scope_unstated(plan)
-        or _period_reduction_unstated(stated, view, reads_user_words=reads_user_words)
+        or _period_reduction_unstated(stated, view)
     )
 
 
@@ -2941,9 +2894,7 @@ def _one_year_together(together_with: Sequence[str]) -> str:
     )
 
 
-def _period_reduction_unstated(
-    plan: Plan, view: SessionView, *, reads_user_words: bool
-) -> dict[str, object] | None:
+def _period_reduction_unstated(plan: Plan, view: SessionView) -> dict[str, object] | None:
     """Return the `PERIOD_REDUCTION_UNSTATED` refusal naming every step of `plan` that reduces across years for a result no ask across years asks for, or `None`.
 
     The rule is `planner.plan.unstated_period_reductions`, over the
@@ -2961,7 +2912,7 @@ def _period_reduction_unstated(
     Otherwise the refusal gives two ways to settle the step: keep the years
     (`_keep_the_years`), or read one year, the second only where the step
     holds a year it can read alone (`planner.plan.YearsHeld.one_year`).
-    Where the planner reads the user's own words (`reads_user_words`), it
+    In an amendment entry, where the planner reads the user's own words, it
     adds a third, naming the step in `across_years` when those words ask for
     the figure.
 
@@ -2982,6 +2933,7 @@ def _period_reduction_unstated(
     if not gaps:
         return None
     view.record_reduction_refused(ask for gap in gaps for ask in gap.asks)
+    in_amendment_entry = amendment_entry(view.state)
     steps = {requirement.id: requirement for requirement in plan.evidence_requirements}
     sentences = []
     offered: list[dict[str, object] | None] = []
@@ -3030,7 +2982,7 @@ def _period_reduction_unstated(
                     f"{_one_year_rolling(read.offset, rolls='`rolling` naming both')}."
                     f"{_one_year_together(gap.together_with)}"
                 )
-            if reads_user_words:
+            if in_amendment_entry:
                 remedies += (
                     f" If the user's own words ask for one ranking over {years}, leave "
                     f"`per_period` false on {step} and name {step} in `across_years`."
@@ -3048,7 +3000,7 @@ def _period_reduction_unstated(
                     f"op `eq` and {_one_year_rolling(read.offset, rolls='`rolling`')}."
                     f"{_one_year_together(gap.together_with)}"
                 )
-            if reads_user_words:
+            if in_amendment_entry:
                 remedies += (
                     f" If the user's own words ask for one figure over {years}, name {step} "
                     "in `across_years`."
@@ -3087,7 +3039,7 @@ def _across_years_unread(
     *,
     requirements: Sequence[EvidenceRequirement],
     previous: Plan | None,
-    reads_user_words: bool,
+    in_amendment_entry: bool,
 ) -> dict[str, object] | None:
     """Return the `INVALID_PLAN` refusal of an `across_years` naming steps where the planner reads none of the user's own words, or `None`.
 
@@ -3096,7 +3048,7 @@ def _across_years_unread(
     A step whose licence `previous` holds as `requirements` state it is a
     restatement, which grants nothing (`planner.plan.licences_restated`).
     """
-    if reads_user_words:
+    if in_amendment_entry:
         return None
     restated = licences_restated(across_years, requirements=requirements, previous=previous)
     unread = [name for name in across_years if name not in restated]
@@ -3526,7 +3478,7 @@ def _first_year_refusal(
     names no dataset whose years can be read
     (`OpenPeriodFault.NO_SOURCE_ON_RECORD`). Otherwise the first year is
     unknown before the dataset was read over no window (`refused` as it
-    is, which `planner.agent.propose_plan_reading` answers by reading it),
+    is, which `planner.source_reads.with_source_reads` answers by reading it),
     `FIRST_YEAR_READ_FAILED` when that read's answer stated none (`read`
     holds the pin with `None`), and `RollingIssue.FRAME_TOO_LARGE` when the
     history is past the rows one frame may hold
@@ -3615,7 +3567,7 @@ def first_year_reads(state: SessionState) -> list[Mapping[str, Any]]:
     can still read in `state`, read through the lookups `first_year_identity` reads.
 
     `propose_plan` reads a pinned dataset's first year
-    (`planner.agent.read_full_history`) when a requirement rolls from its start and
+    (`planner.source_reads.read_full_history`) when a requirement rolls from its start and
     nothing on record states that year (`_first_year_refusal`), once per dataset. Which dataset
     it reads depends on the plan, so this is every dataset whose block `state` holds
     (`planner.plan.held_sources`) that has an identity on record
@@ -3877,8 +3829,7 @@ def _measure_decisions(
         decisions: This `propose_plan` call's own decisions, before they are
             merged with any prior plan.
         evidence_requirements: Likewise, this call's own requirements.
-        previous: The plan this call amends, or `None` on a first draft or a
-            restart.
+        previous: The plan this call amends, or `None` on a first draft.
         measures: The measure choice a pin of each spec_id states
             (`measure_choices`).
         user_settled: The spec_ids of `measures` whose measure the user
@@ -4473,7 +4424,7 @@ def save_aligned_pin(state: SessionState, pin: AlignedPin, *, warnings: tuple[st
 
 # The session slot holding each search code made for a calculation's input
 # the planner pinned no dataset for (`SearchedPin`), which `_aligned_bases`
-# reads and `planner.agent.with_source_reads` writes.
+# reads and `planner.source_reads.with_source_reads` writes.
 SEARCHED_PINS_STATE_KEY = "planner:searched_pins"
 
 
@@ -4484,7 +4435,7 @@ class SearchedPin(StrictModel):
     (`translator.discovery.requirement_revision`), so a requirement restated
     with other words, parties or years is searched again. `spec_id` is the
     dataset Search settled on and `digest` its answer as a search's digest
-    (`harness.tool_contracts.resolver_digest`), which the planner seam stores
+    (`harness.tool_contracts.resolver_digest`), which the planner adapter stores
     as a reading of the conversation; both are `None` when Search settled on
     no one dataset, and `_aligned_bases` then refuses the plan. `status` is
     the status Search answered the part with (`definite`, `ambiguous`,
@@ -4965,10 +4916,10 @@ def _provider_read_in_words(scope: PartScope, choice: ScopeChoice) -> bool:
     (`ChoiceOrigin`) holds on its axis.
 
     Such a row is the one the words picked ("multilateral ODA"), so it counts as
-    stated even on a pin the planner searched for (`planner.agent.pin_by_search`),
+    stated even on a pin the planner searched for (`planner.source_reads.pin_by_search`),
     whose block marks the axis as the planner's and so carries nothing to a later
     search (`harness.scope_choices.carried_entries`). An entry from a choice is one
-    the planner posted to align the pin (`planner.agent.compile_on_basis`) or a
+    the planner posted to align the pin (`planner.source_reads.compile_on_basis`) or a
     carried one. A basis read in the planner's words stays the planner's.
     """
     return (
@@ -5072,7 +5023,7 @@ def _aligned_bases(
     unknown until a dataset is pinned. An input of a calculation another of
     whose inputs carries a basis or provider choice, with no search of it
     held yet, answers `BASIS_UNKNOWN`, naming each to search for
-    (`Unpinned`). `planner.agent.with_source_reads` searches for them and
+    (`Unpinned`). `planner.source_reads.with_source_reads` searches for them and
     proposes again.
     One whose search settled on no one dataset answers
     `OPERATION_UNSUPPORTED`, since one basis or provider scope cannot be
@@ -5150,7 +5101,7 @@ def _aligned_bases(
     plan this call amends states it, on the pin it states. `admit`
     derives its decisions there and pins it to the compile last. An input
     with no such compile yet answers `BASES_UNALIGNED`, naming each to
-    compile with every option it moves to (`Realignment`). `planner.agent.with_source_reads`
+    compile with every option it moves to (`Realignment`). `planner.source_reads.with_source_reads`
     compiles them and proposes again. An input whose choice does not offer
     the provider scope its calculation counts, or offers it unavailable,
     answers `PROVIDERS_UNALIGNED` (`_providers_unaligned`); the same on the
@@ -5286,7 +5237,7 @@ def _scope_unread(
     another input that carries one (`by_axis`) or is a candidate too: a share
     of two candidates aligns once both are read. A candidate whose group holds
     no other input with a choice on any such axis is left unread, as alignment
-    would leave it as it stands. `planner.agent.read_scope` makes each read.
+    would leave it as it stands. `planner.source_reads.read_scope` makes each read.
     """
     pins = {
         requirement.id: requirement.source_spec_id
@@ -6500,7 +6451,7 @@ def _declared_wholes(
 
     A declared whole is its part's final pin, the one alignment moved the
     part to (`realigned`) else its own, with the declared axis left open
-    (`whole_axis_held`, `planner.agent.compile_whole`) and every other choice
+    (`whole_axis_held`, `planner.source_reads.compile_whole`) and every other choice
     held. `compiled` holds the wholes compiled so far
     (`AlignedPin.key`), so wholes declaring one part and axis share one
     compile.
@@ -7230,7 +7181,7 @@ def unread_part(
     missing of its pin source (`part_not_shown`), that source's block
     (`part_block_missing`), the block's scope choices (`scope_unreadable`) and
     what the whole leaves open on `axis` (`whole_axis_held`, `axis_not_held`).
-    `_declared_wholes` and `planner.agent.compile_whole` both name a failure by it."""
+    `_declared_wholes` and `planner.source_reads.compile_whole` both name a failure by it."""
     if source is None:
         return f"{part_pin} is not among the datasets Search showed this turn", "part_not_shown"
     if block is None:
@@ -7267,12 +7218,12 @@ def share_whole_underivable(
       holds), or answers with no one dataset.
     - `part_outside_whole`, `whole_members_unstated`: Search's whole does not
       hold, or does not show it holds, a party the part names
-      (`planner.agent._uncontained`).
+      (`planner.source_reads._uncontained`).
     - `whole_names_another_total`: the whole names an entity on the side it
       leaves open other than the total Search bound there (`_misnamed_total`).
 
     `_declared_wholes` answers the first two kinds and the last, and
-    `planner.agent.compile_whole` every kind but the first and the last.
+    `planner.source_reads.compile_whole` every kind but the first and the last.
     `detail.requirement_id` names the whole for the refusal's sentence
     (`harness.sentences`).
     """
@@ -7322,7 +7273,7 @@ def _with_found(
 def _basis_unknown(unpinned: Sequence[Unpinned]) -> dict[str, object]:
     """Return the `BASIS_UNKNOWN` problem naming each unpinned input of a calculation to search for.
 
-    `planner.agent.with_source_reads` answers it by searching for each and
+    `planner.source_reads.with_source_reads` answers it by searching for each and
     proposing again, so the planner sees it only where no tool surface
     reaches Search.
     """
@@ -7340,8 +7291,8 @@ def _basis_unknown(unpinned: Sequence[Unpinned]) -> dict[str, object]:
 def _scope_unread_problem(reads: Sequence[ScopeRead], proposer: Proposer) -> dict[str, object]:
     """Return the `SCOPE_UNREAD` problem naming each candidate pin to read before alignment.
 
-    `planner.agent.with_source_reads` answers it by reading each
-    (`planner.agent.read_scope`) and proposing again, and answers a read
+    `planner.source_reads.with_source_reads` answers it by reading each
+    (`planner.source_reads.read_scope`) and proposing again, and answers a read
     that leaves a pin unread as `OPERATION_UNSUPPORTED`, so the planner sees
     it only where no tool surface reaches Search. No read can be made there,
     so the same plan would be refused again, and the refusal asks for each
@@ -7372,7 +7323,7 @@ def _bases_unaligned(
 ) -> dict[str, object]:
     """Return the `BASES_UNALIGNED` problem naming each input to compile on its calculation's basis or provider scope.
 
-    `by_axis` holds each input's choice by axis. `planner.agent.with_source_reads`
+    `by_axis` holds each input's choice by axis. `planner.source_reads.with_source_reads`
     answers it by compiling each and proposing again, so the planner sees it
     only where no tool surface reaches Search. `detail.requirement_id` names
     the first input for the refusal's sentence (`harness.sentences`).

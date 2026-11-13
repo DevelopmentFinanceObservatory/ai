@@ -1,0 +1,219 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Total gross ODA disbursements for health including population policy, programmes and reproductive health, from Germany, 2018 to 2023"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Germany's total gross ODA disbursements across all recipients for health and population policy, programme, and reproductive health from 2018 to 2023, using the OECD Creditor Reporting System breakdown level 1.",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "source_spec_b1c621f1c99339fe9301f668844bc7ad",
+        "description": "How the flow is counted.",
+        "options": [
+          "gross disbursements",
+          "net disbursements",
+          "commitments"
+        ],
+        "chosen": "gross disbursements",
+        "resolved_by": "planner_default",
+        "rationale": "Search elected gross disbursements for this source.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_b1c621f1c99339fe9301f668844bc7ad",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "combined",
+        "decision_ids": [
+          "source_spec_b1c621f1c99339fe9301f668844bc7ad"
+        ],
+        "measure": "gross ODA disbursements for health and population policy, programme and reproductive health",
+        "entities": [
+          {
+            "name": "Germany",
+            "role": "donor"
+          }
+        ],
+        "across": [
+          "recipient"
+        ],
+        "period": {
+          "start": 2018,
+          "end": 2023
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_b1c621f1c99339fe9301f668844bc7ad",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": "sum",
+        "breakdown": null
+      },
+      {
+        "kind": "dataset",
+        "id": "split",
+        "decision_ids": [
+          "source_spec_b1c621f1c99339fe9301f668844bc7ad"
+        ],
+        "measure": "gross ODA disbursements for health and population policy, programme and reproductive health",
+        "entities": [
+          {
+            "name": "Germany",
+            "role": "donor"
+          }
+        ],
+        "across": [
+          "recipient"
+        ],
+        "period": {
+          "start": 2018,
+          "end": 2023
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_b1c621f1c99339fe9301f668844bc7ad",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": "separate",
+        "breakdown": {
+          "dimension": "sector",
+          "level": 1
+        }
+      },
+      {
+        "kind": "aggregate",
+        "id": "by_sector",
+        "decision_ids": [],
+        "input_id": "split",
+        "reduction": "sum",
+        "group_by": [
+          "period",
+          "breakdown"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "combined_yearly",
+        "decision_ids": [],
+        "input_id": "combined",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "overall",
+        "decision_ids": [],
+        "input_id": "combined",
+        "reduction": "sum",
+        "group_by": [
+          "entity"
+        ]
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "Germany gross ODA disbursements for health by year, 2018 to 2023",
+      "Germany gross ODA disbursements for population policy, programme, and reproductive health by year, 2018 to 2023",
+      "Combined total gross ODA disbursements for health and population policy/programmes/reproductive health by year, 2018 to 2023",
+      "Overall total combined gross ODA disbursements across 2018 to 2023"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "by_sector"
+        ]
+      },
+      {
+        "ask": 1,
+        "outputs": [
+          "by_sector"
+        ]
+      },
+      {
+        "ask": 2,
+        "outputs": [
+          "combined_yearly"
+        ]
+      },
+      {
+        "ask": 3,
+        "outputs": [
+          "overall"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [
+      3
+    ],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

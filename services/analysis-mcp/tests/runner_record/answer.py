@@ -15,9 +15,9 @@ pair those columns, that groupby and that cut give (`analysis_roots.frame_ref_fo
 with no enrichment stamp). The
 recorded frame of a groupby root is the dataset version apis summed, which a
 mint record names as the root's dataset, so it is read as recorded. A root that
-states no `columns`, such as a Spec root, takes the default enrichment of its
-recorded frame's role columns (`analysis.role_columns`), as the live root source
-resolves it against the version read (`analysis_roots.record_options`).
+states no `columns`, such as a Spec root, takes the default enrichment the live
+root source gives the roles its frame holds, the place type for a frame of no flow
+role (`default_enrichment.with_default_enrichment`).
 
 A GET reads what the calls stored, after every call is answered, as the door
 serving its path answers it: a derived frame's manifest and its Parquet file (`doors.derived`),
@@ -47,7 +47,6 @@ from datasets_api.analysis import (
     ResolvedRoot,
     SpecRoot,
     recorded_dataset_root,
-    role_columns,
     run_analysis,
     run_anchor,
 )
@@ -103,13 +102,9 @@ class _RenderedRoots(FakeRootSource):
         self, root: SpecRoot | DatasetRoot, *, latest: bool, trace_id: str | None
     ) -> ResolvedRoot:
         if root.rendering.columns is None:
-            version = (
-                root.content_version
-                if isinstance(root, DatasetRoot) and not latest
-                else self.newest[root.spec_id]
+            columns = tuple(
+                with_default_enrichment(None, roles=self._roles(root, latest=latest)) or ()
             )
-            roles = role_columns(self.frames[(root.spec_id, version)])
-            columns = tuple(with_default_enrichment(None, roles=roles) or ())
             rendering = root.rendering.model_copy(update={"columns": columns})
             root = root.model_copy(update={"rendering": rendering})
         resolved = super().resolve(root, latest=latest, trace_id=trace_id)
@@ -140,6 +135,14 @@ class _RenderedRoots(FakeRootSource):
             rendering=root_rendering(options),
             source=columns,
         )
+
+    def _roles(self, root: SpecRoot | DatasetRoot, *, latest: bool) -> tuple[str, ...]:
+        """The columns of the frame `root` reads, as `FakeRootSource.resolve` picks its
+        version, among which `with_default_enrichment` finds the frame's roles."""
+        given = root.content_version if isinstance(root, DatasetRoot) else None
+        version = given if given is not None and not latest else self.newest.get(root.spec_id)
+        frame = self.frames.get((root.spec_id, version)) if version is not None else None
+        return () if frame is None else tuple(frame.table.column_names)
 
     def dataset_root(self, record: Mapping[str, Any]) -> DatasetRoot:
         """The dataset root a stored recipe's root `record` names, read with the

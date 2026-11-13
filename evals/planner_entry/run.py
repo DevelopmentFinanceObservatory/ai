@@ -34,6 +34,7 @@ import langfuse_store
 from arms import ARMS
 from entry import (
     EVAL_DIR,
+    PLANNER_RUNNER,
     Task,
     entry_record,
     load_recording,
@@ -79,8 +80,8 @@ def revision() -> str:
 def experiment(arm: str, *, model: str, revision: str, run_timeout: float) -> str:
     """A digest of everything a run of `arm` is treated with besides its task: the arm,
     the model, the code at `revision`, the turn budget each request runs under
-    (`harness.turn_budget.TurnBudget`), the prefix cache, and the eval's own time
-    limit. Records of one arm in one run share it."""
+    (`harness.turn_budget.TurnBudget`), the prefix cache, `PLANNER_RUNNER`, and the
+    eval's own time limit. Records of one arm in one run share it."""
     settings = Settings()
     treatment = {
         "arm": arm,
@@ -92,6 +93,7 @@ def experiment(arm: str, *, model: str, revision: str, run_timeout: float) -> st
         "turn_wall_s": settings.turn_wall_s,
         "model_first_chunk_s": settings.model_first_chunk_s,
         "prefix_cache": settings.studio_prefix_cache,
+        "planner_runner": PLANNER_RUNNER,
     }
     return hashlib.sha256(json.dumps(treatment, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -132,7 +134,12 @@ async def run_all(args: argparse.Namespace, tasks: list[Task], arms: list[str]) 
             f"{args.out} holds runs of {', '.join(foreign)} under another model, code, "
             "setting or arm; start a new --out"
         )
-    prefix_cache = PrefixCache() if Settings().studio_prefix_cache else None
+    # An arm's edits reach the prefix cache's creates (`entry.RequestEdit`) under the key
+    # of the prefix before them, so each arm with edits keeps a cache of its own.
+    shared = PrefixCache() if Settings().studio_prefix_cache else None
+    prefix_caches = {
+        arm: PrefixCache() if shared is not None and ARMS[arm].edits else shared for arm in arms
+    }
     gate = asyncio.Semaphore(args.concurrency)
 
     async def one(triple: Triple, count: int, total: int) -> None:
@@ -141,7 +148,7 @@ async def run_all(args: argparse.Namespace, tasks: list[Task], arms: list[str]) 
             run = await run_entry(
                 by_id[task_id],
                 recordings[task_id],
-                prefix_cache=prefix_cache,
+                prefix_cache=prefix_caches[arm],
                 edits=ARMS[arm].edits,
                 timeout_s=args.run_timeout,
             )

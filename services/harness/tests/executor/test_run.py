@@ -439,7 +439,7 @@ async def test_a_refusal_that_names_a_delay_is_retried_after_it(
     assert sleeps.delays == [7.0]
 
 
-async def test_a_step_reports_each_answer_and_the_retry_it_is_about_to_make(
+async def test_a_step_reports_its_start_once_each_answer_and_the_retry_it_is_about_to_make(
     approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
 ) -> None:
     surface = _surface(
@@ -462,9 +462,11 @@ async def test_a_step_reports_each_answer_and_the_retry_it_is_about_to_make(
 
     assert isinstance(outcome, Accepted), outcome
     assert heard == [
+        ("debt", None),
         ("debt", "Result received; checking it"),
         ("debt", f"Retrying in 7s (attempt 2 of {MAX_ATTEMPTS_PER_STEP})"),
         ("debt", "Result received; checking it"),
+        ("totals", None),
         ("totals", "Result received; checking it"),
     ]
 
@@ -491,7 +493,7 @@ async def test_a_raising_progress_callback_never_fails_the_run(
     )
 
     assert isinstance(outcome, Accepted), outcome
-    assert heard == ["debt", "debt", "debt", "totals"]
+    assert heard == ["debt", "debt", "debt", "debt", "totals", "totals"]
 
 
 class _ReportingSurface(ScriptedSurface):
@@ -532,7 +534,9 @@ async def test_two_concurrent_steps_report_under_their_own_step_ids(
     )
 
     assert heard == [
+        ("debt", None),
         ("debt", f"{SPEC_KENYA} 0"),
+        ("pop", None),
         ("pop", f"{SPEC_POPULATION} 0"),
         ("debt", f"{SPEC_KENYA} 1"),
         ("pop", f"{SPEC_POPULATION} 1"),
@@ -1301,14 +1305,14 @@ async def test_missing_years_are_recorded_or_refused_as_the_requirement_says(
 
 
 @pytest.mark.parametrize(
-    ("seam", "labels"),
+    ("lookup", "labels"),
     [
         pytest.param("graph", ["Kenya", "Germany", None], id="named-by-the-graph"),
         # A lookup that fails or hangs leaves the donors unlabelled, and the
-        # step goes on, whatever seam was injected.
+        # step goes on, whatever lookup was injected.
         pytest.param("graph-fails", ["Kenya", None, None], id="graph-lookup-fails"),
-        pytest.param("raises", ["Kenya", None, None], id="injected-seam-raises"),
-        pytest.param("hangs", ["Kenya", None, None], id="injected-seam-hangs"),
+        pytest.param("raises", ["Kenya", None, None], id="injected-lookup-raises"),
+        pytest.param("hangs", ["Kenya", None, None], id="injected-lookup-hangs"),
     ],
 )
 async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_graph(
@@ -1317,7 +1321,7 @@ async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_
     real_schemas: list[ToolSchema],
     requirement: RequirementFactory,
     monkeypatch: pytest.MonkeyPatch,
-    seam: str,
+    lookup: str,
     labels: list[str | None],
 ) -> None:
     """Kenya's series from two donors miss years. The approved source labels
@@ -1336,7 +1340,7 @@ async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_
 
     async def describe(dcids: list[str]) -> dict[str, Any]:
         asked.append(list(dcids))
-        if seam == "graph-fails":
+        if lookup == "graph-fails":
             raise UpstreamError(status=503, code="upstream_unavailable")
         return {
             "donor/DEU": OrganisationNode.model_construct(ref="donor/DEU", label="Germany"),
@@ -1345,15 +1349,15 @@ async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_
 
     async def injected(refs: Sequence[str]) -> Mapping[str, str]:
         asked.append(list(refs))
-        if seam == "raises":
-            raise RuntimeError("a seam's own defect")
+        if lookup == "raises":
+            raise RuntimeError("a lookup's own defect")
         await asyncio.Event().wait()
         return {}
 
     monkeypatch.setattr("executor.run.describe_nodes", describe)
     monkeypatch.setattr("executor.run.LABEL_ALLOWANCE_S", 0.05)
     plan = approved_plan(requirement=requirement(coverage=Coverage(on_missing="report_gaps")))
-    chosen = {} if seam.startswith("graph") else {"label_refs": injected}
+    chosen = {} if lookup.startswith("graph") else {"label_refs": injected}
 
     outcome = await asyncio.wait_for(
         _run(plan, surface=_surface(real_schemas, sparse), sleep=_Sleeps(), **chosen), timeout=5

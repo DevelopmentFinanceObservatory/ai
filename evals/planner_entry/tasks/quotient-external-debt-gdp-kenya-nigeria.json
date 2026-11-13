@@ -5,7 +5,6 @@
   "question": "Show Kenya's and Nigeria's external debt as a share of GDP over time",
   "searches": [
     {
-      "query": "Show Kenya's and Nigeria's external debt as a share of GDP over time",
       "parts": [
         {
           "entities": [
@@ -21,7 +20,6 @@
       ]
     },
     {
-      "query": "Kenya and Nigeria external debt and GDP",
       "parts": [
         {
           "variable": "external debt stocks as a share of GDP",
@@ -59,7 +57,6 @@
       ]
     },
     {
-      "query": "external debt of Kenya and Nigeria",
       "parts": [
         {
           "entities": [

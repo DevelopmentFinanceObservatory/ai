@@ -12,9 +12,10 @@ Two credentials, sent in apis' principal header (`PRINCIPAL_HEADER`):
 - `live_refresh_principal` (`LIVE_REFRESH_PRINCIPAL`) on `refresh_frame`,
   `render` and `stream_render_data`.
 
-`read_component` and `list_versions` need neither. A call whose principal is
-unset or blank raises `LiveApisNotConfigured` before any request is made. Neither
-value appears in an exception message, an attribute or a `repr`.
+`read_component`, `list_versions` and `analysis_execution_identity` need neither.
+A call whose principal is unset or blank raises `LiveApisNotConfigured` before any
+request is made. Neither value appears in an exception message, an attribute or a
+`repr`.
 
 Every call also carries the headers of the `auth` hook, once per call: the Cloud
 Run ID token from `common.apis_auth.apis_auth_provider`, which Cloud Run IAM in
@@ -30,6 +31,10 @@ Every call returns the same answer on a repeat (a PUT of the same recipe, a
 refresh behind single-flight, a render that appends no revision), so transport
 failures and `retryable` 5xx refusals are retried up to `max_attempts`.
 `stream_render_data` sends one attempt, since a body already begun cannot be resent.
+
+`analysis_execution_identity` reads apis' capabilities document and keeps its answer
+for the `max-age` the document's `Cache-Control` names (300 seconds as apis serves it),
+so a new apis deployment's identity is read within that long of its first answer.
 """
 
 from __future__ import annotations
@@ -37,6 +42,8 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -57,6 +64,11 @@ _REFRESH_PATH = "/api/datasets/frames/refresh"
 _COMPONENT_PATH = "/api/presentation/components/{component_id}"
 _RENDER_PATH = "/api/presentation/components/{component_id}/revisions/{revision}/render"
 _RENDER_DATA_PATH = f"{_RENDER_PATH}/data"
+_CAPABILITIES_PATH = "/api/datasets/capabilities"
+
+# The capabilities field naming the engine apis' analysis runner computes with.
+_EXECUTION_IDENTITY_FIELD = "analysis_execution_identity"
+_MAX_AGE = re.compile(r"(?:^|,)\s*max-age\s*=\s*(\d+)\s*(?:,|$)", re.IGNORECASE)
 
 # Codes apis registers that a caller branches on.
 RECIPE_NOT_FOUND = "recipe_not_found"
@@ -363,6 +375,7 @@ class LiveApisClient:
         max_attempts: int = 3,
         backoff_base_s: float = 1.0,
         sleep: Callable[[float], Awaitable[None]] = _default_sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """Build a client for the apis service at `base_url` (`DFO_APIS_URL`).
 
@@ -377,6 +390,7 @@ class LiveApisClient:
             max_attempts: Attempts of one call, retries included.
             backoff_base_s: The first retry waits up to this long, each later one twice as long.
             sleep: Backoff sleep, replaced in tests.
+            clock: Monotonic seconds, which time the capabilities answer's `max-age`.
         """
         self._datasets_principal = datasets_principal
         self._live_refresh_principal = live_refresh_principal
@@ -384,6 +398,11 @@ class LiveApisClient:
         self._max_attempts = max_attempts
         self._backoff_base_s = backoff_base_s
         self._sleep = sleep
+        self._clock = clock
+        # The last capabilities answer's execution identity and when it goes stale.
+        self._execution_identity: dict[str, str] | None = None
+        self._execution_identity_expires = float("-inf")
+        self._capabilities_read = asyncio.Lock()
         self._client = httpx2.AsyncClient(
             base_url=base_url,
             timeout=httpx2.Timeout(connect_timeout_s, read=read_timeout_s),
@@ -598,6 +617,35 @@ class LiveApisClient:
         frame_ref = _frame_pair(intent.get("frame_ref")) if isinstance(intent, dict) else None
         return ComponentRead(frame_ref=frame_ref, body=body)
 
+    async def analysis_execution_identity(self) -> dict[str, str] | None:
+        """The execution identity of the engine apis' analysis runner computes with,
+        as the capabilities document's `analysis_execution_identity` states it: an
+        object of string fields, `ExecutionIdentity`'s.
+
+        `None` when the document has no such object, which an apis deployed before
+        it served one answers, or when the document cannot be read. An answer is
+        kept for the `max-age` of its `Cache-Control`, and concurrent callers share
+        one read; a failed read is not kept.
+        """
+        async with self._capabilities_read:
+            if self._clock() < self._execution_identity_expires:
+                return self._execution_identity
+            try:
+                response = await self._send("GET", _CAPABILITIES_PATH)
+                document = _json_object(response, "capabilities document")
+            except LiveApisError:
+                return None
+            identity = document.get(_EXECUTION_IDENTITY_FIELD)
+            if not (
+                isinstance(identity, dict)
+                and identity
+                and all(isinstance(value, str) for value in identity.values())
+            ):
+                identity = None
+            self._execution_identity = identity
+            self._execution_identity_expires = self._clock() + _max_age(response)
+            return identity
+
     # Wire.
 
     def _datasets_headers(self) -> dict[str, str]:
@@ -667,6 +715,12 @@ def _principal_headers(principal: str | None, setting: str) -> dict[str, str]:
     if principal is None or not principal.strip():
         raise LiveApisNotConfigured(f"{setting} is not set, so this dfo-apis call cannot be made")
     return {PRINCIPAL_HEADER: principal}
+
+
+def _max_age(response: httpx2.Response) -> float:
+    """The seconds `response`'s `Cache-Control` lets it be reused, 0 when it names none."""
+    match = _MAX_AGE.search(response.headers.get("cache-control", ""))
+    return float(match.group(1)) if match else 0.0
 
 
 def _number(value: object) -> float | None:

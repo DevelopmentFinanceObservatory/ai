@@ -1,0 +1,263 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Rank the top donors to Malawi in the latest year and chart them over time"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Rank the top donors of official development assistance to Malawi in the latest year, and chart each donor's ODA to Malawi over time. The user named no period beyond the latest year.",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "top_n",
+        "description": "How many donors the ranking keeps.",
+        "options": [
+          "5",
+          "10"
+        ],
+        "chosen": "10",
+        "resolved_by": "planner_default",
+        "rationale": "The question names no number; ten is the usual list of top donors.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": null,
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": 10
+        }
+      },
+      {
+        "slot": "every_donor",
+        "description": "Which donors the ranking compares.",
+        "options": [
+          "every donor",
+          "a named list of donors"
+        ],
+        "chosen": "every donor",
+        "resolved_by": "planner_default",
+        "rationale": "The question names no list, so every donor is ranked.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": null,
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": "population",
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      },
+      {
+        "slot": "ranked_year",
+        "description": "Which year the ranking reads.",
+        "options": [
+          "2024, the newest year most donors have reported",
+          "2025, which 9 donors have reported so far"
+        ],
+        "chosen": "2024, the newest year most donors have reported",
+        "resolved_by": "planner_default",
+        "rationale": "The question asks for the latest year, and 2025 holds 9 donors against 85 in 2024.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": null,
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": 2024,
+          "window_end": 2024,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      },
+      {
+        "slot": "source_spec_dc8017ba6ea1ef0171b0181eddc396a8",
+        "description": "How the flow is counted.",
+        "options": [
+          "gross disbursements",
+          "net disbursements"
+        ],
+        "chosen": "gross disbursements",
+        "resolved_by": "planner_default",
+        "rationale": "Search elected gross disbursements for this source.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_dc8017ba6ea1ef0171b0181eddc396a8",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "decision_ids": [
+          "source_spec_dc8017ba6ea1ef0171b0181eddc396a8"
+        ],
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Malawi",
+            "role": "recipient"
+          }
+        ],
+        "across": [
+          "donor"
+        ],
+        "period": {
+          "start": 1960,
+          "end": 2025
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_dc8017ba6ea1ef0171b0181eddc396a8",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "rank",
+        "id": "top_donors",
+        "decision_ids": [
+          "top_n",
+          "every_donor",
+          "ranked_year"
+        ],
+        "input_id": "oda",
+        "direction": "highest_first",
+        "among": "population",
+        "axis": "donor",
+        "reduction": "sum",
+        "window_start": 2024,
+        "window_end": 2024,
+        "per_period": false,
+        "limit": 10,
+        "rolling": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "The top donors to Malawi in the latest year, ranked",
+      "Each donor's ODA to Malawi over time, as a chart"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "top_donors"
+        ]
+      },
+      {
+        "ask": 1,
+        "outputs": [
+          "oda"
+        ]
+      }
+    ],
+    "ask_breakdowns": [
+      {
+        "ask": 0,
+        "by": [
+          "donor"
+        ],
+        "over": []
+      },
+      {
+        "ask": 1,
+        "by": [
+          "donor"
+        ],
+        "over": []
+      }
+    ],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

@@ -27,7 +27,7 @@ have. `strip_manifest`'s `CoverageModel` carries `{rows, dimensions, window}`
 with neither `kind` nor `has_data`, and a manifest's facet values are plain
 strings, so reusing `data_mcp.digest`'s renderers here would either silently
 misrender ("no data" on every frame) or raise (`AttributeError` on a bare
-string). `render_get_data_digest` is the public seam.
+string). `render_get_data_digest` is the public entry point.
 """
 
 from __future__ import annotations

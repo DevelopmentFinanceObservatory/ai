@@ -57,7 +57,7 @@ class _FakeBucket:
 
 
 class _FakeStorageClient:
-    """Fakes the narrow `_StorageClient` seam `gcs.py` calls through."""
+    """Fakes the narrow `_StorageClient` interface `gcs.py` calls through."""
 
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}

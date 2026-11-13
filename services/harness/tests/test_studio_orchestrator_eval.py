@@ -1,6 +1,6 @@
 """CI's share of the studio eval set (`evals/studio`, `--mode scripted`).
 
-The cases run the real workflow and planner seam under a real ADK runner, with
+The cases run the real workflow and planner adapter under a real ADK runner, with
 every model scripted, and check what each model was shown. Three things are
 held here: the cases report as marked (a pass, or an expected failure that
 still fails), each check and each stream invariant fails when the property it
@@ -26,9 +26,11 @@ import pytest
 from google.adk.events import Event
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+from harness.planner_run import failed_tool_answer
 from harness.reply_figures import card_result
 from harness.studio_state import ConversationState, StudioStore
 from harness.studio_translate import _RecordingExecutor, _Translator
+from planner.skills import GET_SKILL
 
 from .orchestrator_fakes import (
     CannedSearch,
@@ -80,6 +82,49 @@ async def test_scripted_cases_report_as_marked() -> None:
         if r["status"] not in ("PASS", "XFAIL")
     }
     assert passed and failures == {}
+
+
+class _SkillReadFailedError(RuntimeError):
+    """What the planner's `get_skill` raises in the raising-tool test."""
+
+
+async def test_a_planner_tool_that_raises_is_logged_as_the_answer_the_model_receives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A planner tool whose body raises is logged with the answer the adapter gives
+    the model for it (`failed_tool_answer`)."""
+    scripted = _load("orchestrator_scripted")
+    run = _load("run")
+    (case,) = run.load_cases(
+        "scripted", only=["orchestrator-every-ask-reaches-the-card-and-the-hand-back"]
+    )
+    case = copy.deepcopy(case)
+    case["scenario"]["planner"] = [{"call": "get_skill", "args": {"skill_id": "aid"}}]
+    serve = scripted.CannedDataSurface.call_tool
+
+    async def failing_skill_reads(self: Any, *, tool: Any, **kwargs: Any) -> Any:
+        if tool == GET_SKILL:
+            raise _SkillReadFailedError
+        return await serve(self, tool=tool, **kwargs)
+
+    monkeypatch.setattr(scripted.CannedDataSurface, "call_tool", failing_skill_reads)
+
+    async with scripted.orchestrator_client(case["scenario"]) as (client, log):
+        await run.run_case(client, case, on_turn=log.mark_turn)
+
+    planner_calls = [
+        entry for entry in log.entries if entry["kind"] == "call" and entry["layer"] == "planner"
+    ]
+    assert planner_calls == [
+        {
+            "kind": "call",
+            "layer": "planner",
+            "tool": "get_skill",
+            "outcome": None,
+            "code": None,
+            "response": failed_tool_answer("get_skill", _SkillReadFailedError()),
+        }
+    ]
 
 
 def _request(agent: str, *texts: str, system: str = "") -> dict[str, Any]:

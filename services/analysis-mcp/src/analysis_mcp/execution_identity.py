@@ -10,6 +10,11 @@ engine and watches `content_version` move confirms the binding holds.
 `frame_grammar_version` is read from `dfo_frame_grammar.FRAME_GRAMMAR_VERSION`
 rather than pinned here, so a frame-grammar bump is picked up automatically
 instead of drifting out of sync with a hand-copied literal.
+
+`current_execution_identity` names this package's own engine, which only the
+in-process verb functions compute with (`tool_pipeline.mint_identity_or_refusal`).
+The registered tools compute on dfo-apis' analysis runner, whose identity apis'
+capabilities document names (`common.live_apis.LiveApisClient.analysis_execution_identity`).
 """
 
 from __future__ import annotations

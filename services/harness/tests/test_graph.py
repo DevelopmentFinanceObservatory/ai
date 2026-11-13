@@ -3,7 +3,7 @@
 the helpers they share.
 
 The workflow tests run the orchestrator topology (`orchestrator_runner`):
-the agent hands a brief to a planner seam, the turn pauses on the plan card,
+the agent hands a brief to a planner, the turn pauses on the plan card,
 and the answer resumes it into `execute` and `plan_done`. The rest are unit
 tests of the node helpers. Everything runs offline against scripted fakes:
 no model, no MCP server.
@@ -108,16 +108,19 @@ from harness.graph.switch import (
     SwitchFailedError,
 )
 from harness.plan_display import decision_option_id
-from harness.planner_seam import PlannerSeam, store_searched_pin_readings
+from harness.planner_adapter import PlannerAdapter, store_searched_pin_readings
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, PartScope
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
-from harness.sentences import FAILURE_SENTENCES, FailureClass, SeamCode
+from harness.sentences import FAILURE_SENTENCES, FailureClass, StopCode
 from harness.settings import Settings
-from harness.studio_translate import _node_name, failure_detail
+from harness.studio_state import ConversationState, StudioStore
+from harness.studio_translate import _node_name, _Translator, failure_detail
+from harness.studio_translate import _RecordingExecutor as _TranslatorRecorder
 from harness.tool_contracts import HarnessCode, reading_facts
 from harness.turn_records import CHIP_STALE_NOTE, SearchReading, basis_line
+from harness.wire import ActivityStep, StepStatus
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from planner.operations import AggregateOperation, GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
@@ -514,13 +517,112 @@ async def test_execute_relays_a_report_while_its_step_is_still_running() -> None
                 surface.release.set()
 
     progress = [_step_progress(event) for event in seen if _step_progress(event)]
+    retrieve = {
+        "step_id": "retrieve",
+        "tool": "get_data",
+        "position": 1,
+        "count": 2,
+        "description": "life expectancy at birth in Kenya, 1960 to 2023.",
+        "gives_answer": False,
+    }
+    totals = {
+        "step_id": "totals",
+        "tool": "aggregate",
+        "position": 2,
+        "count": 2,
+        "description": (
+            "The average of life expectancy at birth, grouped by year. "
+            "Result: one figure per year, 1960-2023."
+        ),
+        "gives_answer": True,
+    }
     assert progress == [
-        {"step_id": "retrieve", "tool": "get_data", "message": _PREPARING},
-        {"step_id": "retrieve", "tool": "get_data", "message": _RECEIVED},
-        {"step_id": "totals", "tool": "aggregate", "message": _RECEIVED},
+        {**retrieve, "message": _PREPARING},
+        {**retrieve, "message": _RECEIVED},
+        {**totals, "message": _RECEIVED},
     ]
     assert _node_name(next(e for e in seen if _step_progress(e))) == "execute"
     assert "plan_done" in visited_nodes(seen)
+
+
+async def test_a_plan_whose_card_places_fail_still_runs_with_unplaced_steps(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The plan card places only label the step lines, so a failure building
+    them is logged and the approved plan runs with every step unplaced."""
+
+    def fails(plan: object) -> dict[str, object]:
+        raise ValueError("no card for this plan")
+
+    monkeypatch.setattr("harness.graph.execute._card_places", fails)
+    stream = await _approval_stream(ScriptedSurface())
+
+    with caplog.at_level("ERROR", logger="harness.graph.execute"):
+        async with asyncio.timeout(10):
+            seen = [event async for event in stream]
+
+    progress = [_step_progress(event) for event in seen if _step_progress(event)]
+    assert progress
+    assert all(report["position"] is None for report in progress)
+    assert "plan_done" in visited_nodes(seen)
+    (logged,) = [r for r in caplog.records if r.name == "harness.graph.execute"]
+    assert logged.exc_info is not None
+
+
+class _HoldsGetData(ScriptedSurface):
+    """`ScriptedSurface`, whose `get_data` sends no report of its own and
+    answers only once `release` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Mapping[str, Any],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        if tool.name == "get_data":
+            await self.release.wait()
+        return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+
+
+async def test_a_plan_step_opens_its_running_line_before_its_call_answers() -> None:
+    """The surface sends no report and answers only once the test has seen
+    the step's running frame, so that frame can come only from the start
+    the executor reports before the call. It gives the step's place on the
+    card first, then the card row's description."""
+    surface = _HoldsGetData()
+    stream = await _approval_stream(surface)
+    translator = _Translator(
+        conversation=ConversationState(conversation_id="s"),
+        recorder=_TranslatorRecorder(_no_executor, store=StudioStore(InMemorySessionService())),
+    )
+    held: list[ActivityStep] = []
+
+    async with asyncio.timeout(10):
+        async for event in stream:
+            if _step_progress(event) is not None and not surface.release.is_set():
+                held = [
+                    frame
+                    for frame in translator.translate(event)
+                    if isinstance(frame, ActivityStep) and frame.tool
+                ]
+                surface.release.set()
+
+    assert [(frame.tool, frame.status, frame.detail) for frame in held] == [
+        (
+            "get_data",
+            StepStatus.RUNNING,
+            "step 1 of 2 \u00b7 life expectancy at birth in Kenya, 1960 to 2023",
+        )
+    ]
+
+
+async def _no_executor(*, tool: str, args: dict[str, object]) -> dict[str, object]:
+    raise AssertionError(f"no agent tool runs in a plan's run, not {tool!r} with {args!r}")
 
 
 async def test_stopping_a_turn_mid_step_cancels_the_run_and_leaves_no_task_behind() -> None:
@@ -611,7 +713,7 @@ async def test_stale_version_approval_routes_to_amend(wrong: Callable[[str], Any
     """A wrong answer, one naming another revision or stating no
     timezone-aware approval time, routes to amend; `ScriptedPlannerModel`
     redrafts the same canned steps as the next version, bumping `version`
-    and `previous_version` the way any `PlannerModel` seam must."""
+    and `previous_version` the way any `PlannerModel` must."""
     surface = _CallRecordingSurface(ScriptedSurface())
     runner, _ = _plan_runner(ScriptedPlannerModel(), tool_surface=surface)
     events = await _start(runner)
@@ -688,11 +790,11 @@ def test_a_frame_unavailable_reason_reads_a_retry_mode_of_any_type(
     assert frame_unavailable_reason({"retry_mode": retry_mode}) == reason
 
 
-def _seam_plan_with_intermediate_step(*, schemas: list[ToolSchema]) -> PlannerPlan:
+def _planner_plan_with_intermediate_step(*, schemas: list[ToolSchema]) -> PlannerPlan:
     """A real, three-step plan: get_data -> totals (aggregate, an
     intermediate step) -> change (growth, the one terminal step).
 
-    `_seam_plan`'s two-step plan has one non-terminal step, so a failure
+    `_planner_plan`'s two-step plan has one non-terminal step, so a failure
     after it leaves one frame. A third step lets two steps, one of them
     genuinely intermediate, complete before the terminal one fails.
     """
@@ -827,7 +929,7 @@ def _stopping_at_growth_surface(real_schemas: list[ToolSchema]) -> FixtureSurfac
     )
 
 
-def _seam_plan_with_two_terminal_steps(*, schemas: list[ToolSchema]) -> PlannerPlan:
+def _planner_plan_with_two_terminal_steps(*, schemas: list[ToolSchema]) -> PlannerPlan:
     """A real plan with two independent terminal steps reading the same
     retrieval directly: `totals` (aggregate) and `change` (growth), at
     different positions in `outcome.steps` (`workflow.steps` is
@@ -941,9 +1043,9 @@ def _seam_plan_with_two_terminal_steps(*, schemas: list[ToolSchema]) -> PlannerP
     "build_plan",
     [
         # totals feeds change, the one terminal step.
-        _seam_plan_with_intermediate_step,
+        _planner_plan_with_intermediate_step,
         # totals is a terminal step of its own, finished beside the failed change.
-        _seam_plan_with_two_terminal_steps,
+        _planner_plan_with_two_terminal_steps,
     ],
     ids=["intermediate", "sibling_terminal"],
 )
@@ -956,10 +1058,10 @@ async def test_a_stopped_plan_hands_back_no_derived_steps_figures(
     whether totals fed change or was a terminal step of its own; the
     retrieval's digest still does, and `plan_done` lists no frame to chart."""
     plan = build_plan(schemas=real_schemas)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     executor = ScriptedExecutor()
     runner, model = _plan_runner(
-        seam, tool_surface=_stopping_at_growth_surface(real_schemas), executor=executor
+        planner, tool_surface=_stopping_at_growth_surface(real_schemas), executor=executor
     )
     await _start(runner)
 
@@ -985,8 +1087,8 @@ async def test_two_terminal_steps_both_come_back_to_the_agent(
     terminal. Finality inferred from `max(step)` would mark only `change`
     final and drop `totals`; `execute`'s Accepted branch states
     `is_final_step` on each entry, so `plan_done` describes and lists both."""
-    plan = _seam_plan_with_two_terminal_steps(schemas=real_schemas)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    plan = _planner_plan_with_two_terminal_steps(schemas=real_schemas)
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     named = {schema.name: schema for schema in real_schemas}
     surface = FixtureSurface(
         schemas=[named["get_data"], named["aggregate"], named["growth"]],
@@ -1006,7 +1108,7 @@ async def test_two_terminal_steps_both_come_back_to_the_agent(
         },
     )
     executor = ScriptedExecutor()
-    runner, model = _plan_runner(seam, tool_surface=surface, executor=executor)
+    runner, model = _plan_runner(planner, tool_surface=surface, executor=executor)
     await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
@@ -1295,10 +1397,10 @@ async def test_plan_amendment_lineage_is_real() -> None:
     assert plan.decisions[0].chosen in plan.decisions[0].options
 
 
-# --- the planner node against a model seam --------------------------------
+# --- the planner node against a planner model --------------------------------
 
 
-def _seam_plan(
+def _planner_plan(
     *,
     question: str = "kenya debt",
     version: int = 1,
@@ -1307,7 +1409,7 @@ def _seam_plan(
     stat_vars: str | None = None,
     terminal: tuple[str, ...] = ("totals",),
 ) -> PlannerPlan:
-    """A real, translated `planner.plan.Plan` -- the shape a `PlannerModel` seam hands back.
+    """A real, translated `planner.plan.Plan` -- the shape a `PlannerModel` hands back.
 
     `stat_vars` is the reading its `get_data` step sends, for a plan whose
     source is a family of StatVars; `None` sends none. `terminal` names the
@@ -1398,7 +1500,7 @@ def _seam_plan(
     return draft.with_translation(translation=translation, workflow=workflow)
 
 
-class _Seam:
+class _Planner:
     """A `PlannerModel` returning `{"plan": ..., "summary": ...}` verbatim."""
 
     def __init__(self, plans: list[dict[str, Any]]) -> None:
@@ -1411,17 +1513,19 @@ class _Seam:
         return self._plans[index]
 
 
-async def test_the_planner_node_validates_the_seams_plan_and_writes_it_to_state(
+async def test_the_planner_node_validates_the_planners_plan_and_writes_it_to_state(
     real_schemas: list[ToolSchema],
 ) -> None:
-    """The seam returns `{"plan": <planner.plan.Plan JSON>, "summary": ...}`;
+    """The planner returns `{"plan": <planner.plan.Plan JSON>, "summary": ...}`;
     the node validates it as a `planner.plan.Plan`, and emits `summary` and
     `revision` beside it -- both the record and the wire keys, not one
     constructed from parts the way the frozen adapter's protocol was.
     """
-    plan = _seam_plan(schemas=real_schemas)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {"version": plan.version}}])
-    runner, _ = _plan_runner(seam)
+    plan = _planner_plan(schemas=real_schemas)
+    planner = _Planner(
+        [{"plan": plan.model_dump(mode="json"), "summary": {"version": plan.version}}]
+    )
+    runner, _ = _plan_runner(planner)
 
     events = await _start(runner)
 
@@ -1434,15 +1538,15 @@ async def test_the_planner_node_validates_the_seams_plan_and_writes_it_to_state(
 
 
 async def test_the_planner_node_raises_on_a_malformed_plan_rather_than_constructing_one() -> None:
-    """A draft the seam could not itself validate must not reach the approve gate."""
-    seam = _Seam([{"plan": {"decisions": "not-a-list"}, "summary": {}}])
-    runner, _ = _plan_runner(seam)
+    """A draft the planner could not itself validate must not reach the approve gate."""
+    planner = _Planner([{"plan": {"decisions": "not-a-list"}, "summary": {}}])
+    runner, _ = _plan_runner(planner)
 
     with pytest.raises(ValidationError):
         await _start(runner)
 
 
-class _StallingSeam:
+class _StallingPlanner:
     """A `PlannerModel` that blocks mid-draft until released, recording
     whether its own task was cancelled and when it wrote to the graph's
     session state -- the two things a turn closed mid-draft must leave
@@ -1457,32 +1561,32 @@ class _StallingSeam:
     async def __call__(self, *, ctx: Any, **_kwargs: Any) -> dict[str, Any]:
         self.task = asyncio.current_task()
         self.state = ctx.session.state
-        self.state["seam_writes"] = [*self.state.get("seam_writes", []), "before"]
+        self.state["planner_writes"] = [*self.state.get("planner_writes", []), "before"]
         self._ready.set()
         await self._release.wait()
-        self.state["seam_writes"] = [*self.state.get("seam_writes", []), "after"]
+        self.state["planner_writes"] = [*self.state.get("planner_writes", []), "after"]
         return {"plan": {}, "summary": {}}
 
 
-async def test_a_turn_closed_mid_draft_cancels_the_seam_and_writes_no_state_after() -> None:
+async def test_a_turn_closed_mid_draft_cancels_the_planner_and_writes_no_state_after() -> None:
     """`studio._sse_stream`'s stop-and-disconnect path closes the ADK event
     stream through `_unwind`: cancel the in-flight next-frame task and
     await that cancellation, which throws into whatever node is suspended.
     The `planner` node is suspended in exactly that way whenever a draft is
     in flight: it awaits `models.planner(...)` directly (`harness.graph.planning`'s
-    `planner`), so a cancellation there throws straight into the seam's own
+    `planner`), so a cancellation there throws straight into the planner's own
     suspended `ctx.run_node` call. The draft must not survive: it is a live
     model and tool round trip that would otherwise keep running, and keep
     writing session state, after the turn has closed."""
     ready = asyncio.Event()
     release = asyncio.Event()
-    seam = _StallingSeam(ready=ready, release=release)
-    runner, _ = _plan_runner(seam)
+    planner = _StallingPlanner(ready=ready, release=release)
+    runner, _ = _plan_runner(planner)
     await open_session(runner)
     stream = runner.run_async(user_id="u", session_id="s", new_message=types.UserContent(_BRIEF))
 
     # Drive the stream one frame at a time, the way `studio._sse_stream`
-    # does, until the seam signals a draft is in flight. `next_frame` is
+    # does, until the planner signals a draft is in flight. `next_frame` is
     # then the in-flight `anext()` task, suspended inside the planner
     # node's own `await models.planner(...)` call -- exactly what
     # `_unwind`, below, closes over in the real stop-and-disconnect path.
@@ -1496,7 +1600,7 @@ async def test_a_turn_closed_mid_draft_cancels_the_seam_and_writes_no_state_afte
             if next_frame in done:
                 next_frame.result()
                 next_frame = asyncio.ensure_future(stream.__anext__())
-    assert seam.task is not None and not seam.task.done(), "the draft must still be in flight"
+    assert planner.task is not None and not planner.task.done(), "the draft must still be in flight"
 
     # Cancel the in-flight next-frame task and await the cancellation,
     # rather than firing it and moving on, so whatever the closed generator
@@ -1510,19 +1614,21 @@ async def test_a_turn_closed_mid_draft_cancels_the_seam_and_writes_no_state_afte
     # If the draft survived the close it is still blocked on `release`;
     # release it and let it finish, so a late write shows up if one lands.
     release.set()
-    if not seam.task.done():
+    if not planner.task.done():
         with suppress(asyncio.CancelledError):
-            await asyncio.wait_for(seam.task, timeout=5)
+            await asyncio.wait_for(planner.task, timeout=5)
 
-    assert seam.task.cancelled(), "a turn closed mid-draft must cancel the draft, not orphan it"
-    assert seam.state is not None
-    assert seam.state.get("seam_writes") == ["before"], "no draft write may land after the close"
+    assert planner.task.cancelled(), "a turn closed mid-draft must cancel the draft, not orphan it"
+    assert planner.state is not None
+    assert planner.state.get("planner_writes") == ["before"], (
+        "no draft write may land after the close"
+    )
 
 
-class _AskingSeam:
+class _AskingPlanner:
     """A `PlannerModel` that reports two progress rounds, then answers that the
-    planner's run ended on a question for the user, as `PlannerSeam` does once
-    `planner.agent.ask_user_question` accepted one."""
+    planner's run ended on a question for the user, as `PlannerAdapter` does once
+    `ask_user_question` (`planner.tools.ask_user`) accepted one."""
 
     async def __call__(self, *, on_progress: Any = None, **_kwargs: Any) -> dict[str, Any]:
         if on_progress is not None:
@@ -1532,12 +1638,12 @@ class _AskingSeam:
 
 
 async def test_a_planner_side_pause_relays_its_progress_before_the_question() -> None:
-    """The `planner` node relays the progress the seam reported, then pauses
+    """The `planner` node relays the progress the planner reported, then pauses
     on the planner's question under its call id, carrying the call's
     arguments as the payload. No `plan.proposed` or `refused` output follows:
     the turn is suspended, not settled."""
-    seam = _AskingSeam()
-    runner, _ = _plan_runner(seam)
+    planner = _AskingPlanner()
+    runner, _ = _plan_runner(planner)
 
     events = await _start(runner)
 
@@ -1563,9 +1669,9 @@ async def test_a_planner_side_pause_relays_its_progress_before_the_question() ->
     assert _output_of(events, "plan_done") is None
 
 
-class _GatedSeam:
+class _GatedPlanner:
     """A `PlannerModel` that drafts only once its caller has seen the
-    planner node's start event, then pauses like `_AskingSeam`."""
+    planner node's start event, then pauses like `_AskingPlanner`."""
 
     def __init__(self) -> None:
         self.seen = asyncio.Event()
@@ -1577,11 +1683,11 @@ class _GatedSeam:
         return _ASKED
 
 
-async def test_the_planner_node_announces_a_draft_before_the_seam_returns() -> None:
-    """The node's first event reaches the runner stream while the seam is
+async def test_the_planner_node_announces_a_draft_before_the_planner_returns() -> None:
+    """The node's first event reaches the runner stream while the planner is
     still drafting, so Studio can say a plan is under way."""
-    seam = _GatedSeam()
-    runner, _ = _plan_runner(seam)
+    planner = _GatedPlanner()
+    runner, _ = _plan_runner(planner)
     await open_session(runner)
     started = []
     async for event in runner.run_async(
@@ -1589,10 +1695,10 @@ async def test_the_planner_node_announces_a_draft_before_the_seam_returns() -> N
     ):
         if event.custom_metadata and PLANNER_STARTED_KEY in event.custom_metadata:
             started.append(event.custom_metadata[PLANNER_STARTED_KEY])
-            seam.seen.set()
+            planner.seen.set()
 
     assert started == [{"revising": False}]
-    assert seam.drafted
+    assert planner.drafted
 
 
 async def test_a_refused_redraft_over_an_unreadable_plan_says_the_plan_was_discarded(
@@ -1601,14 +1707,14 @@ async def test_a_refused_redraft_over_an_unreadable_plan_says_the_plan_was_disca
     """The user approved a plan the release cannot read, and the planner
     refuses to draft it again. No card follows to say what became of the plan
     they approved, so the planner's answer the agent reads opens with it."""
-    plan = _seam_plan(schemas=real_schemas)
-    seam = _Seam(
+    plan = _planner_plan(schemas=real_schemas)
+    planner = _Planner(
         [
             {"plan": plan.model_dump(mode="json"), "summary": {}},
             {"refused": {"text": "The draft budget is spent.", "final": True}},
         ]
     )
-    runner, model = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    runner, model = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
     _session_state(runner)["plan"] = json.dumps({"question": "kenya debt", "tool_calls": []})
 
@@ -1636,7 +1742,7 @@ _PLANNER_ASK = "planner_ask"
 _ASKED = {"asked": {"call_id": _PLANNER_ASK, "args": {"message": "Which years?"}}}
 
 
-class _AskingOnAmendSeam(_Seam):
+class _AskingOnAmendPlanner(_Planner):
     """A `PlannerModel` that drafts its first plan outright and asks the user
     a question on every later call that no answer resumes."""
 
@@ -1652,22 +1758,22 @@ async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_sta
 ) -> None:
     """The planner asks the user a question while amending a plan, and the
     plan on record is unreadable when the answer resumes it. The `planner`
-    node finds that itself: nothing is left to amend, so the seam is handed
+    node finds that itself: nothing is left to amend, so the planner is handed
     no amendment and no prior plan, and the card says why."""
-    plan = _seam_plan(schemas=real_schemas)
-    seam = _AskingOnAmendSeam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    plan = _planner_plan(schemas=real_schemas)
+    planner = _AskingOnAmendPlanner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
     events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "amendment": "only 2020"})
     assert _pending_interrupt(events) == _PLANNER_ASK
-    assert seam.calls[1]["amendment"] == "only 2020"
+    assert planner.calls[1]["amendment"] == "only 2020"
     _session_state(runner)["plan"] = json.dumps({"question": "kenya debt", "tool_calls": []})
 
     events = await _resume(runner, _PLANNER_ASK, {"answer": "2020"})
 
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
-    assert seam.calls[2]["amendment"] is None
-    assert seam.calls[2]["prior_plan"] is None
+    assert planner.calls[2]["amendment"] is None
+    assert planner.calls[2]["prior_plan"] is None
     redrafted = _output_of(events, "planner")
     assert redrafted["refusal_note"] == UNREADABLE_PLAN_NOTE
     assert redrafted["restarted"] is True
@@ -1675,7 +1781,7 @@ async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_sta
 
 def _picked_window(plan: PlannerPlan) -> DecisionPick:
     """The pick of a planner decision the card offers to switch
-    (`plan_display.switchable_decision`): `_seam_plan`'s window, fixing the
+    (`plan_display.switchable_decision`): `_planner_plan`'s window, fixing the
     period, switched to its other option on `plan`."""
     return DecisionPick.on_card(authored(plan), slot="window", chosen="2018-2024")
 
@@ -1688,8 +1794,8 @@ _DRAFTING_KEY = "planner:replan_scratch"
 def _pickable_plan(
     *, schemas: list[ToolSchema], chosen: str = "2015-2024", version: int = 1
 ) -> PlannerPlan:
-    """`_seam_plan` with its window decision fixing the period, so the card offers it."""
-    plan = _seam_plan(schemas=schemas, version=version)
+    """`_planner_plan` with its window decision fixing the period, so the card offers it."""
+    plan = _planner_plan(schemas=schemas, version=version)
     (window,) = plan.decisions
     fixed = window.model_copy(
         update={"chosen": chosen, "fixes": DecisionFixes(period=Period(start=2015, end=2024))}
@@ -1697,10 +1803,10 @@ def _pickable_plan(
     return plan.model_copy(update={"decisions": (fixed,)})
 
 
-class _ReplanSeam(_Seam):
+class _ReplanPlanner(_Planner):
     """A `PlannerModel` that drafts its first plan outright and, on every
     later call, writes `_DRAFTING_KEY` and the pick it is handed, as
-    `PlannerSeam` records it, notes the snapshot the state holds under
+    `PlannerAdapter` records it, notes the snapshot the state holds under
     `PICK_REPLAN_KEY` (`held_snapshot`), waits for `release` when given one,
     and then answers its next scripted result."""
 
@@ -1731,20 +1837,20 @@ async def test_a_planner_decisions_pick_replans_with_the_pick_held(
     replanned plan with nothing else moved."""
     plan = _pickable_plan(schemas=real_schemas)
     replanned = _pickable_plan(schemas=real_schemas, chosen="2018-2024", version=2)
-    seam = _ReplanSeam(
+    planner = _ReplanPlanner(
         [
             {"plan": plan.model_dump(mode="json"), "summary": {}},
             {"plan": replanned.model_dump(mode="json"), "summary": {}},
         ]
     )
-    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
 
-    assert seam.calls[1]["pick"] == _picked_window(plan)
-    assert seam.calls[1]["amendment"] is None
-    assert seam.calls[1]["prior_plan"] == plan.model_dump(mode="json")
+    assert planner.calls[1]["pick"] == _picked_window(plan)
+    assert planner.calls[1]["amendment"] is None
+    assert planner.calls[1]["prior_plan"] == plan.model_dump(mode="json")
     offered = _output_of(events, "planner")
     assert offered["revision"] == plan_revision(replanned)
     assert "moved" not in offered
@@ -1753,7 +1859,7 @@ async def test_a_planner_decisions_pick_replans_with_the_pick_held(
     assert state[_DRAFTING_KEY] == "draft"
     # The pick belongs to its entry, and only a pause records the snapshot.
     assert decision_pick(cast(SessionState, state)) is None
-    assert seam.held_snapshot is None
+    assert planner.held_snapshot is None
     assert state.get(PICK_REPLAN_KEY) is None
 
 
@@ -1764,14 +1870,14 @@ async def test_a_switch_to_the_option_a_planner_decision_has_offers_the_plan_unc
     does not apply: the planner is not called again, and the card offers the
     plan on record with `switch_failed`, saying the choice is already on it."""
     plan = _pickable_plan(schemas=real_schemas)
-    seam = _ReplanSeam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    planner = _ReplanPlanner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
     switch = {"choice_id": "decision/window", "option_id": decision_option_id("2015-2024")}
 
     events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": switch})
 
-    assert len(seam.calls) == 1
+    assert len(planner.calls) == 1
     offered = _output_of(events, "switch")
     assert offered["revision"] == plan_revision(plan)
     assert offered["switch_failed"]["choice_id"] == "decision/window"
@@ -1799,8 +1905,8 @@ async def test_a_pick_this_release_cannot_read_offers_the_plan_unchanged(
     record with `switch_failed`, asking the user to make the choice again,
     and no pick is left in state."""
     plan = _pickable_plan(schemas=real_schemas)
-    seam = _ReplanSeam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    planner = _ReplanPlanner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
     monkeypatch.setattr(
         "harness.graph.planning.decision_pick",
@@ -1809,7 +1915,7 @@ async def test_a_pick_this_release_cannot_read_offers_the_plan_unchanged(
 
     events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
 
-    assert len(seam.calls) == 1
+    assert len(planner.calls) == 1
     offered = _output_of(events, "planner")
     assert offered["revision"] == plan_revision(plan)
     assert offered["switch_failed"] == {
@@ -1823,8 +1929,8 @@ async def test_a_pick_this_release_cannot_read_offers_the_plan_unchanged(
     assert state.get(DECISION_PICK_STATE_KEY) is None
 
 
-class _StaleSnapshotSeam(_ReplanSeam):
-    """`_ReplanSeam` whose first draft leaves `PICK_REPLAN_KEY` holding a
+class _StaleSnapshotPlanner(_ReplanPlanner):
+    """`_ReplanPlanner` whose first draft leaves `PICK_REPLAN_KEY` holding a
     snapshot, as a pick replan paused on an ask the user never answered does."""
 
     def __init__(self, plans: list[dict[str, Any]], stale: dict[str, Any]) -> None:
@@ -1851,8 +1957,8 @@ async def test_a_pick_this_release_cannot_read_puts_back_no_stale_snapshot(
         ).model_dump_json(),
         _DRAFTING_KEY: "stale",
     }
-    seam = _StaleSnapshotSeam([{"plan": plan.model_dump(mode="json"), "summary": {}}], stale)
-    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    planner = _StaleSnapshotPlanner([{"plan": plan.model_dump(mode="json"), "summary": {}}], stale)
+    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
     assert _session_state(runner)[PICK_REPLAN_KEY] == stale
     monkeypatch.setattr(
@@ -1873,8 +1979,8 @@ async def test_a_pick_this_release_cannot_read_puts_back_no_stale_snapshot(
     ("code", "final", "reported", "retryable"),
     [
         ("budget_exhausted", False, "budget_exhausted", False),
-        (None, False, SeamCode.PLAN_NOT_READY.value, False),
-        (SeamCode.DISCOVERY_UNAVAILABLE.value, True, SeamCode.DISCOVERY_UNAVAILABLE.value, True),
+        (None, False, StopCode.PLAN_NOT_READY.value, False),
+        (StopCode.DISCOVERY_UNAVAILABLE.value, True, StopCode.DISCOVERY_UNAVAILABLE.value, True),
     ],
     ids=["coded", "uncoded", "service-unreachable"],
 )
@@ -1887,7 +1993,7 @@ async def test_a_refused_pick_replan_offers_the_plan_unchanged_and_puts_its_stat
 ) -> None:
     """The planner refuses the replan: the card offers the plan on record
     again with the switch node's `switch_failed`, carrying the refusal's code,
-    or the seam's `plan_not_ready` for a refusal stating none, and the
+    or the planner's `plan_not_ready` for a refusal stating none, and the
     sentence for the user, and the drafting state is put back. The same pick
     can succeed again only where a scope switch's revision could, whatever
     the refusal's `final` says."""
@@ -1898,10 +2004,10 @@ async def test_a_refused_pick_replan_offers_the_plan_unchanged_and_puts_its_stat
         "code": code,
         "reason": "This request has used its budget of 4 plan drafts.",
     }
-    seam = _ReplanSeam(
+    planner = _ReplanPlanner(
         [{"plan": plan.model_dump(mode="json"), "summary": {}}, {"refused": refused}]
     )
-    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
@@ -1926,10 +2032,10 @@ async def test_a_stopped_pick_replan_offers_the_plan_unchanged_and_puts_its_stat
     the draft is cancelled, and the card offers the plan on record again
     under `switch_cancelled`, as a stopped scope switch does."""
     plan = _pickable_plan(schemas=real_schemas)
-    seam = _ReplanSeam(
+    planner = _ReplanPlanner(
         [{"plan": plan.model_dump(mode="json"), "summary": {}}], release=asyncio.Event()
     )
-    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
     stop = asyncio.Event()
 
@@ -1940,7 +2046,7 @@ async def test_a_stopped_pick_replan_offers_the_plan_unchanged_and_puts_its_stat
         )
     finally:
         SWITCH_STOP.reset(token)
-    await asyncio.wait_for(seam.replanning.wait(), timeout=5)
+    await asyncio.wait_for(planner.replanning.wait(), timeout=5)
     stop.set()
     events = await asyncio.wait_for(resumed, timeout=5)
 
@@ -1952,9 +2058,9 @@ async def test_a_stopped_pick_replan_offers_the_plan_unchanged_and_puts_its_stat
     assert _session_state(runner).get(_DRAFTING_KEY) is None
 
 
-class _AskingOnPickSeam(_ReplanSeam):
-    """`_ReplanSeam` that, on its second call, asks the user a question
-    after writing `_DRAFTING_KEY` and the pick, as `PlannerSeam` records it."""
+class _AskingOnPickPlanner(_ReplanPlanner):
+    """`_ReplanPlanner` that, on its second call, asks the user a question
+    after writing `_DRAFTING_KEY` and the pick, as `PlannerAdapter` records it."""
 
     async def __call__(self, **kwargs: Any) -> dict[str, Any]:
         if len(self.calls) == 1:
@@ -1974,14 +2080,14 @@ async def test_a_planner_ask_during_a_pick_replan_keeps_its_state_and_resumes_wi
     the pick again and offers the replanned plan."""
     plan = _pickable_plan(schemas=real_schemas)
     replanned = _pickable_plan(schemas=real_schemas, chosen="2018-2024", version=2)
-    seam = _AskingOnPickSeam(
+    planner = _AskingOnPickPlanner(
         [
             {"plan": plan.model_dump(mode="json"), "summary": {}},
             {"plan": plan.model_dump(mode="json"), "summary": {}},
             {"plan": replanned.model_dump(mode="json"), "summary": {}},
         ]
     )
-    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
     paused = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
@@ -1990,7 +2096,7 @@ async def test_a_planner_ask_during_a_pick_replan_keeps_its_state_and_resumes_wi
 
     events = await _resume(runner, _PLANNER_ASK, {"answer": "2018"})
 
-    assert seam.calls[2]["pick"] == _picked_window(plan)
+    assert planner.calls[2]["pick"] == _picked_window(plan)
     assert _output_of(events, "planner")["revision"] == plan_revision(replanned)
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
 
@@ -2006,7 +2112,7 @@ async def test_a_pick_replan_failing_after_an_ask_puts_back_the_state_from_befor
     to hold, and no record of the replan."""
     plan = _pickable_plan(schemas=real_schemas)
     refused = {"text": "No plan.", "final": False, "code": "plan_not_ready", "reason": "No plan."}
-    seam = _AskingOnPickSeam(
+    planner = _AskingOnPickPlanner(
         [
             {"plan": plan.model_dump(mode="json"), "summary": {}},
             {"plan": plan.model_dump(mode="json"), "summary": {}},
@@ -2014,7 +2120,7 @@ async def test_a_pick_replan_failing_after_an_ask_puts_back_the_state_from_befor
         ],
         release=asyncio.Event() if ending == "stopped" else None,
     )
-    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
     paused = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "switch": _PICK_SWITCH})
     assert _pending_interrupt(paused) == _PLANNER_ASK
@@ -2027,7 +2133,7 @@ async def test_a_pick_replan_failing_after_an_ask_puts_back_the_state_from_befor
     finally:
         SWITCH_STOP.reset(token)
     if ending == "stopped":
-        await asyncio.wait_for(seam.replanning.wait(), timeout=5)
+        await asyncio.wait_for(planner.replanning.wait(), timeout=5)
         stop.set()
     events = await asyncio.wait_for(resumed, timeout=5)
 
@@ -2056,16 +2162,18 @@ async def test_an_approval_for_a_superseded_revision_routes_to_amend(
     for what it reads as a different question, so two unrelated plans can
     both be version 1 in one conversation).
     """
-    plan_v1 = _seam_plan(question="kenya debt", schemas=real_schemas)
-    plan_v2 = _seam_plan(question="kenya debt, revised", schemas=real_schemas)
-    seam = _Seam(
+    plan_v1 = _planner_plan(question="kenya debt", schemas=real_schemas)
+    plan_v2 = _planner_plan(question="kenya debt, revised", schemas=real_schemas)
+    planner = _Planner(
         [
             {"plan": plan_v1.model_dump(mode="json"), "summary": {}},
             {"plan": plan_v2.model_dump(mode="json"), "summary": {}},
         ]
     )
     executor = ScriptedExecutor()
-    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas), executor=executor)
+    runner, _ = _plan_runner(
+        planner, tool_surface=_fixture_surface(real_schemas), executor=executor
+    )
     events = await _start(runner)
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     revision_1 = plan_revision(plan_v1)
@@ -2117,9 +2225,9 @@ async def test_a_pending_plan_saved_at_the_base_revision_format_is_approved_unam
     """The card a user holds names the revision computed when the plan was
     saved. A plan saved without the fields its models have since gained
     still hashes to that revision, so the answer approves it and it runs."""
-    seam = _Seam([{"plan": _BASE_FORMAT_PLAN["plan"], "summary": {}}])
+    planner = _Planner([{"plan": _BASE_FORMAT_PLAN["plan"], "summary": {}}])
     surface = _CallRecordingSurface(ScriptedSurface())
-    runner, _ = _plan_runner(seam, tool_surface=surface)
+    runner, _ = _plan_runner(planner, tool_surface=surface)
     events = await _start(runner)
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     assert _output_of(events, "planner")["revision"] == _BASE_FORMAT_PLAN["revision"]
@@ -2129,7 +2237,7 @@ async def test_a_pending_plan_saved_at_the_base_revision_format_is_approved_unam
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(_BASE_FORMAT_PLAN["revision"]))
 
     assert _pending_interrupt(events) is None
-    assert len(seam.calls) == 1
+    assert len(planner.calls) == 1
     assert [call[0] for call in surface.calls] == ["get_data", "aggregate"]
     assert _output_of(events, "execute")["plan_version"] == 1
     finished = PlannerPlan.model_validate_json(_session_state(runner)["plan"])
@@ -2227,10 +2335,10 @@ async def test_an_approved_plan_compiled_against_an_older_get_data_is_refused_fo
 async def test_a_refused_amendment_still_offers_the_pending_version_for_approval(
     real_schemas: list[ToolSchema],
 ) -> None:
-    """A `PlannerModel` seam can refuse to draft at all
-    (`harness.planner_seam.PlannerSeam`'s own `MAX_PLAN_ROUNDS` cap,
+    """A `PlannerModel` can refuse to draft at all
+    (`harness.planner_adapter.PlannerAdapter`'s own `MAX_PLAN_ROUNDS` cap,
     surfaced as `{"refused": {"text": ...}}` rather than a raised
-    `PlannerSeamError`). The planner node never writes `ctx.state["plan"]`
+    `PlannerAdapterError`). The planner node never writes `ctx.state["plan"]`
     on that path, so the plan the user already had -- still
     `PENDING_APPROVAL` -- stays exactly as it was. Since that plan is
     still real and still pending, the refusal is not a dead end: the node
@@ -2240,8 +2348,8 @@ async def test_a_refused_amendment_still_offers_the_pending_version_for_approval
     approve" by actually approving it, not only by reading the sentence
     that says so.
     """
-    plan_v1 = _seam_plan(question="kenya debt", schemas=real_schemas)
-    seam = _Seam(
+    plan_v1 = _planner_plan(question="kenya debt", schemas=real_schemas)
+    planner = _Planner(
         [
             {"plan": plan_v1.model_dump(mode="json"), "summary": {}},
             {
@@ -2253,7 +2361,9 @@ async def test_a_refused_amendment_still_offers_the_pending_version_for_approval
         ]
     )
     executor = ScriptedExecutor()
-    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas), executor=executor)
+    runner, _ = _plan_runner(
+        planner, tool_surface=_fixture_surface(real_schemas), executor=executor
+    )
     events = await _start(runner)
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     revision_1 = plan_revision(plan_v1)
@@ -2294,11 +2404,11 @@ async def test_the_execute_node_runs_the_approved_workflow_through_the_surface(
     """`execute` calls `execute_approved_plan` against the injected
     `ToolSurface`; the executor sees no plan step, only `plan_done`'s
     description of the final frame."""
-    plan = _seam_plan(schemas=real_schemas)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    plan = _planner_plan(schemas=real_schemas)
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     executor = ScriptedExecutor()
     surface = _CallRecordingSurface(_fixture_surface(real_schemas))
-    runner, _ = _plan_runner(seam, tool_surface=surface, executor=executor)
+    runner, _ = _plan_runner(planner, tool_surface=surface, executor=executor)
     events = await _start(runner)
     revision = plan_revision(plan)
 
@@ -2358,8 +2468,8 @@ async def test_a_final_retrieval_read_with_extra_columns_is_shown_by_its_manifes
     frame's own pair. Each frame is registered with the pair the store holds
     it under, which is the typed pair for the retrieval and its own pair for
     the total."""
-    plan = _seam_plan(schemas=real_schemas, terminal=("get_data", "totals"))
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    plan = _planner_plan(schemas=real_schemas, terminal=("get_data", "totals"))
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     served = {"spec_id": SPEC_A, "content_version": "cv_" + "1" * 32}
     typed = {"spec_id": SPEC_A, "content_version": "cv_" + "9" * 32}
     total = {"spec_id": "ops_" + "2" * 32, "content_version": "ocv_" + "3" * 32}
@@ -2374,7 +2484,7 @@ async def test_a_final_retrieval_read_with_extra_columns_is_shown_by_its_manifes
         )
     )
     platform = _ServedPairsPlatform([served, total])
-    runner, model = _plan_runner(seam, tool_surface=surface, executor=platform)
+    runner, model = _plan_runner(planner, tool_surface=surface, executor=platform)
     await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
@@ -2476,9 +2586,9 @@ async def test_a_summed_familys_total_reaches_the_agent_in_the_hand_back(
         "sum of 74 indicators."
     )
     monkeypatch.setattr(answer_module, "_stat_var_totals", lambda *a, **k: [sentence])
-    plan = _seam_plan(schemas=real_schemas)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-    runner, model = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    plan = _planner_plan(schemas=real_schemas)
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    runner, model = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
@@ -2494,9 +2604,9 @@ async def test_a_none_tool_surface_refuses_loudly_rather_than_executing_nothing(
     """`create_root_workflow(tool_surface=None)`, stated explicitly, must not
     let an approved plan reach execute silently: reading a plan the node
     cannot run has to fail loudly."""
-    plan = _seam_plan(schemas=real_schemas)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-    runner, _ = _plan_runner(seam)
+    plan = _planner_plan(schemas=real_schemas)
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    runner, _ = _plan_runner(planner)
     await _start(runner)
     revision = plan_revision(plan)
 
@@ -2511,8 +2621,8 @@ async def test_a_rediscovery_outcome_replans_naming_the_requirement(
     source a `RediscoveryNeeded` refusal reports -- a bare retry would only
     reproduce it, so `execute` routes back to the planner naming what to
     rediscover, never retrying the call itself."""
-    plan = _seam_plan(schemas=real_schemas, bind_evidence=True)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    plan = _planner_plan(schemas=real_schemas, bind_evidence=True)
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     refusal = ToolCallResult(
         is_error=True,
         structured_content={
@@ -2523,7 +2633,7 @@ async def test_a_rediscovery_outcome_replans_naming_the_requirement(
         text="refused",
     )
     surface = _fixture_surface(real_schemas, get_data_result=refusal)
-    runner, _ = _plan_runner(seam, tool_surface=surface)
+    runner, _ = _plan_runner(planner, tool_surface=surface)
     events = await _start(runner)
     revision = plan_revision(plan)
 
@@ -2532,7 +2642,7 @@ async def test_a_rediscovery_outcome_replans_naming_the_requirement(
     # Replanned (MAX_REPLANS == 1 covers one round): a fresh approval is
     # pending rather than the turn closing on the first refusal.
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
-    assert seam.calls[-1]["refusal"] == {
+    assert planner.calls[-1]["refusal"] == {
         "kind": "rediscovery_needed",
         "step_id": "get_data",
         "tool": "get_data",
@@ -2554,8 +2664,8 @@ async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step
 ) -> None:
     """`MAX_REPLANS == 1`: a second identical refusal closes the turn with
     what ran and the failed step named, rather than a third plan."""
-    plan = _seam_plan(schemas=real_schemas)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    plan = _planner_plan(schemas=real_schemas)
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     refusal = ToolCallResult(
         is_error=True,
         structured_content={
@@ -2568,7 +2678,7 @@ async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step
     )
     surface = _fixture_surface(real_schemas, analysis_call_result=refusal)
     executor = ScriptedExecutor()
-    runner, model = _plan_runner(seam, tool_surface=surface, executor=executor)
+    runner, model = _plan_runner(planner, tool_surface=surface, executor=executor)
     events = await _start(runner)
     revision = plan_revision(plan)
 
@@ -2603,8 +2713,8 @@ async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_repl
     guess. Unlike `test_a_method_choice_refusal_
     replans_once_then_closes_with_failed_step`'s `entity_ambiguous`, no
     second approval is ever pending."""
-    plan = _seam_plan(schemas=real_schemas)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    plan = _planner_plan(schemas=real_schemas)
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     refusal = ToolCallResult(
         is_error=True,
         structured_content={
@@ -2616,7 +2726,7 @@ async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_repl
         text="refused",
     )
     surface = _fixture_surface(real_schemas, analysis_call_result=refusal)
-    runner, model = _plan_runner(seam, tool_surface=surface)
+    runner, model = _plan_runner(planner, tool_surface=surface)
     events = await _start(runner)
     revision = plan_revision(plan)
 
@@ -2654,8 +2764,8 @@ async def test_a_member_cardinality_ceiling_closes_the_turn_without_replanning(
     reproduces the identical refusal. `classify_refusal` classifies it
     `STOP`, so `execute` closes the turn on this first refusal instead of
     spending the turn's one replan on a rediscovery that cannot help."""
-    plan = _seam_plan(schemas=real_schemas, bind_evidence=True)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    plan = _planner_plan(schemas=real_schemas, bind_evidence=True)
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     refusal = ToolCallResult(
         is_error=True,
         structured_content={
@@ -2673,7 +2783,7 @@ async def test_a_member_cardinality_ceiling_closes_the_turn_without_replanning(
         text="refused",
     )
     surface = _fixture_surface(real_schemas, get_data_result=refusal)
-    runner, model = _plan_runner(seam, tool_surface=surface)
+    runner, model = _plan_runner(planner, tool_surface=surface)
     events = await _start(runner)
     revision = plan_revision(plan)
 
@@ -2703,8 +2813,8 @@ async def test_a_member_cardinality_ceilings_remedy_reaches_the_agent_in_the_han
     after a `member_cardinality` ceiling's dead end, reaches
     the agent verbatim in the hand-back's `failed_step`, beside the code and
     message."""
-    plan = _seam_plan(schemas=real_schemas, bind_evidence=True)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    plan = _planner_plan(schemas=real_schemas, bind_evidence=True)
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     remedy = (
         "This spec_id's definition has more member series than one request can "
         "serve. scope.entities and scope.window do not change that. A narrower "
@@ -2728,7 +2838,7 @@ async def test_a_member_cardinality_ceilings_remedy_reaches_the_agent_in_the_han
         text="refused",
     )
     surface = _fixture_surface(real_schemas, get_data_result=refusal)
-    runner, model = _plan_runner(seam, tool_surface=surface)
+    runner, model = _plan_runner(planner, tool_surface=surface)
     await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
@@ -2748,21 +2858,21 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
     an identical plan. The agent reads the executor's own message and
     remedy, both written for the user, in place of the count of `stat_vars`
     the refusal's `detail` states."""
-    plan = _seam_plan(schemas=real_schemas, stat_vars="sum")
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    plan = _planner_plan(schemas=real_schemas, stat_vars="sum")
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     unsummed = ToolCallResult(
         is_error=False,
         structured_content=_get_data_manifest() | {"stat_var_count": 3},
         text="fetched",
     )
     surface = _fixture_surface(real_schemas, get_data_result=unsummed)
-    runner, model = _plan_runner(seam, tool_surface=surface)
+    runner, model = _plan_runner(planner, tool_surface=surface)
     events = await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
 
     assert _pending_interrupt(events) is None
-    assert len(seam.calls) == 1
+    assert len(planner.calls) == 1
     message = (
         "The data service returned this measure's component series side by side and did "
         "not add them up, so there is no total to report."
@@ -2793,8 +2903,8 @@ async def test_an_over_ceiling_rows_refusal_still_replans(
     """A `rows`/`bytes` ceiling narrows with `scope.entities`/`scope.window`,
     so -- unlike `member_cardinality` above -- it is a method choice, not a
     dead end, and replans once like any other correctable refusal."""
-    plan = _seam_plan(schemas=real_schemas)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    plan = _planner_plan(schemas=real_schemas)
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     refusal = ToolCallResult(
         is_error=True,
         structured_content={
@@ -2806,18 +2916,18 @@ async def test_an_over_ceiling_rows_refusal_still_replans(
         text="refused",
     )
     surface = _fixture_surface(real_schemas, analysis_call_result=refusal)
-    runner, _ = _plan_runner(seam, tool_surface=surface)
+    runner, _ = _plan_runner(planner, tool_surface=surface)
     events = await _start(runner)
     revision = plan_revision(plan)
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
 
     # A method choice, not a dead end: the planner is asked again (the
-    # scripted seam redrafts the same plan, so the version does not bump),
+    # scripted planner redrafts the same plan, so the version does not bump),
     # and a fresh approval is pending rather than the turn closing.
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
-    assert len(seam.calls) == 2
-    assert seam.calls[-1]["refusal"]["code"] == "over_ceiling"
+    assert len(planner.calls) == 2
+    assert planner.calls[-1]["refusal"]["code"] == "over_ceiling"
 
 
 _MOVED = (EvidenceIssueCode.STAT_VAR_FAMILY_MOVED, Severity.ERROR)
@@ -2903,8 +3013,8 @@ async def test_a_wave_of_dead_ends_closes_the_turn(
     refusal is another. A binding that fails the same way for every search, a
     stop that also fails on another issue, or a wave with any other stop
     (`also`) replans like any other."""
-    plan = _seam_plan(schemas=real_schemas)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    plan = _planner_plan(schemas=real_schemas)
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
 
     async def _stub_wave(drafted_plan: Any, **_kwargs: Any) -> Any:
         revision = plan_revision(drafted_plan)
@@ -2913,12 +3023,12 @@ async def test_a_wave_of_dead_ends_closes_the_turn(
         return drafted_plan, stop.model_copy(update={"also_stopped": siblings})
 
     monkeypatch.setattr("harness.graph.execute.execute_approved_plan", _stub_wave)
-    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
 
-    assert len(seam.calls) == (1 if dead_end else 2)
+    assert len(planner.calls) == (1 if dead_end else 2)
     if not dead_end:
         assert _pending_interrupt(events) == APPROVE_INTERRUPT
         return
@@ -2939,8 +3049,8 @@ async def test_a_transport_stop_closes_the_turn_only_when_no_retry_can_help(
     """A step the tool surface failed for a fault no later attempt gets past
     closes the turn without a replan, which would spend an approval on the
     same failure. A retryable transport stop replans."""
-    plan = _seam_plan(schemas=real_schemas)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    plan = _planner_plan(schemas=real_schemas)
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
 
     async def _stub_wave(drafted_plan: Any, **_kwargs: Any) -> Any:
         stop = Refused(
@@ -2953,12 +3063,12 @@ async def test_a_transport_stop_closes_the_turn_only_when_no_retry_can_help(
         return drafted_plan, stop
 
     monkeypatch.setattr("harness.graph.execute.execute_approved_plan", _stub_wave)
-    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
 
-    assert len(seam.calls) == (2 if retryable else 1)
+    assert len(planner.calls) == (2 if retryable else 1)
     assert (_pending_interrupt(events) == APPROVE_INTERRUPT) is retryable
 
 
@@ -2972,8 +3082,8 @@ async def test_a_not_approved_outcome_raises_instead_of_replanning(
     before routing here), so the outcome is stubbed to prove this node's own
     branch rather than trying to coax `approve` into a defect it structurally
     prevents."""
-    plan = _seam_plan(schemas=real_schemas)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    plan = _planner_plan(schemas=real_schemas)
+    planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
 
     async def _stub_not_approved(
         drafted_plan: Any, *, surface: Any, max_concurrent_steps: int = 4, **_kwargs: Any
@@ -2986,7 +3096,7 @@ async def test_a_not_approved_outcome_raises_instead_of_replanning(
         )
 
     monkeypatch.setattr("harness.graph.execute.execute_approved_plan", _stub_not_approved)
-    runner, _ = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
     revision = plan_revision(plan)
 
@@ -3668,9 +3778,9 @@ def _switched_answer(scope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 def _scoped_plan(
     pin: str, scope: dict[str, Any], *, schemas: list[ToolSchema], version: int = 1
 ) -> PlannerPlan:
-    """`_seam_plan` with its dataset pinned to `pin`, citing the scope
+    """`_planner_plan` with its dataset pinned to `pin`, citing the scope
     decisions a pin of `scope`'s part states."""
-    plan = _seam_plan(schemas=schemas)
+    plan = _planner_plan(schemas=schemas)
     block = {"spec_id": pin, "resolved": {"scope_choices": scope}}
     scoped = scope_choice_decisions({pin: PinSource(block=block, settled=True)})[pin]
     return PlannerPlan.model_validate(
@@ -3701,7 +3811,7 @@ def _row_id(plan: PlannerPlan, axis: str) -> str:
     return f"{dataset.id}:{axis}"
 
 
-class _RevisingSeam(_Seam):
+class _RevisingPlanner(_Planner):
     """A `PlannerModel` drafting `plans` and answering each revision with `revised`."""
 
     def __init__(self, plans: list[dict[str, Any]], revised: dict[str, Any]) -> None:
@@ -3715,12 +3825,12 @@ class _RevisingSeam(_Seam):
         return self._revised
 
 
-# The dataset `_StoppedSeam`'s revision searches for an input it pinned none for.
+# The dataset `_StoppedPlanner`'s revision searches for an input it pinned none for.
 _SEARCHED_PIN = "spec_" + "7" * 32
 
 
-class _StoppedSeam(_RevisingSeam):
-    """A `_RevisingSeam` whose revision the user stops while it runs: it writes
+class _StoppedPlanner(_RevisingPlanner):
+    """A `_RevisingPlanner` whose revision the user stops while it runs: it writes
     drafting state, searches a dataset for an input it pinned none for and stores
     its reading (`store_searched_pin_readings`), as a revision of a share does,
     sets `SWITCH_STOP` as a Stop does, and waits to be cancelled."""
@@ -3763,8 +3873,8 @@ class _StoppedSeam(_RevisingSeam):
         raise AssertionError("a stopped revision is cancelled")
 
 
-class _FinishingStoppedSeam(_StoppedSeam):
-    """A `_StoppedSeam` whose revision finishes in the step the Stop comes in,
+class _FinishingStoppedPlanner(_StoppedPlanner):
+    """A `_StoppedPlanner` whose revision finishes in the step the Stop comes in,
     so the switch's wait sees both done."""
 
     async def _stopped(self) -> dict[str, Any]:
@@ -3781,27 +3891,27 @@ async def _switch_runner(
     entity_groups: dict[str, Any] | None = None,
     stored_unreadable: bool = False,
     stored_groups: list[dict[str, Any]] | None = None,
-    seam_type: type[_RevisingSeam] = _RevisingSeam,
+    planner_type: type[_RevisingPlanner] = _RevisingPlanner,
     earlier_whole: AlignedPin | None = None,
-) -> tuple[Runner, _RevisingSeam, PlannerPlan, dict[str, Any], list[Event]]:
+) -> tuple[Runner, _RevisingPlanner, PlannerPlan, dict[str, Any], list[Event]]:
     """A turn paused on a plan pinning the compiled US health aid source, its
     reading stored (marked as one the planner compiled to align a basis when
     `aligned`, as one whose sets were not readable when `stored_unreadable`, and
     as one resolved with `stored_groups` when given) beside its block naming `entity_groups` when given, held as the
     whole `earlier_whole` an earlier plan compiled from its part when given,
     then answered with a switch to `option_id`, by default its sector to CRS
-    120 and 130, through `search`. Returns the runner, the seam, the plan, the scope and the
+    120 and 130, through `search`. Returns the runner, the planner, the plan, the scope and the
     resumed turn's events."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     plan = _scoped_plan(pin, scope, schemas=real_schemas)
-    seam = seam_type(
+    planner = planner_type(
         [{"plan": plan.model_dump(mode="json"), "summary": {}}],
         revised or {"refused": {"text": "unused"}},
     )
     runner, _ = orchestrator_runner(
         plan_call(_BRIEF),
-        planner=seam,
+        planner=planner,
         executor=ScriptedExecutor(),
         definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
     )
@@ -3837,7 +3947,7 @@ async def _switch_runner(
         APPROVE_INTERRUPT,
         {"approved": None, "switch": {"choice_id": choice_id, "option_id": option_id}},
     )
-    return runner, seam, plan, scope, events
+    return runner, planner, plan, scope, events
 
 
 @pytest.mark.parametrize("basis_row", [True, False], ids=["basis-row", "no-basis-row"])
@@ -3873,11 +3983,11 @@ async def test_a_switch_compiles_through_search_repins_the_plan_and_says_what_mo
         )
     search = SearchStub(answer={scope["id"]: envelope})
 
-    runner, seam, plan, scope, events = await _switch_runner(
+    runner, planner, plan, scope, events = await _switch_runner(
         real_schemas, search, {"plan": revised.model_dump(mode="json"), "summary": {}}
     )
 
-    assert len(seam.calls) == 1  # the first draft; the switch drafts nothing
+    assert len(planner.calls) == 1  # the first draft; the switch drafts nothing
     (posted,) = search.posted
     (entry,) = posted["input"]["entries"]
     assert (entry["variable_text"], entry["identity"]) == (scope["id"], scope["base"]["identity"])
@@ -3891,7 +4001,7 @@ async def test_a_switch_compiles_through_search_repins_the_plan_and_says_what_mo
             "origin": {"kind": "choice", "choice_id": f"{scope['id']}:sector"},
         },
     ]
-    (revision,) = seam.revisions
+    (revision,) = planner.revisions
     assert revision["inherits"] == {new_pin: scope["compiled"]["spec_id"]}
     assert [r["source_spec_id"] for r in revision["evidence_requirements"]] == [new_pin]
     assert PlannerPlan.model_validate(revision["prior_plan"]) == plan
@@ -3942,7 +4052,7 @@ def test_one_move_across_two_switched_sources_with_no_row_is_listed_once(
 
     (dataset,) = [
         r
-        for r in _seam_plan(schemas=real_schemas).evidence_requirements
+        for r in _planner_plan(schemas=real_schemas).evidence_requirements
         if isinstance(r, DatasetRequirement)
     ]
     plan = SimpleNamespace(
@@ -3979,7 +4089,7 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
     part = "spec_" + "4" * 32
     whole = AlignedPin(origin=part, option_ids=(), spec_id="", digest={}, whole_axis="sector")
 
-    _, seam, _, _, events = await _switch_runner(
+    _, planner, _, _, events = await _switch_runner(
         real_schemas,
         search,
         {"plan": revised.model_dump(mode="json"), "summary": {}},
@@ -3987,7 +4097,7 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
     )
 
     assert len(search.posted) == 1
-    assert len(seam.revisions) == 1
+    assert len(planner.revisions) == 1
     offered = _output_of(events, "switch")
     assert "switch_failed" not in offered
     assert offered["revision"] == plan_revision(revised)
@@ -4198,10 +4308,10 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
         }
     }
 
-    runner, seam, plan, scope, events = await _switch_runner(real_schemas, search, refused)
+    runner, planner, plan, scope, events = await _switch_runner(real_schemas, search, refused)
 
-    assert len(seam.calls) == 1
-    assert len(seam.revisions) == (0 if refused_by == "search" else 1)
+    assert len(planner.calls) == 1
+    assert len(planner.revisions) == (0 if refused_by == "search" else 1)
     offered = _output_of(events, "switch")
     assert offered["revision"] == plan_revision(plan)
     assert "refusal_note" not in offered
@@ -4222,7 +4332,7 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
     assert [r["spec_id"] for r in state[ORCHESTRATOR_SEARCHES_KEY]] == [
         scope["compiled"]["spec_id"]
     ]
-    # The fake seam drafted with no pin sources or rounds of its own.
+    # The fake planner drafted with no pin sources or rounds of its own.
     assert state.get("planner:rounds") is None
     assert state.get("planner:pin_sources") is None
     resolved = [
@@ -4233,12 +4343,12 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
 
 
 @pytest.mark.parametrize(
-    "seam_type",
-    [_StoppedSeam, _FinishingStoppedSeam],
+    "planner_type",
+    [_StoppedPlanner, _FinishingStoppedPlanner],
     ids=["revision-cancelled", "revision-finishes-with-the-stop"],
 )
 async def test_a_switch_the_user_stops_offers_the_plan_unchanged_to_answer_again(
-    real_schemas: list[ToolSchema], seam_type: type[_StoppedSeam]
+    real_schemas: list[ToolSchema], planner_type: type[_StoppedPlanner]
 ) -> None:
     """A Stop while the revision runs (`SWITCH_STOP`) cancels it and offers
     the plan unchanged under `switch_cancelled`, which asking again can get
@@ -4255,16 +4365,16 @@ async def test_a_switch_the_user_stops_offers_the_plan_unchanged_to_answer_again
     )
     token = SWITCH_STOP.set(asyncio.Event())
     try:
-        runner, seam, plan, scope, events = await _switch_runner(
+        runner, planner, plan, scope, events = await _switch_runner(
             real_schemas,
             SearchStub(answer={scope["id"]: envelope}),
             {"plan": revised.model_dump(mode="json"), "summary": {}},
-            seam_type=seam_type,
+            planner_type=planner_type,
         )
     finally:
         SWITCH_STOP.reset(token)
 
-    assert len(seam.revisions) == 1
+    assert len(planner.revisions) == 1
     offered = _output_of(events, "switch")
     assert offered["revision"] == plan_revision(plan)
     assert offered["switch_failed"] == {
@@ -4283,8 +4393,8 @@ async def test_a_switch_the_user_stops_offers_the_plan_unchanged_to_answer_again
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
 
 
-class _RaisingSeam(_StoppedSeam):
-    """A `_StoppedSeam` whose revision, once it has written its state, raises an
+class _RaisingPlanner(_StoppedPlanner):
+    """A `_StoppedPlanner` whose revision, once it has written its state, raises an
     error of its own with no Stop. `sessions` holds the session each revision ran in."""
 
     sessions: ClassVar[list[Any]] = []
@@ -4315,17 +4425,17 @@ async def test_a_switch_whose_revision_raises_puts_the_state_back_and_raises(
         schemas=real_schemas,
         version=2,
     )
-    _RaisingSeam.sessions.clear()
+    _RaisingPlanner.sessions.clear()
 
     with pytest.raises(RuntimeError, match="revision broke"):
         await _switch_runner(
             real_schemas,
             SearchStub(answer={scope["id"]: envelope}),
             {"plan": revised.model_dump(mode="json"), "summary": {}},
-            seam_type=_RaisingSeam,
+            planner_type=_RaisingPlanner,
         )
 
-    (session,) = _RaisingSeam.sessions
+    (session,) = _RaisingPlanner.sessions
     state = session.state
     assert [r["spec_id"] for r in state[ORCHESTRATOR_SEARCHES_KEY]] == [
         scope["compiled"]["spec_id"]
@@ -4452,9 +4562,9 @@ class _RecordedFixtures(FixtureSurface):
         return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
 
 
-class _TranslatingSeam(_Seam):
+class _TranslatingPlanner(_Planner):
     """A `PlannerModel` drafting `plans` and revising through the real
-    `harness.planner_seam.PlannerSeam.revise`: the proposal chain, the
+    `harness.planner_adapter.PlannerAdapter.revise`: the proposal chain, the
     translation's discovery and the compile, over `schemas`, answering
     `responses`, with no model."""
 
@@ -4467,27 +4577,27 @@ class _TranslatingSeam(_Seam):
     ) -> None:
         super().__init__(plans)
         self.surface = _RecordedFixtures(schemas=schemas, responses=responses or {})
-        self._seam = PlannerSeam(settings=Settings(), surface=self.surface)
+        self._adapter = PlannerAdapter(settings=Settings(), surface=self.surface)
 
     async def revise(self, **kwargs: Any) -> dict[str, Any]:
-        return await self._seam.revise(**kwargs)
+        return await self._adapter.revise(**kwargs)
 
 
 class _SwitchedOff(NamedTuple):
     """A switch off a stated source (`_switch_off_a_stated_source`): the runner, the
-    switch's events, the seam that revised, the pin Search answered and the copy
+    switch's events, the planner that revised, the pin Search answered and the copy
     of it over the plan's years."""
 
     runner: Any
     events: list[Any]
-    seam: _TranslatingSeam
+    planner: _TranslatingPlanner
     new_pin: str
     copy_pin: str
 
 
-class _RefusingPickSeam(_TranslatingSeam):
-    """A `_TranslatingSeam` whose replan for a pick asks the user a question,
-    after recording the pick and drafting state as `PlannerSeam` does, and is
+class _RefusingPickPlanner(_TranslatingPlanner):
+    """A `_TranslatingPlanner` whose replan for a pick asks the user a question,
+    after recording the pick and drafting state as `PlannerAdapter` does, and is
     refused once resumed."""
 
     async def __call__(self, **kwargs: Any) -> dict[str, Any]:
@@ -4516,7 +4626,7 @@ async def _switch_off_a_stated_source(
     `before_switch` is what happened on the card before the switch:
     `"refused_pick_replan"` switches the window decision, which then fixes
     the period, and the planner's replan asks a question and is refused once
-    answered (`_RefusingPickSeam`)."""
+    answered (`_RefusingPickPlanner`)."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     new_pin, envelope = _switched_answer(scope)
@@ -4565,7 +4675,9 @@ async def _switch_off_a_stated_source(
     copied_block["spec_id"] = copied_block["definition"]["spec_id"] = copy_pin
     copied_block["definition"]["identity"] = copied
     copied_block["resolved"]["coverage"]["window"]["start_year"] = 2015
-    seam = (_RefusingPickSeam if before_switch == "refused_pick_replan" else _TranslatingSeam)(
+    planner = (
+        _RefusingPickPlanner if before_switch == "refused_pick_replan" else _TranslatingPlanner
+    )(
         [{"plan": plan.model_dump(mode="json"), "summary": {}}],
         schemas=real_schemas,
         responses={
@@ -4577,7 +4689,7 @@ async def _switch_off_a_stated_source(
     search = SearchStub(answer={scope["id"]: envelope})
     runner, _ = orchestrator_runner(
         plan_call(_BRIEF),
-        planner=seam,
+        planner=planner,
         executor=ScriptedExecutor(),
         definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
     )
@@ -4602,7 +4714,7 @@ async def _switch_off_a_stated_source(
             "switch": {"choice_id": _row_id(plan, "sector"), "option_id": "sector:120+130"},
         },
     )
-    return _SwitchedOff(runner, events, seam, new_pin, copy_pin)
+    return _SwitchedOff(runner, events, planner, new_pin, copy_pin)
 
 
 @pytest.mark.parametrize("before_switch", [None, "refused_pick_replan"])
@@ -4616,11 +4728,11 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
     plan's years, and searches nothing. A pick on the card belongs to its
     planner entry, so the revision holds none after a replan for one was
     refused following a question the planner asked."""
-    runner, events, seam, _, copy_pin = await _switch_off_a_stated_source(
+    runner, events, planner, _, copy_pin = await _switch_off_a_stated_source(
         real_schemas, before_switch=before_switch
     )
 
-    assert [(tool, arguments.get("spec_id")) for tool, arguments in seam.surface.calls] == [
+    assert [(tool, arguments.get("spec_id")) for tool, arguments in planner.surface.calls] == [
         ("resolve_definition", copy_pin)
     ]
     offered = _output_of(events, "switch")
@@ -4753,7 +4865,7 @@ async def _chip_turn(
     ).model_dump(mode="json")
     executor = executor or _RecordingExecutor()
     runner, model = orchestrator_runner(
-        call("search", query="health aid", parts=[{"variable": "health aid"}]),
+        call("search", parts=[{"variable": "health aid"}]),
         executor=executor,
         definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
     )
@@ -4959,9 +5071,9 @@ async def test_each_card_offered_starts_its_retrievals_once_with_the_arguments_e
     """The first card starts its retrieval, an amendment's card starts its own,
     a re-offer of that card starts nothing, and the run the approval starts
     asks `get_data` with exactly the arguments the early call sent."""
-    plan_v1 = _seam_plan(question="kenya debt", schemas=real_schemas, stat_vars="sum")
-    plan_v2 = _seam_plan(question="kenya debt, revised", schemas=real_schemas, stat_vars="sum")
-    seam = _Seam(
+    plan_v1 = _planner_plan(question="kenya debt", schemas=real_schemas, stat_vars="sum")
+    plan_v2 = _planner_plan(question="kenya debt, revised", schemas=real_schemas, stat_vars="sum")
+    planner = _Planner(
         [
             {"plan": plan_v1.model_dump(mode="json"), "summary": {}},
             {"plan": plan_v2.model_dump(mode="json"), "summary": {}},
@@ -4971,7 +5083,7 @@ async def test_each_card_offered_starts_its_retrievals_once_with_the_arguments_e
     surface = _CallRecordingSurface(_fixture_surface(real_schemas))
     runner, _ = orchestrator_runner(
         plan_call(_BRIEF),
-        planner=seam,
+        planner=planner,
         tool_surface=surface,
         executor=ScriptedExecutor(),
         early_mints=EarlyMints(send=sends, max_concurrent=4, settle_s=3.0),
@@ -5009,12 +5121,12 @@ async def test_an_early_mint_that_fails_is_logged_and_leaves_the_card_and_plan_a
     outcome: str | Exception,
     logged: str,
 ) -> None:
-    plan = _seam_plan(schemas=real_schemas)
+    plan = _planner_plan(schemas=real_schemas)
 
     async def card(early_mints: EarlyMints | None) -> tuple[Any, Any, str | None]:
-        seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+        planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
         runner, _ = orchestrator_runner(
-            plan_call(_BRIEF), planner=seam, executor=ScriptedExecutor(), early_mints=early_mints
+            plan_call(_BRIEF), planner=planner, executor=ScriptedExecutor(), early_mints=early_mints
         )
         events = await _start(runner)
         await asyncio.sleep(0)
@@ -5046,7 +5158,7 @@ async def test_a_call_unsent_at_one_stream_end_logs_one_line_with_its_own_elapse
     sends = _EarlySends(hold=hold)
     now = [100.0]
     early = EarlyMints(send=sends, max_concurrent=4, settle_s=0.01, clock=lambda: now[0])
-    early.offer(_seam_plan(schemas=real_schemas))
+    early.offer(_planner_plan(schemas=real_schemas))
 
     with caplog.at_level("INFO", logger="harness.early_mint"):
         now[0] = 102.5
@@ -5066,7 +5178,7 @@ async def test_a_cards_early_calls_go_out_no_more_than_the_cap_at_once(
 ) -> None:
     """A card with more retrievals than the cap sends the cap's worth, and the
     rest as those end."""
-    wide = _with_retrievals(_seam_plan(schemas=real_schemas), 3)
+    wide = _with_retrievals(_planner_plan(schemas=real_schemas), 3)
     hold = asyncio.Event()
     sends = _EarlySends(hold=hold)
     early = EarlyMints(send=sends, max_concurrent=2, settle_s=3.0)
@@ -5101,10 +5213,10 @@ async def test_offering_a_newer_card_withdraws_the_older_cards_calls_still_waiti
     early = EarlyMints(send=sends, max_concurrent=1, settle_s=3.0)
 
     with caplog.at_level("INFO", logger="harness.early_mint"):
-        early.offer(_with_retrievals(_seam_plan(schemas=real_schemas), 3))
+        early.offer(_with_retrievals(_planner_plan(schemas=real_schemas), 3))
         await asyncio.sleep(0)
         assert len(sends.sent) == 1
-        early.offer(_seam_plan(question="kenya debt, revised", schemas=real_schemas))
+        early.offer(_planner_plan(question="kenya debt, revised", schemas=real_schemas))
         hold.set()
         await asyncio.gather(*early._tasks, return_exceptions=True)
 
@@ -5120,7 +5232,7 @@ async def test_withdrawing_cancels_the_latest_cards_calls_still_waiting_for_a_sl
     hold = asyncio.Event()
     sends = _EarlySends(hold=hold)
     early = EarlyMints(send=sends, max_concurrent=1, settle_s=3.0)
-    early.offer(_with_retrievals(_seam_plan(schemas=real_schemas), 3))
+    early.offer(_with_retrievals(_planner_plan(schemas=real_schemas), 3))
     await asyncio.sleep(0)
     assert len(sends.sent) == 1
 
@@ -5141,8 +5253,8 @@ async def test_evicting_a_conversation_withdraws_its_calls_still_waiting_for_a_s
     hold = asyncio.Event()
     sends = _EarlySends(hold=hold)
     early = EarlyMints(send=sends, max_concurrent=1, settle_s=3.0)
-    oldest = _with_retrievals(_seam_plan(schemas=real_schemas), 3)
-    other = _seam_plan(schemas=real_schemas)
+    oldest = _with_retrievals(_planner_plan(schemas=real_schemas), 3)
+    other = _planner_plan(schemas=real_schemas)
 
     current_conversation_id.set("conversation-0")
     early.offer(oldest)
@@ -5161,13 +5273,13 @@ async def test_evicting_a_conversation_withdraws_its_calls_still_waiting_for_a_s
 async def test_approving_a_card_withdraws_its_early_calls_and_offering_it_does_not(
     real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plan = _seam_plan(schemas=real_schemas)
+    plan = _planner_plan(schemas=real_schemas)
     early = EarlyMints(send=_EarlySends(), max_concurrent=4, settle_s=3.0)
     withdrawn: list[str] = []
     monkeypatch.setattr(early, "withdraw", lambda: withdrawn.append("withdraw"))
     runner, _ = orchestrator_runner(
         plan_call(_BRIEF),
-        planner=_Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}]),
+        planner=_Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}]),
         tool_surface=_fixture_surface(real_schemas),
         executor=ScriptedExecutor(),
         early_mints=early,
@@ -5185,7 +5297,7 @@ async def test_closing_early_mints_cancels_the_calls_still_running(
 ) -> None:
     sends = _EarlySends(hold=asyncio.Event())
     early = EarlyMints(send=sends, max_concurrent=4, settle_s=3.0)
-    early.offer(_seam_plan(schemas=real_schemas))
+    early.offer(_planner_plan(schemas=real_schemas))
     await asyncio.sleep(0)
     assert len(sends.sent) == 1
 

@@ -6,7 +6,7 @@ data-mcp and analysis-mcp apps, as in `test_executor_integration.py`, and the
 verbs compute on dfo-apis' analysis runner, replayed from its recorded answers
 (`conftest.runner`), which stores each frame with its recipe. The replay mints
 its root through data-mcp's `mint_recorded_root`, whose upstream is a canned
-apis mint with the artifact fetch patched at the seam nothing threads a
+apis mint with the artifact fetch patched at the function nothing threads a
 transport into, and reads recipes and replay keys from a fake apis that defers
 to the runner for the frames it stored, so no socket opens.
 """
@@ -79,7 +79,7 @@ class Services:
         return result.structured_content
 
     async def analysis(self, *, name: str, arguments: Mapping[str, object]) -> ToolCallResult:
-        """The replayer's tool seam: analysis-mcp over the surface the executor uses,
+        """The replayer's tool client: analysis-mcp over the surface the executor uses,
         recording each call."""
         self.verbs.append((name, dict(arguments)))
         return await self.surface.call_tool(

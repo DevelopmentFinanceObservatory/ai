@@ -5,7 +5,6 @@
   "question": "Give me one table with Ghana's GDP and its external debt service for each year from 2015 to 2022.",
   "searches": [
     {
-      "query": "Give me one table with Ghana's GDP and its external debt service for each year from 2015 to 2022.",
       "parts": [
         {
           "variable": "GDP",

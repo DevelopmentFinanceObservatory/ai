@@ -310,7 +310,7 @@ async def test_response_dcid_mismatch_refuses_upstream_response_unusable() -> No
 
 # 11. With `node_lookup.describe_nodes` monkeypatched to a stub, the tool
 # produces its full digest and issues no HTTP request -- proving the tool
-# never reaches past the node lookup seam.
+# never reaches past the node lookup client.
 
 
 async def test_stubbed_node_lookup_produces_the_full_digest_with_no_http_request(

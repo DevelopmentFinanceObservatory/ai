@@ -47,9 +47,10 @@ its violations and rubric scores.
 ## Scripted mode
 
 Scripted mode (`orchestrator_scripted.py`) serves the studio routes over the real
-workflow, the real orchestrator tools and the real `PlannerSeam`, and scripts what a
-model or an upstream would answer. It is the same battery CI runs via
-`services/harness/tests/test_studio_orchestrator_eval.py`. A case's `scenario`
+workflow, the real orchestrator tools and the real `PlannerAdapter`, and scripts what a
+model or an upstream would answer. The planner's model calls are answered by a
+scripted google-genai client (`harness.scripted.scripted_client`). CI runs the same
+battery via `services/harness/tests/test_studio_orchestrator_eval.py`. A case's `scenario`
 (inline, or the name of an entry in the file's `scenarios`) holds:
 
 - `orchestrator`: the orchestrator model's replies, one per model call across every
@@ -59,7 +60,7 @@ model or an upstream would answer. It is the same battery CI runs via
   (`variable`, `status`, and for a definite part `spec_id`, `sentence`, `coverage`,
   `warnings`), run through the same digest the served resolver builds.
 - `plan_spec_id`: the source the canned plan retrieves. The planner's model submits
-  the plan `harness.scripted_plan` builds, so the seam renders its real first message
+  the plan `harness.scripted_plan` builds, so the adapter renders its real first message
   and the approval, execution and hand-back nodes run as served; `propose_plan` and
   its translation are not exercised.
 - `planner`: the planner model's replies instead, in the orchestrator script's shape.

@@ -459,6 +459,10 @@ LABELLED_REFS = 100
 # and an answer counts them as it would without the lookup.
 LABEL_ALLOWANCE_S = 5.0
 
+# The progress message a step's call reports once its result is back and the
+# executor checks it.
+RESULT_RECEIVED = "Result received; checking it"
+
 
 class StatisticsUnreachableError(Exception):
     """A manifest's statistics artifact could not be fetched this time.
@@ -490,10 +494,12 @@ def _is_transient(exc: Exception) -> bool:
 
 # What `execute_approved_plan` hands each progress report to, with the id of
 # the plan step it describes: a wave's steps run concurrently, so a report
-# means nothing without its step. `_Run._call` binds the step id and passes
-# the result to `ToolSurface.call_tool` as that call's `on_progress`, and
-# reports its own retries through the same binding. It runs on the event
-# loop, so it must return promptly.
+# means nothing without its step. `_Run._run_step` reports a step's start,
+# `ProgressReport(progress=0)` with no message, once its arguments resolve.
+# `_Run._call` binds the step id and passes the result to
+# `ToolSurface.call_tool` as that call's `on_progress`, and reports its own
+# retries through the same binding. It runs on the event loop, so it must
+# return promptly.
 type StepProgressCallback = Callable[[str, ProgressReport], None]
 
 
@@ -611,7 +617,7 @@ async def _series_labels(label_refs: LabelRefs, refs: Sequence[str]) -> Mapping[
         allowance_s = min(step_deadline.remaining() - _EVIDENCE_DEADLINE_MARGIN_S, allowance_s)
     if allowance_s <= 0:
         return {}
-    # Whatever an injected seam raises, only the names go unread, so the catch is broad.
+    # Whatever an injected dependency raises, only the names go unread, so the catch is broad.
     try:
         async with asyncio.timeout(allowance_s):
             return await label_refs(refs)
@@ -1116,9 +1122,9 @@ async def execute_approved_plan(
     one does. `label_refs` names the entities of the series a retrieval holds
     short of its period that the approved source names none for, so an
     answer can name the largest (`default_label_refs` by default).
-    `on_progress` hears every progress report a step's tool call sends, and
-    a report naming the next attempt each time a step is retried, tagged
-    with the step's id.
+    `on_progress` hears a report with no message as each step starts, every
+    progress report a step's tool call sends, and a report naming the next
+    attempt each time a step is retried, tagged with the step's id.
 
     Returns:
         The plan as the run left it, or unchanged when it could not start,
@@ -2185,6 +2191,10 @@ class _Run:
         set for this whole method's body -- not only for `_call`, the way
         `current_step_id` is -- so `default_fetch_series_stats` can read it
         and give `_check_evidence`'s own evidence fetch a deadline of its own.
+
+        The step reports its start, once, just before its call (`_call` runs
+        once per attempt), so a step whose arguments do not bind reports
+        nothing.
         """
         arguments = self._arguments(step, schema)
         expected_role_keys = self._expected_role_keys(step)
@@ -2198,6 +2208,10 @@ class _Run:
                 try:
                     token = current_step_id.set(step.id)
                     try:
+                        if self.on_progress is not None:
+                            deliver_progress(
+                                partial(self.on_progress, step.id), ProgressReport(progress=0)
+                            )
                         result, attempts = await self._call(step.id, step.tool, arguments)
                     finally:
                         current_step_id.reset(token)
@@ -2526,7 +2540,7 @@ class _Run:
                     ProgressReport(
                         progress=attempt + 1,
                         total=MAX_ATTEMPTS_PER_STEP,
-                        message="Result received; checking it",
+                        message=RESULT_RECEIVED,
                     ),
                 )
             if not result.is_error:

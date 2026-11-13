@@ -46,7 +46,7 @@ without delivering its result records `Undelivered`; once that has happened
 `MAX_DELIVERY_ATTEMPTS` times, or `MAX_PENDING_AGE` after its admission, the
 run is carried on no more.
 
-`RunLedger` is the storage seam. `InMemoryRunLedger` serves tests and the
+`RunLedger` is the storage interface. `InMemoryRunLedger` serves tests and the
 standalone harness, keeping each conversation's runs apart by the scope its
 caller names; `harness.run_ledger.StudioRunLedger` keeps runs in the
 conversation's ledger session.

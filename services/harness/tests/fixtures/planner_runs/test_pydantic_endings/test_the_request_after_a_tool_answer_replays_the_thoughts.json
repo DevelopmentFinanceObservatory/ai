@@ -1,0 +1,97 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "How much aid did Ghana receive?"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Context for this question: the readings."
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Weighing the sources.A summary of the weighing.",
+          "thought": true,
+          "thought_signature": "dGhvdWdodC1zaWduYXR1cmU="
+        },
+        {
+          "function_call": {
+            "id": "p1",
+            "args": {
+              "question": "How much aid did Ghana receive?"
+            },
+            "name": "propose_plan"
+          },
+          "thought_signature": "Y2FsbC1zaWduYXR1cmU="
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "function_response": {
+            "id": "p1",
+            "name": "propose_plan",
+            "response": {
+              "outcome": "invalid_input",
+              "code": "invalid_plan",
+              "message": "Invalid plan data: a first draft states the `answer_mode` it answers under"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "conversations": [
+    [
+      [
+        "part",
+        {
+          "text": "Weighing the sources.A summary of the weighing.",
+          "thought": true,
+          "thought_signature": "dGhvdWdodC1zaWduYXR1cmU="
+        }
+      ],
+      [
+        "part",
+        {
+          "function_call": {
+            "id": "p1",
+            "args": {
+              "question": "How much aid did Ghana receive?"
+            },
+            "name": "propose_plan"
+          },
+          "thought_signature": "Y2FsbC1zaWduYXR1cmU="
+        }
+      ],
+      [
+        "answer",
+        "propose_plan",
+        "p1",
+        {
+          "outcome": "invalid_input",
+          "code": "invalid_plan",
+          "message": "Invalid plan data: a first draft states the `answer_mode` it answers under"
+        }
+      ],
+      [
+        "part",
+        {
+          "text": "done"
+        }
+      ]
+    ]
+  ]
+}

@@ -5,7 +5,6 @@
   "question": "Put Guatemala's GDP and population in the same table, and divide one by the other",
   "searches": [
     {
-      "query": "Guatemala gross domestic product and population, and GDP per capita",
       "parts": [
         {
           "entities": [

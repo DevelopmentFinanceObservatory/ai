@@ -74,6 +74,7 @@ def make_client(
     live_refresh_principal: str | None = LIVE_PRINCIPAL,
     auth: AuthProvider | None = None,
     max_attempts: int = 1,
+    clock: Callable[[], float] | None = None,
 ) -> LiveApisClient:
     async def no_sleep(_: float) -> None:
         return None
@@ -86,6 +87,7 @@ def make_client(
         transport=httpx2.MockTransport(handler),
         max_attempts=max_attempts,
         sleep=no_sleep,
+        **({} if clock is None else {"clock": clock}),
     )
 
 
@@ -731,6 +733,94 @@ async def test_read_component_not_found_raises() -> None:
             await client.read_component(component_id="cmp_1", revision=9)
 
     assert raised.value.code == "not_found"
+
+
+# analysis_execution_identity
+
+IDENTITY = {
+    "engine_version": "0.9.1",
+    "frame_grammar_version": "1.2.0",
+    "reduction_policy_version": "0.2.0",
+}
+
+
+def capabilities(document: dict[str, Any], *, cache_control: str | None) -> httpx2.Response:
+    headers = {} if cache_control is None else {"cache-control": cache_control}
+    return httpx2.Response(200, json=document, headers=headers)
+
+
+async def test_the_execution_identity_is_read_without_a_credential_and_kept_for_its_max_age() -> (
+    None
+):
+    calls = Calls(
+        capabilities(
+            {"capability_version": "1", "analysis_execution_identity": IDENTITY},
+            cache_control="public, max-age=300",
+        )
+    )
+    now = [0.0]
+
+    async with make_client(
+        calls, datasets_principal=None, live_refresh_principal=None, clock=lambda: now[0]
+    ) as client:
+        first = await client.analysis_execution_identity()
+        now[0] = 299.0
+        kept = await client.analysis_execution_identity()
+        now[0] = 300.0
+        read_again = await client.analysis_execution_identity()
+
+    assert first == kept == read_again == IDENTITY
+    assert [request.url.path for request in calls.requests] == ["/api/datasets/capabilities"] * 2
+    assert PRINCIPAL_HEADER not in calls.requests[0].headers
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        capabilities({"capability_version": "1"}, cache_control="public, max-age=300"),
+        capabilities(
+            {"analysis_execution_identity": {"engine_version": 1}}, cache_control="max-age=300"
+        ),
+        capabilities({"analysis_execution_identity": "0.9.1|1.2.0|0.2.0"}, cache_control=None),
+    ],
+    ids=["absent", "not-strings", "not-an-object"],
+)
+async def test_a_document_naming_no_execution_identity_answers_none(
+    answer: httpx2.Response,
+) -> None:
+    async with make_client(Calls(answer)) as client:
+        assert await client.analysis_execution_identity() is None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [problem(503, "internal_error"), httpx2.ConnectError("refused"), ok([1, 2])],
+    ids=["refused", "unreachable", "not-a-document"],
+)
+async def test_a_failed_read_answers_none_and_is_not_kept(
+    failure: httpx2.Response | Exception,
+) -> None:
+    calls = Calls(
+        failure,
+        capabilities({"analysis_execution_identity": IDENTITY}, cache_control="max-age=300"),
+    )
+
+    async with make_client(calls) as client:
+        failed = await client.analysis_execution_identity()
+        read = await client.analysis_execution_identity()
+
+    assert (failed, read) == (None, IDENTITY)
+    assert len(calls.requests) == 2
+
+
+async def test_without_a_max_age_the_execution_identity_is_read_on_every_call() -> None:
+    calls = Calls(capabilities({"analysis_execution_identity": IDENTITY}, cache_control="no-cache"))
+
+    async with make_client(calls) as client:
+        for _ in range(2):
+            assert await client.analysis_execution_identity() == IDENTITY
+
+    assert len(calls.requests) == 2
 
 
 # principals

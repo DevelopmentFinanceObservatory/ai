@@ -1,13 +1,15 @@
-"""Tests for `planner.skills`: the planner's `get_skill` and `get_skill_file`.
+"""Tests for `planner.skills`: the planner's one skill tool, `get_skill`.
 
-Each tool calls data-mcp's tool of the same name through the surface it was
-built over and answers with data-mcp's text, a refusal's included, and records
-each page read without an error in session state.
+It calls data-mcp's `get_skill` through the surface it was built over, with the
+switch that makes pages name `get_skill`, and answers with data-mcp's text, a
+refusal's included. It records each page or file read without an error in
+session state.
 """
 
 from __future__ import annotations
 
 import functools
+import json
 import logging
 from collections.abc import Mapping
 from types import SimpleNamespace
@@ -19,10 +21,12 @@ from compiler.surface import (
     ToolCallResult,
     ToolSurfaceUnavailableError,
 )
-from google.adk.tools.function_tool import FunctionTool
-from planner.agent import create_planner_agent
-from planner.skills import SKILLS_READ_STATE_KEY, build_skill_tools, skill_page_key
+from planner.instruction import planner_instruction
+from planner.skills import SKILLS_READ_STATE_KEY, skill_page_key
+from planner.specs import planner_specs, skill_tool_spec
 from planner.workflow import ToolId
+
+from ..planner_tools import call_planner_tool, planner_tool_declaration
 
 
 class _RecordingSurface:
@@ -51,42 +55,57 @@ class _RecordingSurface:
 
 def _tools(surface: _RecordingSurface, state: dict[str, Any] | None = None) -> dict[str, Any]:
     """Each tool's function, called with a tool context over `state`."""
-    tool_context = SimpleNamespace(state={} if state is None else state)
+    tool_context = SimpleNamespace(
+        state={} if state is None else state,
+        session=SimpleNamespace(events=[]),
+        function_call_id=None,
+    )
     return {
-        tool.name: functools.partial(tool.func, tool_context=tool_context)
-        for tool in build_skill_tools(surface)
+        tool.name: functools.partial(call_planner_tool, tool, tool_context=tool_context)
+        for tool in [skill_tool_spec(surface)]
     }
 
 
 _SKILL_TEXT = "---\nname: oda-concepts\n---\n\n# ODA concepts\n"
 
 
-def test_a_planner_built_with_a_surface_carries_the_skill_tools_and_names_dfo_faq() -> None:
-    agent = create_planner_agent(
-        model_name="m", surface=_RecordingSurface(ToolCallResult(is_error=False))
-    )
+async def _translate(call: Any) -> dict[str, object]:
+    raise AssertionError("no test here runs a translation")
 
-    names = {tool.name for tool in agent.tools if isinstance(tool, FunctionTool)}
-    assert {"get_skill", "get_skill_file"} <= names
-    instruction = str(agent.instruction)
-    assert "`get_skill`" in instruction
-    assert "`get_skill_file`" in instruction
+
+def _get_skill_declaration(surface: _RecordingSurface) -> Any:
     get_skill = next(
-        tool for tool in agent.tools if isinstance(tool, FunctionTool) and tool.name == "get_skill"
+        spec
+        for spec in planner_specs(translate=_translate, surface=surface)
+        if spec.name == "get_skill"
     )
-    declaration = get_skill._get_declaration()
+    declaration = planner_tool_declaration(get_skill)
     assert declaration is not None
-    assert "`dfo-faq`" in (declaration.description or "")
+    return declaration
 
 
-def test_a_planner_built_without_a_surface_has_no_skill_tools_and_no_skill_paragraph() -> None:
-    agent = create_planner_agent(model_name="m")
+def test_a_planner_built_with_a_surface_carries_one_skill_tool_and_names_dfo_faq() -> None:
+    surface = _RecordingSurface(ToolCallResult(is_error=False))
 
-    names = {tool.name for tool in agent.tools if isinstance(tool, FunctionTool)}
-    assert names.isdisjoint({"get_skill", "get_skill_file"})
-    instruction = str(agent.instruction)
-    assert "get_skill" not in instruction
-    assert "dfo-faq" not in instruction
+    names = {spec.name for spec in planner_specs(translate=_translate, surface=surface)}
+    assert "get_skill" in names
+    assert "get_skill_file" not in names
+    instruction = planner_instruction()
+    assert "`get_skill`" in instruction
+    assert "get_skill_file" not in instruction
+    declaration = _get_skill_declaration(surface)
+    assert "`dfo-faq`" in json.dumps(declaration.parameters_json_schema)
+
+
+# Keep the description to one short sentence: a longer one makes Gemini reason at
+# length before some calls.
+SKILL_DESCRIPTION_CEILING = 200
+
+
+def test_the_skill_tools_description_stays_short() -> None:
+    declaration = _get_skill_declaration(_RecordingSurface(ToolCallResult(is_error=False)))
+
+    assert len(declaration.description) <= SKILL_DESCRIPTION_CEILING
 
 
 async def test_get_skill_calls_data_mcps_get_skill_and_returns_its_text() -> None:
@@ -97,31 +116,34 @@ async def test_get_skill_calls_data_mcps_get_skill_and_returns_its_text() -> Non
     answer = await _tools(surface)["get_skill"](skill_id="oda-concepts")
 
     assert surface.calls == [
-        (ToolId(server="data-mcp", name="get_skill"), {"skill_id": "oda-concepts"})
+        (
+            ToolId(server="data-mcp", name="get_skill"),
+            {"skill_id": "oda-concepts"},
+        )
     ]
     assert answer == _SKILL_TEXT
 
 
-async def test_get_skill_file_passes_path_and_offset_and_leaves_an_unset_digest_out() -> None:
+async def test_get_skill_with_a_path_reads_that_file_and_leaves_unset_paging_out() -> None:
     surface = _RecordingSurface(ToolCallResult(is_error=False, text="# Core ODA\n"))
 
-    answer = await _tools(surface)["get_skill_file"](
+    answer = await _tools(surface)["get_skill"](
         skill_id="oda-concepts", path="references/core-oda.md"
     )
 
     assert surface.calls == [
         (
-            ToolId(server="data-mcp", name="get_skill_file"),
-            {"skill_id": "oda-concepts", "path": "references/core-oda.md", "offset": 0},
+            ToolId(server="data-mcp", name="get_skill"),
+            {"skill_id": "oda-concepts", "path": "references/core-oda.md"},
         )
     ]
     assert answer == "# Core ODA\n"
 
 
-async def test_get_skill_file_passes_a_continuations_offset_and_digest() -> None:
+async def test_get_skill_passes_a_continuations_offset_and_digest() -> None:
     surface = _RecordingSurface(ToolCallResult(is_error=False, text="page two"))
 
-    await _tools(surface)["get_skill_file"](
+    await _tools(surface)["get_skill"](
         skill_id="oda-concepts", path="SKILL.md", offset=31844, digest="sha256:" + "a" * 64
     )
 
@@ -133,8 +155,8 @@ async def test_get_skill_file_passes_a_continuations_offset_and_digest() -> None
     }
 
 
-@pytest.mark.parametrize("tool", ["get_skill", "get_skill_file"])
-async def test_a_refusal_reaches_the_model_as_data_mcps_text(tool: str) -> None:
+@pytest.mark.parametrize("path", [None, "SKILL.md"], ids=["page", "file"])
+async def test_a_refusal_reaches_the_model_as_data_mcps_text(path: str | None) -> None:
     refusal = (
         "capability_unavailable: this deployment serves no skills. Carry on without the skill."
     )
@@ -143,9 +165,8 @@ async def test_a_refusal_reaches_the_model_as_data_mcps_text(tool: str) -> None:
             is_error=True, text=refusal, structured_content={"code": "capability_unavailable"}
         )
     )
-    arguments = {"skill_id": "dfo-faq"} | ({"path": "SKILL.md"} if tool == "get_skill_file" else {})
 
-    answer = await _tools(surface)[tool](**arguments)
+    answer = await _tools(surface)["get_skill"](skill_id="dfo-faq", path=path)
 
     assert answer == refusal
 
@@ -175,7 +196,7 @@ async def test_each_page_read_without_an_error_is_recorded_once_in_read_order() 
     tools = _tools(_RecordingSurface(ToolCallResult(is_error=False, text=_SKILL_TEXT)), state)
 
     await tools["get_skill"](skill_id="oda-concepts")
-    await tools["get_skill_file"](skill_id="oda-concepts", path="references/core-oda.md")
+    await tools["get_skill"](skill_id="oda-concepts", path="references/core-oda.md")
     await tools["get_skill"](skill_id="oda-concepts")
 
     pages = [

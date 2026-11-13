@@ -1,0 +1,675 @@
+"""Tests for `harness.planner_model`, the planner's Gemini model.
+
+The budget and cache behaviours run on the same script through the planner's
+model and through the orchestrator's model stack (`BoundedGemini` or
+`PrefixCachedGemini` over the scripted client), and both must end the same
+way. Bounds are fractions of a second, so a cut fires at once.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import AsyncIterator, Iterator, Sequence
+from contextlib import contextmanager
+from typing import Any, cast
+
+import pytest
+from google.adk.models.base_llm import BaseLlm
+from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
+from google.genai import Client, _api_client, errors, types
+from harness.planner_model import (
+    UnexpectedRequestFormError,
+    Usage,
+    _in_canonical_form,
+    planner_model,
+)
+from harness.prefix_cache import PrefixCache, PrefixCachedGemini
+from harness.sentences import StopCode, refusal_sentence
+from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from orchestrator.agent import _retrying, model_retry_options
+from planner.pydantic_agent import _without_unsigned_thoughts
+from planner.settings import without_unsigned_thoughts
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ThinkingPart,
+    ToolCallPart,
+    UserPromptPart,
+)
+from pydantic_ai.models import Model, ModelRequestParameters
+from pydantic_ai.tools import ToolDefinition
+
+from .scripted_genai import (
+    Reply,
+    ScriptedGenai,
+    call_part,
+    client_error,
+    malformed_call_reply,
+    reply,
+    text_part,
+    thought_part,
+    usage_metadata,
+)
+
+MODEL = "gemini-3.8-flash"
+INSTRUCTION = "Plan the user's question."
+SCHEMA: dict[str, Any] = {"type": "object", "properties": {"key": {"type": "string"}}}
+CACHE_NAME = "cachedContents/c1"
+
+
+class _HangingGenai(ScriptedGenai):
+    """A `ScriptedGenai` whose streams wait for ever after `hang_after` chunks,
+    as a model does when it stops sending mid-answer."""
+
+    def __init__(self, replies: Sequence[Reply], *, hang_after: int) -> None:
+        super().__init__(replies)
+        self._hang_after = hang_after
+
+    async def _open(
+        self, *, model: str, contents: Any, config: Any = None
+    ) -> AsyncIterator[types.GenerateContentResponse]:
+        stream = await super()._open(model=model, contents=contents, config=config)
+        return _hanging(stream, after=self._hang_after)
+
+
+async def _hanging(
+    stream: AsyncIterator[types.GenerateContentResponse], *, after: int
+) -> AsyncIterator[types.GenerateContentResponse]:
+    delivered = 0
+    async for chunk in stream:
+        if delivered == after:
+            break
+        delivered += 1
+        yield chunk
+    await asyncio.Event().wait()
+
+
+class _Caches:
+    """`caches.create` answering with `CACHE_NAME`, then failing with each of
+    `failures` in turn."""
+
+    def __init__(self, failures: Sequence[Exception] = ()) -> None:
+        self.created: list[types.CreateCachedContentConfig] = []
+        self._failures = list(failures)
+
+    async def create(self, *, model: str, config: types.CreateCachedContentConfig) -> Any:
+        if self.created and self._failures:
+            raise self._failures.pop(0)
+        self.created.append(config)
+        return types.CachedContent(name=f"cachedContents/c{len(self.created)}")
+
+
+def _with_caches(scripted: ScriptedGenai, caches: _Caches) -> ScriptedGenai:
+    scripted.client.aio.caches.create = caches.create  # type: ignore[method-assign]
+    return scripted
+
+
+def _budget(**overrides: Any) -> TurnBudget:
+    bounds: dict[str, Any] = {
+        "model_time_s": 5.0,
+        "model_calls_max": 30,
+        "wall_s": 600.0,
+        "first_chunk_s": 5.0,
+    }
+    return TurnBudget(**{**bounds, **overrides})
+
+
+@contextmanager
+def _current(budget: TurnBudget | None) -> Iterator[None]:
+    token = current_turn_budget.set(budget)
+    try:
+        yield
+    finally:
+        current_turn_budget.reset(token)
+
+
+async def _pai(model: Model) -> ModelResponse:
+    """The planner model's response to one request with one tool."""
+    messages = [
+        ModelRequest(parts=[UserPromptPart("Total ODA to Ghana?")], instructions=INSTRUCTION)
+    ]
+    parameters = ModelRequestParameters(
+        function_tools=[ToolDefinition(name="lookup", parameters_json_schema=SCHEMA, strict=False)]
+    )
+    async with model.request_stream(messages, None, parameters) as stream:
+        async for _ in stream:
+            pass
+    return stream.get()
+
+
+async def _orchestrator_run(model: BaseLlm, budget: TurnBudget | None) -> list[LlmResponse]:
+    """The orchestrator's model's responses, partial and final, to the same request."""
+    request = LlmRequest(
+        model=MODEL,
+        contents=[types.Content(role="user", parts=[text_part("Total ODA to Ghana?")])],
+        config=types.GenerateContentConfig(
+            system_instruction=INSTRUCTION,
+            tools=[
+                types.Tool(
+                    function_declarations=[
+                        types.FunctionDeclaration(name="lookup", parameters_json_schema=SCHEMA)
+                    ]
+                )
+            ],
+        ),
+    )
+    with _current(budget):
+        return [response async for response in model.generate_content_async(request, stream=True)]
+
+
+def _final(responses: list[LlmResponse]) -> list[types.Part]:
+    """The parts of the orchestrator's model's last final response, the one its
+    agent reads."""
+    final = [response for response in responses if not response.partial]
+    content = final[-1].content
+    assert content is not None
+    return list(content.parts or [])
+
+
+def _pai_text(response: ModelResponse) -> str:
+    return "".join(part.content for part in response.parts if isinstance(part, TextPart))
+
+
+def _text(parts: list[types.Part]) -> str:
+    return "".join(part.text or "" for part in parts if not part.thought)
+
+
+class _After:
+    """An `after_response` hook that records its calls and answers with `replace`."""
+
+    def __init__(self, replace: types.Content | None = None) -> None:
+        self.calls: list[tuple[StopCode | None, Usage | None]] = []
+        self._replace = replace
+
+    def __call__(self, closed_by: StopCode | None, usage: Usage | None) -> types.Content | None:
+        self.calls.append((closed_by, usage))
+        return self._replace
+
+
+async def test_a_cut_after_a_function_call_chunk_delivers_only_the_closing_sentence() -> None:
+    script = [Reply(chunks=[[call_part("lookup", {"key": "gh"})], [text_part("late")]])]
+    pai_scripted = _HangingGenai(script, hang_after=1)
+    orchestrator_scripted = _HangingGenai(script, hang_after=1)
+    pai_budget = _budget(model_time_s=0.05)
+    orchestrator_budget = _budget(model_time_s=0.05)
+    after = _After()
+
+    response = await _pai(
+        planner_model(MODEL, client=pai_scripted.client, budget=pai_budget, after_response=after)
+    )
+    orchestrator = await _orchestrator_run(
+        BoundedGemini(model=MODEL, client=orchestrator_scripted.client), orchestrator_budget
+    )
+
+    sentence = refusal_sentence({"code": StopCode.TURN_MODEL_TIME_SPENT})
+    assert not any(isinstance(part, ToolCallPart) for part in response.parts)
+    assert not any(
+        part.function_call
+        for r in orchestrator
+        if not r.partial and r.content
+        for part in r.content.parts or []
+    )
+    assert _pai_text(response) == _text(_final(orchestrator)) == sentence
+    assert pai_budget.closed == orchestrator_budget.closed
+    assert pai_budget.closed is not None
+    assert pai_budget.closed["code"] == StopCode.TURN_MODEL_TIME_SPENT
+    assert after.calls == [(StopCode.TURN_MODEL_TIME_SPENT, None)]
+
+
+async def test_a_first_chunk_stall_is_resent_once_and_the_second_answer_delivered() -> None:
+    script = [
+        Reply(chunks=[[text_part("stalled")]], stall_s=5.0),
+        reply(text_part("Accra")),
+    ]
+    pai_scripted, orchestrator_scripted = ScriptedGenai(script), ScriptedGenai(script)
+
+    response = await _pai(
+        planner_model(MODEL, client=pai_scripted.client, budget=_budget(first_chunk_s=0.05))
+    )
+    orchestrator = await _orchestrator_run(
+        BoundedGemini(model=MODEL, client=orchestrator_scripted.client), _budget(first_chunk_s=0.05)
+    )
+
+    assert len(pai_scripted.requests) == len(orchestrator_scripted.requests) == 2
+    assert _pai_text(response) == _text(_final(orchestrator)) == "Accra"
+
+
+@pytest.mark.parametrize(
+    ("budget", "code", "sent"),
+    [
+        pytest.param({"model_calls_max": 0}, StopCode.TURN_MODEL_CALLS_SPENT, 0, id="call-cap"),
+        pytest.param({"wall_s": 0.0}, StopCode.TURN_WALL_TIME_SPENT, 0, id="wall"),
+        pytest.param(
+            {"model_time_s": 0.05, "first_chunk_s": 0.01},
+            StopCode.TURN_MODEL_TIME_SPENT,
+            2,
+            id="model-time",
+        ),
+    ],
+)
+async def test_each_bound_closes_the_call_with_the_same_code_on_both_models(
+    budget: dict[str, Any], code: StopCode, sent: int
+) -> None:
+    # Each stream stalls past every bound. The first stall spends the resend.
+    script = [Reply(chunks=[[text_part("x")]], stall_s=5.0)] * 2
+    pai_scripted, orchestrator_scripted = ScriptedGenai(script), ScriptedGenai(script)
+    pai_budget, orchestrator_budget = _budget(**budget), _budget(**budget)
+
+    response = await _pai(planner_model(MODEL, client=pai_scripted.client, budget=pai_budget))
+    orchestrator = await _orchestrator_run(
+        BoundedGemini(model=MODEL, client=orchestrator_scripted.client), orchestrator_budget
+    )
+
+    assert len(pai_scripted.requests) == len(orchestrator_scripted.requests) == sent
+    assert pai_budget.closed == orchestrator_budget.closed == {"code": code, "detail": {}}
+    assert _pai_text(response) == _text(_final(orchestrator)) == refusal_sentence({"code": code})
+
+
+def _cache_fields(config: types.GenerateContentConfig) -> tuple[Any, ...]:
+    return (
+        config.cached_content,
+        config.system_instruction is None,
+        config.tools is None,
+        config.tool_config is None,
+    )
+
+
+async def test_a_cached_request_names_the_cache_and_omits_what_it_holds() -> None:
+    pai_caches, orchestrator_caches = _Caches(), _Caches()
+    pai_scripted = _with_caches(ScriptedGenai([reply(text_part("Accra"))]), pai_caches)
+    orchestrator_scripted = _with_caches(
+        ScriptedGenai([reply(text_part("Accra"))]), orchestrator_caches
+    )
+
+    await _pai(
+        planner_model(
+            MODEL, client=pai_scripted.client, budget=_budget(), prefix_cache=PrefixCache()
+        )
+    )
+    await _orchestrator_run(
+        PrefixCachedGemini(
+            model=MODEL, client=orchestrator_scripted.client, prefix_cache=PrefixCache()
+        ),
+        _budget(),
+    )
+
+    pai_config = pai_scripted.requests[0].generate_config
+    orchestrator_config = orchestrator_scripted.requests[0].generate_config
+    assert (
+        _cache_fields(pai_config)
+        == _cache_fields(orchestrator_config)
+        == (CACHE_NAME, True, True, True)
+    )
+    # The cache holds the instruction and the tool the request leaves out.
+    for caches in (pai_caches, orchestrator_caches):
+        (created,) = caches.created
+        assert created.system_instruction is not None
+        assert [
+            d.name for tool in created.tools or [] for d in tool.function_declarations or []
+        ] == ["lookup"]
+
+
+@pytest.mark.parametrize("status", [403, 404])
+async def test_a_cache_refused_at_open_is_forgotten_and_the_request_resent_whole(
+    status: int,
+) -> None:
+    script = [
+        Reply(chunks=[[text_part("x")]], open_error=client_error(status)),
+        reply(text_part("Accra")),
+    ]
+    # The cache cannot be made again, so the resend goes uncached.
+    failure = errors.ServerError(503, {"error": {"code": 503, "message": "unavailable"}})
+    pai_caches, orchestrator_caches = _Caches([failure]), _Caches([failure])
+    pai_scripted = _with_caches(ScriptedGenai(script), pai_caches)
+    orchestrator_scripted = _with_caches(ScriptedGenai(script), orchestrator_caches)
+
+    response = await _pai(
+        planner_model(
+            MODEL, client=pai_scripted.client, budget=_budget(), prefix_cache=PrefixCache()
+        )
+    )
+    orchestrator = await _orchestrator_run(
+        PrefixCachedGemini(
+            model=MODEL, client=orchestrator_scripted.client, prefix_cache=PrefixCache()
+        ),
+        _budget(),
+    )
+
+    for scripted in (pai_scripted, orchestrator_scripted):
+        first, resent = (request.generate_config for request in scripted.requests)
+        assert first.cached_content == CACHE_NAME
+        assert resent.cached_content is None
+        assert resent.system_instruction is not None
+        assert resent.tools is not None
+    # Forgetting the entry is what sent the lookup back to `create`.
+    assert pai_caches._failures == orchestrator_caches._failures == []
+    assert _pai_text(response) == _text(_final(orchestrator)) == "Accra"
+
+
+async def test_before_request_answers_with_no_request_and_no_budget_spent() -> None:
+    scripted = ScriptedGenai([])
+    budget = _budget()
+    turn = types.Content(role="model", parts=[text_part("Which source?")])
+    after = _After()
+
+    response = await _pai(
+        planner_model(
+            MODEL,
+            client=scripted.client,
+            budget=budget,
+            before_request=lambda: turn,
+            after_response=after,
+        )
+    )
+
+    assert _pai_text(response) == "Which source?"
+    assert scripted.requests == []
+    assert (budget.model_calls, budget.closed, after.calls) == (0, None, [])
+
+
+async def test_a_turn_put_in_place_of_a_resend_keeps_the_span_a_generation(
+    exported_spans: InMemorySpanExporter,
+) -> None:
+    """The first reply ends on a function call Gemini could not parse, and
+    `before_request` answers the resend with a turn. The turn is delivered, and the
+    span, which carries the sent call's usage, stays a generation."""
+    usage = usage_metadata(prompt=40, cached=30, candidates=5)
+    scripted = ScriptedGenai([malformed_call_reply(usage=usage)])
+    turn = types.Content(role="model", parts=[text_part("Which source?")])
+    turns = iter([None, turn])
+    model = planner_model(
+        MODEL, client=scripted.client, budget=_budget(), before_request=lambda: next(turns)
+    )
+
+    with trace.get_tracer(__name__).start_as_current_span("chat"):
+        response = await _pai(model)
+
+    (span,) = exported_spans.get_finished_spans()
+    attributes = span.attributes or {}
+    assert _pai_text(response) == "Which source?"
+    assert "langfuse.observation.type" not in attributes
+    assert json.loads(str(attributes["langfuse.observation.usage_details"])) == {
+        "input": 10,
+        "output": 5,
+        "input_cached_tokens": 30,
+    }
+
+
+async def test_after_response_sees_the_reported_usage_and_its_turn_replaces_the_response() -> None:
+    usage = usage_metadata(prompt=40, cached=30, candidates=5)
+    scripted = ScriptedGenai([reply(call_part("lookup", {"key": "gh"}), usage=usage)])
+    replacement = types.Content(role="model", parts=[text_part("Asked instead.")])
+    after = _After(replace=replacement)
+
+    response = await _pai(
+        planner_model(MODEL, client=scripted.client, budget=_budget(), after_response=after)
+    )
+
+    assert after.calls == [(None, usage)]
+    assert [type(part) for part in response.parts] == [TextPart]
+    assert _pai_text(response) == "Asked instead."
+    assert response.usage.input_tokens == 40
+
+
+async def test_every_request_carries_the_orchestrators_retries() -> None:
+    scripted = ScriptedGenai([reply(text_part("Accra"))])
+
+    await _pai(planner_model(MODEL, client=scripted.client, budget=_budget()))
+
+    http_options = scripted.requests[0].generate_config.http_options
+    assert http_options is not None
+    orchestrator_model = _retrying(MODEL)
+    assert isinstance(orchestrator_model, BoundedGemini)
+    assert http_options.retry_options == orchestrator_model.retry_options == model_retry_options()
+
+
+_UNAVAILABLE = {"error": {"code": 503, "status": "UNAVAILABLE"}}
+_ACCRA = {
+    "candidates": [
+        {"content": {"role": "model", "parts": [{"text": "Accra"}]}, "finishReason": "STOP"}
+    ]
+}
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["uncached", "prefix-cached"])
+async def test_a_503_is_retried_by_google_genai_before_the_planner_sees_it(
+    cached: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fault goes in under google-genai's retry loop, so the attempts counted
+    # are the ones the SDK makes. A client built without retry options makes
+    # one attempt, so the retries are the ones each request carries.
+    sent: list[dict[str, Any]] = []
+
+    async def answer(
+        self: Any, http_request: _api_client.HttpRequest, stream: bool = False, **_: Any
+    ) -> _api_client.HttpResponse:
+        if http_request.url.endswith("/cachedContents"):
+            return _api_client.HttpResponse({}, [json.dumps({"name": CACHE_NAME})])
+        sent.append(cast(dict[str, Any], http_request.data))
+        if len(sent) < 3:
+            raise errors.ServerError(503, _UNAVAILABLE)
+        return _api_client.HttpResponse({}, [json.dumps(_ACCRA)])
+
+    async def no_wait(seconds: float) -> None:
+        del seconds
+
+    monkeypatch.setattr(_api_client.BaseApiClient, "_async_request_once", answer)
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+    model = planner_model(
+        MODEL,
+        client=Client(api_key="test-key"),
+        budget=None,
+        prefix_cache=PrefixCache() if cached else None,
+    )
+
+    response = await _pai(model)
+
+    assert len(sent) == 3
+    assert {request.get("cachedContent") for request in sent} == {CACHE_NAME if cached else None}
+    assert _pai_text(response) == "Accra"
+
+
+async def test_a_non_streamed_request_refuses() -> None:
+    scripted = ScriptedGenai([reply(text_part("Accra"))])
+    model = planner_model(MODEL, client=scripted.client, budget=_budget())
+
+    with pytest.raises(TypeError, match="streams every request"):
+        await model.request(
+            [ModelRequest(parts=[UserPromptPart("hi")])], None, ModelRequestParameters()
+        )
+    assert scripted.requests == []
+
+
+_SIGNED = thought_part("weighed the sources", signature=b"sig")
+_UNSIGNED = thought_part("thinking aloud", signature=None)
+_ANSWER = text_part("Accra")
+
+
+@pytest.mark.parametrize(
+    ("parts", "kept"),
+    [
+        pytest.param([_SIGNED, _UNSIGNED, _ANSWER], [_SIGNED, _ANSWER], id="signed-and-unsigned"),
+        pytest.param([_UNSIGNED, _ANSWER], [_ANSWER], id="unsigned"),
+        pytest.param([_UNSIGNED], [_UNSIGNED], id="only-unsigned"),
+        pytest.param([_SIGNED, _ANSWER], [_SIGNED, _ANSWER], id="none-to-drop"),
+    ],
+)
+def test_the_thought_rule_keeps_the_signed_parts_and_the_answer(
+    parts: list[types.Part], kept: list[types.Part]
+) -> None:
+    """Every unsigned thought summary is dropped, a signed thought kept, and a
+    response made only of unsigned thoughts kept whole."""
+    ruled = without_unsigned_thoughts(parts)
+
+    assert (parts if ruled is None else ruled) == kept
+
+
+_MORE = thought_part("and more", signature=None)
+
+
+@pytest.mark.parametrize(
+    ("chunks", "thoughts", "text", "calls"),
+    [
+        pytest.param(
+            [[_SIGNED], [_UNSIGNED], [_ANSWER]],
+            [("weighed the sourcesthinking aloud", True)],
+            "Accra",
+            [],
+            id="signed-then-unsigned-chunk",
+        ),
+        pytest.param(
+            [[_UNSIGNED], [_SIGNED], [_ANSWER]],
+            [("thinking aloudweighed the sources", True)],
+            "Accra",
+            [],
+            id="unsigned-then-signed-chunk",
+        ),
+        pytest.param([[_UNSIGNED], [_MORE], [_ANSWER]], [], "Accra", [], id="unsigned-run"),
+        pytest.param(
+            [[_UNSIGNED], [_ANSWER], [_SIGNED]],
+            [("weighed the sources", True)],
+            "Accra",
+            [],
+            id="split-by-text",
+        ),
+        pytest.param(
+            [[_UNSIGNED], [call_part("lookup", {"key": "gh"}, signature=b"call")]],
+            [],
+            "",
+            ["lookup"],
+            id="before-a-call",
+        ),
+        pytest.param(
+            [[_UNSIGNED], [_MORE]], [("thinking aloudand more", False)], "", [], id="only-unsigned"
+        ),
+    ],
+)
+async def test_a_response_reaches_the_agent_with_the_thoughts_the_rule_keeps(
+    chunks: list[list[types.Part]],
+    thoughts: list[tuple[str, bool]],
+    text: str,
+    calls: list[str],
+) -> None:
+    """Consecutive thought chunks merge into one part, signed when any chunk of
+    them is. The rule then drops each merged unsigned one unless nothing else is
+    left. The planner keeps `thoughts` (each part's text and whether it is
+    signed), `text` and `calls`."""
+    scripted = ScriptedGenai([Reply(chunks=chunks)])
+
+    response = _without_unsigned_thoughts(
+        await _pai(planner_model(MODEL, client=scripted.client, budget=_budget()))
+    )
+
+    assert [
+        (part.content, bool(part.provider_details))
+        for part in response.parts
+        if isinstance(part, ThinkingPart)
+    ] == thoughts
+    assert _pai_text(response) == text
+    assert [part.tool_name for part in response.parts if isinstance(part, ToolCallPart)] == calls
+
+
+# --- The request in its canonical form ------------------------------------------------
+
+
+def _declared(schema: dict[str, Any] | None) -> types.Tool:
+    return types.Tool(
+        function_declarations=[
+            types.FunctionDeclaration(name="lookup", description="d", parameters_json_schema=schema)
+        ]
+    )
+
+
+def _expected_config(**overrides: Any) -> types.GenerateContentConfig:
+    """The config Pydantic AI builds on `PLANNER_PROFILE`, less `overrides`."""
+    fields: dict[str, Any] = {
+        "system_instruction": types.Content(role="user", parts=[types.Part(text="Plan.")]),
+        "tools": [_declared({"type": "object", "properties": {}})],
+        "tool_config": types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(
+                mode=types.FunctionCallingConfigMode.AUTO
+            )
+        ),
+        "response_modalities": [types.Modality.TEXT],
+    }
+    return types.GenerateContentConfig(**{**fields, **overrides})
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        pytest.param(
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            id="not-the-empty-object",
+        ),
+        pytest.param({"type": "object"}, id="without-properties"),
+    ],
+)
+def test_the_canonical_form_keeps_a_parameters_schema_that_is_not_the_empty_object(
+    schema: dict[str, Any],
+) -> None:
+    rewritten = _in_canonical_form(_expected_config(tools=[_declared(schema)]))
+
+    assert rewritten.tools == [_declared(schema)]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param(
+            "tools",
+            [_declared(None), types.Tool(google_search=types.GoogleSearch())],
+            id="tools-beside-a-non-function-tool",
+        ),
+        pytest.param("tools", None, id="no-tools"),
+        pytest.param("tool_config", None, id="no-tool-config"),
+        pytest.param("response_modalities", None, id="no-response-modalities"),
+        pytest.param("system_instruction", None, id="no-instruction"),
+        pytest.param(
+            "tool_config",
+            types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode=types.FunctionCallingConfigMode.VALIDATED
+                )
+            ),
+            id="tool-config-validated",
+        ),
+        pytest.param(
+            "tool_config",
+            types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode=types.FunctionCallingConfigMode.AUTO, allowed_function_names=["lookup"]
+                )
+            ),
+            id="tool-config-auto-with-allowed-names",
+        ),
+        pytest.param(
+            "response_modalities",
+            [types.Modality.TEXT, types.Modality.IMAGE],
+            id="response-modalities-beyond-text",
+        ),
+        pytest.param(
+            "system_instruction",
+            types.Content(role="user", parts=[types.Part(text="Plan. "), types.Part(text="Then.")]),
+            id="instruction-of-two-parts",
+        ),
+        pytest.param(
+            "system_instruction",
+            types.Content(role="user", parts=[types.Part(text="Plan.", thought_signature=b"s")]),
+            id="instruction-part-with-more-than-text",
+        ),
+    ],
+)
+def test_the_canonical_form_refuses_any_value_it_does_not_expect(field: str, value: Any) -> None:
+    """Each rewrite takes only the exact value Pydantic AI sends today; anything
+    else is refused, since a form Gemini would read differently must not be sent
+    unseen."""
+    config = _expected_config(**{field: value})
+
+    with pytest.raises(UnexpectedRequestFormError):
+        _in_canonical_form(config)

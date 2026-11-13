@@ -5,7 +5,6 @@
   "question": "What is the cumulative net flow of external debt from China to Kenya over the past five years?",
   "searches": [
     {
-      "query": "What is the cumulative net flow of external debt from China to Kenya over the past five years?",
       "parts": [
         {
           "variable": "cumulative net flow of external debt",
@@ -24,7 +23,6 @@
       ]
     },
     {
-      "query": "net financial flows on external debt from China to Kenya",
       "parts": [
         {
           "variable": "net financial flows on external debt",

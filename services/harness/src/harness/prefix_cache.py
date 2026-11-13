@@ -11,7 +11,8 @@ request as before.
 
 `harness.server.create_app` builds one `PrefixCache` per process and hands it
 to the planner and the orchestrator model constructors
-(`planner.agent.create_planner_agent`, `orchestrator.agent.create_orchestrator_agent`).
+(`harness.planner_model.planner_model`,
+`orchestrator.agent.create_orchestrator_agent`).
 Each Cloud Run instance creates its own cache per prefix, once per
 `CACHE_TTL_S`. A changed prompt or model is a new key, and the old cache
 expires on its TTL.
@@ -71,7 +72,7 @@ CREATE_COOLDOWN_S = 60.0
 # Gemini answers a request whose `cached_content` has expired or been deleted
 # with 403 PERMISSION_DENIED, "CachedContent not found (or permission
 # denied)". 404 covers the same on the Vertex backend.
-_CACHE_GONE_CODES = frozenset({403, 404})
+CACHE_GONE_CODES = frozenset({403, 404})
 
 
 def prefix_key(model: str, config: types.GenerateContentConfig) -> str | None:
@@ -203,6 +204,22 @@ class PrefixCache:
         self._entries[key] = _Entry(name=created.name, expires_at=started + CACHE_TTL_S)
         return self._entries[key]
 
+    async def lookup(
+        self, *, client: Client, model: str, config: types.GenerateContentConfig
+    ) -> tuple[str, str] | None:
+        """The prefix key and cache name a request for `model` built as `config`
+        is sent against, or None when it has no prefix, or finding or creating
+        its cache fails in any way short of cancellation."""
+        try:
+            key = prefix_key(model, config)
+            if key is None:
+                return None
+            name = await self.cache_name(key, client=client, model=model, config=config)
+        except Exception as exc:
+            logger.warning("prefix cache: lookup failed (%s): %s", type(exc).__name__, exc)
+            return None
+        return None if name is None else (key, name)
+
     def forget(self, key: str, name: str) -> None:
         """Drop `key`'s entry if it still names `name`, the cache a request
         found gone; a concurrent call may already have replaced it."""
@@ -211,11 +228,10 @@ class PrefixCache:
             del self._entries[key]
 
 
-def _against_cache(llm_request: LlmRequest, name: str) -> LlmRequest:
-    """A copy of `llm_request` sent against cache `name`. ADK traces the
-    original after the call, so the trace keeps the system instruction and
-    tool declarations the model was given."""
-    config = llm_request.config.model_copy(
+def against_cache(config: types.GenerateContentConfig, name: str) -> types.GenerateContentConfig:
+    """A copy of `config` sent against cache `name`: it names the cache and
+    leaves out the system instruction, tools and tool config the cache holds."""
+    return config.model_copy(
         update={
             "cached_content": name,
             "system_instruction": None,
@@ -223,7 +239,13 @@ def _against_cache(llm_request: LlmRequest, name: str) -> LlmRequest:
             "tool_config": None,
         }
     )
-    return llm_request.model_copy(update={"config": config})
+
+
+def _against_cache(llm_request: LlmRequest, name: str) -> LlmRequest:
+    """A copy of `llm_request` sent against cache `name`. ADK traces the
+    original after the call, so the trace keeps the system instruction and
+    tool declarations the model was given."""
+    return llm_request.model_copy(update={"config": against_cache(llm_request.config, name)})
 
 
 class PrefixCachedGemini(BoundedGemini):
@@ -242,18 +264,9 @@ class PrefixCachedGemini(BoundedGemini):
         """The prefix key and cache name `llm_request` is sent against, or
         None when it has no prefix, or finding or creating its cache fails
         in any way short of cancellation."""
-        model = llm_request.model or self.model
-        try:
-            key = prefix_key(model, llm_request.config)
-            if key is None:
-                return None
-            name = await self.prefix_cache.cache_name(
-                key, client=self.api_client, model=model, config=llm_request.config
-            )
-        except Exception as exc:
-            logger.warning("prefix cache: lookup failed (%s): %s", type(exc).__name__, exc)
-            return None
-        return None if name is None else (key, name)
+        return await self.prefix_cache.lookup(
+            client=self.api_client, model=llm_request.model or self.model, config=llm_request.config
+        )
 
     @override
     async def generate_content_async(
@@ -279,7 +292,7 @@ class PrefixCachedGemini(BoundedGemini):
         except errors.ClientError as exc:
             # Streamed output that already reached the caller would repeat on
             # a resend.
-            if delivered or exc.code not in _CACHE_GONE_CODES:
+            if delivered or exc.code not in CACHE_GONE_CODES:
                 raise
             logger.warning("prefix cache %s: %s gone (%s), recreating", key[:16], name, exc.code)
 
@@ -292,12 +305,14 @@ class PrefixCachedGemini(BoundedGemini):
 
 
 __all__ = [
+    "CACHE_GONE_CODES",
     "CACHE_TTL_S",
     "CREATE_COOLDOWN_S",
     "CREATE_TIMEOUT_S",
     "REFRESH_MARGIN_S",
     "PrefixCache",
     "PrefixCachedGemini",
+    "against_cache",
     "gemini_model_name",
     "prefix_key",
 ]

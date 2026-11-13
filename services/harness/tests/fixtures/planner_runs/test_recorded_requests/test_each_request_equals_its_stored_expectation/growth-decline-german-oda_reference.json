@@ -1,0 +1,156 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Show the decline in German ODA from 2023 to 2025"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Show the decline in German ODA from 2023 to 2025",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "source_spec_313a1317f35d812b920635b771b1abf9",
+        "description": "How the flow is counted.",
+        "options": [
+          "gross disbursements",
+          "net disbursements",
+          "commitments"
+        ],
+        "chosen": "gross disbursements",
+        "resolved_by": "planner_default",
+        "rationale": "Search elected gross disbursements for this source.",
+        "fixes": {
+          "period": null,
+          "unit": null,
+          "entities": null,
+          "across": null,
+          "measure": null,
+          "source_spec_id": "spec_313a1317f35d812b920635b771b1abf9",
+          "stat_vars": null,
+          "reduction": null,
+          "group_by": null,
+          "window_start": null,
+          "window_end": null,
+          "direction": null,
+          "predicates": null,
+          "among": null,
+          "axis": null,
+          "denominator_scope": null,
+          "change": null,
+          "per_period": null,
+          "limit": null
+        }
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "decision_ids": [
+          "source_spec_313a1317f35d812b920635b771b1abf9"
+        ],
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Germany",
+            "role": "donor"
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2023,
+          "end": 2025
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_313a1317f35d812b920635b771b1abf9",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "growth",
+        "id": "decline",
+        "decision_ids": [],
+        "input_id": "oda",
+        "window_start": 2023,
+        "window_end": 2025,
+        "change": "relative",
+        "rolling": null
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "German ODA in 2023",
+      "German ODA in 2024",
+      "German ODA in 2025",
+      "Decline in German ODA from 2023 to 2025"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "oda"
+        ]
+      },
+      {
+        "ask": 1,
+        "outputs": [
+          "oda"
+        ]
+      },
+      {
+        "ask": 2,
+        "outputs": [
+          "oda"
+        ]
+      },
+      {
+        "ask": 3,
+        "outputs": [
+          "decline"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

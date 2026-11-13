@@ -1,0 +1,126 @@
+{
+  "requests": [
+    {
+      "model": "gemini-3.8-flash",
+      "config": {
+        "shared": "request_config_recorded_entry"
+      },
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Put Kenya's population and GDP side by side for each year from 2010 to 2022."
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "<brief>"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ],
+  "plan": {
+    "question": "Put Kenya's population and GDP side by side for each year from 2010 to 2022.",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "population",
+        "decision_ids": [],
+        "measure": "population",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": null
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2010,
+          "end": 2022
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_9b43428c92e20ff720106ceea923a2d4",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "dataset",
+        "id": "gdp",
+        "decision_ids": [],
+        "measure": "GDP",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": null
+          }
+        ],
+        "across": [],
+        "period": {
+          "start": 2010,
+          "end": 2022
+        },
+        "period_end_open": false,
+        "frequency": "annual",
+        "unit": null,
+        "source": null,
+        "source_ref": null,
+        "source_exclude": false,
+        "source_code": null,
+        "source_spec_id": "spec_3da38110e888d273e43821111c0c1b1c",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "stat_vars": null,
+        "breakdown": null
+      },
+      {
+        "kind": "join",
+        "id": "table",
+        "decision_ids": [],
+        "left_id": "population",
+        "right_id": "gdp"
+      }
+    ],
+    "declined": [],
+    "asks": [
+      "Kenya's population and GDP side by side, each year 2010 to 2022"
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "table"
+        ]
+      }
+    ],
+    "ask_breakdowns": [],
+    "asks_across_years": [],
+    "period_licences": [],
+    "rolling_copies": [],
+    "first_years": [],
+    "translation": null,
+    "workflow": null,
+    "version": 1,
+    "previous_version": null,
+    "status": "draft",
+    "approved_revision": null,
+    "approved_at": null
+  }
+}

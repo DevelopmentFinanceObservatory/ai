@@ -88,10 +88,10 @@ through `ask_user`.
 ## 7. Skills for planner grounding
 
 **Resolved.** apis serves skills through its Skills API, and data-mcp reads
-them with `get_skill` and `get_skill_file`. The planner carries both as its own
-tools (`services/harness/src/planner/skills.py`), called through the harness's
+them with `get_skill`. The planner carries `get_skill` as its
+own tool (`services/harness/src/planner/skills.py`), called through the harness's
 tool surface, and loads a skill that bears on the question. Where the Skills
-API is not mounted, both tools refuse `capability_unavailable` and the planner drafts without the skill.
+API is not mounted, the tool refuses `capability_unavailable` and the planner drafts without the skill.
 
 ## 8. Frames produced by analysis-mcp are invisible to the presentation surface
 

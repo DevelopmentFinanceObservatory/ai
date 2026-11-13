@@ -9,12 +9,12 @@ sentence fails `tests/test_sentences.py`:
 - `DECLINE_REASONS`, per `planner.plan.UnsupportedOperation`, the reason the
   plan card and `harness.graph.plan_done` give for an ask the plan declines,
   and `DROPPED_REASON`, the card's for an ask the user's amendment removed;
-- `SEAM_REASONS`, per `SeamCode` and `planner.tool_results.ProblemCode`: why
+- `STOP_REASONS`, per `StopCode` and `planner.tool_results.ProblemCode`: why
   a revision in code was refused and nothing more, which
   `harness.graph.switch` shows under the choice a switch did not apply to;
-- `SEAM_SENTENCES`, per `SeamCode` and `planner.tool_results.ProblemCode`:
-  the whole sentence `harness.planner_seam` answers when an entry into the
-  planner, or a revision in code (`PlannerSeam.revise`), ends without a
+- `STOP_SENTENCES`, per `StopCode` and `planner.tool_results.ProblemCode`:
+  the whole sentence `harness.planner_adapter` answers when an entry into the
+  planner, or a revision in code (`PlannerAdapter.revise`), ends without a
   plan, which `harness.graph.planning` hands the orchestrator to quote and
   `harness.graph.switch` shows on a switch that did not apply, and the
   final message `harness.turn_budget` writes when a request spends a bound;
@@ -29,12 +29,12 @@ sentence fails `tests/test_sentences.py`:
 the question a referral the user decides puts to them.
 
 The first three hold reason clauses, lower case and without a full stop, so a
-seam sentence can carry one (`{why}`) and a declined ask reads "not computed
-because <reason>". A `SEAM_SENTENCES` entry is a template filled by
+stop sentence can carry one (`{why}`) and a declined ask reads "not computed
+because <reason>". A `STOP_SENTENCES` entry is a template filled by
 `refusal_sentence` from the refusal's own `detail`. The tables are separate
 because the vocabularies share values: `requirement_unmeetable` is both a
 referral kind and a compile issue code, and `discovery_unavailable` both a
-referral kind and a seam code. A seam code has two texts: its `SEAM_SENTENCES`
+referral kind and a stop code. A stop code has two texts: its `STOP_SENTENCES`
 template, which the orchestrator reads and quotes, and its `FAILURE_CLASS`
 sentence, which the Activity log shows.
 """
@@ -63,8 +63,8 @@ from harness.wire import RetryMode
 logger = logging.getLogger(__name__)
 
 
-class SeamCode(StrEnum):
-    """Why `harness.planner_seam` ended an entry into the planner without a plan,
+class StopCode(StrEnum):
+    """Why `harness.planner_adapter` ended an entry into the planner without a plan,
     or `harness.turn_budget` ended a request before it finished."""
 
     # The request spent its model-time budget (`harness.turn_budget.TurnBudget`).
@@ -235,7 +235,7 @@ DECLINE_REASONS: Mapping[UnsupportedOperation, str] = {
 DROPPED_REASON = "you removed it from the plan"
 
 # A problem the planner's model repairs within its entry, which ends a
-# revision in code (`harness.planner_seam.PlannerSeam.revise`), where no model
+# revision in code (`harness.planner_adapter.PlannerAdapter.revise`), where no model
 # is there to repair it.
 _NOT_DRAFTED = (
     "The plan could not be drafted{at}, a fault in the system rather than in the request, "
@@ -254,6 +254,7 @@ _NOT_DRAFTED_CODES = frozenset(
         ProblemCode.INVALID_PLAN,
         ProblemCode.INVALID_REFERRAL,
         ProblemCode.INVALID_ARGUMENTS,
+        ProblemCode.PLAN_WRITE_REPEATED,
         ProblemCode.COMPILE_FAILED,
         ProblemCode.NO_CANDIDATES_RECORDED,
         ProblemCode.SOURCE_NOT_OFFERED,
@@ -282,38 +283,38 @@ _DECISION_KEPT = (
 # `unsupported` why a calculation cannot be made, `reading` the series a
 # requirement pins, by its spec_id, `chosen` the prices the user chose, and `rounds`,
 # `tool` and `reference` come straight from the refusal's detail.
-SEAM_SENTENCES: Mapping[SeamCode | ProblemCode, str] = {
-    SeamCode.TURN_MODEL_TIME_SPENT: (
+STOP_SENTENCES: Mapping[StopCode | ProblemCode, str] = {
+    StopCode.TURN_MODEL_TIME_SPENT: (
         "This request used all the time it allows the model to work before it finished, so "
         "it stopped here. Your next message starts with a fresh budget."
     ),
-    SeamCode.TURN_MODEL_CALLS_SPENT: (
+    StopCode.TURN_MODEL_CALLS_SPENT: (
         "This request took as many model steps as it allows before it finished, so it "
         "stopped here. Your next message starts with a fresh budget."
     ),
-    SeamCode.TURN_WALL_TIME_SPENT: (
+    StopCode.TURN_WALL_TIME_SPENT: (
         "This request ran for as long as one request may before it finished, so it stopped "
         "here. Your next message starts with a fresh budget."
     ),
-    SeamCode.TRANSLATION_INTERNAL_FAILURE: (
+    StopCode.TRANSLATION_INTERNAL_FAILURE: (
         "Translation failed internally (reference {reference}), so nothing was recorded. The "
         "fault is in the system, not the request, and planning the same request again fails "
         "the same way."
     ),
-    SeamCode.TRANSLATION_REPEATED: (
+    StopCode.TRANSLATION_REPEATED: (
         "The plan failed the same way twice{at}: {why}. Nothing was recorded, and "
         "planning the same request again fails the same way; what that part of the request "
         "asks for has to change."
     ),
-    SeamCode.DISCOVERY_UNAVAILABLE: (
+    StopCode.DISCOVERY_UNAVAILABLE: (
         "The data service did not answer while finding data for {about}, so nothing was "
         "recorded. The service is unavailable; try again shortly."
     ),
-    SeamCode.PLANNER_TOOL_FAILED: (
+    StopCode.PLANNER_TOOL_FAILED: (
         "The planner's {tool} tool failed inside DFO, so no plan was made. The fault is in "
         "the system, not the request."
     ),
-    SeamCode.PLAN_NOT_READY: "No plan was made{at}: {why}.",
+    StopCode.PLAN_NOT_READY: "No plan was made{at}: {why}.",
     ProblemCode.QUESTION_FIXED: (
         "The plan already on record answers this turn's question, so this was not recorded "
         "as a change to it. Ask the other question as its own message."
@@ -375,18 +376,18 @@ SEAM_SENTENCES: Mapping[SeamCode | ProblemCode, str] = {
 }
 
 # Why a refusal ended a planner entry or a revision in code, as a clause with
-# no advice and no account of what was kept, filled as `SEAM_SENTENCES` is,
+# no advice and no account of what was kept, filled as `STOP_SENTENCES` is,
 # with `lead` "for <name>, " or nothing and `mixed` why a calculation cannot
 # be made. `refusal_reason` makes it a sentence.
-SEAM_REASONS: Mapping[SeamCode | ProblemCode, str] = {
-    SeamCode.TURN_MODEL_TIME_SPENT: "this request used all the time it allows the model to work",
-    SeamCode.TURN_MODEL_CALLS_SPENT: "this request took as many model steps as it allows",
-    SeamCode.TURN_WALL_TIME_SPENT: "this request ran for as long as one request may",
-    SeamCode.TRANSLATION_INTERNAL_FAILURE: "a fault inside the system stopped the plan",
-    SeamCode.TRANSLATION_REPEATED: "{lead}{why}, and it failed the same way twice",
-    SeamCode.DISCOVERY_UNAVAILABLE: "the data service did not answer while finding data for {about}",
-    SeamCode.PLANNER_TOOL_FAILED: "the planner's {tool} tool failed inside the system",
-    SeamCode.PLAN_NOT_READY: "{lead}{why}",
+STOP_REASONS: Mapping[StopCode | ProblemCode, str] = {
+    StopCode.TURN_MODEL_TIME_SPENT: "this request used all the time it allows the model to work",
+    StopCode.TURN_MODEL_CALLS_SPENT: "this request took as many model steps as it allows",
+    StopCode.TURN_WALL_TIME_SPENT: "this request ran for as long as one request may",
+    StopCode.TRANSLATION_INTERNAL_FAILURE: "a fault inside the system stopped the plan",
+    StopCode.TRANSLATION_REPEATED: "{lead}{why}, and it failed the same way twice",
+    StopCode.DISCOVERY_UNAVAILABLE: "the data service did not answer while finding data for {about}",
+    StopCode.PLANNER_TOOL_FAILED: "the planner's {tool} tool failed inside the system",
+    StopCode.PLAN_NOT_READY: "{lead}{why}",
     ProblemCode.QUESTION_FIXED: "the plan on record answers another question",
     ProblemCode.BUDGET_EXHAUSTED: "this request has used its budget of {rounds} plan drafts",
     ProblemCode.NOTHING_TO_PLAN: "this system cannot calculate what was asked",
@@ -476,7 +477,7 @@ def referral_sentence(
     kind: object, constraint: object = None, *, source_mismatch: bool = False
 ) -> str:
     """`referral_reason` as a sentence of its own, which leads the question
-    `harness.planner_seam` puts to the user for a referral they decide."""
+    `harness.planner_adapter` puts to the user for a referral they decide."""
     reason = referral_reason(kind, constraint, source_mismatch=source_mismatch)
     return f"{reason[0].upper()}{reason[1:]}."
 
@@ -503,22 +504,22 @@ def refusal_sentence(refused: Mapping[str, object]) -> str:
     planner and the orchestrator, naming a requirement by its id, which a
     repair cites.
 
-    `refused` is `{"code", "detail"}`, the shape `harness.planner_seam` stamps
+    `refused` is `{"code", "detail"}`, the shape `harness.planner_adapter` stamps
     and `propose_plan` refuses with. A code in no table gives a plain
     sentence that claims nothing about why.
     """
     code = refused.get("code")
-    template = SEAM_SENTENCES.get(code, _UNKNOWN_REFUSAL) if isinstance(code, str) else None
+    template = STOP_SENTENCES.get(code, _UNKNOWN_REFUSAL) if isinstance(code, str) else None
     return (template or _UNKNOWN_REFUSAL).format_map(_refusal_fields(refused, None))
 
 
 def refusal_reason(refused: Mapping[str, object], *, words: PlanWords = _NO_WORDS) -> str:
-    """Why `refused` refused, as one sentence for the user (`SEAM_REASONS`),
+    """Why `refused` refused, as one sentence for the user (`STOP_REASONS`),
     naming the plan's requirements by `words`, since an id reads as a
     fault. A code in no table gives a plain clause that claims nothing
     about why."""
     code = refused.get("code")
-    template = SEAM_REASONS.get(code, _STOPPED) if isinstance(code, str) else _STOPPED
+    template = STOP_REASONS.get(code, _STOPPED) if isinstance(code, str) else _STOPPED
     reason = template.format_map(_refusal_fields(refused, words))
     first = next(index for index, char in enumerate(reason) if char.isalpha())
     return f"{reason[:first]}{reason[first].upper()}{reason[first + 1 :]}."
@@ -530,7 +531,7 @@ def _refusal_fields(refused: Mapping[str, object], words: PlanWords | None) -> d
 
 
 def _fields(detail: Mapping[Any, object], words: PlanWords | None) -> dict[str, object]:
-    """What a `SEAM_SENTENCES` or `SEAM_REASONS` template reads, from a
+    """What a `STOP_SENTENCES` or `STOP_REASONS` template reads, from a
     refusal's `detail`: a requirement by its reader's name in `words`, or by
     its id when `words` is `None`."""
     basis = detail.get("basis")
@@ -706,7 +707,7 @@ FAILURE_SENTENCES: Mapping[FailureClass, FailureText] = {
 
 # Every code a user can be told about, under the class that words it. A code
 # two vocabularies share (`service_unavailable`, `internal_error`) sits once.
-# A code of `SEAM_SENTENCES` sits here too, since its class or its own text
+# A code of `STOP_SENTENCES` sits here too, since its class or its own text
 # words the failed step a refused plan shows, with none of the refusal's detail.
 _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
     FailureClass.TRANSIENT: frozenset(
@@ -727,7 +728,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             ExecutorCode.PUBLICATION_UNFINISHED,
             ExecutorCode.RUN_NOT_STARTED,
             ExecutorCode.LEDGER_UNAVAILABLE,
-            SeamCode.DISCOVERY_UNAVAILABLE,
+            StopCode.DISCOVERY_UNAVAILABLE,
             ProblemCode.SURFACE_UNAVAILABLE,
         }
     ),
@@ -912,8 +913,8 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             HarnessCode.RECIPE_UNBUILDABLE,
             HarnessCode.RECIPE_NORMAL_FORM_CONFLICT,
             ExecutorCode.PUBLICATION_ERROR,
-            SeamCode.TRANSLATION_INTERNAL_FAILURE,
-            SeamCode.PLANNER_TOOL_FAILED,
+            StopCode.TRANSLATION_INTERNAL_FAILURE,
+            StopCode.PLANNER_TOOL_FAILED,
             *_NOT_DRAFTED_CODES,
         }
     ),
@@ -941,9 +942,9 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
     FailureClass.BUDGET_SPENT: frozenset(
         {
             HarnessCode.TOOL_BUDGET_SPENT,
-            SeamCode.TURN_MODEL_TIME_SPENT,
-            SeamCode.TURN_MODEL_CALLS_SPENT,
-            SeamCode.TURN_WALL_TIME_SPENT,
+            StopCode.TURN_MODEL_TIME_SPENT,
+            StopCode.TURN_MODEL_CALLS_SPENT,
+            StopCode.TURN_WALL_TIME_SPENT,
             ProblemCode.BUDGET_EXHAUSTED,
         }
     ),
@@ -964,8 +965,8 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             HarnessCode.UNSPECIFIED,
             HarnessCode.CARD_NOT_FOUND,
             HarnessCode.RAISED,
-            SeamCode.TRANSLATION_REPEATED,
-            SeamCode.PLAN_NOT_READY,
+            StopCode.TRANSLATION_REPEATED,
+            StopCode.PLAN_NOT_READY,
             ProblemCode.QUESTION_FIXED,
             ProblemCode.SEARCH_REFUSED,
             ProblemCode.USER_DECISION_CONTRADICTED,
@@ -1066,10 +1067,10 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
     HarnessCode.HAND_OFF_PENDING: FailureText(
         "This request is already waiting on your answer or on a plan"
     ),
-    SeamCode.TRANSLATION_REPEATED: FailureText(
+    StopCode.TRANSLATION_REPEATED: FailureText(
         "The plan for this failed the same way twice", "so ask for it another way"
     ),
-    SeamCode.PLAN_NOT_READY: FailureText("A plan for what was asked could not be completed"),
+    StopCode.PLAN_NOT_READY: FailureText("A plan for what was asked could not be completed"),
     ProblemCode.QUESTION_FIXED: FailureText(
         "The plan on record already answers this question",
         "so ask the other question as its own message",

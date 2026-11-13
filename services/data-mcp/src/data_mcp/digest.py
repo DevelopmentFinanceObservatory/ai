@@ -7,7 +7,7 @@ refused part (`unsupported`, or `no_data` that never resolved the ask) limited
 to warnings about the caller's own input. Beneath
 every block come the skills the envelope attaches to its specs, then the
 envelope's diagnostics warnings as a shared trailer. `render_digest(envelope)`
-is the public seam: the digest corpus imports it to exercise rendering with no
+is the public entry point: the digest corpus imports it to exercise rendering with no
 network and no tool. `render_answer(envelope)` is its data-shaped twin: the
 identifiers, labels, statuses, skill ids and warnings the digest names, as the
 small `structuredContent` a host may hand a model.

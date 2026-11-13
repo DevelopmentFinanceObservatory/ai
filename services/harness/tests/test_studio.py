@@ -1,4 +1,4 @@
-"""The studio routes end-to-end over real HTTP, with scripted seams.
+"""The studio routes end-to-end over real HTTP, with scripted fakes.
 
 Everything runs against a FastAPI app through httpx2's ASGI transport, with
 real routing, real SSE streaming and real ADK run/resume mechanics, on the
@@ -78,9 +78,10 @@ from harness.graph.state import (
 from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.plan_display import decision_option_id
+from harness.planner_adapter import PlannerAdapter
 from harness.provenance import ProvenanceStore
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
-from harness.sentences import FAILURE_CLASS, SeamCode, refusal_sentence
+from harness.sentences import FAILURE_CLASS, StopCode, refusal_sentence
 from harness.settings import Settings
 from harness.studio import (
     _acquire_or_conflict,
@@ -130,6 +131,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from planner.operations import GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
+    PLAN_STATE_KEY,
     SEEDS_STATE_KEY,
     DatasetRequirement,
     Decision,
@@ -142,6 +144,7 @@ from planner.plan import (
 from planner.plan import Plan as PlannerPlan
 from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
+from translator.referral import REFERRAL_STATE_KEY, Referral, ReferralKind
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .failure_text import classed_sentence, is_user_sentence
@@ -164,10 +167,9 @@ from .orchestrator_fakes import (
     turn_body,
 )
 from .resolved_revision import resolved_revision
+from .scripted_genai import ScriptedGenai, call_part, reply, text_part
 from .sqlite_session import sqlite_session_service
 from .test_graph import _hashed_scope, _switched_answer
-from .test_planner_seam import ScriptedPlannerLlm
-from .test_planner_seam import _seam as _planner_seam
 
 SPEC_A = "spec_" + "a" * 32
 REF_A = {"spec_id": SPEC_A, "content_version": "cv_" + "1" * 32}
@@ -364,7 +366,7 @@ def _card(
         for index in range(charts)
     ]
     return (
-        search_call("kenya oda 2023", "aid to Kenya"),
+        search_call("aid to Kenya"),
         fetch_call(SPEC_A),
         make_charts_call(*drawn),
         _text("Here is the card."),
@@ -428,7 +430,7 @@ class _HangingResolver:
 
 
 # The session service backend every route-exercising test in this module
-# builds its store and runner over: `_new_session_service` is the one seam
+# builds its store and runner over: `_new_session_service` is the one function
 # `session_service_backend` (below) switches, so the whole suite runs
 # through `InMemorySessionService` and a sqlite-backed
 # `DatabaseSessionService` without any call site naming which one it is
@@ -592,7 +594,7 @@ async def test_a_wrong_shared_secret_is_401() -> None:
 async def test_a_definite_turn_streams_steps_text_and_done() -> None:
     executor = ScriptedExecutor(_card_results()[:2], strict=True)
     app = _app(
-        search_call("kenya oda 2023", "aid to Kenya"),
+        search_call("aid to Kenya"),
         fetch_call(SPEC_A),
         _text("Kenya received aid."),
         resolver=_search(),
@@ -642,7 +644,7 @@ async def test_a_turn_past_its_call_cap_ends_on_the_cap_sentence_with_no_further
 
     assert len(_model(app).requests) == 1
     assert _frame(frames, "message.complete")["text"] == refusal_sentence(
-        {"code": SeamCode.TURN_MODEL_CALLS_SPENT}
+        {"code": StopCode.TURN_MODEL_CALLS_SPENT}
     )
     assert _events(frames)[-1] == "done"
 
@@ -696,11 +698,11 @@ async def test_a_chart_call_writes_each_chart_and_a_refused_write_fails_its_line
     assert [b["component_id"] for b in done["composition"]["blocks"]] == ["cmp_01test0001"]
 
 
-async def test_a_planner_run_shows_working_on_a_plan_and_not_the_seams_late_reports(
+async def test_a_planner_run_shows_working_on_a_plan_and_not_the_planners_late_reports(
     real_schemas: list[ToolSchema],
 ) -> None:
     """A plan call opens "Working on a plan" as the draft starts and
-    completes it before the plan card. The seam's `on_progress` reports,
+    completes it before the plan card. The planner's `on_progress` reports,
     relayed only once the draft is done, never reach the wire (see
     `harness.studio_translate`'s module docstring)."""
 
@@ -769,12 +771,14 @@ async def test_a_crash_mid_execute_reports_the_finished_steps_on_the_failing_tur
         )
         second = await _stream(client, "/api/studio/turn", _turn_body("kenya oda 2023"))
 
-    # The plan's own step; "Starting the plan" is a status line with no tool.
-    finished = [
-        frame for frame in failed if frame["event"] == "activity.step" and frame.get("tool")
-    ]
-    assert [frame["status"] for frame in finished] == ["running", "complete"]
-    assert finished[0]["step_id"] == finished[1]["step_id"]
+    # The plan's own steps; "Starting the plan" is a status line with no tool.
+    # Each step's line opens as it starts, and the step the crash cut off
+    # closes as failed.
+    lines: dict[str, list[str]] = {}
+    for frame in failed:
+        if frame["event"] == "activity.step" and frame.get("tool"):
+            lines.setdefault(frame["step_id"], []).append(frame["status"])
+    assert list(lines.values()) == [["running", "complete"], ["running", "failed"]]
     assert _events(failed)[-1] == "error"
     assert "component.created" not in _events(second)
     assert _events(second)[-1] == "done"
@@ -842,11 +846,11 @@ async def test_a_cancelled_turn_keeps_its_recorded_steps_out_of_the_next_turn(
 
 
 async def test_a_malformed_drafted_plan_ends_the_turn_as_an_error_not_a_silent_success() -> None:
-    """A draft the seam could not itself validate must not reach the approve
-    gate or the executor. `harness.graph.planning`'s `planner` node validates the seam's
+    """A draft the planner could not itself validate must not reach the approve
+    gate or the executor. `harness.graph.planning`'s `planner` node validates the planner's
     record as a `planner.plan.Plan` before writing it to state, outside
-    `handing_back_planner_failures`, which hands back only a seam's own
-    `PlannerSeamError`."""
+    `handing_back_planner_failures`, which hands back only a planner's own
+    `PlannerAdapterError`."""
 
     async def drafts_badly(**kwargs: Any) -> dict[str, Any]:
         return {"plan": {"decisions": "not-a-list"}, "summary": {}}
@@ -996,7 +1000,7 @@ async def test_the_stream_waits_no_longer_than_the_bound_for_early_mints(
 
 
 async def test_plan_proposed_pauses_and_approve_resumes_on_a_new_stream() -> None:
-    """The scripted planner and surface (`harness.scripted`'s seams)
+    """The scripted planner and surface (`harness.scripted`'s fakes)
     draft the plan and run it, and once it is handed back the agent charts
     its frame. `executor` serves only the hand-back's `describe_frame` and the
     chart's `write_component`, since the plan's own steps run through
@@ -1097,7 +1101,7 @@ async def test_a_turn_paused_for_approval_exports_as_one_trace(
                 return await super().__call__(tool=tool, args=args)
 
     app = _app(
-        search_call("q with forks", "aid to Kenya"),
+        search_call("aid to Kenya"),
         *_plan("q with forks", *_charts_the_plan()),
         resolver=ProbingSearch(definite_envelope(spec_id=SPEC_A)),
         executor=ProbingExecutor(),
@@ -1192,13 +1196,13 @@ async def test_cancelling_an_idle_conversation_flushes_nothing(
 
 
 class ScriptedPlanner:
-    """A `PlannerModel` seam, standing in for `harness.planner_seam`.
+    """A `PlannerModel`, standing in for `harness.planner_adapter`.
 
     Builds a real, translated `planner.plan.Plan` directly rather than
     running the planner agent and its translator (covered model-free in
-    `test_planner_seam.py`). It proves the wire from a `planner.plan.Plan`-
+    `test_planner_adapter.py`). It proves the wire from a `planner.plan.Plan`-
     shaped payload to the plan card: any `PlannerModel`, including the real
-    `harness.planner_seam.PlannerSeam`, returns that same shape, so a
+    `harness.planner_adapter.PlannerAdapter`, returns that same shape, so a
     planner that settles a decision with the user reaches the plan card as
     written here.
     """
@@ -1295,11 +1299,11 @@ class ScriptedPlanner:
         }
 
 
-async def test_a_planner_seams_own_labels_and_decisions_reach_the_plan_card(
+async def test_a_planners_own_labels_and_decisions_reach_the_plan_card(
     real_schemas: list[ToolSchema],
 ) -> None:
     """`plan.proposed`'s steps, decisions, requirements and operations are
-    composed by `harness.plan_display` from the seam's real `planner.plan.Plan`,
+    composed by `harness.plan_display` from the planner's real `planner.plan.Plan`,
     not the scripted record's bare tool names. Approving still ends the turn
     cleanly by the revision key, and runs the workflow's steps through
     `execute_approved_plan` against a real `ToolSurface`: every step produces
@@ -1334,7 +1338,7 @@ async def test_a_planner_seams_own_labels_and_decisions_reach_the_plan_card(
     # The revision key matched, so `approve` routed "approved" and the turn
     # ran to completion with no error -- proof the gate itself works.
     assert _events(second)[-1] == "done"
-    # The seam drafted for the agent's brief.
+    # The planner drafted for the agent's brief.
     assert planner.calls[0]["question"] == "q with forks"
     # Every step of the two-step workflow produced its own activity frame,
     # each timed by `_RecordingSurface` -- not merely "some frames exist".
@@ -1349,7 +1353,6 @@ async def test_a_planner_seams_own_labels_and_decisions_reach_the_plan_card(
 
 
 _POLLING = "Preparing the dataset (in progress, 12s)"
-_RECEIVED = "Result received; checking it"
 
 
 def _tool_steps(frames: list[dict[str, Any]]) -> list[tuple[str, str, str, str | None]]:
@@ -1381,7 +1384,8 @@ class _PollsOnceSurface(ScriptedSurface):
 async def test_a_polled_get_data_step_updates_one_activity_line_until_it_completes() -> None:
     """While `get_data` waits on a background operation, its step streams a
     `running` frame carrying data-mcp's report; once the call answers, the
-    line says so, then completes on the same `step_id`. Studio keeps one
+    line drops the report and shows the step's description again, then completes
+    on the same `step_id`. Studio keeps one
     Activity line per step, so the plan's two steps still read as two
     lines. A plan step's surface call is the only place progress reaches
     the wire: the agent's `fetch` calls `get_data` with none."""
@@ -1395,9 +1399,10 @@ async def test_a_polled_get_data_step_updates_one_activity_line_until_it_complet
 
     steps = _tool_steps(second)
     get_data = [step for step in steps if step[1] == "get_data"]
+    source = "life expectancy at birth in Kenya, 1960 to 2023"
     assert [(status, detail) for _, _, status, detail in get_data] == [
-        ("running", _POLLING),
-        ("running", _RECEIVED),
+        ("running", f"{_POLLING} \u00b7 step 1 of 2"),
+        ("running", f"step 1 of 2 \u00b7 {source}"),
         ("complete", "64 observations \u00b7 World Development Indicators"),
     ]
     assert len({step_id for step_id, *_ in get_data}) == 1
@@ -1706,7 +1711,7 @@ async def test_reject_ends_the_turn_without_computing() -> None:
 class _UnrelatedPlansPlanner:
     """A `PlannerModel` that ignores `prior_plan`: every call starts a fresh
     `planner.plan.Plan` at version 1, for a different measure each time --
-    standing in for a seam that reads an amendment as a new question rather
+    standing in for a planner that reads an amendment as a new question rather
     than a revision. Two calls in one conversation then both draft a
     version-1 plan with nothing else in common, the exact shape that makes
     the bare integer ambiguous across them."""
@@ -1854,7 +1859,7 @@ _BUDGET_EXHAUSTED_TEXT = (
     "recorded. Your next message starts with a fresh budget."
 )
 # `harness.graph`'s `planner` node appends this when it routes a refusal
-# back to `approve` with a plan still `PENDING_APPROVAL`: the seam's own
+# back to `approve` with a plan still `PENDING_APPROVAL`: the planner's own
 # sentence states facts it can verify from inside one turn; the node adds
 # the approvability claim, since only it holds `ctx.state["plan"]`.
 _STILL_APPROVABLE_TEXT = (
@@ -1865,8 +1870,8 @@ _STILL_APPROVABLE_TEXT = (
 
 class _RefusingAmendPlanner:
     """A `PlannerModel` that drafts once for real, then answers every later
-    call with `PlannerSeam`'s own `BUDGET_EXHAUSTED` shape -- standing in
-    for a real seam whose amendment round hits `MAX_PLAN_ROUNDS`, without
+    call with `PlannerAdapter`'s own `BUDGET_EXHAUSTED` shape -- standing in
+    for a real adapter whose amendment round hits `MAX_PLAN_ROUNDS`, without
     needing a real model to drive it there."""
 
     def __init__(self, schemas: list[ToolSchema]) -> None:
@@ -1950,7 +1955,7 @@ class _RefusingAmendPlanner:
 async def test_a_refused_amendment_still_offers_the_pending_version_for_approval(
     real_schemas: list[ToolSchema],
 ) -> None:
-    """`PlannerSeam`'s own `MAX_PLAN_ROUNDS` cap can refuse an amendment
+    """`PlannerAdapter`'s own `MAX_PLAN_ROUNDS` cap can refuse an amendment
     outright (`{"refused": {"text": ...}}`). The plan the user was already
     looking at is still `PENDING_APPROVAL` and untouched by that refusal,
     so the served turn re-offers it for approval instead of ending the
@@ -2011,8 +2016,8 @@ _QUESTION_FIXED_STILL_APPROVABLE_TEXT = (
 
 class _RestartRefusingPlanner(_RefusingAmendPlanner):
     """`_RefusingAmendPlanner`, refusing every later call the way a real
-    `PlannerSeam` -- its pair always built with `question_fixed=True`
-    (`harness.planner_seam.PlannerSeam.__init__`) -- refuses an amendment
+    `PlannerAdapter`, which holds the turn's question fixed
+    (`submission.service._resolve_intent`), refuses an amendment
     that tries to restart for a different question: `QUESTION_FIXED`, not
     `BUDGET_EXHAUSTED`. Records every call's own `question`, so a test can
     prove `ctx.state["question"]` reached the second call unchanged from
@@ -2033,7 +2038,7 @@ class _RestartRefusingPlanner(_RefusingAmendPlanner):
 async def test_an_amend_that_restarts_is_refused_with_no_version_regression_or_duplicate_id(
     real_schemas: list[ToolSchema],
 ) -> None:
-    """A restart the planner's `question_fixed` pair refuses (`QUESTION_FIXED`)
+    """A restart the planner refuses (`QUESTION_FIXED`)
     reaches the wire exactly like a `BUDGET_EXHAUSTED` refusal (see
     `test_a_refused_amendment_still_offers_the_pending_version_for_approval`,
     just above): the same pending plan is re-offered, under the same
@@ -2240,10 +2245,9 @@ async def test_an_ask_elicits_and_the_answer_resumes_on_a_new_stream() -> None:
 
 
 async def test_the_planner_s_ask_elicits_and_its_answer_resumes_the_planner() -> None:
-    """The planner's own ask, through a real `PlannerSeam`, pauses the turn
+    """The planner's own ask, through a real `PlannerAdapter`, pauses the turn
     on its question. Studio's answer runs the planner again with the pick in
     its brief, the resumed stream asks nothing again, and the turn ends."""
-    seam = _planner_seam()
     asked = {
         "message": "Which source did you mean?",
         "candidates": [
@@ -2251,9 +2255,13 @@ async def test_the_planner_s_ask_elicits_and_its_answer_resumes_the_planner() ->
             {"spec_id": "spec_b", "label": "reading B"},
         ],
     }
-    llm = ScriptedPlannerLlm(script=[[(PLANNER_ASK, asked)], "done"])
-    seam._agent.model = llm
-    app = _app(*_plan(), _text("No plan came of it."), planner=seam)
+    llm = ScriptedGenai(
+        [reply(call_part(PLANNER_ASK, asked, id="call-1")), reply(text_part("done"))]
+    )
+    adapter = PlannerAdapter(
+        settings=Settings(), surface=FixtureSurface(schemas=[]), client=llm.client
+    )
+    app = _app(*_plan(), _text("No plan came of it."), planner=adapter)
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
 
@@ -2271,11 +2279,9 @@ async def test_the_planner_s_ask_elicits_and_its_answer_resumes_the_planner() ->
 
     assert "elicitation.request" not in _events(second)
     assert _events(second)[-1] == "done"
-    assert len(llm.captured_requests) == 2
+    assert len(llm.requests) == 2
     brief = "".join(
-        part.text or ""
-        for content in llm.captured_requests[-1].contents
-        for part in content.parts or []
+        part.text or "" for content in llm.requests[-1].content_list for part in content.parts or []
     )
     assert "They picked 'reading B', id `spec_b`." in brief
 
@@ -2285,9 +2291,9 @@ async def test_a_search_after_the_answer_reads_the_message_the_answer_refined() 
     question first, and after the resume the question with the answer."""
     search = CannedSearch(definite_envelope(spec_id=SPEC_A), definite_envelope(spec_id=SPEC_A))
     app = _app(
-        search_call("ambiguous q", "aid"),
+        search_call("aid"),
         *_ask("reading A", "reading B"),
-        search_call("aid, reading B", "aid"),
+        search_call("aid"),
         _text("You meant reading B."),
         resolver=search,
     )
@@ -2358,7 +2364,7 @@ async def test_the_turn_record_keeps_a_picked_count_under_its_spec_id() -> None:
     """A pick whose option carries a spec_id is recorded as `label (spec_id)`,
     so a later turn can tell which series the user settled."""
     app = _app(
-        search_call("kenya oda 2023", "aid to Kenya"),
+        search_call("aid to Kenya"),
         call(
             "ask_user",
             questions=[
@@ -4239,7 +4245,7 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
     assert "cmw_" not in json.dumps(
         [(record.args, record.result) for record in records], default=str
     )
-    # The seam took the token off every result, content text included,
+    # `McpExecutor` took the token off every result, content text included,
     # before any reader downstream of `McpExecutor` saw it.
     assert "cmw_" not in json.dumps(
         [(r.structured_content, [block.text for block in r.content]) for r in platform.results]
@@ -5341,7 +5347,7 @@ async def test_a_switch_leaves_its_label_out_of_the_words_later_searches_send() 
     )
     search = _search()
     app = _app(
-        *_plan("q with forks", search_call("aid", "aid"), _text("Done.")),
+        *_plan("q with forks", search_call("aid"), _text("Done.")),
         resolver=search,
         tool_surface=ScriptedSurface(),
     )
@@ -5429,7 +5435,7 @@ def _chip_app(
         else SearchStub(answer={scope["id"]: _switched_answer(scope)[1]})
     )
     app = _app(
-        search_call("health aid to Africa", "health aid"),
+        search_call("health aid"),
         *(fetch_call(scope["compiled"]["spec_id"], **fetched) for fetched in fetches),
         _text("Health aid to Africa was this much."),
         *script,
@@ -5609,7 +5615,7 @@ async def test_a_chip_applies_only_on_the_answer_it_was_offered_with() -> None:
     Search is asked nothing. The newer answer's own chip still applies."""
     pin = _hashed_scope()["compiled"]["spec_id"]
     app, scope, search = _chip_app(
-        search_call("health aid to Africa", "health aid"),
+        search_call("health aid"),
         fetch_call(pin),
         _text("Health aid to Ghana was this much."),
         _text("Now with population."),
@@ -6670,7 +6676,7 @@ async def test_a_heartbeat_that_cannot_renew_ends_the_stream_once_its_clock_pass
 ) -> None:
     """`renew` raises on every call: the stream stays open, retried every
     heartbeat interval, for as long as the store's own injectable clock
-    (the same seam every other TTL comparison in this store uses, not the
+    (the same clock every other TTL comparison in this store uses, not the
     wall clock) reads before `segment.expires_at - 10`. Moving that clock
     past the deadline, with no real time elapsed, is what ends the stream
     with a stream-fatal `segment_lost` error."""
@@ -7349,6 +7355,39 @@ async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block() -> 
         "warnings": {spec_id: []},
         "spec_ids": [spec_id],
     }
+
+
+async def test_a_referral_an_earlier_turn_left_pending_is_not_in_the_next_turns_session() -> None:
+    """Each turn opens a fresh session, so a plan and a pending referral the
+    user decides, left in turn one's session, are not in turn two's."""
+    session_service = _new_session_service()
+    store = StudioStore(session_service, app_name=AGENT_NAME)
+    app = _app(session_service=session_service, store=store)
+    conversation = await store.create(PRINCIPAL, CONVERSATION)
+    conversation.turn_index = 1
+    conversation.turn_recorded = True
+    conversation.turns = [{"user": "q1", "assistant": "a1"}]
+    await store.save(PRINCIPAL, CONVERSATION)
+    referral = Referral(kind=ReferralKind.REQUIREMENT_UNMEETABLE, reason="r", requirement_id="oda")
+    await session_service.create_session(
+        app_name=AGENT_NAME,
+        user_id=PRINCIPAL,
+        session_id=f"{CONVERSATION}#t1",
+        state={
+            PLAN_STATE_KEY: PlannerPlan(question="q1").model_dump_json(),
+            REFERRAL_STATE_KEY: referral.model_dump_json(),
+        },
+    )
+
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body())
+
+    session = await session_service.get_session(
+        app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t2"
+    )
+    assert session is not None
+    assert session.state.get(REFERRAL_STATE_KEY) is None
+    assert session.state.get(PLAN_STATE_KEY) is None
 
 
 def test_the_turn_keeps_the_plan_records_readings_and_spec_blocks_its_events_write() -> None:

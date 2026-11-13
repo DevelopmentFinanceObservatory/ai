@@ -1,0 +1,18 @@
+[
+  {
+    "role": "assistant",
+    "parts": [
+      {
+        "type": "thinking",
+        "content": "I weigh the two debt sources, sentinel-7f3a."
+      },
+      {
+        "type": "tool_call",
+        "id": "p1",
+        "name": "propose_plan",
+        "arguments": {}
+      }
+    ],
+    "finish_reason": "stop"
+  }
+]

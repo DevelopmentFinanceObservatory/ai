@@ -1750,7 +1750,7 @@ register_trace_codec(
 
 
 class _FakeGcsBlob:
-    """`GcsMaterialisationStore`'s narrow blob seam over plain dicts. Duplicates
+    """`GcsMaterialisationStore`'s narrow blob interface over plain dicts. Duplicates
     `packages/common/tests/test_gcs_store.py`'s own fake, since a service's tests don't
     import another package's own test module."""
 

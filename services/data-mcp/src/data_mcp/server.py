@@ -45,8 +45,7 @@ from data_mcp.definition_store import (
 from data_mcp.describe_tool import describe
 from data_mcp.export_data_tool import export_data
 from data_mcp.get_data_tool import TYPE_COLUMNS, aclose_background_mints, get_data
-from data_mcp.get_skill_file_tool import get_skill_file
-from data_mcp.get_skill_tool import NAMES_GET_SKILL, get_skill
+from data_mcp.get_skill_tool import get_skill
 from data_mcp.manifest import ARTIFACT_URI_TEMPLATE
 from data_mcp.resolve_definition_tool import resolve_definition
 from data_mcp.result_bound import ResultBoundMiddleware
@@ -152,8 +151,8 @@ def _add_declared(
 
 # Each tool's declared implementation version, read by
 # `compiler.surface._declared_version` and pinned per row in
-# `compiler.capabilities`, which lists `get_skill` and `get_skill_file`
-# among the tools no workflow step calls. No `output_schema=`: each tool's
+# `compiler.capabilities`, which lists `get_skill` among the tools no
+# workflow step calls. No `output_schema=`: each tool's
 # structured result is the full `Manifest`, and deriving and validating that
 # schema on every call is a risk left untaken here. `resolve_definition` and
 # `catalogue_counts` are the harness's: the combined server outside clients
@@ -162,7 +161,6 @@ _add_declared(search_tool.search, title="Search DFO data")
 _add_declared(get_data, title="Get data")
 _add_declared(describe, title="Explain a data identifier")
 _add_declared(get_skill, title="Load a skill")
-_add_declared(get_skill_file, title="Read a skill file")
 _add_declared(sources, title="List data sources")
 _add_declared(export_data, title="Export data as a file", annotations=_EXPORT)
 mcp.tool(resolve_definition, version="1")
@@ -170,15 +168,13 @@ mcp.tool(catalogue_counts, version="1")
 
 # The public form of each tool the combined server lists differently from this
 # mount (`common.public_shape`). Every public `get_data` frame carries the type
-# columns, and the harness asks for them per call. `get_skill` is the public skill
-# tool, so its pages name it.
+# columns, and the harness asks for them per call.
 PUBLIC_SHAPES: Mapping[str, PublicShape] = {
     "get_data": PublicShape(
         paragraphs=(TYPE_COLUMNS,),
         hidden=frozenset({"place_types"}),
         forced={"place_types": True},
     ),
-    "get_skill": PublicShape(hidden=frozenset({NAMES_GET_SKILL}), forced={NAMES_GET_SKILL: True}),
 }
 
 # A templated resource, not a tool -- it surfaces only via

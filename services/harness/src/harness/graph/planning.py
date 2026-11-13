@@ -39,7 +39,7 @@ from planner.plan import Plan as PlannerPlan
 from harness.decision_pick import DecisionPick, decision_pick
 from harness.early_mint import EarlyMints
 from harness.graph import switch as switch_module
-from harness.graph.seams import (
+from harness.graph.interfaces import (
     PlannerModel,
 )
 from harness.graph.state import (
@@ -57,7 +57,7 @@ from harness.graph.state import (
     state_json,
 )
 from harness.graph.switch import SwitchFailedError
-from harness.sentences import SeamCode
+from harness.sentences import StopCode
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +68,11 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
     async def draft_plan(ctx: Context, node_input: Any) -> AsyncIterator[Any]:
         """The planner node.
 
-        A `PlannerModel` seam drafts a compiled `planner.plan.Plan` from the
+        A `PlannerModel` drafts a compiled `planner.plan.Plan` from the
         conversation's search readings and this node only validates it
         (`PlannerModel`'s contract): versioning, `previous_version` lineage and the
         DRAFT/PENDING_APPROVAL transitions are enforced by `planner.plan.Plan`
-        itself, inside the seam, never here.
+        itself, inside the planner, never here.
 
         A draft can run long (the planner loads skills, proposes,
         translates, and corrects) with nothing to show for it until
@@ -94,14 +94,14 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
 
         Three routes out, all explicit on the final yield: `"ok"`, to
         the `approve` node, for a drafted plan; `"pending_refusal"`, also to
-        the `approve` node, for a seam that refuses to draft one at all -- either
-        `PlannerSeam`'s own `MAX_PLAN_ROUNDS` cap, or `starts_new_plan`
-        refused as `QUESTION_FIXED` because this seam's pair is built with
-        the question fixed (`harness.planner_seam.PlannerSeam.__init__`) --
+        the `approve` node, for a planner that refuses to draft one at all -- either
+        `PlannerAdapter`'s own `MAX_PLAN_ROUNDS` cap, or `starts_new_plan`
+        refused as `QUESTION_FIXED` because the turn's question is fixed
+        (`submission.service._resolve_intent`) --
         surfaced as `{"refused": {"text": ...}}` rather than a raised
-        `PlannerSeamError` -- while `ctx.state["plan"]` still holds a plan
+        `PlannerAdapterError` -- while `ctx.state["plan"]` still holds a plan
         `PENDING_APPROVAL`; and `"refused"`, to `plan_done`, for the same
-        two refusals when it does not. Raising `PlannerSeamError` here
+        two refusals when it does not. Raising `PlannerAdapterError` here
         instead would end the turn through `_stream_fatal`'s own
         `close_turn(error=...)`, which `studio_state.begin_turn` documents
         as abandoning the paused session and its plan -- exactly the plan
@@ -112,10 +112,10 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         `"refused"` covers a refusal on a first draft (nothing was ever
         submitted this turn) and on a replan (the record on file is already
         `APPROVED`, not something a fresh approval interrupt could act on).
-        A seam that raises fails the turn. A seam that answers `"asked"`,
+        A planner that raises fails the turn. A planner that answers `"asked"`,
         for a planner run that ended on a question for the user
-        (`planner.agent.ask_user_question`), pauses the entry on that
-        question; the resume reruns this node and the seam with the answer.
+        (`ask_user_question`, `planner.specs`), pauses the entry on that
+        question; the resume reruns this node and the planner with the answer.
         On the `"refused"` route `plan_done` lists the asks an earlier run
         of the plan call computed (`ORCHESTRATOR_KEPT_ASKS_KEY`).
 
@@ -129,7 +129,7 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
 
         An `"amend"` entry carrying `pick` (`approve` routes a switch of a
         planner decision's row so) replans with the user's pick held: the
-        seam is passed it, and admission refuses a plan that does not state
+        planner is passed it, and admission refuses a plan that does not state
         it. The run can be stopped as a switch is (`harness.graph.switch.
         SWITCH_STOP`), so it runs under the switch node's `_unless_stopped`.
         A stop or a refusal routes `"pending_refusal"` with the unchanged
@@ -147,7 +147,7 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         `asyncio.ensure_future` wrapper of its own: ADK's own docstring
         warns against wrapping a `ctx.run_node`-calling call in a task like
         that, and this node has two reasons that matters. A real
-        `PlannerModel` seam (`harness.planner_seam.PlannerSeam`) calls
+        `PlannerModel` (`harness.planner_adapter.PlannerAdapter`) calls
         `ctx.run_node` from inside it, and the direct await closes a real
         turn simply:
         `studio.py`'s `_sse_stream` -> `_unwind` cancels the event stream on
@@ -162,8 +162,9 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         the `await` returns, a pause on the planner's ask included, which
         this node yields after them. A pick's replan is the one exception:
         Stop has to reach it while it runs, so `_unless_stopped` runs it as
-        a task. A task copies the context it starts in, so the seam's
-        `_active_call` and `ctx.run_node` read the same values there.
+        a task. A task copies the context it starts in, so the planner reads the
+        same `harness.turn_budget.current_turn_budget` there, and the
+        `planner.plan.current_discovery_time_left` it sets stays within the run.
         """
         raw = ctx.state.get("plan")
         question = ctx.state.get(ORCHESTRATOR_BRIEF_KEY, "")
@@ -186,12 +187,12 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         # plan still `PENDING_APPROVAL` right before the `approve` node re-offers
         # it. A later `plan` call in the same turn finds the earlier call's
         # plan on record -- withholding it here is what lets
-        # `harness.planner_seam.PlannerSeam.__call__` tell this is a genuine
+        # `harness.planner_adapter.PlannerAdapter.__call__` tell this is a genuine
         # first draft and clear its own `planner:plan` and briefed-flag
         # state for it (see that module's docstring), rather than reading
         # as a continuing call on an already-briefed session that would
-        # need `starts_new_plan` -- refused, this seam's pair being built
-        # with the question fixed -- to draft anything but an amendment to
+        # need `starts_new_plan` (refused, the turn's question being
+        # fixed) to draft anything but an amendment to
         # that stale plan.
         existing = readable_plan(ctx, raw)
         is_first_draft = "plan" not in payload and "refusal" not in payload
@@ -272,7 +273,7 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
             # The planner's run ended on an ask it put to the user, so the
             # entry pauses on it, under the ask's call id, after every call
             # the run made has reported. The resume reruns this node, and the
-            # seam re-enters the planner with the answer. A pick's replan
+            # adapter re-enters the planner with the answer. A pick's replan
             # keeps its state for the resume, and records what to put back
             # should the resumed replan not land.
             if before is not None:
@@ -414,13 +415,13 @@ def _end_pick_entry(ctx: Context, *, before: dict[str, Any] | None = None) -> No
 
 
 def _pick_refused(refused: dict[str, Any], pick: DecisionPick) -> SwitchFailedError:
-    """The `SwitchFailedError` for a pick's replan that the planner seam
-    refused: it takes the refusal's code, or the seam's `PLAN_NOT_READY` for
+    """The `SwitchFailedError` for a pick's replan that the planner adapter
+    refused: it takes the refusal's code, or the adapter's `PLAN_NOT_READY` for
     one stating none, and its sentence for the user (`reason`). It is
     retryable under the codes a scope switch's revision is
     (`harness.graph.switch._RETRYABLE_REVISION_CODES`): a later pick of the
     same option escapes only a refusal for time or an unreachable service."""
-    code = str(refused.get("code") or SeamCode.PLAN_NOT_READY)
+    code = str(refused.get("code") or StopCode.PLAN_NOT_READY)
     return SwitchFailedError(
         str(refused.get("reason") or refused.get("text") or "")
         or f"The plan could not be redrafted to use {pick.chosen}.",
@@ -449,7 +450,7 @@ def approve(
     executor.
 
     `ctx.state["plan"]` always holds a `planner.plan.Plan`, since every
-    `PlannerModel` seam drafts one. A plan is keyed on `plan_revision(plan)`,
+    `PlannerModel` drafts one. A plan is keyed on `plan_revision(plan)`,
     a content hash that changes with every amendment. A plan stored in a
     shape this release does not read (`readable_plan`) has no revision
     for the answer to name: it routes `"amend"` with

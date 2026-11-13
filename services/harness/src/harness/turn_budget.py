@@ -19,18 +19,20 @@ each meters):
 request, starting the clock before genai's own HTTP retries so it covers
 them. The budget cuts a call that is still streaming. A call that finds a
 bound spent, or that a bound cuts, makes no further request and answers with
-that bound's sentence (`harness.sentences.SEAM_SENTENCES`) as the model's
+that bound's sentence (`harness.sentences.STOP_SENTENCES`) as the model's
 final text, so the orchestrator ends the turn on it. In the planner,
-`harness.planner_seam` turns that response into a question to the user when
+`harness.planner_adapter` turns that response into a question to the user when
 the last referral names sources to choose from, and otherwise the run ends on
 it and the entry refuses with the code on `TurnBudget.closed`.
 
 A user's stop or a client disconnect cancels the call. The cancellation
-propagates and closes the stream, and the call is not retried. The `generate_content`
-span ADK opens around the call is marked as an error when the call is
-cancelled or cut. It also carries `langfuse.observation.completion_start_time`
-at the first chunk and the gaps between chunks (`dfo.model.chunk_gaps_s`), so
-an idle rule can be sized from the traces.
+propagates and closes the stream, and the call is not retried. The span current
+around the call (ADK's `generate_content`, or Pydantic AI's `chat` on the
+planner's model, `harness.planner_model`) is marked as an error
+when the call is cancelled or cut. It also carries
+`langfuse.observation.completion_start_time` at the first chunk and the gaps
+between chunks (`dfo.model.chunk_gaps_s`), so an idle rule can be sized from
+the traces.
 
 With no budget set (an eval runner, a test driving an agent directly) a call
 runs unbounded, as ADK's `Gemini` does.
@@ -54,7 +56,7 @@ from google.genai import types
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
-from harness.sentences import SeamCode, refusal_sentence
+from harness.sentences import StopCode, refusal_sentence
 from harness.settings import Settings
 
 # `langfuse.LangfuseOtelSpanAttributes.OBSERVATION_COMPLETION_START_TIME`: Langfuse
@@ -63,8 +65,8 @@ from harness.settings import Settings
 COMPLETION_START_TIME = "langfuse.observation.completion_start_time"
 
 # The `LlmResponse.custom_metadata` key a closing response carries, holding the
-# code of the bound that closed the call, so a callback can tell it from text
-# the model wrote (`harness.planner_seam.PlannerSeam._after_planner_model`).
+# code of the bound that closed the call, so a reader can tell it from text
+# the model wrote (`harness.planner_model`).
 CLOSED_BY_KEY = "dfo.turn_budget.closed_by"
 
 
@@ -120,17 +122,17 @@ class TurnBudget:
         """The seconds of model time left, counting the waits of a call in flight."""
         return self.model_time_s - self.model_time_spent
 
-    def spent_bound(self) -> SeamCode | None:
+    def spent_bound(self) -> StopCode | None:
         """The bound that leaves no room for another model call, if one does."""
         if self.wall_left() <= 0:
-            return SeamCode.TURN_WALL_TIME_SPENT
+            return StopCode.TURN_WALL_TIME_SPENT
         if self.model_time_left() <= 0:
-            return SeamCode.TURN_MODEL_TIME_SPENT
+            return StopCode.TURN_MODEL_TIME_SPENT
         if self.model_calls >= self.model_calls_max:
-            return SeamCode.TURN_MODEL_CALLS_SPENT
+            return StopCode.TURN_MODEL_CALLS_SPENT
         return None
 
-    def close(self, code: SeamCode) -> None:
+    def close(self, code: StopCode) -> None:
         """Record `code` as the bound that closed a call, unless one already has."""
         if self.closed is None:
             self.closed = {"code": code, "detail": {}}
@@ -168,15 +170,27 @@ class BoundedGemini(Gemini):
                 yield response
 
 
-async def bounded(
+def bounded(
     request: Callable[[], AsyncGenerator[LlmResponse]], *, stream: bool
 ) -> AsyncGenerator[LlmResponse]:
-    """The responses of one model call, `request()`, kept to the current `TurnBudget`.
+    """The responses of one model call, `request()`, kept to the current `TurnBudget`
+    (`bounded_by`)."""
+    return bounded_by(current_turn_budget.get(), request, stream=stream)
+
+
+async def bounded_by(
+    budget: TurnBudget | None,
+    request: Callable[[], AsyncGenerator[LlmResponse]],
+    *,
+    stream: bool,
+) -> AsyncGenerator[LlmResponse]:
+    """The responses of one model call, `request()`, kept to `budget`.
 
     `request` opens the call afresh each time it is invoked, so a first-chunk
-    retry sends it again. With no budget set the call runs unbounded.
+    retry sends it again. With no budget the call runs unbounded. A call a
+    bound closes ends on the responses `_closing` builds, the last of which
+    carries the bound's code under `CLOSED_BY_KEY`.
     """
-    budget = current_turn_budget.get()
     if budget is None:
         async with aclosing(request()) as responses:
             async for response in responses:
@@ -199,7 +213,7 @@ async def bounded(
         delivered_thought = False
         streamed = 0.0
         gaps: list[float] = []
-        cut: SeamCode | None = None
+        cut: StopCode | None = None
         retry = False
         try:
             async with aclosing(request()) as responses:
@@ -228,9 +242,9 @@ async def bounded(
                             retry = True
                         else:
                             cut = (
-                                SeamCode.TURN_WALL_TIME_SPENT
+                                StopCode.TURN_WALL_TIME_SPENT
                                 if wall_left <= model_left
-                                else SeamCode.TURN_MODEL_TIME_SPENT
+                                else StopCode.TURN_MODEL_TIME_SPENT
                             )
                         break
                     finally:
@@ -270,7 +284,7 @@ async def bounded(
         return
 
 
-def _closing(code: SeamCode, *, stream: bool, after_text: bool) -> list[LlmResponse]:
+def _closing(code: StopCode, *, stream: bool, after_text: bool) -> list[LlmResponse]:
     """The model's final text for a call the bound `code` closed: its sentence,
     marked with `code` under `CLOSED_BY_KEY`.
 
@@ -355,6 +369,7 @@ __all__ = [
     "BoundedGemini",
     "TurnBudget",
     "bounded",
+    "bounded_by",
     "current_turn_budget",
     "start_turn_budget",
 ]

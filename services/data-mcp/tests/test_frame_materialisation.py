@@ -547,7 +547,7 @@ async def test_cache_check_too_large_failure_refuses_without_refetching() -> Non
 
 
 class _FakeGcsBlob:
-    """`GcsMaterialisationStore`'s narrow blob seam over plain dicts. Duplicates
+    """`GcsMaterialisationStore`'s narrow blob interface over plain dicts. Duplicates
     `packages/common/tests/test_gcs_store.py`'s own fake, since a service's tests don't
     import another package's own test module."""
 

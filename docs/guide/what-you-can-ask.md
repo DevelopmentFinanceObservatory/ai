@@ -4,7 +4,7 @@ description: How a question to the DFO MCP server becomes a cited answer, and th
 
 # How the MCP server answers questions
 
-Once the DFO is connected to your AI assistant (see [Connect](connect.md)), you can ask it questions about development finance in plain language, such as "What is health spending per person in Kenya?" or "How much health aid did Nigeria receive between 2020 and 2024?" The DFO covers countries, subregions, and continents. It can look up a figure or trend, compare places, rank them, or calculate per-person amounts, and every answer names the dataset it came from. You'll get the best results by naming the place, years, and unit you want. The DFO can't handle very large requests in one go. If you ask for something it can't do, or for years it doesn't have data for, the assistant will tell you and suggest an alternative.
+Once the DFO is connected to your AI assistant (see [Connect your assistant](connect.md)), you can ask it questions about development finance in plain language, such as "What is health spending per person in Kenya?" or "How much health aid did Nigeria receive between 2020 and 2024?" The DFO covers countries, subregions, and continents. It can look up a figure or trend, compare places, rank them, or calculate per-person amounts, and every answer names the dataset it came from. You'll get the best results by naming the place, years, and unit you want. The DFO can't handle very large requests in one go. If you ask for something it can't do, or for years it doesn't have data for, the assistant will tell you and suggest an alternative.
 
 ## For developers
 
@@ -77,7 +77,7 @@ To get one figure per entity, such as aid per head for each of several recipient
 
 ## Skills
 
-A `search` result can name skills that apply to it, each with an id and a one-line description, beneath the part blocks: "Skills for these results; get_skill loads one by id:". `get_skill(skill_id)` loads one as a SKILL.md document, front matter followed by its body, cut past 32,000 characters with a line giving the full length. An id no skill carries refuses `skill_not_found`.
+A `search` result can name skills that apply to it, each with an id and a one-line description, beneath the part blocks: "Skills for these results; get_skill loads one by id:". `get_skill(skill_id)` loads one as a SKILL.md document, front matter followed by its body, then lists the skill's other files. With `path`, `get_skill` reads one of those files, and text past 32,000 characters comes in pages, each closing with the call that reads on. An id no skill carries refuses `skill_not_found`.
 
 ## Limits and refusals
 
@@ -114,5 +114,5 @@ A single `search` call takes up to six parts, one per measured variable, and `de
 
 ## Next
 
-- [Connect](connect.md) shows how to add the server to Claude, ChatGPT, Gemini, Claude Code, Codex, or Gemini CLI.
+- [Connect your assistant](connect.md) shows how to add the server to Claude, ChatGPT, Gemini, Le Chat, Claude Code, Codex, or Gemini CLI.
 - The Tools reference lists every argument, error code and retry mode. <!-- TODO: link when the generated Tools reference is published. -->

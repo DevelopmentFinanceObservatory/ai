@@ -1,0 +1,121 @@
+{
+  "events": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "How much aid did Ghana receive?"
+          }
+        ],
+        "role": "user"
+      },
+      "author": "user",
+      "actions": {
+        "state_delta": {},
+        "artifact_delta": {},
+        "requested_auth_configs": {},
+        "requested_tool_confirmations": {}
+      },
+      "node_info": {
+        "path": ""
+      },
+      "invocation": 0
+    },
+    {
+      "author": "dfo_planner",
+      "branch": "dfo_planner",
+      "invocation": 0,
+      "path": "adapter_test_wf@1/adapter_under_test@1/dfo_planner@1",
+      "partial": false,
+      "content": {
+        "parts": [
+          {
+            "text": "Only thinking.",
+            "thought": true
+          }
+        ],
+        "role": "model"
+      },
+      "state_delta": {}
+    },
+    {
+      "author": "adapter_test_wf",
+      "actions": {
+        "state_delta": {
+          "planner:plan": null,
+          "planner:alignments": null,
+          "planner:rounds": 0,
+          "planner:pin_sources": {},
+          "planner:unsupported": [],
+          "planner:optional_declines": [
+            "no_operation_covers"
+          ],
+          "planner:terminal_declines": [
+            "no_operation_covers"
+          ],
+          "planner:reduction_refused_asks": [],
+          "translator:compile_failures": [],
+          "planner:amendment_entry": false,
+          "planner:decision_pick": null,
+          "planner:refused_spec_ids": [],
+          "planner:refused_spec_details": {},
+          "planner:skills_read": [],
+          "planner:skills_before_entry": 0,
+          "planner:pending_ask": null,
+          "planner:asked_referral": null
+        },
+        "artifact_delta": {},
+        "requested_auth_configs": {},
+        "requested_tool_confirmations": {}
+      },
+      "output": {
+        "refused": {
+          "text": "No plan was made: the planner stopped before the plan was ready.",
+          "final": false,
+          "code": "plan_not_ready"
+        }
+      },
+      "node_info": {
+        "path": "adapter_test_wf@1/adapter_under_test@1",
+        "output_for": [
+          "adapter_test_wf@1/adapter_under_test@1",
+          "adapter_test_wf@1"
+        ]
+      },
+      "invocation": 0
+    }
+  ],
+  "steps": [
+    {
+      "kind": "message",
+      "call_id": null,
+      "args": null,
+      "body": {},
+      "name": null
+    }
+  ],
+  "frames": [],
+  "state": {
+    "planner:plan": null,
+    "planner:alignments": null,
+    "planner:rounds": 0,
+    "planner:pin_sources": {},
+    "planner:unsupported": [],
+    "planner:optional_declines": [
+      "no_operation_covers"
+    ],
+    "planner:terminal_declines": [
+      "no_operation_covers"
+    ],
+    "planner:reduction_refused_asks": [],
+    "translator:compile_failures": [],
+    "planner:amendment_entry": false,
+    "planner:decision_pick": null,
+    "planner:refused_spec_ids": [],
+    "planner:refused_spec_details": {},
+    "planner:skills_read": [],
+    "planner:skills_before_entry": 0,
+    "planner:pending_ask": null,
+    "planner:asked_referral": null
+  }
+}
