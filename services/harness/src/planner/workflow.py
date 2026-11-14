@@ -305,6 +305,13 @@ class SelectedSource(StrictModel):
     none. The membership check compares it against the binding a retrieval
     traces.
 
+    `sums_components` is `True` when `resolved.stat_vars.sums_components`
+    states that apis's mint adds the family's members into one figure by a
+    declared composite (DAC2a's inclusive scope, bilateral plus imputed
+    multilateral lines), however its slots are bound; `None` when the
+    envelope states it false or omits it, as Search does for every other
+    family.
+
     `open_axes` are the slots the family's members vary along, from
     `resolved.slots`: the ones with a constraint property that is not
     inapplicable, bound to no value, to a set, or to a value whose code
@@ -412,6 +419,11 @@ class SelectedSource(StrictModel):
     stat_var_member_count: int | None = None
     stat_var_member_count_exact: Annotated[bool | None, HASHED_WHEN_SET] = None
     served_count: Annotated[int | None, HASHED_WHEN_SET] = None
+    # Left out of every dump while unset, so a source saved without it keeps
+    # its serialised form.
+    sums_components: Annotated[bool | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda sums: sums is None
+    )
     shape_member_count: int | None = None
     shape_member_digest: str | None = None
     entities: tuple[ResolvedEntity, ...] = ()

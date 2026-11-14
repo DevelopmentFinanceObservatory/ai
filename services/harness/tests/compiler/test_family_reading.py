@@ -1390,3 +1390,174 @@ def test_a_breakdown_over_a_source_that_does_not_vary_by_sector_is_unusable(
     assert [(issue.code, issue.requirement_id) for issue in result.issues] == [
         (CompileIssueCode.SOURCE_UNUSABLE, "oda")
     ]
+
+
+# --- A family a declared composite sums ----------------------------------------------
+
+_FIXTURES = Path(__file__).parent.parent / "fixtures"
+
+
+def _composite(name: str, *, sums_components: bool = True) -> dict[str, Any]:
+    """The spec block apis serves for a composite identity, recorded whole as
+    `tests/fixtures/<name>.json`; with `sums_components` false, as an apis
+    service that predates `resolved.stat_vars.sums_components` serves it."""
+    block = json.loads((_FIXTURES / f"{name}.json").read_text())
+    if not sums_components:
+        del block["resolved"]["stat_vars"]["sums_components"]
+    return block
+
+
+def _dac2a_inclusive(*, sums_components: bool = True) -> dict[str, Any]:
+    """US net ODA to Kenya in 2019 on DAC2a's inclusive scope, bilateral plus
+    imputed multilateral: every slot of the family is bound, and the mint
+    serves and adds its two component lines."""
+    return _composite("dac2a_inclusive_spec_block", sums_components=sums_components)
+
+
+def _dac2a_inclusive_to_every_recipient(*, sums_components: bool = True) -> dict[str, Any]:
+    """`_dac2a_inclusive` with its recipient left open: Kenya cut from the
+    entities it resolves and from its definition's identity, and the
+    recipient side counted at 140 parties, as Search counts an open side
+    (`role_axis_facts`). The 140 is this test's, not a recorded count."""
+    block = _dac2a_inclusive(sums_components=sums_components)
+    resolved = block["resolved"]
+    resolved["entities"] = [e for e in resolved["entities"] if e["role"] != "destination"]
+    resolved["role_axis_facts"] = [
+        {"role": "destination", "member_count": 140, "members_available": True}
+    ]
+    identity = block["definition"]["identity"]
+    del identity["entities"]["destination"]
+    identity["open_roles"] = ["destination"]
+    return block
+
+
+def test_a_composite_family_with_every_slot_bound_is_summed_by_the_rule() -> None:
+    """The mint adds the two lines DAC2a's inclusive scope is made of, so the
+    family reads as one figure though no open axis is left to sum over."""
+    source = source_from_spec_block(_dac2a_inclusive())
+
+    read = stat_var_reading(source, None)
+
+    assert source.sums_components is True
+    assert source.open_axes == ()
+    assert read.stat_var_reading is StatVarReading.SUM
+    assert read.stat_var_reading_set_by is ReadingSetBy.RULE
+
+
+def test_a_block_without_the_composite_flag_reads_as_it_did() -> None:
+    """Pins unchanged behaviour: a family of two with no open axis and no
+    `sums_components` reads separately, and the source states no flag."""
+    source = source_from_spec_block(_dac2a_inclusive(sums_components=False))
+
+    assert source.sums_components is None
+    assert default_reading(source) is StatVarReading.SEPARATE
+
+
+def test_an_expanded_aid_type_keeps_a_composite_family_separate() -> None:
+    """Pins unchanged behaviour: the aid-type binding expanded to the codes
+    below it, as a hierarchical value does, opens an axis the slot declares
+    unsummable, so the family reads separately even where the mint adds its
+    components. The added code is this test's edit of the recorded block."""
+    block = _dac2a_inclusive()
+    _slot(block, "dac2aAidType")["expansion"] = {"added": [{"ref": "DAC2aAidType106"}]}
+
+    source = source_from_spec_block(block)
+
+    assert source.open_axes == (OpenAxis(property="dac2aAidType", summable=False),)
+    assert default_reading(source) is StatVarReading.SEPARATE
+
+
+@pytest.mark.parametrize("sums_components", [True, False], ids=["flag", "no-flag"])
+def test_crs_inclusive_health_aid_with_its_purpose_bound_is_summed(sums_components: bool) -> None:
+    """Pins unchanged behaviour: US aid to Kenya for health policy, 2015 to 2020,
+    on the CRS inclusive scope. The modality and type of finance are open and
+    summable, so the rule sums the family with or without the flag."""
+    source = source_from_spec_block(
+        _composite("crs_inclusive_bound_purpose_spec_block", sums_components=sums_components)
+    )
+
+    assert source.open_axes == (
+        OpenAxis(property="crsCooperationModality", summable=True),
+        OpenAxis(property="crsTypeOfFinance", summable=True),
+    )
+    assert default_reading(source) is StatVarReading.SUM
+
+
+_EVERY_RECIPIENT = Decision(
+    slot="every_recipient",
+    description="Whether to rank every recipient or named ones.",
+    options=["every recipient", "named recipients"],
+    chosen="every recipient",
+    resolved_by=ResolvedBy.PLANNER_DEFAULT,
+    rationale="The question asks which recipients received the most.",
+    fixes=DecisionFixes(among=RankAmong.POPULATION),
+)
+
+
+def _compile_top_recipients(
+    compile_question: Callable[..., CompileResult], source: SelectedSource
+) -> CompileResult:
+    """ "Which countries received the most US aid in 2019, counting imputed
+    multilateral aid?"."""
+    oda = _dataset(
+        "oda",
+        [Entity(name="United States", role="donor")],
+        Period(start=2019, end=2019),
+        across=("recipient",),
+    )
+    rank: dict[str, Any] = {
+        "direction": RankDirection.HIGHEST_FIRST,
+        "among": RankAmong.POPULATION,
+        "axis": "recipient",
+        "reduction": Reduction.SUM,
+        "limit": 10,
+    }
+    return compile_question(
+        [
+            oda,
+            RankRequirement(
+                id="top", decision_ids=["measure", "every_recipient"], input_id="oda", **rank
+            ),
+        ],
+        [
+            RetrieveOperation(id="oda_op", requirement_id="oda", spec_id=source.spec_id),
+            RankOperation(id="top_op", requirement_id="top", input="oda_op", **rank),
+        ],
+        terminal=["top_op"],
+        sources={"oda": source},
+        decisions=(_WHAT, _EVERY_RECIPIENT),
+    )
+
+
+def test_a_rank_over_recipients_of_a_composite_family_reads_its_sum(
+    compile_question: Callable[..., CompileResult],
+) -> None:
+    """The plan leaves the reading unset, so the rule sums the two component
+    lines and the rank reads one measure. The card says the sum is the default."""
+    source = source_from_spec_block(_dac2a_inclusive_to_every_recipient())
+
+    result = _compile_top_recipients(compile_question, source)
+
+    assert result.issues == ()
+    assert _step_args(result, "oda_op")["stat_vars"] == "sum"
+    assert result.workflow is not None
+    (selected,) = result.workflow.sources
+    assert selected.stat_var_reading is StatVarReading.SUM
+    assert selected.stat_var_reading_set_by is ReadingSetBy.RULE
+    assert _reading_clause(selected) == (
+        "summed over whichever of its 2 indicators hold data by default"
+    )
+
+
+def test_a_rank_over_recipients_of_a_composite_family_without_the_flag_is_refused(
+    compile_question: Callable[..., CompileResult],
+) -> None:
+    """Pins unchanged behaviour: without `sums_components` the rule keeps the two
+    lines apart, and the rank, which reads one measure, is refused at compile."""
+    source = source_from_spec_block(_dac2a_inclusive_to_every_recipient(sums_components=False))
+
+    result = _compile_top_recipients(compile_question, source)
+
+    assert [(issue.code, issue.operation_id) for issue in result.issues] == [
+        (CompileIssueCode.INPUT_SHAPE_UNSUPPORTED, "top_op")
+    ]
