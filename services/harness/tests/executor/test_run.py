@@ -1217,6 +1217,8 @@ async def test_a_retrieval_missing_a_required_entity_is_not_evidence(
     assert outcome.refusal is RefusalKind.REQUIREMENT_UNMET
     assert outcome.requirement_id == "annual_debt_service"
     assert "entity_no_series" in [issue.code.value for issue in outcome.issues]
+    # The stop names the source it read, as a `RediscoveryNeeded` does.
+    assert outcome.spec_id == SPEC_KENYA
     # The verb never ran: evidence is checked before anything depends on it.
     assert [name for name, _ in surface.calls] == ["get_data"]
 

@@ -182,7 +182,7 @@ from harness.tool_contracts import (
     measure_choice,
 )
 from harness.turn_records import SETTLED_STATUSES, SearchReading, SiblingReading
-from harness.wire import RetryMode, usable_component
+from harness.wire import RetryMode
 
 logger = logging.getLogger(__name__)
 
@@ -195,8 +195,9 @@ _FETCHES_KEY = "orchestrator:fetches"
 _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
 # The cards `make_charts` drew this turn that are still on the canvas:
 # {"invocation", "drawn"}, `drawn` mapping `_card_identity` to the card's
-# {"component_id", "revision"}, the revision it was drawn as. `remove_cards`
-# drops the cards it takes off.
+# {"component_id", "revision"}, the revision it was drawn as; a card the harness
+# could not read back also holds "unreadable": True and is not on the canvas.
+# `remove_cards` drops the cards it takes off.
 _DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
 # The key of the result of an `ask_user` or `plan` call that recorded its
 # action; the Studio stream holds back later text only after one of these,
@@ -296,8 +297,10 @@ class Chart(BaseModel):
     order_by_value: bool = Field(
         default=False,
         description=(
-            "has no effect: the platform draws every chart's members in its own order. "
-            "A cut keeps the largest members whether this flag is true or false"
+            "set true to draw a line_chart, bar_chart or table largest first: its lines, "
+            "bars or rows ranked by value at the period most of them report. A table is "
+            "ordered only when its rows share one unit. A cut chart is drawn largest "
+            "first whether this flag is true or false"
         ),
     )
     state_values_for: list[str] = Field(
@@ -674,8 +677,8 @@ def _cut_refused(chart: Chart, refusal: Mapping[str, Any]) -> bool:
 @dataclass(frozen=True)
 class _Narrowed:
     """A select with its one multiplying dimension listing members in rank
-    order, and for a select cut to what its chart draws, the cut. The platform
-    draws the members in its own order."""
+    order, and for a select cut to what its chart draws, the cut, which
+    `_card_order` draws largest first."""
 
     select: dict[str, Any]
     cut: TopMembers | None
@@ -808,6 +811,24 @@ async def _card_period(
     return at, {"start": at, "end": at} if pinned else None
 
 
+def _card_order(chart: Chart, cut: TopMembers | None) -> dict[str, str] | None:
+    """The `order` a card's intent names: largest first on a chart cut to its
+    largest members and on one the model asked to order by value, and None on
+    any other chart and on a stat card, which draws one value. A cut line chart
+    or table ranks at the period the cut ranked at, the one its title names,
+    since the platform's own choice among the drawn members can fall on
+    another. A bar chart takes no period: a cut one is pinned to the cut's
+    period by its window. An uncut chart names none, as neither its select nor
+    its window fixes one period, and the platform ranks at the period where
+    the most drawn series hold a value, the later on a tie."""
+    if chart.type == "stat_card" or (cut is None and not chart.order_by_value):
+        return None
+    order = {"by": "value", "direction": "descending"}
+    if cut is not None and chart.type in {"line_chart", "table"}:
+        order["period"] = cut.period
+    return order
+
+
 def _drawn_period(held: _FrameRows, *, select: dict[str, Any]) -> str | None:
     """`latest_shared_period` over a stored frame, read without its enrichment
     columns, which describe a member and split no series."""
@@ -824,7 +845,7 @@ def _drawn_period(held: _FrameRows, *, select: dict[str, Any]) -> str | None:
 
 def _card_identity(intent: Mapping[str, Any]) -> str:
     """What a drawn card is: the intent the platform renders and checks it
-    from (kind, frame, select, window, title). The figures a chart asks to be
+    from (kind, frame, select, window, order, title). The figures a chart asks to be
     stated are no part of it, so asking a drawn card for other figures reads
     them from it. The title stays in, so a title the platform would refuse is
     checked afresh rather than answered from a card drawn under another."""
@@ -906,7 +927,8 @@ async def _cut_plan(
     (`_plan_cut`), from one read of its frame; None when there is no cut. A plan
     that needs the members' kinds, on a frame whose rows carry no kind or
     type cell, reads them (`_member_cells`) and plans from the frame once
-    more. The cut keeps the largest members; apis draws them in its own order."""
+    more. The cut keeps the largest members, and `_card_order` draws them
+    largest first."""
     view = frame["view"]
     plan_with = functools.partial(
         _plan_cut, type_=chart.type, select=select, dimension=dimension, view=view
@@ -2418,6 +2440,30 @@ def build_orchestrator_tools(
         drawn: list[dict[str, Any]] = []
         landed = read = False
 
+        def _remember_drawn(identity: str, card: dict[str, Any]) -> None:
+            """Record `card` as drawn for `identity` this turn."""
+            drawn_cards[identity] = card
+            tool_context.state[_DRAWN_CARDS_KEY] = {
+                "invocation": tool_context.invocation_id,
+                "drawn": drawn_cards,
+            }
+
+        def _unreadable_entry(chart: Chart, *, later: bool) -> dict[str, Any]:
+            """The entry of a chart whose stored card the harness cannot read.
+            `later` is whether the call asked for charts after it, which are
+            skipped."""
+            return _not_drawn(
+                chart,
+                "the platform stored this chart but DFO could not read it back, "
+                "so it is not on the canvas. This is a fault inside DFO, not in "
+                "the call's arguments: drawing this chart again meets the same "
+                "fault"
+                + (", and the charts after it in this call were not drawn" if later else "")
+                + ". Do not replace it with other data; tell the user this chart "
+                "could not be shown.",
+                code=HarnessCode.STORED_CARD_UNREADABLE,
+            )
+
         async def _place(
             chart: Chart,
             frame: Mapping[str, Any],
@@ -2427,6 +2473,7 @@ def build_orchestrator_tools(
             select: dict[str, Any],
             own: dict[str, Any],
             cut: TopMembers | None,
+            later: bool,
         ) -> tuple[dict[str, Any], dict[str, Any] | None, bool]:
             """Title `select` for `chart` and write it, or read the card on the
             canvas that already draws it. A refused write of a select other
@@ -2436,7 +2483,8 @@ def build_orchestrator_tools(
             Returns:
                 The chart's `make_charts` entry; the platform's refusal when it
                 refused the write; and whether the charts after it are left
-                undrawn, after a write that raised and may have stored it.
+                undrawn: after a write that raised and may have stored it, and
+                after a stored card the harness cannot read.
             """
             nonlocal landed, read
             period, window = await _card_period(chart, frame=frame, select=select, cut=cut)
@@ -2449,13 +2497,22 @@ def build_orchestrator_tools(
             }
             if window is not None:
                 intent["window"] = window
+            if (order := _card_order(chart, cut)) is not None:
+                intent["order"] = order
             identity = _card_identity(intent)
             held = drawn_cards.get(identity) or canvas.get(identity)
-            stored = None if held is None else await _stored_card(held["component_id"])
+            # An earlier write of this card stored one the harness cannot read,
+            # and another write would stack a second orphan.
+            unreadable = held is not None and bool(held.get("unreadable"))
+            stored = (
+                None if held is None or unreadable else await _stored_card(held["component_id"])
+            )
             if held is not None and stored is None:
                 # The canvas holds this card, so another write would stack a copy.
                 return (
-                    _not_drawn(
+                    _unreadable_entry(chart, later=later)
+                    if unreadable
+                    else _not_drawn(
                         chart,
                         "This card is already on the canvas, and its figures could "
                         "not be read back. No copy was drawn; state no value of it "
@@ -2463,7 +2520,7 @@ def build_orchestrator_tools(
                         code=HarnessCode.FIGURES_UNREAD,
                     ),
                     None,
-                    False,
+                    unreadable,
                 )
             # A card revised since it was drawn no longer draws this intent.
             if held is not None and stored is not None and stored["revision"] == held["revision"]:
@@ -2493,8 +2550,16 @@ def build_orchestrator_tools(
             try:
                 written = await executor(tool="write_component", args={"intent": intent})
                 component = written.get("component") if written.get("outcome") == "ok" else None
-                if component is None or not usable_component(component):
+                if component is None:
                     refusal = written.get("refusal") or {}
+                    if refusal.get("code") == HarnessCode.STORED_CARD_UNREADABLE:
+                        # The platform holds this card and the canvas lacks it,
+                        # so the charts after it are left undrawn.
+                        _remember_drawn(
+                            identity,
+                            {"component_id": refusal.get("component_id"), "unreadable": True},
+                        )
+                        return _unreadable_entry(chart, later=later), None, True
                     failed = _not_drawn(
                         chart,
                         refusal.get("message") or "the platform refused it",
@@ -2518,9 +2583,9 @@ def build_orchestrator_tools(
                 return (
                     _not_drawn(
                         chart,
-                        f"drawing it failed inside DFO ({type(error).__name__}), and "
-                        "the charts after it in this call were not drawn. Do not "
-                        "draw this chart again: it may be on the canvas already.",
+                        f"drawing it failed inside DFO ({type(error).__name__})"
+                        + (", and the charts after it in this call were not drawn" if later else "")
+                        + ". Do not draw this chart again: it may be on the canvas already.",
                         code=HarnessCode.WRITE_UNCONFIRMED,
                     ),
                     None,
@@ -2536,14 +2601,10 @@ def build_orchestrator_tools(
                 cut=cut,
                 whole=untitled,
             )
-            drawn_cards[identity] = {
-                "component_id": component["component_id"],
-                "revision": component["revision"],
-            }
-            tool_context.state[_DRAWN_CARDS_KEY] = {
-                "invocation": tool_context.invocation_id,
-                "drawn": drawn_cards,
-            }
+            _remember_drawn(
+                identity,
+                {"component_id": component["component_id"], "revision": component["revision"]},
+            )
             return entry, None, False
 
         async def _cut(
@@ -2566,7 +2627,9 @@ def build_orchestrator_tools(
             )
 
         try:
-            for chart in charts[:MAX_CHARTS_PER_CALL]:
+            attempted = charts[:MAX_CHARTS_PER_CALL]
+            for index, chart in enumerate(attempted):
+                later = index < len(attempted) - 1
                 frame = frames.get(chart.frame)
                 if frame is None:
                     drawn.append(
@@ -2645,7 +2708,14 @@ def build_orchestrator_tools(
                         # so a covering select no cut narrows is not written.
                         select = own
                 entry, refused, stop = await _place(
-                    chart, frame, subject=subject, whole=whole, select=select, own=own, cut=cut
+                    chart,
+                    frame,
+                    subject=subject,
+                    whole=whole,
+                    select=select,
+                    own=own,
+                    cut=cut,
+                    later=later,
                 )
                 if (
                     refused is not None
@@ -2674,6 +2744,7 @@ def build_orchestrator_tools(
                             select=narrowed.select,
                             own=own,
                             cut=narrowed.cut,
+                            later=later,
                         )
                 drawn.append(entry)
                 if stop:

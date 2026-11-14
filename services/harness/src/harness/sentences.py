@@ -909,6 +909,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             HarnessCode.RUN_RECORD_UNREADABLE,
             HarnessCode.RESUME_FAILED,
             HarnessCode.FIGURES_UNREAD,
+            HarnessCode.STORED_CARD_UNREADABLE,
             HarnessCode.STORE_REFUSED,
             HarnessCode.RECIPE_UNBUILDABLE,
             HarnessCode.RECIPE_NORMAL_FORM_CONFLICT,
@@ -1046,6 +1047,10 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
     HarnessCode.WRITE_UNCONFIRMED: FailureText(
         "The request to draw this card got no answer and the card may already be on the canvas",
         "so look there before asking again",
+    ),
+    HarnessCode.STORED_CARD_UNREADABLE: FailureText(
+        "A card was saved but could not be read back, so it is not shown",
+        "and asking again will not fix it",
     ),
     HarnessCode.ROLLING_SELECT_NEEDS_NEW_FRAME: FailureText(
         "The series now chosen have another latest period than this card was made for",

@@ -33,12 +33,14 @@ from types import SimpleNamespace
 from typing import Any, NamedTuple, cast, override
 
 import pytest
-from compiler.evidence import resolve_name
+from compiler.evidence import check_evidence, errors, evidence_from_manifest, resolve_name
 from compiler.sources import bound_refs
 from compiler.surface import FixtureSurface, ToolCallResult, ToolSurfaceUnavailableError
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from executor.classify import ToolFailure
+from executor.outcomes import RediscoveryNeeded, Refused
 from google.adk import Context, Event
 from google.adk.agents.run_config import RunConfig
 from google.adk.runners import Runner
@@ -50,6 +52,7 @@ from google.genai import types
 from harness import plan_display, planner_adapter, planner_node, planner_run
 from harness.decision_pick import DecisionPick
 from harness.graph import switch
+from harness.graph.execute import _refusal_shape
 from harness.graph.planning import planner_ask_interrupt
 from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
@@ -184,6 +187,7 @@ from .basis_alignment import (
     WholeCompiles,
     basis_block,
 )
+from .compiler.test_evidence import _manifest, _series_stats, _stat
 from .scripted_genai import (
     Reply,
     Request,
@@ -1687,6 +1691,241 @@ def test_a_wave_with_two_refused_specs_names_both() -> None:
     avoid = message.split("Call propose_plan again with a plan that avoids it.")[1]
     assert SPEC in avoid and SPEC_B in avoid
     assert "again" in avoid and "refused" in avoid
+
+
+_WINDOWED_ID = "spec_" + "c" * 32
+
+
+def _unmet_refusal(
+    spec_id: str, code: str = "unit_unverified", *, found: str | None = None
+) -> dict[str, Any]:
+    """A `Refused` `REQUIREMENT_UNMET` payload as `harness.graph.execute._refusal_shape` builds it,
+    its one error finding `code`, with `found` as the unit text the source states."""
+    return {
+        "kind": "refused",
+        "refusal": "requirement_unmet",
+        "detail": "requirement 'aid' is not met by what 'get_data' returned",
+        "step_id": "aid",
+        "requirement_id": "aid",
+        "spec_id": spec_id,
+        "issues": [
+            {
+                "code": "unit_unverified" if code != "unit_unverified" else "unit_mismatch",
+                "severity": "warning",
+                "requirement_id": "aid",
+                "detail": "a warning that is not the cause",
+            },
+            {
+                "code": code,
+                "severity": "error",
+                "requirement_id": "aid",
+                "detail": "the source states no unit",
+                "found": found,
+            },
+        ],
+    }
+
+
+def test_a_requirement_unmet_stop_names_its_spec_with_every_source_fault() -> None:
+    """A plain `Refused` carries the spec the executor read. The code comes from
+    its first source-fault error issue, the detail joins every one and leaves out
+    an error finding that is no source fault, and the replan's avoid sentence
+    names the spec."""
+    refusal = _unmet_refusal(SPEC)
+    refusal["issues"] += [
+        {
+            "code": "unit_unverified",
+            "severity": "error",
+            "requirement_id": "aid",
+            "detail": "the source states no unit for a second series",
+        },
+        {
+            "code": "unit_price_basis_unverified",
+            "severity": "error",
+            "requirement_id": "aid",
+            "detail": "the source states no price basis",
+        },
+    ]
+
+    (source,) = planner_adapter._refused_specs(refusal)
+
+    assert source == (
+        SPEC,
+        "unit_unverified",
+        "the source states no unit; the source states no unit for a second series",
+    )
+    message = _scripted_planner(ScriptedGenai([]))._message(
+        question="aid",
+        prior_plan=None,
+        refusal=refusal,
+        amendment=None,
+        canvas_digest=None,
+        conversation_digest=None,
+    )
+    assert SPEC in message.split("Call propose_plan again with a plan that avoids it.")[1]
+
+
+def _as_executor_shapes_it(payload: dict[str, Any], *, origins: dict[str, str]) -> dict[str, Any]:
+    """`payload` rebuilt as the outcome it describes and shaped by `_refusal_shape`,
+    which maps a windowed copy's spec_id to its origin's for a `Refused` alone."""
+    outcome: Refused | RediscoveryNeeded
+    if payload["kind"] == "refused":
+        outcome = Refused.model_validate({**payload, "revision": "rev1"})
+    else:
+        outcome = RediscoveryNeeded(
+            revision="rev1",
+            step_id=payload["step_id"],
+            tool=ToolId(server="data-mcp", name="get_data"),
+            requirement_id=payload["requirement_id"],
+            spec_id=payload["spec_id"],
+            refusal=ToolFailure.model_validate(payload["refusal"]),
+            completed=(),
+        )
+    return _refusal_shape(outcome, origins=origins)
+
+
+@pytest.mark.parametrize(
+    ("refusal", "held", "code"),
+    [
+        pytest.param(
+            _unmet_refusal(_WINDOWED_ID), SPEC, "unit_unverified", id="unit-unverified-on-copy"
+        ),
+        pytest.param(
+            _unmet_refusal(_WINDOWED_ID, found="Percent"),
+            None,
+            None,
+            id="unit-unverified-with-a-readable-unit",
+        ),
+        pytest.param(
+            _unmet_refusal(_WINDOWED_ID, "unit_price_basis_unverified"),
+            None,
+            None,
+            id="price-basis-unverified-on-copy",
+        ),
+        pytest.param(
+            _unmet_refusal(_WINDOWED_ID, "unit_mismatch"), None, None, id="unit-mismatch-on-copy"
+        ),
+        pytest.param(
+            _unmet_refusal(_WINDOWED_ID, "unit_price_basis_mismatch"),
+            None,
+            None,
+            id="price-basis-mismatch-on-copy",
+        ),
+        pytest.param(_unmet_refusal(_WINDOWED_ID, "window_short"), None, None, id="window-short"),
+        pytest.param(_unmet_refusal(_WINDOWED_ID, "coverage_gaps"), None, None, id="coverage-gaps"),
+        pytest.param(
+            _unmet_refusal(_WINDOWED_ID, "entity_no_series"), None, None, id="entity-no-series"
+        ),
+        pytest.param(
+            _rediscovery_refusal(_WINDOWED_ID, "definition_not_held"),
+            _WINDOWED_ID,
+            "definition_not_held",
+            id="rediscovery-on-copy-keeps-the-copy",
+        ),
+    ],
+)
+async def test_a_refusal_on_a_windowed_copy_holds_what_the_fault_names(
+    refusal: dict[str, Any], held: str | None, code: str | None
+) -> None:
+    """A `Refused` stop holds a source only for an unverified unit, by the origin
+    the planner was shown when the stop read a windowed copy. Any other code
+    holds nothing, and a `RediscoveryNeeded` holds its spec_id as it names it.
+    The payload is the one the executor's `_refusal_shape` builds."""
+    scripted = ScriptedGenai([_says("still nothing")])
+    harness = _AdapterHarness(
+        {
+            WINDOWED_PINS_STATE_KEY: [
+                {"spec_id": _WINDOWED_ID, "identity": {}, "windowed_from": SPEC}
+            ]
+        }
+    )
+
+    await harness.run(
+        _scripted_planner(scripted),
+        question="aid to guatemala",
+        readings=_turn_readings(),
+        refusal=_as_executor_shapes_it(refusal, origins={_WINDOWED_ID: SPEC}),
+    )
+
+    state = await harness.state()
+    assert [(spec.spec_id, spec.code) for spec in load_refused_specs(state)] == (
+        [] if held is None else [(held, code)]
+    )
+    prompt = _prompt_text(scripted.requests[0])
+    assert (held is not None) is ("Do not propose" in prompt)
+    assert held is None or held in prompt.split("Do not propose")[1]
+    # The planner never saw the copy, so the brief names the origin alone.
+    assert held != SPEC or _WINDOWED_ID not in prompt.split("Do not propose")[1]
+
+
+@pytest.mark.parametrize(
+    ("units", "rows", "held"),
+    [
+        pytest.param(
+            [{"currency": {"role": "destination"}, "prices": "current"}],
+            10,
+            True,
+            id="unreadable",
+        ),
+        pytest.param(
+            [{"currency": {"role": "destination"}, "prices": "current"}],
+            0,
+            False,
+            id="unreadable-and-rows-empty",
+        ),
+        pytest.param(
+            [
+                {"currency": "USD", "prices": "current"},
+                {"currency": "EUR", "prices": "current"},
+            ],
+            10,
+            False,
+            id="readable-and-disagreeing",
+        ),
+    ],
+)
+async def test_a_refusal_built_from_a_manifests_unit_evidence_holds_only_an_unreadable_unit(
+    requirement: Callable[..., Any],
+    source: Callable[..., Any],
+    units: list[dict[str, Any]],
+    rows: int,
+    held: bool,
+) -> None:
+    """The `unit_unverified` finding `compiler.evidence` raises for a manifest, not a
+    hand-built one, drives the replan. A unit that could not be read leaves `found` empty
+    and holds the source. Units that read but disagree are named in `found` and hold nothing.
+    A retrieval with no rows reports `rows_empty`, no unit finding, and holds nothing."""
+    series_stats = _series_stats(
+        *(_stat("DebtServicePaid", facet={"unit": unit}) for unit in units)
+    )
+    issues = check_evidence(
+        requirement(),
+        evidence_from_manifest(
+            _manifest(coverage={"rows": rows, "dimensions": []}), series_stats=series_stats
+        ),
+        approved=source(),
+    )
+    unverified = [found for found in errors(issues) if found.code.value == "unit_unverified"]
+    # A retrieval with no rows says nothing about the unit, so it carries no unit finding.
+    assert len(unverified) == (0 if rows == 0 else 1)
+    assert all((issue.found is None) is held for issue in unverified)
+    assert ("rows_empty" in [found.code.value for found in issues]) is (rows == 0)
+    payload = {
+        "kind": "refused",
+        "refusal": "requirement_unmet",
+        "detail": "requirement 'annual_debt_service' is not met by what 'get_data' returned",
+        "step_id": "annual_debt_service",
+        "requirement_id": "annual_debt_service",
+        "spec_id": SPEC,
+        "issues": [found.model_dump(mode="json") for found in issues],
+    }
+    refusal = _as_executor_shapes_it(payload, origins={})
+
+    sources = planner_adapter._refused_specs(refusal)
+
+    assert [(spec.spec_id, spec.code) for spec in sources] == (
+        [(SPEC, "unit_unverified")] if held else []
+    )
 
 
 def test_a_replan_names_the_asks_the_failed_run_computed() -> None:

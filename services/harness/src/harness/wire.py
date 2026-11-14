@@ -18,9 +18,11 @@ Every model forbids unknown members, mirroring the schemas'
 fails loudly at the boundary. The deliberate openings are objects another
 contract owns, referenced by name so the two cannot drift:
 `ComponentCreated.payload` / `ComponentRevised.payload` is the platform's
-Presentation contract, and `SeedSpec` reads the Search API's Spec block,
-keeping the members a seed hands over and dropping the rest. `TurnRequest.seed_spec` holds its items
-unparsed: each is read as a `Seed` on its own (`harness.seeds.seeds_slot`),
+Presentation contract, `FactSummary.unit` is that contract's unit slot, forwarded
+whole when it is an object, and `SeedSpec` reads the Search API's Spec block,
+keeping the members a seed hands over and dropping the rest.
+`TurnRequest.seed_spec` holds its items unparsed. Each is read as a `Seed` on
+its own (`harness.seeds.seeds_slot`),
 so one bad seed fails its own step rather than the request.
 
 `conversation_id` is delta 5: the frontend client mints the conversation
@@ -44,6 +46,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     TypeAdapter,
     ValidationError,
     ValidationInfo,
@@ -128,79 +131,14 @@ class Provenance(_WireModel):
     refreshed_from: int | None = None
 
 
-class Magnitude(StrEnum):
-    UNITS = "units"
-    THOUSANDS = "thousands"
-    MILLIONS = "millions"
-    BILLIONS = "billions"
-    TRILLIONS = "trillions"
-
-
-class PriceBasis(StrEnum):
-    CURRENT = "current"
-    CONSTANT = "constant"
-
-
-class DeflationBasis(StrEnum):
-    """Whose prices deflated a constant-price amount."""
-
-    DONOR = "donor"
-    RECIPIENT = "recipient"
-    NATIONAL = "national"
-
-
-# A unit, or one side of a composed unit, named in words: the unit's graph
-# name, or its ref where the graph has none.
+# A unit named in words: the unit's graph name, or its ref where the graph has
+# none.
 UnitName = Annotated[str, Field(min_length=1, max_length=200)]
 
-
-class StructuredUnit(_WireModel):
-    """A unit stated in parts, as a converted frame's unit is: the components
-    catalogue's `structured_unit`. Every member is optional and at least one
-    is present."""
-
-    currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
-    magnitude: Magnitude | None = None
-    prices: PriceBasis | None = None
-    base_year: int | None = None
-    deflation_basis: DeflationBasis | None = None
-
-    @model_validator(mode="after")
-    def _states_a_member(self) -> StructuredUnit:
-        if not self.model_fields_set:
-            raise ValueError("a structured unit states at least one member")
-        return self
-
-    @model_validator(mode="after")
-    def _basis_goes_with_constant_prices(self) -> StructuredUnit:
-        # The frame grammar's `validate_unit_request` holds a basis to constant prices.
-        if self.deflation_basis is not None and self.prices is not PriceBasis.CONSTANT:
-            raise ValueError("deflation_basis is valid only with prices 'constant'")
-        return self
-
-
-class CountedStatVar(_WireModel):
-    """One side of a composed unit whose measure declares no unit: the StatVar
-    it counts, with the name to print for it."""
-
-    stat_var: str = Field(pattern=r"^dcid:.", max_length=200)
-    label: UnitName
-
-
-type UnitPart = UnitName | StructuredUnit | CountedStatVar
-
-
-class ComposedUnit(_WireModel):
-    """The unit of a quotient of two measures, read `<numerator> per
-    <denominator>`. A side is never null and never itself a composed unit."""
-
-    numerator: UnitPart
-    denominator: UnitPart
-
-
-# The unit slot of a card's payload, as the platform's fact summary repeats
-# it: a name, a structured unit, or a composed unit.
-type Unit = UnitName | StructuredUnit | ComposedUnit
+# The unit slot of a card's fact summary: a name, or the platform's unit object
+# forwarded as it is. The Presentation contract owns the object's members, and
+# the platform validates them, so a member it adds never stops a card.
+type Unit = UnitName | dict[str, JsonValue]
 
 
 class Attribution(_WireModel):
@@ -1366,6 +1304,11 @@ class PlanProposed(_WireModel):
     # Delta 23 (v1.8): the plan's decisions that qualify the answer, one
     # reader sentence each, which `plan.approved` carries once it is approved.
     caveats: list[str] = []
+    # True on a plan card that starts a new plan after an earlier plan in the
+    # same turn (a second `plan` call). Left out of a dump while unset or false,
+    # and left out of a stored pending card (`harness.studio_state`), so a stored
+    # card reads as before.
+    new_plan: bool | None = Field(default=None, exclude_if=lambda new_plan: not new_plan)
 
 
 class PlanRevisionStaleError(ToolError):
@@ -1504,35 +1447,64 @@ class ComponentCreated(_WireModel):
     created_from: CreatedFrom | None = None
 
 
-def usable_component(component: dict[str, Any] | None) -> bool:
-    """Whether `component` (a `write_component` result's own `component`
-    member) would satisfy the `component.created` wire contract above:
-    the full model, not just a `fact_summary` presence check. `make_charts`
-    (`harness.orchestrator_tools`) calls this to decide which writes land;
-    `harness.studio_translate`'s `_component_frames` validates the same
-    contract again at drain time, immediately before a write actually lands.
+def component_created(component: dict[str, Any], *, step_id: str) -> ComponentCreated:
+    """The `component.created` frame for `component` (a `write_component`
+    result's own `component` member), with `seq` 0 until the caller stamps it.
+    `step_id` is the step that produced it, unless the component names its own.
 
-    `event`, `seq` and `created_from` are not the writer's to give: `event`
-    and `seq` are wire bookkeeping no caller of this function has a real
-    value for yet, and the real `created_from` (the step that produced the
-    component) is only known at drain time. Stand-ins fill the three
-    fields here so validation can run on everything else the contract
-    actually requires.
+    Raises:
+        ValidationError: `component` does not satisfy the contract above.
     """
-    if component is None:
-        return False
+    return ComponentCreated.model_validate(
+        {
+            **component,
+            "event": "component.created",
+            "seq": 0,
+            "created_from": component.get("created_from") or {"step_id": step_id},
+        }
+    )
+
+
+def component_fault(component: dict[str, Any]) -> ValidationError | None:
+    """The `ValidationError` that keeps `component` from satisfying the
+    `component.created` wire contract above, the full model, or `None` when it
+    satisfies it. `stored_card_fault` calls this for a create, and
+    `harness.mcp_client` refuses a write whose card it names;
+    `harness.studio_translate`'s `_record_frames` builds the same frame again
+    at drain time.
+
+    `event`, `seq` and `created_from` are not the writer's to give, and the
+    real `created_from` (the step that produced the component) is only known
+    at drain time, so a stand-in step fills it here (`component_created`).
+    """
     try:
-        ComponentCreated.model_validate(
-            {
-                **component,
-                "event": "component.created",
-                "seq": 0,
-                "created_from": component.get("created_from") or {"step_id": "_"},
-            }
-        )
-    except ValidationError:
-        return False
-    return True
+        component_created(component, step_id="_")
+    except ValidationError as fault:
+        return fault
+    return None
+
+
+def log_unreadable_card(
+    log: logging.Logger,
+    component: dict[str, Any],
+    fault: ValidationError,
+    *,
+    where: str,
+    frame: str | None = None,
+) -> None:
+    """Log, at ERROR, a stored card that fails the component contract. The
+    platform stored it, so nothing refused the write, and the harness cannot read
+    what was stored. `log` is the caller's logger. The log names the card,
+    `where` it was met and each faulty member, and leaves `input` out so
+    payload values stay out."""
+    log.error(
+        "%s: stored card %s revision %s%s fails the component contract: %s",
+        where,
+        component.get("component_id"),
+        component.get("revision"),
+        f" (frame {frame})" if frame else "",
+        [(error["loc"], error["type"]) for error in fault.errors(include_input=False)],
+    )
 
 
 class ComponentRevised(_WireModel):
@@ -1547,6 +1519,53 @@ class ComponentRevised(_WireModel):
     changed: list[str] = Field(min_length=1)
     fact_summary: FactSummary
     payload: dict[str, Any] | None = None
+
+
+def component_revised(
+    component: dict[str, Any], component_id: str, patch: dict[str, Any]
+) -> ComponentRevised:
+    """The `component.revised` frame for a revise of `component_id` (a
+    `write_component` result's own `component` member) by `patch`, with `seq`
+    0 until the caller stamps it. The card needs only the members this frame
+    carries.
+
+    Raises:
+        ValidationError: the stored card cannot fill them.
+    """
+    return ComponentRevised.model_validate(
+        {
+            "event": "component.revised",
+            "seq": 0,
+            "component_id": component_id,
+            "revision": component.get("revision"),
+            "changed": sorted(patch),
+            "fact_summary": component.get("fact_summary"),
+            "payload": component.get("payload"),
+        }
+    )
+
+
+def stored_card_fault(
+    component: dict[str, Any], *, revised_by: dict[str, Any] | None = None
+) -> ValidationError | None:
+    """The `ValidationError` that keeps the frame a `write_component` call
+    emits from being built from `component`, or `None` when it can be. A
+    create (`revised_by` is `None`) emits `component.created`
+    (`component_fault`). A revise emits `component.revised`
+    (`component_revised`), whose `changed` names the members of the patch
+    `revised_by`. A revise the platform answered as a no-op returns the
+    revision the card already held, which is `1` for a card never revised, so
+    the revision is not judged here, since a no-op carries no frame.
+    """
+    if revised_by is None:
+        return component_fault(component)
+    revision = component.get("revision")
+    judged = {**component, "revision": max(revision, 2)} if isinstance(revision, int) else component
+    try:
+        component_revised(judged, str(component.get("component_id")), revised_by)
+    except ValidationError as fault:
+        return fault
+    return None
 
 
 class CompositionUpdated(_WireModel):

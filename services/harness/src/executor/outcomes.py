@@ -210,6 +210,12 @@ class Refused(StrictModel):
     _answer_refusal`). `anchors` holds the newest period of each group of
     rolling steps the run resolved before it stopped.
 
+    `spec_id` names the source a `REQUIREMENT_UNMET` stop read, when the
+    requirement has a binding, as a `RediscoveryNeeded` does. Other stops leave
+    it unset. A replan avoids the source of a `Refused` stop only when an error
+    finding says its unit is unverified and found no unit text
+    (`harness.planner_adapter._SOURCE_FAULT_CODES`).
+
     `retryable` says whether a later attempt can get past a
     `TRANSPORT_FAILED` stop: `False` when the tool surface reported a failure
     no retry changes (`compiler.surface.ToolSurfaceUnavailableError`), such as
@@ -224,6 +230,8 @@ class Refused(StrictModel):
     retryable: bool = True
     step_id: Identifier | None = None
     requirement_id: Identifier | None = None
+    # Left out of a dump while unset, so a stored refusal reads as before.
+    spec_id: SpecId | None = Field(default=None, exclude_if=lambda spec_id: spec_id is None)
     payload: ToolFailure | None = None
     issues: tuple[EvidenceIssue, ...] = ()
     completed: tuple[StepRecord, ...] = ()

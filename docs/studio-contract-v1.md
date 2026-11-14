@@ -12,7 +12,7 @@ explains the protocol around them, and `services/harness/tests/test_wire.py`
 pins the two together against the fixtures in
 `services/harness/tests/wire_fixtures/studio/`.
 
-v1 records its design decisions as numbered deltas (1–24; 16 is folded
+v1 records its design decisions as numbered deltas (1–25; 16 is folded
 into 11). The deltas are marked where they apply and listed in the delta
 index at the end.
 
@@ -166,6 +166,8 @@ pause; `plan.proposed` has a second showing a failed switch).
 | `done`                | turn complete: `trace_id` + final composition or null                                                                                       |
 
 `component.created.payload` / `component.revised.payload` are the platform's resolved revision, passed through verbatim as the envelope `{schema_version, catalog_version, component_id, revision, provenance, component}` that dfo-spec-kit's `envelope.schema.json` defines. `payload.component` is the resolved component for its type, points included, and `payload.provenance` is the platform's provenance for that revision, authoritative for the card's back. The member is opaque to this contract, which does not restate its shape.
+
+`fact_summary.unit` is the Presentation contract's unit slot, and this contract does not restate its shape either: a unit name string of 1 to 200 characters, or the platform's unit object forwarded with every member it states (an empty object included). The key is absent, or null, when the platform states no unit; the harness reads a null as absent. The harness refuses an empty or longer string and any other JSON type, and does not read the object's members, so a member the platform adds reaches the website unchanged.
 
 ### Interrupt resume protocol (delta 1)
 
@@ -569,6 +571,23 @@ ignores it and an older harness omits it.
 
 `schema_version` stays 1.
 
+## A new plan in the same turn (delta 25, v1.10)
+
+- `plan.proposed.new_plan` is `true` on a plan card that starts a new plan
+  after an earlier plan in the same turn, and absent otherwise. A first draft made after an
+  earlier plan card in the turn starts a new plan: its card has a `plan_version_id` of its own,
+  no `plan.versioned` precedes it, and its `version` counts from 1. A client treats it as a new
+  plan and drops the choice labels it kept from the earlier plan. A client
+  that ignores the member reads the card as before. The member is optional
+  and absent from a `plan.proposed` stored earlier.
+- A plan drafted over a plan the harness could not read restarts too: its
+  `version` counts from 1 and its `plan_version_id` is new. Its first card
+  carries no `new_plan`, because it stands for the same question. The card it
+  replaces is superseded, as for any revision, and a client keeps the choice
+  labels it holds.
+
+`schema_version` stays 1.
+
 ## Sample fixture values (delta 10)
 
 Fixture values that are samples:
@@ -673,3 +692,6 @@ Fixture values that are samples:
    choice carries, so a client tells a planner decision
    (`"decision/<slot>"`) from a scope choice; present from v1.9, absent
    from a `plan.approved` stored earlier.
+1. `plan.proposed` gains an optional `new_plan`, `true` on a plan card that
+   starts a new plan after an earlier plan in the same turn, so a first draft made after an
+   earlier plan card in the turn reads as a new plan with its own `plan_version_id`.

@@ -32,7 +32,7 @@ from planner.plan import (
     plan_revision,
     save_decision_pick,
     stored_plan,
-    windowed_pins,
+    windowed_origins,
 )
 from planner.plan import Plan as PlannerPlan
 
@@ -126,6 +126,10 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
         plan card, and `"restarted": True`, since its version counts from 1
         again. The `"refused"` route's text opens with
         `UNREADABLE_PLAN_UNPLANNED_NOTE`.
+
+        A first draft's plan also carries `"new_plan": True`
+        (`harness.studio_translate`), which starts a new plan card lineage in
+        the turn. A re-offer of the plan on record does not carry it.
 
         An `"amend"` entry carrying `pick` (`approve` routes a switch of a
         planner decision's row so) replans with the user's pick held: the
@@ -349,6 +353,10 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
                 # The draft's version counts from 1 again, on a line of its
                 # own: no earlier card of the turn is a version of this plan.
                 **({"restarted": True} if unreadable else {}),
+                # A first draft starts a new plan card lineage, as a second
+                # `plan` call in a turn does. A re-offer of the plan on
+                # record (`"pending_refusal"`) keeps the lineage it has.
+                **({"new_plan": True} if is_first_draft and not unreadable else {}),
             },
             route="ok",
         )
@@ -511,10 +519,7 @@ def approve(
             plan,
             choice_id=str(switch.get("choice_id")),
             option_id=str(switch.get("option_id")),
-            to_origin={
-                copy.spec_id: copy.windowed_from
-                for copy in windowed_pins(cast(SessionState, ctx.state)).values()
-            },
+            to_origin=windowed_origins(cast(SessionState, ctx.state)),
             alignments=alignments(cast(SessionState, ctx.state)),
         )
         if pick is not None:

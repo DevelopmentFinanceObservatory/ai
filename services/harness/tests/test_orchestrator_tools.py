@@ -1,9 +1,4 @@
-"""The orchestrator's tools against a fake resolver, executor and tool surface.
-
-`usable_component` is `harness.wire`'s own check, tested with the wire
-contract; here it is stubbed so a fake component can stand in for a written
-one.
-"""
+"""The orchestrator's tools against a fake resolver, executor and tool surface."""
 
 from __future__ import annotations
 
@@ -94,11 +89,12 @@ from harness.tool_contracts import (
     HarnessCode,
     ResolverError,
     graph_envelope,
+    harness_refusal,
     reading_facts,
     resolver_digest,
 )
 from harness.turn_records import SearchReading, basis_line, loose_match_notes, render_readings
-from harness.wire import AddOp, CompositionActor, MutationOp
+from harness.wire import AddOp, CompositionActor, MutationOp, component_revised
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
 from orchestrator.agent import INSTRUCTION
@@ -261,11 +257,6 @@ def _tools(
         invocation_id="inv_1",
         actions=SimpleNamespace(skip_summarization=None),
     )
-
-
-@pytest.fixture(autouse=True)
-def _usable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(orchestrator_tools, "usable_component", lambda component: True)
 
 
 # --- declarations ---------------------------------------------------------
@@ -2303,6 +2294,52 @@ class RaisingExecutor(FakeExecutor):
         return await super().__call__(tool=tool, args=args, on_progress=on_progress)
 
 
+class UnreadableCardExecutor(FakeExecutor):
+    """Answers every write as `McpExecutor` does for a card the platform stored
+    and the harness cannot read (`harness.mcp_client._withheld_card`)."""
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        if tool != "write_component":
+            return await super().__call__(tool=tool, args=args, on_progress=on_progress)
+        self.calls.append((tool, args))
+        return {
+            "outcome": "refusal",
+            "refusal": harness_refusal(
+                code=HarnessCode.STORED_CARD_UNREADABLE,
+                message="the platform stored card cmp_1 but it fails the component contract",
+            )
+            | {"component_id": "cmp_1"},
+        }
+
+
+async def test_a_stored_card_the_harness_cannot_read_is_a_dfo_fault_not_a_refusal() -> None:
+    """The platform stored the chart and the harness could not read it back.
+    The model is told not to redraw it or swap in other data, the call draws
+    nothing after it, and the same chart in a later call this turn is answered
+    from the record rather than written again."""
+    executor = UnreadableCardExecutor()
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+
+    frame = frame_id_for(REF)
+    drawn = await tools["make_charts"]([*_one_chart(frame), *_one_chart(frame)], ctx)
+
+    # The call stops at the first unreadable card, since a second chart would meet it too.
+    (entry,) = drawn["charts"]
+    assert [tool for tool, _ in executor.calls].count("write_component") == 1
+    assert _stated(entry) == (HarnessCode.STORED_CARD_UNREADABLE, "do_not_retry")
+    assert "refused" not in entry["error"]
+    assert "charts after it" in entry["error"]
+    assert executor.landed == []
+
+    again = await tools["make_charts"](_one_chart(frame), ctx)
+    (repeat,) = again["charts"]
+    assert [tool for tool, _ in executor.calls].count("write_component") == 1
+    assert _stated(repeat) == (HarnessCode.STORED_CARD_UNREADABLE, "do_not_retry")
+    # The unreadable chart is the call's last, so no chart was skipped after it.
+    assert "charts after it" not in repeat["error"]
+
+
 def _one_chart(frame: str) -> list[dict[str, str]]:
     select = json.dumps({"observationAbout": "country/NGA"})
     return [{"frame": frame, "type": "bar_chart", "title": "t", "select_json": select}]
@@ -3432,16 +3469,21 @@ async def test_make_charts_refuses_a_cut_whose_members_share_no_period(
 
 
 @pytest.mark.parametrize(
-    ("type_", "providers", "window"),
+    ("type_", "providers", "window", "period"),
     [
-        ("bar_chart", 30, {"start": "2020/2024", "end": "2020/2024"}),
-        ("table", 30, None),
-        # Twenty bars are under the cap: nothing is cut and no period is pinned.
-        ("bar_chart", 20, None),
+        # A bar chart takes no `order.period`; its window holds the cut's period.
+        ("bar_chart", 30, {"start": "2020/2024", "end": "2020/2024"}, None),
+        ("table", 30, None, "2020/2024"),
+        # Twenty bars are under the cap: nothing is cut, ordered or pinned.
+        ("bar_chart", 20, None, None),
     ],
 )
 async def test_make_charts_cuts_a_frame_of_one_span_at_that_span(
-    monkeypatch: pytest.MonkeyPatch, type_: str, providers: int, window: dict[str, str] | None
+    monkeypatch: pytest.MonkeyPatch,
+    type_: str,
+    providers: int,
+    window: dict[str, str] | None,
+    period: str | None,
 ) -> None:
     """Thirty providers each hold the one period 2020/2024, so the largest
     are chosen at it and the title names it. A cut bar chart is written with
@@ -3459,7 +3501,10 @@ async def test_make_charts_cuts_a_frame_of_one_span_at_that_span(
     if providers > MAX_SERIES_PER_COMPONENT:
         assert intent["title"] == "Aid to Kenya (24 largest of 30 in 2020/2024)"
         assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in range(29, 5, -1)]
+        largest_first = {"by": "value", "direction": "descending"}
+        assert intent["order"] == largest_first | ({} if period is None else {"period": period})
     else:
+        assert "order" not in intent
         assert (intent["title"], intent["select"]) == (
             "Aid to Kenya, 2020 to 2024",
             {"financingRecipient": "country/KEN"},
@@ -3851,8 +3896,13 @@ async def test_make_charts_draws_again_a_card_revised_since_it_was_drawn(
     await tools["fetch"](SPEC_LIFE, ctx)
     await tools["make_charts"]([_wide_chart()], ctx)
     revised = executor.cards["cmp_01"] | {"revision": executor.cards["cmp_01"]["revision"] + 1}
+    patch = {"title": "Renamed"}
     _revised_frames(
-        executor.state, component_id="cmp_01", component=revised, patch={"title": "Renamed"}
+        executor.state,
+        component_id="cmp_01",
+        component=revised,
+        patch=patch,
+        revised=component_revised(revised, "cmp_01", patch),
     )
     executor.cards["cmp_01"] = revised
     if later_turn:
@@ -3893,6 +3943,8 @@ async def test_make_charts_counts_only_the_members_the_chart_lists(
     (intent,) = _intents(executor)
     assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in range(8, 0, -1)]
     assert intent["title"] == "Aid to Kenya, 2023 to 2024 (8 largest of 9 in 2024)"
+    # The legend ranks at the period the title names.
+    assert intent["order"] == {"by": "value", "direction": "descending", "period": "2024"}
 
 
 async def test_make_charts_keeps_the_cap_refusal_when_no_member_is_a_party(
@@ -3906,17 +3958,31 @@ async def test_make_charts_keeps_the_cap_refusal_when_no_member_is_a_party(
     assert _writes(executor) == 1
 
 
-@pytest.mark.parametrize("type_", ["table", "line_chart", "bar_chart"])
-async def test_make_charts_writes_no_order_for_order_by_value(
-    monkeypatch: pytest.MonkeyPatch, type_: str
+_LISTED = {
+    "financingRecipient": "country/KEN",
+    "financingProvider": ["donor/00", "donor/03", "donor/01"],
+}
+
+
+@pytest.mark.parametrize(
+    ("type_", "select", "order"),
+    [
+        ("table", _LISTED, {"by": "value", "direction": "descending"}),
+        ("line_chart", _LISTED, {"by": "value", "direction": "descending"}),
+        ("bar_chart", _LISTED, {"by": "value", "direction": "descending"}),
+        # A stat card draws one value, and its intent takes no order.
+        ("stat_card", {"financingRecipient": "country/KEN", "financingProvider": "donor/00"}, None),
+    ],
+)
+async def test_make_charts_orders_by_value_without_reading_the_frame(
+    monkeypatch: pytest.MonkeyPatch,
+    type_: str,
+    select: dict[str, Any],
+    order: dict[str, str] | None,
 ) -> None:
-    """The platform draws every chart's members in its own order, so
-    `order_by_value` writes the select as the model listed it and reads no
-    frame to rank it."""
-    select = {
-        "financingRecipient": "country/KEN",
-        "financingProvider": ["donor/00", "donor/03", "donor/01"],
-    }
+    """`order_by_value` writes the select as the model listed it with an
+    `order` largest first and no period, which the platform ranks at, and
+    reads no frame to rank it."""
     store = CountedFrames(providers=5, carried=True)
 
     executor, _ = await _draw_wide(
@@ -3930,8 +3996,9 @@ async def test_make_charts_writes_no_order_for_order_by_value(
 
     (intent,) = _intents(executor)
     assert intent["select"] == select
-    # Only a bar chart reads the frame, to pin the period its bars draw.
-    assert store.opens == (1 if type_ == "bar_chart" else 0)
+    assert intent.get("order") == order
+    # Only a bar chart or a stat card reads the frame, for the period it draws.
+    assert store.opens == (1 if type_ in {"bar_chart", "stat_card"} else 0)
 
 
 async def test_make_charts_keeps_a_table_under_the_platforms_row_cap(
