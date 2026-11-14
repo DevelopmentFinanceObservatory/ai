@@ -2045,15 +2045,14 @@ def _refused_specs(refusal: dict[str, Any] | None) -> list[_RefusedSource]:
 
 # The finding code that says the source's own data states no unit. A `Refused`
 # stop holds a spec_id for every replan only on an error finding of this code
-# with nothing found (`found` is None), because such a source is no use to any
-# requirement. A source whose unit text names no recognisable currency carries
-# that text in `found` and holds nothing. The other unit codes describe one
-# requirement against a source that reads fine, and the remaining codes
-# (window, coverage, entity, grain, membership) a replan fixes on the same
-# source, so none of those holds a spec_id either. A refusal that also carries
-# `rows_empty` holds nothing: the retrieval returned no rows, so the unit is
-# unreadable only because nothing was there to read, and a replan can change
-# the window or entity on the same source.
+# with nothing found (`found` is None): the source states no unit the harness
+# can read, so a replan that needs a unit cannot use it. A source whose unit
+# text names no recognisable currency carries that text in `found` and holds
+# nothing. The other unit codes describe one requirement against a source that
+# reads fine, and the remaining codes (window, coverage, entity, grain,
+# membership) a replan fixes on the same source, so none of those holds a
+# spec_id either. A retrieval with no rows carries no unit finding
+# (`compiler.evidence.check_evidence`), so it holds nothing.
 _SOURCE_FAULT_CODES = frozenset({EvidenceIssueCode.UNIT_UNVERIFIED.value})
 
 
@@ -2079,8 +2078,6 @@ def _one_refused_spec(payload: object) -> list[_RefusedSource]:
     reported = [
         issue for issue in (issues if isinstance(issues, list) else ()) if isinstance(issue, dict)
     ]
-    if any(issue.get("code") == EvidenceIssueCode.ROWS_EMPTY.value for issue in reported):
-        return []
     faults = [
         issue
         for issue in reported

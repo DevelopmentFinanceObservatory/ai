@@ -1894,7 +1894,7 @@ async def test_a_refusal_built_from_a_manifests_unit_evidence_holds_only_an_unre
     """The `unit_unverified` finding `compiler.evidence` raises for a manifest, not a
     hand-built one, drives the replan. A unit that could not be read leaves `found` empty
     and holds the source; units that read but disagree are named in `found` and hold nothing.
-    A retrieval with no rows also reports `rows_empty` and holds nothing."""
+    A retrieval with no rows reports `rows_empty`, no unit finding, and holds nothing."""
     series_stats = _series_stats(
         *(_stat("DebtServicePaid", facet={"unit": unit}) for unit in units)
     )
@@ -1905,9 +1905,10 @@ async def test_a_refusal_built_from_a_manifests_unit_evidence_holds_only_an_unre
         ),
         approved=source(),
     )
-    (issue, *others) = [found for found in errors(issues) if found.code.value == "unit_unverified"]
-    assert not others
-    assert (issue.found is None) is (held or rows == 0)
+    unverified = [found for found in errors(issues) if found.code.value == "unit_unverified"]
+    # A retrieval with no rows says nothing about the unit, so it carries no unit finding.
+    assert len(unverified) == (0 if rows == 0 else 1)
+    assert all((issue.found is None) is held for issue in unverified)
     assert ("rows_empty" in [found.code.value for found in issues]) is (rows == 0)
     payload = {
         "kind": "refused",
