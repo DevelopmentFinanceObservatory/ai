@@ -224,7 +224,7 @@ The module ships in the image (`services/harness/src/harness/recipe_backfill.py`
 | `DATASETS_FIRST_PARTY_PRINCIPAL` | the publish principal, sent on the recipe routes |
 | `FRAME_STORE_BUCKET`             | the materialisation bucket                       |
 
-The identity it runs as needs to list and read objects in the bucket. `--write` also creates `mints/v4/` objects, so it needs object create.
+The identity it runs as needs to list and read objects in the bucket. `--write` also creates `mints/v5/` objects, so it needs object create.
 
 From a workstation, set `DFO_APIS_URL=http://localhost:8083` and run `just apis-proxy` beside it, since the job sends a Cloud Run ID token only on Cloud Run, in a service (`K_SERVICE` set) or a job (`CLOUD_RUN_JOB` set).
 
