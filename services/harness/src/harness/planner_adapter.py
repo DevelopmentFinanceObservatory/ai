@@ -1000,7 +1000,15 @@ class PlannerAdapter:
         """What `revise` answers for a refusal: `_refused`'s, with why alone
         as one sentence for the user (`harness.sentences.refusal_reason`),
         naming requirements by `words` (`harness.plan_display.plan_words`), under `reason`, which
-        a switch that did not apply shows under its choice."""
+        a switch that did not apply shows under its choice.
+
+        Logs the refusal's code and its detail as they came, before `reason`
+        rewrites them for the user: for a compile issue, the issue's code
+        (`constraint`) and the compiler's own reason, so a refused switch is
+        diagnosable from the logs."""
+        logger.info(
+            "plan revision refused: code=%s detail=%s", refused.get("code"), refused.get("detail")
+        )
         answer = PlannerAdapter._refused(refused)
         answer["refused"]["reason"] = refusal_reason(refused, words=words)
         return answer

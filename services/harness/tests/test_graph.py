@@ -107,7 +107,7 @@ from harness.graph.switch import (
     SWITCH_STOP,
     SwitchFailedError,
 )
-from harness.plan_display import decision_option_id
+from harness.plan_display import choice_id, decision_option_id
 from harness.planner_adapter import PlannerAdapter, store_searched_pin_readings
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, PartScope
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
@@ -128,6 +128,7 @@ from planner.plan import (
     DECISION_PICK_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
+    AnswerMode,
     Coverage,
     DatasetRequirement,
     Decision,
@@ -137,6 +138,7 @@ from planner.plan import (
     Period,
     PinSource,
     PlanStatus,
+    RankRequirement,
     ResolvedBy,
     SessionState,
     WindowedPin,
@@ -146,6 +148,7 @@ from planner.plan import (
     plan_revision,
     repinned,
     save_decision_pick,
+    save_pin_sources,
     windowed_pins,
     with_authored_requirements,
 )
@@ -154,12 +157,22 @@ from planner.records import (
     EvidenceIssue,
     EvidenceIssueCode,
     GroupBy,
+    RankAmong,
+    RankDirection,
     Reduction,
     RelativePeriod,
     RollingWindow,
     Severity,
+    StatVarReading,
 )
-from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, WorkflowStep
+from planner.workflow import (
+    EvidenceBinding,
+    ReadingSetBy,
+    SelectedSource,
+    ToolId,
+    Workflow,
+    WorkflowStep,
+)
 from pydantic import ValidationError
 from submission.service import (
     AlignedPin,
@@ -185,6 +198,7 @@ from .orchestrator_fakes import (
     run_turn,
     visited_nodes,
 )
+from .planner.test_agent import _FakeToolContext
 from .share_plan import ALL_DONORS, DAC_DONORS, US_DONOR, us_share_of_kenya_oda
 from .split_plan import FIRST_YEAR, SPEC_DEBT_HISTORY, split_draft, stored_split_plan
 from .test_turn_records import _example_part, _manifest, _served_identity, _switchable_scope
@@ -4834,6 +4848,185 @@ async def test_a_later_period_amendment_reads_the_switched_dataset_over_every_ye
     stored = SearchReading.model_validate(state[ORCHESTRATOR_SEARCHES_KEY][-1])
     assert stored.spec_id == new_pin
     assert windowed_pins(cast(SessionState, state))[copy_pin].windowed_from == new_pin
+
+
+# --- a switch onto a family the mint adds by a declared composite ----------------
+
+
+def _recipient_open(block: dict[str, Any], identity: dict[str, Any]) -> dict[str, Any]:
+    """`identity` with its recipient left open, and `block` reading it under the
+    spec_id it hashes to: Kenya cut from the entities the block resolves, and the
+    recipient side counted at 140 parties (`role_axis_facts`), a count this test
+    sets, not a recorded one."""
+    identity = copy.deepcopy(identity)
+    del identity["entities"]["destination"]
+    identity["open_roles"] = ["destination"]
+    spec_id = spec_id_for(canonicalize(identity))
+    block = copy.deepcopy(block)
+    block["spec_id"] = spec_id
+    block["definition"] |= {"spec_id": spec_id, "identity": identity}
+    resolved = block["resolved"]
+    resolved["entities"] = [e for e in resolved["entities"] if e["role"] != "destination"]
+    resolved["role_axis_facts"] = [
+        {"role": "destination", "member_count": 140, "members_available": True}
+    ]
+    return block
+
+
+def _dac2a_provider_blocks() -> tuple[dict[str, Any], dict[str, Any]]:
+    """US net ODA to every recipient in 2019 on DAC2a, as the bilateral block the
+    card shows and the inclusive block Search answers its provider switch with.
+
+    Both are read from the block dfo-apis serves for the inclusive answer
+    (`tests/fixtures/dac2a_inclusive_spec_block.json`), its recipient left open
+    (`_recipient_open`). The bilateral block is its bilateral component: the
+    composite's first component identity, one StatVar served, no composite flag,
+    the provider row on bilateral flows as the user's words chose. The inclusive
+    block is the composite compiled from that base."""
+    recorded = json.loads(
+        (Path(__file__).parent / "fixtures" / "dac2a_inclusive_spec_block.json").read_text()
+    )
+    scope = recorded["resolved"]["scope_choices"]
+    bilateral_component, _ = scope["compiled"]["components"]
+    bilateral = _recipient_open(recorded, bilateral_component["identity"])
+    inclusive = _recipient_open(recorded, recorded["definition"]["identity"])
+    base = {**scope["base"], "spec_id": bilateral["spec_id"]}
+    base["identity"] = bilateral["definition"]["identity"]
+
+    shown = bilateral["resolved"]
+    shown["facets"]["provenance"] = {"ref": "provenance/OECDDAC2A", "label": "OECD DAC2a"}
+    shown["stat_vars"] = {
+        **{k: v for k, v in shown["stat_vars"].items() if k != "sums_components"},
+        "member_count": 1,
+        "served_count": 1,
+    }
+    shown_scope = shown["scope_choices"]
+    shown_scope |= {
+        "id": base["spec_id"],
+        "base": base,
+        "entries": [],
+        "compiled": {"spec_id": base["spec_id"], "identity": base["identity"], "components": []},
+    }
+    for choice in shown_scope["choices"]:
+        choice["id"] = f"{base['spec_id']}:{choice['axis']}"
+        if choice["axis"] == "provider":
+            choice["active"] = "provider:bilateral"
+    switched_scope = inclusive["resolved"]["scope_choices"]
+    switched_scope |= {
+        "id": base["spec_id"],
+        "base": base,
+        "compiled": {
+            **switched_scope["compiled"],
+            "spec_id": inclusive["spec_id"],
+            "identity": inclusive["definition"]["identity"],
+        },
+    }
+    for choice in switched_scope["choices"]:
+        choice["id"] = f"{base['spec_id']}:{choice['axis']}"
+    return bilateral, inclusive
+
+
+async def test_a_ranking_switched_to_dac2a_s_inclusive_scope_compiles_its_sum(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The deployed failure: a card ranking the recipients of US net ODA in 2019 on
+    DAC2a's bilateral flows, switched to bilateral plus imputed multilateral. The
+    inclusive answer binds every slot and serves two StatVars, the lines the mint
+    adds (`sums_components`), and the plan states no reading. The revision
+    re-pins the ranking's dataset and compiles: the rule reads the family summed,
+    so the rank reads one measure."""
+    bilateral, inclusive = _dac2a_provider_blocks()
+    pin = bilateral["spec_id"]
+    scoped = scope_choice_decisions({pin: PinSource(block=bilateral, settled=True)})[pin]
+    measure = Decision(
+        slot="measure",
+        description="Which measure answers the question.",
+        options=["DAC2a net ODA", "another source"],
+        chosen="DAC2a net ODA",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="DAC2a reports ODA by donor and recipient.",
+    )
+    every = Decision(
+        slot="every_recipient",
+        description="Whether to rank every recipient or named ones.",
+        options=["every recipient", "named recipients"],
+        chosen="every recipient",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="The question asks which recipients received the most.",
+        fixes=DecisionFixes(among=RankAmong.POPULATION),
+    )
+    oda = DatasetRequirement(
+        id="oda",
+        decision_ids=["measure", *(d.slot for d in scoped)],
+        measure="US net ODA",
+        entities=[Entity(name="United States", role="donor")],
+        across=("recipient",),
+        period=Period(start=2019, end=2019),
+        source_spec_id=pin,
+    )
+    top = RankRequirement(
+        id="top",
+        decision_ids=["measure", "every_recipient"],
+        input_id="oda",
+        direction=RankDirection.HIGHEST_FIRST,
+        among=RankAmong.POPULATION,
+        axis="recipient",
+        reduction=Reduction.SUM,
+        limit=10,
+    )
+    plan = PlannerPlan(
+        question="Which countries received the most US net ODA in 2019?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=[measure, every, *scoped],
+        evidence_requirements=[oda, top],
+        version=1,
+    )
+    ctx = _FakeToolContext()
+    state = cast(SessionState, ctx.state)
+    save_pin_sources(state, {pin: PinSource(block=bilateral, settled=True)})
+    reading = SearchReading.from_part(
+        {
+            "variable": "US net ODA",
+            "status": "definite",
+            "spec_id": pin,
+            "scope": PartScope.from_search(bilateral["resolved"]["scope_choices"]).model_dump(
+                mode="json"
+            ),
+            "asked_roles": ["donor"],
+        }
+    )
+    ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
+    answered = {"parts": [{"status": "definite", "spec": inclusive}]}
+    planner = _TranslatingPlanner(
+        [],
+        schemas=real_schemas,
+        responses={
+            "resolve_definition": ToolCallResult(
+                is_error=False, meta={SEARCH_ENVELOPE_META_KEY: answered}
+            )
+        },
+    )
+    (row,) = [d for d in plan.decisions if d.scope is not None and d.scope.axis == "provider"]
+
+    await switch_module._switched_plan(
+        cast(Any, ctx),
+        plan,
+        choice_id=choice_id(plan, row),
+        option_id="provider:inclusive",
+        planner=cast(Any, planner),
+        surface=planner.surface,
+    )
+
+    revised = PlannerPlan.model_validate_json(ctx.state["plan"])
+    assert revised.workflow is not None
+    (source,) = revised.workflow.sources
+    assert source.spec_id == inclusive["spec_id"]
+    assert (source.stat_var_reading, source.stat_var_reading_set_by) == (
+        StatVarReading.SUM,
+        ReadingSetBy.RULE,
+    )
+    fetch = next(step for step in revised.workflow.steps if step.tool.name == "get_data")
+    assert fetch.args["stat_vars"] == "sum"
 
 
 @pytest.mark.parametrize(
