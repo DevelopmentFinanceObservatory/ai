@@ -4505,6 +4505,13 @@ async def test_a_no_op_revise_over_a_readable_head_above_the_canvas_catches_the_
         **COMPONENT,
         "revision": 2,
         "fact_summary": {**COMPONENT["fact_summary"], "revision": 2},
+        "payload": resolved_revision(
+            "stat_card",
+            component_id="cmp_01test0001",
+            revision=2,
+            frame_ref=REF_A,
+            title="Aid to Kenya, stored by the timed-out edit",
+        ),
     }
     executor = ScriptedExecutor(
         [
@@ -4516,7 +4523,7 @@ async def test_a_no_op_revise_over_a_readable_head_above_the_canvas_catches_the_
         strict=True,
     )
     edit_model = ScriptedEditModel(
-        {"text": "Renamed.", "patch": {"title": "Aid to Kenya, 2018-2024"}, "recreate": None}
+        {"text": "Renamed.", "patch": {"note": "same again"}, "recreate": None}
     )
     app = _app(*_card(), resolver=_search(), executor=executor, edit_model=edit_model)
     async with _client(app) as client:
@@ -4526,7 +4533,12 @@ async def test_a_no_op_revise_over_a_readable_head_above_the_canvas_catches_the_
     assert _frame(frames, "component.revised")["revision"] == 2
     assert _frame(frames, "message.complete")["text"] == "Renamed."
     assert not [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
-    assert _frame(frames, "done")["composition"]["blocks"][0]["revision"] == 2
+    block = _frame(frames, "done")["composition"]["blocks"][0]
+    assert block["revision"] == 2
+    assert block["title"] == "Aid to Kenya, stored by the timed-out edit"
+    assert _frame(frames, "composition.updated")["manifest"]["blocks"][0]["title"] == block["title"]
+    entry = app.state.studio.store.current(PRINCIPAL, CONVERSATION).components["cmp_01test0001"]
+    assert entry["title"] == block["title"]
 
 
 async def test_a_repeat_of_a_rebuild_stored_unreadable_writes_again() -> None:

@@ -241,6 +241,7 @@ async def _edit_flow(
                     component=component,
                     patch=patch,
                     revised=revised,
+                    caught_up=_is_no_op(component, current_revision),
                 ),
                 *_close(text or "Done -- the card was updated."),
             ]
@@ -353,9 +354,12 @@ def _revised_frames(
     component: dict[str, Any],
     patch: dict[str, Any],
     revised: ComponentRevised,
+    caught_up: bool = False,
 ) -> list[Any]:
     """The frames of a landed revise. `revised` is the frame `component_revised`
-    built to check the card."""
+    built to check the card. `caught_up` marks a no-op write over a head above the
+    canvas (`_canvas_is_behind`): the title then comes from that head, which holds
+    what the earlier edit stored, not from this edit's patch."""
     revision = revised.revision
     revised.seq = conversation.next_seq()
     frames: list[Any] = [revised]
@@ -363,8 +367,9 @@ def _revised_frames(
     entry["revision"] = revision
     entry["fact_summary"] = component.get("fact_summary") or entry.get("fact_summary")
     entry.update(drawn_series_ids(component))
-    if patch.get("title"):
-        entry["title"] = patch["title"]
+    title = _block_title(component) if caught_up else patch.get("title")
+    if title:
+        entry["title"] = title
     conversation.turn_components.append(
         _turn_component_entry(
             component_id=component_id,
@@ -378,7 +383,7 @@ def _revised_frames(
         conversation,
         component_id=component_id,
         revision=revision,
-        title=patch.get("title"),
+        title=title,
     ):
         frames.append(
             CompositionUpdated(
