@@ -85,6 +85,41 @@ _LATEST = {"anchor": "latest", "offset": 0}
 
 
 @pytest.mark.parametrize(
+    ("field", "drafted"),
+    [
+        (
+            "recreate",
+            {
+                "type": "table",
+                "title": "Aid",
+                "select": {"donor": "country/FRA"},
+                "order": {"by": "value", "direction": "descending"},
+            },
+        ),
+        ("patch", {"order": {"by": "value", "direction": "ascending"}}),
+        ("patch", {"order": None}),
+    ],
+    ids=["recreate", "patch", "patch-clears"],
+)
+async def test_edit_passes_an_order_through_as_the_model_wrote_it(
+    field: str, drafted: dict[str, Any]
+) -> None:
+    """A drafted `order` is passed on, and the edit route makes it legal."""
+    other = "recreate" if field == "patch" else "patch"
+    client = _FakeClient(
+        json.dumps({"text": "Done.", f"{field}_json": json.dumps(drafted), f"{other}_json": None})
+    )
+
+    out = await GeminiEdit(model_name="test-model", timeout_s=90.0, client=client)(
+        message="sort it",
+        stored_intent={"type": "bar_chart", "title": "Aid"},
+        frame_view={"dimensions": []},
+    )
+
+    assert out[field] == drafted
+
+
+@pytest.mark.parametrize(
     "period",
     [
         pytest.param(

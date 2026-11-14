@@ -1,8 +1,8 @@
 """The Edit Card route: `component_ref.intent: "edit"`.
 
 No resolve, no plan, no ADK session: the card is described, the model
-decides between a revise patch (title / select) and a full recreate (type,
-window, frame_ref), and the platform write streams back as
+decides between a revise patch (title / select / order) and a full recreate
+(type, window, frame_ref), and the platform write streams back as
 `component.revised` or `component.created`. A recreated component takes
 the replaced block's slot on the canvas.
 
@@ -64,6 +64,8 @@ logger = logging.getLogger(__name__)
 # Intent fields a revise patch may not name, as apis
 # `assembler.merge.merge_intent` refuses them.
 _CREATE_ONLY_FIELDS = ("type", "frame_ref")
+# The component types whose intent takes an `order`.
+_ORDERED_TYPES = frozenset({"line_chart", "bar_chart", "table"})
 
 # What a closing message says before the sentence for a refused edit's code.
 _EDIT_REFUSED = "The edit was refused."
@@ -195,6 +197,11 @@ async def _edit_flow(
     patch = drafted.get("patch")
     recreate = drafted.get("recreate")
     text = str(drafted.get("text") or "")
+    if patch:
+        patch = _ordered_patch(stored, patch)
+        if not patch:
+            # The patch named only an order the card cannot take.
+            text = ""
     if not patch and not recreate:
         for frame in _close(text or "That edit isn't possible for this card's data."):
             yield frame
@@ -268,7 +275,7 @@ async def _edit_flow(
             # The model drafted `text` for an in-place revise; this is a new card.
             closing = _REBUILT_TEXT
     else:
-        intent = {**recreate, "frame_ref": stored.get("frame_ref")}
+        intent = _recreated(stored, recreate)
         step_label = "Rebuild the card"
         closing = text or "Done -- the card was rebuilt with your change."
     written = await recorder(tool="write_component", args={"intent": intent})
@@ -331,6 +338,74 @@ def _refused_lead(result: dict[str, Any], *, unreadable: str) -> str:
     `unreadable` when the platform stored a card the harness cannot read."""
     code = (result.get("refusal") or {}).get("code")
     return unreadable if code == HarnessCode.STORED_CARD_UNREADABLE else _EDIT_REFUSED
+
+
+def _legal_order(order: Any, *, type_: Any) -> dict[str, Any] | None:
+    """`order` as a `type_` card's intent takes it: None on a type that takes
+    no order and for an order whose shape the platform refuses, which is
+    logged, and with no `period` on a `bar_chart`."""
+    if type_ not in _ORDERED_TYPES:
+        return None
+    valid = (
+        isinstance(order, dict)
+        and set(order) <= {"by", "direction", "period"}
+        and order.get("by") == "value"
+        and order.get("direction") in {"ascending", "descending"}
+        and ("period" not in order or (isinstance(order["period"], str) and order["period"]))
+    )
+    if not valid:
+        logger.warning("card edit dropped an invalid order: %r", order)
+        return None
+    return _without_period(order) if type_ == "bar_chart" else order
+
+
+def _without_period(order: dict[str, Any]) -> dict[str, Any]:
+    """`order` ranking at the platform's own period."""
+    return {key: value for key, value in order.items() if key != "period"}
+
+
+def _ordered_patch(stored: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    """`patch` with an `order` the stored card's type takes: the model's own,
+    made legal (`_legal_order`) or left out, `null` clearing it. A patch that
+    changes the select or window and leaves the order alone ranks at the
+    platform's own period, since the stored card's period may hold no value
+    for a series the new card draws, and the platform refuses an order at
+    such a period."""
+    patch = dict(patch)
+    if patch.get("order") is not None:
+        order = _legal_order(patch.pop("order"), type_=stored.get("type"))
+        if order is not None:
+            patch["order"] = order
+    held = stored.get("order")
+    if (
+        "order" not in patch
+        and isinstance(held, dict)
+        and "period" in held
+        and any(key in patch and patch[key] != stored.get(key) for key in ("select", "window"))
+    ):
+        patch["order"] = _without_period(held)
+    return patch
+
+
+def _recreated(stored: dict[str, Any], recreate: dict[str, Any]) -> dict[str, Any]:
+    """The intent a recreate writes: the model's `recreate` on the stored
+    card's frame, with its `order` made legal for its type (`_legal_order`).
+    A recreate with no order draws the card unordered. The stored card's own
+    period is kept only on its select and window, among the series it ranked,
+    since the platform refuses an order at a period no drawn series holds; a
+    period the model names afresh stands."""
+    intent = {key: value for key, value in recreate.items() if key != "order"}
+    intent["frame_ref"] = stored.get("frame_ref")
+    if recreate.get("order") is None:
+        return intent
+    order = _legal_order(recreate["order"], type_=intent.get("type"))
+    if order is None:
+        return intent
+    held = stored.get("order")
+    carried = isinstance(held, dict) and "period" in order and order["period"] == held.get("period")
+    if carried and any(intent.get(key) != stored.get(key) for key in ("select", "window")):
+        order = _without_period(order)
+    return intent | {"order": order}
 
 
 def _merge_patch(stored: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:

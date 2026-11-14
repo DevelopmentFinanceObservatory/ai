@@ -4687,6 +4687,106 @@ async def test_an_edit_writes_the_period_as_the_model_drafted_it(period: dict[st
     }
 
 
+_ORDERED_BAR = {
+    "type": "bar_chart",
+    "title": "Aid to Kenya",
+    "select": {"stat_var": "dcid:Aid"},
+    "frame_ref": REF_A,
+    "order": {"by": "value", "direction": "descending"},
+}
+_ORDERED_LINE = {
+    **_ORDERED_BAR,
+    "type": "line_chart",
+    "order": {"by": "value", "direction": "descending", "period": "2023"},
+}
+_LARGEST_FIRST = {"by": "value", "direction": "descending"}
+_OTHER_SELECT = {"stat_var": "dcid:Loans"}
+
+
+@pytest.mark.parametrize(
+    ("stored", "recreate", "written_order"),
+    [
+        # The model copied the stored order onto a type that takes none.
+        (_ORDERED_BAR, {"type": "stat_card", "order": _LARGEST_FIRST}, None),
+        # The model left the order out, so the rebuilt table is unordered.
+        (_ORDERED_BAR, {"type": "table"}, None),
+        # A bar chart takes no period.
+        (_ORDERED_LINE, {"type": "bar_chart", "order": _ORDERED_LINE["order"]}, _LARGEST_FIRST),
+        # The same series rank at the stored period.
+        (_ORDERED_LINE, {"type": "table", "order": _ORDERED_LINE["order"]}, _ORDERED_LINE["order"]),
+        # Other series may hold no value at the stored period.
+        (
+            _ORDERED_LINE,
+            {"type": "line_chart", "select": _OTHER_SELECT, "order": _ORDERED_LINE["order"]},
+            _LARGEST_FIRST,
+        ),
+        # A period the model names afresh stands.
+        (
+            _ORDERED_LINE,
+            {
+                "type": "line_chart",
+                "select": _OTHER_SELECT,
+                "order": {**_LARGEST_FIRST, "period": "2021"},
+            },
+            {**_LARGEST_FIRST, "period": "2021"},
+        ),
+    ],
+)
+async def test_an_edit_recreate_writes_the_drafted_order_where_the_type_takes_it(
+    stored: dict[str, Any], recreate: dict[str, Any], written_order: dict[str, str] | None
+) -> None:
+    """A recreate writes the order the model drafted, made legal for its type:
+    none on a stat card, no period on a bar chart, and the stored card's period
+    only over its series and window."""
+    recreate = {"title": "Aid to Kenya", "select": stored["select"], **recreate}
+    executor = ScriptedExecutor(
+        [
+            *_card_results(),
+            _described(stored_intent=stored),
+            _VIEW,
+            {"outcome": "ok", "frame_refs": [], "component": COMPONENT},
+        ],
+        strict=True,
+    )
+    app = _app(
+        *_card(),
+        resolver=_search(),
+        executor=executor,
+        edit_model=ScriptedEditModel({"text": "Done.", "patch": None, "recreate": recreate}),
+    )
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        await _stream(client, "/api/studio/turn", _edit_body("rebuild it"))
+
+    write = executor.calls[-1]
+    assert write["tool"] == "write_component"
+    assert write["args"]["intent"].get("order") == written_order
+
+
+@pytest.mark.parametrize(
+    ("patch", "written_order"),
+    [
+        # A new select ranks at the platform's own period.
+        ({"select": _OTHER_SELECT}, _LARGEST_FIRST),
+        ({"order": None}, None),
+        (
+            {"order": {"by": "value", "direction": "ascending"}},
+            {"by": "value", "direction": "ascending"},
+        ),
+    ],
+)
+async def test_an_edit_patch_writes_the_order_it_names(
+    patch: dict[str, Any], written_order: dict[str, str] | None
+) -> None:
+    """A patch sets or clears the order, and one that changes the select and
+    leaves the order alone drops the stored order's period."""
+    _, executor = await _edit_without_a_write_token(patch, stored_intent=_ORDERED_LINE)
+
+    write = executor.calls[-1]
+    assert write["tool"] == "write_component"
+    assert write["args"]["intent"].get("order") == written_order
+
+
 # --- the canvas digest -----------------------------------------------------------
 
 

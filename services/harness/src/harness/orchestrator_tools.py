@@ -297,8 +297,10 @@ class Chart(BaseModel):
     order_by_value: bool = Field(
         default=False,
         description=(
-            "has no effect: the platform draws every chart's members in its own order. "
-            "A cut keeps the largest members whether this flag is true or false"
+            "set true to draw a line_chart, bar_chart or table largest first: its lines, "
+            "bars or rows ranked by value at the period most of them report. A table is "
+            "ordered only when its rows share one unit. A cut chart is drawn largest "
+            "first whether this flag is true or false"
         ),
     )
     state_values_for: list[str] = Field(
@@ -675,8 +677,8 @@ def _cut_refused(chart: Chart, refusal: Mapping[str, Any]) -> bool:
 @dataclass(frozen=True)
 class _Narrowed:
     """A select with its one multiplying dimension listing members in rank
-    order, and for a select cut to what its chart draws, the cut. The platform
-    draws the members in its own order."""
+    order, and for a select cut to what its chart draws, the cut, which
+    `_card_order` draws largest first."""
 
     select: dict[str, Any]
     cut: TopMembers | None
@@ -809,6 +811,24 @@ async def _card_period(
     return at, {"start": at, "end": at} if pinned else None
 
 
+def _card_order(chart: Chart, cut: TopMembers | None) -> dict[str, str] | None:
+    """The `order` a card's intent names: largest first on a chart cut to its
+    largest members and on one the model asked to order by value, and None on
+    any other chart and on a stat card, which draws one value. A cut line chart
+    or table ranks at the period the cut ranked at, the one its title names,
+    since the platform's own choice among the drawn members can fall on
+    another. A bar chart takes no period: a cut one is pinned to the cut's
+    period by its window. An uncut chart names none, as neither its select nor
+    its window fixes one period, and the platform ranks at the period where
+    the most drawn series hold a value, the later on a tie."""
+    if chart.type == "stat_card" or (cut is None and not chart.order_by_value):
+        return None
+    order = {"by": "value", "direction": "descending"}
+    if cut is not None and chart.type in {"line_chart", "table"}:
+        order["period"] = cut.period
+    return order
+
+
 def _drawn_period(held: _FrameRows, *, select: dict[str, Any]) -> str | None:
     """`latest_shared_period` over a stored frame, read without its enrichment
     columns, which describe a member and split no series."""
@@ -825,7 +845,7 @@ def _drawn_period(held: _FrameRows, *, select: dict[str, Any]) -> str | None:
 
 def _card_identity(intent: Mapping[str, Any]) -> str:
     """What a drawn card is: the intent the platform renders and checks it
-    from (kind, frame, select, window, title). The figures a chart asks to be
+    from (kind, frame, select, window, order, title). The figures a chart asks to be
     stated are no part of it, so asking a drawn card for other figures reads
     them from it. The title stays in, so a title the platform would refuse is
     checked afresh rather than answered from a card drawn under another."""
@@ -907,7 +927,8 @@ async def _cut_plan(
     (`_plan_cut`), from one read of its frame; None when there is no cut. A plan
     that needs the members' kinds, on a frame whose rows carry no kind or
     type cell, reads them (`_member_cells`) and plans from the frame once
-    more. The cut keeps the largest members; apis draws them in its own order."""
+    more. The cut keeps the largest members, and `_card_order` draws them
+    largest first."""
     view = frame["view"]
     plan_with = functools.partial(
         _plan_cut, type_=chart.type, select=select, dimension=dimension, view=view
@@ -2476,6 +2497,8 @@ def build_orchestrator_tools(
             }
             if window is not None:
                 intent["window"] = window
+            if (order := _card_order(chart, cut)) is not None:
+                intent["order"] = order
             identity = _card_identity(intent)
             held = drawn_cards.get(identity) or canvas.get(identity)
             # An earlier write of this card stored one the harness cannot read,
