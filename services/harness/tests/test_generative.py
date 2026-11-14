@@ -84,22 +84,39 @@ class _FakeClient:
 _LATEST = {"anchor": "latest", "offset": 0}
 
 
-async def test_edit_accepts_a_recreate_carrying_the_stored_order() -> None:
-    """A recreate that copies the stored card's `order` is passed on, and the
-    edit route decides the order it writes."""
-    order = {"by": "value", "direction": "descending"}
-    recreate = {"type": "table", "title": "Aid", "select": {"donor": "country/FRA"}, "order": order}
+@pytest.mark.parametrize(
+    ("field", "drafted"),
+    [
+        (
+            "recreate",
+            {
+                "type": "table",
+                "title": "Aid",
+                "select": {"donor": "country/FRA"},
+                "order": {"by": "value", "direction": "descending"},
+            },
+        ),
+        ("patch", {"order": {"by": "value", "direction": "ascending"}}),
+        ("patch", {"order": None}),
+    ],
+    ids=["recreate", "patch", "patch-clears"],
+)
+async def test_edit_passes_an_order_through_as_the_model_wrote_it(
+    field: str, drafted: dict[str, Any]
+) -> None:
+    """A drafted `order` is passed on, and the edit route makes it legal."""
+    other = "recreate" if field == "patch" else "patch"
     client = _FakeClient(
-        json.dumps({"text": "Done.", "patch_json": None, "recreate_json": json.dumps(recreate)})
+        json.dumps({"text": "Done.", f"{field}_json": json.dumps(drafted), f"{other}_json": None})
     )
 
-    drafted = await GeminiEdit(model_name="test-model", timeout_s=90.0, client=client)(
-        message="make it a table",
-        stored_intent={"type": "bar_chart", "title": "Aid", "order": order},
+    out = await GeminiEdit(model_name="test-model", timeout_s=90.0, client=client)(
+        message="sort it",
+        stored_intent={"type": "bar_chart", "title": "Aid"},
         frame_view={"dimensions": []},
     )
 
-    assert drafted["recreate"] == recreate
+    assert out[field] == drafted
 
 
 @pytest.mark.parametrize(

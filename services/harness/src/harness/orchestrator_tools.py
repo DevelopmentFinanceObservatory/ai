@@ -298,8 +298,9 @@ class Chart(BaseModel):
         default=False,
         description=(
             "set true to draw a line_chart, bar_chart or table largest first: its lines, "
-            "bars or rows ranked by value at the period most of them report. A cut chart is "
-            "drawn largest first whether this flag is true or false"
+            "bars or rows ranked by value at the period most of them report. A table is "
+            "ordered only when its rows share one unit. A cut chart is drawn largest "
+            "first whether this flag is true or false"
         ),
     )
     state_values_for: list[str] = Field(

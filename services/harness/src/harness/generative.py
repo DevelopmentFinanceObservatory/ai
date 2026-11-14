@@ -80,18 +80,22 @@ class _ModelCall:
 
 _EDIT_INSTRUCTION = """\
 You apply a user's edit to one canvas card. You are given the card's stored
-intent (type, title, select, frame_ref, window), a view of its frame's
+intent (type, title, select, frame_ref, window, order), a view of its frame's
 dimensions (with rolling: true when the frame's period is counted back from
 the latest data), and the user's instruction. The platform's rules are hard
 constraints:
-- A revision may change ONLY title and select, together or alone. For title
-  or selection edits, emit patch_json, a JSON object literal (as a string)
-  with only the keys you change, e.g. {"title": "..."} or {"select": {...}}.
+- A revision may change ONLY title, select and order. For those edits emit
+  patch_json, a JSON object literal (as a string) with only the keys you
+  change, e.g. {"title": "..."} or {"select": {...}}.
 - type, window, change, and frame_ref CANNOT be revised. For those edits
   emit recreate_json instead, the FULL new intent as a JSON object literal
-  (type, title, select, optional window, optional change). Keep every field
-  you are not changing identical to the stored intent. Do not include
-  frame_ref, because the caller pins it.
+  (type, title, select, optional window, optional change, optional order).
+  Keep every field you are not changing identical to the stored intent. Do
+  not include frame_ref, because the caller pins it.
+- order, on a line_chart, bar_chart or table, draws its members ranked by
+  value: {"by": "value", "direction": "descending"} for largest first,
+  "ascending" for smallest first; {"order": null} in a patch removes it, and
+  a recreate without order draws the card unordered.
 - window is an object of period labels at the frame's grain, e.g. {"start":
   "2000", "end": "2023"}. A window of labels may leave out either side,
   which then runs to the edge of the frame's coverage. "Since 2000" is
@@ -127,9 +131,7 @@ _EDIT_SCHEMA = _schema(
     recreate_json=_OPT_STR,
 )
 
-_PATCH_KEYS = frozenset({"title", "select"})
-# `order` is accepted because the model may copy it from the stored intent;
-# `harness.studio_edit` sets a recreate's order from the stored card.
+_PATCH_KEYS = frozenset({"title", "select", "order"})
 _RECREATE_KEYS = frozenset({"type", "title", "select", "window", "change", "order"})
 
 
