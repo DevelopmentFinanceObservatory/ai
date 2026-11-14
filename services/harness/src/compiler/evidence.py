@@ -218,11 +218,12 @@ class RetrievalEvidence(StrictModel):
     `deflation_basis` values the frame grammar names states one unit and sets
     `mixed_deflation`, which words that different parties' prices deflated
     them. A manifest with no single readable unit leaves `stated_unit` and
-    `unit_ref` empty. `unit_disagreement` marks readable units that differ and
-    `disagreeing_units` words each, so an issue's `found` is `None` only when no
-    unit was readable. `unreadable_unit` holds the capped JSON of the first unit
-    that could not be read, which also leaves the unit unknown beside readable
-    ones. It appears in an issue's `detail` only, and `found` omits it.
+    `unit_ref` empty. `unit_disagreement` marks readable units that differ.
+    `disagreeing_units` words each readable unit when they differ or when an
+    unreadable one stands beside them, so an issue's `found` is `None` only when
+    no unit was readable. `unreadable_unit` holds the capped JSON of the first
+    unit that could not be read, which also leaves the unit unknown beside
+    readable ones. It appears in an issue's `detail` only, and `found` omits it.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -355,7 +356,9 @@ def evidence_from_manifest(
         ),
         unit_disagreement=len(read.units) > 1,
         disagreeing_units=(
-            tuple(sorted(_unit_wording(one) for one in read.units)) if len(read.units) > 1 else ()
+            tuple(sorted(_unit_wording(one) for one in read.units))
+            if len(read.units) > 1 or (read.units and read.unreadable)
+            else ()
         ),
         mixed_deflation=read.mixed_deflation and unit is not None,
         provenance_ref="; ".join(one.ref for one in sources) or None,
