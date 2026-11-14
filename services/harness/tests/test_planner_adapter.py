@@ -6395,13 +6395,23 @@ async def test_a_region_switch_and_its_users_decision_carry_through_an_amendment
             "A service the plan needs could not be reached.",
             True,
         ),
+        (
+            ReferralKind.REQUIREMENT_NEEDS_REPAIR,
+            "invalid_input",
+            StopCode.PLAN_NOT_READY,
+            False,
+            "For health (CRS 120) and population and reproductive health (CRS 130), a "
+            "calculation was asked of data in a shape it cannot read.",
+            False,
+        ),
     ],
-    ids=["not_ready", "search_unanswered", "service_unanswered"],
+    ids=["not_ready", "search_unanswered", "service_unanswered", "needs_repair"],
 )
 async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_reason(
     decision: Any,
     requirement: Any,
     derived_requirement: Any,
+    caplog: pytest.LogCaptureFixture,
     kind: ReferralKind,
     outcome: str,
     code: str,
@@ -6414,7 +6424,10 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
     that was not found again ends on `plan_not_ready` and the referral's
     reason, since no model is there to settle it, and a switch to the same
     option repeats it. A transient referral, with time left, ends on the
-    service that did not answer, which a later switch can escape."""
+    service that did not answer, which a later switch can escape. A compile
+    issue the requirement needs repaired ends on `plan_not_ready` too. Each
+    refusal is logged with its code and the referral's own reason and
+    constraint, before the user's sentence replaces them."""
     old, new = "spec_" + "c" * 32, "spec_" + "d" * 32
     scope = _switchable_scope()
     shown = {
@@ -6435,14 +6448,25 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
         }
     )
 
+    referred = {
+        "kind": kind.value,
+        "outcome": outcome,
+        "requirement_id": dataset.id,
+        "reason": f"{dataset.id!r} pins {new!r}, which discovery did not find.",
+    }
+    if kind is ReferralKind.REQUIREMENT_NEEDS_REPAIR:
+        referred |= {
+            "reason": "operation 'ranked' (rank) refused: rank reads a single measure; got 2",
+            "constraint": "input_shape_unsupported",
+            "repair": (
+                "change the calculation, or the requirement it reads, so its input has a "
+                "shape the calculation takes"
+            ),
+        }
+
     async def translate(call: Any) -> dict[str, object]:
         del call
-        return {
-            "kind": kind.value,
-            "outcome": outcome,
-            "requirement_id": dataset.id,
-            "reason": f"{dataset.id!r} pins {new!r}, which discovery did not find.",
-        }
+        return referred
 
     adapter = scripted_planner(ScriptedGenai([]), translate=translate)
 
@@ -6470,20 +6494,27 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
         app_name=_APP,
         session_service=sessions,
     )
-    (result,) = [
-        event.output
-        async for event in runner.run_async(
-            user_id=_USER,
-            session_id=session.id,
-            new_message=types.Content(role="user", parts=[types.Part(text="switch")]),
-        )
-        if event.output is not None
-    ]
+    with caplog.at_level(logging.INFO, logger=planner_adapter.__name__):
+        (result,) = [
+            event.output
+            async for event in runner.run_async(
+                user_id=_USER,
+                session_id=session.id,
+                new_message=types.Content(role="user", parts=[types.Part(text="switch")]),
+            )
+            if event.output is not None
+        ]
 
     refused = result["refused"]
     assert (refused["code"], refused["final"], refused["reason"]) == (code, final, reason)
     assert (refused["code"] in switch._RETRYABLE_REVISION_CODES) is retryable
     assert f"for requirement {dataset.id!r}" in refused["text"]
+    (logged,) = [
+        record.args
+        for record in caplog.records
+        if record.msg == "plan revision refused: code=%s constraint=%s reason=%.500s"
+    ]
+    assert logged == (code, referred.get("constraint"), referred["reason"])
 
 
 def test_a_declared_wholes_compile_leaves_the_readings_unchanged() -> None:
