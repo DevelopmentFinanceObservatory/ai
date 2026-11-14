@@ -67,6 +67,7 @@ records a check that passed and is worth showing.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -123,10 +124,11 @@ class StatedUnit(Unit):
     and a source that states one is read, worded and compared with it intact.
 
     A source's unit belongs to the platform, which adds members this check
-    does not compare, so those are ignored. `deflation_basis` is any string,
-    and an empty one reads as none. A basis the frame grammar does not name is
-    left out of the wording (`_describe_unit`), and series stating different
-    known ones merge into a unit that names none (`_collapse_bases`).
+    does not compare, so those are ignored. `deflation_basis` is any string;
+    an empty one, or a value that is not a string, reads as none. A basis
+    the frame grammar does not name is left out of the wording
+    (`_describe_unit`), and series stating different known ones merge into a unit that names
+    none (`_collapse_bases`).
     `currency`, `prices` and `base_year` are validated strictly."""
 
     model_config = ConfigDict(extra="ignore")
@@ -136,7 +138,7 @@ class StatedUnit(Unit):
     @field_validator("deflation_basis", mode="before")
     @classmethod
     def _empty_basis_is_none(cls, value: object) -> object:
-        return value or None
+        return value if isinstance(value, str) and value else None
 
 
 class SeriesEvidence(StrictModel):
@@ -1761,7 +1763,9 @@ def _unit_issues(
                 severity=Severity.ERROR if evidence.origin == "manifest" else Severity.WARNING,
                 requirement_id=requirement.id,
                 detail=_unverified_detail(evidence, described),
-                found=described or "; ".join(evidence.disagreeing_units) or None,
+                found=described
+                or truncate("; ".join(evidence.disagreeing_units), _UNREADABLE_UNIT_CHARS)
+                or None,
                 required=unit.model_dump(),
             )
         )
@@ -2585,16 +2589,15 @@ def _facet_unit(value: object) -> str | StatedUnit | None:
     """The unit a series' facet states: a bare ref, a `{ref, label}` block,
     or the frame grammar's `{currency, prices, base_year, deflation_basis}`
     object, its basis kept and its other members ignored. An object whose
-    `currency`, `prices` or `base_year` the grammar rejects states no unit."""
+    `currency`, `prices` or `base_year` the grammar rejects is read through its
+    `ref` or `label`, and states no unit when it has neither."""
     if isinstance(value, str):
         return value or None
     if not isinstance(value, dict):
         return None
     if "currency" in value:
-        try:
+        with contextlib.suppress(ValidationError):
             return StatedUnit.model_validate(value)
-        except ValidationError:
-            return None
     ref = value.get("ref") or value.get("label")
     return ref if isinstance(ref, str) and ref else None
 
