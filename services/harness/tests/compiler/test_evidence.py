@@ -2101,7 +2101,16 @@ _MANY_REFS_FOUND = truncate(
 @pytest.mark.parametrize(
     ("units", "found", "quoted"),
     [
-        ([_USD_CURRENT, _UNREADABLE], None, json.dumps(_UNREADABLE, sort_keys=True)),
+        (
+            [_USD_CURRENT, _UNREADABLE],
+            "current prices, US dollars",
+            json.dumps(_UNREADABLE, sort_keys=True),
+        ),
+        (
+            [_USD_CURRENT, {**_USD_CURRENT, "currency": "EUR"}, _UNREADABLE],
+            _BOTH_UNITS,
+            json.dumps(_UNREADABLE, sort_keys=True),
+        ),
         ([_USD_CURRENT, {**_USD_CURRENT, "currency": "EUR"}], _BOTH_UNITS, None),
         ([{}], None, None),
         ([_LONG_UNREADABLE], None, _LONG_UNREADABLE_QUOTED),
@@ -2109,6 +2118,7 @@ _MANY_REFS_FOUND = truncate(
     ],
     ids=[
         "unreadable-beside-readable",
+        "unreadable-beside-disagreeing-readable",
         "readable-units-disagree",
         "memberless",
         "unreadable-quoted-to-a-cap",
