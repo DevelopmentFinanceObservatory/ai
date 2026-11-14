@@ -6512,15 +6512,9 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
     (logged,) = [
         record.args
         for record in caplog.records
-        if record.msg == "plan revision refused: code=%s detail=%s"
+        if record.msg == "plan revision refused: code=%s constraint=%s reason=%.500s"
     ]
-    assert isinstance(logged, tuple)
-    logged_code, detail = logged
-    assert logged_code == code
-    assert (detail["reason"], detail.get("constraint")) == (
-        referred["reason"],
-        referred.get("constraint"),
-    )
+    assert logged == (code, referred.get("constraint"), referred["reason"])
 
 
 def test_a_declared_wholes_compile_leaves_the_readings_unchanged() -> None:

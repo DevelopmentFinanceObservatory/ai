@@ -1006,8 +1006,13 @@ class PlannerAdapter:
         rewrites them for the user: for a compile issue, the issue's code
         (`constraint`) and the compiler's own reason, so a refused switch is
         diagnosable from the logs."""
+        detail = refused.get("detail")
+        detail = detail if isinstance(detail, Mapping) else {}
         logger.info(
-            "plan revision refused: code=%s detail=%s", refused.get("code"), refused.get("detail")
+            "plan revision refused: code=%s constraint=%s reason=%.500s",
+            refused.get("code"),
+            detail.get("constraint"),
+            detail.get("reason"),
         )
         answer = PlannerAdapter._refused(refused)
         answer["refused"]["reason"] = refusal_reason(refused, words=words)
