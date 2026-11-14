@@ -208,6 +208,7 @@ def test_an_unknown_frame_member_is_refused() -> None:
 
 _PER_HEAD = {"stat_var": "dcid:Count_Person", "label": "Total population"}
 _CONSTANT_USD = {"currency": "USD", "prices": "constant", "base_year": 2023}
+_DONOR_USD = {**_CONSTANT_USD, "deflation_basis": "donor"}
 
 
 def _written_component(unit: object) -> dict[str, Any]:
@@ -224,11 +225,20 @@ def _written_component(unit: object) -> dict[str, Any]:
         None,
         "US Dollar",
         _CONSTANT_USD,
+        _DONOR_USD,
         {"magnitude": "trillions"},
         {"numerator": "US Dollar", "denominator": _PER_HEAD},
         {"numerator": _CONSTANT_USD, "denominator": "Square Kilometer"},
     ],
-    ids=["none", "name", "structured", "one-member", "per-stat-var", "structured-per-name"],
+    ids=[
+        "none",
+        "name",
+        "structured",
+        "structured-with-basis",
+        "one-member",
+        "per-stat-var",
+        "structured-per-name",
+    ],
 )
 def test_a_component_is_usable_with_each_unit_the_platform_states(unit: object) -> None:
     assert usable_component(_written_component(unit))
@@ -241,6 +251,9 @@ def test_a_component_is_usable_with_each_unit_the_platform_states(unit: object) 
         {},
         {"currency": "USD", "price_basis": "constant"},
         {"currency": "usd"},
+        {"currency": "USD", "prices": "constant", "deflation_basis": "creditor"},
+        {"currency": "USD", "prices": "current", "deflation_basis": "donor"},
+        {"currency": "USD", "deflation_basis": "donor"},
         {"numerator": "US Dollar"},
         {"numerator": "US Dollar", "denominator": None},
         {"numerator": "US Dollar", "denominator": _PER_HEAD, "label": "per head"},
@@ -254,6 +267,9 @@ def test_a_component_is_usable_with_each_unit_the_platform_states(unit: object) 
         "no-member",
         "unknown-member",
         "lower-case-currency",
+        "unknown-basis",
+        "basis-at-current-prices",
+        "basis-without-prices",
         "no-denominator",
         "null-side",
         "extra-member",

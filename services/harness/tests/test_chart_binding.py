@@ -105,7 +105,7 @@ def test_top_members_anchors_on_the_compared_members_alone(
 def test_top_members_counts_a_row_with_no_value_as_not_held() -> None:
     rows = _provider_rows({"A": {"2024": 1.0}, "B": {"2024": 2.0}, "C": {"2024": None}})
 
-    top = top_members(rows=rows, select=KENYA, dimension="financingProvider", limit=None)
+    top = top_members(rows=rows, select=KENYA, dimension="financingProvider", limit=5)
 
     assert top == TopMembers(
         members=["B", "A"],

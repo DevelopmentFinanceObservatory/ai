@@ -54,6 +54,7 @@ from dfo_frame_grammar import (
     FrameError,
     StatVarPart,
     UnitRequest,
+    canonical_frame_schema,
     frame_sha256,
     mint_content_version,
     unit_cell_array,
@@ -2107,7 +2108,9 @@ def test_a_unit_struct_in_the_frame_tagged_form_refuses_as_an_invalid_unit(
 
 
 def test_a_text_unit_column_decodes_refs_and_converted_units_as_dfo_apis_writes_them() -> None:
-    """apis writes a ref as its own text and a converted unit as JCS object text."""
+    """apis writes a ref as its own text and a converted unit as JCS object text.
+    The decode targets the recipe layout, and with no cell carrying a recipe or
+    a deflation basis the frame holds the default layout."""
     unit = pa.array(
         [
             "dcid:USDollar",
@@ -2125,6 +2128,35 @@ def test_a_text_unit_column_decodes_refs_and_converted_units_as_dfo_apis_writes_
         "country/C2": UnitRequest(currency="USD", prices="constant", base_year=2024),
         "country/C3": None,
     }
+    assert frame.table.schema == canonical_frame_schema(frame.columns)
+
+
+def test_a_text_unit_keeps_its_deflation_basis_and_a_cell_without_one_reads_as_before() -> None:
+    """The recipe layout the decode targets holds `deflation_basis`; a narrower
+    layout would drop it, so the frame keeps that layout. A converted unit
+    stating none decodes with no basis."""
+    unit = pa.array(
+        [
+            '{"base_year":2024,"currency":"NGN","deflation_basis":"donor","prices":"constant"}',
+            '{"base_year":2024,"currency":"NGN","deflation_basis":"recipient","prices":"constant"}',
+            '{"base_year":2024,"currency":"NGN","prices":"constant"}',
+            "dcid:USDollar",
+        ]
+    )
+
+    frame = _decoded(unit=unit)
+
+    assert _unit_cells(frame) == {
+        "country/C0": UnitRequest(
+            currency="NGN", prices="constant", base_year=2024, deflation_basis="donor"
+        ),
+        "country/C1": UnitRequest(
+            currency="NGN", prices="constant", base_year=2024, deflation_basis="recipient"
+        ),
+        "country/C2": UnitRequest(currency="NGN", prices="constant", base_year=2024),
+        "country/C3": "dcid:USDollar",
+    }
+    assert frame.table.schema == canonical_frame_schema(frame.columns, recipe=True)
 
 
 def test_a_derived_frame_decodes_composed_units_as_the_runner_writes_them() -> None:

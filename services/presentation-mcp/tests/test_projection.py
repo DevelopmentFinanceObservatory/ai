@@ -192,6 +192,8 @@ _PER_HEAD = {
     "denominator": {"stat_var": "dcid:Count_Person", "label": "Total population"},
 }
 _CONSTANT_EUR = {"currency": "EUR", "prices": "constant", "base_year": 2020}
+_DONOR_EUR = {**_CONSTANT_EUR, "deflation_basis": "donor"}
+_RECIPIENT_EUR = {**_CONSTANT_EUR, "deflation_basis": "recipient"}
 
 
 @pytest.mark.parametrize(
@@ -207,6 +209,9 @@ _CONSTANT_EUR = {"currency": "EUR", "prices": "constant", "base_year": 2020}
             {"currency": "USD", "magnitude": "millions", "prices": "current"},
             "USD millions, current prices",
         ),
+        (_DONOR_EUR, "EUR, constant 2020 prices, donor prices"),
+        (_RECIPIENT_EUR, "EUR, constant 2020 prices, recipient prices"),
+        (_CONSTANT_EUR, "EUR, constant 2020 prices"),
         (_PER_HEAD, "US Dollar per Total population"),
         (
             {"numerator": _CONSTANT_EUR, "denominator": "Square Kilometer"},
@@ -222,6 +227,9 @@ _CONSTANT_EUR = {"currency": "EUR", "prices": "constant", "base_year": 2020}
         "string",
         "long-string",
         "structured",
+        "donor-basis",
+        "recipient-basis",
+        "no-basis",
         "per-stat-var",
         "structured-per",
         "per-structured",
@@ -240,6 +248,8 @@ def test_unit_text_words_every_unit_form_whole_on_one_line(unit: object, text: s
         (["x" * MAX_CELL_CHARS + "a", "x" * MAX_CELL_CHARS + "b"], None),
         ([{"currency": "USD", "magnitude": "units"}, {"currency": "USD"}], "USD"),
         ([_PER_HEAD, "US Dollar"], None),
+        ([_DONOR_EUR, _RECIPIENT_EUR], None),
+        ([_DONOR_EUR, _CONSTANT_EUR], None),
     ],
     ids=[
         "no-entry",
@@ -248,6 +258,8 @@ def test_unit_text_words_every_unit_form_whole_on_one_line(unit: object, text: s
         "differ-past-a-cell",
         "read-alike",
         "composed-beside-a-ref",
+        "bases-differ",
+        "basis-beside-none",
     ],
 )
 def test_shared_unit_compares_units_by_their_words(units: list[object], shared: str | None) -> None:

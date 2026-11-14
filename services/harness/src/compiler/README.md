@@ -187,7 +187,7 @@ its whole, so two sides in different units, or one unit against none, are
 `share_units_differ`, which the translator refers back to the planner for repair
 with `quotient_of` among the permitted repairs. A `quotient_of` takes any pair of
 units. It pins each side's own unit (`numerator_unit`, `denominator_unit`) when its
-source declares one, and analysis-mcp states the result in the unit the two
+source declares a unit ref, and analysis-mcp states the result in the unit the two
 compose. A quotient's numerator is keyed by `axis` and its denominator by
 `denominator_axis`, each resolved on that side's own frame, and `denominator_by`
 maps the numerator's key column to the denominator's. A numerator that still holds
@@ -207,7 +207,11 @@ it names the pinned side's requirement, the translator refers it as
 decline the pairing. Any other pair with a side in constant prices is
 `frame_price_bases_differ`, repaired by stating one unit on both sides, in
 current prices or in constant prices of one base year;
-`frame_unit_forms_differ` and `frame_units_differ` cover the rest.
+`frame_unit_forms_differ` and `frame_units_differ` cover the rest. A side bound to
+a unit by request is not pinned. Its converted frame states whose prices deflated
+it (`deflation_basis`), which the request does not, so two sides in one currency
+and base year deflated by different prices are refused when they run, by
+analysis-mcp's `cross_frame_unit_mismatch`, which names each unit with its basis.
 
 **Every issue is reported in one pass.** `compile_plan` never stops at the
 first problem: a failed attempt returns the whole list, each issue naming the

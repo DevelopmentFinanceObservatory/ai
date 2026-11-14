@@ -64,6 +64,7 @@ from common.rolling import (
 from dfo_frame_grammar import shift_period
 from dfo_frame_grammar.grammar import (
     TIME_PERIOD_COLUMN,
+    DeflationBasis,
     UnitCell,
     UnitRequest,
     unit_cell_from_json,
@@ -524,11 +525,14 @@ PredicateAdapter: TypeAdapter[Predicate] = TypeAdapter(Predicate)
 class ConvertedUnit(TypedDict):
     """A converted unit, as `get_data` writes it into a frame's `unit` cells:
     `currency` is an upper-case ISO 4217 code, `prices` is `current` or
-    `constant`, and `base_year` is present exactly when prices are constant."""
+    `constant`, and `base_year` is present exactly when prices are constant.
+    `deflation_basis` names whose prices deflated a constant-price amount and
+    is valid only at constant prices."""
 
     currency: Annotated[str, Field(pattern=r"^[A-Z]{3}$")]
     prices: Literal["current", "constant"]
     base_year: NotRequired[int]
+    deflation_basis: NotRequired[DeflationBasis]
 
 
 # A composed pin as a tool's input schema advertises it. A caller copies one
