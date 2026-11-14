@@ -436,7 +436,9 @@ def check_evidence(
     issues.extend(_entity_issues(requirement, evidence, approved))
     issues.extend(_period_issues(requirement, evidence))
     issues.extend(_scope_issues(requirement, evidence))
-    issues.extend(_unit_issues(requirement, evidence))
+    if at_discovery or evidence.has_data is not False:
+        # A retrieval with no rows says nothing about its source's unit.
+        issues.extend(_unit_issues(requirement, evidence))
     issues.extend(_source_issues(requirement, evidence, approved))
     return issues
 

@@ -2208,6 +2208,25 @@ def test_a_manifest_with_no_rows_is_an_error(
     assert EvidenceIssueCode.ROWS_EMPTY in [i.code for i in errors(issues)]
 
 
+def test_a_manifest_with_no_rows_gets_no_unit_finding(
+    requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    empty = _manifest(coverage={"rows": 0, "dimensions": []})
+
+    issues = check_evidence(
+        requirement(unit=Unit(currency="USD", prices="current")),
+        evidence_from_manifest(empty, series_stats=_default_series_stats()),
+        approved=source(),
+    )
+
+    assert EvidenceIssueCode.ROWS_EMPTY in [i.code for i in issues]
+    assert not {i.code for i in issues} & {
+        EvidenceIssueCode.UNIT_UNVERIFIED,
+        EvidenceIssueCode.UNIT_MATCHES,
+        EvidenceIssueCode.UNIT_MISMATCH,
+    }
+
+
 # --- Open axes: a population covered whole ----------------------------------------
 
 DONORS = OpenEntityAxis(column="origin", member_count=55)
