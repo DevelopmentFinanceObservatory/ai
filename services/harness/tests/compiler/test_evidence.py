@@ -10,6 +10,7 @@ from typing import Any
 import pyarrow as pa
 import pytest
 from compiler.evidence import (
+    _UNREADABLE_UNIT_CHARS,
     EvidenceIssueCode,
     RetrievalEvidence,
     SeriesEvidence,
@@ -32,7 +33,7 @@ from compiler.evidence import (
 from compiler.sources import bound_refs, member_digest, source_from_spec_block, stat_var_reading
 from data_mcp.manifest import Manifest, SeriesStatisticsModel
 from data_mcp.series_statistics import SERIES_STATISTICS_ARROW_SCHEMA, series_statistics_table
-from planner.plan import Coverage, DatasetRequirement, Entity, Unit, open_window
+from planner.plan import Coverage, DatasetRequirement, Entity, Unit, open_window, truncate
 from planner.records import (
     EvidenceIssue,
     Period,
@@ -1980,7 +1981,7 @@ _BASIS_UNSTATED = ("unit_price_basis_unverified", "warning")
         ),
         (
             {"currency": {"role": "destination"}, "prices": "current"},
-            [("unit_unverified", "error"), _BASIS_UNSTATED],
+            [("unit_unverified", "error")],
         ),
     ],
 )
@@ -1998,6 +1999,201 @@ def test_a_manifest_unit_is_read_by_its_structure(
     assert [(issue.code.value, issue.severity.value) for issue in issues] == expected
 
 
+@pytest.mark.parametrize(
+    ("deflation_basis", "worded"), [("donor", True), ("regional", False)], ids=["known", "unknown"]
+)
+def test_a_facet_unit_with_members_the_check_does_not_compare_still_reads(
+    requirement: RequirementFactory, source: SourceFactory, deflation_basis: str, worded: bool
+) -> None:
+    unit = {**_DONOR_CONVERTED, "deflation_basis": deflation_basis, "recipe": "r"}
+    series_stats = _series_stats(_stat("DebtServicePaid", facet={"unit": unit}))
+
+    issues = check_evidence(
+        requirement(unit=Unit(currency="USD", prices="constant", base_year=2024)),
+        evidence_from_manifest(_manifest(), series_stats=series_stats),
+        approved=source(),
+    )
+
+    assert errors(issues) == []
+    (matches,) = [issue for issue in issues if issue.code.value == "unit_matches"]
+    assert (deflation_basis in (matches.found or "")) is worded
+
+
+_MIXED_WORDING = "deflated by different parties' prices"
+
+
+@pytest.mark.parametrize(
+    ("bases", "other_currency", "mixed"),
+    [
+        (["donor", "recipient"], False, True),
+        (["donor", None], False, False),
+        (["donor", ""], False, False),
+        (["donor", 7], False, False),
+        (["donor", "regional"], False, False),
+        (["donor", "recipient"], True, False),
+    ],
+    ids=[
+        "two-bases",
+        "one-basis-and-none",
+        "one-basis-and-empty",
+        "one-basis-and-non-string",
+        "one-basis-and-unknown",
+        "units-disagree",
+    ],
+)
+def test_facet_units_that_differ_only_in_deflation_basis_state_one_unit(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    bases: list[str | int | None],
+    other_currency: bool,
+    mixed: bool,
+) -> None:
+    series_stats = _series_stats(
+        *(
+            _stat(
+                "DebtServicePaid",
+                facet={"unit": {**_DONOR_CONVERTED, "deflation_basis": basis}},
+            )
+            for basis in bases
+        ),
+        *(
+            [_stat("B", facet={"unit": {"currency": "EUR", "prices": "current"}})]
+            if other_currency
+            else []
+        ),
+    )
+    evidence = evidence_from_manifest(_manifest(), series_stats=series_stats)
+
+    assert evidence.unit_disagreement is other_currency
+    assert evidence.mixed_deflation is mixed
+    assert (evidence.stated_unit is None) is other_currency
+    if other_currency:
+        return
+    assert evidence.stated_unit is not None
+    assert evidence.stated_unit.deflation_basis is None
+    issues = check_evidence(
+        requirement(unit=Unit(currency="USD", prices="constant", base_year=2024)),
+        evidence,
+        approved=source(),
+    )
+    assert errors(issues) == []
+    (matches,) = [issue for issue in issues if issue.code.value == "unit_matches"]
+    assert (_MIXED_WORDING in (matches.found or "")) is mixed
+    assert not any(
+        basis in (matches.found or "") for basis in bases if isinstance(basis, str) and basis
+    )
+
+
+_USD_CURRENT = {"currency": "USD", "prices": "current"}
+_BOTH_UNITS = "current prices, US dollars; current prices, euros"
+_UNREADABLE = {"currency": {"role": "destination"}, "prices": "current"}
+_LONG_UNREADABLE = {"currency": {"role": "x" * 500}}
+_LONG_UNREADABLE_QUOTED = truncate(
+    json.dumps(_LONG_UNREADABLE, sort_keys=True), _UNREADABLE_UNIT_CHARS
+)
+
+_MANY_REFS = [{"ref": f"unit/{'x' * 40}{n}"} for n in range(10)]
+_MANY_REFS_FOUND = truncate(
+    "; ".join(sorted(str(unit["ref"]) for unit in _MANY_REFS)), _UNREADABLE_UNIT_CHARS
+)
+
+
+@pytest.mark.parametrize(
+    ("units", "found", "quoted"),
+    [
+        (
+            [_USD_CURRENT, _UNREADABLE],
+            "current prices, US dollars",
+            json.dumps(_UNREADABLE, sort_keys=True),
+        ),
+        (
+            [_USD_CURRENT, {**_USD_CURRENT, "currency": "EUR"}, _UNREADABLE],
+            _BOTH_UNITS,
+            json.dumps(_UNREADABLE, sort_keys=True),
+        ),
+        ([_USD_CURRENT, {**_USD_CURRENT, "currency": "EUR"}], _BOTH_UNITS, None),
+        ([{}], None, None),
+        ([_LONG_UNREADABLE], None, _LONG_UNREADABLE_QUOTED),
+        (_MANY_REFS, _MANY_REFS_FOUND, None),
+    ],
+    ids=[
+        "unreadable-beside-readable",
+        "unreadable-beside-disagreeing-readable",
+        "readable-units-disagree",
+        "memberless",
+        "unreadable-quoted-to-a-cap",
+        "disagreeing-units-quoted-to-a-cap",
+    ],
+)
+def test_a_manifest_without_one_readable_unit_is_unverified(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    caplog: pytest.LogCaptureFixture,
+    units: list[dict[str, object]],
+    found: str | None,
+    quoted: str | None,
+) -> None:
+    series_stats = _series_stats(*(_stat("DebtServicePaid", facet={"unit": u}) for u in units))
+
+    with caplog.at_level("WARNING", logger="compiler.evidence"):
+        evidence = evidence_from_manifest(_manifest(), series_stats=series_stats)
+    issues = check_evidence(
+        requirement(unit=Unit(currency="USD", prices="current")), evidence, approved=source()
+    )
+
+    (issue,) = errors(issues)
+    assert issue.code is EvidenceIssueCode.UNIT_UNVERIFIED
+    assert issue.found == found
+    assert (quoted in issue.detail) if quoted else True
+    # An absent unit states no basis. An unreadable or disputed one is already
+    # named by UNIT_UNVERIFIED.
+    assert (EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED in [i.code for i in issues]) is (
+        units == [{}]
+    )
+    assert [record.args for record in caplog.records] == (
+        [(1, evidence.spec_id, "dcid:DebtServicePaid", quoted)] if quoted else []
+    )
+
+
+def test_a_unit_object_the_grammar_rejects_is_read_through_its_ref(
+    requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    unit = {"currency": {"role": "destination"}, "ref": "USD"}
+    series_stats = _series_stats(_stat("DebtServicePaid", facet={"unit": unit}))
+
+    evidence = evidence_from_manifest(_manifest(), series_stats=series_stats)
+
+    assert (evidence.unit_ref, evidence.unreadable_unit) == ("USD", None)
+
+
+def test_the_warning_names_the_first_unreadable_facet_and_counts_distinct_units(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    other = {"currency": {"role": "origin"}}
+    # Two units that share their first `_UNREADABLE_UNIT_CHARS` characters
+    # (`role` sorts first) count twice.
+    long_a = {"currency": {"role": "x" * 500, "z": "a"}}
+    long_b = {"currency": {"role": "x" * 500, "z": "b"}}
+    series_stats = _series_stats(
+        _stat("Zebra", facet={"unit": _UNREADABLE}),
+        _stat("Alpha", facet={"unit": _UNREADABLE, "other": "1"}),
+        _stat("Alpha", facet={"unit": other}),
+        _stat("Alpha", facet={"unit": long_a}),
+        _stat("Alpha", facet={"unit": long_b}),
+    )
+
+    with caplog.at_level("WARNING", logger="compiler.evidence"):
+        evidence = evidence_from_manifest(_manifest(), series_stats=series_stats)
+
+    (record,) = caplog.records
+    assert record.args == (
+        4,
+        evidence.spec_id,
+        "dcid:Zebra",
+        json.dumps(_UNREADABLE, sort_keys=True),
+    )
+
+
 def test_a_manifest_with_no_rows_is_an_error(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
@@ -2010,6 +2206,25 @@ def test_a_manifest_with_no_rows_is_an_error(
     )
 
     assert EvidenceIssueCode.ROWS_EMPTY in [i.code for i in errors(issues)]
+
+
+def test_a_manifest_with_no_rows_gets_no_unit_finding(
+    requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    empty = _manifest(coverage={"rows": 0, "dimensions": []})
+
+    issues = check_evidence(
+        requirement(unit=Unit(currency="USD", prices="current")),
+        evidence_from_manifest(empty, series_stats=_default_series_stats()),
+        approved=source(),
+    )
+
+    assert EvidenceIssueCode.ROWS_EMPTY in [i.code for i in issues]
+    assert not {i.code for i in issues} & {
+        EvidenceIssueCode.UNIT_UNVERIFIED,
+        EvidenceIssueCode.UNIT_MATCHES,
+        EvidenceIssueCode.UNIT_MISMATCH,
+    }
 
 
 # --- Open axes: a population covered whole ----------------------------------------

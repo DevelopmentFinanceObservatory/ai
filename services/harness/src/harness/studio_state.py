@@ -105,6 +105,9 @@ logger = logging.getLogger(__name__)
 _DIGEST_BLOCK_CAP = 16
 _TITLE_BYTE_CAP = 200
 _FACT_SUMMARY_BYTE_CAP = 4_096
+# The wire forwards a unit object whole, so a large one is replaced by
+# `_CUT_MARKER` before any series is cut.
+_UNIT_OBJECT_BYTE_CAP = 512
 _CUT_MARKER = "[cut]"
 # Around its title and fact summary a block carries the keys, a type name of up
 # to `_BLOCK_TYPE_BYTES` (the longest `ComponentType` is 16), the revision (an
@@ -2324,7 +2327,9 @@ def _bounded_fact_summary(summary: Any) -> Any:
     of the card's series chosen by `_SUBSET_RULE`. A summary the platform
     already cut (its own `series_truncated`) states the platform's total in
     that label. Anything else over the cap becomes a `{"cut": ...}` stub
-    stating the summary's size and the limit."""
+    stating the summary's size and the limit. A summary over the cap first has
+    any `unit` object over `_UNIT_OBJECT_BYTE_CAP` replaced by `_CUT_MARKER`,
+    so it cannot crowd out the series."""
     factored = _factored_fact_summary(summary)
     platform_total = 0
     if factored is not None and isinstance(cut := factored.get("series_truncated"), dict):
@@ -2335,6 +2340,12 @@ def _bounded_fact_summary(summary: Any) -> Any:
     shown = summary if factored is None else factored
     if len(json.dumps(shown)) <= _FACT_SUMMARY_BYTE_CAP:
         return shown
+    if (
+        isinstance(summary, dict)
+        and isinstance(unit := summary.get("unit"), dict)
+        and len(json.dumps(unit)) > _UNIT_OBJECT_BYTE_CAP
+    ):
+        return _bounded_fact_summary({**summary, "unit": _CUT_MARKER})
     if factored is not None:
         series = factored["series"]
         total = max(platform_total, len(series))
