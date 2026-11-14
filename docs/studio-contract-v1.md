@@ -167,6 +167,8 @@ pause; `plan.proposed` has a second showing a failed switch).
 
 `component.created.payload` / `component.revised.payload` are the platform's resolved revision, passed through verbatim as the envelope `{schema_version, catalog_version, component_id, revision, provenance, component}` that dfo-spec-kit's `envelope.schema.json` defines. `payload.component` is the resolved component for its type, points included, and `payload.provenance` is the platform's provenance for that revision, authoritative for the card's back. The member is opaque to this contract, which does not restate its shape.
 
+`fact_summary.unit` is the Presentation contract's unit slot, and this contract does not restate its shape either: a unit name string of 1 to 200 characters, or the platform's unit object forwarded with every member it states (an empty object included). The key is absent, or null, when the platform states no unit; the harness reads a null as absent. The harness refuses an empty or longer string and any other JSON type, and does not read the object's members, so a member the platform adds reaches the website unchanged.
+
 ### Interrupt resume protocol (delta 1)
 
 `plan.proposed` and `elicitation.request` are **terminal for their HTTP

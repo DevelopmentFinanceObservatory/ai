@@ -18,9 +18,11 @@ Every model forbids unknown members, mirroring the schemas'
 fails loudly at the boundary. The deliberate openings are objects another
 contract owns, referenced by name so the two cannot drift:
 `ComponentCreated.payload` / `ComponentRevised.payload` is the platform's
-Presentation contract, and `SeedSpec` reads the Search API's Spec block,
-keeping the members a seed hands over and dropping the rest. `TurnRequest.seed_spec` holds its items
-unparsed: each is read as a `Seed` on its own (`harness.seeds.seeds_slot`),
+Presentation contract, `FactSummary.unit` is that contract's unit slot, forwarded
+whole when it is an object, and `SeedSpec` reads the Search API's Spec block,
+keeping the members a seed hands over and dropping the rest.
+`TurnRequest.seed_spec` holds its items unparsed. Each is read as a `Seed` on
+its own (`harness.seeds.seeds_slot`),
 so one bad seed fails its own step rather than the request.
 
 `conversation_id` is delta 5: the frontend client mints the conversation
@@ -44,6 +46,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     TypeAdapter,
     ValidationError,
     ValidationInfo,
@@ -128,79 +131,14 @@ class Provenance(_WireModel):
     refreshed_from: int | None = None
 
 
-class Magnitude(StrEnum):
-    UNITS = "units"
-    THOUSANDS = "thousands"
-    MILLIONS = "millions"
-    BILLIONS = "billions"
-    TRILLIONS = "trillions"
-
-
-class PriceBasis(StrEnum):
-    CURRENT = "current"
-    CONSTANT = "constant"
-
-
-class DeflationBasis(StrEnum):
-    """Whose prices deflated a constant-price amount."""
-
-    DONOR = "donor"
-    RECIPIENT = "recipient"
-    NATIONAL = "national"
-
-
-# A unit, or one side of a composed unit, named in words: the unit's graph
-# name, or its ref where the graph has none.
+# A unit named in words: the unit's graph name, or its ref where the graph has
+# none.
 UnitName = Annotated[str, Field(min_length=1, max_length=200)]
 
-
-class StructuredUnit(_WireModel):
-    """A unit stated in parts, as a converted frame's unit is: the components
-    catalogue's `structured_unit`. Every member is optional and at least one
-    is present."""
-
-    currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
-    magnitude: Magnitude | None = None
-    prices: PriceBasis | None = None
-    base_year: int | None = None
-    deflation_basis: DeflationBasis | None = None
-
-    @model_validator(mode="after")
-    def _states_a_member(self) -> StructuredUnit:
-        if not self.model_fields_set:
-            raise ValueError("a structured unit states at least one member")
-        return self
-
-    @model_validator(mode="after")
-    def _basis_goes_with_constant_prices(self) -> StructuredUnit:
-        # The frame grammar's `validate_unit_request` holds a basis to constant prices.
-        if self.deflation_basis is not None and self.prices is not PriceBasis.CONSTANT:
-            raise ValueError("deflation_basis is valid only with prices 'constant'")
-        return self
-
-
-class CountedStatVar(_WireModel):
-    """One side of a composed unit whose measure declares no unit: the StatVar
-    it counts, with the name to print for it."""
-
-    stat_var: str = Field(pattern=r"^dcid:.", max_length=200)
-    label: UnitName
-
-
-type UnitPart = UnitName | StructuredUnit | CountedStatVar
-
-
-class ComposedUnit(_WireModel):
-    """The unit of a quotient of two measures, read `<numerator> per
-    <denominator>`. A side is never null and never itself a composed unit."""
-
-    numerator: UnitPart
-    denominator: UnitPart
-
-
-# The unit slot of a card's payload, as the platform's fact summary repeats
-# it: a name, a structured unit, or a composed unit.
-type Unit = UnitName | StructuredUnit | ComposedUnit
+# The unit slot of a card's fact summary: a name, or the platform's unit object
+# forwarded as it is. The Presentation contract owns the object's members, and
+# the platform validates them, so a member it adds never stops a card.
+type Unit = UnitName | dict[str, JsonValue]
 
 
 class Attribution(_WireModel):

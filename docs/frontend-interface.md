@@ -551,10 +551,9 @@ it, so its raw frame is not served. The card's own points are in `payload.compon
   entities at one period has that period as both `start` and `end`. A
   table's and a stat card's `window` is null, and `series[].change` is
   null on every card. A table draws without either field.
-- `fact_summary.unit` is the unit slot of the card's payload, in the payload's shape, so one reader serves both: a stat card's `unit`, a chart's first series' `unit`, and a table's row `unit` when every row has the same one. It is absent when the platform states none, as for a table whose rows differ in unit, a note, and a source card. Otherwise it is one of three shapes, and each object is closed:
+- `fact_summary.unit` is the unit slot of the card's payload, in the payload's shape, so one reader serves both: a stat card's `unit`, a chart's first series' `unit`, and a table's row `unit` when every row has the same one. It is absent when the platform states none, as for a table whose rows differ in unit, a note, and a source card. Otherwise it is one of two shapes:
   - a string of 1 to 200 characters, the unit's name, or its reference where the graph names none: `"US Dollar"`.
-  - a structured unit, `{currency?, magnitude?, prices?, base_year?}` with at least one member: `{"currency": "USD", "prices": "constant", "base_year": 2023}`. `currency` is a three-letter ISO 4217 code, `magnitude` is `units`, `thousands`, `millions`, `billions`, or `trillions`, `prices` is `current` or `constant`, and `base_year` is the year of constant prices.
-  - a composed unit, `{numerator, denominator}`, the unit of one measure divided by another, read "numerator per denominator": `{"numerator": "US Dollar", "denominator": {"stat_var": "dcid:Count_Person", "label": "Total population"}}`. Each side is a string or a structured unit as above, or `{stat_var, label}` for a measure that declares no unit, where `stat_var` is the `dcid:`-prefixed StatVar the measure counts and `label` is the name to print for it. A side is never null and never a composed unit.
+  - the platform's unit object, forwarded with every member it states and read by no check here: `{"currency": "USD", "prices": "constant", "base_year": 2023}`. The Presentation contract owns the object's members, so a reader takes the ones it knows and ignores the rest, and the object may be empty.
 - `provenance` holds `inputs[]`, `sources[]`, `freshness`, `warnings[]`,
   `generated_at`, `citation`, `execution_ref?`, `refreshed_from?`. It is
   complete on the frame; no second fetch is needed to show source
