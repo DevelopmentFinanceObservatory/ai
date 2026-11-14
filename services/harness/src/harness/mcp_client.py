@@ -53,10 +53,10 @@ values as the assembler gave them (`_presentation_refusal_outcome`).
 the execute node branches on one grammar, plus the refusal's own
 `retry_after_s` and `limit_name` when it names them.
 `origin` says who declined: `"service"` for a refusal an MCP service
-returned, `"harness"` for the three this module builds itself
-(`unknown_tool`, and `resolved_revision_unavailable` or
-`provenance_unavailable` for a card it withholds after the platform accepted
-the write).
+returned, `"harness"` for those this module builds itself
+(`unknown_tool`, and `resolved_revision_unavailable`,
+`provenance_unavailable` or `stored_card_unreadable` for a card it withholds
+after the platform accepted the write).
 
 Retries: `McpExecutor` retries a `retry_after_delay` refusal on the plan
 executor's own policy (`executor.classify.delay_before_retry`): at most
@@ -182,6 +182,7 @@ from harness.tool_contracts import (
     resolver_digest,
 )
 from harness.wire import RetryMode as WireRetryMode
+from harness.wire import log_unreadable_card, stored_card_fault
 
 logger = logging.getLogger(__name__)
 
@@ -1058,17 +1059,9 @@ class McpExecutor:
                 ),
             }
         component = await self._assemble_component(reply=body, envelope=envelope)
-        if component is None:
-            return {
-                "outcome": "refusal",
-                "refusal": harness_refusal(
-                    code=HarnessCode.PROVENANCE_UNAVAILABLE,
-                    message=(
-                        "no source manifest is linked to this frame; withholding the card "
-                        "rather than stating a source it cannot support"
-                    ),
-                ),
-            }
+        if (withheld := _withheld_card(component, args)) is not None:
+            return withheld
+        assert component is not None
         title = (args.get("intent") or {}).get("title") or _envelope_title(envelope)
         summary = f"{component['type']}: {title}" if title else None
         outcome = {"outcome": "ok", "frame_refs": [], "component": component, "summary": summary}
@@ -1111,7 +1104,7 @@ class McpExecutor:
         nothing when a retrieval it rests on has no manifest), the store has
         evicted it, or the envelope names no input frame at all. A card
         built anyway would state a source it cannot support, which is worse
-        than no card. `_presentation` turns a `None` here into a
+        than no card. `_withheld_card` turns a `None` here into a
         `provenance_unavailable` refusal.
         """
         component_id = reply["component_id"]
@@ -1167,6 +1160,49 @@ class McpExecutor:
                 platform_facts=platform_facts,
             ),
         }
+
+
+def _withheld_card(component: dict[str, Any] | None, args: dict[str, Any]) -> dict[str, Any] | None:
+    """The refusal for a `write_component` result the platform accepted and the
+    harness will not pass on, or `None` when `component` (as
+    `McpExecutor._assemble_component` built it, `None` when no manifest is
+    linked to its frame) can be.
+
+    A card the harness cannot read is an orphan the platform stored. The frame
+    the call emits (`harness.wire.stored_card_fault`, `component.created` for a
+    create and `component.revised` for a revise, which `args` name by its
+    `component_id`) cannot be built from it. The refusal is a
+    `stored_card_unreadable` one that names the card.
+    """
+    if component is None:
+        return {
+            "outcome": "refusal",
+            "refusal": harness_refusal(
+                code=HarnessCode.PROVENANCE_UNAVAILABLE,
+                message=(
+                    "no source manifest is linked to this frame; withholding the card "
+                    "rather than stating a source it cannot support"
+                ),
+            ),
+        }
+    # A revise that patches nothing emits no `component.revised`, so it is
+    # judged as a create.
+    patch = args.get("intent") if args.get("component_id") else None
+    fault = stored_card_fault(
+        component, revised_by=patch if isinstance(patch, dict) and patch else None
+    )
+    if fault is None:
+        return None
+    log_unreadable_card(logger, component, fault, where="write_component")
+    refusal = harness_refusal(
+        code=HarnessCode.STORED_CARD_UNREADABLE,
+        message=(
+            f"the platform stored card {component['component_id']} but it fails the "
+            "component contract, so it cannot be shown"
+        ),
+    )
+    refusal["component_id"] = component["component_id"]
+    return {"outcome": "refusal", "refusal": refusal}
 
 
 def _safe_to_repeat(tool: str, refusal: dict[str, Any]) -> bool:

@@ -50,12 +50,13 @@ from harness.mcp_client import (
     _McpTimeoutError,
     _presentation_refusal_outcome,
     _refusal_outcome,
+    _withheld_card,
 )
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import ProvenanceStore
 from harness.settings import Settings
 from harness.tool_contracts import ResolverError, graph_envelope
-from harness.wire import FactSummary, usable_component
+from harness.wire import FactSummary, component_fault
 from mcp import MCPError
 from mcp.types import INVALID_PARAMS, REQUEST_TIMEOUT, ErrorData
 from presentation_mcp import server as presentation_server
@@ -1633,7 +1634,65 @@ async def test_the_platform_unit_reaches_the_wire_fact_summary_as_it_is(unit: ob
 
     assert component is not None
     assert component["fact_summary"].get("unit") == unit
-    assert usable_component(component)
+    assert component_fault(component) is None
+
+
+@pytest.mark.parametrize(
+    ("args", "fault", "refused"),
+    [
+        pytest.param({"intent": {}}, {}, False, id="create-readable"),
+        pytest.param(
+            {"intent": {}}, {"type": "no_such_component_type"}, True, id="create-bad-type"
+        ),
+        pytest.param(
+            {"component_id": "cmp_1", "intent": {"title": "t"}},
+            {"fact_summary": None},
+            True,
+            id="revise-lacks-what-its-frame-carries",
+        ),
+        pytest.param(
+            {"component_id": "cmp_1", "intent": {"title": "t"}},
+            {"revision": 2, "type": "no_such_component_type"},
+            False,
+            id="revise-is-judged-on-component-revised-only",
+        ),
+        pytest.param(
+            {"component_id": "cmp_1", "intent": {"title": "t"}},
+            {"revision": 1, "type": "no_such_component_type"},
+            False,
+            id="no-op-revise-at-revision-1-is-not-judged",
+        ),
+    ],
+)
+async def test_a_stored_card_the_frame_cannot_be_built_from_is_refused_naming_the_card(
+    args: dict[str, Any], fault: dict[str, Any], refused: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A create must satisfy `component.created`, a revise `component.revised`.
+    The refusal is `do_not_retry`, names the component and is logged once at
+    ERROR without the stored values."""
+    store, envelope, facts = _assembled_summary(drawn=1, resolved=1, series_cut=0)
+    executor = McpExecutor(settings=Settings(), provenance=store)
+    component = await executor._assemble_component(
+        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+    )
+    assert component is not None
+    component = {**component, **fault}
+
+    with caplog.at_level(logging.ERROR, logger="harness.mcp_client"):
+        outcome = _withheld_card(component, args)
+
+    if not refused:
+        assert outcome is None
+        assert not caplog.records
+        return
+    assert outcome is not None
+    refusal = outcome["refusal"]
+    assert outcome["outcome"] == "refusal"
+    assert (refusal["code"], refusal["retry_mode"]) == ("stored_card_unreadable", "do_not_retry")
+    assert refusal["component_id"] == "cmp_1"
+    (record,) = caplog.records
+    assert "cmp_1" in record.getMessage()
+    assert "no_such_component_type" not in record.getMessage()
 
 
 async def test_each_series_states_the_periods_of_its_first_and_last_values() -> None:

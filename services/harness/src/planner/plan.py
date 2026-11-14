@@ -6195,6 +6195,11 @@ def windowed_pins(state: SessionState) -> dict[str, WindowedPin]:
     return pins
 
 
+def windowed_origins(state: SessionState) -> dict[str, str]:
+    """Each windowed copy's spec_id and the origin it was copied from (`windowed_pins`)."""
+    return {pin.spec_id: pin.windowed_from for pin in windowed_pins(state).values()}
+
+
 def save_windowed_pins(state: SessionState, pins: Iterable[WindowedPin]) -> None:
     """Record `pins` as the copies the recorded plan pins."""
     state[WINDOWED_PINS_STATE_KEY] = [pin.model_dump(mode="json") for pin in pins]

@@ -1072,6 +1072,14 @@ class ConversationState:
         sessions on (app_name, user_id, session_id) alone)."""
         return f"{self.conversation_id}#t{self.turn_index}"
 
+    def start_plan_lineage(self) -> None:
+        """Forget the plan version ids given out and the choice labels the
+        turn's switches kept. The next plan card is the first of a new line, as
+        at a turn's start and at a second `plan` call in one turn."""
+        self.plan_version_ids.clear()
+        self.latest_plan_version = None
+        self.turn_choice_baseline = {}
+
     def begin_turn(self) -> None:
         """Reset per-turn wire state. Abandons any pending interrupt: a fresh
         turn.request on a paused conversation ends the pause, and the paused
@@ -1080,8 +1088,7 @@ class ConversationState:
         self.seq = 0
         self.trace_id = _wire_id("tr")
         self.pending.clear()
-        self.plan_version_ids.clear()
-        self.latest_plan_version = None
+        self.start_plan_lineage()
         self._composition_ops = []
         self._removal_unreported = False
         if self.turn_index > 1 and not self.turn_recorded:
@@ -1097,7 +1104,6 @@ class ConversationState:
         self.turn_readings = []
         self.turn_specs = {}
         self.turn_applied_choice = None
-        self.turn_choice_baseline = {}
         self.turn_recorded = False
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
@@ -1291,7 +1297,15 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                 }
                 for choice_id, choice in p.choices.items()
             },
-            "card": p.card.model_dump(mode="json", exclude_none=True) if p.card else None,
+            # `new_plan` is stored beside the card. An instance rolled back to a
+            # model without it cannot load a stored card that holds it, and
+            # ignores an unknown key of the entry.
+            "card": (
+                p.card.model_dump(mode="json", exclude_none=True, exclude={"new_plan"})
+                if p.card
+                else None
+            ),
+            "card_new_plan": bool(p.card and p.card.new_plan),
             "approved_sent": p.approved_sent,
             "pick_replan": p.pick_replan,
         }
@@ -1319,7 +1333,13 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
             )
             for choice_id, choice in (entry.get("choices") or {}).items()
         },
-        card=PlanProposed.model_validate(entry["card"]) if entry.get("card") else None,
+        card=(
+            PlanProposed.model_validate(
+                {**entry["card"], "new_plan": True if entry.get("card_new_plan") else None}
+            )
+            if entry.get("card")
+            else None
+        ),
         approved_sent=bool(entry.get("approved_sent")),
         pick_replan=bool(entry.get("pick_replan")),
     )

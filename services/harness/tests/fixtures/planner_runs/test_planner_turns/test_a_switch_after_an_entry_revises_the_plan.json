@@ -947,7 +947,8 @@
           "revision": "91d58de9a1b03badf6bd9f6dd8956fc1437f06329a89453590c06911c2a93bed",
           "warnings": []
         },
-        "revision": "91d58de9a1b03badf6bd9f6dd8956fc1437f06329a89453590c06911c2a93bed"
+        "revision": "91d58de9a1b03badf6bd9f6dd8956fc1437f06329a89453590c06911c2a93bed",
+        "new_plan": true
       },
       "node_info": {
         "path": "dfo_analyst_graph@1/planner@1",
@@ -1323,7 +1324,8 @@
                     "revision": "91d58de9a1b03badf6bd9f6dd8956fc1437f06329a89453590c06911c2a93bed",
                     "warnings": []
                   },
-                  "revision": "91d58de9a1b03badf6bd9f6dd8956fc1437f06329a89453590c06911c2a93bed"
+                  "revision": "91d58de9a1b03badf6bd9f6dd8956fc1437f06329a89453590c06911c2a93bed",
+                  "new_plan": true
                 },
                 "message": "Approve this plan to run it? Its data may already be loading.",
                 "response_schema": null
@@ -4188,7 +4190,8 @@
             "revision": "91d58de9a1b03badf6bd9f6dd8956fc1437f06329a89453590c06911c2a93bed",
             "warnings": []
           },
-          "revision": "91d58de9a1b03badf6bd9f6dd8956fc1437f06329a89453590c06911c2a93bed"
+          "revision": "91d58de9a1b03badf6bd9f6dd8956fc1437f06329a89453590c06911c2a93bed",
+          "new_plan": true
         },
         "message": "Approve this plan to run it? Its data may already be loading.",
         "response_schema": null
@@ -4559,7 +4562,8 @@
             "revision": "91d58de9a1b03badf6bd9f6dd8956fc1437f06329a89453590c06911c2a93bed",
             "warnings": []
           },
-          "revision": "91d58de9a1b03badf6bd9f6dd8956fc1437f06329a89453590c06911c2a93bed"
+          "revision": "91d58de9a1b03badf6bd9f6dd8956fc1437f06329a89453590c06911c2a93bed",
+          "new_plan": true
         },
         "message": "Approve this plan to run it? Its data may already be loading.",
         "response_schema": null

@@ -2116,14 +2116,14 @@ class _Run:
         whose columns are the approved source's, as the left-out entities'
         are.
         """
-        refused: list[tuple[str, EvidenceIssue]] = []
+        refused: list[tuple[str, str, EvidenceIssue]] = []
         for step in self.workflow.steps:
             for narrowing in entity_narrowings(step.tool, step.args):
                 binding = step.bindings.get(narrowing.frame) or step.bindings.get(FRAME_PARAMETER)
                 if binding is None or not narrowing.refs:
                     continue
                 left_out = {
-                    key: issue
+                    key: (retrieval, issue)
                     for retrieval in sorted(self._retrievals_under(binding.from_step))
                     for key, issue in self.left_out.get(retrieval, {}).items()
                 }
@@ -2133,19 +2133,21 @@ class _Run:
                     if (narrowing.column, ref) in left_out
                 ]
                 if len(missing) == len(narrowing.refs):
-                    refused.extend((step.id, issue) for issue in missing)
+                    refused.extend((step.id, retrieval, issue) for retrieval, issue in missing)
         if not refused:
             return
-        step_id, first = refused[0]
+        step_id, retrieval, first = refused[0]
+        spec_id = self.evidence_bindings[retrieval].spec_id
         raise self._refused(
             RefusalKind.REQUIREMENT_UNMET,
             "; ".join(
                 f"step {narrowing_step!r} reads {issue.required!r} alone, which the retrieval "
                 "holds no series for"
-                for narrowing_step, issue in refused
+                for narrowing_step, _, issue in refused
             ),
             step_id=step_id,
             requirement_id=first.requirement_id,
+            spec_id=spec_id,
             issues=tuple(
                 issue.model_copy(
                     update={
@@ -2154,7 +2156,7 @@ class _Run:
                         f"which step {narrowing_step!r} reads alone",
                     }
                 )
-                for narrowing_step, issue in refused
+                for narrowing_step, _, issue in refused
             ),
         )
 
@@ -2705,6 +2707,7 @@ class _Run:
                 step_id=step.id,
                 requirement_id=requirement.id,
                 issues=tuple(findings),
+                spec_id=self.evidence_bindings[step.id].spec_id,
             )
         if refs := unlabelled_series_refs(findings, limit=LABELLED_REFS):
             findings = with_series_labels(findings, await _series_labels(self.label_refs, refs))
@@ -2730,6 +2733,7 @@ class _Run:
         *,
         step_id: str | None = None,
         requirement_id: str | None = None,
+        spec_id: str | None = None,
         payload: ToolFailure | None = None,
         issues: tuple[EvidenceIssue, ...] = (),
         retryable: bool = True,
@@ -2743,6 +2747,7 @@ class _Run:
                 retryable=retryable,
                 step_id=step_id,
                 requirement_id=requirement_id,
+                spec_id=spec_id,
                 payload=payload,
                 issues=issues,
                 completed=self._completed_so_far(),

@@ -38,6 +38,10 @@ def test_an_outcome_survives_a_round_trip_through_session_state() -> None:
 
     assert RUN_STATE_KEY in state
     assert load_outcome(state) == outcome
+    # A refusal that names no source stores no `spec_id`, so an older release still reads it.
+    assert "spec_id" not in outcome.model_dump(mode="json")
+    named = outcome.model_copy(update={"spec_id": "spec_" + "a" * 32})
+    assert named.model_dump(mode="json")["spec_id"] == "spec_" + "a" * 32
 
 
 def test_a_rediscovery_needed_outcome_survives_a_round_trip_through_session_state() -> None:

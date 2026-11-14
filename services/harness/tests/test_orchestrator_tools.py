@@ -1,9 +1,4 @@
-"""The orchestrator's tools against a fake resolver, executor and tool surface.
-
-`usable_component` is `harness.wire`'s own check, tested with the wire
-contract; here it is stubbed so a fake component can stand in for a written
-one.
-"""
+"""The orchestrator's tools against a fake resolver, executor and tool surface."""
 
 from __future__ import annotations
 
@@ -94,11 +89,12 @@ from harness.tool_contracts import (
     HarnessCode,
     ResolverError,
     graph_envelope,
+    harness_refusal,
     reading_facts,
     resolver_digest,
 )
 from harness.turn_records import SearchReading, basis_line, loose_match_notes, render_readings
-from harness.wire import AddOp, CompositionActor, MutationOp
+from harness.wire import AddOp, CompositionActor, MutationOp, component_revised
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
 from orchestrator.agent import INSTRUCTION
@@ -261,11 +257,6 @@ def _tools(
         invocation_id="inv_1",
         actions=SimpleNamespace(skip_summarization=None),
     )
-
-
-@pytest.fixture(autouse=True)
-def _usable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(orchestrator_tools, "usable_component", lambda component: True)
 
 
 # --- declarations ---------------------------------------------------------
@@ -2303,6 +2294,52 @@ class RaisingExecutor(FakeExecutor):
         return await super().__call__(tool=tool, args=args, on_progress=on_progress)
 
 
+class UnreadableCardExecutor(FakeExecutor):
+    """Answers every write as `McpExecutor` does for a card the platform stored
+    and the harness cannot read (`harness.mcp_client._withheld_card`)."""
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        if tool != "write_component":
+            return await super().__call__(tool=tool, args=args, on_progress=on_progress)
+        self.calls.append((tool, args))
+        return {
+            "outcome": "refusal",
+            "refusal": harness_refusal(
+                code=HarnessCode.STORED_CARD_UNREADABLE,
+                message="the platform stored card cmp_1 but it fails the component contract",
+            )
+            | {"component_id": "cmp_1"},
+        }
+
+
+async def test_a_stored_card_the_harness_cannot_read_is_a_dfo_fault_not_a_refusal() -> None:
+    """The platform stored the chart and the harness could not read it back.
+    The model is told not to redraw it or swap in other data, the call draws
+    nothing after it, and the same chart in a later call this turn is answered
+    from the record rather than written again."""
+    executor = UnreadableCardExecutor()
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+
+    frame = frame_id_for(REF)
+    drawn = await tools["make_charts"]([*_one_chart(frame), *_one_chart(frame)], ctx)
+
+    # The call stops at the first unreadable card, since a second chart would meet it too.
+    (entry,) = drawn["charts"]
+    assert [tool for tool, _ in executor.calls].count("write_component") == 1
+    assert _stated(entry) == (HarnessCode.STORED_CARD_UNREADABLE, "do_not_retry")
+    assert "refused" not in entry["error"]
+    assert "charts after it" in entry["error"]
+    assert executor.landed == []
+
+    again = await tools["make_charts"](_one_chart(frame), ctx)
+    (repeat,) = again["charts"]
+    assert [tool for tool, _ in executor.calls].count("write_component") == 1
+    assert _stated(repeat) == (HarnessCode.STORED_CARD_UNREADABLE, "do_not_retry")
+    # The unreadable chart is the call's last, so no chart was skipped after it.
+    assert "charts after it" not in repeat["error"]
+
+
 def _one_chart(frame: str) -> list[dict[str, str]]:
     select = json.dumps({"observationAbout": "country/NGA"})
     return [{"frame": frame, "type": "bar_chart", "title": "t", "select_json": select}]
@@ -3851,8 +3888,13 @@ async def test_make_charts_draws_again_a_card_revised_since_it_was_drawn(
     await tools["fetch"](SPEC_LIFE, ctx)
     await tools["make_charts"]([_wide_chart()], ctx)
     revised = executor.cards["cmp_01"] | {"revision": executor.cards["cmp_01"]["revision"] + 1}
+    patch = {"title": "Renamed"}
     _revised_frames(
-        executor.state, component_id="cmp_01", component=revised, patch={"title": "Renamed"}
+        executor.state,
+        component_id="cmp_01",
+        component=revised,
+        patch=patch,
+        revised=component_revised(revised, "cmp_01", patch),
     )
     executor.cards["cmp_01"] = revised
     if later_turn:

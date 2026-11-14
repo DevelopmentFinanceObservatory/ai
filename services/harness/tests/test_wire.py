@@ -64,7 +64,7 @@ from harness.wire import (
     TextAnswer,
     TurnRequest,
     check_resolved_bounds,
-    usable_component,
+    component_fault,
 )
 from pydantic import ValidationError
 
@@ -221,12 +221,12 @@ def _written_component(unit: object) -> dict[str, Any]:
 
 @pytest.mark.parametrize("unit", [None, "US Dollar"], ids=["none", "name"])
 def test_a_component_is_usable_with_a_unit_name_or_none(unit: object) -> None:
-    assert usable_component(_written_component(unit))
+    assert component_fault(_written_component(unit)) is None
 
 
 @pytest.mark.parametrize("unit", ["", 7, ["US Dollar"]], ids=["empty-name", "number", "list"])
 def test_a_component_whose_unit_is_not_a_name_or_an_object_is_not_usable(unit: object) -> None:
-    assert not usable_component(_written_component(unit))
+    assert component_fault(_written_component(unit)) is not None
 
 
 @pytest.mark.parametrize(
@@ -258,7 +258,7 @@ def test_a_component_whose_unit_is_not_a_name_or_an_object_is_not_usable(unit: o
 )
 def test_a_unit_object_the_platform_states_is_forwarded_unchanged(unit: dict[str, Any]) -> None:
     component = _written_component(unit)
-    assert usable_component(component)
+    assert component_fault(component) is None
     frame = ComponentCreated.model_validate(
         {**component, "event": "component.created", "seq": 0, "created_from": {"step_id": "_"}}
     )
@@ -391,6 +391,18 @@ def test_a_plan_proposed_carries_a_scope_decision_with_its_choice_and_options() 
     assert isinstance(frame, PlanProposed)
     assert frame.model_dump(mode="json", exclude_unset=True) == raw
     assert all(d.choice_id is None for d in frame.decisions[:-1])
+
+
+@pytest.mark.parametrize("new_plan", [None, False])
+def test_a_plan_card_without_new_plan_dumps_without_the_member(new_plan: bool | None) -> None:
+    """A stored card reads as before in an older release that forbids the member."""
+    raw = json.loads((FIXTURES / "event-03-plan-proposed.json").read_text())
+    card = PlanProposed.model_validate({**raw, "new_plan": new_plan})
+
+    assert "new_plan" not in card.model_dump(mode="json")
+    assert PlanProposed.model_validate({**raw, "new_plan": True}).model_dump(mode="json")[
+        "new_plan"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1292,3 +1304,14 @@ def test_a_set_on_a_role_the_identity_binds_nothing_on_is_dropped() -> None:
 
     assert seed.spec.entity_groups is not None
     assert list(seed.spec.entity_groups) == ["observationAbout"]
+
+
+def test_a_component_the_contract_refuses_names_each_fault_without_its_input() -> None:
+    component = _written_component(None)
+    component["type"] = "no_such_component_type"
+
+    fault = component_fault(component)
+
+    assert isinstance(fault, ValidationError)
+    assert [error["loc"] for error in fault.errors(include_input=False)] == [("type",)]
+    assert component_fault(_written_component(None)) is None

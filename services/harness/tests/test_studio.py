@@ -101,7 +101,7 @@ from harness.studio_state import (
     land_component,
 )
 from harness.studio_translate import _RecordingExecutor, _stream_fatal
-from harness.tool_contracts import HarnessCode, ResolverError
+from harness.tool_contracts import HarnessCode, ResolverError, harness_refusal
 from harness.turn_budget import bounded
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
@@ -4381,6 +4381,202 @@ async def test_component_ref_edit_refusal_is_an_honest_message() -> None:
     assert executor.calls[-1]["tool"] == "write_component"  # the write was what refused
 
 
+def _unreadable_refusal() -> dict[str, Any]:
+    """What the executor answers a write whose stored card the harness cannot
+    read (`harness.mcp_client._withheld_card`)."""
+    return {
+        "outcome": "refusal",
+        "refusal": harness_refusal(
+            code=HarnessCode.STORED_CARD_UNREADABLE,
+            message="the platform stored card cmp_01test0001 but it fails the component contract",
+        )
+        | {"component_id": "cmp_01test0001"},
+    }
+
+
+@pytest.mark.parametrize("path", ["revise", "rebuild"])
+async def test_an_edit_stored_as_a_card_the_harness_cannot_read_is_a_reported_failure(
+    path: str,
+) -> None:
+    """The platform stored the card, so nothing refused the edit, and the harness
+    cannot read what was stored. The turn ends on the failure sentence for
+    `stored_card_unreadable` with no component frame and does not go fatal. A
+    revise says the change was saved and the canvas shows the earlier version,
+    so the next edit builds on it. A rebuild says the canvas is unchanged."""
+    revise = path == "revise"
+    edit_model = ScriptedEditModel(
+        {
+            "text": "Edited.",
+            "patch": {"title": "Aid to Kenya, 2018-2024"} if revise else None,
+            "recreate": None
+            if revise
+            else {"type": "line_chart", "title": "t", "select": {"stat_var": "dcid:Aid"}},
+        }
+    )
+    executor = ScriptedExecutor(
+        [
+            *_card_results(**({"write_token": WRITE_TOKEN} if revise else {})),
+            _described(),
+            _VIEW,
+            _unreadable_refusal(),
+        ],
+        strict=True,
+    )
+    app = _app(*_card(), resolver=_search(), executor=executor, edit_model=edit_model)
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        frames = await _stream(client, "/api/studio/turn", _edit_body("change it"))
+
+    events = _events(frames)
+    assert events[-1] == "done"
+    assert "error" not in events
+    assert "component.revised" not in events
+    assert "component.created" not in events
+    sentence = classed_sentence("stored_card_unreadable", "do_not_retry")
+    message = _frame(frames, "message.complete")["text"]
+    lead = (
+        "Your change was saved, but the card cannot be shown with it, so the canvas still "
+        "shows the earlier version. Your next edit builds on the saved change."
+        if revise
+        else "The card on the canvas is unchanged."
+    )
+    assert message == f"{lead} {sentence}"
+    (failed,) = [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
+    assert failed["detail"] == sentence
+    assert failed.get("produced") is None
+
+
+@pytest.mark.parametrize(
+    ("card", "revised"),
+    [
+        pytest.param(
+            {**COMPONENT, "revision": 1, "type": "no_such_component_type"},
+            False,
+            id="no-op-is-not-judged-on-readability",
+        ),
+        pytest.param(
+            {
+                **{k: v for k, v in COMPONENT.items() if k != "provenance"},
+                "revision": 2,
+                "fact_summary": {**COMPONENT["fact_summary"], "revision": 2},
+            },
+            True,
+            id="revise-needs-only-what-the-revised-frame-carries",
+        ),
+    ],
+)
+async def test_a_revise_is_judged_on_what_its_own_frame_needs(
+    card: dict[str, Any], revised: bool
+) -> None:
+    """A no-op revise ends on the no-op sentence whatever the stored card
+    holds, and a revised card streams `component.revised` when it carries the
+    members that frame needs, though `component.created` would refuse it."""
+    executor = ScriptedExecutor(
+        [
+            *_card_results(write_token=WRITE_TOKEN),
+            _described(),
+            _VIEW,
+            {"outcome": "ok", "frame_refs": [], "component": card},
+        ],
+        strict=True,
+    )
+    edit_model = ScriptedEditModel(
+        {"text": "Renamed.", "patch": {"title": "Aid to Kenya, 2018-2024"}, "recreate": None}
+    )
+    app = _app(*_card(), resolver=_search(), executor=executor, edit_model=edit_model)
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        frames = await _stream(client, "/api/studio/turn", _edit_body("rename it"))
+
+    events = _events(frames)
+    assert events[-1] == "done"
+    assert ("component.revised" in events) is revised
+    assert "component.created" not in events
+    assert (_frame(frames, "message.complete")["text"] == "Renamed.") is revised
+    assert not [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
+
+
+async def test_a_no_op_revise_over_a_readable_head_above_the_canvas_catches_the_canvas_up() -> None:
+    """A revise timed out after the platform stored it, so the canvas shows revision 1
+    while the head is 2. The same edit again is a no-op write that returns the readable
+    head at revision 2: it is applied as a revise, with `component.revised` for that
+    revision, the canvas catching up, and the usual success text."""
+    head = {
+        **COMPONENT,
+        "revision": 2,
+        "fact_summary": {**COMPONENT["fact_summary"], "revision": 2},
+        "payload": resolved_revision(
+            "stat_card",
+            component_id="cmp_01test0001",
+            revision=2,
+            frame_ref=REF_A,
+            title="Aid to Kenya, stored by the timed-out edit",
+        ),
+    }
+    executor = ScriptedExecutor(
+        [
+            *_card_results(write_token=WRITE_TOKEN),
+            _described(2),
+            _VIEW,
+            {"outcome": "ok", "frame_refs": [], "component": head},
+        ],
+        strict=True,
+    )
+    edit_model = ScriptedEditModel(
+        {"text": "Renamed.", "patch": {"note": "same again"}, "recreate": None}
+    )
+    app = _app(*_card(), resolver=_search(), executor=executor, edit_model=edit_model)
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        frames = await _stream(client, "/api/studio/turn", _edit_body("rename it"))
+
+    assert _frame(frames, "component.revised")["revision"] == 2
+    assert _frame(frames, "message.complete")["text"] == "Renamed."
+    assert not [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
+    block = _frame(frames, "done")["composition"]["blocks"][0]
+    assert block["revision"] == 2
+    assert block["title"] == "Aid to Kenya, stored by the timed-out edit"
+    assert _frame(frames, "composition.updated")["manifest"]["blocks"][0]["title"] == block["title"]
+    entry = app.state.studio.store.current(PRINCIPAL, CONVERSATION).components["cmp_01test0001"]
+    assert entry["title"] == block["title"]
+
+
+async def test_a_repeat_of_a_rebuild_stored_unreadable_writes_again() -> None:
+    """The first rebuild stored a card the harness could not read. The same
+    rebuild again is written again, since nothing records the first: each
+    repeat leaves one more orphan, which the platform's refusal log names."""
+    recreate = {"type": "line_chart", "title": "t", "select": {"stat_var": "dcid:Aid"}}
+    executor = ScriptedExecutor(
+        [
+            *_card_results(),
+            _described(),
+            _VIEW,
+            _unreadable_refusal(),
+            _described(),
+            _VIEW,
+            _unreadable_refusal(),
+        ],
+        strict=True,
+    )
+    edit_model = ScriptedEditModel({"text": "Rebuilt.", "patch": None, "recreate": recreate})
+    app = _app(*_card(), resolver=_search(), executor=executor, edit_model=edit_model)
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        await _stream(client, "/api/studio/turn", _edit_body("make it a line"))
+        frames = await _stream(client, "/api/studio/turn", _edit_body("make it a line"))
+
+    sentence = classed_sentence("stored_card_unreadable", "do_not_retry")
+    assert _frame(frames, "message.complete")["text"] == (
+        f"The card on the canvas is unchanged. {sentence}"
+    )
+    rebuilds = [
+        call
+        for call in executor.calls
+        if call["tool"] == "write_component" and call["args"]["intent"]["type"] == "line_chart"
+    ]
+    assert len(rebuilds) == 2
+
+
 async def test_a_revise_that_needs_another_frame_is_written_as_a_new_card_in_its_slot() -> None:
     """The executor refuses a revise whose select counts other series than the
     card's rolling frame did. The edit is then written as a create of the stored
@@ -6199,7 +6395,9 @@ async def test_a_recreated_edit_cards_resolved_window_reaches_the_turn_record() 
 # --- the cards one chart call lands, end to end -------------------------------
 
 
-async def test_a_component_missing_fact_summary_never_lands() -> None:
+async def test_a_component_missing_fact_summary_never_lands(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """An `ok` write whose component fails the `component.created` wire
     contract (here, a missing `fact_summary`) is refused like any other
     unusable write. No frame announces it and the canvas is unchanged."""
@@ -6213,13 +6411,17 @@ async def test_a_component_missing_fact_summary_never_lands() -> None:
         session_service=session_service,
         store=store,
     )
-    async with _client(app) as client:
-        frames = await _stream(client, "/api/studio/turn", _turn_body())
+    with caplog.at_level("ERROR", logger="harness.studio_translate"):
+        async with _client(app) as client:
+            frames = await _stream(client, "/api/studio/turn", _turn_body())
 
     assert _events(frames)[-1] == "done"
     assert "component.created" not in _events(frames)
     assert "composition" not in _frame(frames, "done")
     assert store.current(PRINCIPAL, CONVERSATION).composition is None
+    unreadable = [r for r in caplog.records if "fails the component contract" in r.getMessage()]
+    assert len(unreadable) == 1
+    assert "fact_summary" in unreadable[0].getMessage()
 
 
 class _WritesUntil(ScriptedExecutor):
@@ -6300,6 +6502,32 @@ async def test_first_write_ok_then_cancellation_before_drain_leaves_the_canvas_u
     assert "component.created" not in _events(cancelled)
     after = [b.component_id for b in store.current(PRINCIPAL, CONVERSATION).composition.blocks]
     assert after == before == ["cmp_01test0001"]
+
+
+async def test_a_chart_stored_as_a_card_the_harness_cannot_read_fails_its_line() -> None:
+    """`make_charts` draws nothing for a card the executor refused as unreadable,
+    and the recorded write that stored it ends the turn's line as a failed step
+    with the `stored_card_unreadable` sentence: no `produced`, no component
+    frame, and no canvas update."""
+    executor = ScriptedExecutor(
+        [*_card_results()[:2], _unreadable_refusal()],
+        strict=True,
+    )
+    app = _app(*_card(), resolver=_search(), executor=executor)
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body())
+
+    events = _events(frames)
+    assert events[-1] == "done"
+    assert "error" not in events
+    assert "component.created" not in events
+    (line,) = [
+        f for f in frames if f["event"] == "activity.step" and f.get("tool") == "write_component"
+    ]
+    assert line["status"] == "failed"
+    assert line.get("produced") is None
+    assert line["detail"] == classed_sentence("stored_card_unreadable", "do_not_retry")
+    assert "composition.updated" not in events
 
 
 async def test_first_write_ok_then_second_write_raises_still_announces_what_actually_landed() -> (
