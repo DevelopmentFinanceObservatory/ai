@@ -27776,6 +27776,264 @@
     },
     "retry_after": null
   },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"left_entity\":{},\"right_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_225f0abf0fd1548db41679ebb1d66502\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_dddddddddddddddddddddddddddddddd\"},\"other\":{\"content_version\":\"cv_c76b07b1808ad5ce08bb17f0a67da2b5\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_11111111111111111111111111111111\"}},\"verb\":\"sum_of\"}}": {
+    "status": 422,
+    "body": {
+      "type": "/codes/cross_frame_unit_mismatch",
+      "title": "Cross Frame Unit Mismatch",
+      "status": 422,
+      "detail": "left resolved to unit 'converted to constant 2024 prices, US dollars, donor prices', right to 'converted to constant 2024 prices, US dollars, recipient prices' -- combining values across different units is silently wrong, not merely inconvenient. The two sides are on different deflation bases, so their constant-price amounts measure different things. Call get_data for both sides in current prices, then retry with the new frame_refs.",
+      "code": "cross_frame_unit_mismatch",
+      "trace_id": "af55e67f82034cc7a799527e497ebbaa",
+      "capability_version": "dset_135e455c1eb8ac63",
+      "retryable": false,
+      "retry_mode": "correct_and_retry",
+      "fix": {
+        "left": {
+          "currency": "USD",
+          "prices": "constant",
+          "base_year": 2024,
+          "deflation_basis": "donor"
+        },
+        "right": {
+          "currency": "USD",
+          "prices": "constant",
+          "base_year": 2024,
+          "deflation_basis": "recipient"
+        }
+      }
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"left_entity\":{},\"right_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_225f0abf0fd1548db41679ebb1d66502\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_dddddddddddddddddddddddddddddddd\"},\"other\":{\"content_version\":\"cv_edbdcf4fbee7ed5dffe17dceab80b73c\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_cccccccccccccccccccccccccccccccc\"}},\"verb\":\"sum_of\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: sum_of.",
+            "spec": {
+              "spec_id": "ops_17e3665e855fb7d054fef60df1ba3614",
+              "recipe": {
+                "normal_form_hash": "rnf_bd6bc8000cad7f4fa57b93587a6c89be",
+                "replay_key": "rpk_819b79fd7ec09d0f9a11882e411911ec"
+              }
+            },
+            "content_version": "ocv_05fbdf7cdaf5e18d3e29bf276dc78f2c",
+            "output_digest": "out_bcee649582b775147df8bce167be2ffe",
+            "roots": [
+              {
+                "spec_id": "spec_dddddddddddddddddddddddddddddddd",
+                "content_version": "cv_225f0abf0fd1548db41679ebb1d66502",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              },
+              {
+                "spec_id": "spec_cccccccccccccccccccccccccccccccc",
+                "content_version": "cv_edbdcf4fbee7ed5dffe17dceab80b73c",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.1|1.2.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:8a3383b91f7571221c2bbc4309c1e68b852c1e300876b61338605e4a82497b38",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_fefee99c0ec04cad588dfb07365a5a8c",
+      "output_digest": "out_bcee649582b775147df8bce167be2ffe",
+      "summary": {
+        "verb": "sum_of",
+        "spec_id": "ops_17e3665e855fb7d054fef60df1ba3614",
+        "content_version": "ocv_05fbdf7cdaf5e18d3e29bf276dc78f2c",
+        "frame_content_version": "cv_fefee99c0ec04cad588dfb07365a5a8c",
+        "rows": 10,
+        "role_keys": [],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "left_entity": {},
+          "left_unit": null,
+          "right_entity": {},
+          "right_frame_ref": {
+            "content_version": "cv_edbdcf4fbee7ed5dffe17dceab80b73c",
+            "spec_id": "spec_cccccccccccccccccccccccccccccccc"
+          },
+          "right_unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.1",
+          "frame_grammar_version": "1.2.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "stat_var": "dcid:ops_17e3665e855fb7d054fef60df1ba3614",
+          "left_stat_vars": [
+            "dcid:AidReceived"
+          ],
+          "right_stat_vars": [
+            "dcid:AidDisbursed"
+          ],
+          "unit": {
+            "currency": "USD",
+            "prices": "constant",
+            "base_year": 2024,
+            "deflation_basis": "donor"
+          },
+          "facet_selections": [],
+          "left_facet_selections": [],
+          "right_facet_selections": [],
+          "warnings": [],
+          "left_periods": [
+            "2015",
+            "2016",
+            "2017",
+            "2018",
+            "2019",
+            "2020",
+            "2021",
+            "2022",
+            "2023",
+            "2024"
+          ],
+          "right_periods": [
+            "2015",
+            "2016",
+            "2017",
+            "2018",
+            "2019",
+            "2020",
+            "2021",
+            "2022",
+            "2023",
+            "2024"
+          ],
+          "intersected_periods": [
+            "2015",
+            "2016",
+            "2017",
+            "2018",
+            "2019",
+            "2020",
+            "2021",
+            "2022",
+            "2023",
+            "2024"
+          ],
+          "left_coverage_fraction": 1.0,
+          "right_coverage_fraction": 1.0,
+          "period_sums": [
+            {
+              "time_period": "2015",
+              "left_value": 100.0,
+              "right_value": 100.0,
+              "value": 200.0
+            },
+            {
+              "time_period": "2016",
+              "left_value": 101.0,
+              "right_value": 101.0,
+              "value": 202.0
+            },
+            {
+              "time_period": "2017",
+              "left_value": 102.0,
+              "right_value": 102.0,
+              "value": 204.0
+            },
+            {
+              "time_period": "2018",
+              "left_value": 103.0,
+              "right_value": 103.0,
+              "value": 206.0
+            },
+            {
+              "time_period": "2019",
+              "left_value": 104.0,
+              "right_value": 104.0,
+              "value": 208.0
+            },
+            {
+              "time_period": "2020",
+              "left_value": 105.0,
+              "right_value": 105.0,
+              "value": 210.0
+            },
+            {
+              "time_period": "2021",
+              "left_value": 106.0,
+              "right_value": 106.0,
+              "value": 212.0
+            },
+            {
+              "time_period": "2022",
+              "left_value": 107.0,
+              "right_value": 107.0,
+              "value": 214.0
+            },
+            {
+              "time_period": "2023",
+              "left_value": 108.0,
+              "right_value": 108.0,
+              "value": 216.0
+            },
+            {
+              "time_period": "2024",
+              "left_value": 109.0,
+              "right_value": 109.0,
+              "value": 218.0
+            }
+          ],
+          "left_out": [],
+          "exclusions": {
+            "records": []
+          }
+        },
+        "sides": {
+          "data": "left",
+          "other": "right"
+        }
+      },
+      "rows": 10,
+      "role_keys": [],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.1",
+        "frame_grammar_version": "1.2.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"predicates\":[]},\"inputs\":{\"data\":{\"content_version\":\"cv_55fe793f14b370e68322f8cf3ca0a9c8\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_55555555555555555555555555555555\"}},\"verb\":\"filter\"}}": {
     "status": 200,
     "body": {
@@ -39891,6 +40149,127 @@
     },
     "retry_after": null
   },
+  "GET /api/datasets/derived/ops_17e3665e855fb7d054fef60df1ba3614/ocv_05fbdf7cdaf5e18d3e29bf276dc78f2c?": {
+    "status": 200,
+    "body": {
+      "spec_id": "ops_17e3665e855fb7d054fef60df1ba3614",
+      "content_version": "ocv_05fbdf7cdaf5e18d3e29bf276dc78f2c",
+      "retention": {
+        "pinned": false,
+        "held_until": "2026-11-27T00:00:00Z"
+      },
+      "citation": {
+        "text": "",
+        "sources": []
+      },
+      "recipe": {
+        "normal_form_hash": "rnf_bd6bc8000cad7f4fa57b93587a6c89be",
+        "replay_key": "rpk_819b79fd7ec09d0f9a11882e411911ec",
+        "execution_identity": "0.9.1|1.2.0|0.2.0",
+        "tree": {
+          "frame": {
+            "spec_id": "ops_17e3665e855fb7d054fef60df1ba3614",
+            "content_version": "ocv_05fbdf7cdaf5e18d3e29bf276dc78f2c"
+          },
+          "op_spec": {
+            "frame_ref": {
+              "content_version": "cv_225f0abf0fd1548db41679ebb1d66502",
+              "spec_id": "spec_dddddddddddddddddddddddddddddddd"
+            },
+            "identity_version": "ops1",
+            "parameters": {
+              "left_entity": {},
+              "left_unit": null,
+              "right_entity": {},
+              "right_frame_ref": {
+                "content_version": "cv_edbdcf4fbee7ed5dffe17dceab80b73c",
+                "spec_id": "spec_cccccccccccccccccccccccccccccccc"
+              },
+              "right_unit": null
+            },
+            "verb": "sum_of"
+          },
+          "inputs": {
+            "frame_ref": {
+              "frame": {
+                "spec_id": "spec_dddddddddddddddddddddddddddddddd",
+                "content_version": "cv_225f0abf0fd1548db41679ebb1d66502"
+              },
+              "root": 0
+            },
+            "right_frame_ref": {
+              "frame": {
+                "spec_id": "spec_cccccccccccccccccccccccccccccccc",
+                "content_version": "cv_edbdcf4fbee7ed5dffe17dceab80b73c"
+              },
+              "root": 1
+            }
+          }
+        },
+        "roots": [
+          {
+            "schema_version": 1,
+            "frame": {
+              "spec_id": "spec_dddddddddddddddddddddddddddddddd",
+              "content_version": "cv_225f0abf0fd1548db41679ebb1d66502"
+            },
+            "dataset": {
+              "spec_id": "spec_dddddddddddddddddddddddddddddddd",
+              "content_version": "cv_225f0abf0fd1548db41679ebb1d66502"
+            },
+            "options": {
+              "format": "parquet",
+              "bundle": false,
+              "layout": "frame"
+            },
+            "scope": {}
+          },
+          {
+            "schema_version": 1,
+            "frame": {
+              "spec_id": "spec_cccccccccccccccccccccccccccccccc",
+              "content_version": "cv_edbdcf4fbee7ed5dffe17dceab80b73c"
+            },
+            "dataset": {
+              "spec_id": "spec_cccccccccccccccccccccccccccccccc",
+              "content_version": "cv_edbdcf4fbee7ed5dffe17dceab80b73c"
+            },
+            "options": {
+              "format": "parquet",
+              "bundle": false,
+              "layout": "frame"
+            },
+            "scope": {}
+          }
+        ]
+      },
+      "roots": [
+        {
+          "spec_id": "spec_dddddddddddddddddddddddddddddddd",
+          "content_version": "cv_225f0abf0fd1548db41679ebb1d66502",
+          "rendering": {
+            "format": "parquet",
+            "bundle": false,
+            "layout": "frame"
+          }
+        },
+        {
+          "spec_id": "spec_cccccccccccccccccccccccccccccccc",
+          "content_version": "cv_edbdcf4fbee7ed5dffe17dceab80b73c",
+          "rendering": {
+            "format": "parquet",
+            "bundle": false,
+            "layout": "frame"
+          }
+        }
+      ],
+      "resolved_periods": [],
+      "anchor": null,
+      "left_out": [],
+      "left_out_complete": true
+    },
+    "retry_after": null
+  },
   "GET /api/datasets/derived/ops_1a6538e0db3e16b4e95008b8c94f0fb5/ocv_aa92c9d39a9f208f7b7c18f5a4bcbb9b/file?format=parquet&bundle=false": {
     "status": 200,
     "content": "UEFSMRUEFUoVTkwVAhUAEgAAJZAhAAAAZGNpZDpHcm9zc0Rpc2J1cnNlbWVudHNfQ29udmVydGVkFQAVEhUWLBUEFRAVBhUGHDYAKCFkY2lkOkdyb3NzRGlzYnVyc2VtZW50c19Db252ZXJ0ZWQYIWRjaWQ6R3Jvc3NEaXNidXJzZW1lbnRzX0NvbnZlcnRlZBERAAAACSACAAAABAEBBAAVBBU8FUBMFQQVABIAAB50CwAAAGNvdW50cnkvS0VOCwAAAGNvdW50cnkvU0VOFQAVEhUWLBUEFRAVBhUGHDYAKAtjb3VudHJ5L1NFThgLY291bnRyeS9LRU4REQAAAAkgAgAAAAQBAQMCFQQVEhUWTBUCFQASAAAJIAUAAABwYXJ0eRUAFRIVFiwVBBUQFQYVBhw2ACgFcGFydHkYBXBhcnR5EREAAAAJIAIAAAAEAQEEABUEFRoVHkwVAhUAEgAADTAJAAAAMjAyMi8yMDI0FQAVEhUWLBUEFRAVBhUGHDYAKAkyMDIyLzIwMjQYCTIwMjIvMjAyNBERAAAACSACAAAABAEBBAAVBBUgFSRMFQQVABIAABA8xLEujubiNkEmUwUjs6wWQRUAFRIVFiwVBBUQFQYVBhwYCMSxLo7m4jZBGAgmUwUjs6wWQRYAKAjEsS6O5uI2QRgIJlMFI7OsFkEREQAAAAkgAgAAAAQBAQMCFQQVHhUiTBUCFQASAAAPOAsAAABDdXJyZW5jeVVTRBUAFRIVFiwVBBUQFQYVBhw2ACgLQ3VycmVuY3lVU0QYC0N1cnJlbmN5VVNEEREAAAAJIAIAAAAEAQEEABUEFQAVAkwVABUAEgAAABUAFQ4VEiwVBBUQFQYVBhw2BAAAAAcYAgAAAAQAABUEFTIVNkwVAhUAEgAAGWAVAAAAZGNpZDpkYy9iYXNlL09FQ0RfQ1JTFQAVEhUWLBUEFRAVBhUGHDYAKBVkY2lkOmRjL2Jhc2UvT0VDRF9DUlMYFWRjaWQ6ZGMvYmFzZS9PRUNEX0NSUxERAAAACSACAAAABAEBBAAVBBUAFQJMFQAVABIAAAAVABUOFRIsFQQVEBUGFQYcNgQAAAAHGAIAAAAEAAAVBBmsNQAYBnNjaGVtYRUSABUMJQIYCHN0YXRfdmFyJQBMHAAAABUMJQIYEmZpbmFuY2luZ1JlY2lwaWVudCUATBwAAAAVDCUCGB1maW5hbmNpbmdSZWNpcGllbnRfcGFydHlfa2luZCUATBwAAAAVDCUCGAt0aW1lX3BlcmlvZCUATBwAAAAVCiUCGAV2YWx1ZQAVDCUCGAR1bml0JQBMHAAAABUMJQIYEW1lYXN1cmVtZW50TWV0aG9kJQBMHAAAABUMJQIYCnByb3ZlbmFuY2UlAEwcAAAAFQwlAhgGc3RhdHVzJQBMHAAAABYEGRwZnCYAHBUMGTUABhAZGAhzdGF0X3ZhchUCFgQWsgIWugImciYIHDYAKCFkY2lkOkdyb3NzRGlzYnVyc2VtZW50c19Db252ZXJ0ZWQYIWRjaWQ6R3Jvc3NEaXNidXJzZW1lbnRzX0NvbnZlcnRlZBERABksFQQVABUCABUAFRAVAgA8FoQBGQYZJgAEAAAAJgAcFQwZNQAGEBkYEmZpbmFuY2luZ1JlY2lwaWVudBUCFgQWzAEW1AEmngMmwgIcNgAoC2NvdW50cnkvU0VOGAtjb3VudHJ5L0tFThERABksFQQVABUCABUAFRAVAgA8FiwZBhkmAAQAAAAmABwVDBk1AAYQGRgdZmluYW5jaW5nUmVjaXBpZW50X3BhcnR5X2tpbmQVAhYEFooBFpIBJsgEJpYEHDYAKAVwYXJ0eRgFcGFydHkREQAZLBUEFQAVAgAVABUQFQIAPBYUGQYZJgAEAAAAJgAcFQwZNQAGEBkYC3RpbWVfcGVyaW9kFQIWBBaiARaqASbiBSaoBRw2ACgJMjAyMi8yMDI0GAkyMDIyLzIwMjQREQAZLBUEFQAVAgAVABUQFQIAPBYkGQYZJgAEAAAAJgAcFQoZNQAGEBkYBXZhbHVlFQIWBBbMARbUASaSBybSBhwYCMSxLo7m4jZBGAgmUwUjs6wWQRYAKAjEsS6O5uI2QRgIJlMFI7OsFkEREQAZLBUEFQAVAgAVABUQFQIAPCkGGSYABAAAACYAHBUMGTUABhAZGAR1bml0FQIWBBauARa2ASbkCCamCBw2ACgLQ3VycmVuY3lVU0QYC0N1cnJlbmN5VVNEEREAGSwVBBUAFQIAFQAVEBUCADwWLBkGGSYABAAAACYAHBUMGTUABhAZGBFtZWFzdXJlbWVudE1ldGhvZBUCFgQWVBZaJvoJJtwJHDYEABksFQQVABUCABUAFRAVAgA8FgAZBhkmBAAAAAAmABwVDBk1AAYQGRgKcHJvdmVuYW5jZRUCFgQW6gEW8gEmiAsmtgocNgAoFWRjaWQ6ZGMvYmFzZS9PRUNEX0NSUxgVZGNpZDpkYy9iYXNlL09FQ0RfQ1JTEREAGSwVBBUAFQIAFQAVEBUCADwWVBkGGSYABAAAACYAHBUMGTUABhAZGAZzdGF0dXMVAhYEFlQWWibGDCaoDBw2BAAZLBUEFQAVAgAVABUQFQIAPBYAGQYZJgQAAAAAFrYMFgQmCBb6DAAZHBgMQVJST1c6c2NoZW1hGNgFLy8vLy94Z0NBQUFRQUFBQUFBQUtBQXdBQmdBRkFBZ0FDZ0FBQUFBQkJBQU1BQUFBQ0FBSUFBQUFCQUFJQUFBQUJBQUFBQWtBQUFDMEFRQUFiQUVBQUNnQkFBRDRBQUFBeEFBQUFKZ0FBQUJnQUFBQU1BQUFBQVFBQUFDQS92Ly9BQUFCQlJBQUFBQVlBQUFBQkFBQUFBQUFBQUFHQUFBQWMzUmhkSFZ6QUFCcy92Ly9xUDcvL3dBQUFRVVFBQUFBSEFBQUFBUUFBQUFBQUFBQUNnQUFBSEJ5YjNabGJtRnVZMlVBQUpqKy8vL1Uvdi8vQUFBQkJSQUFBQUFrQUFBQUJBQUFBQUFBQUFBUkFBQUFiV1ZoYzNWeVpXMWxiblJOWlhSb2IyUUFBQURNL3YvL0NQLy8vd0FBQVFVUUFBQUFHQUFBQUFRQUFBQUFBQUFBQkFBQUFIVnVhWFFBQUFBQTlQNy8vekQvLy84QUFBRURFQUFBQUJ3QUFBQUVBQUFBQUFBQUFBVUFBQUIyWVd4MVpRQUdBQWdBQmdBR0FBQUFBQUFDQUdELy8vOEFBQUVGRUFBQUFCd0FBQUFFQUFBQUFBQUFBQXNBQUFCMGFXMWxYM0JsY21sdlpBQlEvLy8valAvLy93QUFBUVVRQUFBQU1BQUFBQVFBQUFBQUFBQUFIUUFBQUdacGJtRnVZMmx1WjFKbFkybHdhV1Z1ZEY5d1lYSjBlVjlyYVc1a0FBQUFrUC8vLzh6Ly8vOEFBQUVGRUFBQUFDUUFBQUFFQUFBQUFBQUFBQklBQUFCbWFXNWhibU5wYm1kU1pXTnBjR2xsYm5RQUFNVC8vLzhRQUJRQUNBQUdBQWNBREFBQUFCQUFFQUFBQUFBQUFRVVFBQUFBSUFBQUFBUUFBQUFBQUFBQUNBQUFBSE4wWVhSZmRtRnlBQUFBQUFRQUJBQUVBQUFBQUFBQUFBPT0AGCBwYXJxdWV0LWNwcC1hcnJvdyB2ZXJzaW9uIDI0LjAuMBmcHAAAHAAAHAAAHAAAHAAAHAAAHAAAHAAAHAAAALUHAABQQVIx",
@@ -44335,385 +44714,6 @@
         "series": [],
         "complete": true
       }
-    },
-    "retry_after": null
-  },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"left_entity\":{},\"right_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_225f0abf0fd1548db41679ebb1d66502\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_dddddddddddddddddddddddddddddddd\"},\"other\":{\"content_version\":\"cv_c76b07b1808ad5ce08bb17f0a67da2b5\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_11111111111111111111111111111111\"}},\"verb\":\"sum_of\"}}": {
-    "status": 422,
-    "body": {
-      "type": "/codes/cross_frame_unit_mismatch",
-      "title": "Cross Frame Unit Mismatch",
-      "status": 422,
-      "detail": "left resolved to unit 'converted to constant 2024 prices, US dollars, donor prices', right to 'converted to constant 2024 prices, US dollars, recipient prices' -- combining values across different units is silently wrong, not merely inconvenient. The two sides were deflated by different parties' prices, so their constant-price amounts measure different things. Call get_data for both sides in current prices, then retry with the new frame_refs.",
-      "code": "cross_frame_unit_mismatch",
-      "trace_id": "cc894bc37d5241a8a0c49fd63bd2c18f",
-      "capability_version": "dset_ffadb5cc6ba2692b",
-      "retryable": false,
-      "retry_mode": "correct_and_retry",
-      "fix": {
-        "left": {
-          "currency": "USD",
-          "prices": "constant",
-          "base_year": 2024,
-          "deflation_basis": "donor"
-        },
-        "right": {
-          "currency": "USD",
-          "prices": "constant",
-          "base_year": 2024,
-          "deflation_basis": "recipient"
-        }
-      }
-    },
-    "retry_after": null
-  },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"left_entity\":{},\"right_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_225f0abf0fd1548db41679ebb1d66502\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_dddddddddddddddddddddddddddddddd\"},\"other\":{\"content_version\":\"cv_edbdcf4fbee7ed5dffe17dceab80b73c\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_cccccccccccccccccccccccccccccccc\"}},\"verb\":\"sum_of\"}}": {
-    "status": 200,
-    "body": {
-      "status": "ready",
-      "ref": {
-        "format_version": 2,
-        "members": [
-          {
-            "parts": [],
-            "sentence": "Computed by DFO: sum_of.",
-            "spec": {
-              "spec_id": "ops_17e3665e855fb7d054fef60df1ba3614",
-              "recipe": {
-                "normal_form_hash": "rnf_bd6bc8000cad7f4fa57b93587a6c89be",
-                "replay_key": "rpk_819b79fd7ec09d0f9a11882e411911ec"
-              }
-            },
-            "content_version": "ocv_05fbdf7cdaf5e18d3e29bf276dc78f2c",
-            "output_digest": "out_bcee649582b775147df8bce167be2ffe",
-            "roots": [
-              {
-                "spec_id": "spec_dddddddddddddddddddddddddddddddd",
-                "content_version": "cv_225f0abf0fd1548db41679ebb1d66502",
-                "rendering": {
-                  "format": "parquet",
-                  "bundle": false,
-                  "layout": "frame"
-                }
-              },
-              {
-                "spec_id": "spec_cccccccccccccccccccccccccccccccc",
-                "content_version": "cv_edbdcf4fbee7ed5dffe17dceab80b73c",
-                "rendering": {
-                  "format": "parquet",
-                  "bundle": false,
-                  "layout": "frame"
-                }
-              }
-            ],
-            "execution_identity": "0.9.1|1.2.0|0.2.0",
-            "resolved_periods": [],
-            "artifact": {
-              "digest": "sha256:8a3383b91f7571221c2bbc4309c1e68b852c1e300876b61338605e4a82497b38",
-              "rendering": {
-                "format": "parquet",
-                "bundle": false,
-                "layout": "frame"
-              }
-            }
-          }
-        ]
-      },
-      "frame_content_version": "cv_fefee99c0ec04cad588dfb07365a5a8c",
-      "output_digest": "out_bcee649582b775147df8bce167be2ffe",
-      "summary": {
-        "verb": "sum_of",
-        "spec_id": "ops_17e3665e855fb7d054fef60df1ba3614",
-        "content_version": "ocv_05fbdf7cdaf5e18d3e29bf276dc78f2c",
-        "frame_content_version": "cv_fefee99c0ec04cad588dfb07365a5a8c",
-        "rows": 10,
-        "role_keys": [],
-        "stat_var_count": 1,
-        "dropped_key_count": 0,
-        "right_dropped_key_count": 0,
-        "ranked_before_limit": null,
-        "exclusions": [],
-        "time": {
-          "kind": "observation"
-        },
-        "parameters": {
-          "left_entity": {},
-          "left_unit": null,
-          "right_entity": {},
-          "right_frame_ref": {
-            "content_version": "cv_edbdcf4fbee7ed5dffe17dceab80b73c",
-            "spec_id": "spec_cccccccccccccccccccccccccccccccc"
-          },
-          "right_unit": null
-        },
-        "execution_identity": {
-          "engine_version": "0.9.1",
-          "frame_grammar_version": "1.2.0",
-          "reduction_policy_version": "0.2.0"
-        },
-        "derived": null,
-        "result": {
-          "stat_var": "dcid:ops_17e3665e855fb7d054fef60df1ba3614",
-          "left_stat_vars": [
-            "dcid:AidReceived"
-          ],
-          "right_stat_vars": [
-            "dcid:AidDisbursed"
-          ],
-          "unit": {
-            "currency": "USD",
-            "prices": "constant",
-            "base_year": 2024,
-            "deflation_basis": "donor"
-          },
-          "facet_selections": [],
-          "left_facet_selections": [],
-          "right_facet_selections": [],
-          "warnings": [],
-          "left_periods": [
-            "2015",
-            "2016",
-            "2017",
-            "2018",
-            "2019",
-            "2020",
-            "2021",
-            "2022",
-            "2023",
-            "2024"
-          ],
-          "right_periods": [
-            "2015",
-            "2016",
-            "2017",
-            "2018",
-            "2019",
-            "2020",
-            "2021",
-            "2022",
-            "2023",
-            "2024"
-          ],
-          "intersected_periods": [
-            "2015",
-            "2016",
-            "2017",
-            "2018",
-            "2019",
-            "2020",
-            "2021",
-            "2022",
-            "2023",
-            "2024"
-          ],
-          "left_coverage_fraction": 1.0,
-          "right_coverage_fraction": 1.0,
-          "period_sums": [
-            {
-              "time_period": "2015",
-              "left_value": 100.0,
-              "right_value": 100.0,
-              "value": 200.0
-            },
-            {
-              "time_period": "2016",
-              "left_value": 101.0,
-              "right_value": 101.0,
-              "value": 202.0
-            },
-            {
-              "time_period": "2017",
-              "left_value": 102.0,
-              "right_value": 102.0,
-              "value": 204.0
-            },
-            {
-              "time_period": "2018",
-              "left_value": 103.0,
-              "right_value": 103.0,
-              "value": 206.0
-            },
-            {
-              "time_period": "2019",
-              "left_value": 104.0,
-              "right_value": 104.0,
-              "value": 208.0
-            },
-            {
-              "time_period": "2020",
-              "left_value": 105.0,
-              "right_value": 105.0,
-              "value": 210.0
-            },
-            {
-              "time_period": "2021",
-              "left_value": 106.0,
-              "right_value": 106.0,
-              "value": 212.0
-            },
-            {
-              "time_period": "2022",
-              "left_value": 107.0,
-              "right_value": 107.0,
-              "value": 214.0
-            },
-            {
-              "time_period": "2023",
-              "left_value": 108.0,
-              "right_value": 108.0,
-              "value": 216.0
-            },
-            {
-              "time_period": "2024",
-              "left_value": 109.0,
-              "right_value": 109.0,
-              "value": 218.0
-            }
-          ],
-          "left_out": [],
-          "exclusions": {
-            "records": []
-          }
-        },
-        "sides": {
-          "data": "left",
-          "other": "right"
-        }
-      },
-      "rows": 10,
-      "role_keys": [],
-      "stat_var_count": 1,
-      "exclusions": [],
-      "time": {
-        "kind": "observation"
-      },
-      "execution_identity": {
-        "engine_version": "0.9.1",
-        "frame_grammar_version": "1.2.0",
-        "reduction_policy_version": "0.2.0"
-      },
-      "resolved_periods": []
-    },
-    "retry_after": null
-  },
-  "GET /api/datasets/derived/ops_17e3665e855fb7d054fef60df1ba3614/ocv_05fbdf7cdaf5e18d3e29bf276dc78f2c?": {
-    "status": 200,
-    "body": {
-      "spec_id": "ops_17e3665e855fb7d054fef60df1ba3614",
-      "content_version": "ocv_05fbdf7cdaf5e18d3e29bf276dc78f2c",
-      "retention": {
-        "pinned": false,
-        "held_until": "2026-11-27T00:00:00Z"
-      },
-      "citation": {
-        "text": "",
-        "sources": []
-      },
-      "recipe": {
-        "normal_form_hash": "rnf_bd6bc8000cad7f4fa57b93587a6c89be",
-        "replay_key": "rpk_819b79fd7ec09d0f9a11882e411911ec",
-        "execution_identity": "0.9.1|1.2.0|0.2.0",
-        "tree": {
-          "frame": {
-            "spec_id": "ops_17e3665e855fb7d054fef60df1ba3614",
-            "content_version": "ocv_05fbdf7cdaf5e18d3e29bf276dc78f2c"
-          },
-          "op_spec": {
-            "frame_ref": {
-              "content_version": "cv_225f0abf0fd1548db41679ebb1d66502",
-              "spec_id": "spec_dddddddddddddddddddddddddddddddd"
-            },
-            "identity_version": "ops1",
-            "parameters": {
-              "left_entity": {},
-              "left_unit": null,
-              "right_entity": {},
-              "right_frame_ref": {
-                "content_version": "cv_edbdcf4fbee7ed5dffe17dceab80b73c",
-                "spec_id": "spec_cccccccccccccccccccccccccccccccc"
-              },
-              "right_unit": null
-            },
-            "verb": "sum_of"
-          },
-          "inputs": {
-            "frame_ref": {
-              "frame": {
-                "spec_id": "spec_dddddddddddddddddddddddddddddddd",
-                "content_version": "cv_225f0abf0fd1548db41679ebb1d66502"
-              },
-              "root": 0
-            },
-            "right_frame_ref": {
-              "frame": {
-                "spec_id": "spec_cccccccccccccccccccccccccccccccc",
-                "content_version": "cv_edbdcf4fbee7ed5dffe17dceab80b73c"
-              },
-              "root": 1
-            }
-          }
-        },
-        "roots": [
-          {
-            "schema_version": 1,
-            "frame": {
-              "spec_id": "spec_dddddddddddddddddddddddddddddddd",
-              "content_version": "cv_225f0abf0fd1548db41679ebb1d66502"
-            },
-            "dataset": {
-              "spec_id": "spec_dddddddddddddddddddddddddddddddd",
-              "content_version": "cv_225f0abf0fd1548db41679ebb1d66502"
-            },
-            "options": {
-              "format": "parquet",
-              "bundle": false,
-              "layout": "frame"
-            },
-            "scope": {}
-          },
-          {
-            "schema_version": 1,
-            "frame": {
-              "spec_id": "spec_cccccccccccccccccccccccccccccccc",
-              "content_version": "cv_edbdcf4fbee7ed5dffe17dceab80b73c"
-            },
-            "dataset": {
-              "spec_id": "spec_cccccccccccccccccccccccccccccccc",
-              "content_version": "cv_edbdcf4fbee7ed5dffe17dceab80b73c"
-            },
-            "options": {
-              "format": "parquet",
-              "bundle": false,
-              "layout": "frame"
-            },
-            "scope": {}
-          }
-        ]
-      },
-      "roots": [
-        {
-          "spec_id": "spec_dddddddddddddddddddddddddddddddd",
-          "content_version": "cv_225f0abf0fd1548db41679ebb1d66502",
-          "rendering": {
-            "format": "parquet",
-            "bundle": false,
-            "layout": "frame"
-          }
-        },
-        {
-          "spec_id": "spec_cccccccccccccccccccccccccccccccc",
-          "content_version": "cv_edbdcf4fbee7ed5dffe17dceab80b73c",
-          "rendering": {
-            "format": "parquet",
-            "bundle": false,
-            "layout": "frame"
-          }
-        }
-      ],
-      "resolved_periods": [],
-      "anchor": null,
-      "left_out": [],
-      "left_out_complete": true
     },
     "retry_after": null
   }
