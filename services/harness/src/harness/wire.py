@@ -1366,6 +1366,11 @@ class PlanProposed(_WireModel):
     # Delta 23 (v1.8): the plan's decisions that qualify the answer, one
     # reader sentence each, which `plan.approved` carries once it is approved.
     caveats: list[str] = []
+    # True on a plan card that starts a new plan after an earlier plan in the
+    # same turn (a second `plan` call). Left out of a dump while unset or false,
+    # and left out of a stored pending card (`harness.studio_state`), so a stored
+    # card reads as before.
+    new_plan: bool | None = Field(default=None, exclude_if=lambda new_plan: not new_plan)
 
 
 class PlanRevisionStaleError(ToolError):
@@ -1504,35 +1509,64 @@ class ComponentCreated(_WireModel):
     created_from: CreatedFrom | None = None
 
 
-def usable_component(component: dict[str, Any] | None) -> bool:
-    """Whether `component` (a `write_component` result's own `component`
-    member) would satisfy the `component.created` wire contract above:
-    the full model, not just a `fact_summary` presence check. `make_charts`
-    (`harness.orchestrator_tools`) calls this to decide which writes land;
-    `harness.studio_translate`'s `_component_frames` validates the same
-    contract again at drain time, immediately before a write actually lands.
+def component_created(component: dict[str, Any], *, step_id: str) -> ComponentCreated:
+    """The `component.created` frame for `component` (a `write_component`
+    result's own `component` member), with `seq` 0 until the caller stamps it.
+    `step_id` is the step that produced it, unless the component names its own.
 
-    `event`, `seq` and `created_from` are not the writer's to give: `event`
-    and `seq` are wire bookkeeping no caller of this function has a real
-    value for yet, and the real `created_from` (the step that produced the
-    component) is only known at drain time. Stand-ins fill the three
-    fields here so validation can run on everything else the contract
-    actually requires.
+    Raises:
+        ValidationError: `component` does not satisfy the contract above.
     """
-    if component is None:
-        return False
+    return ComponentCreated.model_validate(
+        {
+            **component,
+            "event": "component.created",
+            "seq": 0,
+            "created_from": component.get("created_from") or {"step_id": step_id},
+        }
+    )
+
+
+def component_fault(component: dict[str, Any]) -> ValidationError | None:
+    """The `ValidationError` that keeps `component` from satisfying the
+    `component.created` wire contract above, the full model, or `None` when it
+    satisfies it. `stored_card_fault` calls this for a create, and
+    `harness.mcp_client` refuses a write whose card it names;
+    `harness.studio_translate`'s `_record_frames` builds the same frame again
+    at drain time.
+
+    `event`, `seq` and `created_from` are not the writer's to give, and the
+    real `created_from` (the step that produced the component) is only known
+    at drain time, so a stand-in step fills it here (`component_created`).
+    """
     try:
-        ComponentCreated.model_validate(
-            {
-                **component,
-                "event": "component.created",
-                "seq": 0,
-                "created_from": component.get("created_from") or {"step_id": "_"},
-            }
-        )
-    except ValidationError:
-        return False
-    return True
+        component_created(component, step_id="_")
+    except ValidationError as fault:
+        return fault
+    return None
+
+
+def log_unreadable_card(
+    log: logging.Logger,
+    component: dict[str, Any],
+    fault: ValidationError,
+    *,
+    where: str,
+    frame: str | None = None,
+) -> None:
+    """Log, at ERROR, a stored card that fails the component contract. The
+    platform stored it, so nothing refused the write: the harness cannot read
+    what was stored. `log` is the caller's logger. The log names the card,
+    `where` it was met and each faulty member, and leaves `input` out so
+    payload values stay out."""
+    log.error(
+        "%s: stored card %s revision %s%s fails the component contract: %s",
+        where,
+        component.get("component_id"),
+        component.get("revision"),
+        f" (frame {frame})" if frame else "",
+        [(error["loc"], error["type"]) for error in fault.errors(include_input=False)],
+    )
 
 
 class ComponentRevised(_WireModel):
@@ -1547,6 +1581,53 @@ class ComponentRevised(_WireModel):
     changed: list[str] = Field(min_length=1)
     fact_summary: FactSummary
     payload: dict[str, Any] | None = None
+
+
+def component_revised(
+    component: dict[str, Any], component_id: str, patch: dict[str, Any]
+) -> ComponentRevised:
+    """The `component.revised` frame for a revise of `component_id` (a
+    `write_component` result's own `component` member) by `patch`, with `seq`
+    0 until the caller stamps it. The card needs only the members this frame
+    carries.
+
+    Raises:
+        ValidationError: the stored card cannot fill them.
+    """
+    return ComponentRevised.model_validate(
+        {
+            "event": "component.revised",
+            "seq": 0,
+            "component_id": component_id,
+            "revision": component.get("revision"),
+            "changed": sorted(patch),
+            "fact_summary": component.get("fact_summary"),
+            "payload": component.get("payload"),
+        }
+    )
+
+
+def stored_card_fault(
+    component: dict[str, Any], *, revised_by: dict[str, Any] | None = None
+) -> ValidationError | None:
+    """The `ValidationError` that keeps the frame a `write_component` call
+    emits from being built from `component`, or `None` when it can be. A
+    create (`revised_by` is `None`) emits `component.created`
+    (`component_fault`). A revise emits `component.revised`
+    (`component_revised`), whose `changed` names the members of the patch
+    `revised_by`. A revise the platform answered as a no-op returns the
+    revision the card already held, which is `1` for a card never revised, so
+    the revision is not judged here: a no-op carries no frame.
+    """
+    if revised_by is None:
+        return component_fault(component)
+    revision = component.get("revision")
+    judged = {**component, "revision": max(revision, 2)} if isinstance(revision, int) else component
+    try:
+        component_revised(judged, str(component.get("component_id")), revised_by)
+    except ValidationError as fault:
+        return fault
+    return None
 
 
 class CompositionUpdated(_WireModel):

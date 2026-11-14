@@ -40,6 +40,7 @@ the node can only relay once the draft is done (`harness.graph`'s
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import json
 import logging
@@ -148,6 +149,7 @@ from harness.wire import (
     StepStatus,
     Suggestions,
     ToolError,
+    component_created,
 )
 
 logger = logging.getLogger(__name__)
@@ -366,7 +368,7 @@ class _ExecutorRecord:
     step_id: str | None = None
     # Stamped by `_RecordingExecutor.land_component` right after the write
     # it belongs to returns (`make_charts`, `harness.orchestrator_tools`), for
-    # a component that passed `harness.wire.usable_component`. Not a
+    # a component that passed `harness.wire.component_fault`. Not a
     # decision; the landing happens later, at drain time, when
     # `_component_frames` reads it. `False` (its default) for every record
     # that never became a `land_component` call: a plan-step surface record,
@@ -1249,7 +1251,9 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     a plan again, and `Plan`'s schema has no field for that. `restarted`
     marks an `"ok"` draft made over a plan the node could not read, whose version
     counts from 1 again; `_interrupt_frames` reads it to start a new line of
-    plan version ids. `moved` rides on a plan the `switch` node offers
+    plan version ids. `new_plan` marks a first draft, which starts a new line
+    of plan version ids and a new `plan.proposed` card when an earlier plan
+    card is in the turn. `moved` rides on a plan the `switch` node offers
     (`harness.graph.switch`): the other scope choices the switch moved;
     `switch_failed` on one it offers again after a switch that did not
     apply (`_switch_failed`).
@@ -1257,7 +1261,16 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     fields = {
         key: value
         for key, value in payload.items()
-        if key not in ("summary", "revision", "refusal_note", "restarted", "moved", "switch_failed")
+        if key
+        not in (
+            "summary",
+            "revision",
+            "refusal_note",
+            "restarted",
+            "new_plan",
+            "moved",
+            "switch_failed",
+        )
     }
     return PlannerPlan.model_validate(fields)
 
@@ -1763,6 +1776,13 @@ class _Translator:
             step_id = self._wire_step_id(record.step_id, seq=seq)
             refused = record.result.get("outcome") == "refusal"
             component = record.result.get("component")
+            created: ComponentCreated | None = None
+            if isinstance(component, dict):
+                # `McpExecutor` refuses a card that fails this contract
+                # (`stored_card_unreadable`); a bare executor's is left off the
+                # wire here.
+                with contextlib.suppress(ValidationError):
+                    created = component_created(component, step_id=step_id)
             if record.step_id is not None:
                 self._running_plan_steps.pop(record.step_id, None)
                 if record.step_id == self._answer_step:
@@ -1788,18 +1808,18 @@ class _Translator:
                             component_id=component["component_id"],
                             revision=component["revision"],
                         )
-                        if isinstance(component, dict)
+                        if isinstance(component, dict) and created is not None
                         else None
                     ),
                 )
             )
-            if isinstance(component, dict):
+            if isinstance(component, dict) and created is not None:
                 frames.extend(
                     self._component_frames(
                         component,
-                        step_id=step_id,
                         land=record.land,
                         intent=record.args.get("intent"),
+                        created=created,
                     )
                 )
         return frames
@@ -1808,47 +1828,23 @@ class _Translator:
         self,
         component: dict[str, Any],
         *,
-        step_id: str,
         land: bool,
+        created: ComponentCreated,
         intent: dict[str, Any] | None = None,
     ) -> list[Any]:
-        """Validate `component` against the `component.created` wire
-        contract, then, only for a component stamped `land=True`
+        """Frames for `component`, which passed the `component.created` wire
+        contract (`created` is the frame `_record_frames` built from it).
+        Only for a component stamped `land=True`
         (`_RecordingExecutor.land_component`, called by `make_charts` right
         after the write returned), land it: append its block to the canvas
         and keep the `intent` it was written from with it
-        (`harness.studio_state.land_component`). A component that fails
-        validation here never lands and produces no frame at all. For an
-        unstamped record (`land=False`) this is the expected outcome:
-        `make_charts` already refused this write because the same component
-        failed `harness.wire.usable_component`, so no frame is the right
-        result and this is not logged. For a record stamped `land=True`,
-        `make_charts` already ran `usable_component` on this exact component
-        and it passed, so a validation failure here means the wire check and
-        this method's own contract have diverged: a real bug, logged at
-        ERROR. `land=False` with a valid component (a bare executor with no
-        `land_component` capability at all) means no block exists to report:
-        only `component.created` goes out. `land=True` against an
-        `auto_add=False` conversation resolves to `"held"` inside
+        (`harness.studio_state.land_component`). `land=False` with a valid component (a bare
+        executor with no `land_component` capability at all) means no block
+        exists to report: only `component.created` goes out. `land=True`
+        against an `auto_add=False` conversation resolves to `"held"` inside
         `harness.studio_state.land_component` itself, also only
         `component.created`."""
-        try:
-            created = ComponentCreated.model_validate(
-                {
-                    **component,
-                    "event": "component.created",
-                    "seq": self._conversation.next_seq(),
-                    "created_from": component.get("created_from") or {"step_id": step_id},
-                }
-            )
-        except ValidationError:
-            if land:
-                logger.error(
-                    "a component stamped land=True (make_charts' usable_component check "
-                    "passed) failed component.created validation at drain time; "
-                    "make_charts' wire check and this validation have diverged"
-                )
-            return []
+        created.seq = self._conversation.next_seq()
         if not land:
             return [created]
         if state_land_component(self._conversation, component, intent=intent) != "created":
@@ -1922,7 +1918,15 @@ class _Translator:
             version = int(payload.get("version", 1))
             latest = conversation.latest_plan_version
             restarted_from: str | None = None
-            if payload.get("restarted"):
+            # A first draft made after an earlier plan card in the turn: that
+            # card is settled, so this one supersedes nothing, its version ids
+            # are its own, and the card says it starts a plan. The turn's
+            # first card has no earlier lineage to part from.
+            new_plan = bool(payload.get("new_plan")) and latest is not None
+            if new_plan:
+                conversation.start_plan_lineage()
+                latest = None
+            elif payload.get("restarted"):
                 # `harness.graph.planning`'s `planner` node drafted this plan from the
                 # start, over a plan it could not read, so its version
                 # counts from 1 on a line of its own. The ids given out so
@@ -2090,6 +2094,7 @@ class _Translator:
                 else None,
                 switch_failed=_switch_failed(payload),
                 caveats=_caveats(plan),
+                new_plan=True if new_plan else None,
             )
             frames.append(card)
             conversation.pending[wire_id] = _PendingInterrupt(

@@ -719,6 +719,7 @@ async def test_stale_version_approval_routes_to_amend(wrong: Callable[[str], Any
     events = await _start(runner)
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     first = _output_of(events, "planner")
+    assert first["new_plan"] is True
 
     events = await _resume(runner, APPROVE_INTERRUPT, wrong(first["revision"]))
 
@@ -731,6 +732,7 @@ async def test_stale_version_approval_routes_to_amend(wrong: Callable[[str], Any
     assert amended["previous_version"] == 1
     assert amended["status"] == "pending_approval"
     assert amended["revision"] != first["revision"]
+    assert "new_plan" not in amended
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(amended["revision"]))
     assert [call[0] for call in surface.calls] == ["get_data", "aggregate"]
@@ -1532,7 +1534,7 @@ async def test_the_planner_node_validates_the_planners_plan_and_writes_it_to_sta
     output = _output_of(events, "planner")
     assert output["summary"] == {"version": 1}
     assert output["revision"] == plan_revision(plan)
-    plan_fields = {k: v for k, v in output.items() if k not in ("summary", "revision")}
+    plan_fields = {k: v for k, v in output.items() if k not in ("summary", "revision", "new_plan")}
     validated = PlannerPlan.model_validate(plan_fields)
     assert validated == plan
 
@@ -1777,6 +1779,7 @@ async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_sta
     redrafted = _output_of(events, "planner")
     assert redrafted["refusal_note"] == UNREADABLE_PLAN_NOTE
     assert redrafted["restarted"] is True
+    assert "new_plan" not in redrafted
 
 
 def _picked_window(plan: PlannerPlan) -> DecisionPick:
@@ -3104,6 +3107,45 @@ async def test_a_not_approved_outcome_raises_instead_of_replanning(
         await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
 
 
+def test_a_refused_stop_that_read_a_source_names_it_in_the_replan_payload() -> None:
+    refused = Refused(
+        revision="rev1",
+        refusal=RefusalKind.REQUIREMENT_UNMET,
+        detail="requirement not met",
+        step_id="totals",
+        spec_id=SPEC_A,
+    )
+
+    assert _replan_refusal(refused, origins={})["spec_id"] == SPEC_A
+    # A stop that read a windowed copy names the origin the planner was shown,
+    # in the payload and in each sibling stop.
+    payload = _replan_refusal(
+        refused.model_copy(update={"also_stopped": (refused,)}), origins={SPEC_A: SPEC_B}
+    )
+    assert payload["spec_id"] == SPEC_B
+    assert [stop["spec_id"] for stop in payload["also_stopped"]] == [SPEC_B]
+
+
+def test_a_rediscovery_stop_names_the_spec_it_read_whatever_the_origins() -> None:
+    """Only a `Refused` stop maps a windowed copy to its origin: a rediscovery
+    holds the copy's own spec_id."""
+    rediscovery = RediscoveryNeeded(
+        revision="rev1",
+        step_id="totals",
+        tool=ToolId(server="data-mcp", name="get_data"),
+        requirement_id="totals",
+        spec_id=SPEC_A,
+        refusal=ToolFailure(
+            code="definition_not_held", message="gone", retry_mode="correct_and_retry"
+        ),
+        completed=(),
+    )
+
+    payload = _replan_refusal(rediscovery, origins={SPEC_A: SPEC_B})
+
+    assert payload["spec_id"] == SPEC_A
+
+
 def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> None:
     """`_replan_refusal`'s payload shapes, pinned directly against each outcome
     kind -- not merely reachable through one graph run apiece."""
@@ -3118,7 +3160,7 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         ),
         completed=(),
     )
-    assert _replan_refusal(method_choice) == {
+    assert _replan_refusal(method_choice, origins={}) == {
         "kind": "method_choice_needed",
         "step_id": "totals",
         "tool": "aggregate",
@@ -3152,7 +3194,7 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         ),
         completed=(),
     )
-    assert _replan_refusal(rediscovery) == {
+    assert _replan_refusal(rediscovery, origins={}) == {
         "kind": "rediscovery_needed",
         "step_id": "get_data",
         "tool": "get_data",
@@ -3182,7 +3224,7 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         detail="no rows matched",
         step_id="totals",
     )
-    assert _replan_refusal(refused) == {
+    assert _replan_refusal(refused, origins={}) == {
         "kind": "refused",
         "refusal": "empty_answer",
         "detail": "no rows matched",
@@ -3478,7 +3520,7 @@ async def test_a_stop_on_a_copy_names_the_requirement_the_model_wrote(
         }
     )
 
-    refusal = _planner_refusal(stop, plan=plan)
+    refusal = _planner_refusal(stop, plan=plan, origins={})
     ctx = SimpleNamespace(state={"plan": plan.model_dump_json()})
     plan_done = plan_done_node(executor=ScriptedExecutor(), run_ledger=InMemoryRunLedger())
     node_input = {"frame_refs": [], "frame_ref_steps": [], "failed_step": _failed_step(stop)}
@@ -3530,7 +3572,7 @@ def test_a_stop_on_a_copy_renames_it_only_where_a_field_names_a_step(
         completed=(),
     )
 
-    refusal = _planner_refusal(stop, plan=plan)
+    refusal = _planner_refusal(stop, plan=plan, origins={})
 
     assert (refusal["step_id"], refusal["requirement_id"]) == ("debt", "debt")
     assert refusal["refusal"]["message"] == "debt needs its source found again"
@@ -3563,7 +3605,7 @@ def test_a_window_short_gap_on_a_copy_names_the_origin_and_the_years_its_retriev
         issues=tuple(findings),
     )
 
-    refusal = _planner_refusal(stop, plan=plan)
+    refusal = _planner_refusal(stop, plan=plan, origins={})
 
     (gap,) = [issue for issue in refusal["issues"] if issue["code"] == "window_short"]
     # A finding naming no series reads as it did before findings could name one.
@@ -3626,7 +3668,7 @@ def test_replan_refusal_names_every_sibling_a_wave_surfaced() -> None:
         also_stopped=(sibling,),
     )
 
-    payload = _replan_refusal(primary)
+    payload = _replan_refusal(primary, origins={})
 
     assert payload["also_stopped"] == [
         {
@@ -3644,7 +3686,7 @@ def test_replan_refusal_names_every_sibling_a_wave_surfaced() -> None:
             },
         }
     ]
-    assert _replan_refusal(sibling)["also_stopped"] == []
+    assert _replan_refusal(sibling, origins={})["also_stopped"] == []
 
 
 def test_mark_masked_step_failed_corrects_every_sibling_a_wave_surfaced() -> None:

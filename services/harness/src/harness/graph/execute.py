@@ -49,7 +49,7 @@ from executor.run import (
 )
 from google.adk import Context, Event
 from planner.plan import Plan as PlannerPlan
-from planner.plan import SessionState, aligned_pins, plan_revision, windowed_pins
+from planner.plan import SessionState, aligned_pins, plan_revision, windowed_origins
 
 from harness import plan_display
 from harness.conversation import conversation_of
@@ -100,7 +100,7 @@ def record_served_scopes(
     manifest_of = getattr(tool_surface, "retrieval_manifest", None)
     if manifest_of is None:
         return
-    origin_of = {copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()}
+    origin_of = windowed_origins(state)
     served: dict[str, dict[str, Any]] = {}
     for record in outcome.evidence:
         manifest = manifest_of(frame_ref=record.frame_ref.model_dump())
@@ -129,25 +129,37 @@ def record_served_scopes(
         state[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json") for reading in updated]
 
 
-def _replan_refusal(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
+def _replan_refusal(
+    outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused,
+    *,
+    origins: Mapping[str, str],
+) -> dict[str, Any]:
     """The refusal payload the planner node reads on a "replan" route:
     each outcome kind's own identity plus its diagnosis, never a numeric step
     index -- the compiled workflow steps are named, not ordinal. `also_stopped`
     names the same wave's other stops (`outcome.also_stopped`), each in this
-    same per-kind shape, empty when the wave surfaced only this one."""
+    same per-kind shape, empty when the wave surfaced only this one. A spec_id
+    a `Refused` payload names is its origin's when the stop read a windowed copy
+    (`origins`, from `planner.plan.windowed_origins`): the planner was shown the
+    origin."""
     return {
-        **_refusal_shape(outcome),
-        "also_stopped": [_refusal_shape(sibling) for sibling in outcome.also_stopped],
+        **_refusal_shape(outcome, origins=origins),
+        "also_stopped": [
+            _refusal_shape(sibling, origins=origins) for sibling in outcome.also_stopped
+        ],
     }
 
 
 def _planner_refusal(
-    outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused, *, plan: PlannerPlan
+    outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused,
+    *,
+    plan: PlannerPlan,
+    origins: Mapping[str, str],
 ) -> dict[str, Any]:
     """`_replan_refusal` as the planner reads it, naming the step and
     requirement the model wrote in place of each copy `plan`'s split added
     (`plan_done.authored_report`)."""
-    return authored_report(_replan_refusal(outcome), plan)
+    return authored_report(_replan_refusal(outcome, origins=origins), plan)
 
 
 def _is_dead_end(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> bool:
@@ -196,7 +208,9 @@ def _family_moved(failing: list[EvidenceIssue]) -> bool:
     )
 
 
-def _refusal_shape(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
+def _refusal_shape(
+    outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused, *, origins: Mapping[str, str]
+) -> dict[str, Any]:
     """One outcome's own identity and diagnosis, with no `also_stopped` of its own."""
     if isinstance(outcome, MethodChoiceNeeded):
         return {
@@ -228,6 +242,11 @@ def _refusal_shape(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) ->
         "step_id": outcome.step_id,
         "requirement_id": outcome.requirement_id,
         "issues": [issue.model_dump(mode="json") for issue in outcome.issues],
+        **(
+            {"spec_id": origins.get(outcome.spec_id, outcome.spec_id)}
+            if outcome.spec_id is not None
+            else {}
+        ),
     }
 
 
@@ -710,7 +729,7 @@ def execute_node(
         replans = int(ctx.state.get("replans", 0))
         if not dead_end and replans < MAX_REPLANS:
             ctx.state["replans"] = replans + 1
-            refusal = _planner_refusal(outcome, plan=finished)
+            refusal = _planner_refusal(outcome, plan=finished, origins=windowed_origins(ctx.state))
             if finished.asks:
                 refusal["computed_asks"] = _computed_asks(finished, answers)
             output: dict[str, Any] = {"refusal": refusal, "plan_version": finished.version}

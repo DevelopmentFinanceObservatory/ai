@@ -101,6 +101,9 @@ class HarnessCode(StrEnum):
     # A card write that was sent and got no answer, so the platform may hold
     # the card.
     WRITE_UNCONFIRMED = "write_unconfirmed"
+    # A card the platform stored and the harness could not read back, so it
+    # is not on the canvas.
+    STORED_CARD_UNREADABLE = "stored_card_unreadable"
     # A card that was drawn, whose payload the figures of a reply could not
     # be read from.
     FIGURES_UNREAD = "figures_unread"

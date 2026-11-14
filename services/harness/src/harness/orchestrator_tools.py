@@ -181,7 +181,7 @@ from harness.tool_contracts import (
     measure_choice,
 )
 from harness.turn_records import SETTLED_STATUSES, SearchReading, SiblingReading
-from harness.wire import RetryMode, usable_component
+from harness.wire import RetryMode
 
 logger = logging.getLogger(__name__)
 
@@ -194,8 +194,9 @@ _FETCHES_KEY = "orchestrator:fetches"
 _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
 # The cards `make_charts` drew this turn that are still on the canvas:
 # {"invocation", "drawn"}, `drawn` mapping `_card_identity` to the card's
-# {"component_id", "revision"}, the revision it was drawn as. `remove_cards`
-# drops the cards it takes off.
+# {"component_id", "revision"}, the revision it was drawn as; a card the harness
+# could not read back also holds "unreadable": True and is not on the canvas.
+# `remove_cards` drops the cards it takes off.
 _DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
 # The key of the result of an `ask_user` or `plan` call that recorded its
 # action; the Studio stream holds back later text only after one of these,
@@ -2493,6 +2494,27 @@ def build_orchestrator_tools(
         drawn: list[dict[str, Any]] = []
         landed = read = False
 
+        def _remember_drawn(identity: str, card: dict[str, Any]) -> None:
+            """Record `card` as drawn for `identity` this turn."""
+            drawn_cards[identity] = card
+            tool_context.state[_DRAWN_CARDS_KEY] = {
+                "invocation": tool_context.invocation_id,
+                "drawn": drawn_cards,
+            }
+
+        def _unreadable_entry(chart: Chart) -> dict[str, Any]:
+            """The entry of a chart whose stored card the harness cannot read."""
+            return _not_drawn(
+                chart,
+                "the platform stored this chart but DFO could not read it back, "
+                "so it is not on the canvas. This is a fault inside DFO, not in "
+                "the call's arguments: drawing this chart again meets the same "
+                "fault, and the charts after it in this call were not drawn. Do "
+                "not replace it with other data; tell the user this chart could "
+                "not be shown.",
+                code=HarnessCode.STORED_CARD_UNREADABLE,
+            )
+
         async def _place(
             chart: Chart,
             frame: Mapping[str, Any],
@@ -2512,7 +2534,8 @@ def build_orchestrator_tools(
             Returns:
                 The chart's `make_charts` entry; the platform's refusal when it
                 refused the write; and whether the charts after it are left
-                undrawn, after a write that raised and may have stored it.
+                undrawn: after a write that raised and may have stored it, and
+                after a stored card the harness cannot read.
             """
             nonlocal landed, read
             period, window = await _card_period(chart, frame=frame, select=select, cut=cut)
@@ -2527,11 +2550,18 @@ def build_orchestrator_tools(
                 intent["window"] = window
             identity = _card_identity(intent)
             held = drawn_cards.get(identity) or canvas.get(identity)
-            stored = None if held is None else await _stored_card(held["component_id"])
+            # An earlier write of this card stored one the harness cannot read,
+            # and another write would stack a second orphan.
+            unreadable = held is not None and bool(held.get("unreadable"))
+            stored = (
+                None if held is None or unreadable else await _stored_card(held["component_id"])
+            )
             if held is not None and stored is None:
                 # The canvas holds this card, so another write would stack a copy.
                 return (
-                    _not_drawn(
+                    _unreadable_entry(chart)
+                    if unreadable
+                    else _not_drawn(
                         chart,
                         "This card is already on the canvas, and its figures could "
                         "not be read back. No copy was drawn; state no value of it "
@@ -2539,7 +2569,7 @@ def build_orchestrator_tools(
                         code=HarnessCode.FIGURES_UNREAD,
                     ),
                     None,
-                    False,
+                    unreadable,
                 )
             # A card revised since it was drawn no longer draws this intent.
             if held is not None and stored is not None and stored["revision"] == held["revision"]:
@@ -2569,8 +2599,16 @@ def build_orchestrator_tools(
             try:
                 written = await executor(tool="write_component", args={"intent": intent})
                 component = written.get("component") if written.get("outcome") == "ok" else None
-                if component is None or not usable_component(component):
+                if component is None:
                     refusal = written.get("refusal") or {}
+                    if refusal.get("code") == HarnessCode.STORED_CARD_UNREADABLE:
+                        # Stored, so a card the platform holds and the canvas
+                        # lacks: the charts after it are left undrawn.
+                        _remember_drawn(
+                            identity,
+                            {"component_id": refusal.get("component_id"), "unreadable": True},
+                        )
+                        return _unreadable_entry(chart), None, True
                     failed = _not_drawn(
                         chart,
                         refusal.get("message") or "the platform refused it",
@@ -2612,14 +2650,10 @@ def build_orchestrator_tools(
                 cut=cut,
                 whole=untitled,
             )
-            drawn_cards[identity] = {
-                "component_id": component["component_id"],
-                "revision": component["revision"],
-            }
-            tool_context.state[_DRAWN_CARDS_KEY] = {
-                "invocation": tool_context.invocation_id,
-                "drawn": drawn_cards,
-            }
+            _remember_drawn(
+                identity,
+                {"component_id": component["component_id"], "revision": component["revision"]},
+            )
             return entry, None, False
 
         async def _cut(

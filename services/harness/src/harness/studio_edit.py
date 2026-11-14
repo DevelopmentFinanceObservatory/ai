@@ -47,7 +47,6 @@ from harness.studio_translate import _RecordingExecutor, _stream_fatal, failure_
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.wire import (
     ActivityStep,
-    ComponentCreated,
     ComponentRevised,
     CompositionActor,
     CompositionUpdated,
@@ -56,6 +55,8 @@ from harness.wire import (
     StepProduced,
     StepStatus,
     Suggestions,
+    component_created,
+    component_revised,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,17 @@ _CREATE_ONLY_FIELDS = ("type", "frame_ref")
 
 # What a closing message says before the sentence for a refused edit's code.
 _EDIT_REFUSED = "The edit was refused."
+
+# What a closing message says before the sentence for a rebuild whose stored
+# card the harness cannot read: the canvas keeps the card it showed.
+_UNREADABLE_LEAD = "The card on the canvas is unchanged."
+
+# The same for a revise: the platform's head holds the change, the canvas shows
+# the earlier version, and the next edit starts from the saved change.
+_UNREADABLE_REVISE_LEAD = (
+    "Your change was saved, but the card cannot be shown with it, so the canvas still "
+    "shows the earlier version. Your next edit builds on the saved change."
+)
 
 _REBUILT_TEXT = (
     "This conversation holds no edit access to this card, so I could not update it in "
@@ -152,7 +164,10 @@ async def _edit_flow(
         refusal = refusal if isinstance(refusal, dict) else {}
         logger.info("card edit refused (%s): %s", refusal.get("code"), refusal.get("message"))
         sentence = failure_detail(refusal)
-        return [_step(step_id, label, failed=sentence), *_close(f"{lead} {sentence}")]
+        return [
+            _step(step_id, label, failed=sentence),
+            *_close(" ".join(part for part in (lead, sentence) if part)),
+        ]
 
     described = await recorder(tool="describe_component", args={"component_id": component_id})
     recorder.drain(current_conversation_id.get())
@@ -199,22 +214,39 @@ async def _edit_flow(
         ) == HarnessCode.ROLLING_SELECT_NEEDS_NEW_FRAME
     if patch and write_token and not moved:
         if written.get("outcome") != "ok" or not written.get("component"):
-            frames = _refused("e2", "Apply the edit", _EDIT_REFUSED, written)
-        elif int(written["component"]["revision"]) <= current_revision:
-            # The platform treats an effectively-equal patch as a no-op.
-            yield _step("e2", "Apply the edit")
-            frames = _close("The card already looks like that; nothing changed.")
+            frames = _refused(
+                "e2",
+                "Apply the edit",
+                _refused_lead(written, unreadable=_UNREADABLE_REVISE_LEAD),
+                written,
+            )
+        elif _is_no_op(written["component"], current_revision):
+            shown = (conversation.components.get(component_id) or {}).get("revision")
+            if isinstance(shown, int) and shown < written["component"]["revision"]:
+                # The head is a revision an earlier edit stored and the
+                # harness could not read, so the canvas does not show it.
+                frames = _refused(
+                    "e2", "Apply the edit", _UNREADABLE_REVISE_LEAD, _unreadable_result()
+                )
+            else:
+                # The platform treats an effectively-equal patch as a no-op.
+                yield _step("e2", "Apply the edit")
+                frames = _close("The card already looks like that; nothing changed.")
         else:
             component = written["component"]
-            revision = int(component["revision"])
+            revised = component_revised(component, component_id, patch)
             yield _step(
                 "e2",
                 "Apply the edit",
-                produced=StepProduced(component_id=component_id, revision=revision),
+                produced=StepProduced(component_id=component_id, revision=revised.revision),
             )
             frames = [
                 *_revised_frames(
-                    conversation, component_id=component_id, component=component, patch=patch
+                    conversation,
+                    component_id=component_id,
+                    component=component,
+                    patch=patch,
+                    revised=revised,
                 ),
                 *_close(text or "Done -- the card was updated."),
             ]
@@ -247,28 +279,21 @@ async def _edit_flow(
     written = await recorder(tool="write_component", args={"intent": intent})
     recorder.drain(current_conversation_id.get())
     if written.get("outcome") != "ok" or not written.get("component"):
-        for frame in _refused("e2", step_label, _EDIT_REFUSED, written):
+        lead = _refused_lead(written, unreadable=_UNREADABLE_LEAD)
+        for frame in _refused("e2", step_label, lead, written):
             yield frame
         return
+    created = component_created(written["component"], step_id="e2")
     component = written["component"]
     # The step frame is yielded FIRST and its seq allocated first --
-    # constructing the created frame earlier gave it a lower seq than
+    # stamping the created frame earlier gave it a lower seq than
     # the step that precedes it on the wire (broke delta 2).
     yield _step(
         "e2",
         step_label,
-        produced=StepProduced(
-            component_id=component["component_id"], revision=int(component["revision"])
-        ),
+        produced=StepProduced(component_id=created.component_id, revision=created.revision),
     )
-    created = ComponentCreated.model_validate(
-        {
-            **component,
-            "event": "component.created",
-            "seq": c.next_seq(),
-            "created_from": {"step_id": "e2"},
-        }
-    )
+    created.seq = c.next_seq()
     yield created
     entry = _digest_entry(component)
     conversation.components[created.component_id] = entry
@@ -287,6 +312,29 @@ async def _edit_flow(
         )
     for frame in _close(closing):
         yield frame
+
+
+def _is_no_op(component: dict[str, Any], current_revision: int) -> bool:
+    """Whether a revise left the card at the revision it held."""
+    revision = component.get("revision")
+    return isinstance(revision, int) and revision <= current_revision
+
+
+def _refused_lead(result: dict[str, Any], *, unreadable: str) -> str:
+    """What a closing message says before the sentence for a refused write:
+    `unreadable` when the platform stored a card the harness cannot read."""
+    code = (result.get("refusal") or {}).get("code")
+    return unreadable if code == HarnessCode.STORED_CARD_UNREADABLE else _EDIT_REFUSED
+
+
+def _unreadable_result() -> dict[str, Any]:
+    """The refusal-shaped result for a stored card the harness cannot read."""
+    return {
+        "refusal": harness_refusal(
+            code=HarnessCode.STORED_CARD_UNREADABLE,
+            message="the stored card fails the component contract",
+        )
+    }
 
 
 def _merge_patch(stored: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -309,19 +357,13 @@ def _revised_frames(
     component_id: str,
     component: dict[str, Any],
     patch: dict[str, Any],
+    revised: ComponentRevised,
 ) -> list[Any]:
-    revision = int(component["revision"])
-    frames: list[Any] = [
-        ComponentRevised(
-            event="component.revised",
-            seq=conversation.next_seq(),
-            component_id=component_id,
-            revision=revision,
-            changed=sorted(patch),
-            fact_summary=component["fact_summary"],
-            payload=component.get("payload"),
-        )
-    ]
+    """The frames of a landed revise. `revised` is the frame `component_revised`
+    built to check the card."""
+    revision = revised.revision
+    revised.seq = conversation.next_seq()
+    frames: list[Any] = [revised]
     entry = conversation.components.setdefault(component_id, _digest_entry(component))
     entry["revision"] = revision
     entry["fact_summary"] = component.get("fact_summary") or entry.get("fact_summary")

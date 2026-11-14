@@ -72,6 +72,7 @@ from harness.wire import (
     CompositionBlock,
     CompositionManifest,
     MutationOp,
+    PlanProposed,
 )
 from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
@@ -1288,6 +1289,23 @@ def test_begin_turn_clears_the_previous_turns_plans_and_readings():
     assert (state.turn_plans, state.turn_readings, state.turn_specs) == ([], [], {})
 
 
+def test_begin_turn_and_a_new_plan_lineage_reset_the_lineage_fields_together():
+    state = ConversationState(conversation_id=CONVERSATION)
+
+    for reset in (state.begin_turn, state.start_plan_lineage):
+        state.plan_version_ids = {1: "plan_a", 2: "plan_b"}
+        state.latest_plan_version = 2
+        state.turn_choice_baseline = {"aid:sector": "health"}
+
+        reset()
+
+        assert (state.plan_version_ids, state.latest_plan_version, state.turn_choice_baseline) == (
+            {},
+            None,
+            {},
+        )
+
+
 _LONG_ANSWER = (
     "The United States gave the most, followed by the European Union institutions. "
     "Germany came third and Japan fourth. "
@@ -1691,6 +1709,23 @@ def test_the_conversation_digest_holds_its_cap_for_any_size_of_a_single_id():
 
 def _pending(*, resuming_segment: str | None = None) -> _PendingInterrupt:
     return _PendingInterrupt(adk_id="adk_1", kind="plan", resuming_segment=resuming_segment)
+
+
+def test_a_stored_pending_card_leaves_out_new_plan() -> None:
+    """The member marks the emitted frame. An instance rolled back to a model
+    without it cannot load a stored card that holds it."""
+    raw = json.loads(
+        (
+            Path(__file__).parent / "wire_fixtures" / "studio" / "event-03-plan-proposed.json"
+        ).read_text()
+    )
+    card = PlanProposed.model_validate({**raw, "new_plan": True})
+    pending = _PendingInterrupt(adk_id="adk_1", kind="plan", card=card)
+
+    stored = studio_state._serialize_pending({"int_1": pending})["int_1"]["card"]
+
+    assert "new_plan" not in stored
+    assert card.new_plan is True
 
 
 def test_awaiting_answer_excludes_an_entry_marked_resuming() -> None:

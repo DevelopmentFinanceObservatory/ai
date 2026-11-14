@@ -87,6 +87,7 @@ from harness.wire import (
     PlanProposed,
     PlanStep,
     StepStatus,
+    component_created,
 )
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR
@@ -943,6 +944,76 @@ def test_a_regressed_version_is_logged_and_does_not_move_latest_backwards(
     assert regressed.plan_version_id != first.plan_version_id
 
 
+def test_a_second_plan_call_in_one_turn_starts_a_new_plan_lineage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A new `plan` call drafts a plan for another question. Its card has an
+    id of its own, supersedes nothing, and its first amendment does not get
+    the id the first call's version 2 was given. The turn's first card does not say it
+    starts a plan."""
+    conversation = ConversationState(conversation_id="c1")
+    translator = _Translator(
+        conversation=conversation,
+        recorder=_RecordingExecutor(_dummy_executor, store=StudioStore(InMemorySessionService())),
+    )
+    first = translator._interrupt_frames(
+        APPROVE_INTERRUPT, {"payload": _plan_payload(version=1, new_plan=True)}
+    )[-1]
+    amended = translator._interrupt_frames(
+        APPROVE_INTERRUPT, {"payload": _plan_payload(version=2)}
+    )[-1]
+    conversation.turn_choice_baseline = {_PICKED_ROW: "the DAC total"}
+
+    with caplog.at_level(logging.ERROR, logger="harness.studio_translate"):
+        (second,) = translator._interrupt_frames(
+            APPROVE_INTERRUPT, {"payload": _plan_payload(version=1, new_plan=True)}
+        )
+        second_versioned, second_amended = translator._interrupt_frames(
+            APPROVE_INTERRUPT, {"payload": _plan_payload(version=2)}
+        )
+
+    assert caplog.records == []
+    assert (second.event, second.new_plan) == ("plan.proposed", True)
+    # The turn's first card has no earlier lineage to part from.
+    assert first.new_plan is None
+    assert amended.new_plan is None
+    assert second.plan_version_id not in {first.plan_version_id, amended.plan_version_id}
+    assert second_amended.plan_version_id not in {
+        first.plan_version_id,
+        amended.plan_version_id,
+        second.plan_version_id,
+    }
+    assert second_versioned.event == "plan.versioned"
+    assert second_versioned.supersedes == second.plan_version_id
+    assert conversation.turn_choice_baseline == {}
+    # The second plan holds another label for the same choice id; the first plan's
+    # switch left no baseline for it to differ from.
+    labels = ("the DAC total", "the top 10 donors")
+    card = second_amended.model_copy(
+        update={
+            "decisions": [
+                PlanDecision(
+                    id="d_donors",
+                    question="Donors",
+                    chosen=labels[1],
+                    reason="The user picked it.",
+                    resolved_by="user",
+                    choice_id=_PICKED_ROW,
+                    active_option_id=decision_option_id(labels[1]),
+                    options=[
+                        PlanDecisionOption(
+                            option_id=decision_option_id(label), label=label, status="available"
+                        )
+                        for label in labels
+                    ],
+                )
+            ]
+        }
+    )
+    approved = plan_approved(card, seq=9, baseline=conversation.turn_choice_baseline)
+    assert [choice.changed_from for choice in approved.choices] == [None]
+
+
 @pytest.mark.parametrize("unreadable_version", [1, 2])
 def test_a_restarted_plan_opens_a_new_line_of_plan_versions(
     unreadable_version: int, caplog: pytest.LogCaptureFixture
@@ -1631,13 +1702,22 @@ def _written_component(
 # --- `_component_frames`: the one place validation, landing and framing meet --
 
 
+def _component_frames_of(
+    translator: _Translator, component: dict[str, Any], *, land: bool
+) -> list[Any]:
+    """`translator._component_frames` for a component that passed the wire contract."""
+    return translator._component_frames(
+        component, land=land, created=component_created(component, step_id="s1")
+    )
+
+
 def test_component_frames_lands_and_appends() -> None:
     """`land=True`: an append, which also streams both frames."""
     current_conversation_id.set("c1")
     translator = _translator()
     translator._conversation.composition = _next_manifest(None, [], actor=CompositionActor.MODEL)
 
-    frames = translator._component_frames(_written_component("cmp_two"), step_id="s1", land=True)
+    frames = _component_frames_of(translator, _written_component("cmp_two"), land=True)
 
     events = [getattr(f, "event", None) for f in frames]
     assert events == ["component.created", "composition.updated"]
@@ -1728,7 +1808,7 @@ def test_component_frames_land_true_holds_when_auto_add_is_off() -> None:
     translator = _translator()
     translator._conversation.auto_add = False
 
-    frames = translator._component_frames(_written_component("cmp_two"), step_id="s1", land=True)
+    frames = _component_frames_of(translator, _written_component("cmp_two"), land=True)
 
     events = [getattr(f, "event", None) for f in frames]
     assert events == ["component.created"]
@@ -1742,59 +1822,12 @@ def test_component_frames_land_false_emits_only_component_created() -> None:
     translator = _translator()
     before = translator._conversation.composition
 
-    frames = translator._component_frames(_written_component("cmp_two"), step_id="s1", land=False)
+    frames = _component_frames_of(translator, _written_component("cmp_two"), land=False)
 
     events = [getattr(f, "event", None) for f in frames]
     assert events == ["component.created"]
     assert translator._conversation.composition is before
     assert translator._conversation.turn_components == []
-
-
-def test_component_frames_logs_error_for_a_stamped_component_that_fails_validation(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """`land=True` means `make_charts` already ran
-    `harness.wire.usable_component` on this exact component and it passed,
-    so a validation failure here means the wire check and this method's
-    own contract have diverged, which is a bug and earns an ERROR record.
-    Nothing streams and the canvas stays untouched. The method does not
-    raise out of `translate` and fail the whole segment."""
-    current_conversation_id.set("c1")
-    translator = _translator()
-    before = translator._conversation.composition
-    invalid = {**_written_component("cmp_two")}
-    del invalid["fact_summary"]
-
-    with caplog.at_level(logging.ERROR, logger="harness.studio_translate"):
-        frames = translator._component_frames(invalid, step_id="s1", land=True)
-
-    assert frames == []
-    assert translator._conversation.composition is before
-    assert translator._conversation.turn_components == []
-    assert any("validation" in record.message.lower() for record in caplog.records)
-
-
-def test_component_frames_logs_nothing_for_an_unstamped_component_that_fails_validation(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """`land=False` means this write was never stamped usable.
-    `make_charts` already reported it as not drawn because this same
-    component failed `harness.wire.usable_component`. Failing validation
-    here again is the expected outcome of that refusal, so no frames
-    stream and nothing is logged at ERROR."""
-    current_conversation_id.set("c1")
-    translator = _translator()
-    before = translator._conversation.composition
-    invalid = {**_written_component("cmp_two")}
-    del invalid["fact_summary"]
-
-    with caplog.at_level(logging.DEBUG, logger="harness.studio_translate"):
-        frames = translator._component_frames(invalid, step_id="s1", land=False)
-
-    assert frames == []
-    assert translator._conversation.composition is before
-    assert translator._conversation.turn_components == []
-    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
 
 
 # --- `_RecordingExecutor.land_component`: stamps the record, decides nothing -

@@ -109,9 +109,9 @@ from planner.plan import (
     standing_block,
     truncate,
     warning_codes,
-    windowed_pins,
+    windowed_origins,
 )
-from planner.records import Severity
+from planner.records import EvidenceIssueCode, Severity
 from planner.session import SessionCall
 from planner.settings import AGENT_NAME, AgentSettings
 from planner.skills import (
@@ -1251,7 +1251,7 @@ def _sources_by_spec_id(state: SessionState, plan: Plan) -> dict[str, SelectedSo
     its requirement's window (`planner.plan.windowed_pins`) reads its
     origin's block. A block not readable as a source is left out, so the
     retrieval is named by its composed label."""
-    to_origin = {pin.spec_id: pin.windowed_from for pin in windowed_pins(state).values()}
+    to_origin = windowed_origins(state)
     blocks = _spec_blocks(state)
     sources = SourceReadings(lambda spec_id: blocks.get(to_origin.get(spec_id, spec_id)))
     return pinned_sources(plan.evidence_requirements, sources)
@@ -2029,16 +2029,12 @@ def _refused_specs(refusal: dict[str, Any] | None) -> list[_RefusedSource]:
     in that order.
 
     Reads `refusal` and each `also_stopped` entry as the opaque per-kind dict
-    `_message`'s `elif refusal:` branch already treats them as: only
-    `RediscoveryNeeded`'s shape carries a `spec_id` today, at the top
-    level, with why in its nested `refusal.message`. `MethodChoiceNeeded` and
-    `Refused` name neither. `RediscoveryNeeded` fires for
-    `executor.classify.REDISCOVERY_CODES` (`upstream_version_changed`,
-    `definition_not_held`, `open_role_unavailable`) alone;
-    `over_ceiling`/`member_cardinality` is a
-    `Refused` `STOP` (`classify.py`'s own `STOP_CODES` default) and so
-    carries no `spec_id` here. This does not assume that shape survives
-    unchanged.
+    `_message`'s `elif refusal:` branch already treats them as. A `RediscoveryNeeded`
+    names its spec_id at the top level, with why in its nested `refusal.message`;
+    a `Refused` `REQUIREMENT_UNMET` names it at the top level too, with why in the
+    unit error findings that fault the source (`_one_refused_spec`).
+    Any other `Refused` names none. A windowed copy's spec_id arrives as its
+    origin's (`_refusal_shape`).
     """
     if not isinstance(refusal, dict):
         return []
@@ -2047,18 +2043,54 @@ def _refused_specs(refusal: dict[str, Any] | None) -> list[_RefusedSource]:
     return [spec for payload in payloads for spec in _one_refused_spec(payload)]
 
 
+# The finding code that says the source's own data states no unit. A `Refused`
+# stop holds a spec_id for every replan only on an error finding of this code
+# with nothing found (`found` is None), because such a source is no use to any
+# requirement. A source whose unit text names no recognisable currency carries
+# that text in `found` and holds nothing. The other unit codes describe one
+# requirement against a source that reads fine, and the remaining codes
+# (window, coverage, entity, grain, membership) a replan fixes on the same
+# source, so none of those holds a spec_id either.
+_SOURCE_FAULT_CODES = frozenset({EvidenceIssueCode.UNIT_UNVERIFIED.value})
+
+
 def _one_refused_spec(payload: object) -> list[_RefusedSource]:
-    """The spec one refusal payload names as refused, if any."""
+    """The spec one refusal payload names as refused, if any.
+
+    A `RediscoveryNeeded` payload names it as it stands. A `Refused` payload names
+    it only when an error finding (`_SOURCE_FAULT_CODES`) with no `found` says the
+    source states no unit it can read. The detail names every such finding.
+    """
     if not isinstance(payload, dict):
         return []
     spec_id = payload.get("spec_id")
     if not isinstance(spec_id, str) or not spec_id:
         return []
-    nested = payload.get("refusal")
-    code = nested.get("code") if isinstance(nested, dict) else None
-    message = nested.get("message") if isinstance(nested, dict) else None
-    detail = message if isinstance(message, str) and message else "refused"
-    return [_RefusedSource(spec_id, code if isinstance(code, str) and code else None, detail)]
+    if payload.get("kind") != "refused":
+        nested = payload.get("refusal")
+        code = nested.get("code") if isinstance(nested, dict) else None
+        message = nested.get("message") if isinstance(nested, dict) else None
+        detail = message if isinstance(message, str) and message else "refused"
+        return [_RefusedSource(spec_id, code if isinstance(code, str) and code else None, detail)]
+    issues = payload.get("issues")
+    faults = [
+        issue
+        for issue in (issues if isinstance(issues, list) else ())
+        if isinstance(issue, dict)
+        and issue.get("severity") == Severity.ERROR.value
+        and issue.get("code") in _SOURCE_FAULT_CODES
+        and issue.get("found") is None
+    ]
+    if not faults:
+        return []
+    details = [
+        detail for fault in faults if isinstance(detail := fault.get("detail"), str) and detail
+    ]
+    return [
+        _RefusedSource(
+            spec_id, EvidenceIssueCode.UNIT_UNVERIFIED.value, "; ".join(details) or "refused"
+        )
+    ]
 
 
 def _refused_with_earlier(

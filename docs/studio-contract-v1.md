@@ -12,7 +12,7 @@ explains the protocol around them, and `services/harness/tests/test_wire.py`
 pins the two together against the fixtures in
 `services/harness/tests/wire_fixtures/studio/`.
 
-v1 records its design decisions as numbered deltas (1–24; 16 is folded
+v1 records its design decisions as numbered deltas (1–25; 16 is folded
 into 11). The deltas are marked where they apply and listed in the delta
 index at the end.
 
@@ -569,6 +569,23 @@ ignores it and an older harness omits it.
 
 `schema_version` stays 1.
 
+## A new plan in the same turn (delta 25, v1.10)
+
+- `plan.proposed.new_plan` is `true` on a plan card that starts a new plan
+  after an earlier plan in the same turn, and absent otherwise. A second plan call in one turn drafts a plan for another
+  question: its card has a `plan_version_id` of its own, no `plan.versioned`
+  precedes it, and its `version` counts from 1. A client treats it as a new
+  plan and drops the choice labels it kept from the earlier plan. A client
+  that ignores the member reads the card as before. The member is optional
+  and absent from a `plan.proposed` stored earlier.
+- A plan drafted over a plan the harness could not read restarts too: its
+  `version` counts from 1 and its `plan_version_id` is new. Its first card
+  carries no `new_plan`, because it stands for the same question. The card it
+  replaces is superseded, as for any revision, and a client keeps the choice
+  labels it holds.
+
+`schema_version` stays 1.
+
 ## Sample fixture values (delta 10)
 
 Fixture values that are samples:
@@ -673,3 +690,6 @@ Fixture values that are samples:
    choice carries, so a client tells a planner decision
    (`"decision/<slot>"`) from a scope choice; present from v1.9, absent
    from a `plan.approved` stored earlier.
+1. `plan.proposed` gains an optional `new_plan`, `true` on a plan card that
+   starts a new plan after an earlier plan in the same turn, so a second plan call in one turn reads as a new plan with its
+   own `plan_version_id`.
