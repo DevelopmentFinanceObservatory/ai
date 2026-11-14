@@ -612,6 +612,34 @@ def test_an_oversized_fact_summary_keeps_its_leading_series_and_labels_the_subse
     )
 
 
+@pytest.mark.parametrize(
+    ("recipe_bytes", "series", "kept", "cut"),
+    [
+        (studio_state._FACT_SUMMARY_BYTE_CAP, 3, False, False),
+        (studio_state._UNIT_OBJECT_BYTE_CAP + 100, 3, True, False),
+        (0, BIG // 500, True, True),
+    ],
+    ids=["crowds-the-series-out", "over-its-cap-but-the-summary-fits", "small-beside-cut-series"],
+)
+def test_a_unit_object_is_shed_only_when_it_is_over_its_cap_and_the_summary_is_over_the_cap(
+    recipe_bytes: int, series: int, kept: bool, cut: bool
+):
+    """A unit object the wire forwarded whole becomes `_CUT_MARKER` only when it
+    is over its cap and the summary is over the cap with it, and then before any
+    series is cut."""
+    unit = {"currency": "USD", "recipe": "r" * recipe_bytes}
+    summary = {**_fact_summary(series), "unit": unit}
+    state = _canvas({"cmp_01": _entry("Aid", summary)})
+
+    digest = state.canvas_digest_state()
+
+    assert digest is not None
+    shown = digest["blocks"][0]["fact_summary"]
+    assert shown["unit"] == (unit if kept else studio_state._CUT_MARKER)
+    assert ("series_truncated" in shown) is cut
+    assert (len(shown["series"]) < series) is cut
+
+
 @pytest.mark.parametrize("oversized", [False, True], ids=["fits", "oversized"])
 def test_a_summary_the_platform_cut_states_the_platforms_total(oversized: bool):
     """The platform's `series_truncated` (its series cap) reaches the digest

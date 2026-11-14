@@ -68,6 +68,7 @@ records a check that passed and is worth showing.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import unicodedata
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -79,10 +80,10 @@ from common.price_basis import price_basis_reading
 from data_mcp.manifest import Manifest
 from data_mcp.series_statistics import continuing_method, series_index
 from dfo_frame_grammar.columnar import array_kernel, scalar_kernel, unit_codes
-from dfo_frame_grammar.grammar import DeflationBasis
+from dfo_frame_grammar.grammar import DEFLATION_BASES
 from planner.parties import Party, across_party, flow_side, place_qualified_party
 from planner.phrasing import pluralize
-from planner.plan import DatasetRequirement, Entity, Unit
+from planner.plan import DatasetRequirement, Entity, Unit, truncate
 
 # `Severity`, `EvidenceIssueCode` and `EvidenceIssue` live in `planner.records`
 # so a `Workflow` can carry its findings; they are re-exported here so the
@@ -104,21 +105,38 @@ from planner.workflow import (
     ResolvedGroup,
     SelectedSource,
 )
-from pydantic import ConfigDict, Field, JsonValue, ValidationError
+from pydantic import ConfigDict, Field, JsonValue, ValidationError, field_validator
 
 from compiler.frame_columns import columns_on_axes
 from compiler.sources import pinned_stat_var, source_constraint_matches
+
+logger = logging.getLogger(__name__)
+
+# The longest stretch of an unreadable unit's JSON quoted in an issue.
+_UNREADABLE_UNIT_CHARS = 200
 
 
 class StatedUnit(Unit):
     """A unit a source states: a `Unit` that also names whose prices deflated a
     constant-price amount (`deflation_basis`), as the frame grammar's converted
     unit does. A requirement is a plain `Unit`, so the planner states no basis
-    and a source that states one is read, worded and compared with it intact."""
+    and a source that states one is read, worded and compared with it intact.
 
-    deflation_basis: DeflationBasis | None = Field(
-        default=None, exclude_if=lambda basis: basis is None
-    )
+    A source's unit belongs to the platform, which adds members this check
+    does not compare, so those are ignored. `deflation_basis` is any string,
+    and an empty one reads as none. A basis the frame grammar does not name is
+    left out of the wording (`_describe_unit`), and series stating different
+    known ones merge into a unit that names none (`_collapse_bases`).
+    `currency`, `prices` and `base_year` are validated strictly."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    deflation_basis: str | None = Field(default=None, exclude_if=lambda basis: basis is None)
+
+    @field_validator("deflation_basis", mode="before")
+    @classmethod
+    def _empty_basis_is_none(cls, value: object) -> object:
+        return value or None
 
 
 class SeriesEvidence(StrictModel):
@@ -188,11 +206,21 @@ class RetrievalEvidence(StrictModel):
     A unit is stated in one of two forms. `unit_ref` and `unit_label` hold a
     unit named by reference (a Data Commons unit dcid such as `CurrencyUSD`)
     and its text. `stated_unit` holds a unit stated field by field, the
-    frame grammar's `{currency, prices, base_year, deflation_basis}` object a mint serves when
-    its definition binds the unit by request. A manifest reads it from the
-    series it returned, with whose prices deflated a constant-price conversion
+    frame grammar's `{currency, prices, base_year, deflation_basis}` object a
+    mint serves when its definition binds the unit by request. A manifest reads
+    it from the series it returned, with whose prices deflated a constant-price conversion
     (`deflation_basis`), and a discovered source from its definition's
     `facets.unit.request` (`requested_unit`), which states no basis.
+
+    A manifest whose series differ only in stating two or more distinct
+    `deflation_basis` values the frame grammar names states one unit and sets
+    `mixed_deflation`, which words that different parties' prices deflated
+    them. A manifest with no single readable unit leaves `stated_unit` and
+    `unit_ref` empty. `unit_disagreement` marks readable units that differ and
+    `disagreeing_units` words each, so an issue's `found` is `None` only when no
+    unit was readable. `unreadable_unit` holds the capped JSON of the first unit
+    that could not be read, which also leaves the unit unknown beside readable
+    ones. It appears in an issue's `detail` only, and `found` omits it.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -213,6 +241,10 @@ class RetrievalEvidence(StrictModel):
     unit_ref: str | None = None
     unit_label: str | None = None
     stated_unit: StatedUnit | None = None
+    unreadable_unit: str | None = None
+    unit_disagreement: bool = False
+    disagreeing_units: tuple[str, ...] = ()
+    mixed_deflation: bool = False
     provenance_ref: str | None = None
     provenance_label: str | None = None
     resolved_sources: tuple[ResolvedSourceMention, ...] = ()
@@ -296,8 +328,11 @@ def evidence_from_manifest(
     for the entities and years asked is still part of the binding, not
     absent from it.
     """
-    units = _series_units(series_stats) if series_stats is not None else set()
-    unit = next(iter(units)) if len(units) == 1 else None
+    read = _series_units(series_stats) if series_stats is not None else _SeriesUnits()
+    _log_unreadable_units(manifest.definition.spec_id, read)
+    # The manifest is the record of what was retrieved, so a unit that could not
+    # be read leaves the unit unknown even beside readable ones.
+    unit = next(iter(read.units)) if len(read.units) == 1 and not read.unreadable else None
     sources = manifest.citation.sources
     return RetrievalEvidence(
         origin="manifest",
@@ -313,6 +348,14 @@ def evidence_from_manifest(
         },
         unit_ref=unit if isinstance(unit, str) else None,
         stated_unit=unit if isinstance(unit, StatedUnit) else None,
+        unreadable_unit=(
+            truncate(read.unreadable[0], _UNREADABLE_UNIT_CHARS) if read.unreadable else None
+        ),
+        unit_disagreement=len(read.units) > 1,
+        disagreeing_units=(
+            tuple(sorted(_unit_wording(one) for one in read.units)) if len(read.units) > 1 else ()
+        ),
+        mixed_deflation=read.mixed_deflation and unit is not None,
         provenance_ref="; ".join(one.ref for one in sources) or None,
         provenance_label="; ".join(one.label for one in sources) or None,
         window=_window_of(series_stats),
@@ -1717,15 +1760,14 @@ def _unit_issues(
                 # the approval summary.
                 severity=Severity.ERROR if evidence.origin == "manifest" else Severity.WARNING,
                 requirement_id=requirement.id,
-                detail=(
-                    f"the source's unit {described!r} names no recognisable currency"
-                    if described
-                    else "the source states no unit"
-                ),
-                found=described or None,
+                detail=_unverified_detail(evidence, described),
+                found=described or "; ".join(evidence.disagreeing_units) or None,
                 required=unit.model_dump(),
             )
         )
+        if evidence.unit_disagreement or evidence.unreadable_unit:
+            # UNIT_UNVERIFIED names the cause; a price-basis finding would contradict it.
+            return issues
     issues.extend(
         _price_basis_issues(
             requirement,
@@ -1738,14 +1780,40 @@ def _unit_issues(
     return issues
 
 
+def _unverified_detail(evidence: RetrievalEvidence, described: str) -> str:
+    """Why `evidence`'s unit could not be checked against a currency."""
+    if described:
+        return f"the source's unit {described!r} names no recognisable currency"
+    reasons = []
+    if evidence.unit_disagreement:
+        reasons.append("the source's series state different units")
+    if evidence.unreadable_unit:
+        reasons.append(f"the source's unit {evidence.unreadable_unit} could not be read")
+    return " and ".join(reasons) or "the source states no unit"
+
+
+def _unit_wording(unit: str | StatedUnit) -> str:
+    """A unit as the issues quote it, without a basis the frame grammar does not name."""
+    if isinstance(unit, str):
+        return unit
+    return price_basis_reading(
+        currency=unit.currency,
+        prices=unit.prices,
+        base_year=unit.base_year,
+        deflation_basis=unit.deflation_basis if unit.deflation_basis in DEFLATION_BASES else None,
+    )
+
+
 def _describe_unit(evidence: RetrievalEvidence) -> str:
-    """The unit `evidence` states, as the issues quote it."""
+    """The unit `evidence` states, as the issues quote it. The wording omits a
+    basis the frame grammar does not name, and says so when series were deflated
+    by different parties' prices."""
     if (stated := evidence.stated_unit) is not None:
-        return price_basis_reading(
-            currency=stated.currency,
-            prices=stated.prices,
-            base_year=stated.base_year,
-            deflation_basis=stated.deflation_basis,
+        reading = _unit_wording(stated)
+        return (
+            f"{reading}, deflated by different parties' prices"
+            if evidence.mixed_deflation
+            else reading
         )
     return " ".join(part for part in (evidence.unit_ref, evidence.unit_label) if part)
 
@@ -2516,7 +2584,8 @@ def _family_member_count(trace: Mapping[str, object]) -> int | None:
 def _facet_unit(value: object) -> str | StatedUnit | None:
     """The unit a series' facet states: a bare ref, a `{ref, label}` block,
     or the frame grammar's `{currency, prices, base_year, deflation_basis}`
-    object, its basis kept. An object outside that grammar states no unit."""
+    object, its basis kept and its other members ignored. An object whose
+    `currency`, `prices` or `base_year` the grammar rejects states no unit."""
     if isinstance(value, str):
         return value or None
     if not isinstance(value, dict):
@@ -2576,11 +2645,77 @@ def _series_entities(series: pa.Table) -> tuple[ResolvedEntity, ...]:
     )
 
 
-def _series_units(series: pa.Table) -> set[str | StatedUnit]:
+class _SeriesUnits(NamedTuple):
+    """What the facets of a series table state as their unit.
+
+    `units` holds the readable ones. `mixed_deflation` is set when stated units
+    that share a currency, price basis and base year, but state two or more
+    distinct `deflation_basis` values the frame grammar names (`DEFLATION_BASES`),
+    merged into one. A basis beside none, or beside one the grammar does not
+    name, merges without setting it. `unreadable` holds the full JSON of each
+    distinct unit that could not be read, and `unreadable_stat_var` the stat_var
+    of the first series that states the first of them."""
+
+    units: frozenset[str | StatedUnit] = frozenset()
+    mixed_deflation: bool = False
+    unreadable: tuple[str, ...] = ()
+    unreadable_stat_var: str | None = None
+
+
+def _series_units(series: pa.Table) -> _SeriesUnits:
     """The units the facets of `series` state, read once per distinct facet."""
-    distinct = array_kernel("unique", _column(series, "facet")).to_pylist()
-    facets = (json.loads(facet) for facet in distinct)
-    return {unit for facet in facets if (unit := _facet_unit(facet.get("unit")))}
+    facets = _column(series, "facet")
+    distinct = array_kernel("unique", facets).to_pylist()
+    units: set[str | StatedUnit] = set()
+    unreadable: dict[str, None] = {}
+    first_unreadable_facet: str | None = None
+    for facet in distinct:
+        raw = json.loads(facet).get("unit")
+        if unit := _facet_unit(raw):
+            units.add(unit)
+        elif raw not in (None, "", {}):
+            unreadable.setdefault(json.dumps(raw, sort_keys=True))
+            first_unreadable_facet = first_unreadable_facet or facet
+    stat_var = None
+    if first_unreadable_facet is not None:
+        stat_var = _column(series, "stat_var")[facets.index(first_unreadable_facet).as_py()].as_py()
+    merged, mixed = _collapse_bases(units)
+    return _SeriesUnits(frozenset(merged), mixed, tuple(unreadable), stat_var)
+
+
+def _log_unreadable_units(spec_id: SpecId, read: _SeriesUnits) -> None:
+    """One WARNING for a retrieval whose facets state units that could not be read."""
+    if read.unreadable:
+        logger.warning(
+            "%d facet units of source %s could not be read, first on stat_var %s: %s",
+            len(read.unreadable),
+            spec_id,
+            read.unreadable_stat_var,
+            truncate(read.unreadable[0], _UNREADABLE_UNIT_CHARS),
+        )
+
+
+def _collapse_bases(units: set[str | StatedUnit]) -> tuple[set[str | StatedUnit], bool]:
+    """`units` with the stated units that share a currency, price basis and base
+    year merged into one, and whether the merge joined two or more distinct
+    `deflation_basis` values the frame grammar names (`DEFLATION_BASES`). A
+    group whose members state different bases, or a basis beside none or an
+    unnamed one, merges into a unit that names none, because the basis is
+    wording and the series still state one currency and price basis."""
+    groups: dict[tuple[str, str, int | None], list[StatedUnit]] = {}
+    for unit in units:
+        if isinstance(unit, StatedUnit):
+            groups.setdefault((unit.currency, unit.prices, unit.base_year), []).append(unit)
+    merged: set[str | StatedUnit] = {unit for unit in units if isinstance(unit, str)}
+    mixed = False
+    for group in groups.values():
+        bases = {unit.deflation_basis for unit in group}
+        if len(bases) > 1:
+            mixed = mixed or len(bases & DEFLATION_BASES) > 1
+            merged.add(group[0].model_copy(update={"deflation_basis": None}))
+        else:
+            merged.add(group[0])
+    return merged, mixed
 
 
 def _series_off_period(
