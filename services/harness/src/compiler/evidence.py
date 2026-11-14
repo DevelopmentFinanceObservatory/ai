@@ -67,6 +67,7 @@ records a check that passed and is worth showing.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -123,10 +124,11 @@ class StatedUnit(Unit):
     and a source that states one is read, worded and compared with it intact.
 
     A source's unit belongs to the platform, which adds members this check
-    does not compare, so those are ignored. `deflation_basis` is any string,
-    and an empty one reads as none. A basis the frame grammar does not name is
-    left out of the wording (`_describe_unit`), and series stating different
-    known ones merge into a unit that names none (`_collapse_bases`).
+    does not compare, so those are ignored. `deflation_basis` is any string;
+    an empty one, or a value that is not a string, reads as none. A basis
+    the frame grammar does not name is left out of the wording
+    (`_describe_unit`), and series stating different known ones merge into a unit that names
+    none (`_collapse_bases`).
     `currency`, `prices` and `base_year` are validated strictly."""
 
     model_config = ConfigDict(extra="ignore")
@@ -136,7 +138,7 @@ class StatedUnit(Unit):
     @field_validator("deflation_basis", mode="before")
     @classmethod
     def _empty_basis_is_none(cls, value: object) -> object:
-        return value or None
+        return value if isinstance(value, str) and value else None
 
 
 class SeriesEvidence(StrictModel):
@@ -216,11 +218,12 @@ class RetrievalEvidence(StrictModel):
     `deflation_basis` values the frame grammar names states one unit and sets
     `mixed_deflation`, which words that different parties' prices deflated
     them. A manifest with no single readable unit leaves `stated_unit` and
-    `unit_ref` empty. `unit_disagreement` marks readable units that differ and
-    `disagreeing_units` words each, so an issue's `found` is `None` only when no
-    unit was readable. `unreadable_unit` holds the capped JSON of the first unit
-    that could not be read, which also leaves the unit unknown beside readable
-    ones. It appears in an issue's `detail` only, and `found` omits it.
+    `unit_ref` empty. `unit_disagreement` marks readable units that differ.
+    `disagreeing_units` words each readable unit when they differ or when an
+    unreadable one stands beside them, so an issue's `found` is `None` only when
+    no unit was readable. `unreadable_unit` holds the capped JSON of the first
+    unit that could not be read, which also leaves the unit unknown beside
+    readable ones. It appears in an issue's `detail` only, and `found` omits it.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -353,7 +356,9 @@ def evidence_from_manifest(
         ),
         unit_disagreement=len(read.units) > 1,
         disagreeing_units=(
-            tuple(sorted(_unit_wording(one) for one in read.units)) if len(read.units) > 1 else ()
+            tuple(sorted(_unit_wording(one) for one in read.units))
+            if len(read.units) > 1 or (read.units and read.unreadable)
+            else ()
         ),
         mixed_deflation=read.mixed_deflation and unit is not None,
         provenance_ref="; ".join(one.ref for one in sources) or None,
@@ -1761,7 +1766,9 @@ def _unit_issues(
                 severity=Severity.ERROR if evidence.origin == "manifest" else Severity.WARNING,
                 requirement_id=requirement.id,
                 detail=_unverified_detail(evidence, described),
-                found=described or "; ".join(evidence.disagreeing_units) or None,
+                found=described
+                or truncate("; ".join(evidence.disagreeing_units), _UNREADABLE_UNIT_CHARS)
+                or None,
                 required=unit.model_dump(),
             )
         )
@@ -2585,16 +2592,15 @@ def _facet_unit(value: object) -> str | StatedUnit | None:
     """The unit a series' facet states: a bare ref, a `{ref, label}` block,
     or the frame grammar's `{currency, prices, base_year, deflation_basis}`
     object, its basis kept and its other members ignored. An object whose
-    `currency`, `prices` or `base_year` the grammar rejects states no unit."""
+    `currency`, `prices` or `base_year` the grammar rejects is read through its
+    `ref` or `label`, and states no unit when it has neither."""
     if isinstance(value, str):
         return value or None
     if not isinstance(value, dict):
         return None
     if "currency" in value:
-        try:
+        with contextlib.suppress(ValidationError):
             return StatedUnit.model_validate(value)
-        except ValidationError:
-            return None
     ref = value.get("ref") or value.get("label")
     return ref if isinstance(ref, str) and ref else None
 
