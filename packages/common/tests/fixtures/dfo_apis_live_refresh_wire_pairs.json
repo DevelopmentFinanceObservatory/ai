@@ -983,6 +983,7 @@
           "status": 409,
           "detail": "cmp_000000000000000000000001 revision 1: frame 'ops_00000000000000000000000000000001' at content_version 'ocv_00000000000000000000000000000001' is not on record as a frame of the same kind as the stored frame 'spec_176b1b132147fff98b37810b759f6f90' at content_version 'cv_00000000000000000000000000000001'",
           "code": "render_target_mismatch",
+          "retry_mode": "do_not_retry",
           "trace_id": "<trace_id>",
           "capability_version": "<capability_version>",
           "retryable": false

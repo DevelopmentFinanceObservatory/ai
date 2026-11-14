@@ -41,6 +41,7 @@ NGN_DONOR = UnitRequest(currency="NGN", prices="constant", base_year=2024, defla
 NGN_RECIPIENT = UnitRequest(
     currency="NGN", prices="constant", base_year=2024, deflation_basis="recipient"
 )
+NGN_UNSTATED = UnitRequest(currency="NGN", prices="constant", base_year=2024)
 # The same two units as converted cells naming the recipe of each dataset.
 NGN_DONOR_DAC = UnitRequest(
     currency="NGN",
@@ -228,7 +229,7 @@ CONVERTED_RETRY = (
 )
 
 DEFLATED_RETRY = (
-    "The two sides were deflated by different parties' prices, so their constant-price "
+    "The two sides are on different deflation bases, so their constant-price "
     "amounts measure different things. Call get_data for both sides in current prices, "
     "then retry with the new frame_refs."
 )
@@ -275,6 +276,13 @@ MISMATCHES = {
         NGN_RECIPIENT_IDS,
         "'converted to constant 2024 prices, NGN, donor prices'",
         "'converted to constant 2024 prices, NGN, recipient prices'",
+        DEFLATED_RETRY,
+    ),
+    "deflated_one_side_unstated": (
+        NGN_DONOR,
+        NGN_UNSTATED,
+        "'converted to constant 2024 prices, NGN, donor prices'",
+        "'converted to constant 2024 prices, NGN'",
         DEFLATED_RETRY,
     ),
     "two_composed": (

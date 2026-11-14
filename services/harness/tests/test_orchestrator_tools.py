@@ -2667,9 +2667,9 @@ def _intents(executor: FakeExecutor) -> list[dict[str, Any]]:
 
 # dfo-apis' refusals of a write over a chart type's limit, copied from its
 # assembler's wording (`_check_line_chart_series` and the table row check in
-# dfo-data-tools' `assembler/pipeline/candidate.py`, `_check_series_estimate`
-# in `assembler/resolve.py` and the catalogue schema's `maxItems`), which this
-# package cannot import. dfo-apis answers them with status 400.
+# dfo-data-tools' `assembler/pipeline/candidate.py`), which this package
+# cannot import. dfo-apis answers them with status 400. `_apis_refusal` builds
+# the refusals the fake platform makes before these two checks.
 _LINE_SERIES_REFUSAL = Refusal(
     error="resource_exhausted",
     retry=RetryMode.CORRECT_AND_RETRY,
@@ -2697,22 +2697,33 @@ _TABLE_ROWS_REFUSAL = Refusal(
 _FACETS = frozenset({"unit", "measurementMethod", "provenance"})
 
 
+def _distinct_members(values: list[Any]) -> list[str]:
+    """`values` without repeats, compared as sorted JSON."""
+    return sorted({json.dumps(value, sort_keys=True) for value in values})
+
+
 def _apis_refusal(intent: dict[str, Any], *, view: dict[str, Any]) -> Refusal | None:
     """dfo-apis' refusal of a write of `intent` on a frame with `view`, in the
-    order it checks them: a line chart's list longer than the catalogue's
-    `maxItems` of 8, an empty select (`check_select_nonempty`), then a select
+    order it checks them: a line chart's list of more than 8 distinct
+    values, an empty select (`check_select_nonempty`), then a select
     whose estimate passes 24 series, which multiplies each dimension's bound
     values, 1 for an unbound facet, and the view's count for any other unbound
     dimension (`_check_series_estimate` and `multiplying_advice`). None for any
     other write."""
     select, line = intent.get("select") or {}, intent["type"] == "line_chart"
     for name, value in select.items():
-        if line and isinstance(value, list) and len(value) > LINE_CHART_MAX_VALUES:
+        distinct = _distinct_members(value) if isinstance(value, list) else []
+        if line and len(distinct) > LINE_CHART_MAX_VALUES:
             return Refusal(
-                error="schema_invalid",
+                error="resource_exhausted",
                 retry=RetryMode.CORRECT_AND_RETRY,
-                detail=f"{value!r} is not valid under any of the given schemas",
+                detail=(
+                    f"select lists {len(distinct)} values on {name!r}, one series each, "
+                    f"over the maximum of {LINE_CHART_MAX_VALUES}; bind it to at most "
+                    f"{LINE_CHART_MAX_VALUES} values"
+                ),
                 pointer=f"/select/{name}",
+                limit_name="MAX_LINE_CHART_SERIES",
             )
     if not select:
         held = ", ".join(
@@ -2728,7 +2739,11 @@ def _apis_refusal(intent: dict[str, Any], *, view: dict[str, Any]) -> Refusal | 
         )
     factors = {
         str(dim["name"]): (
-            (len(select[dim["name"]]) if isinstance(select[dim["name"]], list) else 1)
+            (
+                len(_distinct_members(select[dim["name"]]))
+                if isinstance(select[dim["name"]], list)
+                else 1
+            )
             if dim["name"] in select
             else 1
             if dim["name"] in _FACETS
@@ -2745,7 +2760,11 @@ def _apis_refusal(intent: dict[str, Any], *, view: dict[str, Any]) -> Refusal | 
         for name, count in sorted(factors.items(), key=lambda factor: (factor[1], factor[0]))
         if count > 1
     }
-    kept = [name for name, value in select.items() if isinstance(value, list) and len(value) > 1]
+    kept = [
+        name
+        for name, value in select.items()
+        if isinstance(value, list) and len(_distinct_members(value)) > 1
+    ]
     others = [text for name, text in named.items() if kept != [name]]
 
     def joined(items: list[str]) -> str:
@@ -2805,9 +2824,9 @@ class CapExecutor(WideFrameExecutor):
         intent = args.get("intent") or {}
         # A one-value list reads as its one value.
         listed = [
-            value
+            _distinct_members(value)
             for value in (intent.get("select") or {}).values()
-            if isinstance(value, list) and len(value) > 1
+            if isinstance(value, list) and len(_distinct_members(value)) > 1
         ]
         if (
             tool == "write_component"
@@ -2984,8 +3003,8 @@ async def test_make_charts_cuts_a_select_over_the_cap_at_one_period(
     assert members == sorted(members, key=lambda member: -values[member][period])
     assert result["charts"][0]["title"] == intent["title"]
     assert result["charts"][0]["note"] == (
-        f"This card draws the {kept} largest of the 20 members with a value in 2024, highest "
-        "first. Left out as group totals, unallocated amounts or members of another level: 0. "
+        f"This card draws the {kept} largest of the 20 members with a value in 2024. "
+        "Left out as group totals, unallocated amounts or members of another level: 0. "
         "Left out with no "
         "value in 2024: 10. Say in the reply that it shows the largest of them in 2024."
     )
@@ -3887,49 +3906,32 @@ async def test_make_charts_keeps_the_cap_refusal_when_no_member_is_a_party(
     assert _writes(executor) == 1
 
 
-@pytest.mark.parametrize(
-    "store",
-    [
-        HeldFrames(providers=5),
-        HeldFrames(providers=5, totals=frozenset({"donor/04"}), carried=True),
-    ],
-    ids=["plain", "kinds_carried"],
-)
-async def test_make_charts_orders_a_ranking_under_the_cap_highest_first(
-    monkeypatch: pytest.MonkeyPatch, store: HeldFrames
+@pytest.mark.parametrize("type_", ["table", "line_chart", "bar_chart"])
+async def test_make_charts_writes_no_order_for_order_by_value(
+    monkeypatch: pytest.MonkeyPatch, type_: str
 ) -> None:
-    """A table ordered by value lists every provider, highest first, with no
-    note, since nothing is left out. A kind column the rows carry leaves the
-    ordering as it is, group total included."""
-    executor, result = await _draw_wide(
-        monkeypatch, store, providers=5, type="table", order_by_value=True
-    )
-
-    (intent,) = _intents(executor)
-    assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in (4, 3, 2, 1, 0)]
-    assert intent["title"] == "Aid to Kenya, 2023 to 2024"
-    assert "note" not in result["charts"][0]
-
-
-@pytest.mark.parametrize(
-    "chart",
-    [{"type": "table"}, {"type": "bar_chart", "order_by_value": True}],
-    ids=["not_asked", "bar_chart"],
-)
-async def test_make_charts_keeps_the_listed_order_unless_asked_to_rank(
-    monkeypatch: pytest.MonkeyPatch, chart: dict[str, Any]
-) -> None:
-    """apis orders a bar chart's bars itself, so `order_by_value` leaves
-    its select as listed."""
-    listed = ["donor/00", "donor/03", "donor/01"]
-    select = json.dumps({"financingRecipient": "country/KEN", "financingProvider": listed})
+    """The platform draws every chart's members in its own order, so
+    `order_by_value` writes the select as the model listed it and reads no
+    frame to rank it."""
+    select = {
+        "financingRecipient": "country/KEN",
+        "financingProvider": ["donor/00", "donor/03", "donor/01"],
+    }
+    store = CountedFrames(providers=5, carried=True)
 
     executor, _ = await _draw_wide(
-        monkeypatch, HeldFrames(providers=5), providers=5, select_json=select, **chart
+        monkeypatch,
+        store,
+        providers=5,
+        type=type_,
+        order_by_value=True,
+        select_json=json.dumps(select),
     )
 
     (intent,) = _intents(executor)
-    assert intent["select"]["financingProvider"] == listed
+    assert intent["select"] == select
+    # Only a bar chart reads the frame, to pin the period its bars draw.
+    assert store.opens == (1 if type_ == "bar_chart" else 0)
 
 
 async def test_make_charts_keeps_a_table_under_the_platforms_row_cap(
@@ -3991,31 +3993,20 @@ class CountedFrames(HeldFrames):
 
 
 @pytest.mark.parametrize(
-    ("providers", "listed", "recipient"),
-    [
-        (8, None, "country/KEN"),
-        (6, None, ["country/KEN"]),
-        (9, 8, "country/KEN"),
-    ],
+    "recipient", ["country/KEN", ["country/KEN"], ["country/KEN", "country/KEN"]]
 )
-async def test_make_charts_cuts_an_ordered_line_chart_to_the_lines_it_lists(
-    monkeypatch: pytest.MonkeyPatch,
-    providers: int,
-    listed: int | None,
-    recipient: str | list[str],
+async def test_make_charts_cuts_a_line_chart_to_the_lines_it_lists(
+    monkeypatch: pytest.MonkeyPatch, recipient: str | list[str]
 ) -> None:
-    """Ordering lists every provider, and a line chart lists at most eight.
-    Six or eight providers are listed highest first, a one-value list beside
-    them written as its value; nine are cut to the largest eight, which the
-    one write lists. The rows, which carry each provider's kind, are read
-    once to order and cut them."""
-    store = CountedFrames(providers=providers, carried=True)
+    """Thirty providers are cut to the largest eight, which the one write
+    lists, a one-value or repeated list beside them written as its value.
+    The rows, which carry each provider's kind, are read once."""
+    store = CountedFrames(providers=30, carried=True)
     executor, result = await _draw_wide(
         monkeypatch,
         store,
-        providers=providers,
+        providers=30,
         type="line_chart",
-        order_by_value=True,
         select_json=json.dumps({"financingRecipient": recipient}),
     )
 
@@ -4023,16 +4014,10 @@ async def test_make_charts_cuts_an_ordered_line_chart_to_the_lines_it_lists(
     assert "error" not in result["charts"][0]
     assert intent["select"]["financingRecipient"] == "country/KEN"
     assert store.opens == 1
-    assert (
-        intent["select"]["financingProvider"]
-        == [f"donor/{number:02d}" for number in range(providers - 1, -1, -1)][
-            :LINE_CHART_MAX_VALUES
-        ]
-    )
-    if listed is None:
-        assert "largest of" not in intent["title"]
-    else:
-        assert f"({listed} largest of {providers} in " in intent["title"]
+    assert intent["select"]["financingProvider"] == [
+        f"donor/{number:02d}" for number in range(29, 21, -1)
+    ]
+    assert "(8 largest of 30 in " in intent["title"]
 
 
 class KindlessFrames(HeldFrames):
@@ -4055,12 +4040,12 @@ class ScatteredFrames(HeldFrames):
         ]
 
 
-async def test_make_charts_cuts_a_refused_ordered_table_from_the_rows_it_ordered(
+async def test_make_charts_cuts_a_refused_table_once_from_one_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An ordered table lists all twenty providers, and dfo-apis refuses its
-    4,800 rows. The cut to the largest eight was ranked from the rows read to
-    order them, so the frame is read once for both writes."""
+    """A table of twenty providers is written as given and dfo-apis refuses
+    its 4,800 rows. The cut to the largest eight is written once more, and
+    the frame is read once."""
     store = CountedFrames(providers=20, carried=True)
     executor, result = await _draw_capped(
         monkeypatch,
@@ -4068,33 +4053,15 @@ async def test_make_charts_cuts_a_refused_ordered_table_from_the_rows_it_ordered
         refusal=_TABLE_ROWS_REFUSAL,
         view=_MONTHLY_VIEW,
         store=store,
-        order_by_value=True,
     )
 
-    ordered, cut = _intents(executor)
-    providers = [f"donor/{number:02d}" for number in range(19, -1, -1)]
-    assert ordered["select"]["financingProvider"] == providers
-    assert cut["select"]["financingProvider"] == providers[:8]
+    whole, cut = _intents(executor)
+    assert "financingProvider" not in whole["select"]
+    assert cut["select"]["financingProvider"] == [
+        f"donor/{number:02d}" for number in range(19, 11, -1)
+    ]
     assert "error" not in result["charts"][0]
     assert store.opens == 1
-
-
-async def test_make_charts_orders_a_member_with_no_value_at_the_period_last(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Ordering under the cap leaves no provider out. One with no value in
-    the year the others are ordered at is listed after them, and the card
-    carries no note."""
-    values = {"donor/a": {"2024": 1.0}, "donor/b": {"2024": 2.0}, "donor/c": {"2023": 3.0}}
-
-    executor, result = await _draw_wide(
-        monkeypatch, RowFrames(values), providers=3, type="table", order_by_value=True
-    )
-
-    (intent,) = _intents(executor)
-    assert intent["select"]["financingProvider"] == ["donor/b", "donor/a", "donor/c"]
-    assert intent["title"] == "Aid to Kenya, 2023 to 2024"
-    assert "note" not in result["charts"][0]
 
 
 class UnreadableFrames:
@@ -4414,16 +4381,16 @@ _UNIT_VIEW["dimensions"].append({"name": "unit", "values": [], "plural": True, "
 
 
 @pytest.mark.parametrize(
-    ("store", "chart", "view", "warned"),
+    ("store", "chart", "view", "warned", "kind_reads"),
     [
-        (UnreadableFrames(), {}, None, True),
-        (FailingStore(), {}, None, True),
-        (HeldFrames(held=False), {}, None, True),
-        (UncountedFrames(), {}, None, True),
-        (_rank_positions(), {}, None, False),
-        (TwoUnitFrames(), {}, _UNIT_VIEW, False),
-        (HeldFrames(), {}, {**WIDE_VIEW, "rolling": True}, False),
-        (HeldFrames(), {"type": "line_chart", "latest_periods": 2}, None, False),
+        (UnreadableFrames(), {}, None, True, 0),
+        (FailingStore(), {}, None, True, 0),
+        (HeldFrames(held=False), {}, None, True, 0),
+        (UncountedFrames(), {}, None, True, 0),
+        (_rank_positions(), {}, None, False, 0),
+        (TwoUnitFrames(), {}, _UNIT_VIEW, False, 1),
+        (HeldFrames(), {}, {**WIDE_VIEW, "rolling": True}, False, 0),
+        (HeldFrames(), {"type": "line_chart", "latest_periods": 2}, None, False, 0),
     ],
     ids=[
         "unreadable",
@@ -4443,6 +4410,7 @@ async def test_make_charts_keeps_the_cap_refusal_when_the_frame_cannot_be_ranked
     chart: dict[str, Any],
     view: Any,
     warned: bool,
+    kind_reads: int,
 ) -> None:
     """A frame the store cannot read, a plan's rank positions (where the
     highest number is the worst), rows in two units, and a card whose period
@@ -4450,7 +4418,8 @@ async def test_make_charts_keeps_the_cap_refusal_when_the_frame_cannot_be_ranked
     narrowed: the select is written as it is, and dfo-apis' refusal reaches
     the model as the platform gave it, naming the limit the chart type
     crosses. A frame the store cannot read, does not hold or states no row
-    count for is logged as a warning."""
+    count for is logged as a warning. Only rows in two units, which are ranked
+    after the read of the members' kinds, start that read."""
     monkeypatch.setattr(orchestrator_tools, "read_derived_marker", _marker_of)
 
     with caplog.at_level(logging.WARNING, logger=orchestrator_tools.__name__):
@@ -4463,6 +4432,7 @@ async def test_make_charts_keeps_the_cap_refusal_when_the_frame_cannot_be_ranked
     assert refused["limit_name"] == (
         "MAX_LINE_CHART_SERIES" if chart else "MAX_SERIES_PER_COMPONENT"
     )
+    assert _kind_reads(executor) == kind_reads
 
 
 def _marker_of(trace: Any) -> Any:
@@ -5929,15 +5899,14 @@ _PLATFORM = _Platform("resource_exhausted", "MAX_LINE_CHART_SERIES")
 class _Cut:
     """One way a chart over its limit can end: the store, the providers the
     view counts, the view, the select, then the select drawn or the
-    platform's refusal, the writes made unordered and ordered by value, and
-    the frames opened."""
+    platform's refusal, the writes made, and the frames opened."""
 
     make: Callable[[], Any]
     providers: int
     view: dict[str, Any] | None
     select: dict[str, Any]
     outcome: dict[str, Any] | _Platform
-    writes: tuple[int, int]
+    writes: int
     opens: int
     type_: str = "line_chart"
     # The select of the write the platform refused, where the cell pins it.
@@ -5955,7 +5924,6 @@ _THIRTY_LISTED_UNIT_VIEW["dimensions"][1]["values"] = [
     f"donor/{number:02d}" for number in range(30)
 ]
 _LINE_LIMIT = _Platform("resource_exhausted", _LIMIT)
-_SCHEMA = _Platform("schema_invalid", None)
 _EMPTY = _Platform("binding_invalid", None)
 
 
@@ -5992,11 +5960,11 @@ def _holds_rows(value: Any) -> bool:
     return False
 
 
-# The select resolves past the chart's limit when written (the fake platform
-# refuses a select listing no dimension's values), lists more than eight (the
-# catalogue's `maxItems`), or is estimated past 24 series (the harness
-# refuses both before any write). An ordered chart whose order lists more
-# members than it draws is cut before its first write.
+# The select resolves past the chart's limit when written, names no dimension
+# (`check_select_nonempty`, which the fake platform refuses and the harness
+# does not see), lists more than eight distinct values on a line chart (the
+# catalogue's `maxItems`), or is estimated past 24 series (the harness cuts
+# those two before any write).
 _CUT_CASES = {
     "cut-succeeds": _Cut(
         lambda: HeldFrames(providers=20, carried=True),
@@ -6004,7 +5972,7 @@ _CUT_CASES = {
         None,
         {"financingRecipient": "country/KEN"},
         _TOP_EIGHT,
-        (2, 1),
+        2,
         1,
     ),
     "unrankable": _Cut(
@@ -6013,7 +5981,7 @@ _CUT_CASES = {
         _UNIT_VIEW,
         {"financingRecipient": "country/KEN"},
         _PLATFORM,
-        (1, 1),
+        1,
         1,
     ),
     "kinds-unread": _Cut(
@@ -6022,7 +5990,7 @@ _CUT_CASES = {
         None,
         {"financingRecipient": "country/KEN"},
         _PLATFORM,
-        (1, 1),
+        1,
         2,
     ),
     "table-kinds-unread": _Cut(
@@ -6031,7 +5999,7 @@ _CUT_CASES = {
         _MONTHLY_VIEW,
         {"financingRecipient": "country/KEN"},
         _Platform("resource_exhausted", "MAX_TABLE_ROWS"),
-        (1, 1),
+        1,
         2,
         type_="table",
     ),
@@ -6041,7 +6009,7 @@ _CUT_CASES = {
         None,
         {"financingRecipient": "country/KEN"},
         _PLATFORM,
-        (1, 1),
+        1,
         3,
     ),
     "two-multiplying-dimensions": _Cut(
@@ -6050,7 +6018,7 @@ _CUT_CASES = {
         _pair_view(providers=3, recipients=3),
         {},
         _PLATFORM,
-        (1, 1),
+        1,
         1,
     ),
     "listed-over-limit": _Cut(
@@ -6059,7 +6027,7 @@ _CUT_CASES = {
         None,
         _LISTED,
         _TOP_EIGHT,
-        (1, 1),
+        1,
         1,
     ),
     "listed-over-limit-unrankable": _Cut(
@@ -6067,8 +6035,8 @@ _CUT_CASES = {
         20,
         _UNIT_VIEW,
         _LISTED,
-        _SCHEMA,
-        (1, 1),
+        _LINE_LIMIT,
+        1,
         1,
     ),
     "listed-mostly-unheld": _Cut(
@@ -6080,7 +6048,7 @@ _CUT_CASES = {
             "financingRecipient": "country/KEN",
             "financingProvider": [f"donor/{number:02d}" for number in range(5, -1, -1)],
         },
-        (1, 1),
+        1,
         1,
     ),
     "measures-listed-mostly-unheld": _Cut(
@@ -6092,7 +6060,7 @@ _CUT_CASES = {
             "financingRecipient": "country/KEN",
             "variableMeasured": [f"donor/{number:02d}" for number in range(5, -1, -1)],
         },
-        (1, 1),
+        1,
         1,
     ),
     "measures-listed-ten-held": _Cut(
@@ -6104,7 +6072,7 @@ _CUT_CASES = {
             "financingRecipient": "country/KEN",
             "variableMeasured": [f"donor/{number:02d}" for number in range(9, 1, -1)],
         },
-        (1, 1),
+        1,
         1,
     ),
     "measures-and-providers-unbound": _Cut(
@@ -6113,7 +6081,7 @@ _CUT_CASES = {
         _FIVE_MEASURE_VIEW,
         {"financingRecipient": "country/KEN"},
         _LINE_LIMIT,
-        (1, 1),
+        1,
         0,
     ),
     "estimate-over-24": _Cut(
@@ -6125,7 +6093,7 @@ _CUT_CASES = {
             "financingRecipient": "country/KEN",
             "financingProvider": [f"donor/{number:02d}" for number in range(29, 21, -1)],
         },
-        (1, 1),
+        1,
         1,
     ),
     "estimate-over-24-unrankable": _Cut(
@@ -6134,7 +6102,7 @@ _CUT_CASES = {
         _UNIT_VIEW,
         {"financingRecipient": "country/KEN"},
         _LINE_LIMIT,
-        (1, 1),
+        1,
         1,
     ),
     "two-dimensions-over-24": _Cut(
@@ -6143,7 +6111,7 @@ _CUT_CASES = {
         _pair_view(providers=5, recipients=6),
         {"stat_var": "dcid:aid"},
         _LINE_LIMIT,
-        (1, 1),
+        1,
         0,
     ),
     "empty-select-over-limit": _Cut(
@@ -6152,7 +6120,7 @@ _CUT_CASES = {
         _TEN_LISTED_VIEW,
         {},
         {"financingProvider": [f"donor/{number:02d}" for number in range(9, 1, -1)]},
-        (1, 1),
+        1,
         2,
     ),
     # The covering select of ten providers is no cut, so the model's empty
@@ -6163,7 +6131,7 @@ _CUT_CASES = {
         _TEN_LISTED_VIEW,
         {},
         _EMPTY,
-        (1, 1),
+        1,
         2,
         refused_select={},
     ),
@@ -6173,7 +6141,7 @@ _CUT_CASES = {
         _CONTINUED_VIEW,
         {"financingRecipient": "country/KEN"},
         _TOP_EIGHT,
-        (2, 1),
+        2,
         1,
     ),
     "rank-positions": _Cut(
@@ -6188,7 +6156,7 @@ _CUT_CASES = {
         None,
         {"financingRecipient": "country/KEN"},
         _PLATFORM,
-        (1, 1),
+        1,
         1,
     ),
     "aggregate-among-members": _Cut(
@@ -6200,7 +6168,7 @@ _CUT_CASES = {
             "financingRecipient": "country/KEN",
             "financingProvider": [f"donor/{number:02d}" for number in range(8, 0, -1)],
         },
-        (2, 2),
+        2,
         1,
     ),
     "methods-split-series": _Cut(
@@ -6209,8 +6177,8 @@ _CUT_CASES = {
         _METHOD_VIEW,
         {"financingRecipient": "country/KEN"},
         _PLATFORM,
-        (1, 1),
         1,
+        0,
     ),
     "undeclared-split": _Cut(
         lambda: MethodFrames(providers=5, carried=True),
@@ -6218,8 +6186,8 @@ _CUT_CASES = {
         None,
         {"financingRecipient": "country/KEN"},
         _PLATFORM,
-        (1, 1),
         1,
+        0,
     ),
     "derived-frame": _Cut(
         lambda: DerivedFrames(providers=20),
@@ -6227,7 +6195,7 @@ _CUT_CASES = {
         None,
         {"financingRecipient": "country/KEN"},
         _PLATFORM,
-        (1, 1),
+        1,
         1,
     ),
     "period-moves": _Cut(
@@ -6236,7 +6204,7 @@ _CUT_CASES = {
         _ROLLING_VIEW,
         {"financingRecipient": "country/KEN"},
         _PLATFORM,
-        (1, 1),
+        1,
         0,
     ),
     "frame-unreadable": _Cut(
@@ -6245,7 +6213,7 @@ _CUT_CASES = {
         None,
         {"financingRecipient": "country/KEN"},
         _PLATFORM,
-        (1, 1),
+        1,
         1,
     ),
     "pairs-split-by-method": _Cut(
@@ -6254,7 +6222,7 @@ _CUT_CASES = {
         _pair_view(providers=3, recipients=5),
         {},
         _PLATFORM,
-        (1, 1),
+        1,
         1,
     ),
     "table-empty-select-over-24": _Cut(
@@ -6263,7 +6231,7 @@ _CUT_CASES = {
         _THIRTY_LISTED_UNIT_VIEW,
         {},
         _EMPTY,
-        (1, 1),
+        1,
         2,
         type_="table",
         refused_select={},
@@ -6271,19 +6239,15 @@ _CUT_CASES = {
 }
 
 
-@pytest.mark.parametrize("ordered", [False, True], ids=["unordered", "ordered"])
 @pytest.mark.parametrize("case", _CUT_CASES)
-async def test_a_chart_over_its_limit_ends_the_same_ordered_or_not(
-    monkeypatch: pytest.MonkeyPatch, case: str, ordered: bool
+async def test_a_chart_over_its_limit_ends_cut_or_refused(
+    monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
     """A chart whose select resolves past its limit is drawn cut to its
     largest members, or is written as it is and ends with dfo-apis' refusal,
     relayed exactly as presentation-mcp gave it. The harness refuses nothing
-    for its series before a write; a cut is the one thing it does first. The
-    end and the frames opened are the same whether or not it is ordered
-    by value; an ordered chart whose order lists more than it draws is cut
-    before its first write. No read of a frame hands its rows back out of the
-    row budget's claim (`_frame_work`)."""
+    for its series before a write; a cut is the one thing it does first. No
+    read of a frame hands its rows back out of the row budget's claim (`_frame_work`)."""
     cell = _CUT_CASES[case]
     store = _Counted(cell.make())
     read = orchestrator_tools._frame_work
@@ -6307,18 +6271,17 @@ async def test_a_chart_over_its_limit_ends_the_same_ordered_or_not(
         store=store,
         providers=cell.providers,
         select_json=json.dumps(cell.select),
-        order_by_value=ordered,
     )
 
     (entry,) = result["charts"]
-    assert _writes(executor) == cell.writes[ordered]
+    assert _writes(executor) == cell.writes
     if isinstance(cell.outcome, dict):
         assert "error" not in entry
         assert _intents(executor)[-1]["select"] == cell.outcome
     else:
         refused = _intents(executor)[-1]["select"]
         # A refused select the harness wrote in place of the model's own, a
-        # cut or an ordering, rides beside the platform's body.
+        # cut, rides beside the platform's body.
         harness_written = {} if refused == cell.select else {"written_select": refused}
         assert entry == _relayed(executor.refusals[-1]) | harness_written
         assert (entry["code"], entry.get("limit_name")) == (cell.outcome.code, cell.outcome.limit)
@@ -6362,13 +6325,18 @@ _BINDING_REFUSAL = Refusal(
 
 
 async def _draw_scripted(
-    monkeypatch: pytest.MonkeyPatch, answers: list[Refusal | Exception | None], *charts: Any
+    monkeypatch: pytest.MonkeyPatch,
+    answers: list[Refusal | Exception | None],
+    *charts: Any,
+    store: Any = None,
+    view: dict[str, Any] | None = None,
+    providers: int = 20,
 ) -> tuple[ScriptedWrites, dict[str, Any]]:
-    """Draw `charts` of twenty providers' aid to Kenya, the platform
-    answering each write as `answers` says."""
-    held = HeldFrames(providers=20, carried=True)
+    """Draw `charts` of `providers` providers' aid to Kenya, held in `store`,
+    the platform answering each write as `answers` says."""
+    held = store or HeldFrames(providers=providers, carried=True)
     monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: held)
-    executor = ScriptedWrites(answers, providers=20, view=copy.deepcopy(WIDE_VIEW))
+    executor = ScriptedWrites(answers, providers=providers, view=copy.deepcopy(view or WIDE_VIEW))
     tools, ctx = _tools(executor=executor)
     await tools["fetch"](SPEC_LIFE, ctx)
     return executor, await tools["make_charts"](list(charts), ctx)
@@ -6392,6 +6360,119 @@ async def test_a_cut_write_the_platform_refuses_again_ends_with_that_refusal(
     (entry,) = result["charts"]
     # The platform's body as it gave it, beside the cut it judged.
     assert entry == _relayed(_BINDING_REFUSAL) | {"written_select": cut["select"]}
+
+
+@pytest.mark.parametrize("type_", ["bar_chart", "table"])
+async def test_a_bar_chart_or_table_refused_on_the_series_estimate_is_written_once(
+    monkeypatch: pytest.MonkeyPatch, type_: str
+) -> None:
+    """dfo-apis refuses a bar chart or a table over its series estimate as
+    `resource_exhausted` on `MAX_SERIES_PER_COMPONENT`. The select leaves
+    unbound a dimension the view counts at 20, no more than the 24 members the
+    chart draws, so a cut would list the same members and meet the same
+    refusal. The chart is written once, without a frame read."""
+    store = CountedFrames(providers=20, carried=True)
+    executor, result = await _draw_scripted(
+        monkeypatch, [_COMPONENT_SERIES_REFUSAL], _wide_chart(type=type_), store=store
+    )
+
+    (written,) = _intents(executor)
+    assert written["select"] == {"financingRecipient": "country/KEN"}
+    (entry,) = result["charts"]
+    assert entry == _relayed(_COMPONENT_SERIES_REFUSAL)
+    assert store.opens == 0
+
+
+async def test_a_line_chart_leaving_unbound_a_dimension_of_eight_is_written_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A line chart refused over its lines that leaves unbound a dimension the
+    view counts at eight, the lines it draws, is cut to as many members, so it
+    is not written again and the frame is not read."""
+    store = CountedFrames(providers=8, carried=True)
+    executor, result = await _draw_scripted(
+        monkeypatch,
+        [_LINE_SERIES_REFUSAL],
+        _wide_chart(type="line_chart"),
+        store=store,
+        providers=8,
+    )
+
+    (written,) = _intents(executor)
+    assert written["select"] == {"financingRecipient": "country/KEN"}
+    (entry,) = result["charts"]
+    assert entry == _relayed(_LINE_SERIES_REFUSAL)
+    assert store.opens == 0
+
+
+_FIVE = {
+    "financingRecipient": "country/KEN",
+    "financingProvider": [f"donor/{number:02d}" for number in range(5)],
+}
+
+
+@pytest.mark.parametrize(
+    ("type_", "refusal", "select", "view"),
+    [
+        pytest.param("line_chart", _LINE_SERIES_REFUSAL, _TOP_EIGHT, WIDE_VIEW, id="same-order"),
+        pytest.param(
+            "line_chart",
+            _LINE_SERIES_REFUSAL,
+            {**_TOP_EIGHT, "financingProvider": _TOP_EIGHT["financingProvider"][::-1]},
+            WIDE_VIEW,
+            id="reordered",
+        ),
+        pytest.param(
+            "line_chart",
+            _LINE_SERIES_REFUSAL,
+            {
+                **_TOP_EIGHT,
+                "financingProvider": [
+                    *_TOP_EIGHT["financingProvider"],
+                    _TOP_EIGHT["financingProvider"][0],
+                ],
+            },
+            WIDE_VIEW,
+            id="repeated",
+        ),
+        pytest.param(
+            "line_chart",
+            _LINE_SERIES_REFUSAL,
+            {
+                **_TOP_EIGHT,
+                "financingProvider": [*_TOP_EIGHT["financingProvider"][:-1], "donor/11"],
+            },
+            WIDE_VIEW,
+            id="same-size-swap",
+        ),
+        pytest.param("table", _TABLE_ROWS_REFUSAL, _FIVE, _MONTHLY_VIEW, id="table-of-five"),
+    ],
+)
+async def test_a_refusal_the_cut_cannot_change_is_written_once(
+    monkeypatch: pytest.MonkeyPatch,
+    type_: str,
+    refusal: Refusal,
+    select: dict[str, Any],
+    view: dict[str, Any],
+) -> None:
+    """A line chart already listing eight providers, in any order, with repeats,
+    or with the weakest swapped for another, refused over its lines, or a table
+    listing five, refused over its rows, is cut to as many members, so it is
+    not written again and the frame is not read."""
+    store = CountedFrames(providers=20, carried=True)
+    executor, result = await _draw_scripted(
+        monkeypatch,
+        [refusal],
+        _wide_chart(type=type_, select_json=json.dumps(select)),
+        store=store,
+        view=view,
+    )
+
+    (written,) = _intents(executor)
+    assert written["select"] == select
+    (entry,) = result["charts"]
+    assert entry == _relayed(refusal)
+    assert store.opens == 0
 
 
 async def test_a_cut_written_first_and_refused_carries_the_select_written(
@@ -6457,7 +6538,7 @@ _POINTS_REFUSAL = Refusal(
     ("type_", "refusal"),
     [
         pytest.param("line_chart", _POINTS_REFUSAL, id="line-chart-points"),
-        pytest.param("table", _COMPONENT_SERIES_REFUSAL, id="table-component-series"),
+        pytest.param("bar_chart", _TABLE_ROWS_REFUSAL, id="bar-chart-table-rows"),
     ],
 )
 async def test_a_refusal_on_another_limit_is_relayed_as_the_platform_gave_it(
