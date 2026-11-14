@@ -40,7 +40,7 @@ pytestmark = pytest.mark.skipif(
 async def test_schema_endpoint_reports_expected_contract_version() -> None:
     base_url = os.environ["DFO_APIS_URL"]
     async with httpx2.AsyncClient(base_url=base_url, timeout=10.0) as client:
-        response = await client.get("/api/search/schema")
+        response = await client.get("/api/search/json-schema")
 
     response.raise_for_status()
     body = response.json()
@@ -65,7 +65,7 @@ async def test_wire_request_validates_against_the_published_request_schema() -> 
     """
     base_url = os.environ["DFO_APIS_URL"]
     async with httpx2.AsyncClient(base_url=base_url, timeout=10.0) as client:
-        response = await client.get("/api/search/schema")
+        response = await client.get("/api/search/json-schema")
     response.raise_for_status()
     request_schema = response.json()["request"]
 
@@ -128,7 +128,7 @@ async def test_live_graph_schema_matches_the_committed_snapshot() -> None:
     """A difference means `just graph-schema` and `just graph-models` are due."""
     base_url = os.environ["DFO_APIS_URL"]
     async with httpx2.AsyncClient(base_url=base_url, timeout=10.0) as client:
-        response = await client.get("/api/graph/schema")
+        response = await client.get("/api/graph/json-schema")
 
     response.raise_for_status()
     assert response.json() == json.loads(_GRAPH_SCHEMA_SNAPSHOT.read_text())
