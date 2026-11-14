@@ -64,6 +64,8 @@ logger = logging.getLogger(__name__)
 # Intent fields a revise patch may not name, as apis
 # `assembler.merge.merge_intent` refuses them.
 _CREATE_ONLY_FIELDS = ("type", "frame_ref")
+# The component types whose intent takes an `order`.
+_ORDERED_TYPES = frozenset({"line_chart", "bar_chart", "table"})
 
 # What a closing message says before the sentence for a refused edit's code.
 _EDIT_REFUSED = "The edit was refused."
@@ -268,7 +270,7 @@ async def _edit_flow(
             # The model drafted `text` for an in-place revise; this is a new card.
             closing = _REBUILT_TEXT
     else:
-        intent = {**recreate, "frame_ref": stored.get("frame_ref")}
+        intent = _recreated(stored, recreate)
         step_label = "Rebuild the card"
         closing = text or "Done -- the card was rebuilt with your change."
     written = await recorder(tool="write_component", args={"intent": intent})
@@ -331,6 +333,22 @@ def _refused_lead(result: dict[str, Any], *, unreadable: str) -> str:
     `unreadable` when the platform stored a card the harness cannot read."""
     code = (result.get("refusal") or {}).get("code")
     return unreadable if code == HarnessCode.STORED_CARD_UNREADABLE else _EDIT_REFUSED
+
+
+def _recreated(stored: dict[str, Any], recreate: dict[str, Any]) -> dict[str, Any]:
+    """The intent a recreate writes: the model's `recreate` on the stored
+    card's frame, drawn in the stored card's `order` where its type takes one.
+    The order is the stored card's whatever the model wrote, since a
+    `stat_card` takes none and a `bar_chart` takes no `order.period`. A period
+    is kept only under the stored card's window, the one it ranked inside."""
+    intent = {key: value for key, value in recreate.items() if key != "order"}
+    intent["frame_ref"] = stored.get("frame_ref")
+    order = stored.get("order")
+    if not isinstance(order, dict) or intent.get("type") not in _ORDERED_TYPES:
+        return intent
+    if intent["type"] == "bar_chart" or intent.get("window") != stored.get("window"):
+        order = {key: value for key, value in order.items() if key != "period"}
+    return intent | {"order": order}
 
 
 def _merge_patch(stored: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:

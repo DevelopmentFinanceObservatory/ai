@@ -3469,16 +3469,21 @@ async def test_make_charts_refuses_a_cut_whose_members_share_no_period(
 
 
 @pytest.mark.parametrize(
-    ("type_", "providers", "window"),
+    ("type_", "providers", "window", "period"),
     [
-        ("bar_chart", 30, {"start": "2020/2024", "end": "2020/2024"}),
-        ("table", 30, None),
-        # Twenty bars are under the cap: nothing is cut and no period is pinned.
-        ("bar_chart", 20, None),
+        # A bar chart takes no `order.period`; its window holds the cut's period.
+        ("bar_chart", 30, {"start": "2020/2024", "end": "2020/2024"}, None),
+        ("table", 30, None, "2020/2024"),
+        # Twenty bars are under the cap: nothing is cut, ordered or pinned.
+        ("bar_chart", 20, None, None),
     ],
 )
 async def test_make_charts_cuts_a_frame_of_one_span_at_that_span(
-    monkeypatch: pytest.MonkeyPatch, type_: str, providers: int, window: dict[str, str] | None
+    monkeypatch: pytest.MonkeyPatch,
+    type_: str,
+    providers: int,
+    window: dict[str, str] | None,
+    period: str | None,
 ) -> None:
     """Thirty providers each hold the one period 2020/2024, so the largest
     are chosen at it and the title names it. A cut bar chart is written with
@@ -3496,7 +3501,10 @@ async def test_make_charts_cuts_a_frame_of_one_span_at_that_span(
     if providers > MAX_SERIES_PER_COMPONENT:
         assert intent["title"] == "Aid to Kenya (24 largest of 30 in 2020/2024)"
         assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in range(29, 5, -1)]
+        largest_first = {"by": "value", "direction": "descending"}
+        assert intent["order"] == largest_first | ({} if period is None else {"period": period})
     else:
+        assert "order" not in intent
         assert (intent["title"], intent["select"]) == (
             "Aid to Kenya, 2020 to 2024",
             {"financingRecipient": "country/KEN"},
@@ -3935,6 +3943,8 @@ async def test_make_charts_counts_only_the_members_the_chart_lists(
     (intent,) = _intents(executor)
     assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in range(8, 0, -1)]
     assert intent["title"] == "Aid to Kenya, 2023 to 2024 (8 largest of 9 in 2024)"
+    # The legend ranks at the period the title names.
+    assert intent["order"] == {"by": "value", "direction": "descending", "period": "2024"}
 
 
 async def test_make_charts_keeps_the_cap_refusal_when_no_member_is_a_party(
@@ -3948,17 +3958,31 @@ async def test_make_charts_keeps_the_cap_refusal_when_no_member_is_a_party(
     assert _writes(executor) == 1
 
 
-@pytest.mark.parametrize("type_", ["table", "line_chart", "bar_chart"])
-async def test_make_charts_writes_no_order_for_order_by_value(
-    monkeypatch: pytest.MonkeyPatch, type_: str
+_LISTED = {
+    "financingRecipient": "country/KEN",
+    "financingProvider": ["donor/00", "donor/03", "donor/01"],
+}
+
+
+@pytest.mark.parametrize(
+    ("type_", "select", "order"),
+    [
+        ("table", _LISTED, {"by": "value", "direction": "descending"}),
+        ("line_chart", _LISTED, {"by": "value", "direction": "descending"}),
+        ("bar_chart", _LISTED, {"by": "value", "direction": "descending"}),
+        # A stat card draws one value, and its intent takes no order.
+        ("stat_card", {"financingRecipient": "country/KEN", "financingProvider": "donor/00"}, None),
+    ],
+)
+async def test_make_charts_orders_by_value_without_reading_the_frame(
+    monkeypatch: pytest.MonkeyPatch,
+    type_: str,
+    select: dict[str, Any],
+    order: dict[str, str] | None,
 ) -> None:
-    """The platform draws every chart's members in its own order, so
-    `order_by_value` writes the select as the model listed it and reads no
-    frame to rank it."""
-    select = {
-        "financingRecipient": "country/KEN",
-        "financingProvider": ["donor/00", "donor/03", "donor/01"],
-    }
+    """`order_by_value` writes the select as the model listed it with an
+    `order` largest first and no period, which the platform ranks at, and
+    reads no frame to rank it."""
     store = CountedFrames(providers=5, carried=True)
 
     executor, _ = await _draw_wide(
@@ -3972,8 +3996,9 @@ async def test_make_charts_writes_no_order_for_order_by_value(
 
     (intent,) = _intents(executor)
     assert intent["select"] == select
-    # Only a bar chart reads the frame, to pin the period its bars draw.
-    assert store.opens == (1 if type_ == "bar_chart" else 0)
+    assert intent.get("order") == order
+    # Only a bar chart or a stat card reads the frame, for the period it draws.
+    assert store.opens == (1 if type_ in {"bar_chart", "stat_card"} else 0)
 
 
 async def test_make_charts_keeps_a_table_under_the_platforms_row_cap(

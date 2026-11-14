@@ -4687,6 +4687,56 @@ async def test_an_edit_writes_the_period_as_the_model_drafted_it(period: dict[st
     }
 
 
+_ORDERED_BAR = {
+    "type": "bar_chart",
+    "title": "Aid to Kenya",
+    "select": {"stat_var": "dcid:Aid"},
+    "frame_ref": REF_A,
+    "order": {"by": "value", "direction": "descending"},
+}
+
+
+@pytest.mark.parametrize(
+    ("type_", "drafted_order", "written_order"),
+    [
+        # The model copied the stored order onto a type that takes none.
+        ("stat_card", _ORDERED_BAR["order"], None),
+        # The model left the order out; the rebuilt table keeps it.
+        ("table", None, _ORDERED_BAR["order"]),
+    ],
+)
+async def test_an_edit_recreate_keeps_the_stored_order_where_the_type_takes_one(
+    type_: str, drafted_order: dict[str, str] | None, written_order: dict[str, str] | None
+) -> None:
+    """A recreate of an ordered bar chart writes the stored card's order on a
+    type that takes one and none on a stat card, whatever the model drafted."""
+    recreate = {"type": type_, "title": "Aid to Kenya", "select": {"stat_var": "dcid:Aid"}}
+    if drafted_order is not None:
+        recreate["order"] = drafted_order
+    executor = ScriptedExecutor(
+        [
+            *_card_results(),
+            _described(stored_intent=_ORDERED_BAR),
+            _VIEW,
+            {"outcome": "ok", "frame_refs": [], "component": COMPONENT},
+        ],
+        strict=True,
+    )
+    app = _app(
+        *_card(),
+        resolver=_search(),
+        executor=executor,
+        edit_model=ScriptedEditModel({"text": "Done.", "patch": None, "recreate": recreate}),
+    )
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        await _stream(client, "/api/studio/turn", _edit_body("rebuild it"))
+
+    write = executor.calls[-1]
+    assert write["tool"] == "write_component"
+    assert write["args"]["intent"].get("order") == written_order
+
+
 # --- the canvas digest -----------------------------------------------------------
 
 

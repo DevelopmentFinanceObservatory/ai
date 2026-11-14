@@ -84,6 +84,24 @@ class _FakeClient:
 _LATEST = {"anchor": "latest", "offset": 0}
 
 
+async def test_edit_accepts_a_recreate_carrying_the_stored_order() -> None:
+    """A recreate that copies the stored card's `order` is passed on, and the
+    edit route decides the order it writes."""
+    order = {"by": "value", "direction": "descending"}
+    recreate = {"type": "table", "title": "Aid", "select": {"donor": "country/FRA"}, "order": order}
+    client = _FakeClient(
+        json.dumps({"text": "Done.", "patch_json": None, "recreate_json": json.dumps(recreate)})
+    )
+
+    drafted = await GeminiEdit(model_name="test-model", timeout_s=90.0, client=client)(
+        message="make it a table",
+        stored_intent={"type": "bar_chart", "title": "Aid", "order": order},
+        frame_view={"dimensions": []},
+    )
+
+    assert drafted["recreate"] == recreate
+
+
 @pytest.mark.parametrize(
     "period",
     [

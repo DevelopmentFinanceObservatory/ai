@@ -128,7 +128,9 @@ _EDIT_SCHEMA = _schema(
 )
 
 _PATCH_KEYS = frozenset({"title", "select"})
-_RECREATE_KEYS = frozenset({"type", "title", "select", "window", "change"})
+# `order` is accepted because the model may copy it from the stored intent;
+# `harness.studio_edit` sets a recreate's order from the stored card.
+_RECREATE_KEYS = frozenset({"type", "title", "select", "window", "change", "order"})
 
 
 class GeminiEdit(_ModelCall):
