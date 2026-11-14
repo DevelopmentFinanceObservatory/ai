@@ -2,7 +2,7 @@
 survives a process restart in one shared bucket, keyed by the reference
 pair a `FrameRef` names.
 
-One object per reference: `frames/v4/{spec_id}/{content_version}.parquet`,
+One object per reference: `frames/v5/{spec_id}/{content_version}.parquet`,
 uploaded with `if_generation_match=0` -- insert-only, first-writer-wins. A
 pair is content-addressed by construction (the reference pair names the
 exact frame it names), so a `PreconditionFailed` (412) means the bytes are
@@ -66,13 +66,16 @@ to 4 with `max_rows` as the claim, and decodes it. `get` is `open` then
 `read` with this store's row ceiling as the claim.
 
 Every object this store keeps sits under the layout version `_LAYOUT`
-(`v4`): frames under `frames/v4/`, mint records under `mints/v4/` and anchor
-records under `anchors/v4/`. A pair can name other bytes from one layout to
-the next (under `v4` an apis service pair holds that version's canonical frame,
+(`v5`): frames under `frames/v5/`, mint records under `mints/v5/` and anchor
+records under `anchors/v5/`. A pair can name other bytes from one layout to
+the next (from `v4` an apis service pair holds that version's canonical frame,
 where it held a rendering before), and a mint or anchor record describes the
-frames of the pairs it names, so the records move with the frames.
+frames of the pairs it names, so the records move with the frames. Under `v5` a
+converted unit keeps its `recipe` and `deflation_basis`. A `v4` frame decoded from
+apis' text `unit` column dropped both, so donor- and recipient-deflated units read
+as one unit, and no read can restore them; the frame is fetched again instead.
 
-`frames/v4/` (`_FRAMES_PREFIX`) is the one frame prefix this store writes and
+`frames/v5/` (`_FRAMES_PREFIX`) is the one frame prefix this store writes and
 reads. It holds `frame_to_parquet_bytes`'s canonical Arrow layout, whose
 `unit` struct is `{ref, request, composed}` with `composed` a composed
 unit's JCS text. `frame_from_verified_parquet_bytes` reads it with
@@ -88,12 +91,12 @@ content-version check (`_with_party_kind_columns`).
 An object that passes all four checks and still has another schema raises
 `FrameIntegrityError`.
 
-An object under an older prefix (`frames/v3/`, `frames/v2/`, `frames/v1/`,
-`mints/v1/`, `anchors/v1/`) is a plain miss for `open`, `get`, `get_trace`,
+An object under an older prefix (`frames/v5/`, `frames/v3/`, `frames/v2/`,
+`frames/v1/`, `mints/v5/`, `mints/v1/`, `anchors/v5/`, `anchors/v1/`) is a plain miss for `open`, `get`, `get_trace`,
 `get_mint_record` and `get_anchor_record`, and `list_frames` leaves it out, as
 it would an object the lifecycle rule has deleted; the bucket's lifecycle rule
 deletes it on the schedule it deletes any object. A root whose mint record is
-held only under `mints/v1/` therefore has none, as one whose record was lost,
+held only under an older `mints/` prefix therefore has none, as one whose record was lost,
 and `data_mcp.mint_recovery` rebuilds it. A
 deployment reads only its own prefix, so during a rollout a pair one
 deployment stores is a miss for a deployment on another prefix, never
@@ -128,7 +131,7 @@ from the footer's envelope. It decodes no column, so it claims no rows. The
 encoded-bytes ceiling bounds what it holds.
 
 A root frame's mint record (`common.materialisation.mint_record`) is one more
-object per reference, `mints/v4/{spec_id}/{content_version}.json`, holding
+object per reference, `mints/v5/{spec_id}/{content_version}.json`, holding
 `encode_mint_record`'s bytes. It is uploaded with `if_generation_match=0` like a
 frame, and a 412 means a record is already held, which stands. It is written
 apart from the frame's object, so a frame the bucket already holds gains one on
@@ -137,14 +140,14 @@ reference it was read under, raises `FrameIntegrityError`. The bucket's lifecycl
 rule deletes it on the schedule it deletes any object.
 
 An anchor record (`common.materialisation.anchor_record`) is one object per
-`anchor_key`, `anchors/v4/{anchor_key}.json`, holding `encode_anchor_record`'s
+`anchor_key`, `anchors/v5/{anchor_key}.json`, holding `encode_anchor_record`'s
 bytes. It is uploaded with `if_generation_match=0`, and a 412 means a record is
 already held, which stands. A stored record that does not decode, or whose
 populations, roots and rule hash to another key, raises
 `AnchorRecordIntegrityError`. The bucket's lifecycle rule deletes it on the
 schedule it deletes any object.
 
-`list_frames` lists the object names under `frames/v4/` with each object's creation
+`list_frames` lists the object names under `frames/v5/` with each object's creation
 time and downloads nothing. A name that is not a frame's is skipped.
 
 `asyncio.to_thread` crosses the synchronous `google-cloud-storage` client
@@ -276,7 +279,7 @@ class _StorageClient(Protocol):
 # The layout version of every object this store keeps: the canonical frame layout
 # `frame_from_verified_parquet_bytes` decodes. Frames and the records that describe
 # them share it, so a move to a new frame layout moves the records too.
-_LAYOUT = "v4"
+_LAYOUT = "v5"
 _FRAMES_PREFIX = f"frames/{_LAYOUT}"
 _MINT_RECORD_PREFIX = f"mints/{_LAYOUT}"
 _ANCHOR_RECORD_PREFIX = f"anchors/{_LAYOUT}"

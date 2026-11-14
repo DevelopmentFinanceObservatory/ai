@@ -51,7 +51,7 @@ from dfo_frame_grammar import (
 from google.api_core.exceptions import NotFound, PreconditionFailed
 
 _BUCKET = "dev-fin-observatory-frames"
-_WRITTEN_PREFIX = "frames/v4"
+_WRITTEN_PREFIX = "frames/v5"
 
 
 class _FakeBlob:
@@ -887,14 +887,14 @@ async def test_get_renames_a_legacy_kind_column_to_the_party_kind_column() -> No
     assert canonical_frame_bytes(result[0]) == canonical_frame_bytes(current)
 
 
-async def test_put_writes_the_canonical_table_under_the_v4_prefix_and_get_reads_it_back() -> None:
+async def test_put_writes_the_canonical_table_under_the_v5_prefix_and_get_reads_it_back() -> None:
     client = _FakeStorageClient()
     store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
     ref = _ref()
     frame = _every_unit_frame()
 
     await store.put(ref, frame=frame, trace=_trace(ref), writer="writer-1")
-    name = _object_name(ref, prefix="frames/v4")
+    name = _object_name(ref, prefix="frames/v5")
     stored_schema = pq.read_schema(io.BytesIO(client.objects[name]))
     result = await store.get(ref)
 
@@ -908,7 +908,7 @@ async def test_put_writes_the_canonical_table_under_the_v4_prefix_and_get_reads_
     assert result[1] == _trace(ref)
 
 
-@pytest.mark.parametrize("prefix", ["frames/v3", "frames/v2", "frames/v1"])
+@pytest.mark.parametrize("prefix", ["frames/v4", "frames/v3", "frames/v2", "frames/v1"])
 async def test_an_object_held_only_under_an_older_prefix_is_a_miss(prefix: str) -> None:
     """The object holds the canonical table and passes every byte check, so only
     its prefix keeps it out."""
@@ -974,7 +974,7 @@ async def test_get_widens_an_object_whose_unit_is_the_two_member_struct() -> Non
 async def test_get_refuses_an_object_whose_schema_is_not_the_canonical_one(
     table: Callable[[], pa.Table],
 ) -> None:
-    """Each object passes every byte check under `frames/v4/` and holds rows the
+    """Each object passes every byte check under `frames/v5/` and holds rows the
     grammar reads in some layout: a text-layout object (JSON-text `unit`, no
     `status`), the canonical columns with a `float32` value, and the
     struct-composed `unit` struct. The decoder wraps only the canonical schema
@@ -1044,7 +1044,7 @@ async def test_a_mint_record_is_written_beside_a_frame_the_bucket_already_holds(
     assert await store.get_mint_record(ref) is None
     await store.put_mint_record(_mint_record(ref))
 
-    record_name = f"mints/v4/{ref.spec_id}/{ref.content_version}.json"
+    record_name = f"mints/v5/{ref.spec_id}/{ref.content_version}.json"
     assert objects == {
         _object_name(ref, prefix=_WRITTEN_PREFIX): frame_bytes,
         record_name: encode_mint_record(_mint_record(ref)),
@@ -1084,7 +1084,7 @@ async def test_a_stored_mint_record_that_is_wrong_raises_frame_integrity_error(
     client = _FakeStorageClient()
     store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
     ref = _ref()
-    client.objects[f"mints/v4/{ref.spec_id}/{ref.content_version}.json"] = stored
+    client.objects[f"mints/v5/{ref.spec_id}/{ref.content_version}.json"] = stored
 
     with pytest.raises(FrameIntegrityError, match=reason) as raised:
         await store.get_mint_record(ref)
@@ -1104,14 +1104,14 @@ async def test_list_frames_names_every_frame_object_oldest_first_and_downloads_n
     both = FrameRef(spec_id="ops_" + "0" * 32, content_version="ocv_" + "3" * 32)
     older = FrameRef(spec_id="ops_" + "4" * 32, content_version="ocv_" + "5" * 32)
     written = {
-        _object_name(derived, prefix="frames/v4"): 2,
-        _object_name(root, prefix="frames/v4"): 0,
-        _object_name(older, prefix="frames/v3"): 1,
-        _object_name(both, prefix="frames/v4"): 5,
+        _object_name(derived, prefix="frames/v5"): 2,
+        _object_name(root, prefix="frames/v5"): 0,
+        _object_name(older, prefix="frames/v4"): 1,
+        _object_name(both, prefix="frames/v5"): 5,
         _object_name(both, prefix="frames/v3"): 1,
-        f"mints/v4/{root.spec_id}/{root.content_version}.json": 0,
-        "frames/v4/not-a-frame/ocv_x.parquet": 0,
-        "frames/v4/stray.txt": 0,
+        f"mints/v5/{root.spec_id}/{root.content_version}.json": 0,
+        "frames/v5/not-a-frame/ocv_x.parquet": 0,
+        "frames/v5/stray.txt": 0,
     }
     for name, day in written.items():
         client.objects[name] = b"never read"
@@ -1143,7 +1143,7 @@ async def test_an_anchor_record_is_one_object_under_its_key_and_the_first_stands
     await store.put_anchor_record(record)
     await store.put_anchor_record(_anchor_record(period="2022"))
 
-    assert client.objects == {f"anchors/v4/{record.anchor_key}.json": encode_anchor_record(record)}
+    assert client.objects == {f"anchors/v5/{record.anchor_key}.json": encode_anchor_record(record)}
     restarted = GcsMaterialisationStore(
         bucket_name=_BUCKET, client=_FakeStorageClient(client.objects, client.metadata)
     )
@@ -1165,7 +1165,7 @@ async def test_a_stored_anchor_record_that_is_wrong_raises_its_integrity_error(
     client = _FakeStorageClient()
     store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
     key = _anchor_record().anchor_key
-    client.objects[f"anchors/v4/{key}.json"] = stored
+    client.objects[f"anchors/v5/{key}.json"] = stored
 
     with pytest.raises(AnchorRecordIntegrityError, match=reason) as raised:
         await store.get_anchor_record(key)
