@@ -2427,16 +2427,19 @@ def build_orchestrator_tools(
                 "drawn": drawn_cards,
             }
 
-        def _unreadable_entry(chart: Chart) -> dict[str, Any]:
-            """The entry of a chart whose stored card the harness cannot read."""
+        def _unreadable_entry(chart: Chart, *, later: bool) -> dict[str, Any]:
+            """The entry of a chart whose stored card the harness cannot read.
+            `later` is whether the call asked for charts after it, which are
+            skipped."""
             return _not_drawn(
                 chart,
                 "the platform stored this chart but DFO could not read it back, "
                 "so it is not on the canvas. This is a fault inside DFO, not in "
                 "the call's arguments: drawing this chart again meets the same "
-                "fault, and the charts after it in this call were not drawn. Do "
-                "not replace it with other data; tell the user this chart could "
-                "not be shown.",
+                "fault"
+                + (", and the charts after it in this call were not drawn" if later else "")
+                + ". Do not replace it with other data; tell the user this chart "
+                "could not be shown.",
                 code=HarnessCode.STORED_CARD_UNREADABLE,
             )
 
@@ -2449,6 +2452,7 @@ def build_orchestrator_tools(
             select: dict[str, Any],
             own: dict[str, Any],
             cut: TopMembers | None,
+            later: bool,
         ) -> tuple[dict[str, Any], dict[str, Any] | None, bool]:
             """Title `select` for `chart` and write it, or read the card on the
             canvas that already draws it. A refused write of a select other
@@ -2483,7 +2487,7 @@ def build_orchestrator_tools(
             if held is not None and stored is None:
                 # The canvas holds this card, so another write would stack a copy.
                 return (
-                    _unreadable_entry(chart)
+                    _unreadable_entry(chart, later=later)
                     if unreadable
                     else _not_drawn(
                         chart,
@@ -2532,7 +2536,7 @@ def build_orchestrator_tools(
                             identity,
                             {"component_id": refusal.get("component_id"), "unreadable": True},
                         )
-                        return _unreadable_entry(chart), None, True
+                        return _unreadable_entry(chart, later=later), None, True
                     failed = _not_drawn(
                         chart,
                         refusal.get("message") or "the platform refused it",
@@ -2556,9 +2560,9 @@ def build_orchestrator_tools(
                 return (
                     _not_drawn(
                         chart,
-                        f"drawing it failed inside DFO ({type(error).__name__}), and "
-                        "the charts after it in this call were not drawn. Do not "
-                        "draw this chart again: it may be on the canvas already.",
+                        f"drawing it failed inside DFO ({type(error).__name__})"
+                        + (", and the charts after it in this call were not drawn" if later else "")
+                        + ". Do not draw this chart again: it may be on the canvas already.",
                         code=HarnessCode.WRITE_UNCONFIRMED,
                     ),
                     None,
@@ -2600,7 +2604,9 @@ def build_orchestrator_tools(
             )
 
         try:
-            for chart in charts[:MAX_CHARTS_PER_CALL]:
+            attempted = charts[:MAX_CHARTS_PER_CALL]
+            for index, chart in enumerate(attempted):
+                later = index < len(attempted) - 1
                 frame = frames.get(chart.frame)
                 if frame is None:
                     drawn.append(
@@ -2679,7 +2685,14 @@ def build_orchestrator_tools(
                         # so a covering select no cut narrows is not written.
                         select = own
                 entry, refused, stop = await _place(
-                    chart, frame, subject=subject, whole=whole, select=select, own=own, cut=cut
+                    chart,
+                    frame,
+                    subject=subject,
+                    whole=whole,
+                    select=select,
+                    own=own,
+                    cut=cut,
+                    later=later,
                 )
                 if (
                     refused is not None
@@ -2708,6 +2721,7 @@ def build_orchestrator_tools(
                             select=narrowed.select,
                             own=own,
                             cut=narrowed.cut,
+                            later=later,
                         )
                 drawn.append(entry)
                 if stop:

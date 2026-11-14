@@ -1859,16 +1859,26 @@ async def test_a_refusal_on_a_windowed_copy_holds_what_the_fault_names(
 
 
 @pytest.mark.parametrize(
-    ("units", "held"),
+    ("units", "rows", "held"),
     [
         pytest.param(
-            [{"currency": {"role": "destination"}, "prices": "current"}], True, id="unreadable"
+            [{"currency": {"role": "destination"}, "prices": "current"}],
+            10,
+            True,
+            id="unreadable",
+        ),
+        pytest.param(
+            [{"currency": {"role": "destination"}, "prices": "current"}],
+            0,
+            False,
+            id="unreadable-and-rows-empty",
         ),
         pytest.param(
             [
                 {"currency": "USD", "prices": "current"},
                 {"currency": "EUR", "prices": "current"},
             ],
+            10,
             False,
             id="readable-and-disagreeing",
         ),
@@ -1878,22 +1888,27 @@ async def test_a_refusal_built_from_a_manifests_unit_evidence_holds_only_an_unre
     requirement: Callable[..., Any],
     source: Callable[..., Any],
     units: list[dict[str, Any]],
+    rows: int,
     held: bool,
 ) -> None:
     """The `unit_unverified` finding `compiler.evidence` raises for a manifest, not a
     hand-built one, drives the replan. A unit that could not be read leaves `found` empty
-    and holds the source; units that read but disagree are named in `found` and hold nothing."""
+    and holds the source; units that read but disagree are named in `found` and hold nothing.
+    A retrieval with no rows also reports `rows_empty` and holds nothing."""
     series_stats = _series_stats(
         *(_stat("DebtServicePaid", facet={"unit": unit}) for unit in units)
     )
     issues = check_evidence(
         requirement(),
-        evidence_from_manifest(_manifest(), series_stats=series_stats),
+        evidence_from_manifest(
+            _manifest(coverage={"rows": rows, "dimensions": []}), series_stats=series_stats
+        ),
         approved=source(),
     )
-    (issue,) = errors(issues)
-    assert issue.code.value == "unit_unverified"
-    assert (issue.found is None) is held
+    (issue, *others) = [found for found in errors(issues) if found.code.value == "unit_unverified"]
+    assert not others
+    assert (issue.found is None) is (held or rows == 0)
+    assert ("rows_empty" in [found.code.value for found in issues]) is (rows == 0)
     payload = {
         "kind": "refused",
         "refusal": "requirement_unmet",

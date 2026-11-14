@@ -1739,21 +1739,25 @@ def _pending(*, resuming_segment: str | None = None) -> _PendingInterrupt:
     return _PendingInterrupt(adk_id="adk_1", kind="plan", resuming_segment=resuming_segment)
 
 
-def test_a_stored_pending_card_leaves_out_new_plan() -> None:
+@pytest.mark.parametrize("new_plan", [True, False])
+def test_a_stored_pending_card_keeps_new_plan_beside_the_card(new_plan: bool) -> None:
     """The member marks the emitted frame. An instance rolled back to a model
-    without it cannot load a stored card that holds it."""
+    without it cannot load a stored card that holds it, so it is stored beside the
+    card and restored on load, and the card's own entry leaves it out."""
     raw = json.loads(
         (
             Path(__file__).parent / "wire_fixtures" / "studio" / "event-03-plan-proposed.json"
         ).read_text()
     )
-    card = PlanProposed.model_validate({**raw, "new_plan": True})
+    card = PlanProposed.model_validate({**raw, "new_plan": new_plan})
     pending = _PendingInterrupt(adk_id="adk_1", kind="plan", card=card)
 
-    stored = studio_state._serialize_pending({"int_1": pending})["int_1"]["card"]
+    entry = studio_state._serialize_pending({"int_1": pending})["int_1"]
+    restored = studio_state._deserialize_entry(json.loads(json.dumps(entry)))
 
-    assert "new_plan" not in stored
-    assert card.new_plan is True
+    assert "new_plan" not in entry["card"]
+    assert restored.card is not None
+    assert bool(restored.card.new_plan) is new_plan
 
 
 def test_awaiting_answer_excludes_an_entry_marked_resuming() -> None:

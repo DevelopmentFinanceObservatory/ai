@@ -220,18 +220,12 @@ async def _edit_flow(
                 _refused_lead(written, unreadable=_UNREADABLE_REVISE_LEAD),
                 written,
             )
-        elif _is_no_op(written["component"], current_revision):
-            shown = (conversation.components.get(component_id) or {}).get("revision")
-            if isinstance(shown, int) and shown < written["component"]["revision"]:
-                # The head is a revision an earlier edit stored and the
-                # harness could not read, so the canvas does not show it.
-                frames = _refused(
-                    "e2", "Apply the edit", _UNREADABLE_REVISE_LEAD, _unreadable_result()
-                )
-            else:
-                # The platform treats an effectively-equal patch as a no-op.
-                yield _step("e2", "Apply the edit")
-                frames = _close("The card already looks like that; nothing changed.")
+        elif _is_no_op(written["component"], current_revision) and not _canvas_is_behind(
+            conversation, component_id, written["component"]
+        ):
+            # The platform treats an effectively-equal patch as a no-op.
+            yield _step("e2", "Apply the edit")
+            frames = _close("The card already looks like that; nothing changed.")
         else:
             component = written["component"]
             revised = component_revised(component, component_id, patch)
@@ -320,21 +314,22 @@ def _is_no_op(component: dict[str, Any], current_revision: int) -> bool:
     return isinstance(revision, int) and revision <= current_revision
 
 
+def _canvas_is_behind(
+    conversation: ConversationState, component_id: str, head: dict[str, Any]
+) -> bool:
+    """Whether the canvas shows an older revision than `head`, a readable head the
+    platform stored for an earlier edit whose own reply the harness never received
+    (a timeout). A no-op write over such a head is applied as a revise, so the
+    canvas catches up."""
+    shown = (conversation.components.get(component_id) or {}).get("revision")
+    return isinstance(shown, int) and shown < head["revision"]
+
+
 def _refused_lead(result: dict[str, Any], *, unreadable: str) -> str:
     """What a closing message says before the sentence for a refused write:
     `unreadable` when the platform stored a card the harness cannot read."""
     code = (result.get("refusal") or {}).get("code")
     return unreadable if code == HarnessCode.STORED_CARD_UNREADABLE else _EDIT_REFUSED
-
-
-def _unreadable_result() -> dict[str, Any]:
-    """The refusal-shaped result for a stored card the harness cannot read."""
-    return {
-        "refusal": harness_refusal(
-            code=HarnessCode.STORED_CARD_UNREADABLE,
-            message="the stored card fails the component contract",
-        )
-    }
 
 
 def _merge_patch(stored: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:

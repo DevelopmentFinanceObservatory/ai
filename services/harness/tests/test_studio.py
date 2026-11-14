@@ -4496,19 +4496,19 @@ async def test_a_revise_is_judged_on_what_its_own_frame_needs(
     assert not [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
 
 
-async def test_a_repeat_of_an_edit_stored_unreadable_still_reports_the_unreadable_card() -> None:
-    """The first edit stored revision 2, which the harness could not read, so the
-    canvas stays on revision 1 while the platform's head is 2. The same edit
-    again changes nothing on the platform (a no-op write at revision 2), and the
-    turn still says the change was saved but not shown instead of "nothing
-    changed", since the written revision is above the canvas's."""
-    head = {**COMPONENT, "revision": 2}
+async def test_a_no_op_revise_over_a_readable_head_above_the_canvas_catches_the_canvas_up() -> None:
+    """A revise timed out after the platform stored it, so the canvas shows revision 1
+    while the head is 2. The same edit again is a no-op write that returns the readable
+    head at revision 2: it is applied as a revise, with `component.revised` for that
+    revision, the canvas catching up, and the usual success text."""
+    head = {
+        **COMPONENT,
+        "revision": 2,
+        "fact_summary": {**COMPONENT["fact_summary"], "revision": 2},
+    }
     executor = ScriptedExecutor(
         [
             *_card_results(write_token=WRITE_TOKEN),
-            _described(),
-            _VIEW,
-            _unreadable_refusal(),
             _described(2),
             _VIEW,
             {"outcome": "ok", "frame_refs": [], "component": head},
@@ -4521,14 +4521,12 @@ async def test_a_repeat_of_an_edit_stored_unreadable_still_reports_the_unreadabl
     app = _app(*_card(), resolver=_search(), executor=executor, edit_model=edit_model)
     async with _client(app) as client:
         await _conversation_with_component(client)
-        await _stream(client, "/api/studio/turn", _edit_body("rename it"))
         frames = await _stream(client, "/api/studio/turn", _edit_body("rename it"))
 
-    sentence = classed_sentence("stored_card_unreadable", "do_not_retry")
-    assert _frame(frames, "message.complete")["text"].endswith(sentence)
-    assert "saved" in _frame(frames, "message.complete")["text"]
-    (failed,) = [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
-    assert failed["detail"] == sentence
+    assert _frame(frames, "component.revised")["revision"] == 2
+    assert _frame(frames, "message.complete")["text"] == "Renamed."
+    assert not [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
+    assert _frame(frames, "done")["composition"]["blocks"][0]["revision"] == 2
 
 
 async def test_a_repeat_of_a_rebuild_stored_unreadable_writes_again() -> None:

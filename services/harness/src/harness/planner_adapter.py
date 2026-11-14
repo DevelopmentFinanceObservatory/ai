@@ -2050,7 +2050,10 @@ def _refused_specs(refusal: dict[str, Any] | None) -> list[_RefusedSource]:
 # that text in `found` and holds nothing. The other unit codes describe one
 # requirement against a source that reads fine, and the remaining codes
 # (window, coverage, entity, grain, membership) a replan fixes on the same
-# source, so none of those holds a spec_id either.
+# source, so none of those holds a spec_id either. A refusal that also carries
+# `rows_empty` holds nothing: the retrieval returned no rows, so the unit is
+# unreadable only because nothing was there to read, and a replan can change
+# the window or entity on the same source.
 _SOURCE_FAULT_CODES = frozenset({EvidenceIssueCode.UNIT_UNVERIFIED.value})
 
 
@@ -2073,11 +2076,15 @@ def _one_refused_spec(payload: object) -> list[_RefusedSource]:
         detail = message if isinstance(message, str) and message else "refused"
         return [_RefusedSource(spec_id, code if isinstance(code, str) and code else None, detail)]
     issues = payload.get("issues")
+    reported = [
+        issue for issue in (issues if isinstance(issues, list) else ()) if isinstance(issue, dict)
+    ]
+    if any(issue.get("code") == EvidenceIssueCode.ROWS_EMPTY.value for issue in reported):
+        return []
     faults = [
         issue
-        for issue in (issues if isinstance(issues, list) else ())
-        if isinstance(issue, dict)
-        and issue.get("severity") == Severity.ERROR.value
+        for issue in reported
+        if issue.get("severity") == Severity.ERROR.value
         and issue.get("code") in _SOURCE_FAULT_CODES
         and issue.get("found") is None
     ]

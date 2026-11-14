@@ -1297,13 +1297,15 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                 }
                 for choice_id, choice in p.choices.items()
             },
-            # `new_plan` marks the emitted frame only: an instance rolled back
-            # to a model without it cannot load a stored card that holds it.
+            # `new_plan` is stored beside the card, not in it: an instance rolled
+            # back to a model without it cannot load a stored card that holds it,
+            # and ignores an unknown key of the entry.
             "card": (
                 p.card.model_dump(mode="json", exclude_none=True, exclude={"new_plan"})
                 if p.card
                 else None
             ),
+            "card_new_plan": bool(p.card and p.card.new_plan),
             "approved_sent": p.approved_sent,
             "pick_replan": p.pick_replan,
         }
@@ -1331,7 +1333,13 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
             )
             for choice_id, choice in (entry.get("choices") or {}).items()
         },
-        card=PlanProposed.model_validate(entry["card"]) if entry.get("card") else None,
+        card=(
+            PlanProposed.model_validate(
+                {**entry["card"], "new_plan": True if entry.get("card_new_plan") else None}
+            )
+            if entry.get("card")
+            else None
+        ),
         approved_sent=bool(entry.get("approved_sent")),
         pick_replan=bool(entry.get("pick_replan")),
     )

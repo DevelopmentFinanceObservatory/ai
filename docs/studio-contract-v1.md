@@ -574,9 +574,9 @@ ignores it and an older harness omits it.
 ## A new plan in the same turn (delta 25, v1.10)
 
 - `plan.proposed.new_plan` is `true` on a plan card that starts a new plan
-  after an earlier plan in the same turn, and absent otherwise. A second plan call in one turn drafts a plan for another
-  question: its card has a `plan_version_id` of its own, no `plan.versioned`
-  precedes it, and its `version` counts from 1. A client treats it as a new
+  after an earlier plan in the same turn, and absent otherwise. A first draft made after an
+  earlier plan card in the turn starts a new plan: its card has a `plan_version_id` of its own,
+  no `plan.versioned` precedes it, and its `version` counts from 1. A client treats it as a new
   plan and drops the choice labels it kept from the earlier plan. A client
   that ignores the member reads the card as before. The member is optional
   and absent from a `plan.proposed` stored earlier.
@@ -693,5 +693,5 @@ Fixture values that are samples:
    (`"decision/<slot>"`) from a scope choice; present from v1.9, absent
    from a `plan.approved` stored earlier.
 1. `plan.proposed` gains an optional `new_plan`, `true` on a plan card that
-   starts a new plan after an earlier plan in the same turn, so a second plan call in one turn reads as a new plan with its
-   own `plan_version_id`.
+   starts a new plan after an earlier plan in the same turn, so a first draft made after an
+   earlier plan card in the turn reads as a new plan with its own `plan_version_id`.

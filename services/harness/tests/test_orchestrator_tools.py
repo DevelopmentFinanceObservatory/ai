@@ -2329,12 +2329,15 @@ async def test_a_stored_card_the_harness_cannot_read_is_a_dfo_fault_not_a_refusa
     assert [tool for tool, _ in executor.calls].count("write_component") == 1
     assert _stated(entry) == (HarnessCode.STORED_CARD_UNREADABLE, "do_not_retry")
     assert "refused" not in entry["error"]
+    assert "charts after it" in entry["error"]
     assert executor.landed == []
 
     again = await tools["make_charts"](_one_chart(frame), ctx)
     (repeat,) = again["charts"]
     assert [tool for tool, _ in executor.calls].count("write_component") == 1
     assert _stated(repeat) == (HarnessCode.STORED_CARD_UNREADABLE, "do_not_retry")
+    # The unreadable chart is the call's last, so no chart was skipped after it.
+    assert "charts after it" not in repeat["error"]
 
 
 def _one_chart(frame: str) -> list[dict[str, str]]:
