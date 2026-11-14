@@ -40,7 +40,6 @@ the node can only relay once the draft is done (`harness.graph`'s
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import functools
 import json
 import logging
@@ -150,6 +149,7 @@ from harness.wire import (
     Suggestions,
     ToolError,
     component_created,
+    log_unreadable_card,
 )
 
 logger = logging.getLogger(__name__)
@@ -1779,10 +1779,14 @@ class _Translator:
             created: ComponentCreated | None = None
             if isinstance(component, dict):
                 # `McpExecutor` refuses a card that fails this contract
-                # (`stored_card_unreadable`); a bare executor's is left off the
-                # wire here.
-                with contextlib.suppress(ValidationError):
+                # (`stored_card_unreadable`); a bare executor's is logged and
+                # left off the wire here.
+                try:
                     created = component_created(component, step_id=step_id)
+                except ValidationError as fault:
+                    log_unreadable_card(
+                        logger, component, fault, where="record_frames", frame=step_id
+                    )
             if record.step_id is not None:
                 self._running_plan_steps.pop(record.step_id, None)
                 if record.step_id == self._answer_step:

@@ -33,7 +33,7 @@ from types import SimpleNamespace
 from typing import Any, NamedTuple, cast, override
 
 import pytest
-from compiler.evidence import resolve_name
+from compiler.evidence import check_evidence, errors, evidence_from_manifest, resolve_name
 from compiler.sources import bound_refs
 from compiler.surface import FixtureSurface, ToolCallResult, ToolSurfaceUnavailableError
 from data_mcp.definition_store import canonicalize, spec_id_for
@@ -187,6 +187,7 @@ from .basis_alignment import (
     WholeCompiles,
     basis_block,
 )
+from .compiler.test_evidence import _manifest, _series_stats, _stat
 from .scripted_genai import (
     Reply,
     Request,
@@ -1855,6 +1856,60 @@ async def test_a_refusal_on_a_windowed_copy_holds_what_the_fault_names(
     assert held is None or held in prompt.split("Do not propose")[1]
     # The planner never saw the copy, so the brief names the origin alone.
     assert held != SPEC or _WINDOWED_ID not in prompt.split("Do not propose")[1]
+
+
+@pytest.mark.parametrize(
+    ("units", "held"),
+    [
+        pytest.param(
+            [{"currency": {"role": "destination"}, "prices": "current"}], True, id="unreadable"
+        ),
+        pytest.param(
+            [
+                {"currency": "USD", "prices": "current"},
+                {"currency": "EUR", "prices": "current"},
+            ],
+            False,
+            id="readable-and-disagreeing",
+        ),
+    ],
+)
+async def test_a_refusal_built_from_a_manifests_unit_evidence_holds_only_an_unreadable_unit(
+    requirement: Callable[..., Any],
+    source: Callable[..., Any],
+    units: list[dict[str, Any]],
+    held: bool,
+) -> None:
+    """The `unit_unverified` finding `compiler.evidence` raises for a manifest, not a
+    hand-built one, drives the replan. A unit that could not be read leaves `found` empty
+    and holds the source; units that read but disagree are named in `found` and hold nothing."""
+    series_stats = _series_stats(
+        *(_stat("DebtServicePaid", facet={"unit": unit}) for unit in units)
+    )
+    issues = check_evidence(
+        requirement(),
+        evidence_from_manifest(_manifest(), series_stats=series_stats),
+        approved=source(),
+    )
+    (issue,) = errors(issues)
+    assert issue.code.value == "unit_unverified"
+    assert (issue.found is None) is held
+    payload = {
+        "kind": "refused",
+        "refusal": "requirement_unmet",
+        "detail": "requirement 'annual_debt_service' is not met by what 'get_data' returned",
+        "step_id": "annual_debt_service",
+        "requirement_id": "annual_debt_service",
+        "spec_id": SPEC,
+        "issues": [found.model_dump(mode="json") for found in issues],
+    }
+    refusal = _as_executor_shapes_it(payload, origins={})
+
+    sources = planner_adapter._refused_specs(refusal)
+
+    assert [(spec.spec_id, spec.code) for spec in sources] == (
+        [(SPEC, "unit_unverified")] if held else []
+    )
 
 
 def test_a_replan_names_the_asks_the_failed_run_computed() -> None:

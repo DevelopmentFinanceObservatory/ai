@@ -6385,7 +6385,9 @@ async def test_a_recreated_edit_cards_resolved_window_reaches_the_turn_record() 
 # --- the cards one chart call lands, end to end -------------------------------
 
 
-async def test_a_component_missing_fact_summary_never_lands() -> None:
+async def test_a_component_missing_fact_summary_never_lands(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """An `ok` write whose component fails the `component.created` wire
     contract (here, a missing `fact_summary`) is refused like any other
     unusable write. No frame announces it and the canvas is unchanged."""
@@ -6399,13 +6401,17 @@ async def test_a_component_missing_fact_summary_never_lands() -> None:
         session_service=session_service,
         store=store,
     )
-    async with _client(app) as client:
-        frames = await _stream(client, "/api/studio/turn", _turn_body())
+    with caplog.at_level("ERROR", logger="harness.studio_translate"):
+        async with _client(app) as client:
+            frames = await _stream(client, "/api/studio/turn", _turn_body())
 
     assert _events(frames)[-1] == "done"
     assert "component.created" not in _events(frames)
     assert "composition" not in _frame(frames, "done")
     assert store.current(PRINCIPAL, CONVERSATION).composition is None
+    unreadable = [r for r in caplog.records if "fails the component contract" in r.getMessage()]
+    assert len(unreadable) == 1
+    assert "fact_summary" in unreadable[0].getMessage()
 
 
 class _WritesUntil(ScriptedExecutor):
