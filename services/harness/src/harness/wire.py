@@ -1493,7 +1493,7 @@ def log_unreadable_card(
     frame: str | None = None,
 ) -> None:
     """Log, at ERROR, a stored card that fails the component contract. The
-    platform stored it, so nothing refused the write: the harness cannot read
+    platform stored it, so nothing refused the write, and the harness cannot read
     what was stored. `log` is the caller's logger. The log names the card,
     `where` it was met and each faulty member, and leaves `input` out so
     payload values stay out."""
@@ -1555,7 +1555,7 @@ def stored_card_fault(
     (`component_revised`), whose `changed` names the members of the patch
     `revised_by`. A revise the platform answered as a no-op returns the
     revision the card already held, which is `1` for a card never revised, so
-    the revision is not judged here: a no-op carries no frame.
+    the revision is not judged here, since a no-op carries no frame.
     """
     if revised_by is None:
         return component_fault(component)

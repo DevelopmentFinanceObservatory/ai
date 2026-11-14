@@ -1168,10 +1168,10 @@ def _withheld_card(component: dict[str, Any] | None, args: dict[str, Any]) -> di
     `McpExecutor._assemble_component` built it, `None` when no manifest is
     linked to its frame) can be.
 
-    A card the harness cannot read is an orphan the platform stored: the
-    frame the call emits (`harness.wire.stored_card_fault`, `component.created`
-    for a create and `component.revised` for a revise, which `args` name by
-    its `component_id`) cannot be built from it. The refusal is a
+    A card the harness cannot read is an orphan the platform stored. The frame
+    the call emits (`harness.wire.stored_card_fault`, `component.created` for a
+    create and `component.revised` for a revise, which `args` name by its
+    `component_id`) cannot be built from it. The refusal is a
     `stored_card_unreadable` one that names the card.
     """
     if component is None:

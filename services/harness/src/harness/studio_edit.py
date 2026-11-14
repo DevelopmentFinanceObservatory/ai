@@ -69,10 +69,10 @@ _CREATE_ONLY_FIELDS = ("type", "frame_ref")
 _EDIT_REFUSED = "The edit was refused."
 
 # What a closing message says before the sentence for a rebuild whose stored
-# card the harness cannot read: the canvas keeps the card it showed.
+# card the harness cannot read. The canvas keeps the card it showed.
 _UNREADABLE_LEAD = "The card on the canvas is unchanged."
 
-# The same for a revise: the platform's head holds the change, the canvas shows
+# The same for a revise. The platform's head holds the change, the canvas shows
 # the earlier version, and the next edit starts from the saved change.
 _UNREADABLE_REVISE_LEAD = (
     "Your change was saved, but the card cannot be shown with it, so the canvas still "
@@ -327,7 +327,7 @@ def _canvas_is_behind(
 
 
 def _refused_lead(result: dict[str, Any], *, unreadable: str) -> str:
-    """What a closing message says before the sentence for a refused write:
+    """What a closing message says before the sentence for a refused write. It is
     `unreadable` when the platform stored a card the harness cannot read."""
     code = (result.get("refusal") or {}).get("code")
     return unreadable if code == HarnessCode.STORED_CARD_UNREADABLE else _EDIT_REFUSED
@@ -358,8 +358,8 @@ def _revised_frames(
 ) -> list[Any]:
     """The frames of a landed revise. `revised` is the frame `component_revised`
     built to check the card. `caught_up` marks a no-op write over a head above the
-    canvas (`_canvas_is_behind`): the title then comes from that head, which holds
-    what the earlier edit stored, not from this edit's patch."""
+    canvas (`_canvas_is_behind`). The title then comes from that head, which holds
+    what the earlier edit stored, and the patch's title is ignored."""
     revision = revised.revision
     revised.seq = conversation.next_seq()
     frames: list[Any] = [revised]

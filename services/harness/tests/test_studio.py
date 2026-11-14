@@ -4398,11 +4398,11 @@ def _unreadable_refusal() -> dict[str, Any]:
 async def test_an_edit_stored_as_a_card_the_harness_cannot_read_is_a_reported_failure(
     path: str,
 ) -> None:
-    """The platform stored the card, so nothing refused the edit: the harness
+    """The platform stored the card, so nothing refused the edit, and the harness
     cannot read what was stored. The turn ends on the failure sentence for
     `stored_card_unreadable` with no component frame and does not go fatal. A
     revise says the change was saved and the canvas shows the earlier version,
-    so the next edit builds on it; a rebuild says the canvas is unchanged."""
+    so the next edit builds on it. A rebuild says the canvas is unchanged."""
     revise = path == "revise"
     edit_model = ScriptedEditModel(
         {

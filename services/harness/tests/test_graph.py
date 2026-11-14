@@ -3140,7 +3140,7 @@ def test_a_refused_stop_that_read_a_source_names_it_in_the_replan_payload() -> N
 
 
 def test_a_rediscovery_stop_names_the_spec_it_read_whatever_the_origins() -> None:
-    """Only a `Refused` stop maps a windowed copy to its origin: a rediscovery
+    """Only a `Refused` stop maps a windowed copy to its origin. A rediscovery
     holds the copy's own spec_id."""
     rediscovery = RediscoveryNeeded(
         revision="rev1",

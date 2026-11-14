@@ -1074,8 +1074,8 @@ class ConversationState:
 
     def start_plan_lineage(self) -> None:
         """Forget the plan version ids given out and the choice labels the
-        turn's switches kept: the next plan card is the first of a new line,
-        as at a turn's start and at a second `plan` call in one turn."""
+        turn's switches kept. The next plan card is the first of a new line, as
+        at a turn's start and at a second `plan` call in one turn."""
         self.plan_version_ids.clear()
         self.latest_plan_version = None
         self.turn_choice_baseline = {}
@@ -1297,9 +1297,9 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                 }
                 for choice_id, choice in p.choices.items()
             },
-            # `new_plan` is stored beside the card, not in it: an instance rolled
-            # back to a model without it cannot load a stored card that holds it,
-            # and ignores an unknown key of the entry.
+            # `new_plan` is stored beside the card. An instance rolled back to a
+            # model without it cannot load a stored card that holds it, and
+            # ignores an unknown key of the entry.
             "card": (
                 p.card.model_dump(mode="json", exclude_none=True, exclude={"new_plan"})
                 if p.card

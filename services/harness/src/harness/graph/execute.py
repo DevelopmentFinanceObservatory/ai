@@ -140,8 +140,8 @@ def _replan_refusal(
     names the same wave's other stops (`outcome.also_stopped`), each in this
     same per-kind shape, empty when the wave surfaced only this one. A spec_id
     a `Refused` payload names is its origin's when the stop read a windowed copy
-    (`origins`, from `planner.plan.windowed_origins`): the planner was shown the
-    origin."""
+    (`origins`, from `planner.plan.windowed_origins`), since the planner was shown
+    the origin."""
     return {
         **_refusal_shape(outcome, origins=origins),
         "also_stopped": [

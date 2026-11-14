@@ -2530,8 +2530,8 @@ def build_orchestrator_tools(
                 if component is None:
                     refusal = written.get("refusal") or {}
                     if refusal.get("code") == HarnessCode.STORED_CARD_UNREADABLE:
-                        # Stored, so a card the platform holds and the canvas
-                        # lacks: the charts after it are left undrawn.
+                        # The platform holds this card and the canvas lacks it,
+                        # so the charts after it are left undrawn.
                         _remember_drawn(
                             identity,
                             {"component_id": refusal.get("component_id"), "unreadable": True},

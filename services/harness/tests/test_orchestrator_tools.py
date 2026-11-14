@@ -2324,7 +2324,7 @@ async def test_a_stored_card_the_harness_cannot_read_is_a_dfo_fault_not_a_refusa
     frame = frame_id_for(REF)
     drawn = await tools["make_charts"]([*_one_chart(frame), *_one_chart(frame)], ctx)
 
-    # The call stops at the first unreadable card: a second chart would meet it too.
+    # The call stops at the first unreadable card, since a second chart would meet it too.
     (entry,) = drawn["charts"]
     assert [tool for tool, _ in executor.calls].count("write_component") == 1
     assert _stated(entry) == (HarnessCode.STORED_CARD_UNREADABLE, "do_not_retry")

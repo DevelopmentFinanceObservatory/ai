@@ -368,8 +368,9 @@ class _ExecutorRecord:
     step_id: str | None = None
     # Stamped by `_RecordingExecutor.land_component` right after the write
     # it belongs to returns (`make_charts`, `harness.orchestrator_tools`), for
-    # a component that passed `harness.wire.component_fault`. Not a
-    # decision; the landing happens later, at drain time, when
+    # a write the executor returned as drawn (`McpExecutor` refuses a stored
+    # card it cannot read). Not a decision; the landing happens later, at
+    # drain time, when
     # `_component_frames` reads it. `False` (its default) for every record
     # that never became a `land_component` call: a plan-step surface record,
     # or a write whose component failed validation.
@@ -1779,8 +1780,8 @@ class _Translator:
             created: ComponentCreated | None = None
             if isinstance(component, dict):
                 # `McpExecutor` refuses a card that fails this contract
-                # (`stored_card_unreadable`); a bare executor's is logged and
-                # left off the wire here.
+                # (`stored_card_unreadable`). A bare executor's card is logged
+                # and left off the wire here.
                 try:
                     created = component_created(component, step_id=step_id)
                 except ValidationError as fault:
@@ -1838,13 +1839,13 @@ class _Translator:
     ) -> list[Any]:
         """Frames for `component`, which passed the `component.created` wire
         contract (`created` is the frame `_record_frames` built from it).
-        Only for a component stamped `land=True`
+        A component stamped `land=True`
         (`_RecordingExecutor.land_component`, called by `make_charts` right
-        after the write returned), land it: append its block to the canvas
-        and keep the `intent` it was written from with it
-        (`harness.studio_state.land_component`). `land=False` with a valid component (a bare
-        executor with no `land_component` capability at all) means no block
-        exists to report: only `component.created` goes out. `land=True`
+        after the write returned) is landed. Its block is appended to the
+        canvas and the `intent` it was written from is kept with it
+        (`harness.studio_state.land_component`). `land=False` with a valid
+        component (a bare executor with no `land_component` capability at all)
+        means no block exists to report, so only `component.created` goes out. `land=True`
         against an `auto_add=False` conversation resolves to `"held"` inside
         `harness.studio_state.land_component` itself, also only
         `component.created`."""
@@ -1922,7 +1923,7 @@ class _Translator:
             version = int(payload.get("version", 1))
             latest = conversation.latest_plan_version
             restarted_from: str | None = None
-            # A first draft made after an earlier plan card in the turn: that
+            # A first draft made after an earlier plan card in the turn. That
             # card is settled, so this one supersedes nothing, its version ids
             # are its own, and the card says it starts a plan. The turn's
             # first card has no earlier lineage to part from.

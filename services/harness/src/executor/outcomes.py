@@ -211,7 +211,7 @@ class Refused(StrictModel):
     rolling steps the run resolved before it stopped.
 
     `spec_id` names the source a `REQUIREMENT_UNMET` stop read, when the
-    requirement has a binding, as a `RediscoveryNeeded` does; other stops leave
+    requirement has a binding, as a `RediscoveryNeeded` does. Other stops leave
     it unset. A replan avoids the source of a `Refused` stop only when an error
     finding says its unit is unverified and found no unit text
     (`harness.planner_adapter._SOURCE_FAULT_CODES`).

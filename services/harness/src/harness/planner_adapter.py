@@ -2033,8 +2033,8 @@ def _refused_specs(refusal: dict[str, Any] | None) -> list[_RefusedSource]:
     names its spec_id at the top level, with why in its nested `refusal.message`;
     a `Refused` `REQUIREMENT_UNMET` names it at the top level too, with why in the
     unit error findings that fault the source (`_one_refused_spec`).
-    Any other `Refused` names none. A windowed copy's spec_id arrives as its
-    origin's (`_refusal_shape`).
+    Any other `Refused` names none. A `Refused` stop on a windowed copy names
+    the copy's origin (`_refusal_shape`).
     """
     if not isinstance(refusal, dict):
         return []
@@ -2045,7 +2045,7 @@ def _refused_specs(refusal: dict[str, Any] | None) -> list[_RefusedSource]:
 
 # The finding code that says the source's own data states no unit. A `Refused`
 # stop holds a spec_id for every replan only on an error finding of this code
-# with nothing found (`found` is None): the source states no unit the harness
+# with nothing found (`found` is None). Such a source states no unit the harness
 # can read, so a replan that needs a unit cannot use it. A source whose unit
 # text names no recognisable currency carries that text in `found` and holds
 # nothing. The other unit codes describe one requirement against a source that

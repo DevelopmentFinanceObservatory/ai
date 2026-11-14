@@ -986,7 +986,7 @@ def test_a_second_plan_call_in_one_turn_starts_a_new_plan_lineage(
     assert second_versioned.event == "plan.versioned"
     assert second_versioned.supersedes == second.plan_version_id
     assert conversation.turn_choice_baseline == {}
-    # The second plan holds another label for the same choice id; the first plan's
+    # The second plan holds another label for the same choice id. The first plan's
     # switch left no baseline for it to differ from.
     labels = ("the DAC total", "the top 10 donors")
     card = second_amended.model_copy(

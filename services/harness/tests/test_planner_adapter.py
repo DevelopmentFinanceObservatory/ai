@@ -1727,7 +1727,7 @@ def _unmet_refusal(
 
 
 def test_a_requirement_unmet_stop_names_its_spec_with_every_source_fault() -> None:
-    """A plain `Refused` carries the spec the executor read; the code comes from
+    """A plain `Refused` carries the spec the executor read. The code comes from
     its first source-fault error issue, the detail joins every one and leaves out
     an error finding that is no source fault, and the replan's avoid sentence
     names the spec."""
@@ -1893,7 +1893,7 @@ async def test_a_refusal_built_from_a_manifests_unit_evidence_holds_only_an_unre
 ) -> None:
     """The `unit_unverified` finding `compiler.evidence` raises for a manifest, not a
     hand-built one, drives the replan. A unit that could not be read leaves `found` empty
-    and holds the source; units that read but disagree are named in `found` and hold nothing.
+    and holds the source. Units that read but disagree are named in `found` and hold nothing.
     A retrieval with no rows reports `rows_empty`, no unit finding, and holds nothing."""
     series_stats = _series_stats(
         *(_stat("DebtServicePaid", facet={"unit": unit}) for unit in units)
