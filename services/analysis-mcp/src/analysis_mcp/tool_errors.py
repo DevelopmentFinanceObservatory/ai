@@ -427,13 +427,12 @@ _PIN_ONE_UNIT = (
 
 def _deflated_apart(left: UnitCell, right: UnitCell) -> bool:
     """Whether two converted units share a currency, price basis and base year
-    and state different deflation bases. The conversion recipe a cell may name
-    plays no part, since two datasets' recipes deflate by their own parties' prices."""
+    and differ in deflation basis, a basis one side states and the other leaves
+    unstated included. The conversion recipe a cell may name plays no part,
+    since two datasets' recipes deflate by their own parties' prices."""
     return (
         isinstance(left, UnitRequest)
         and isinstance(right, UnitRequest)
-        and left.deflation_basis is not None
-        and right.deflation_basis is not None
         and left.deflation_basis != right.deflation_basis
         and (left.currency, left.prices, left.base_year)
         == (right.currency, right.prices, right.base_year)
@@ -950,15 +949,15 @@ class ToolRefusal:
         written by `quotient_of`, so no `get_data` binding and no pin changes
         it; when either side holds one, the message asks for sides divided
         from inputs in matching units. When the two sides are converted to one
-        currency, price basis and base year but deflated by different parties'
-        prices, no unit binding makes them agree, since each dataset's
-        conversion fixes its own basis, so the message asks for both sides in
-        current prices.
+        currency, price basis and base year but on different deflation bases,
+        no unit binding makes them agree, since each dataset's conversion
+        fixes its own basis, so the message asks for both sides in current
+        prices.
         """
         units = (left_unit, right_unit)
         if _deflated_apart(left_unit, right_unit):
             retry = (
-                "The two sides were deflated by different parties' prices, so their "
+                "The two sides are on different deflation bases, so their "
                 "constant-price amounts measure different things. Call get_data for both "
                 "sides in current prices, then retry with the new frame_refs."
             )

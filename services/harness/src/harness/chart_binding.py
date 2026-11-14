@@ -5,6 +5,7 @@ of one dimension's members that cuts a select over the series cap.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -23,11 +24,10 @@ MAX_SERIES_PER_COMPONENT = 24
 # The most rows the apis service's assembler draws in one table (`MAX_TABLE_ROWS` in
 # dfo-data-tools' `assembler/limits.py`): series times periods.
 MAX_TABLE_ROWS = 2_000
-# The catalogue grammar's `maxItems` on a `line_chart` select's one array
-# value (the release document's `intent_schemas_tolerant.line_chart`). The
-# platform refuses a longer list as `schema_invalid`, and a select resolving to
-# more than this many series as `resource_exhausted` (limit
-# `MAX_LINE_CHART_SERIES`).
+# The most distinct values a `line_chart` select's one array may list (the
+# catalogue schema's `maxItems`). The platform refuses a list of more, and a
+# select resolving to more than this many series, as `resource_exhausted`
+# (limit `MAX_LINE_CHART_SERIES`).
 LINE_CHART_MAX_VALUES = 8
 # Charts one make_charts call may draw.
 MAX_CHARTS_PER_CALL = 8
@@ -144,14 +144,20 @@ def select_binding_ok(
     return None
 
 
+def distinct_count(values: list[Any]) -> int:
+    """How many different values a select lists. apis resolves a repeated value
+    to one series."""
+    return len({json.dumps(member, sort_keys=True) for member in values})
+
+
 def over_series_limit(*, type_: str, select: dict[str, Any], view: dict[str, Any]) -> bool:
     """Whether dfo-apis certainly refuses a `type_` select for the series it
     lists or is estimated at, which `make_charts` cuts before a write: a
-    `line_chart` array longer than `LINE_CHART_MAX_VALUES` (the catalogue's
-    `maxItems`, refused `schema_invalid`), or a `_series_estimate` past
-    `MAX_SERIES_PER_COMPONENT` (`_check_series_estimate` in dfo-data-tools'
-    `assembler/resolve.py`)."""
-    lists = [len(value) for value in select.values() if isinstance(value, list)]
+    `line_chart` array of more than `LINE_CHART_MAX_VALUES` distinct values
+    (refused `resource_exhausted`, limit `MAX_LINE_CHART_SERIES`), or a
+    `_series_estimate` past `MAX_SERIES_PER_COMPONENT` (`_check_series_estimate`
+    in dfo-data-tools' `assembler/resolve.py`)."""
+    lists = [distinct_count(value) for value in select.values() if isinstance(value, list)]
     if type_ == "line_chart" and any(length > LINE_CHART_MAX_VALUES for length in lists):
         return True
     declared = _declared_dimensions(view)
@@ -225,18 +231,23 @@ def empty_select_refusal(
 def over_cap_dimension(*, select: dict[str, Any], view: dict[str, Any]) -> tuple[str, int] | None:
     """The one dimension whose values multiply `_series_estimate` past one,
     unbound or listed, with the factor it contributes, when exactly one does;
-    None when none or several do."""
+    None when none or several do, or when the one is a facet column
+    (`_FACET_DIMENSIONS`), whose members a cut would rank across units,
+    methods or sources."""
     multiplying = _multiplying_dimensions(select=select, declared=_declared_dimensions(view))
-    return next(iter(multiplying.items())) if len(multiplying) == 1 else None
+    if len(multiplying) != 1:
+        return None
+    name, factor = next(iter(multiplying.items()))
+    return None if name in _FACET_DIMENSIONS else (name, factor)
 
 
 def _multiplying_dimensions(*, select: dict[str, Any], declared: dict[str, int]) -> dict[str, int]:
     """Each dimension whose values multiply `_series_estimate` past one, with
-    the factor it contributes: the length of a listed array, or the
+    the factor it contributes: the distinct values of a listed array, or the
     `total_count` of a non-facet dimension `select` leaves unbound. Fewest
     values first, then by name."""
     factors = {
-        name: len(select[name]) if isinstance(select.get(name), list) else declared[name]
+        name: distinct_count(select[name]) if isinstance(select.get(name), list) else declared[name]
         for name in declared.keys() | select.keys()
         if isinstance(select.get(name), list)
         or (name not in select and name not in _FACET_DIMENSIONS)
@@ -273,12 +284,11 @@ def top_members(
     rows: Sequence[Mapping[str, Any]],
     select: dict[str, Any],
     dimension: str,
-    limit: int | None,
+    limit: int,
     cells: Mapping[str, str] | None = None,
 ) -> TopMembers | None:
     """The members of `dimension` among `rows` matching `select` with the
-    largest values at one period, at most `limit` of them, or all when `limit`
-    is None.
+    largest values at one period, at most `limit` of them.
 
     The period is the one period the members compared hold a value at, a
     year, a span or any other label, when they hold only one between them.
@@ -328,7 +338,7 @@ def top_members(
     values = {member: periods[period] for member, periods in observed.items() if period in periods}
     ranked = sorted(values, key=lambda member: (-values[member], member))
     return TopMembers(
-        members=ranked if limit is None else ranked[:limit],
+        members=ranked[:limit],
         period=period,
         holding=len(values),
         unvalued=[member for member in observed if member not in values],
@@ -446,7 +456,7 @@ def _series_estimate(*, select: dict[str, Any], declared: dict[str, int]) -> int
     """The apis service's own upper bound on the series `select` resolves to
     (`_check_series_estimate` in dfo-data-tools' `assembler/resolve.py`):
     the product, over every declared dimension, of the bound array's
-    length, 1 for a single bound value or an unbound facet column, and
+    distinct values, 1 for a single bound value or an unbound facet column, and
     `max(total_count, 1)` for any other dimension `select` leaves unbound.
     `select_binding_ok` has already refused a select binding an undeclared
     dimension, so the dimensions `select` binds count only when the view
@@ -454,7 +464,7 @@ def _series_estimate(*, select: dict[str, Any], declared: dict[str, int]) -> int
     estimate = 1
     for name in declared.keys() | select.keys():
         if name in select:
-            estimate *= len(select[name]) if isinstance(select[name], list) else 1
+            estimate *= distinct_count(select[name]) if isinstance(select[name], list) else 1
         elif name not in _FACET_DIMENSIONS:
             estimate *= max(declared[name], 1)
     return estimate

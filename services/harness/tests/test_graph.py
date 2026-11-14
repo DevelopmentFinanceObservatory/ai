@@ -1267,6 +1267,11 @@ def _counted_view(**total_counts: int) -> dict[str, Any]:
         ),
         ("table", {"stat_var": "a"}, _counted_view(stat_var=1, donor=30, unit=30)),
         (
+            "line_chart",
+            {"stat_var": "a", "donor": [f"donor/{index}" for index in range(9)]},
+            _counted_view(stat_var=1, donor=30),
+        ),
+        (
             "table",
             {"stat_var": "a", "unit": ["USDollar", "EUR"]},
             _counted_view(stat_var=1, donor=30, unit=3, measurementMethod=5),
@@ -1278,12 +1283,13 @@ def test_over_series_limit_matches_dfo_apis_series_estimate(
 ) -> None:
     """The harness computes the apis service's own estimate (`_check_series_estimate`
     in dfo-data-tools' `assembler/resolve.py`): over every coordinate
-    dimension, the bound array's length, 1 for a single bound value, and
+    dimension, the bound array's distinct values, 1 for a single bound value, and
     `max(total_count, 1)` for an unbound dimension, on every component type
     the assembler resolves. Each case here is one apis refuses on that
     estimate: an unbound plural dimension, a `line_chart` whose array
-    multiplies past 24, and an unbound dimension multiplying a table's array.
-    An unbound facet column counts 1 and a bound one counts its values."""
+    lists more than eight distinct values or multiplies past 24, and an
+    unbound dimension multiplying a table's array. An unbound facet column
+    counts 1 and a bound one counts its values."""
     assert over_series_limit(type_=type_, select=select, view=view)
 
 
@@ -1296,6 +1302,10 @@ def test_over_cap_dimension_names_the_one_dimension_that_multiplies() -> None:
         select={"financingProvider": ["a", "b"], "stat_var": "x"}, view=wide
     ) == ("financingProvider", 2)
     assert over_cap_dimension(select={}, view=wide) is None
+    repeated = {"financingProvider": ["donor/01"] * 30, "stat_var": "x"}
+    assert over_cap_dimension(select=repeated, view=wide) is None
+    facets = _counted_view(stat_var=1, unit=1, financingProvider=1)
+    assert over_cap_dimension(select={"unit": ["USD", "EUR"], "stat_var": "x"}, view=facets) is None
 
 
 def test_over_series_limit_counts_an_unbound_dimension_at_its_total_count() -> None:
@@ -1309,8 +1319,11 @@ def test_over_series_limit_counts_an_unbound_dimension_at_its_total_count() -> N
         ({"stat_var": "a"}, _counted_view(stat_var=1, donor=24, unit=30, provenance=30)),
         ({"stat_var": "a"}, {"dimensions": ["stat_var", "observationAbout"]}),
         ({"stat_var": "a"}, _MULTISERIES_VIEW),
+        # A repeated member resolves to one series, whatever the chart type.
+        ({"stat_var": "a", "donor": ["donor/1"] * 30}, _counted_view(stat_var=1, donor=40)),
     ]:
-        assert not over_series_limit(type_="bar_chart", select=select, view=view), view
+        for type_ in ("line_chart", "bar_chart", "table"):
+            assert not over_series_limit(type_=type_, select=select, view=view), view
 
 
 def test_select_binding_ok_refuses_a_dimension_the_view_does_not_declare() -> None:

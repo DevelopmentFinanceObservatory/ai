@@ -2182,17 +2182,19 @@ async def test_a_platform_refusal_without_a_usable_trace_id_logs_nothing(
 
 
 @pytest.mark.parametrize(
-    ("problem", "retry"),
+    ("problem", "retry", "warned"),
     [
         # The body states the mode for this occurrence, whatever `retryable` and the table say.
         pytest.param(
             {"code": "resource_exhausted", "retryable": False, "retry_mode": "correct_and_retry"},
             RetryMode.CORRECT_AND_RETRY,
+            [],
             id="stated-correct-and-retry",
         ),
         pytest.param(
             {"code": "not_found", "retryable": False, "retry_mode": "do_not_retry"},
             RetryMode.DO_NOT_RETRY,
+            [],
             id="stated-do-not-retry",
         ),
         # A platform that states no mode: `retryable` false is do_not_retry, whatever the
@@ -2200,24 +2202,30 @@ async def test_a_platform_refusal_without_a_usable_trace_id_logs_nothing(
         pytest.param(
             {"code": "not_found", "retryable": False},
             RetryMode.DO_NOT_RETRY,
+            [],
             id="unstated-not-retryable",
         ),
         # ... and `retryable` true takes the table's mode.
         pytest.param(
             {"code": "frame_unavailable", "retryable": True},
             RetryMode.REFRESH_THEN_RETRY,
+            [],
             id="unstated-retryable",
         ),
         # A mode this client does not know falls back the same way.
         pytest.param(
             {"code": "not_found", "retryable": False, "retry_mode": "retry_someday"},
             RetryMode.DO_NOT_RETRY,
+            [("retry_someday", "not_found")],
             id="unknown-stated-mode",
         ),
     ],
 )
 async def test_a_refusal_takes_the_problems_retry_mode_else_retryable_and_the_table(
-    problem: dict[str, object], retry: RetryMode
+    problem: dict[str, object],
+    retry: RetryMode,
+    warned: list[tuple[str, str]],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     release_body = {
         "retry_modes": {"not_found": "correct_and_retry", "frame_unavailable": "refresh_then_retry"}
@@ -2234,12 +2242,22 @@ async def test_a_refusal_takes_the_problems_retry_mode_else_retryable_and_the_ta
     def handler(_request: httpx2.Request) -> httpx2.Response:
         return next(responses)
 
+    caplog.set_level(logging.WARNING, logger=client_module.__name__)
+
     async with _assembler(handler) as assembler:
         await assembler.release()
         reply = await assembler.get_component(component_id="cmp_1")
 
     assert isinstance(reply, Refusal)
     assert reply.retry == retry
+    # Only a mode this client does not know is logged, as a warning naming it and the code.
+    assert [
+        record.args
+        for record in caplog.records
+        if record.name == client_module.__name__
+        and record.levelno == logging.WARNING
+        and "retry_mode" in record.msg
+    ] == warned
 
 
 async def test_unknown_code_falls_back_to_retry_after_delay() -> None:

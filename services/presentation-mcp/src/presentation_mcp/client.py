@@ -1274,6 +1274,10 @@ class PlatformAssembler:
         stated = self._parse_retry_mode(exc.retry_mode)
         if stated is not None:
             return stated
+        if exc.retry_mode is not None:
+            logger.warning(
+                "platform stated an unknown retry_mode %r for code=%s", exc.retry_mode, exc.code
+            )
         if not exc.retryable or exc.code is None:
             return RetryMode.DO_NOT_RETRY
         return self._retry_mode_for(exc.code)
