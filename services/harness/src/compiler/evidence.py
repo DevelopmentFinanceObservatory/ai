@@ -79,6 +79,7 @@ from common.price_basis import price_basis_reading
 from data_mcp.manifest import Manifest
 from data_mcp.series_statistics import continuing_method, series_index
 from dfo_frame_grammar.columnar import array_kernel, scalar_kernel, unit_codes
+from dfo_frame_grammar.grammar import DeflationBasis
 from planner.parties import Party, across_party, flow_side, place_qualified_party
 from planner.phrasing import pluralize
 from planner.plan import DatasetRequirement, Entity, Unit
@@ -107,6 +108,17 @@ from pydantic import ConfigDict, Field, JsonValue, ValidationError
 
 from compiler.frame_columns import columns_on_axes
 from compiler.sources import pinned_stat_var, source_constraint_matches
+
+
+class StatedUnit(Unit):
+    """A unit a source states: a `Unit` that also names whose prices deflated a
+    constant-price amount (`deflation_basis`), as the frame grammar's converted
+    unit does. A requirement is a plain `Unit`, so the planner states no basis
+    and a source that states one is read, worded and compared with it intact."""
+
+    deflation_basis: DeflationBasis | None = Field(
+        default=None, exclude_if=lambda basis: basis is None
+    )
 
 
 class SeriesEvidence(StrictModel):
@@ -176,10 +188,11 @@ class RetrievalEvidence(StrictModel):
     A unit is stated in one of two forms. `unit_ref` and `unit_label` hold a
     unit named by reference (a Data Commons unit dcid such as `CurrencyUSD`)
     and its text. `stated_unit` holds a unit stated field by field, the
-    frame grammar's `{currency, prices, base_year}` object a mint serves when
+    frame grammar's `{currency, prices, base_year, deflation_basis}` object a mint serves when
     its definition binds the unit by request. A manifest reads it from the
-    series it returned, and a discovered source from its definition's
-    `facets.unit.request` (`requested_unit`).
+    series it returned, with whose prices deflated a constant-price conversion
+    (`deflation_basis`), and a discovered source from its definition's
+    `facets.unit.request` (`requested_unit`), which states no basis.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -199,7 +212,7 @@ class RetrievalEvidence(StrictModel):
     axis_by_column: dict[str, str | None] | None = None
     unit_ref: str | None = None
     unit_label: str | None = None
-    stated_unit: Unit | None = None
+    stated_unit: StatedUnit | None = None
     provenance_ref: str | None = None
     provenance_label: str | None = None
     resolved_sources: tuple[ResolvedSourceMention, ...] = ()
@@ -222,7 +235,7 @@ def evidence_from_source(source: SelectedSource) -> RetrievalEvidence:
         bound_refs=source.bound_refs,
         unit_ref=source.unit_ref,
         unit_label=source.unit_label,
-        stated_unit=requested_unit(source.identity),
+        stated_unit=_stated(requested_unit(source.identity)),
         provenance_ref=source.provenance_ref,
         provenance_label=source.provenance_label,
         resolved_sources=source.resolved_sources,
@@ -231,13 +244,21 @@ def evidence_from_source(source: SelectedSource) -> RetrievalEvidence:
     )
 
 
+def _stated(unit: Unit | None) -> StatedUnit | None:
+    """`unit` as a `StatedUnit` that names no deflation basis."""
+    return None if unit is None else StatedUnit.model_validate(unit.model_dump())
+
+
 def requested_unit(identity: Mapping[str, JsonValue] | None) -> Unit | None:
     """The unit a definition binds by request (`facets.unit.request`), which its frame is
     converted to on fetch.
 
-    `None` when the definition binds no unit by request, or binds one that is
-    not a single `Unit`, such as a currency named by entity role, which
-    resolves per row.
+    A request states a currency, a price basis and a base year. Whose prices
+    deflate a constant-price conversion is a fact of the conversion, which the
+    converted frame's unit cells state (`StatedUnit.deflation_basis`). `None`
+    when the definition binds no unit by request, or binds one that is not a
+    single `Unit`, such as a currency named by entity role, which resolves per
+    row.
     """
     facets = (identity or {}).get("facets")
     unit = facets.get("unit") if isinstance(facets, dict) else None
@@ -291,7 +312,7 @@ def evidence_from_manifest(
             dimension.label: dimension.axis for dimension in manifest.coverage.dimensions
         },
         unit_ref=unit if isinstance(unit, str) else None,
-        stated_unit=unit if isinstance(unit, Unit) else None,
+        stated_unit=unit if isinstance(unit, StatedUnit) else None,
         provenance_ref="; ".join(one.ref for one in sources) or None,
         provenance_label="; ".join(one.label for one in sources) or None,
         window=_window_of(series_stats),
@@ -1721,7 +1742,10 @@ def _describe_unit(evidence: RetrievalEvidence) -> str:
     """The unit `evidence` states, as the issues quote it."""
     if (stated := evidence.stated_unit) is not None:
         return price_basis_reading(
-            currency=stated.currency, prices=stated.prices, base_year=stated.base_year
+            currency=stated.currency,
+            prices=stated.prices,
+            base_year=stated.base_year,
+            deflation_basis=stated.deflation_basis,
         )
     return " ".join(part for part in (evidence.unit_ref, evidence.unit_label) if part)
 
@@ -2489,17 +2513,17 @@ def _family_member_count(trace: Mapping[str, object]) -> int | None:
     return count
 
 
-def _facet_unit(value: object) -> str | Unit | None:
+def _facet_unit(value: object) -> str | StatedUnit | None:
     """The unit a series' facet states: a bare ref, a `{ref, label}` block,
-    or the frame grammar's `{currency, prices, base_year}` object. An object
-    outside that grammar states no unit."""
+    or the frame grammar's `{currency, prices, base_year, deflation_basis}`
+    object, its basis kept. An object outside that grammar states no unit."""
     if isinstance(value, str):
         return value or None
     if not isinstance(value, dict):
         return None
     if "currency" in value:
         try:
-            return Unit.model_validate(value)
+            return StatedUnit.model_validate(value)
         except ValidationError:
             return None
     ref = value.get("ref") or value.get("label")
@@ -2552,7 +2576,7 @@ def _series_entities(series: pa.Table) -> tuple[ResolvedEntity, ...]:
     )
 
 
-def _series_units(series: pa.Table) -> set[str | Unit]:
+def _series_units(series: pa.Table) -> set[str | StatedUnit]:
     """The units the facets of `series` state, read once per distinct facet."""
     distinct = array_kernel("unique", _column(series, "facet")).to_pylist()
     facets = (json.loads(facet) for facet in distinct)

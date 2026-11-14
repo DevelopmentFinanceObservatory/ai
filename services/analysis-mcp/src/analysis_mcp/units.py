@@ -24,7 +24,12 @@ from dfo_frame_grammar.grammar import (
 
 
 def _price_basis(unit: UnitRequest) -> str:
-    return price_basis_reading(currency=unit.currency, prices=unit.prices, base_year=unit.base_year)
+    return price_basis_reading(
+        currency=unit.currency,
+        prices=unit.prices,
+        base_year=unit.base_year,
+        deflation_basis=unit.deflation_basis,
+    )
 
 
 def converted_unit_label(unit: UnitRequest) -> str:

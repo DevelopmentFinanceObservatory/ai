@@ -63,6 +63,7 @@ from harness.chart_binding import (
     covers_every_row,
     every_series_selects,
     over_cap_dimension,
+    over_series_limit,
     select_binding_ok,
 )
 from harness.conversation import current_conversation_id
@@ -1211,43 +1212,30 @@ def test_a_line_chart_lists_no_more_values_than_the_catalogue_allows() -> None:
     ]
     cap = array["maxItems"]
 
-    allowed = select_binding_ok(
+    allowed = over_series_limit(
         type_="line_chart", select={"observationAbout": _countries(cap)}, view={}
     )
-    refused = select_binding_ok(
+    over = over_series_limit(
         type_="line_chart", select={"observationAbout": _countries(cap + 1)}, view={}
     )
 
     assert cap == LINE_CHART_MAX_VALUES
-    assert allowed is None
-    assert refused is not None
-    assert refused["code"] == "series_limit_exceeded"
+    assert (allowed, over) == (False, True)
 
 
 @pytest.mark.parametrize("type_", ["bar_chart", "table"])
-def test_select_binding_ok_permits_24_series(type_: str) -> None:
-    select = {"observationAbout": _countries(24), "stat_var": "a"}
-    assert select_binding_ok(type_=type_, select=select, view={}) is None
-
-
-@pytest.mark.parametrize("type_", ["bar_chart", "table"])
-def test_select_binding_ok_rejects_a_25th_series(type_: str) -> None:
+def test_a_select_is_over_the_series_limit_past_24_series(type_: str) -> None:
     """apis refuses a component past 24 series even though the catalogue
-    grammar's `maxItems` allows an array of 30."""
-    select = {"observationAbout": _countries(25), "stat_var": "a"}
-    reason = select_binding_ok(type_=type_, select=select, view={})
-    assert reason is not None
-    assert reason["message"] == (
-        f"{type_} select expands to an estimated 25 series, over the platform's maximum of 24"
+    grammar's `maxItems` allows an array of 30, and a table's cross product
+    counts against it."""
+    assert not over_series_limit(
+        type_=type_, select={"observationAbout": _countries(24), "stat_var": "a"}, view={}
     )
-
-
-def test_select_binding_ok_counts_a_tables_cross_product_against_the_cap() -> None:
-    select = {"observationAbout": _countries(5), "stat_var": ["a", "b", "c", "d", "e"]}
-    reason = select_binding_ok(type_="table", select=select, view={})
-    assert reason is not None
-    assert reason["code"] == "series_limit_exceeded"
-    assert "estimated 25 series" in reason["message"]
+    assert over_series_limit(
+        type_=type_, select={"observationAbout": _countries(25), "stat_var": "a"}, view={}
+    )
+    crossed = {"observationAbout": _countries(5), "stat_var": ["a", "b", "c", "d", "e"]}
+    assert over_series_limit(type_="table", select=crossed, view={})
 
 
 def _counted_view(**total_counts: int) -> dict[str, Any]:
@@ -1261,48 +1249,46 @@ def _counted_view(**total_counts: int) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(
-    ("type_", "select", "view", "estimate"),
+    ("type_", "select", "view"),
     [
-        ("bar_chart", {"stat_var": "a"}, _counted_view(stat_var=1, donor=30), 30),
-        ("table", {"stat_var": "a"}, _counted_view(stat_var=1, donor=30), 30),
+        ("bar_chart", {"stat_var": "a"}, _counted_view(stat_var=1, donor=30)),
+        ("table", {"stat_var": "a"}, _counted_view(stat_var=1, donor=30)),
         (
             "line_chart",
             {"donor": [f"donor/{index}" for index in range(5)]},
             _counted_view(stat_var=5, donor=30),
-            25,
         ),
         (
             "table",
             {"donor": [f"donor/{index}" for index in range(20)]},
             _counted_view(stat_var=2, donor=30),
-            40,
         ),
-        ("table", {"stat_var": "a"}, _counted_view(stat_var=1, donor=30, unit=30), 30),
+        ("table", {"stat_var": "a"}, _counted_view(stat_var=1, donor=30, unit=30)),
+        (
+            "line_chart",
+            {"stat_var": "a", "donor": [f"donor/{index}" for index in range(9)]},
+            _counted_view(stat_var=1, donor=30),
+        ),
         (
             "table",
             {"stat_var": "a", "unit": ["USDollar", "EUR"]},
             _counted_view(stat_var=1, donor=30, unit=3, measurementMethod=5),
-            60,
         ),
     ],
 )
-def test_select_binding_ok_matches_dfo_apis_series_estimate(
-    type_: str, select: dict[str, Any], view: dict[str, Any], estimate: int
+def test_over_series_limit_matches_dfo_apis_series_estimate(
+    type_: str, select: dict[str, Any], view: dict[str, Any]
 ) -> None:
     """The harness computes the apis service's own estimate (`_check_series_estimate`
     in dfo-data-tools' `assembler/resolve.py`): over every coordinate
-    dimension, the bound array's length, 1 for a single bound value, and
+    dimension, the bound array's distinct values, 1 for a single bound value, and
     `max(total_count, 1)` for an unbound dimension, on every component type
-    the assembler resolves. Each case here is one apis refuses with
-    `MAX_SERIES_PER_COMPONENT`: an unbound plural dimension, a `line_chart`
-    array past 24, and an unbound dimension multiplying a table's array.
-    An unbound facet column counts 1 and a bound one counts its values."""
-    reason = select_binding_ok(type_=type_, select=select, view=view)
-    assert reason is not None
-    assert reason["message"].startswith(
-        f"{type_} select expands to an estimated {estimate} series, "
-        "over the platform's maximum of 24"
-    )
+    the assembler resolves. Each case here is one apis refuses on that
+    estimate: an unbound plural dimension, a `line_chart` whose array
+    lists more than eight distinct values or multiplies past 24, and an
+    unbound dimension multiplying a table's array. An unbound facet column
+    counts 1 and a bound one counts its values."""
+    assert over_series_limit(type_=type_, select=select, view=view)
 
 
 def test_over_cap_dimension_names_the_one_dimension_that_multiplies() -> None:
@@ -1314,97 +1300,28 @@ def test_over_cap_dimension_names_the_one_dimension_that_multiplies() -> None:
         select={"financingProvider": ["a", "b"], "stat_var": "x"}, view=wide
     ) == ("financingProvider", 2)
     assert over_cap_dimension(select={}, view=wide) is None
+    repeated = {"financingProvider": ["donor/01"] * 30, "stat_var": "x"}
+    assert over_cap_dimension(select=repeated, view=wide) is None
+    facets = _counted_view(stat_var=1, unit=1, financingProvider=1)
+    assert over_cap_dimension(select={"unit": ["USD", "EUR"], "stat_var": "x"}, view=facets) is None
 
 
-@pytest.mark.parametrize(
-    ("select", "view", "retry_mode", "named", "charts"),
-    [
-        pytest.param(
-            {},
-            _counted_view(stat_var=1, financingRecipient=6, financingProvider=51),
-            "correct_and_retry",
-            ["financingRecipient (6 values)", "financingProvider (51 values)"],
-            "each financingRecipient value is 6 charts, which fits",
-            id="smaller_fits_one_call",
-        ),
-        pytest.param(
-            {"financingRecipient": _countries(12)},
-            _counted_view(stat_var=1, financingRecipient=40, financingProvider=51),
-            "correct_and_retry",
-            ["financingRecipient (12 values)", "financingProvider (51 values)"],
-            "each financingRecipient value is 12 charts, more than the 8",
-            id="smaller_past_one_call",
-        ),
-        pytest.param(
-            {},
-            _counted_view(stat_var=2, financingRecipient=3, financingProvider=51),
-            "correct_and_retry",
-            ["stat_var (2 values)", "financingRecipient (3 values)", "financingProvider (51"],
-            "each combination of stat_var and financingRecipient values is 6 charts, which fits",
-            id="three_dimensions",
-        ),
-        pytest.param(
-            {},
-            _counted_view(stat_var=1, financingRecipient=1, financingProvider=51),
-            "do_not_retry",
-            [],
-            "",
-            id="one_dimension",
-        ),
-    ],
-)
-def test_a_select_over_the_cap_on_several_dimensions_is_told_what_draws(
-    select: dict[str, Any], view: dict[str, Any], retry_mode: str, named: list[str], charts: str
-) -> None:
-    """Where two or more dimensions multiply past the cap, the refusal names
-    each with the values it contributes, counts the charts that bind all but
-    the widest, and says whether one call draws them. One dimension over the
-    cap keeps the bare estimate: `make_charts` draws its largest members."""
-    refusal = select_binding_ok(type_="table", select=select, view=view)
-
-    assert refusal is not None
-    assert refusal["code"] == "series_limit_exceeded"
-    assert refusal["retry_mode"] == retry_mode
-    assert all(name in refusal["message"] for name in named)
-    assert charts in refusal["message"]
-    assert ("multiply" in refusal["message"]) == bool(named)
-
-
-def test_select_binding_ok_counts_an_unbound_dimension_at_its_total_count() -> None:
+def test_over_series_limit_counts_an_unbound_dimension_at_its_total_count() -> None:
     """An unbound dimension holding 24 values is within the cap, and binding
-    it to a single value brings 30 down to 1."""
-    assert (
-        select_binding_ok(
-            type_="bar_chart", select={"stat_var": "a"}, view=_counted_view(stat_var=1, donor=24)
-        )
-        is None
-    )
-    assert (
-        select_binding_ok(
-            type_="bar_chart",
-            select={"stat_var": "a", "donor": "donor/1"},
-            view=_counted_view(stat_var=1, donor=30),
-        )
-        is None
-    )
-    assert (
-        select_binding_ok(
-            type_="bar_chart",
-            select={"stat_var": "a"},
-            view=_counted_view(stat_var=1, donor=24, unit=30, provenance=30),
-        )
-        is None
-    )
-
-
-def test_select_binding_ok_counts_a_dimension_with_no_total_count_as_one() -> None:
-    """Scripted fixtures list bare dimension names, or entries without
-    `total_count`; neither refuses for want of the figure."""
-    bare = {"dimensions": ["stat_var", "observationAbout"]}
-    assert select_binding_ok(type_="bar_chart", select={"stat_var": "a"}, view=bare) is None
-    assert (
-        select_binding_ok(type_="table", select={"stat_var": "a"}, view=_MULTISERIES_VIEW) is None
-    )
+    it to a single value brings 30 down to 1. Scripted fixtures list bare
+    dimension names, or entries without `total_count`; neither counts past
+    one for want of the figure."""
+    for select, view in [
+        ({"stat_var": "a"}, _counted_view(stat_var=1, donor=24)),
+        ({"stat_var": "a", "donor": "donor/1"}, _counted_view(stat_var=1, donor=30)),
+        ({"stat_var": "a"}, _counted_view(stat_var=1, donor=24, unit=30, provenance=30)),
+        ({"stat_var": "a"}, {"dimensions": ["stat_var", "observationAbout"]}),
+        ({"stat_var": "a"}, _MULTISERIES_VIEW),
+        # A repeated member resolves to one series, whatever the chart type.
+        ({"stat_var": "a", "donor": ["donor/1"] * 30}, _counted_view(stat_var=1, donor=40)),
+    ]:
+        for type_ in ("line_chart", "bar_chart", "table"):
+            assert not over_series_limit(type_=type_, select=select, view=view), view
 
 
 def test_select_binding_ok_refuses_a_dimension_the_view_does_not_declare() -> None:
@@ -1445,11 +1362,12 @@ def test_select_binding_ok_refuses_a_dimension_the_view_does_not_declare() -> No
         ),
         # A facet may hold rows with no value, which no select on it names.
         ("table", {"dimensions": [{"name": "unit", "values": ["USD"], "total_count": 1}]}, []),
-        # A select the binding check refuses is not offered.
+        # A select listing more lines than a line_chart draws is offered,
+        # and make_charts cuts it.
         (
             "line_chart",
             {"dimensions": [{"name": "donor", "values": list("abcdefghi"), "total_count": 9}]},
-            [],
+            [{"donor": list("abcdefghi")}],
         ),
     ],
 )

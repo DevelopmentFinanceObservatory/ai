@@ -115,16 +115,19 @@ from harness.chart_binding import (
     LINE_CHART_MAX_VALUES,
     MAX_CHARTS_PER_CALL,
     MAX_SERIES_PER_COMPONENT,
+    MAX_TABLE_ROWS,
     TopMembers,
     chart_draws,
     covers_every_row,
-    differing_coordinates,
+    distinct_count,
     empty_select_refusal,
     every_series_selects,
     latest_shared_period,
     over_cap_dimension,
+    over_series_limit,
     select_binding_ok,
     top_members,
+    unsplit_facets,
 )
 from harness.conversation import current_user_message
 from harness.derived_frames import DerivedFile, derived_file
@@ -276,23 +279,25 @@ class Chart(BaseModel):
             "dimension, or on one dimension a list of them: where the view lists "
             'observationAbout, {"observationAbout": ["country/KEN", "country/UGA"]}; '
             'where it lists financingRecipient, {"financingRecipient": "country/MWI"}. A '
-            "dimension the select leaves unbound becomes one series per value. A chart "
-            f"draws at most {MAX_SERIES_PER_COMPONENT} series. When a chart the user asked "
+            "dimension the select leaves unbound becomes one series per value. A line_chart "
+            f"draws at most {LINE_CHART_MAX_VALUES} series, and a bar_chart or a table at "
+            f"most {MAX_SERIES_PER_COMPONENT}, a table fewer when its rows over the periods "
+            f"it covers would pass {MAX_TABLE_ROWS:,}. When a chart the user asked "
             "to see compares more places, donors or categories than that, leave their "
             "dimension unbound: the chart is cut for display to the largest of them at one "
             "period, and its title says how many and when. The cut is for showing them: "
             "a user asking which are largest wants a ranking calculated, and a cut chart "
             "does not replace it. Never list a subset you chose to stand in for the "
-            "largest."
+            "largest. A chart with latest_periods, or over a frame whose view says rolling, "
+            "is not cut: list its members from a ranking you asked for, at most as many "
+            "as the chart draws."
         )
     )
     order_by_value: bool = Field(
         default=False,
         description=(
-            "true to list a table's or a line chart's compared places, donors or "
-            "categories highest first by their value at the latest period most of them "
-            "hold. Leave it false to keep the order select_json lists them in. A bar chart "
-            "ignores it: its bars are drawn highest first when their dimension is unbound"
+            "has no effect: the platform draws every chart's members in its own order. "
+            "A cut keeps the largest members whether this flag is true or false"
         ),
     )
     state_values_for: list[str] = Field(
@@ -637,131 +642,40 @@ async def _member_cells(
 @dataclass(frozen=True)
 class _Unranked:
     """Why a select's largest members were not picked: a cut of a typed role
-    whose rows carry no kind or type cell (`kinds_needed`), a plan's rank
-    positions for values (`rank_positions`), compared members with no anchor
-    period (`no_period`), a chart whose period moves with the data
-    (`period_moves`), matching rows that differ on the declared `coordinates`
-    (`coordinates_differ`), or anything else (`not_ranked`)."""
+    whose rows carry no kind or type cell, which the frame's kind read
+    settles (`kinds_needed`), or anything else (`not_ranked`)."""
 
-    reason: Literal[
-        "kinds_needed",
-        "rank_positions",
-        "no_period",
-        "period_moves",
-        "coordinates_differ",
-        "not_ranked",
-    ]
-    coordinates: tuple[str, ...] = ()
+    reason: Literal["kinds_needed", "not_ranked"]
 
 
-def _ranked(
-    held: _FrameRows,
-    *,
-    select: dict[str, Any],
-    dimension: str,
-    view: dict[str, Any],
-    limit: int | None,
-    cut: bool,
-    kinds: Mapping[str, str] | None,
-) -> TopMembers | _Unranked:
-    """`top_members` over a stored frame. A cut of a place or flow party
-    dimension compares only the members one ranking does, by the kind or type
-    cells the frame's own rows carry, or by `kinds` when they carry none.
-    Rows are ranked without their enrichment columns (`common.place_type`),
-    which describe a member and split no series. Rows that give no ranking
-    and differ on a dimension `view` declares are `coordinates_differ`."""
-    if held.rank_positions:
-        return _Unranked("rank_positions")
-    rows = held.rows
-    cells = None
-    if cut and dimension in TYPED_ROLES:
-        cells = _held_cells(dimension, rows) or kinds
-        if cells is None:
-            return _Unranked("kinds_needed")
-    rows = [
-        {
-            name: cell
-            for name, cell in row.items()
-            if name in select or enrichment_role(name, roles=TYPED_ROLES) is None
-        }
-        for row in rows
-    ]
-    try:
-        top = top_members(rows=rows, select=select, dimension=dimension, limit=limit, cells=cells)
-    except RollingError:
-        return _Unranked("no_period")
-    if top is not None:
-        return top
-    differing = differing_coordinates(rows=rows, select=select, dimension=dimension, view=view)
-    if differing:
-        return _Unranked("coordinates_differ", coordinates=tuple(differing))
-    return _Unranked("not_ranked")
+# The platform limits, by chart type, whose refusal of a write `make_charts`
+# meets by cutting the chart to its largest members (`_cut_refused`).
+# The series estimate (`MAX_SERIES_PER_COMPONENT`) bounds every component type,
+# `stat_card` included, but a `stat_card` draws one series, so a cut cannot
+# meet it and it has no entry.
+_CUT_LIMITS = {
+    "line_chart": frozenset({"MAX_LINE_CHART_SERIES", "MAX_SERIES_PER_COMPONENT"}),
+    "table": frozenset({"MAX_TABLE_ROWS", "MAX_SERIES_PER_COMPONENT"}),
+}
 
 
-def _over_cap_remedy(*, dimension: str, unranked: _Unranked, draws: int, plan_unspent: bool) -> str:
-    """What to change in a select refused with the one `dimension` over the
-    series cap, given why its largest members were not picked: bind the
-    coordinates the rows differ on; or list at most `draws` of its values,
-    with a plan offered beside the list when `plan_unspent` and the frame's
-    values can be ranked."""
-    plan = f", or plan a ranking or a total across {dimension}" if plan_unspent else ""
-    if unranked.reason == "period_moves":
-        return (
-            "This chart's period moves with the latest data, so its largest members are not "
-            f"chosen for it. List at most {draws} {dimension} values in the select{plan}."
-        )
-    if unranked.reason == "coordinates_differ":
-        differing = " and ".join(unranked.coordinates)
-        each = " each" if len(unranked.coordinates) > 1 else ""
-        return (
-            f"Its rows differ on {differing}, so the largest cannot be compared. "
-            f"Bind {differing}{each} to one value."
-        )
-    if unranked.reason == "rank_positions":
-        return (
-            "This frame holds rank positions, which the chart draws as they are. "
-            f"List the {dimension} values to show, at most {draws}."
-        )
-    return (
-        "The largest could not be picked from this frame's rows. "
-        f"List the {dimension} values the question names, at most {draws}{plan}."
-    )
-
-
-def _unnarrowed_refusal(
-    issue: dict[str, Any],
-    *,
-    chart: Chart,
-    select: dict[str, Any],
-    view: dict[str, Any],
-    unranked: _Unranked,
-    plan_unspent: bool,
-) -> dict[str, Any]:
-    """The over-cap `issue` of a select `_top_select` left as written, with
-    what to change (`_over_cap_remedy`) when one dimension is over the cap:
-    `correct_and_retry`, with the dimension and its count in `fix`."""
-    over = over_cap_dimension(select=select, view=view)
-    if over is None:
-        return issue
-    dimension, count = over
-    remedy = _over_cap_remedy(
-        dimension=dimension,
-        unranked=unranked,
-        draws=chart_draws(type_=chart.type, view=view),
-        plan_unspent=plan_unspent,
-    )
-    return harness_refusal(
-        code=HarnessCode.SERIES_LIMIT_EXCEEDED,
-        message=f"{issue['message']}. {remedy}",
-        fix={"dimension": dimension, "values": count},
-        retry_mode=RetryMode.CORRECT_AND_RETRY,
-    )
+def _cut_refused(chart: Chart, refusal: Mapping[str, Any]) -> bool:
+    """Whether the platform's `refusal` of a write is the `resource_exhausted`
+    limit on the series or rows `chart.type` draws, which a cut to the largest
+    members meets. apis raises `MAX_SERIES_PER_COMPONENT` from the estimate of
+    the select's shape alone, so a write the harness did not cut first meets it
+    when the harness's estimate (`over_series_limit`) and apis' disagree, or
+    when the cut before the write found no ranking."""
+    return refusal.get("code") == "resource_exhausted" and refusal.get(
+        "limit_name"
+    ) in _CUT_LIMITS.get(chart.type, ())
 
 
 @dataclass(frozen=True)
 class _Narrowed:
-    """A select with its one multiplying dimension listing members highest
-    first, and for a select cut to what its chart draws, the cut."""
+    """A select with its one multiplying dimension listing members in rank
+    order, and for a select cut to what its chart draws, the cut. The platform
+    draws the members in its own order."""
 
     select: dict[str, Any]
     cut: TopMembers | None
@@ -917,79 +831,119 @@ def _card_identity(intent: Mapping[str, Any]) -> str:
     return json.dumps(intent, sort_keys=True)
 
 
-async def _top_select(
+def _cut_dimension(
+    chart: Chart, select: dict[str, Any], view: dict[str, Any]
+) -> tuple[str, int] | None:
+    """The one dimension whose members a cut of `select` lists, with how many
+    distinct members it lists, or leaves unbound where the view counts them.
+    None when the chart's period moves with the data, since a list picked
+    today would not follow it, or when no one dimension multiplies."""
+    if view.get("rolling") or chart.latest_periods is not None:
+        return None
+    return over_cap_dimension(select=select, view=view)
+
+
+def _plan_cut(
+    held: _FrameRows,
+    *,
+    type_: str,
+    select: dict[str, Any],
+    dimension: str,
+    view: dict[str, Any],
+    kinds: Mapping[str, str] | None,
+) -> _Narrowed | _Unranked:
+    """`select` cut to the largest members of `dimension` a `type_` chart
+    draws (`chart_draws`) among a stored frame's rows, or why its rows give no
+    cut: `not_ranked` for a plan's rank positions, rows that give no ranking
+    and members with no anchor period, and `kinds_needed` for a place or flow
+    party dimension whose rows carry no kind or type cell and for which
+    `kinds` gives none. Such a dimension compares only the members one ranking
+    compares, by the cells its rows carry or by `kinds`. Any other dimension
+    compares every member. Rows are ranked without enrichment columns and without the
+    facets `view` finds split none (`unsplit_facets`)."""
+    if held.rank_positions:
+        return _Unranked("not_ranked")
+    cells = None
+    if dimension in TYPED_ROLES:
+        cells = _held_cells(dimension, held.rows) or kinds
+        if cells is None:
+            return _Unranked("kinds_needed")
+    unsplit = unsplit_facets(view)
+    rows = [
+        {
+            name: cell
+            for name, cell in row.items()
+            if name in select
+            or (name not in unsplit and enrichment_role(name, roles=TYPED_ROLES) is None)
+        }
+        for row in held.rows
+    ]
+    try:
+        top = top_members(
+            rows=rows,
+            select=select,
+            dimension=dimension,
+            limit=chart_draws(type_=type_, view=view),
+            cells=cells,
+        )
+    except RollingError:
+        return _Unranked("not_ranked")
+    if top is None or not top.members:
+        return _Unranked("not_ranked")
+    return _narrowed(select, dimension=dimension, top=top)
+
+
+async def _cut_plan(
     chart: Chart,
     select: dict[str, Any],
+    frame: Mapping[str, Any],
     state: Any,
     executor: Executor,
     *,
-    cut: bool,
-) -> _Narrowed | dict[str, Any] | _Unranked:
-    """`select` with its one multiplying dimension listing the frame's
-    members by their value at one period (`top_members`), highest first.
-
-    When `cut`, it lists only the members holding a value at that period, as
-    many as `chart.type` draws (`chart_draws`). A cut of a place or flow
-    party dimension ranks only the members one ranking compares (`_ranked`),
-    by the frame's kind read (`_member_cells`) when its rows carry no kind or
-    type cell. Otherwise it lists every member, those with no value at the
-    period last. apis
-    draws a table's and a line chart's series in the order the select lists
-    them.
-
-    Returns:
-        The narrowed select; a harness refusal for a cut whose kind read
-        failed (`member_kind_unread`) or whose members have no anchor period
-        (`no_shared_period`); or an `_Unranked`, leaving the select as
-        written: `period_moves` when the card's period moves with the data,
-        so a list picked today would not follow it; `not_ranked` when no one
-        dimension multiplies or the frame cannot be read; otherwise why its
-        rows gave no ranking (`_ranked`).
-    """
-    frame = stored_mapping(state, ORCHESTRATOR_FRAMES_KEY)[chart.frame]
-    if frame["view"].get("rolling") or chart.latest_periods is not None:
-        return _Unranked("period_moves")
-    over = over_cap_dimension(select=select, view=frame["view"])
-    if over is None:
-        return _Unranked("not_ranked")
-    dimension = over[0]
-    rank = functools.partial(
-        _ranked,
-        select=select,
-        dimension=dimension,
-        view=frame["view"],
-        limit=chart_draws(type_=chart.type, view=frame["view"]) if cut else None,
-        cut=cut,
+    dimension: str,
+) -> _Narrowed | None:
+    """The cut of `select` to the members of `dimension` `chart.type` draws
+    (`_plan_cut`), from one read of its frame; None when there is no cut. A plan
+    that needs the members' kinds, on a frame whose rows carry no kind or
+    type cell, reads them (`_member_cells`) and plans from the frame once
+    more. The cut keeps the largest members; apis draws them in its own order."""
+    view = frame["view"]
+    plan_with = functools.partial(
+        _plan_cut, type_=chart.type, select=select, dimension=dimension, view=view
     )
-    top = await _frame_work(frame_store_ref(frame), functools.partial(rank, kinds=None))
+    plan = await _frame_work(frame_store_ref(frame), functools.partial(plan_with, kinds=None))
     analysis = str(frame["ref"]["spec_id"]).startswith(OP_SPEC_HASH_PREFIX)
-    if top == _Unranked("kinds_needed") and not analysis:
+    if plan == _Unranked("kinds_needed") and not analysis:
         kinds = await _member_cells(state, chart.frame, executor)
         if kinds is None:
-            return harness_refusal(
-                code=HarnessCode.MEMBER_KIND_UNREAD,
-                message=(
-                    f"{chart.type} select is over the chart's series limit, and the kinds of "
-                    f"its {dimension} members could not be read to choose the largest of them. "
-                    "Drawing it again reads them once more; or list the members to show in select_json"
-                ),
-            )
-        top = await _frame_work(
-            frame_store_ref(frame), functools.partial(rank, kinds=kinds.get(dimension, {}))
+            return None
+        plan = await _frame_work(
+            frame_store_ref(frame), functools.partial(plan_with, kinds=kinds.get(dimension, {}))
         )
-    if top == _Unranked("no_period") and cut:
-        return harness_refusal(
-            code=HarnessCode.NO_SHARED_PERIOD,
-            message=(
-                f"{chart.type} select is over the chart's series limit, and its {dimension} "
-                "members hold several periods with none to choose the largest of them at: no "
-                "period is held by half of them, or their periods are spans or of mixed grains"
-            ),
-        )
-    if not isinstance(top, TopMembers) or not top.members:
-        return top if isinstance(top, _Unranked) else _Unranked("not_ranked")
-    members = top.members if cut else [*top.members, *top.unvalued]
-    return _Narrowed(select={**select, dimension: members}, cut=top if cut else None)
+    return plan if isinstance(plan, _Narrowed) else None
+
+
+def _one_values(select: dict[str, Any]) -> dict[str, Any]:
+    """`select` with each one-value list written as its value: apis reads a
+    one-value list as its one value, and refuses a second dimension listed
+    beside the one a chart lists."""
+    return {
+        name: value[0] if isinstance(value, list) and distinct_count(value) == 1 else value
+        for name, value in select.items()
+    }
+
+
+def _narrowed(select: dict[str, Any], *, dimension: str, top: TopMembers) -> _Narrowed:
+    """`select` with `dimension` listing `top`'s members in rank order, only
+    those with a value at its period. Every other one-value list is written as
+    its value (`_one_values`). A cut that leaves out no member the rows hold is
+    drawn as a list, with no cut to state."""
+    members = top.members
+    whole = len(top.members) == top.holding and not top.unvalued and not top.other_kinds
+    return _Narrowed(
+        select={**_one_values(select), dimension: members},
+        cut=None if whole else top,
+    )
 
 
 def _whole_note(whole: str) -> str:
@@ -1006,7 +960,7 @@ def _cut_note(cut: TopMembers) -> str:
     kind and the members with no value at the cut's period counted apart."""
     return (
         f"This card draws the {len(cut.members)} largest of the {cut.holding} members with a "
-        f"value in {cut.period}, highest first. Left out as group totals, unallocated amounts "
+        f"value in {cut.period}. Left out as group totals, unallocated amounts "
         f"or members of another level: {cut.other_kinds}. Left out with no value in {cut.period}: "
         f"{len(cut.unvalued)}. Say in the reply that it shows the largest of them in "
         f"{cut.period}."
@@ -1080,8 +1034,9 @@ def _not_drawn(
     """The `make_charts` entry of a chart that was not drawn: `error` is the
     model's reason. The entry states the `code` and `retry_mode` of `refusal`,
     the refusal that stopped it, with its `fix` when that is a mapping, as a
-    refusal of the harness's own is. It states those of `code` when no
-    refusal stopped the chart or the refusal names no code."""
+    refusal of the harness's own is, and the `limit_name` of a platform limit
+    it crossed. It states those of `code` when no refusal stopped the chart
+    or the refusal names no code."""
     if refusal is None or not refusal.get("code"):
         return {"title": chart.title, **_failed(code, error)}
     entry = {"title": chart.title, "error": error, "code": str(refusal["code"])}
@@ -1089,6 +1044,8 @@ def _not_drawn(
         entry["retry_mode"] = str(refusal["retry_mode"])
     if isinstance(refusal.get("fix"), Mapping):
         entry["fix"] = dict(refusal["fix"])
+    if isinstance(limit_name := refusal.get("limit_name"), str):
+        entry["limit_name"] = limit_name
     return entry
 
 
@@ -2460,6 +2417,154 @@ def build_orchestrator_tools(
         }
         drawn: list[dict[str, Any]] = []
         landed = read = False
+
+        async def _place(
+            chart: Chart,
+            frame: Mapping[str, Any],
+            *,
+            subject: str,
+            whole: str | None,
+            select: dict[str, Any],
+            own: dict[str, Any],
+            cut: TopMembers | None,
+        ) -> tuple[dict[str, Any], dict[str, Any] | None, bool]:
+            """Title `select` for `chart` and write it, or read the card on the
+            canvas that already draws it. A refused write of a select other
+            than the model's own (`own`), a cut or the select written for
+            `{}`, carries it as `written_select`, so the model reads the platform's refusal against the select it judged.
+
+            Returns:
+                The chart's `make_charts` entry; the platform's refusal when it
+                refused the write; and whether the charts after it are left
+                undrawn, after a write that raised and may have stored it.
+            """
+            nonlocal landed, read
+            period, window = await _card_period(chart, frame=frame, select=select, cut=cut)
+            title, untitled = _card_title(subject, whole=whole, period=period, cut=cut)
+            intent: dict[str, Any] = {
+                "type": chart.type,
+                "frame_ref": frame["ref"],
+                "select": select,
+                "title": title,
+            }
+            if window is not None:
+                intent["window"] = window
+            identity = _card_identity(intent)
+            held = drawn_cards.get(identity) or canvas.get(identity)
+            stored = None if held is None else await _stored_card(held["component_id"])
+            if held is not None and stored is None:
+                # The canvas holds this card, so another write would stack a copy.
+                return (
+                    _not_drawn(
+                        chart,
+                        "This card is already on the canvas, and its figures could "
+                        "not be read back. No copy was drawn; state no value of it "
+                        "in the reply.",
+                        code=HarnessCode.FIGURES_UNREAD,
+                    ),
+                    None,
+                    False,
+                )
+            # A card revised since it was drawn no longer draws this intent.
+            if held is not None and stored is not None and stored["revision"] == held["revision"]:
+                read = True
+                entry = await _card_entry(
+                    chart,
+                    stored,
+                    title=title,
+                    frame=frame,
+                    on_canvas=on_canvas,
+                    cut=cut,
+                    whole=untitled,
+                )
+                return (
+                    entry
+                    | {
+                        "already_on_canvas": (
+                            "This card is already on the canvas, and no copy was "
+                            "drawn. Its reply_figures are those this call asks for; "
+                            "draw a chart again only with a different kind, frame, "
+                            "select or period."
+                        )
+                    },
+                    None,
+                    False,
+                )
+            try:
+                written = await executor(tool="write_component", args={"intent": intent})
+                component = written.get("component") if written.get("outcome") == "ok" else None
+                if component is None or not usable_component(component):
+                    refusal = written.get("refusal") or {}
+                    failed = _not_drawn(
+                        chart,
+                        refusal.get("message") or "the platform refused it",
+                        refusal=refusal,
+                    )
+                    # presentation-mcp's `fix`: the values the platform would
+                    # accept, as `label (ref)`, for the retry's select.
+                    if refusal.get("advice"):
+                        failed["advice"] = refusal["advice"]
+                    if select != own:
+                        failed["written_select"] = select
+                    return failed, dict(refusal), False
+                land = getattr(executor, "land_component", None)
+                if land is not None:
+                    land(component)
+            except Exception as error:
+                # Charts already drawn stay on the canvas and in the result.
+                # A write that timed out may still have stored this chart,
+                # so the model is told not to draw it again.
+                logger.exception("make_charts: drawing %r failed", chart.title)
+                return (
+                    _not_drawn(
+                        chart,
+                        f"drawing it failed inside DFO ({type(error).__name__}), and "
+                        "the charts after it in this call were not drawn. Do not "
+                        "draw this chart again: it may be on the canvas already.",
+                        code=HarnessCode.WRITE_UNCONFIRMED,
+                    ),
+                    None,
+                    True,
+                )
+            landed = True
+            entry = await _card_entry(
+                chart,
+                component,
+                title=title,
+                frame=frame,
+                on_canvas=on_canvas,
+                cut=cut,
+                whole=untitled,
+            )
+            drawn_cards[identity] = {
+                "component_id": component["component_id"],
+                "revision": component["revision"],
+            }
+            tool_context.state[_DRAWN_CARDS_KEY] = {
+                "invocation": tool_context.invocation_id,
+                "drawn": drawn_cards,
+            }
+            return entry, None, False
+
+        async def _cut(
+            chart: Chart,
+            asked: dict[str, Any],
+            frame: Mapping[str, Any],
+            dimension: tuple[str, int] | None,
+        ) -> _Narrowed | None:
+            """`_cut_plan` of `asked`, or None when no one dimension is cut
+            (`_cut_dimension`)."""
+            if dimension is None:
+                return None
+            return await _cut_plan(
+                chart,
+                asked,
+                frame,
+                tool_context.state,
+                executor,
+                dimension=dimension[0],
+            )
+
         try:
             for chart in charts[:MAX_CHARTS_PER_CALL]:
                 frame = frames.get(chart.frame)
@@ -2494,14 +2599,8 @@ def build_orchestrator_tools(
                         )
                     )
                     continue
-                plan_unspent = _used(tool_context, "plan") < _budgets(tool_context)["plan"]
-                issue = select_binding_ok(
-                    type_=chart.type,
-                    select=select,
-                    view=frame["view"],
-                    latest_periods=chart.latest_periods is not None,
-                    plan_unspent=plan_unspent,
-                )
+                issue = select_binding_ok(type_=chart.type, select=select, view=frame["view"])
+                own = select
                 if select == {} and issue is None and frame["view"].get("dimensions"):
                     # The platform refuses an empty select, so one that names
                     # every series is written for it, the first the frame's
@@ -2516,147 +2615,69 @@ def build_orchestrator_tools(
                             functools.partial(_covering_selects, selects=selects),
                         )
                     if covering:
+                        # A covering select over the chart's limit is cut below,
+                        # or the model's own select is written in its place.
+                        # `every_series_selects` keeps only selects whose shape
+                        # passes `select_binding_ok`.
                         select = covering[0]
                     else:
                         issue = empty_select_refusal(
                             type_=chart.type, view=frame["view"], unread=covering is None
                         )
-                cut = None
-                over_cap = issue is not None and issue["code"] == HarnessCode.SERIES_LIMIT_EXCEEDED
-                # apis sorts a bar chart's bars itself, at the period it draws.
-                ordered = chart.order_by_value and chart.type != "bar_chart"
-                if over_cap or (issue is None and ordered):
-                    narrowed = await _top_select(
-                        chart, select, tool_context.state, executor, cut=over_cap
-                    )
-                    if isinstance(narrowed, _Narrowed):
-                        rewritten = select_binding_ok(
-                            type_=chart.type, select=narrowed.select, view=frame["view"]
-                        )
-                        # Ordering alone never turns a drawable select into a refused one.
-                        if over_cap or rewritten is None:
-                            select, cut, issue = narrowed.select, narrowed.cut, rewritten
-                    elif not isinstance(narrowed, _Unranked):
-                        issue = narrowed
-                    elif over_cap and issue is not None:
-                        issue = _unnarrowed_refusal(
-                            issue,
-                            chart=chart,
-                            select=select,
-                            view=frame["view"],
-                            unranked=narrowed,
-                            plan_unspent=plan_unspent,
-                        )
                 if issue is not None:
                     drawn.append(_not_drawn(chart, issue["message"], refusal=issue))
                     continue
-                period, window = await _card_period(chart, frame=frame, select=select, cut=cut)
-                title, untitled = _card_title(subject, whole=whole, period=period, cut=cut)
-                intent: dict[str, Any] = {
-                    "type": chart.type,
-                    "frame_ref": frame["ref"],
-                    "select": select,
-                    "title": title,
-                }
-                if window is not None:
-                    intent["window"] = window
-                identity = _card_identity(intent)
-                held = drawn_cards.get(identity) or canvas.get(identity)
-                stored = None if held is None else await _stored_card(held["component_id"])
-                if held is not None and stored is None:
-                    # The canvas holds this card, so another write would stack a copy.
-                    drawn.append(
-                        _not_drawn(
-                            chart,
-                            "This card is already on the canvas, and its figures could "
-                            "not be read back. No copy was drawn; state no value of it "
-                            "in the reply.",
-                            code=HarnessCode.FIGURES_UNREAD,
-                        )
-                    )
-                    continue
-                # A card revised since it was drawn no longer draws this intent.
-                if (
-                    held is not None
-                    and stored is not None
-                    and stored["revision"] == held["revision"]
-                ):
-                    read = True
-                    entry = await _card_entry(
-                        chart,
-                        stored,
-                        title=title,
-                        frame=frame,
-                        on_canvas=on_canvas,
-                        cut=cut,
-                        whole=untitled,
-                    )
-                    drawn.append(
-                        entry
-                        | {
-                            "already_on_canvas": (
-                                "This card is already on the canvas, and no copy was "
-                                "drawn. Its reply_figures are those this call asks for; "
-                                "draw a chart again only with a different kind, frame, "
-                                "select or period."
-                            )
-                        }
-                    )
-                    continue
-                try:
-                    written = await executor(tool="write_component", args={"intent": intent})
-                    component = written.get("component") if written.get("outcome") == "ok" else None
-                    if component is None or not usable_component(component):
-                        refusal = written.get("refusal") or {}
-                        failed = _not_drawn(
-                            chart,
-                            refusal.get("message") or "the platform refused it",
-                            refusal=refusal,
-                        )
-                        # presentation-mcp's `fix`: the values the platform would
-                        # accept, as `label (ref)`, for the retry's select.
-                        if refusal.get("advice"):
-                            failed["advice"] = refusal["advice"]
-                        drawn.append(failed)
-                        continue
-                    land = getattr(executor, "land_component", None)
-                    if land is not None:
-                        land(component)
-                except Exception as error:
-                    # Charts already drawn stay on the canvas and in the result.
-                    # A write that timed out may still have stored this chart,
-                    # so the model is told not to draw it again.
-                    logger.exception("make_charts: drawing %r failed", chart.title)
-                    drawn.append(
-                        _not_drawn(
-                            chart,
-                            f"drawing it failed inside DFO ({type(error).__name__}), and "
-                            "the charts after it in this call were not drawn. Do not "
-                            "draw this chart again: it may be on the canvas already.",
-                            code=HarnessCode.WRITE_UNCONFIRMED,
-                        )
-                    )
-                    break
-                landed = True
-                drawn.append(
-                    await _card_entry(
-                        chart,
-                        component,
-                        title=title,
-                        frame=frame,
-                        on_canvas=on_canvas,
-                        cut=cut,
-                        whole=untitled,
-                    )
+                cut = None
+                # `cut_tried` is whether the one cut has run.
+                cut_tried = False
+                # The one dimension a cut lists, worked out once.
+                dimension = _cut_dimension(chart, select, frame["view"])
+                over = functools.partial(over_series_limit, type_=chart.type, view=frame["view"])
+                if over(select=select):
+                    # A select dfo-apis certainly refuses for its series is cut
+                    # before the write; one no cut narrows is written as it is.
+                    cut_tried = True
+                    narrowed = await _cut(chart, select, frame, dimension)
+                    if narrowed is not None:
+                        select, cut = narrowed.select, narrowed.cut
+                    elif over(select=select):
+                        # The platform judges only the model's select or a cut,
+                        # so a covering select no cut narrows is not written.
+                        select = own
+                entry, refused, stop = await _place(
+                    chart, frame, subject=subject, whole=whole, select=select, own=own, cut=cut
                 )
-                drawn_cards[identity] = {
-                    "component_id": component["component_id"],
-                    "revision": component["revision"],
-                }
-                tool_context.state[_DRAWN_CARDS_KEY] = {
-                    "invocation": tool_context.invocation_id,
-                    "drawn": drawn_cards,
-                }
+                if (
+                    refused is not None
+                    and dimension is not None
+                    and not cut_tried
+                    and _cut_refused(chart, refused)
+                    and dimension[1] > chart_draws(type_=chart.type, view=frame["view"])
+                ):
+                    # apis counts the series and rows a select resolves to, so
+                    # a write over the chart's limit is cut once to the largest
+                    # members its frame ranks and written again. A refused select
+                    # that lists no more distinct members of the dimension than the
+                    # chart draws, or leaves it unbound where the view counts no
+                    # more, is not cut, and nor is a facet column, a chart whose
+                    # period moves with the data, or a select with no one
+                    # dimension that multiplies, so no frame is read. Whatever the
+                    # platform answers, to either write, reaches the model as it
+                    # gave it.
+                    narrowed = await _cut(chart, select, frame, dimension)
+                    if narrowed is not None:
+                        entry, _, stop = await _place(
+                            chart,
+                            frame,
+                            subject=subject,
+                            whole=whole,
+                            select=narrowed.select,
+                            own=own,
+                            cut=narrowed.cut,
+                        )
+                drawn.append(entry)
+                if stop:
+                    break
         finally:
             # After the awaits, so the counts are read afresh. The `finally`
             # covers cancellation and anything raised outside the per-chart
@@ -2672,7 +2693,10 @@ def build_orchestrator_tools(
 
         Returns for each chart drawn what it holds and its reply_figures, or
         why it could not be drawn and, when the platform names them, the
-        values it would accept. A chart drawn whose values could not be read
+        values it would accept. A chart refused for a select written in place
+        of yours (a cut to its largest members or the select
+        written for {}) carries that select as written_select: the
+        refusal is about it. A chart drawn whose values could not be read
         back says so under the code `figures_unread`.
         """
         async with _canvas_lock(tool_context):

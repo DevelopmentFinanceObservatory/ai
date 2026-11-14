@@ -1461,12 +1461,12 @@ def _refused_chart(title: str, code: str) -> dict[str, Any]:
             ["A", "B", "C"],
             {
                 "charts": [
-                    _refused_chart("A", "series_limit_exceeded"),
+                    _refused_chart("A", "resource_exhausted"),
                     _refused_chart("B", "transient_unavailable"),
-                    _refused_chart("C", "series_limit_exceeded"),
+                    _refused_chart("C", "resource_exhausted"),
                 ]
             },
-            [("series_limit_exceeded", ["A", "C"]), ("transient_unavailable", ["B"])],
+            [("resource_exhausted", ["A", "C"]), ("transient_unavailable", ["B"])],
         ),
     ],
     ids=["refused", "past-the-limit", "two-reasons"],

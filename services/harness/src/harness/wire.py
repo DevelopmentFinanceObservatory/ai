@@ -141,6 +141,14 @@ class PriceBasis(StrEnum):
     CONSTANT = "constant"
 
 
+class DeflationBasis(StrEnum):
+    """Whose prices deflated a constant-price amount."""
+
+    DONOR = "donor"
+    RECIPIENT = "recipient"
+    NATIONAL = "national"
+
+
 # A unit, or one side of a composed unit, named in words: the unit's graph
 # name, or its ref where the graph has none.
 UnitName = Annotated[str, Field(min_length=1, max_length=200)]
@@ -155,11 +163,19 @@ class StructuredUnit(_WireModel):
     magnitude: Magnitude | None = None
     prices: PriceBasis | None = None
     base_year: int | None = None
+    deflation_basis: DeflationBasis | None = None
 
     @model_validator(mode="after")
     def _states_a_member(self) -> StructuredUnit:
         if not self.model_fields_set:
             raise ValueError("a structured unit states at least one member")
+        return self
+
+    @model_validator(mode="after")
+    def _basis_goes_with_constant_prices(self) -> StructuredUnit:
+        # The frame grammar's `validate_unit_request` holds a basis to constant prices.
+        if self.deflation_basis is not None and self.prices is not PriceBasis.CONSTANT:
+            raise ValueError("deflation_basis is valid only with prices 'constant'")
         return self
 
 

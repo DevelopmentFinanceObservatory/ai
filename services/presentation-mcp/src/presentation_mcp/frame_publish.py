@@ -161,7 +161,7 @@ def _wire_row_slices(frame: Frame, *, left_out: Sequence[str]) -> Iterator[list[
     supplies it at all. So is every role column in `left_out`. A `unit` cell
     goes out as `unit_cell_to_json` gives it, the plain-JSON form `Frame.build`
     accepts back: `None`, a bare string unit ref, a converted unit's
-    `{currency, prices, base_year}` object, or a composed unit's
+    `{currency, prices, base_year, deflation_basis}` object, or a composed unit's
     `{numerator, denominator}` object. Each distinct unit converts once, and
     rows sharing it share the result.
     """

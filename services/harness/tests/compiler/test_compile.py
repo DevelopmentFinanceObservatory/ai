@@ -3264,11 +3264,8 @@ _BOUND_BY_REQUEST = {"unit_ref": "CurrencyUSD", "identity": {"facets": _REQUEST_
         pytest.param(
             _BOUND_BY_REQUEST,
             _BOUND_BY_REQUEST,
-            {
-                "left_unit": {"currency": "USD", "prices": "current"},
-                "right_unit": {"currency": "USD", "prices": "current"},
-            },
-            id="unit-request",
+            {},
+            id="unit-request-is-unpinned",
         ),
         pytest.param(
             {},
@@ -7051,8 +7048,8 @@ def _per_head(
         pytest.param(
             _BOUND_BY_REQUEST,
             {"unit_ref": None},
-            {"numerator_unit": {"currency": "USD", "prices": "current"}},
-            id="a-converted-unit-pins-the-request-object",
+            {},
+            id="a-converted-unit-is-unpinned",
         ),
         pytest.param(
             {"unit_ref": "CurrencyUSD"},

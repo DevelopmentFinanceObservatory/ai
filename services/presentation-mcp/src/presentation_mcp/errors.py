@@ -19,6 +19,10 @@ class PlatformError(Exception):
     that never parsed as a problem document (both leave `code` as `None`)
     stay distinguishable from one another. `cause_code` is the problem's `cause.code`,
     why a refusal fired beneath its `code`, `None` on a refusal with no cause.
+    `limit_name` is the limit a `resource_exhausted` refusal names, the problem
+    body's `limit_name` member. `retry_mode` is the body's `retry_mode` member, what
+    the platform says a caller does with this occurrence, `None` from a platform
+    that states none.
     """
 
     def __init__(
@@ -35,6 +39,8 @@ class PlatformError(Exception):
         truncated: bool = False,
         trace_id: str | None = None,
         cause_code: str | None = None,
+        limit_name: str | None = None,
+        retry_mode: str | None = None,
     ) -> None:
         self.status = status
         self.code = code
@@ -47,6 +53,8 @@ class PlatformError(Exception):
         self.truncated = truncated
         self.trace_id = trace_id
         self.cause_code = cause_code
+        self.limit_name = limit_name
+        self.retry_mode = retry_mode
         super().__init__(f"platform call failed: status={status} code={code}")
 
 

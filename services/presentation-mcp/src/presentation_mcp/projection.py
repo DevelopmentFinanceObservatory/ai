@@ -189,8 +189,9 @@ def title_text(component: Mapping[str, Any]) -> str | None:
 
 def unit_text(unit: Any) -> str:
     """A unit slot as words on one line, whole: `""` for null, a string as
-    given, a structured unit as currency, magnitude, and price basis, and a
-    composed unit as `<numerator> per <denominator>`, each side worded the
+    given, a structured unit as currency, magnitude, and price basis (a
+    constant basis ends with its deflation basis, ", donor prices"),
+    and a composed unit as `<numerator> per <denominator>`, each side worded the
     same way and a StatVar side by its label."""
     if unit is None:
         return ""
@@ -211,7 +212,9 @@ def unit_text(unit: Any) -> str:
             prices = "current prices"
         case _:
             prices = ""
-    return ", ".join(part for part in (words, prices) if part)
+    deflator = unit.get("deflation_basis")
+    deflated_by = f"{deflator} prices" if prices and deflator else ""
+    return ", ".join(part for part in (words, prices, deflated_by) if part)
 
 
 def _unit_part_text(part: Any) -> str:

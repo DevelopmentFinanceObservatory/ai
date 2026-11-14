@@ -51,7 +51,7 @@ values as the assembler gave them (`_presentation_refusal_outcome`).
 `_refusal_outcome` normalises both into the graph's `{"outcome":
 "refusal", "refusal": {code, retry_mode, fix, advice, message, origin}}` so
 the execute node branches on one grammar, plus the refusal's own
-`retry_after_s` when it names one.
+`retry_after_s` and `limit_name` when it names them.
 `origin` says who declined: `"service"` for a refusal an MCP service
 returned, `"harness"` for the three this module builds itself
 (`unknown_tool`, and `resolved_revision_unavailable` or
@@ -1231,13 +1231,15 @@ def _presentation_refusal_outcome(
     platform would accept as `label (ref)` and the violated constraint id,
     and `values`, the mapping fix a retry can use. The refusal's `message` is
     the detail, its `advice` the text and its `fix` the values, or `None`
-    when there are none. The envelope in `structured` writes the advice into
-    its message and a `request_invalid` fix as the arguments to correct.
+    when there are none. A refusal that names the limit it crossed, such as
+    `resource_exhausted` with `MAX_TABLE_ROWS`, carries it as `limit_name`.
+    The envelope in `structured` writes the advice into its message and a
+    `request_invalid` fix as the arguments to correct.
     """
     body = structured or {}
     parts = (meta or {}).get(REFUSAL_META_KEY) or {}
     detail, advice, values = parts.get("detail"), parts.get("advice"), parts.get("values")
-    return _refusal_outcome(
+    outcome = _refusal_outcome(
         {
             **body,
             "message": detail if isinstance(detail, str) else body.get("message"),
@@ -1246,6 +1248,9 @@ def _presentation_refusal_outcome(
         fallback_text=fallback_text,
         advice=advice if isinstance(advice, str) else None,
     )
+    if isinstance(limit_name := parts.get("limit_name"), str):
+        outcome["refusal"]["limit_name"] = limit_name
+    return outcome
 
 
 def _first_line(text: str, *, limit: int = 160) -> str | None:
