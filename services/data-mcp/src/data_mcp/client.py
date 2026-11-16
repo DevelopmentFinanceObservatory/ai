@@ -21,7 +21,7 @@ from typing import Any, Self
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider
-from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
+from common.caller import CALLER_HEADER, CALLER_PRINCIPAL_HEADER, WEBSITE_CALLER, current_caller
 from opentelemetry import trace
 
 from data_mcp.deadline import CallDeadline
@@ -267,14 +267,15 @@ class UpstreamClient:
         """The headers that name the current request's caller to dfo-apis.
 
         The caller principal and the caller, when this process holds the principal
-        (`Settings.dfo_caller_principal`) and the website named the caller by address
-        (`x-dfo-caller: ip:<digest>`), so dfo-apis counts that client's allowance.
+        (`Settings.dfo_caller_principal`) and the website named the caller by address or account
+        (`x-dfo-caller: ip:<digest>` or `user:<digest>`), so dfo-apis counts that
+        client's or account's allowance.
         Empty otherwise, and dfo-apis counts the call against this service.
         """
         caller = current_caller()
         if self._caller_principal is None or caller is None:
             return {}
-        if not ADDRESS_CALLER.fullmatch(caller):
+        if not WEBSITE_CALLER.fullmatch(caller):
             return {}
         return {CALLER_PRINCIPAL_HEADER: self._caller_principal, CALLER_HEADER: caller}
 

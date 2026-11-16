@@ -34,6 +34,7 @@ EXPORT_ID = "exp_" + "a" * 32
 SIGNED = "https://storage.googleapis.com/pinned/sha256:abc?X-Goog-Signature=secret"
 PRINCIPAL = "principal-secret"
 ADDRESS = "ip:" + "0" * 32
+ACCOUNT = "user:" + "1" * 32
 
 FETCHED = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "2" * 32}
 DERIVED = {"spec_id": "ops_" + "3" * 32, "content_version": "ocv_" + "4" * 32}
@@ -276,10 +277,28 @@ async def test_a_bare_derived_id_refuses_frame_ref_incomplete_without_a_call() -
     ("caller", "principal", "sent"),
     [
         (ADDRESS, PRINCIPAL, {CALLER_PRINCIPAL_HEADER: PRINCIPAL, CALLER_HEADER: ADDRESS}),
+        (ACCOUNT, PRINCIPAL, {CALLER_PRINCIPAL_HEADER: PRINCIPAL, CALLER_HEADER: ACCOUNT}),
         (ADDRESS, None, {}),
+        (ACCOUNT, None, {}),
         (conversation_caller("c1"), PRINCIPAL, {}),
+        ("ip:" + "0" * 31, PRINCIPAL, {}),
+        ("user:" + "1" * 31, PRINCIPAL, {}),
+        ("user:" + "1" * 33, PRINCIPAL, {}),
+        ("user:" + "G" * 32, PRINCIPAL, {}),
+        ("user:" + "A" * 32, PRINCIPAL, {}),
     ],
-    ids=["website-caller", "no-principal", "harness-caller"],
+    ids=[
+        "website-caller",
+        "account-caller",
+        "no-principal",
+        "no-principal-account",
+        "harness-caller",
+        "malformed-ip-short",
+        "malformed-user-short",
+        "malformed-user-long",
+        "malformed-user-not-hex",
+        "malformed-user-uppercase",
+    ],
 )
 async def test_the_prepare_names_the_caller_the_website_named(
     caller: str, principal: str | None, sent: dict[str, str]

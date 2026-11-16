@@ -95,7 +95,9 @@ https://developmentfinance.org/mcp
 
 Leave off the trailing slash in every client configuration. The site answers `/mcp/` with a 308 redirect to `/mcp`, which some clients don't follow.
 
-No token is needed. The site forwards each request to the DFO AI service with its own credentials.
+No token is needed for anonymous use. The site forwards each request to the DFO AI service with its own credentials.
+
+An API key is optional and raises the call limit. Developer clients such as Claude Code, Cursor, and VS Code, and Claude custom connectors, can send it as a request header, either `Authorization: Bearer <key>` or `X-API-Key`. ChatGPT connectors cannot send a header, so ChatGPT stays anonymous. [Use an API key](../hub/build/api-keys.md) covers creating and sending one.
 
 ### Tools
 
@@ -240,12 +242,12 @@ If the assistant answers without calling `search`, check that the client lists t
 
 ## Troubleshooting for developers
 
-| Problem                                                                      | Cause                                                                                                          | Fix                                                                          |
-| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Redirect on connect, or "server unreachable" with a 308 in the client's logs | Wrong URL ending                                                                                               | Use `/mcp`, with no slash at the end                                         |
-| `rate_limited` refusal                                                       | The server is over its calls-per-second limit across all callers, or the instance already has 16 calls running | Repeat after the `retry_after_s` the refusal gives                           |
-| HTTP 429 from the site                                                       | One address sent more requests in a minute than the site allows                                                | Wait for the seconds given in the `Retry-After` header                       |
-| `internal_error` refusal                                                     | A tool failed in a way with no specific refusal, and the response says only that it failed on the server       | Send the time of the call and the tool's name to whoever runs the deployment |
+| Problem                                                                      | Cause                                                                                                          | Fix                                                                                               |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Redirect on connect, or "server unreachable" with a 308 in the client's logs | Wrong URL ending                                                                                               | Use `/mcp`, with no slash at the end                                                              |
+| `rate_limited` refusal                                                       | The server is over its calls-per-second limit across all callers, or the instance already has 16 calls running | Repeat after the `retry_after_s` the refusal gives                                                |
+| HTTP 429 from the site                                                       | One address sent more requests in a minute than the site allows. A call with a key counts against its account  | Wait for the seconds in the `Retry-After` header, which every 429 carries. A key raises the limit |
+| `internal_error` refusal                                                     | A tool failed in a way with no specific refusal, and the response says only that it failed on the server       | Send the time of the call and the tool's name to whoever runs the deployment                      |
 
 ## Next
 

@@ -1222,6 +1222,7 @@ async def test_publish_call_carries_the_configured_principal_header(
 
 _CALLER_PRINCIPAL = "website-secret"
 _ADDRESS_CALLER = "ip:" + "0123456789abcdef" * 2
+_ACCOUNT_CALLER = "user:" + "fedcba9876543210" * 2
 
 
 @pytest.mark.parametrize(
@@ -1249,6 +1250,14 @@ _ADDRESS_CALLER = "ip:" + "0123456789abcdef" * 2
         pytest.param(
             Caller.EXTERNAL,
             _PUBLISH_PRINCIPAL,
+            _CALLER_PRINCIPAL,
+            _ACCOUNT_CALLER,
+            {CALLER_PRINCIPAL_HEADER: _CALLER_PRINCIPAL, CALLER_HEADER: _ACCOUNT_CALLER},
+            id="external-account-named-by-website",
+        ),
+        pytest.param(
+            Caller.EXTERNAL,
+            _PUBLISH_PRINCIPAL,
             None,
             _ADDRESS_CALLER,
             {},
@@ -1257,10 +1266,58 @@ _ADDRESS_CALLER = "ip:" + "0123456789abcdef" * 2
         pytest.param(
             Caller.EXTERNAL,
             _PUBLISH_PRINCIPAL,
+            None,
+            _ACCOUNT_CALLER,
+            {},
+            id="external-account-no-caller-principal",
+        ),
+        pytest.param(
+            Caller.EXTERNAL,
+            _PUBLISH_PRINCIPAL,
             _CALLER_PRINCIPAL,
             "conversation:" + "0" * 32,
             {},
-            id="external-not-an-address",
+            id="external-not-a-website-caller",
+        ),
+        pytest.param(
+            Caller.EXTERNAL,
+            _PUBLISH_PRINCIPAL,
+            _CALLER_PRINCIPAL,
+            "ip:" + "0" * 31,
+            {},
+            id="external-malformed-ip",
+        ),
+        pytest.param(
+            Caller.EXTERNAL,
+            _PUBLISH_PRINCIPAL,
+            _CALLER_PRINCIPAL,
+            "user:" + "0" * 31,
+            {},
+            id="external-malformed-user-short",
+        ),
+        pytest.param(
+            Caller.EXTERNAL,
+            _PUBLISH_PRINCIPAL,
+            _CALLER_PRINCIPAL,
+            "user:" + "0" * 33,
+            {},
+            id="external-malformed-user-long",
+        ),
+        pytest.param(
+            Caller.EXTERNAL,
+            _PUBLISH_PRINCIPAL,
+            _CALLER_PRINCIPAL,
+            "user:" + "g" * 32,
+            {},
+            id="external-malformed-user-not-hex",
+        ),
+        pytest.param(
+            Caller.EXTERNAL,
+            _PUBLISH_PRINCIPAL,
+            _CALLER_PRINCIPAL,
+            "user:" + "A" * 32,
+            {},
+            id="external-malformed-user-uppercase",
         ),
         pytest.param(
             Caller.EXTERNAL, _PUBLISH_PRINCIPAL, _CALLER_PRINCIPAL, None, {}, id="external-unnamed"
