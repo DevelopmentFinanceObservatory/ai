@@ -78,7 +78,7 @@ from typing import Annotated, Any
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider, apis_auth_provider
-from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
+from common.caller import CALLER_HEADER, CALLER_PRINCIPAL_HEADER, WEBSITE_CALLER, current_caller
 from common.derived_replay import (
     ANALYSIS_PATH,
     DEFAULT_RETRY_AFTER_S,
@@ -187,7 +187,7 @@ class RunnerClient:
         caller = current_caller()
         if self._caller_principal is None or caller is None:
             return {}
-        if not ADDRESS_CALLER.fullmatch(caller):
+        if not WEBSITE_CALLER.fullmatch(caller):
             return {}
         return {CALLER_PRINCIPAL_HEADER: self._caller_principal, CALLER_HEADER: caller}
 

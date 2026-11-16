@@ -14,6 +14,7 @@ from common.caller import (
     ANONYMOUS_WRITER,
     CALLER_HEADER,
     MAX_CALLER_CHARS,
+    WEBSITE_CALLER,
     conversation_caller,
     current_caller,
     current_writer,
@@ -147,3 +148,28 @@ def test_a_conversation_caller_is_a_fixed_length_digest_of_the_key() -> None:
     assert "u_0123456789abcdef" not in caller
     assert conversation_caller(key) == caller
     assert conversation_caller("u/a") != conversation_caller("u/b")
+
+
+@pytest.mark.parametrize("caller", ["ip:" + "0" * 32, "user:" + "0123456789abcdef" * 2])
+def test_website_caller_matches_the_forms_dfo_apis_accepts(caller: str) -> None:
+    assert WEBSITE_CALLER.fullmatch(caller)
+
+
+@pytest.mark.parametrize(
+    "caller",
+    [
+        "key:" + "0" * 32,
+        "conversation:" + "0" * 32,
+        "ip:" + "0" * 31,
+        "user:" + "0" * 31,
+        "user:" + "0" * 33,
+        "user:" + "g" * 32,
+        "user:" + "A" * 32,
+        "user:" + "0" * 32 + "\n",
+        " user:" + "0" * 32,
+        "user:edge",
+        "",
+    ],
+)
+def test_website_caller_rejects_every_other_form(caller: str) -> None:
+    assert WEBSITE_CALLER.fullmatch(caller) is None

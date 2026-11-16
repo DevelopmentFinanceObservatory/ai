@@ -3,7 +3,9 @@
 A caller is an opaque string with a kind prefix, carried in the
 `x-dfo-caller` request header: `conversation:<digest>` from the harness
 (`conversation_caller`), and
-`ip:`, `key:` or `user:` from the website's edge. A request without the
+`ip:` or `user:` from the website's edge: the client's address, or the
+account an API key belongs to (limits are per account), each as 32 hex digits
+of an HMAC digest, never the address or account id itself. A request without the
 header has no caller, and `current_caller` returns `None` for it. Nothing
 here generates an identity in its place.
 
@@ -28,14 +30,16 @@ from contextvars import ContextVar
 CALLER_HEADER = "x-dfo-caller"
 
 # Sent beside `CALLER_HEADER` to dfo-apis on an external caller's calls, when the
-# website named that caller by address: the secret dfo-apis shares with the
+# website named that caller by address or account: the secret dfo-apis shares with the
 # website, which vouches for the caller it names
 # (`dfo_platform.caller.resolve_caller`).
 CALLER_PRINCIPAL_HEADER = "x-dfo-caller-principal"
 
-# The form of a caller the website named by its client's address. dfo-apis
-# accepts no other form beside `CALLER_PRINCIPAL_HEADER`.
-ADDRESS_CALLER = re.compile(r"ip:[0-9a-f]{32}")
+# The forms of a caller the website names: `ip:` for its client's address and
+# `user:` for the account behind an API key, each 32 lowercase hex digits.
+# dfo-apis accepts no other form beside `CALLER_PRINCIPAL_HEADER`, so a caller
+# that does not match is not forwarded.
+WEBSITE_CALLER = re.compile(r"(?:ip|user):[0-9a-f]{32}")
 
 # The longest caller `current_caller` accepts. The frame store writes the
 # caller into GCS object metadata, which holds 8 KiB in all.

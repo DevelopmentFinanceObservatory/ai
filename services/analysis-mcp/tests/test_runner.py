@@ -47,6 +47,7 @@ _DERIVED = {"spec_id": _OPS, "content_version": _OCV}
 _OTHER_SPEC = "spec_" + "7" * 32
 _OTHER_FRAME = {"spec_id": _OTHER_SPEC, "content_version": "cv_" + "8" * 32}
 _ADDRESS_CALLER = "ip:" + "a" * 32
+_ACCOUNT_CALLER = "user:" + "b" * 32
 _SUM = {"by": ["time_period"], "op": "sum"}
 _BREAKDOWN = {"by": ["crsPurpose", "time_period"], "op": "sum", "levels": {"crsPurpose": 1}}
 
@@ -655,10 +656,32 @@ def test_a_summary_holds_only_the_entries_its_digest_shows(
             "secret",
             {"x-dfo-caller-principal": "secret", "x-dfo-caller": _ADDRESS_CALLER},
         ),
+        (
+            _ACCOUNT_CALLER,
+            "secret",
+            {"x-dfo-caller-principal": "secret", "x-dfo-caller": _ACCOUNT_CALLER},
+        ),
         (_ADDRESS_CALLER, None, {}),
+        (_ACCOUNT_CALLER, None, {}),
         ("conversation:" + "b" * 32, "secret", {}),
+        ("ip:" + "a" * 31, "secret", {}),
+        ("user:" + "b" * 31, "secret", {}),
+        ("user:" + "b" * 33, "secret", {}),
+        ("user:" + "g" * 32, "secret", {}),
+        ("user:" + "B" * 32, "secret", {}),
     ],
-    ids=["website-client", "no-principal", "harness-conversation"],
+    ids=[
+        "website-client",
+        "website-account",
+        "no-principal",
+        "no-principal-account",
+        "harness-conversation",
+        "malformed-ip-short",
+        "malformed-user-short",
+        "malformed-user-long",
+        "malformed-user-not-hex",
+        "malformed-user-uppercase",
+    ],
 )
 async def test_a_website_caller_is_named_beside_the_principal(
     store: InMemoryMaterialisationStore,
