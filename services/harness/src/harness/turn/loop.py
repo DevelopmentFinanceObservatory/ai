@@ -74,12 +74,13 @@ class NoEdge(Exception):  # noqa: N818 -- names the missing edge
 
 
 @dataclass(frozen=True)
-class Graph:
+class Graph[E]:
     """The nodes by name, the edges by `(node, label)`, and the node a turn
-    opens at. Every edge leaves a node and reaches a node or `END`."""
+    opens at. Every edge leaves a node and reaches a node or `END`. `E` is
+    the type of the events the nodes emit beside the loop's own."""
 
     start: str
-    nodes: Mapping[str, Node]
+    nodes: Mapping[str, Node[E]]
     edges: Mapping[tuple[str, str], str]
 
     def __post_init__(self) -> None:
@@ -143,7 +144,7 @@ async def _close_on_error(
     return segment
 
 
-async def _after_commit(ctx: NodeCtx, node: str) -> None:
+async def _after_commit(ctx: NodeCtx[Any], node: str) -> None:
     """Run the node's `after_commit` work. A failure is logged: the write
     before it holds the node's outcome, and a crash between the two loses
     the work the same way."""
@@ -154,7 +155,7 @@ async def _after_commit(ctx: NodeCtx, node: str) -> None:
             logger.exception("turn node %s: work after its commit failed", node)
 
 
-def _following(graph: Graph, node: str, result: Next | Pause) -> str | None:
+def _following(graph: Graph[Any], node: str, result: Next | Pause) -> str | None:
     """The node `result` leads to, or `None` for a pause."""
     if isinstance(result, Pause):
         return None
@@ -179,7 +180,7 @@ async def _write_boundary(
     result: Next | Pause,
     following: str | None,
     interrupt_id: str,
-    ctx: NodeCtx,
+    ctx: NodeCtx[Any],
 ) -> Cursor:
     """The write that records `node`'s `result`: a pause under
     `interrupt_id`, the turn's end, or the move to `following`."""
@@ -236,16 +237,16 @@ class _Closes(Exception):  # noqa: N818 -- carries the close, not an error kind
         self.error = error
 
 
-async def _enter(
+async def _enter[E](
     store: TurnStore,
     segment: Segment,
     transcript: Transcript,
     *,
     key: TurnKey,
-    graph: Graph,
+    graph: Graph[E],
     segment_id: str,
     answer: Answer | None,
-) -> tuple[Node, dict[str, Any] | None]:
+) -> tuple[Node[E], dict[str, Any] | None]:
     """The node at the cursor and the answer it owes its `resume`, if any:
     `answer`, accepted here, or the answer the cursor owes from before a
     crash.
@@ -297,20 +298,23 @@ async def _enter(
     return target, owed
 
 
-async def drive(
+async def drive[E](
     store: TurnStore,
     segment: Segment,
     *,
     key: TurnKey,
-    graph: Graph,
+    graph: Graph[E],
     segment_id: str,
-    emit: Callable[[TurnEvent], None],
+    emit: Callable[[E | TurnEvent], None],
     stop: StopScope,
     answer: Answer | None = None,
 ) -> Segment:
     """Run the turn from where `segment.cursor` stands until it pauses or
     ends, writing each boundary under `segment_id`'s lease, and return
     `segment` with its last cursor and outcome.
+
+    `emit` hears the loop's own `TurnEvent`s and every event of the graph's own
+    type `E` its nodes emit, in the order they happen.
 
     The turn's specs and transcript are read in one snapshot that also
     checks the cursor is still current (`TurnStore.load`), so the caller
@@ -350,7 +354,7 @@ async def drive(
     cursor = segment.cursor
 
     while True:
-        ctx = NodeCtx(
+        ctx = NodeCtx[E](
             key=key,
             inputs=cursor.inputs,
             state=cursor.state,
@@ -429,7 +433,7 @@ async def _settle(store: TurnStore, segment: Segment, *, cut_by: Outcome, segmen
         )
 
 
-async def run_segment(
+async def run_segment[E](
     store: TurnStore,
     lease: StudioStore,
     cursor: Cursor,
@@ -437,8 +441,8 @@ async def run_segment(
     principal: str,
     conversation_id: str,
     segment_id: str,
-    graph: Graph,
-    emit: Callable[[TurnEvent], None],
+    graph: Graph[E],
+    emit: Callable[[E | TurnEvent], None],
     answer: Answer | None = None,
     heartbeat_seconds: float = HEARTBEAT_INTERVAL_S,
 ) -> Segment:

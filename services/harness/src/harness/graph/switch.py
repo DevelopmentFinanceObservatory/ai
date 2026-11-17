@@ -80,6 +80,7 @@ from compiler.sources import readable_wire_groups
 from compiler.surface import ToolSurface
 from data_mcp.scope import ScopeEntry
 from google.adk import Context, Event
+from orchestrator.call import OrchestratorCall
 from planner.plan import (
     AlignedInput,
     DatasetRequirement,
@@ -114,7 +115,9 @@ from translator.discovery import (
 )
 
 from harness.decision_pick import picks_the_chosen_option
+from harness.graph.events import GraphEvent
 from harness.graph.interfaces import PlannerModel
+from harness.graph.orchestrate import turn_id
 from harness.graph.state import (
     ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -137,6 +140,7 @@ from harness.scope_choices import (
 )
 from harness.sentences import StopCode
 from harness.tool_contracts import resolver_digest
+from harness.turn.node import NodeCtx
 from harness.turn_records import CHIP_STALE_NOTE, SearchReading, stored_choice
 
 logger = logging.getLogger(__name__)
@@ -973,7 +977,7 @@ def _drafting(key: str) -> bool:
 
 
 async def apply_stored_choice(
-    ctx: Context,
+    ctx: NodeCtx[GraphEvent],
     *,
     choice_id: str,
     option_id: str,
@@ -1097,7 +1101,11 @@ async def apply_stored_choice(
     # One fetch per way the answer fetched the reading, one after another, as
     # the agent's own calls run.
     fetched = [
-        await fetch(spec_id=switched.spec_id, tool_context=ctx, **shaped)
+        await fetch(
+            spec_id=switched.spec_id,
+            call=OrchestratorCall(state=ctx.state, turn_id=turn_id(ctx.key)),
+            **shaped,
+        )
         for shaped in (reading.fetch.args if reading.fetch is not None else ()) or ({},)
     ]
     held = choice.active_option

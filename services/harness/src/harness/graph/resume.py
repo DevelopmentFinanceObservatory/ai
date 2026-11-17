@@ -35,8 +35,7 @@ which is logged and leaves the run as it is, for the next turn to carry on
 until the resume bound (`executor.ledger.MAX_PUBLICATION_RESUMES`,
 `MAX_PENDING_AGE`) ends it; any other exception is logged and the run
 recorded failed (`resume_failed`), so no later turn tries it again. The
-`seed` node calls this, so its `_turn_ran_before` guard keeps a resumed turn
-from doing it twice.
+`seed` node calls this, as the turn's first node.
 """
 
 from __future__ import annotations
@@ -67,7 +66,6 @@ from executor.run import (
     load_submission,
     resume_run,
 )
-from google.adk import Context
 
 from harness.graph.answer import (
     answer_frames,
@@ -77,10 +75,12 @@ from harness.graph.answer import (
     stored_run_plan,
 )
 from harness.graph.delivery import Delivery, deliver
+from harness.graph.events import GraphEvent
 from harness.graph.interfaces import Executor
 from harness.graph.plan_done import HandBack, StepSummary
 from harness.plan_display import share_wholes
 from harness.tool_contracts import HarnessCode
+from harness.turn.node import NodeCtx
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,7 @@ class Resumed:
     acknowledge: Callable[[], Awaitable[None]]
 
 
-type ResumeRuns = Callable[[Context], Awaitable[Resumed | None]]
+type ResumeRuns = Callable[[NodeCtx[GraphEvent]], Awaitable[Resumed | None]]
 
 
 def run_resumer(
@@ -126,7 +126,7 @@ def run_resumer(
     a completed run's frames through `executor` so the agent can chart them.
     Without a `tool_surface`, no run is carried on."""
 
-    async def resume(ctx: Context) -> Resumed | None:
+    async def resume(ctx: NodeCtx[GraphEvent]) -> Resumed | None:
         """The hand-back naming each run carried on and its standing, or
         `None` when the ledger holds no unfinished run or cannot be read."""
         if tool_surface is None:
@@ -169,7 +169,7 @@ def run_resumer(
         return Resumed(hand_back=hand_back, acknowledge=acknowledge)
 
     async def carry_on(
-        ctx: Context, run: RunRecord, surface: ToolSurface
+        ctx: NodeCtx[GraphEvent], run: RunRecord, surface: ToolSurface
     ) -> tuple[dict[str, Any], Delivery | None]:
         """Carry `run` on, and return its standing as the agent reads it and,
         for a completed run, its delivery by that standing."""

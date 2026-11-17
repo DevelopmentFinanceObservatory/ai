@@ -19,7 +19,6 @@ from analysis_mcp.execution_identity import current_execution_identity
 from common.materialisation import FrameRef
 from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp import get_data_digest
-from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar import Frame
 from executor.completion import PublishFault
 from executor.ledger import InMemoryRunLedger
@@ -32,7 +31,6 @@ from harness import plan_display
 from harness.conversation import current_conversation_id
 from harness.graph import execute as execute_module
 from harness.graph import plan_done as plan_done_module
-from harness.graph.orchestrate import orchestrate_node
 from harness.graph.plan_done import (
     _DROPPED,
     HandBack,
@@ -43,12 +41,9 @@ from harness.graph.plan_done import (
 )
 from harness.graph.state import (
     APPROVE_INTERRUPT,
-    CLARIFY_INTERRUPT,
-    ORCHESTRATOR_ASKED_KEY,
     ORCHESTRATOR_BRIEF_KEY,
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
-    ORCHESTRATOR_PENDING_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_READINGS_KEY,
@@ -60,9 +55,6 @@ from harness.graph.state import (
     AskOption,
     AskQuestion,
     GraphState,
-    PendingAsk,
-    ask_questions,
-    pending_action,
 )
 from harness.graph.workflow import planner_entry
 from harness.orchestrator_tools import HANDED_OFF, build_orchestrator_tools
@@ -73,7 +65,7 @@ from harness.sentences import DECLINE_REASONS
 from harness.settings import Settings
 from harness.studio_translate import _RecordingSurface
 from harness.tool_contracts import HarnessCode
-from harness.turn_records import PlanAsk, PlanRecord, SearchReading, WindowReading
+from harness.turn_records import PlanAsk, PlanRecord
 from harness.wiring import handing_back_planner_failures
 from planner.call import CallSession
 from planner.plan import (
@@ -117,7 +109,6 @@ from .orchestrator_fakes import (
     stream,
     studio_client,
     turn_body,
-    visited_nodes,
 )
 from .scripted_genai import ScriptedGenai, reply, text_part
 
@@ -153,20 +144,6 @@ async def _describes(*, tool: str, args: dict[str, Any], on_progress: Any = None
 _SCRIPTED_SPEC = "spec_" + "f" * 32
 
 
-async def test_an_answered_turn_ends_after_the_agent_without_a_pause():
-    runner, model = orchestrator_runner(
-        types.Part.from_text(text="Kenya's GDP was $101 billion in 2020.")
-    )
-    await open_session(runner)
-
-    events = await run_turn(runner, types.UserContent("Kenya's GDP in 2020?"))
-
-    assert request_text(model.requests[0]).count("Kenya's GDP in 2020?") == 1
-    assert not [e for e in events if e.error_code]
-    assert not [c for e in events for c in e.get_function_calls() if c.name == "adk_request_input"]
-    assert "route" in visited_nodes(events) and "ask" not in visited_nodes(events)
-
-
 _CONGO = {
     "question": "Which Congo?",
     "options": [{"label": "Republic of the Congo"}, {"label": "DR Congo"}],
@@ -177,158 +154,6 @@ _SETTLED = "Each answered choice is settled. Do not ask it again."
 def _answers(**answers: dict[str, Any]) -> dict[str, Any]:
     """The clarify interrupt's resume value: one answer per question id."""
     return {"answers": answers}
-
-
-@pytest.mark.parametrize(
-    "answer",
-    [_answers(q1={"kind": "option", "spec_id": "o1"}), {"spec_id": "o1"}],
-    ids=["answers", "legacy_pick"],
-)
-async def test_ask_pauses_with_generated_option_ids_and_hands_the_choice_back_in_words(
-    answer: dict[str, Any],
-):
-    runner, model = orchestrator_runner(
-        call("ask_user", questions=[_CONGO]),
-        types.Part.from_text(text="The Republic of the Congo's GDP was $15.7 billion in 2024."),
-    )
-    await open_session(runner)
-
-    pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
-    assert pause.id == CLARIFY_INTERRUPT
-    assert pause.args["payload"] == {
-        "questions": [
-            {
-                "id": "q1",
-                "question": "Which Congo?",
-                "candidates": [
-                    {"spec_id": "o1", "label": "Republic of the Congo"},
-                    {"spec_id": "o2", "label": "DR Congo"},
-                ],
-            }
-        ]
-    }
-    reply = create_request_input_response(pause.id, {"result": answer})
-    events = await run_turn(runner, types.Content(role="user", parts=[reply]))
-
-    resumed = request_text(model.requests[-1])
-    assert "GDP of Congo?" in resumed
-    assert (
-        f"You asked the user: Which Congo?\nThe user chose: Republic of the Congo\n{_SETTLED}"
-        in resumed
-    )
-    assert not carries_an_interrupt(model.requests[-1])
-    assert not quotes_another_agent(model.requests[-1])
-    assert not [e for e in events if e.error_code]
-
-
-_GROSS, _NET = "spec_" + "a" * 32, "spec_" + "c" * 32
-
-
-@pytest.mark.parametrize(
-    ("answer", "expected"),
-    [
-        (
-            _answers(q1={"kind": "option", "spec_id": _NET}, q2={"kind": "skipped"}),
-            [
-                f"1. How should aid be counted? The user chose: net disbursements ({_NET})",
-                "2. In which prices? The user left this to you. Go on with Current US dollars.",
-                _SETTLED,
-            ],
-        ),
-        (
-            _answers(
-                q1={"kind": "option", "spec_id": "o3"},
-                q2={"kind": "text", "text": "2015 dollars"},
-            ),
-            [
-                "1. How should aid be counted? The user chose: Either",
-                "2. In which prices? The user answered in their own words: 2015 dollars",
-                _SETTLED,
-            ],
-        ),
-        (
-            _answers(q2={"kind": "option", "spec_id": "o2"}),
-            [
-                "1. How should aid be counted? The user left this to you. Go on with "
-                "gross disbursements.",
-                "2. In which prices? The user chose: Constant 2023 US dollars",
-                _SETTLED,
-            ],
-        ),
-        (
-            {"skip": True},
-            [
-                "1. How should aid be counted?",
-                "2. In which prices?",
-                "The user skipped the questions. Do not answer them",
-            ],
-        ),
-    ],
-    ids=["count_and_skipped", "other_and_free_text", "unanswered", "dismissed"],
-)
-async def test_several_questions_pause_together_and_each_answer_is_handed_back(
-    answer: dict[str, Any], expected: list[str]
-):
-    block = {
-        "spec_id": _GROSS,
-        "resolved": {
-            "measure_label": "gross disbursements",
-            "alternative_measures": [
-                {"label": "net disbursements", "axis": "what", "definition": {"spec_id": _NET}}
-            ],
-        },
-    }
-    runner, model = orchestrator_runner(
-        call(
-            "ask_user",
-            questions=[
-                {
-                    "question": "How should aid be counted?",
-                    "options": [
-                        {"label": "gross disbursements", "spec_id": _GROSS},
-                        {"label": "net disbursements", "spec_id": _NET},
-                        {"label": "Either"},
-                    ],
-                },
-                {
-                    "question": "In which prices?",
-                    "options": [
-                        {"label": "Current US dollars"},
-                        {"label": "Constant 2023 US dollars"},
-                    ],
-                },
-            ],
-        ),
-        types.Part.from_text(text="Done."),
-    )
-    await open_session(runner, **{ORCHESTRATOR_SPECS_KEY: {_GROSS: block}})
-
-    pause = single_pause(await run_turn(runner, types.UserContent("Aid from France to Kenya?")))
-    assert pause.args["message"] == "How should aid be counted?"
-    assert pause.args["payload"]["questions"] == [
-        {
-            "id": "q1",
-            "question": "How should aid be counted?",
-            "candidates": [
-                {"spec_id": _GROSS, "label": "gross disbursements"},
-                {"spec_id": _NET, "label": "net disbursements"},
-                {"spec_id": "o3", "label": "Either"},
-            ],
-        },
-        {
-            "id": "q2",
-            "question": "In which prices?",
-            "candidates": [
-                {"spec_id": "o1", "label": "Current US dollars"},
-                {"spec_id": "o2", "label": "Constant 2023 US dollars"},
-            ],
-        },
-    ]
-    reply = create_request_input_response(pause.id, {"result": answer})
-    events = await run_turn(runner, types.Content(role="user", parts=[reply]))
-
-    assert "\n".join(["You asked the user:", *expected]) in request_text(model.requests[-1])
-    assert not [e for e in events if e.error_code]
 
 
 # Search's answer to "Bilateral plus imputed multilateral aid from France to
@@ -375,158 +200,6 @@ def _france_kenya_with_constant_prices(*, net_qualifier: str) -> dict[str, Any]:
         {**constant, "label": "constant prices", "axis": "unit"},
     ]
     return block
-
-
-def _open_reading(spec_id: str) -> dict[str, Any]:
-    """A `definite` reading of `spec_id` over 2018 to 2022, as `store_search` keeps it."""
-    return SearchReading(
-        text=None,
-        status="definite",
-        spec_id=spec_id,
-        window=WindowReading(start=2018, end=2022, source="requested"),
-    ).model_dump(mode="json")
-
-
-_USD_BLOCK_UNIT = {
-    "basis": "fallback",
-    "ref": "CurrencyUSD",
-    "label": "US Dollar",
-    "currency": "USD",
-}
-
-
-def _usd_block(spec_id: str) -> dict[str, Any]:
-    """A spec block in current US dollars, so its prices are open over several years."""
-    return {"spec_id": spec_id, "resolved": {"facets": {"unit": _USD_BLOCK_UNIT}}}
-
-
-_OTHER = "spec_" + "b" * 32
-
-
-async def test_a_prices_question_takes_its_options_from_its_part_s_open_prices():
-    """Two parts whose prices are open, worded alike. Each prices question
-    names its part, and code gives it that part's `open_prices` entries,
-    marked with the part and their prices. A pick of constant prices no
-    search listed asks for a search of that part."""
-    runner, model = orchestrator_runner(
-        call(
-            "ask_user",
-            questions=[
-                {"question": "Aid in which prices?", "prices_of": _GROSS},
-                {"question": "GDP in which prices?", "prices_of": _OTHER},
-            ],
-        ),
-        types.Part.from_text(text="Done."),
-    )
-    await open_session(
-        runner,
-        **{
-            ORCHESTRATOR_SPECS_KEY: {spec: _usd_block(spec) for spec in (_GROSS, _OTHER)},
-            ORCHESTRATOR_SEARCHES_KEY: [_open_reading(spec) for spec in (_GROSS, _OTHER)],
-        },
-    )
-
-    pause = single_pause(await run_turn(runner, types.UserContent("Aid and GDP, 2018-2022?")))
-    assert [q["candidates"] for q in pause.args["payload"]["questions"]] == [
-        [
-            {"spec_id": "o1", "label": "current prices", "part": part, "prices": "current"},
-            {"spec_id": "o2", "label": "constant prices", "part": part, "prices": "constant"},
-        ]
-        for part in (_GROSS, _OTHER)
-    ]
-    reply = create_request_input_response(
-        pause.id,
-        {
-            "result": _answers(
-                q1={"kind": "option", "spec_id": "o1"}, q2={"kind": "option", "spec_id": "o2"}
-            )
-        },
-    )
-    await run_turn(runner, types.Content(role="user", parts=[reply]))
-
-    asked = request_text(model.requests[-1])
-    assert (
-        f"The user chose: constant prices, which no search listed. Search once for that part "
-        f"({_OTHER}) in constant prices." in asked
-    )
-    assert f"({_GROSS}) in constant prices" not in asked
-
-
-async def test_two_prices_questions_on_one_part_are_refused():
-    """Two questions pricing one part would let the later answer override the
-    earlier one in silence, so `ask_user` refuses the call and nothing pauses."""
-    runner, _ = orchestrator_runner(
-        call(
-            "ask_user",
-            questions=[
-                {"question": "Aid in which prices?", "prices_of": _GROSS},
-                {"question": "And in which prices again?", "prices_of": _GROSS},
-            ],
-        ),
-        types.Part.from_text(text="Done."),
-    )
-    await open_session(
-        runner,
-        **{
-            ORCHESTRATOR_SPECS_KEY: {_GROSS: _usd_block(_GROSS)},
-            ORCHESTRATOR_SEARCHES_KEY: [_open_reading(_GROSS)],
-        },
-    )
-
-    events = await run_turn(runner, types.UserContent("Aid, 2018-2022?"))
-
-    assert not [c for e in events for c in e.get_function_calls() if c.name == "adk_request_input"]
-    (refused,) = [
-        r.response for e in events for r in e.get_function_responses() if r.name == "ask_user"
-    ]
-    assert refused is not None
-    assert refused["code"] == ToolErrorCode.REQUEST_INVALID.value
-    assert f"{_GROSS} is priced by more than one question" in refused["refusal"]
-
-
-@pytest.mark.parametrize("same_measure", [True, False], ids=["two-windows", "two-counts"])
-async def test_two_windows_of_one_measure_take_one_prices_question(same_measure: bool):
-    """Two readings of one measure over different years are one part, so two
-    prices questions on them are refused, and nothing pauses. Two readings of
-    different counts each take their own question."""
-    other = copy.deepcopy(_FRANCE_KENYA)
-    other["spec_id"] = other["definition"]["spec_id"] = _OTHER
-    identity = other["definition"]["identity"]
-    if same_measure:
-        identity["requested_window"] = {"kind": "range", "start": 2010, "end": 2014}
-    else:
-        for slot in identity["slots"]:
-            if slot["property"] == "nettingBasis":
-                slot["binding"]["ref"] = "Net"
-    runner, _ = orchestrator_runner(
-        call(
-            "ask_user",
-            questions=[
-                {"question": "Aid to 2014 in which prices?", "prices_of": _OTHER},
-                {"question": "Aid since 2018 in which prices?", "prices_of": _FK_GROSS},
-            ],
-        ),
-        types.Part.from_text(text="Done."),
-    )
-    await open_session(
-        runner,
-        **{
-            ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: _FRANCE_KENYA, _OTHER: other},
-            ORCHESTRATOR_SEARCHES_KEY: [_open_reading(_FK_GROSS), _open_reading(_OTHER)],
-        },
-    )
-
-    events = await run_turn(runner, types.UserContent("Aid to 2014 against since 2018?"))
-
-    paused = [c for e in events for c in e.get_function_calls() if c.name == "adk_request_input"]
-    assert (not paused) is same_measure
-    if same_measure:
-        (refused,) = [
-            r.response for e in events for r in e.get_function_responses() if r.name == "ask_user"
-        ]
-        assert refused is not None
-        assert refused["code"] == ToolErrorCode.REQUEST_INVALID.value
-        assert "measure one thing over other years" in refused["refusal"]
 
 
 _COUNT_AND_PRICES = [
@@ -662,100 +335,6 @@ async def test_a_count_and_prices_picked_together_name_the_one_reading_with_both
     tool_context = SimpleNamespace(state=session.state, function_call_id=None, session=session)
     chosen = CallSession(SessionCall.of(cast(Any, tool_context))).elected_spec_ids()
     assert {spec_id for spec_id in chosen if spec_id.startswith("spec_")} == elected
-
-
-@pytest.mark.parametrize(
-    ("answer", "expected"),
-    [
-        ({"text": "the big one"}, "The user answered in their own words: the big one"),
-        (
-            _answers(q1={"kind": "text", "text": "the big one"}),
-            "The user answered in their own words: the big one",
-        ),
-        ({"skip": True}, "The user skipped the question. Do not answer it"),
-    ],
-    ids=["legacy_text", "answers_text", "dismissed"],
-)
-async def test_a_free_text_answer_and_a_skip_are_handed_back_as_such(
-    answer: dict[str, Any], expected: str
-):
-    runner, model = orchestrator_runner(
-        call("ask_user", questions=[_CONGO]),
-        types.Part.from_text(text="Done."),
-    )
-    await open_session(runner)
-    pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
-
-    reply = create_request_input_response(pause.id, {"result": answer})
-    await run_turn(runner, types.Content(role="user", parts=[reply]))
-
-    assert expected in request_text(model.requests[-1])
-
-
-@pytest.mark.parametrize(
-    "options",
-    [
-        ["Republic of the Congo", "DR Congo"],
-        [{"label": "Republic of the Congo", "spec_id": None}, {"label": "DR Congo"}],
-    ],
-    ids=["bare_labels", "options"],
-)
-@pytest.mark.parametrize(
-    ("answer", "expected"),
-    [
-        ({"spec_id": "o2"}, "The user chose: DR Congo"),
-        (_answers(q1={"kind": "option", "spec_id": "o2"}), "The user chose: DR Congo"),
-        ({"text": "the big one"}, "The user answered in their own words: the big one"),
-        ({"skip": True}, "The user skipped the question. Do not answer it"),
-    ],
-    ids=["legacy_pick", "answers_pick", "text", "dismissed"],
-)
-async def test_a_question_paused_in_the_one_question_shape_resumes(
-    options: list[Any], answer: dict[str, Any], expected: str
-):
-    """A question held in the one-question shape `{kind, question, options}`
-    resumes, whether its options are bare labels or option objects."""
-    runner, model = orchestrator_runner(
-        call("ask_user", questions=[_CONGO]),
-        types.Part.from_text(text="Done."),
-    )
-    await open_session(runner)
-    pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
-    _stored_state(runner)[ORCHESTRATOR_ASKED_KEY] = {
-        "kind": "ask",
-        "question": "Which Congo?",
-        "options": options,
-    }
-
-    reply = create_request_input_response(pause.id, {"result": answer})
-    events = await run_turn(runner, types.Content(role="user", parts=[reply]))
-
-    assert not [e for e in events if e.error_code]
-    assert f"You asked the user: Which Congo?\n{expected}" in request_text(model.requests[-1])
-
-
-def test_a_pending_question_stored_in_the_one_question_shape_reads_as_one_question():
-    state = {
-        ORCHESTRATOR_PENDING_KEY: {
-            "kind": "ask",
-            "question": "Which Congo?",
-            "options": ["Republic of the Congo", "DR Congo"],
-        }
-    }
-
-    pending = pending_action(state)
-
-    assert isinstance(pending, PendingAsk)
-    assert ask_questions(pending.questions) == [
-        {
-            "id": "q1",
-            "question": "Which Congo?",
-            "candidates": [
-                {"spec_id": "o1", "label": "Republic of the Congo"},
-                {"spec_id": "o2", "label": "DR Congo"},
-            ],
-        }
-    ]
 
 
 async def test_a_planner_that_refuses_hands_back_and_the_agent_keeps_the_question():
@@ -1064,21 +643,6 @@ async def test_a_hand_back_in_history_is_the_one_result_of_its_plan_call():
         "You asked the user: Which Congo?\nThe user chose: Republic of the Congo"
     )
     _assert_one_result_per_call(request)
-
-
-@pytest.mark.parametrize("answers", ["plan", "ask_user"])
-async def test_an_answer_no_call_waits_on_is_refused_and_not_read_as_a_seed(answers: str):
-    """A hand-back that answers a call finds no call of the agent's waiting
-    on it: `orchestrate` raises, and records no seed hand-back."""
-    orchestrate = orchestrate_node(
-        orchestrator=cast("Any", SimpleNamespace(name="dfo_orchestrator"))
-    )
-    ctx = SimpleNamespace(session=SimpleNamespace(events=[]), state={}, event_author="orchestrate")
-    hand_back = {"answers": answers, "status": "Reading", "text": "The approved plan ran."}
-
-    with pytest.raises(RuntimeError, match=f"no {answers} call"):
-        [_ async for _ in orchestrate(cast("Any", ctx), hand_back)]
-    assert ctx.state == {}
 
 
 async def test_a_tool_that_raises_answers_the_agent_with_its_class_and_the_turn_goes_on(caplog):

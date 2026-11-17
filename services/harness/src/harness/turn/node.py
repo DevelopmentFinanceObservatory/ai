@@ -8,6 +8,10 @@ or `Pause` (a question for the user). A node that pauses also has a
 raised exception: the loop records it on the turn's cursor and ends the
 turn.
 
+A node's events have a type of the graph's own, `E`, which the loop passes
+to the caller's `emit` beside its own `TurnEvent`s; the loop reads none of
+them.
+
 A node never writes the store. It reads and changes `ctx.state`,
 `ctx.specs` and `ctx.transcript`, and the loop writes all three with the
 cursor at the node's boundary. Changes since the last boundary die with the
@@ -89,16 +93,17 @@ class StopScope:
 
 
 @dataclass
-class NodeCtx:
+class NodeCtx[E]:
     """What a node reads and writes.
 
     `inputs` are the turn's inputs, fixed when it opened. `state` is the
     turn-scoped state the nodes share and `specs` the turn's spec blocks by
     spec id; `transcript` holds the agents' records. The loop writes all
     three with the cursor at the node's boundary. `emit` streams an event to
-    the client at once. `stop` is the turn's `StopScope`. `after_commit`
-    registers work that must follow the boundary's write, such as
-    acknowledging what a hand-back delivered.
+    the client at once: one of the graph's own (`E`), or a `TurnEvent`.
+    `stop` is the turn's `StopScope`. `after_commit` registers work that must
+    follow the boundary's write, such as acknowledging what a hand-back
+    delivered.
     """
 
     key: TurnKey
@@ -106,7 +111,7 @@ class NodeCtx:
     state: dict[str, Any]
     specs: dict[str, dict[str, Any]]
     transcript: Transcript
-    emit: Callable[[TurnEvent], None]
+    emit: Callable[[E | TurnEvent], None]
     stop: StopScope
     committed: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
 
@@ -115,14 +120,14 @@ class NodeCtx:
         self.committed.append(work)
 
 
-type Run = Callable[[NodeCtx, Any], Awaitable[Next | Pause]]
-type Resume = Callable[[NodeCtx, Any, dict[str, Any]], Awaitable[Next | Pause]]
+type Run[E] = Callable[[NodeCtx[E], Any], Awaitable[Next | Pause]]
+type Resume[E] = Callable[[NodeCtx[E], Any, dict[str, Any]], Awaitable[Next | Pause]]
 
 
 @dataclass(frozen=True)
-class Node:
+class Node[E]:
     """One node: `run` on entry with the node's input, and, for a node that
     pauses, `resume` with the same input and the user's answer."""
 
-    run: Run
-    resume: Resume | None = None
+    run: Run[E]
+    resume: Resume[E] | None = None

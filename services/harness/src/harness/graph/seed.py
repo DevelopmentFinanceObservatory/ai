@@ -6,23 +6,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import (
-    AsyncIterator,
-    Awaitable,
-    Callable,
-)
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from compiler.surface import ToolSurface
-from google.adk import Context
-from planner.plan import (
-    SEEDS_STATE_KEY,
-)
+from orchestrator.call import OrchestratorCall
 from pydantic import ValidationError
 from translator.discovery import (
     DefinitionNotResolvedError,
 )
 
+from harness.graph.events import GraphEvent
 from harness.graph.interfaces import (
     Executor,
 )
@@ -30,12 +24,12 @@ from harness.graph.orchestrate import AgentHandBack
 from harness.graph.resume import ResumeRuns
 from harness.graph.state import (
     APPLY_CHOICE_STATE_KEY,
-    SEEDED_STATE_KEY,
-    state_json,
+    TurnInput,
     store_search,
     turn_budgets,
 )
 from harness.graph.switch import apply_stored_choice
+from harness.orchestrator_tools import raised_answer
 from harness.seeds import (
     SEED_DROPPED,
     DroppedSeed,
@@ -51,6 +45,7 @@ from harness.seeds import (
 from harness.tool_contracts import (
     resolver_digest,
 )
+from harness.turn.node import Next, Node, NodeCtx
 
 logger = logging.getLogger(__name__)
 
@@ -63,25 +58,32 @@ def _seed_hand_back(hand_back: dict[str, str]) -> dict[str, Any]:
     ).model_dump(mode="json")
 
 
-def _turn_ran_before(ctx: Context) -> bool:
-    """Whether another workflow node already ran in `ctx`'s invocation.
+# The orchestrator's `fetch` tool, called with its arguments and the call
+# (`harness.orchestrator_tools.build_orchestrator_tools`).
+type Fetch = Callable[..., Awaitable[dict[str, Any]]]
 
-    ADK resumes a paused turn by replaying the workflow from START, and runs
-    live any node the turn's events hold no run of
-    (`google.adk.workflow._workflow.Workflow._start_node_task`). A turn that
-    paused before the workflow had `seed` resumes with `seed` running after
-    `orchestrate` already has, its seeds slot still holding what the host
-    wrote at the turn's start.
-    """
-    own = ctx.node_path
-    return any(
-        event.invocation_id == ctx.invocation_id
-        and event.node_info is not None
-        and bool(event.node_info.path)
-        and event.node_info.path != own
-        and not event.node_info.path.startswith(f"{own}/")
-        for event in ctx.session.events
-    )
+
+def chip_fetch(tools: list[Any]) -> Fetch | None:
+    """The `fetch` tool among the orchestrator's `tools`, answering a raise
+    as the agent's own call is answered (`raised_answer`); `None` without
+    one."""
+    fetch = next((tool for tool in tools if tool.__name__ == "fetch"), None)
+    if fetch is None:
+        return None
+
+    async def answered(*, call: OrchestratorCall, **args: Any) -> dict[str, Any]:
+        try:
+            return await fetch(call=call, **args)
+        except Exception as error:
+            logger.error(
+                "the chip's fetch raised %s turn_id=%s",
+                type(error).__name__,
+                call.turn_id,
+                exc_info=error,
+            )
+            return raised_answer("fetch", error)
+
+    return answered
 
 
 def seed_node(
@@ -89,14 +91,14 @@ def seed_node(
     executor: Executor,
     definition_surface: ToolSurface,
     resume: ResumeRuns | None = None,
-    fetch: Callable[..., Awaitable[dict[str, Any]]] | None = None,
-) -> Callable[[Context, Any], AsyncIterator[dict[str, Any]]]:
+    fetch: Fetch | None = None,
+) -> Node[GraphEvent]:
     """The `seed` node, carrying on unfinished runs through `resume`,
     resolving seeds and applying a chip through `definition_surface`,
-    fetching a chip's data with `fetch`, the orchestrator's `fetch` tool,
-    and recording its steps through `executor`."""
+    fetching a chip's data with `fetch`, the orchestrator's `fetch` tool
+    (`chip_fetch`), and recording its steps through `executor`."""
 
-    async def receive_seeds(ctx: Context, node_input: Any) -> AsyncIterator[dict[str, Any]]:
+    async def receive_seeds(ctx: NodeCtx[GraphEvent], node_input: Any) -> Next:
         """Carry on the runs an earlier turn left unfinished (`resume`,
         `harness.graph.resume`), then hand the agent the datasets the user
         brought from Search, or the data of the chip the user clicked
@@ -104,28 +106,22 @@ def seed_node(
         The hand-back names the runs first, then the seeds or the chip, each
         as its own paragraph. It answers none of the agent's calls
         (`AgentHandBack`), so the agent reads it after the user's message
-        (`orchestrator.agent.prepend_digests`). Once the session holds it,
-        which it does when the yield returns, the runs it delivers are
-        acknowledged (`harness.graph.resume.Resumed.acknowledge`).
+        (`orchestrator.run.Opening.seeded`). Once the turn's cursor holds
+        it, the runs it delivers are acknowledged
+        (`harness.graph.resume.Resumed.acknowledge`, run after the commit).
 
-        No output when there is none of these. A run that resumes a turn
-        already under way (`_turn_ran_before`) clears the seeds slot and
-        does none of them. The chip's slot stays for the turn, since
-        `harness.graph.state.turn_budgets` reads it.
+        The node's output is that hand-back, or None when there is none of
+        these. The node runs once per turn, as its first; a rerun after a
+        crash before its boundary does it all again.
 
         Raises:
             RuntimeError: If the turn applies a chip and the node has no `fetch`.
         """
         del node_input
-        raw = state_json(ctx, SEEDS_STATE_KEY, default=[])
-        ctx.state[SEEDS_STATE_KEY] = None
-        if _turn_ran_before(ctx):
-            return
-        # A fresh turn opens with no seed hand-back on record.
-        ctx.state[SEEDED_STATE_KEY] = None
+        raw = TurnInput.model_validate(ctx.inputs).seeds
         resumed = await resume(ctx) if resume is not None else None
-        seeded = await take(ctx, raw)
-        pick = state_json(ctx, APPLY_CHOICE_STATE_KEY)
+        seeded = await take(ctx, [] if raw is None else raw)
+        pick = ctx.state.get(APPLY_CHOICE_STATE_KEY)
         if seeded is None and pick is not None:
             if fetch is None:
                 raise RuntimeError("the seed node applies a chip only with a fetch tool")
@@ -139,23 +135,24 @@ def seed_node(
                 record_step=getattr(executor, "record_step", None),
             )
         if resumed is None:
-            if seeded is not None:
-                yield _seed_hand_back(seeded)
-            return
+            return Next("next", _seed_hand_back(seeded) if seeded is not None else None)
+        ctx.after_commit(resumed.acknowledge)
         runs = resumed.hand_back
-        yield _seed_hand_back(
-            runs
-            if seeded is None
-            else {"status": seeded["status"], "text": f"{runs['text']}\n\n{seeded['text']}"}
+        return Next(
+            "next",
+            _seed_hand_back(
+                runs
+                if seeded is None
+                else {"status": seeded["status"], "text": f"{runs['text']}\n\n{seeded['text']}"}
+            ),
         )
-        await resumed.acknowledge()
 
-    async def take(ctx: Context, raw: Any) -> dict[str, str] | None:
+    async def take(ctx: NodeCtx[GraphEvent], raw: Any) -> dict[str, str] | None:
         """Hand the agent the datasets the user brought from Search, as
         definite search results.
 
-        The seeds slot (`GraphState.seeds`) holds them as `seeds_slot` kept
-        them; the node reads it once and clears it. Each seed is taken once
+        The seeds slot (`TurnInput.seeds`) holds them as `seeds_slot` kept
+        them. Each seed is taken once
         (`take_seeds`), and each one taken is resolved again through
         Search's `dataset_resubmit` door, all at once, through
         `definition_surface` (`resolve_seed`), so every fact the turn reads
@@ -269,4 +266,4 @@ def seed_node(
             ),
         }
 
-    return receive_seeds
+    return Node(run=receive_seeds)

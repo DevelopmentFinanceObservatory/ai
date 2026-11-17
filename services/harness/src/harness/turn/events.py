@@ -1,5 +1,6 @@
-"""The events a turn emits as it runs, which the Studio translator turns into
-wire frames.
+"""The events the turn loop itself emits as a turn runs, which the Studio
+translator turns into wire frames beside the events of the graph's own
+nodes (`harness.turn.node.NodeCtx.emit`).
 
 Each is a frozen dataclass and carries what the translator reads and nothing
 of how it was produced. `TurnEvent` is their union.

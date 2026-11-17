@@ -55,9 +55,8 @@ from executor.outcomes import (
 from executor.run import StepProgressCallback, execute_approved_plan
 from google.adk.events import Event
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService, State
+from google.adk.sessions import InMemorySessionService
 from google.genai import types
-from harness import scripted
 from harness.chart_binding import (
     LINE_CHART_MAX_VALUES,
     covers_every_row,
@@ -82,11 +81,9 @@ from harness.graph.execute import (
 from harness.graph.plan_done import frame_unavailable_reason, plan_done_node
 from harness.graph.state import (
     APPROVE_INTERRUPT,
-    ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
-    ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
@@ -95,11 +92,8 @@ from harness.graph.state import (
     STEP_PROGRESS_KEY,
     UNREADABLE_PLAN_NOTE,
     UNREADABLE_PLAN_UNPLANNED_NOTE,
-    GraphState,
     frame_id_for,
     frame_store_ref,
-    stored_mapping,
-    stored_sequence,
 )
 from harness.graph.switch import (
     SCOPE_CHOICE_NOT_APPLIED,
@@ -118,8 +112,7 @@ from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.studio_translate import _node_name, _Translator, failure_detail
 from harness.studio_translate import _RecordingExecutor as _TranslatorRecorder
-from harness.tool_contracts import HarnessCode, reading_facts
-from harness.turn_records import CHIP_STALE_NOTE, SearchReading, basis_line
+from harness.turn_records import SearchReading, basis_line
 from harness.wire import ActivityStep, StepStatus
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from planner.operations import AggregateOperation, GrowthOperation, RetrieveOperation, Translation
@@ -187,9 +180,7 @@ from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .orchestrator_fakes import (
     ScriptLlm,
     approve_answer,
-    call,
     create_request_input_response,
-    frame_for,
     handed_back,
     open_session,
     orchestrator_runner,
@@ -200,9 +191,16 @@ from .orchestrator_fakes import (
     visited_nodes,
 )
 from .planner.test_agent import _FakeToolContext
+from .scope_scenarios import (
+    _AFRICA_TOTAL,
+    _AFRICA_UNKNOWN_CLASS,
+    _AFRICA_UNPOSTABLE,
+    _hashed_scope,
+    _switched_answer,
+)
 from .share_plan import ALL_DONORS, DAC_DONORS, US_DONOR, us_share_of_kenya_oda
 from .split_plan import FIRST_YEAR, SPEC_DEBT_HISTORY, split_draft, stored_split_plan
-from .test_turn_records import _example_part, _manifest, _served_identity, _switchable_scope
+from .test_turn_records import _example_part, _manifest, _served_identity
 
 SPEC_A = "spec_" + "a" * 32
 SPEC_B = "spec_" + "b" * 32
@@ -682,33 +680,6 @@ async def test_relay_collapses_many_reports_from_one_step_while_blocked() -> Non
     assert reports[0].report == ProgressReport(progress=49, message="tick 49")
     assert result == "done"
     assert {task for task in asyncio.all_tasks() if not task.done()} == {asyncio.current_task()}
-
-
-# --- the session state schema ---------------------------------------------------
-
-
-def test_a_session_saved_with_a_key_the_schema_no_longer_declares_still_validates() -> None:
-    """A session saved at an interrupt can hold a key the state schema does not
-    declare, such as `spec_id_stat_vars`. The schema validates it, keeps the
-    fields it declares, and leaves the key unread."""
-    saved = {
-        "surface": "download",
-        "spec_id_stat_vars": json.dumps({"spec_id": SPEC_A, "stat_vars": ["Count_Person"]}),
-    }
-
-    state = GraphState.model_validate(saved)
-
-    assert state.surface == "download"
-    assert "spec_id_stat_vars" not in state.model_dump()
-
-
-def test_every_graph_state_field_has_a_default() -> None:
-    """A session saved at an interrupt resumes under the current schema, so a
-    field it does not hold has to validate from its default."""
-    required = [name for name, field in GraphState.model_fields.items() if field.is_required()]
-
-    assert required == []
-    assert GraphState().model_dump()["seeds"] is None
 
 
 # --- version-bound approval -----------------------------------------------------
@@ -3786,63 +3757,8 @@ def test_a_stale_reason_for_another_dataset_omits_a_spec_id_search_did_not_name(
 # --- the switch node: a scope choice moved on the plan card, in code ----------
 
 
-def _hashed_scope() -> dict[str, Any]:
-    """US health aid to Africa's scope (`_switchable_scope`), its base under the
-    spec_id its identity hashes to, so data-mcp takes it as posted: health as
-    CRS 120 alone from the user's words, Africa's countries only carried,
-    gross disbursements by default."""
-    scope = _switchable_scope()
-    base = spec_id_for(canonicalize(scope["base"]["identity"]))
-    scope["id"] = scope["base"]["spec_id"] = base
-    for choice in scope["choices"]:
-        choice["id"] = f"{base}:{choice['axis']}"
-    return scope
-
-
 # The window the plan of `_scoped_plan` reads its dataset over.
 _PLAN_WINDOW = {"kind": "range", "start_year": 2015, "end_year": 2024}
-
-
-def _switched_answer(scope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """The spec_id and envelope Search answers for `scope` switched to CRS
-    120 and 130: grant equivalents become the basis, since gross is out of
-    reach beside the switch."""
-    switched = copy.deepcopy(scope)
-    identity = copy.deepcopy(scope["base"]["identity"])
-    identity["slots"] = [s for s in identity["slots"] if s["property"] != "nettingBasis"]
-    identity["shape"]["measured_property"] = "grantEquivalent"
-    spec_id = spec_id_for(canonicalize(identity))
-    sector, _, basis = switched["choices"]
-    sector["active"] = "sector:120+130"
-    basis["active"] = "measure_basis:grant_equivalent"
-    basis["options"][0]["availability"] = {
-        "status": "unavailable",
-        "code": "conflicts_with",
-        "detail": {"entry": "sector:120+130"},
-    }
-    switched["entries"] = [
-        switched["entries"][1],
-        {
-            "axis": "sector",
-            "option_id": "sector:120+130",
-            "provenance": "explicit",
-            "concept": "health",
-            "origin": {"kind": "choice", "choice_id": sector["id"]},
-        },
-    ]
-    switched["compiled"] = {"spec_id": spec_id, "identity": identity, "components": []}
-    block = {
-        "spec_id": spec_id,
-        "sentence": "US health aid to Africa",
-        "definition": {"schema_version": 1, "spec_id": spec_id, "identity": identity},
-        "resolved": {"scope_choices": switched},
-    }
-    envelope = {
-        "schema_version": 1,
-        "status": "definite",
-        "parts": [{"status": "definite", "variable_text": scope["id"], "spec": block}],
-    }
-    return spec_id, envelope
 
 
 def _scoped_plan(
@@ -4171,15 +4087,6 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
     offered = _output_of(events, "switch")
     assert "switch_failed" not in offered
     assert offered["revision"] == plan_revision(revised)
-
-
-_AFRICA_TOTAL = {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}
-# Africa as a set naming a class of party outside `common.place_type.PartyClass`: the
-# set does not read, but what a resubmit posts of it does.
-_AFRICA_UNKNOWN_CLASS = {"label": "Africa", "ref": "africa", "whole_of": ["sovereign_fund"]}
-# Africa as a set stating a registry id that is not text, so what a resubmit posts of
-# it does not read.
-_AFRICA_UNPOSTABLE = {"label": "Africa", "ref": "africa", "group_id": 7}
 
 
 _AFRICA_POSTED = {"destination": {"label": "Africa", "ref": "africa"}}
@@ -5060,234 +4967,6 @@ def test_a_repinned_requirement_keeps_its_series_code_only_where_the_new_dataset
     assert moved.source_code == ("DT.ODA.ALLD.CD" if kept else None)
 
 
-# --- a chip under an answer, applied with no search ----------------------------
-
-
-class _RecordingExecutor(scripted.ScriptedExecutor):
-    """`harness.scripted.ScriptedExecutor`, recording each call and each step a node records."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-        self.steps: list[dict[str, Any]] = []
-
-    async def __call__(
-        self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
-    ) -> dict[str, Any]:
-        self.calls.append({"tool": tool, "args": args})
-        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
-
-    def record_step(self, **step: Any) -> None:
-        self.steps.append(step)
-
-
-class _BrokenFetchExecutor(_RecordingExecutor):
-    """`_RecordingExecutor` whose `get_data` raises, as a fault inside DFO would."""
-
-    async def __call__(
-        self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
-    ) -> dict[str, Any]:
-        if tool == "get_data":
-            raise RuntimeError("get_data broke")
-        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
-
-
-async def _chip_turn(
-    search: SearchStub,
-    *,
-    option_id: str = "sector:120+130",
-    executor: _RecordingExecutor | None = None,
-    spec_id: str | None = None,
-    entity_groups: dict[str, Any] | None = None,
-) -> tuple[Runner, ScriptLlm, _RecordingExecutor, dict[str, Any]]:
-    """A turn applying a chip that moves the US health aid answer's
-    `option_id` axis to `option_id`, offered on the reading `spec_id`, by
-    default the answer's own, its reading stored by an earlier turn from a
-    block naming `entity_groups` when given, resubmitted through `search`.
-    Its model tries to search, then answers."""
-    scope = _hashed_scope()
-    pin = scope["compiled"]["spec_id"]
-    block = {"spec_id": pin, "resolved": {"scope_choices": scope}}
-    if entity_groups is not None:
-        block["resolved"]["entity_groups"] = entity_groups
-    reading = SearchReading.from_part(
-        {"variable": "health aid", "status": "definite", "spec_id": pin, **reading_facts(block)}
-    ).model_dump(mode="json")
-    executor = executor or _RecordingExecutor()
-    runner, model = orchestrator_runner(
-        call("search", parts=[{"variable": "health aid"}]),
-        executor=executor,
-        definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
-    )
-    axis = option_id.split(":", maxsplit=1)[0]
-    await open_session(
-        runner,
-        apply_choice=json.dumps(
-            {
-                "choice_id": f"{scope['id']}:{axis}",
-                "option_id": option_id,
-                "spec_id": spec_id or pin,
-            }
-        ),
-        **{ORCHESTRATOR_PRIOR_LEDGER_KEY: {"readings": [reading], "warnings": {}, "spec_ids": []}},
-    )
-    await run_turn(runner, types.UserContent("Count health and population."))
-    return runner, model, executor, scope
-
-
-async def test_a_chip_compiles_through_search_fetches_what_it_compiled_and_never_searches() -> None:
-    """The `seed` node posts the stored reading's base identity with the
-    switched entries, stores the reading Search compiles, fetches its spec_id
-    and hands the agent the result; the agent's own search is refused unsent."""
-    scope = _hashed_scope()
-    new_pin, envelope = _switched_answer(scope)
-    search = SearchStub(answer={scope["id"]: envelope})
-
-    runner, model, executor, scope = await _chip_turn(search)
-
-    (posted,) = search.posted
-    (entry,) = posted["input"]["entries"]
-    assert entry["identity"] == scope["base"]["identity"]
-    assert entry["scope_entries"][-1]["option_id"] == "sector:120+130"
-    assert [c["args"]["spec_id"] for c in executor.calls if c["tool"] == "get_data"] == [new_pin]
-    state = _session_state(runner)
-    stored = SearchReading.model_validate(state[ORCHESTRATOR_SEARCHES_KEY][-1])
-    assert (stored.text, stored.spec_id) == ("health aid", new_pin)
-    assert stored.fetch is not None and stored.fetch.refusal_code is None
-    assert state[ORCHESTRATOR_APPLIED_KEY] == {
-        "choice_id": f"{scope['id']}:sector",
-        "option_id": "sector:120+130",
-        "from_option_id": "sector:120",
-        "spec_id": new_pin,
-    }
-    first = request_text(model.requests[0])
-    assert f"counted it again as {new_pin}" in first
-    assert frame_for(new_pin) in first
-    searched = model.requests[1].contents[-1].parts[0].function_response.response
-    assert searched["code"] == "tool_budget_spent"
-    assert [step["result"]["outcome"] for step in executor.steps] == ["ok"]
-
-
-@pytest.mark.parametrize(
-    "group", [_AFRICA_TOTAL, _AFRICA_UNKNOWN_CLASS], ids=["total", "unknown-class"]
-)
-async def test_a_chip_posts_the_groups_its_reading_was_resolved_with(
-    group: dict[str, Any],
-) -> None:
-    """The answer's reading came from a search whose block named Africa as the
-    set its recipients were asked for, and no plan kept that block. The chip's
-    resubmit posts the set as every resubmit does (`compiler.sources.wire_groups`),
-    one naming a class of party this release does not know too, since the reading
-    stored what the resubmit posts of it."""
-    scope = _hashed_scope()
-    _, envelope = _switched_answer(scope)
-    search = SearchStub(answer={scope["id"]: envelope})
-
-    await _chip_turn(search, entity_groups={"destination": group})
-
-    (posted,) = search.posted
-    (entry,) = posted["input"]["entries"]
-    assert entry["entity_groups"] == {"destination": {"label": "Africa", "ref": "africa"}}
-
-
-async def test_a_chip_whose_readings_sets_could_not_be_read_posts_nothing() -> None:
-    """The answer's reading came from a block naming a set on its recipients with a
-    registry id that is not text, and no block of it is kept, so nothing names the set. Posting the part
-    without it would let Search count another population, so the chip posts nothing
-    and its step fails as a plan card's switch over such a block does."""
-    scope = _hashed_scope()
-    _, envelope = _switched_answer(scope)
-    search = SearchStub(answer={scope["id"]: envelope})
-
-    runner, _, executor, _ = await _chip_turn(
-        search, entity_groups={"destination": _AFRICA_UNPOSTABLE}
-    )
-
-    assert search.posted == []
-    (step,) = executor.steps
-    refusal = step["result"]["refusal"]
-    assert (refusal["code"], refusal["retry_mode"]) == (SCOPE_CHOICE_NOT_APPLIED, "do_not_retry")
-    assert not any(c["tool"] == "get_data" for c in executor.calls)
-    assert ORCHESTRATOR_APPLIED_KEY not in _session_state(runner)
-
-
-async def test_a_chip_offered_on_another_reading_is_refused_stale_and_compiles_nothing() -> None:
-    """The chip names a reading other than the newest one holding its choice, as
-    after a later switch of that choice: it is refused as the studio refuses a
-    stale chip, and nothing is posted or fetched."""
-    scope = _hashed_scope()
-    _, envelope = _switched_answer(scope)
-    search = SearchStub(answer={scope["id"]: envelope})
-
-    runner, model, executor, _ = await _chip_turn(search, spec_id=f"spec_{'9' * 32}")
-
-    assert search.posted == []
-    assert CHIP_STALE_NOTE in request_text(model.requests[0])
-    (step,) = executor.steps
-    assert step["result"]["refusal"]["code"] == SCOPE_CHOICE_NOT_APPLIED
-    assert not any(c["tool"] == "get_data" for c in executor.calls)
-    assert ORCHESTRATOR_APPLIED_KEY not in _session_state(runner)
-
-
-async def test_a_chip_whose_fetch_raises_answers_as_the_agents_own_fetch_would() -> None:
-    """The chip's fetch raises inside DFO: the agent is handed the failure the
-    orchestrator's own tool calls answer with, and the turn goes on."""
-    scope = _hashed_scope()
-    _, envelope = _switched_answer(scope)
-    search = SearchStub(answer={scope["id"]: envelope})
-
-    _, model, _, _ = await _chip_turn(search, executor=_BrokenFetchExecutor())
-
-    first = request_text(model.requests[0])
-    assert "fetch failed inside DFO (RuntimeError)" in first
-    assert HarnessCode.RAISED.value in first
-
-
-@pytest.mark.parametrize(
-    ("code", "retryable", "step_code", "retry_mode"),
-    [
-        ("requested_option_unavailable", False, "requested_option_unavailable", "do_not_retry"),
-        # A Search that did not answer states no code of its own.
-        ("transient_unavailable", True, SCOPE_CHOICE_NOT_APPLIED, "retry_after_delay"),
-    ],
-    ids=["refused", "transient"],
-)
-async def test_a_chip_search_refuses_reads_as_a_plan_cards_switch_and_fetches_nothing(
-    code: str, retryable: bool, step_code: str, retry_mode: str
-) -> None:
-    """The chip's step fails with the code and retryability the plan card's
-    switch reports for the same refusal."""
-    scope = _hashed_scope()
-    search = SearchStub(
-        refuse={
-            scope["id"]: {
-                "code": code,
-                "title": "Requested Option Unavailable",
-                "detail": "Scope entry 1 cannot apply to this part: option_unknown.",
-                "pointer": "/input/entries/0/scope_entries/1",
-                "retryable": retryable,
-            }
-        }
-    )
-
-    runner, model, executor, _ = await _chip_turn(search)
-
-    note = (
-        f"Search {'could not' if retryable else 'cannot'} count health (CRS 120) and "
-        "population and reproductive health (CRS 130) "
-        f"{'just now' if retryable else 'for this source'}."
-    )
-    assert note in request_text(model.requests[0])
-    (step,) = executor.steps
-    assert step["result"]["refusal"] == {
-        "code": step_code,
-        "retry_mode": retry_mode,
-        "fix": None,
-        "message": note,
-    }
-    assert not any(c["tool"] == "get_data" for c in executor.calls)
-    assert ORCHESTRATOR_APPLIED_KEY not in _session_state(runner)
-
-
 # --- early mints at the card offer ---------------------------------------------
 
 
@@ -5553,61 +5232,3 @@ async def test_closing_early_mints_cancels_the_calls_still_running(
     await early.aclose()
 
     assert sends.cancelled == 1
-
-
-# A dict and a list key, each with the accessor that reads it and an in-place
-# write into what a read hands out.
-_STORED_READS = [
-    pytest.param(
-        ORCHESTRATOR_SPECS_KEY,
-        {"spec_a": {"label": "a"}},
-        stored_mapping,
-        lambda held: held["spec_a"].update(label="b"),
-        id="mapping",
-    ),
-    pytest.param(
-        ORCHESTRATOR_SEARCHES_KEY,
-        [{"text": "a"}],
-        stored_sequence,
-        lambda held: held[0].update(text="b"),
-        id="sequence",
-    ),
-]
-
-
-@pytest.mark.parametrize(("key", "stored", "read", "write_into"), _STORED_READS)
-def test_a_stored_read_takes_no_copy_for_adk_to_track(
-    key: str, stored: Any, read: Callable[[Any, str], Any], write_into: Callable[[Any], None]
-) -> None:
-    """ADK's `State` copies a dict or list on its first read, which is what lets
-    it record a later write into it; a read through `stored_mapping` or
-    `stored_sequence` takes no copy, so the same write leaves no delta."""
-    tracked = State(value={key: copy.deepcopy(stored)}, delta={})
-    write_into(tracked.get(key))
-    assert tracked.has_delta()
-
-    untracked = State(value={key: copy.deepcopy(stored)}, delta={})
-    write_into(read(untracked, key))
-    assert not untracked.has_delta()
-
-
-@pytest.mark.parametrize(("key", "stored", "read", "write_into"), _STORED_READS)
-def test_a_stored_read_sees_the_pending_delta_first_as_state_get_does(
-    key: str, stored: Any, read: Callable[[Any, str], Any], write_into: Callable[[Any], None]
-) -> None:
-    del write_into
-    state = State(value={key: type(stored)()}, delta={key: stored})
-
-    assert list(read(state, key)) == list(state.to_dict()[key]) == list(stored)
-    assert list(read({key: stored}, key)) == list(stored)
-    assert not read({}, key)
-
-
-def test_a_stored_read_refuses_a_write_into_it() -> None:
-    state = State(value={ORCHESTRATOR_SPECS_KEY: {}, ORCHESTRATOR_SEARCHES_KEY: []}, delta={})
-
-    with pytest.raises(TypeError):
-        stored_mapping(state, ORCHESTRATOR_SPECS_KEY)["spec_a"] = {}  # ty: ignore[invalid-assignment]
-    with pytest.raises(AttributeError):
-        stored_sequence(state, ORCHESTRATOR_SEARCHES_KEY).append({})  # ty: ignore[unresolved-attribute]
-    assert state.to_dict() == {ORCHESTRATOR_SPECS_KEY: {}, ORCHESTRATOR_SEARCHES_KEY: []}
