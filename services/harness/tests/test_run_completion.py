@@ -32,19 +32,17 @@ from executor.ledger import (
     idempotency_key,
 )
 from google.adk.errors import StaleSessionError
-from google.adk.sessions import InMemorySessionService
 from google.api_core.exceptions import Forbidden, ServiceUnavailable, from_http_status
 from google.genai import types
 from harness import mcp_client
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.graph import answer as answer_module
-from harness.graph.state import AGENT_NAME
 from harness.mcp_client import McpExecutor
 from harness.provenance import ProvenanceStore
 from harness.run_ledger import StudioRunLedger
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.settings import Settings
-from harness.studio_state import StudioStore
+from harness.studio_store import StudioStore
 from harness.studio_translate import _RecordingSurface
 from planner.plan import Plan, PlanStatus
 from presentation_mcp import client as presentation_client
@@ -53,12 +51,15 @@ from presentation_mcp.client import PlatformAssembler
 from presentation_mcp.frame_publish import PublishBody
 from presentation_mcp.platform_contract import NormalFormConflict, Refusal, RetryMode
 from presentation_mcp.settings import Settings as PresentationSettings
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .orchestrator_fakes import (
     CONVERSATION,
+    NO_ADK,
     approve_answer,
     call,
     create_request_input_response,
+    no_turn_specs,
     open_session,
     orchestrator_app,
     orchestrator_runner,
@@ -834,16 +835,16 @@ def _frame(frames: list[dict[str, Any]], event: str) -> dict[str, Any]:
 
 
 async def test_a_studio_run_left_pending_is_carried_on_from_the_conversation_ledger(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, pg_engine: AsyncEngine
 ) -> None:
-    """Through the studio, over its conversation ledger session: a run whose
+    """Through the studio, over its stored run ledger: a run whose
     publication is unfinished at the end of its turn is kept under a key that
     names the conversation, not the turn, and the next turn, in a session of
     its own, completes it and hands the agent its frames and the notes read
     from the plan stored with the ledger."""
     total = "The figures are the sum of 3 indicators."
     monkeypatch.setattr(answer_module, "_stat_var_totals", lambda *a, **k: [total])
-    store = StudioStore(InMemorySessionService(), app_name=AGENT_NAME)
+    store = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs)
     ledger = StudioRunLedger(store)
     publisher = _FlakyPublisher()
     app, model = orchestrator_app(
@@ -898,7 +899,9 @@ async def test_a_studio_run_left_pending_is_carried_on_from_the_conversation_led
     )
 
 
-async def test_the_default_ledger_keeps_one_conversations_runs_from_another() -> None:
+async def test_the_default_ledger_keeps_one_conversations_runs_from_another(
+    pg_engine: AsyncEngine,
+) -> None:
     publisher = _FlakyPublisher()
     app, model = orchestrator_app(
         plan_call("Kenya's debt service since 2015"),
@@ -907,6 +910,7 @@ async def test_the_default_ledger_keeps_one_conversations_runs_from_another() ->
         types.Part.from_text(text="Another conversation."),
         tool_surface=ScriptedSurface(),
         publisher=publisher,
+        engine=pg_engine,
     )
     async with studio_client(app) as client:
         first = await stream(client, "/api/studio/turn", turn_body("Kenya's debt service?"))

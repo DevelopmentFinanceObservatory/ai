@@ -46,7 +46,6 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.apps import App
-from google.adk.errors import StaleSessionError
 from google.adk.errors.already_exists_error import AlreadyExistsError
 from google.adk.events import Event
 from google.adk.runners import Runner
@@ -83,25 +82,30 @@ from harness.settings import Settings
 from harness.studio_edit import edit_frames
 from harness.studio_state import (
     HEARTBEAT_INTERVAL_S,
+    SEGMENT_TTL_S,
     ConversationState,
     SegmentBusy,
     SegmentLost,
-    StudioStore,
     _apply_operations,
     _next_manifest,
     _PendingInterrupt,
     _PendingQuestion,
     _tool_error_response,
 )
+from harness.studio_store import (
+    ConversationExists,
+    ConversationHeld,
+    ConversationStale,
+    StudioStore,
+)
 from harness.studio_translate import (
+    _checkpoint_failed_frame,
     _RecordingExecutor,
     _RecordingSurface,
     _stream_fatal,
     _Translator,
-    failure_detail,
     held_labels,
 )
-from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn_budget import start_turn_budget
 from harness.turn_records import CHIP_STALE_NOTE, stored_choice
 from harness.wire import (
@@ -760,7 +764,7 @@ async def _unwind(pending: asyncio.Future[Any]) -> None:
     Unshielded, that re-cancels `pending`'s own cleanup (the session
     service's rollback and connection close, `StudioStore.release`) at
     each of its awaits, and a SQLAlchemy connection torn down twice over
-    aiosqlite leaves a task that never finishes."""
+    asyncpg leaves a task that never finishes."""
     pending.cancel()
     with anyio.CancelScope(shield=True), suppress(asyncio.CancelledError):
         await pending
@@ -783,35 +787,6 @@ def _end_stream(conversation: ConversationState, reason: str) -> None:
     conversation.cancel_reason = reason
     if conversation.cancel_event is not None:
         conversation.cancel_event.set()
-
-
-def _checkpoint_failed_frame(conversation: ConversationState, exc: Exception) -> ErrorFrame:
-    """The stream-fatal frame `StudioRunner._checkpointed` yields when a
-    checkpoint before a pause or terminal frame fails, in place of the
-    frame it would have carried. A `SegmentLost` means another instance's
-    claim has already outlived this one's TTL and now owns the
-    conversation, so the turn is left open for it rather than closed here;
-    anything else (an exhausted retry, a DB error) closes the turn, since
-    nothing else will finish it. The turn's record names `state_not_saved`,
-    and the frame, whose grammar has no such member, the transient code."""
-    refusal = harness_refusal(
-        code=HarnessCode.STATE_NOT_SAVED, message=f"the turn's state could not be saved: {exc}"
-    )
-    detail = failure_detail(refusal)
-    if not isinstance(exc, SegmentLost):
-        conversation.close_turn(
-            final_text=conversation.turn_final_text or detail, error=refusal["code"]
-        )
-    return ErrorFrame(
-        event="error",
-        seq=conversation.next_seq(),
-        error=ToolError(
-            error=ErrorCode.TRANSIENT_UNAVAILABLE,
-            retry=RetryMode.RETRY_AFTER_DELAY,
-            detail=detail,
-            retry_after_seconds=30,
-        ),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -841,8 +816,8 @@ class StudioRunner:
         create_workflow: Any,
         executor: Executor,
         session_service: Any,
+        store: StudioStore,
         tool_surface: ToolSurface | None = None,
-        store: StudioStore | None = None,
         app_name: str | None = None,
         edit_model: Any | None = None,
         provenance: ProvenanceStore | None = None,
@@ -850,20 +825,15 @@ class StudioRunner:
     ) -> None:
         self.edit_model = edit_model
         self.early_mints = early_mints
-        # Resolved before the workflow exists (`AGENT_NAME` is the fixed
-        # name every `create_root_workflow` call gives its `Workflow`, so
-        # this matches `workflow.name` in every real caller) because the
-        # store must be built -- for the recorder to bind, below -- before
-        # `create_workflow` runs, which is the only place `workflow.name`
-        # itself becomes available.
+        # `AGENT_NAME` is the fixed name every `create_root_workflow` call
+        # gives its `Workflow`, so it matches `workflow.name` in every real
+        # caller. `store` reads an open turn's spec blocks from the per-turn
+        # sessions this runner creates, so its caller builds it over the same
+        # `session_service` and app name. `_RecordingExecutor` binds it too,
+        # to keep a create's write token (`harness.studio_translate`) on the
+        # same conversations the rest of this runner reads and writes.
         resolved_app_name = app_name or AGENT_NAME
-        # Built before the recorder: `_RecordingExecutor` binds it too, to
-        # keep a create's write token (`harness.studio_translate`) on the
-        # same conversations the rest of this runner reads and writes. A
-        # caller giving its own `store` (`harness.server`, so `make_recall_part` can bind it before
-        # this constructor runs) is responsible for building it over the
-        # same `session_service`.
-        self.store = store or StudioStore(session_service, app_name=resolved_app_name)
+        self.store = store
         self.recorder = _RecordingExecutor(executor, store=self.store)
         self.surface_recorder = (
             _RecordingSurface(tool_surface, provenance=provenance)
@@ -888,20 +858,51 @@ class StudioRunner:
         await self.recorder.aclose()
 
     async def _ensure_session(
-        self, *, user_id: str, session_id: str, state: dict[str, Any] | None = None
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        session_id: str,
+        state: dict[str, Any] | None = None,
     ) -> None:
-        """Create the turn's per-turn ADK session (`{cid}#t{n}`). Create-only:
-        `session_id` names a fresh turn index the `/turn` route's ledger
-        claim has just won, so this session must not already exist. Raises
-        `AlreadyExistsError` when it does -- another instance claimed the
-        same turn index concurrently -- for the caller to answer as the
-        existing 409 `TRANSIENT_UNAVAILABLE`, the same as a stale claim."""
-        await self.runner.session_service.create_session(
-            app_name=self.runner.app_name,
-            user_id=user_id,
-            session_id=session_id,
-            state=state,
-        )
+        """Create the turn's per-turn ADK session (`{cid}#t{n}`) for a turn
+        the `/turn` route's store claim has just won. A session already under
+        that id is scratch when the conversation's tables never recorded the
+        turn it belonged to: a conversation served as absent (its ledger
+        session refused, or ADK holds none) whose ADK turn sessions remain,
+        or a `--prefer-adk` copy whose `turn_index` is below the turns the
+        tables recorded. It is deleted and the session created fresh. Two
+        instances of this code cannot both reach this for one turn index,
+        because the claim is a compare-and-swap. An instance still running on
+        ADK sessions can: if ADK's ledger session moved since the load, the
+        session may be its live one, so nothing is deleted and
+        `ConversationStale` asks the caller to take ADK's copy of the
+        conversation and answer a retryable 409."""
+        session_service = self.runner.session_service
+        try:
+            await session_service.create_session(
+                app_name=self.runner.app_name,
+                user_id=user_id,
+                session_id=session_id,
+                state=state,
+            )
+        except AlreadyExistsError:
+            if await self.store.adk_moved(user_id, conversation_id):
+                raise ConversationStale from None
+            logger.warning(
+                "replacing leftover per-turn session %s: the turn it belonged to "
+                "was never recorded",
+                session_id,
+            )
+            await session_service.delete_session(
+                app_name=self.runner.app_name, user_id=user_id, session_id=session_id
+            )
+            await session_service.create_session(
+                app_name=self.runner.app_name,
+                user_id=user_id,
+                session_id=session_id,
+                state=state,
+            )
 
     async def _frames(
         self,
@@ -940,10 +941,19 @@ class StudioRunner:
             ) as events:
                 async for event in events:
                     _keep_turn_records(conversation, event)
-                    for frame in translator.translate(event):
+                    for frame in await translator.translate(event):
                         yield frame
-            for frame in translator.finish():
+            for frame in await translator.finish():
                 yield frame
+        except SegmentLost as exc:
+            # A card landing after another instance took the conversation
+            # over (`StudioStore.change_canvas`): that instance finishes it.
+            logger.warning(
+                "studio segment lost while landing a card (trace_id=%s): %s",
+                conversation.trace_id,
+                exc,
+            )
+            yield _checkpoint_failed_frame(conversation, exc)
         except Exception as exc:
             logger.exception("studio turn failed (trace_id=%s)", conversation.trace_id)
             yield _stream_fatal(conversation, exc)
@@ -993,16 +1003,22 @@ class StudioRunner:
         (`_sse_stream`), and a second one, from any instance, sets the flag
         again and ends the stream.
 
-        A `renew` call that raises is retried every interval until
-        `SEGMENT_TTL_S - 10` seconds of the segment's own remaining life are
-        left, then also ends the stream as lost: an instance this deaf to
-        its own renewal cannot be trusted to still own the segment, even
-        though nothing else has claimed it yet.
+        A `renew` call that raises is retried every interval until 10
+        seconds of the segment's life are left, counted on this instance's
+        own clock (`StudioStore.now`) from the last renewal that landed (the
+        claim, when none has), then also ends the stream as lost: an
+        instance this deaf to its own renewal cannot be trusted to still own
+        the segment, even though nothing else has claimed it yet. A span on
+        one clock leaves the gap between this clock and the database's,
+        which decides the lease, out of the deadline.
         """
+        # The claim landed just before this heartbeat started.
+        renewed_at = self.store.now()
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL_S)
             stop = conversation.switch_stop
             switching = stop is not None and not stop.is_set()
+            attempted_at = self.store.now()
             try:
                 result = await self.store.renew(
                     principal, conversation_id, segment_id, consume_cancel=switching
@@ -1016,10 +1032,12 @@ class StudioRunner:
                 segment = conversation.segment
                 if segment is None or segment.id != segment_id:
                     return
-                if self.store.now() < segment.expires_at - 10:
+                if self.store.now() < renewed_at + SEGMENT_TTL_S - 10:
                     continue
                 _end_stream(conversation, "segment_lost")
                 return
+            if result != "lost":
+                renewed_at = attempted_at
             if result == "ok":
                 continue
             _end_stream(conversation, "cancelled" if result == "cancelled" else "segment_lost")
@@ -1035,14 +1053,15 @@ class StudioRunner:
         conversation: ConversationState,
         frames: AsyncGenerator[Any],
     ) -> AsyncGenerator[Any]:
-        """Relay `frames`, checkpointing durably before every actionable
-        pause (`plan.proposed`, `elicitation.request`) and before `done`.
+        """Relay `frames`, each once its `seq` lies inside the segment's
+        reserved frame numbers (`StudioStore.reserve_frames`), checkpointing
+        durably before every actionable pause (`plan.proposed`,
+        `elicitation.request`) and before `done`.
         The client never sees a frame that says "paused" or "done" before
-        the ledger agrees. `done`'s frame is rebuilt to carry the
-        post-checkpoint `conversation.composition`, so a concurrent
-        `/composition` edit merged in by the checkpoint reaches the client
-        on the same frame it reaches the ledger. A checkpoint that fails
-        (the segment was taken over, or the write itself failed) yields a
+        the store agrees. `done`'s frame is rebuilt to carry the canvas
+        the checkpoint read back from the store, so a `/composition` edit
+        another instance made meanwhile reaches the client on it. A checkpoint
+        that fails (the segment was taken over, or the write itself failed) yields a
         stream-fatal error frame instead of the pause or terminal frame it
         would have carried, and ends the stream there. Once a `plan.approved`
         frame is sent, the interrupt it answers records it
@@ -1052,6 +1071,17 @@ class StudioRunner:
         interception point for every route this runs under (`/turn`, its
         edit-card branch, and `/interrupt`)."""
         async for frame in frames:
+            try:
+                await self.store.reserve_frames(principal, conversation_id, segment_id)
+            except Exception as exc:
+                logger.exception(
+                    "studio frame reservation failed: conversation %s segment %s (trace_id=%s)",
+                    conversation_id,
+                    segment_id,
+                    conversation.trace_id,
+                )
+                yield _checkpoint_failed_frame(conversation, exc)
+                return
             event = getattr(frame, "event", None)
             outgoing = frame
             if event in _CHECKPOINT_BEFORE_EVENTS:
@@ -1143,12 +1173,11 @@ class StudioRunner:
 def _streaming_conflict_response(detail: str, *, retry_after_seconds: int = 5) -> JSONResponse:
     """The 409 `TRANSIENT_UNAVAILABLE` every claim conflict answers with,
     whichever guard caught it: the process-local lock (`_acquire_or_conflict`),
-    a live segment lease held by any instance (`SegmentBusy`), the ledger's
-    compare-and-swap on the `/turn` claim (`StaleSessionError`), or a
-    concurrent claim on the per-turn ADK session (`AlreadyExistsError`).
+    a live segment lease held by any instance (`SegmentBusy`), or the store's
+    compare-and-swap on the `/turn` claim (`ConversationStale`).
     `retry_after_seconds` defaults to a flat 5s for the process-local and
-    session-create guards, which carry no TTL of their own to report; a
-    `SegmentBusy` conflict passes its own remaining TTL instead."""
+    claim guards, which carry no TTL of their own to report; a `SegmentBusy`
+    conflict passes its own remaining TTL instead."""
     return _tool_error_response(
         ToolError(
             error=ErrorCode.TRANSIENT_UNAVAILABLE,
@@ -1238,6 +1267,26 @@ def _unknown_conversation_response(conversation_id: str) -> JSONResponse:
     )
 
 
+def _held_response() -> JSONResponse:
+    """The 409 every route answers for a conversation `StudioStore.load`
+    cannot serve until an operator acts (`ConversationHeld`). A retry
+    cannot succeed, so it is `do_not_retry`; the operator's command is in
+    the log line the store's `adk.reimport` wrote."""
+    return _tool_error_response(
+        ToolError(
+            error=ErrorCode.CONSTRAINT_VIOLATION,
+            retry=RetryMode.DO_NOT_RETRY,
+            constraint_id="conversation_diverged",
+            detail=(
+                "This conversation changed in two places during an upgrade, so it cannot be "
+                "continued until it is repaired."
+            ),
+            pointer="/conversation_id",
+        ),
+        status_code=409,
+    )
+
+
 async def _acquire_or_conflict(
     store: StudioStore, principal: str, conversation_id: str
 ) -> asyncio.Lock | JSONResponse:
@@ -1270,8 +1319,15 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         lock = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
         if isinstance(lock, JSONResponse):
             return lock
+        # The segment this request claimed once its claim save landed, which
+        # every failure before the stream starts releases.
+        claimed: str | None = None
         try:
-            conversation = await studio.store.load(principal, body.conversation_id)
+            try:
+                conversation = await studio.store.load(principal, body.conversation_id)
+            except ConversationHeld:
+                lock.release()
+                return _held_response()
             if conversation is None:
                 if body.component_ref is not None or body.apply_choice is not None:
                     # The client refers to state (a card to edit or to follow
@@ -1280,12 +1336,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     return _unknown_conversation_response(body.conversation_id)
                 try:
                     conversation = await studio.store.create(principal, body.conversation_id)
-                except AlreadyExistsError:
+                except ConversationExists:
                     # Another instance's `/turn` created this same
                     # never-before-seen conversation between this request's
                     # own load and create. Load what it created and continue
                     # to the claim below -- its compare-and-swap decides the
-                    # race; a lost claim is the existing `StaleSessionError`
+                    # race; a lost claim is the existing `ConversationStale`
                     # 409, not a bare 500.
                     conversation = await studio.store.load(principal, body.conversation_id)
                     assert conversation is not None
@@ -1365,21 +1421,21 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # saved before the per-turn ADK session is created and before
             # the SSE response starts. This save is a compare-and-swap
             # against what this instance last loaded, so a
-            # `StaleSessionError` here means another instance's `/turn`
-            # claimed a turn on this conversation since, the same case as
-            # the `AlreadyExistsError` from the session create below.
+            # `ConversationStale` here means another instance's `/turn`
+            # claimed a turn on this conversation since.
             # Claiming first leaves no crash window: a crash between the
-            # claim and the create leaves the ledger at the new turn_index
+            # claim and the create leaves the store at the new turn_index
             # with no matching session, and the next `/turn` claims the one
             # after it; the segment it also claimed simply expires by its
             # own TTL.
             try:
                 await studio.store.save(principal, body.conversation_id)
-            except StaleSessionError:
+            except ConversationStale:
                 lock.release()
                 return _streaming_conflict_response(
                     "another request is streaming on this conversation"
                 )
+            claimed = segment_id
             if (
                 body.component_ref is not None
                 and body.component_ref.intent is ComponentRefIntent.EDIT
@@ -1439,9 +1495,20 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 state[APPLY_CHOICE_STATE_KEY] = json.dumps(body.apply_choice.model_dump())
             try:
                 await studio._ensure_session(
-                    user_id=principal, session_id=conversation.session_id, state=state
+                    user_id=principal,
+                    conversation_id=body.conversation_id,
+                    session_id=conversation.session_id,
+                    state=state,
                 )
-            except AlreadyExistsError:
+            except ConversationStale:
+                # An instance still running on ADK sessions moved the
+                # conversation since the load. This request's claim is a
+                # phantom: nothing has streamed. ADK's copy replaces the rows,
+                # so that instance's live lease is in them, `drop_lease`
+                # matches nothing, and the retry meets a busy 409 with no
+                # conflict recorded.
+                await studio.store.adk_take_copy(principal, body.conversation_id)
+                await studio.store.drop_lease(principal, body.conversation_id, segment_id)
                 lock.release()
                 return _streaming_conflict_response(
                     "another request is streaming on this conversation"
@@ -1466,12 +1533,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 media_type=SSE_MEDIA_TYPE,
             )
         except BaseException:
-            # The lock is normally released by the stream wrapper; a failure
-            # before the response starts streaming must release it here.
-            # Nothing durable changed since the claim save above that this
-            # request is responsible for flushing -- the claim already
-            # covers `begin_turn`'s effects and the segment it claimed
-            # alongside it, which simply expires by its own TTL.
+            # The stream wrapper normally releases the segment and the lock;
+            # a failure before the response starts streaming drops the lease
+            # and releases the lock here. The claim save already covers
+            # `begin_turn`'s effects, so the turn stays open and the next
+            # `/turn` closes it as `begin_turn` closes any open turn.
+            if claimed is not None:
+                await studio.store.drop_lease(principal, body.conversation_id, claimed)
             if lock.locked():
                 lock.release()
             raise
@@ -1502,7 +1570,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         this instance answers 204 without waiting for that to happen. Only
         once neither is true (nothing streaming locally, and no live
         segment on record anywhere) does this take the lock, reload, and
-        invalidate a pause the ledger might be holding.
+        invalidate a pause the store might be holding.
         """
         principal = principal_for(authorization, settings=settings)
         live = studio.store.current(principal, body.conversation_id)
@@ -1517,7 +1585,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             return Response(status_code=204)
         await lock.acquire()
         try:
-            conversation = await studio.store.load(principal, body.conversation_id)
+            try:
+                conversation = await studio.store.load(principal, body.conversation_id)
+            except ConversationHeld:
+                return _held_response()
             if conversation is None:
                 return Response(status_code=204)
             closed_here = False
@@ -1532,15 +1603,21 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # beyond that, since it stays in its own per-turn session
             # either way.
             conversation.pending.clear()
-            # No segment is live here (`request_cancel` above found none),
-            # so there is nothing for `release` to fence against; a plain
-            # save persists the clear. A stale write (a segment claimed the
-            # instant after `request_cancel` checked) is a rare enough race
-            # that losing this save is acceptable. The claiming stream's
-            # own release still checkpoints whatever it leaves behind.
+            # `request_cancel` above found no live segment, and the save
+            # below refuses if the load found one since, so the lease on
+            # record, if any, has lapsed. Clearing it fences out a stream
+            # still running under it: its checkpoint is fenced on the lease
+            # id alone, and would otherwise write over the turn this closes.
+            conversation.segment = None
+            # With no live segment there is nothing for `release` to fence
+            # against; a plain save persists the clear. A stale write (a
+            # segment claimed the instant after `request_cancel` checked) is
+            # a rare enough race that losing this save is acceptable. The
+            # claiming stream's own release still checkpoints whatever it
+            # leaves behind.
             try:
                 await studio.store.save(principal, body.conversation_id)
-            except StaleSessionError:
+            except ConversationStale:
                 logger.warning(
                     "studio cancel: conversation %s changed underneath this save; nothing "
                     "persisted",
@@ -1562,7 +1639,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         if isinstance(lock, JSONResponse):
             return lock
         try:
-            conversation = await studio.store.load(principal, body.conversation_id)
+            try:
+                conversation = await studio.store.load(principal, body.conversation_id)
+            except ConversationHeld:
+                lock.release()
+                return _held_response()
             if conversation is None:
                 lock.release()
                 return _unknown_conversation_response(body.conversation_id)
@@ -1641,7 +1722,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             if resuming and pending.answer != requested_answer:
                 # The claim above only succeeds once the earlier resume's
                 # segment has expired (its owner died before reaching a
-                # checkpoint), so this is a genuinely dead attempt, and
+                # checkpoint) or was dropped (it failed before its stream
+                # started), so this is a genuinely dead attempt, and
                 # this request's answer does not match what actually
                 # resumed it. Refused for good: a live segment above would
                 # already have caught a retry of the SAME answer, so a
@@ -1675,17 +1757,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     **held_labels(pending.card),
                     **conversation.turn_choice_baseline,
                 }
-            if resuming:
-                # A retry resuming the same answer again: the dead attempt
-                # may already have sent frames the client saw, carrying a
-                # `seq` this stream must never repeat.
-                conversation.seq += 1000
             # Saved before the resume stream starts: a double answer to the
             # same interrupt across two instances loses cleanly here, with a
             # 409, rather than each resuming its own segment of the turn.
             try:
                 await studio.store.save(principal, body.conversation_id)
-            except StaleSessionError:
+            except ConversationStale:
                 lock.release()
                 return _streaming_conflict_response(
                     "another request already answered this interrupt"
@@ -1696,106 +1773,111 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             lock.release()
             raise
 
-        # The instance that resumes a paused turn may not be the one that
-        # opened it: its telemetry span is process-local and never persisted,
-        # and a workflow's own steps run as concurrent waves whose recording
-        # order `_RecordingSurface` needs the plan's own step order to undo
-        # (`_PendingInterrupt.step_order`'s docstring). Both are restored
-        # before anything below can run the graph or close the turn.
-        conversation.ensure_turn_span()
-        if studio.surface_recorder is not None:
-            studio.surface_recorder.set_step_order(
-                f"{principal}/{body.conversation_id}", pending.step_order, pending.step_labels
-            )
-
-        if body.decision is InterruptDecision.REJECT:
-            # The plan is declined and the turn ends; nothing was computed. Its
-            # early retrievals, if any, are left to finish or lapse.
-            # The paused ADK invocation is abandoned in its per-turn session.
-            async def _rejected() -> AsyncGenerator[Any]:
-                text = "Plan rejected."
-                conversation.close_turn(final_text=text)
-                yield MessageComplete(
-                    event="message.complete",
-                    seq=conversation.next_seq(),
-                    text=text,
-                )
-                yield Done(
-                    event="done",
-                    seq=conversation.next_seq(),
-                    trace_id=conversation.trace_id,
-                    composition=conversation.composition,
-                )
-
-            return StreamingResponse(
-                _sse_stream(
-                    studio._locked(
-                        principal, body.conversation_id, conversation, segment_id, _rejected()
-                    )
-                ),
-                media_type=SSE_MEDIA_TYPE,
-            )
-
-        if pending.kind == "elicitation":
-            # skip dismisses the whole pause; an answer resumes with every
-            # question's answer, keyed by question id.
-            if body.decision is InterruptDecision.SKIP:
-                answer: dict[str, Any] = {"skip": True}
-            else:
-                given = _given_answers(pending, body)
-                answer = {
-                    "answers": {
-                        question.id: _resume_answer(given[question.id])
-                        for question in pending.questions
-                    }
-                }
-                # The turn's history record must carry the answers or the
-                # next turn's digest shows only the un-refined ask.
-                for line in _answered_lines(pending, given):
-                    conversation.add_to_turn(line, user_words=True)
-        elif body.decision is InterruptDecision.APPROVE:
-            # The plan is keyed on its revision hash (`plan_revision`), and
-            # the approval dated by the record of its first answer, so a
-            # retry resuming the same answer later approves as of the same
-            # moment. The graph's `approve` node approves nothing without it.
-            answer = {"approved": pending.plan_revision}
-            recorded = next(
-                (
-                    r
-                    for r in reversed(conversation.approvals)
-                    if r.interrupt_id == body.interrupt_id
-                ),
-                None,
-            )
-            if recorded is not None:
-                answer["at"] = recorded.at.isoformat()
-        elif body.decision is InterruptDecision.SWITCH:
-            # The graph's `switch` node revises the plan in code and offers
-            # it again; a planner decision's switch (`is_decision_choice`)
-            # replans with the pick held (`harness.decision_pick`). The
-            # turn's history record carries the choice.
-            assert body.choice_id is not None and body.option_id is not None
-            answer = {
-                "approved": None,
-                "switch": {"choice_id": body.choice_id, "option_id": body.option_id},
-            }
-            label = pending.choices[body.choice_id].options[body.option_id].label
-            verb = "use" if is_decision_choice(body.choice_id) else "count"
-            conversation.add_to_turn(f"{verb} {label}", user_words=False)
-        else:  # amend: a stated non-approval routes the graph to the planner
-            answer = {"approved": None, "amendment": body.payload}
-            # An amendment refines the question, so the turn's history record
-            # carries it.
-            conversation.add_to_turn(str(body.payload), user_words=True)
-        current_conversation_id.set(f"{principal}/{body.conversation_id}")
-        current_conversation_key.set((principal, body.conversation_id))
-        # The user's words as amended, so a search after the resume reads the
-        # refined ask and no switch's label.
-        current_user_message.set(conversation.turn_user_words)
-        current_earlier_block.set(conversation.earlier_block)
-        current_recorded_identity.set(conversation.recorded_identity)
-        start_turn_budget(settings)
+        # Every failure from here to the stream's start drops the lease the
+        # save above claimed, and releases the lock. Only the lease: the
+        # pending entry stays resuming under the dropped segment with the
+        # answer recorded, so a retry of the same answer claims at once and
+        # resumes, and the turn lines added below stay unsaved.
         try:
+            # The instance that resumes a paused turn may not be the one that
+            # opened it: its telemetry span is process-local and never persisted,
+            # and a workflow's own steps run as concurrent waves whose recording
+            # order `_RecordingSurface` needs the plan's own step order to undo
+            # (`_PendingInterrupt.step_order`'s docstring). Both are restored
+            # before anything below can run the graph or close the turn.
+            conversation.ensure_turn_span()
+            if studio.surface_recorder is not None:
+                studio.surface_recorder.set_step_order(
+                    f"{principal}/{body.conversation_id}", pending.step_order, pending.step_labels
+                )
+
+            if body.decision is InterruptDecision.REJECT:
+                # The plan is declined and the turn ends; nothing was computed. Its
+                # early retrievals, if any, are left to finish or lapse.
+                # The paused ADK invocation is abandoned in its per-turn session.
+                async def _rejected() -> AsyncGenerator[Any]:
+                    text = "Plan rejected."
+                    conversation.close_turn(final_text=text)
+                    yield MessageComplete(
+                        event="message.complete",
+                        seq=conversation.next_seq(),
+                        text=text,
+                    )
+                    yield Done(
+                        event="done",
+                        seq=conversation.next_seq(),
+                        trace_id=conversation.trace_id,
+                        composition=conversation.composition,
+                    )
+
+                return StreamingResponse(
+                    _sse_stream(
+                        studio._locked(
+                            principal, body.conversation_id, conversation, segment_id, _rejected()
+                        )
+                    ),
+                    media_type=SSE_MEDIA_TYPE,
+                )
+
+            if pending.kind == "elicitation":
+                # skip dismisses the whole pause; an answer resumes with every
+                # question's answer, keyed by question id.
+                if body.decision is InterruptDecision.SKIP:
+                    answer: dict[str, Any] = {"skip": True}
+                else:
+                    given = _given_answers(pending, body)
+                    answer = {
+                        "answers": {
+                            question.id: _resume_answer(given[question.id])
+                            for question in pending.questions
+                        }
+                    }
+                    # The turn's history record must carry the answers or the
+                    # next turn's digest shows only the un-refined ask.
+                    for line in _answered_lines(pending, given):
+                        conversation.add_to_turn(line, user_words=True)
+            elif body.decision is InterruptDecision.APPROVE:
+                # The plan is keyed on its revision hash (`plan_revision`), and
+                # the approval dated by the record of its first answer, so a
+                # retry resuming the same answer later approves as of the same
+                # moment. The graph's `approve` node approves nothing without it.
+                answer = {"approved": pending.plan_revision}
+                recorded = next(
+                    (
+                        r
+                        for r in reversed(conversation.approvals)
+                        if r.interrupt_id == body.interrupt_id
+                    ),
+                    None,
+                )
+                if recorded is not None:
+                    answer["at"] = recorded.at.isoformat()
+            elif body.decision is InterruptDecision.SWITCH:
+                # The graph's `switch` node revises the plan in code and offers
+                # it again; a planner decision's switch (`is_decision_choice`)
+                # replans with the pick held (`harness.decision_pick`). The
+                # turn's history record carries the choice.
+                assert body.choice_id is not None and body.option_id is not None
+                answer = {
+                    "approved": None,
+                    "switch": {"choice_id": body.choice_id, "option_id": body.option_id},
+                }
+                label = pending.choices[body.choice_id].options[body.option_id].label
+                verb = "use" if is_decision_choice(body.choice_id) else "count"
+                conversation.add_to_turn(f"{verb} {label}", user_words=False)
+            else:  # amend: a stated non-approval routes the graph to the planner
+                answer = {"approved": None, "amendment": body.payload}
+                # An amendment refines the question, so the turn's history record
+                # carries it.
+                conversation.add_to_turn(str(body.payload), user_words=True)
+            current_conversation_id.set(f"{principal}/{body.conversation_id}")
+            current_conversation_key.set((principal, body.conversation_id))
+            # The user's words as amended, so a search after the resume reads the
+            # refined ask and no switch's label.
+            current_user_message.set(conversation.turn_user_words)
+            current_earlier_block.set(conversation.earlier_block)
+            current_recorded_identity.set(conversation.recorded_identity)
+            start_turn_budget(settings)
             part = create_request_input_response(pending.adk_id, {"result": answer})
             message = types.Content(role="user", parts=[part])
             # The approved plan goes out once per interrupt: a retry resuming
@@ -1828,6 +1910,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 media_type=SSE_MEDIA_TYPE,
             )
         except BaseException:
+            await studio.store.drop_lease(principal, body.conversation_id, segment_id)
             lock.release()
             raise
 
@@ -1836,11 +1919,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         body: CompositionMutation, authorization: str | None = Header(default=None)
     ) -> Response:
         # Routed through the composition lock, not the turn lock: a canvas
-        # edit must land while a turn streams on the same conversation, so a
-        # concurrent turn's own checkpoint replays its composition ops
-        # instead of overwriting this route's write. The composition lock
-        # also serialises two same-instance `/composition` calls, so they
-        # read-mutate-write in turn rather than interleaving.
+        # edit must land while a turn streams on the same conversation. The
+        # turn writes each of its own canvas changes under the same row
+        # lock (`StudioStore.change_canvas`), so neither overwrites the
+        # other. The composition lock also serialises two same-instance
+        # `/composition` calls, so they read-mutate-write in turn rather
+        # than interleaving.
         principal = principal_for(authorization, settings=settings)
         turn_lock = studio.store.lock_for(principal, body.conversation_id)
         async with studio.store.composition_lock_for(principal, body.conversation_id):
@@ -1849,14 +1933,17 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # unsaved turn fields (turn_components, turn_user_message,
                 # ...), so this reads it live rather than reloading over
                 # them. The composition manifest itself is never read off
-                # `conversation` here. `mutate_composition` below fetches
-                # and rebuilds it straight from the ledger, so this choice
+                # `conversation` here. `mutate_composition` below reads it
+                # straight from the store, so this choice
                 # only decides which snapshot of the conversation's OTHER
                 # fields (`.components`, read by `_apply_operations` below)
                 # the route sees.
                 conversation = studio.store.current(principal, body.conversation_id)
             else:
-                conversation = await studio.store.load(principal, body.conversation_id)
+                try:
+                    conversation = await studio.store.load(principal, body.conversation_id)
+                except ConversationHeld:
+                    return _held_response()
             if conversation is None:
                 return _unknown_conversation_response(body.conversation_id)
 
@@ -1890,30 +1977,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     manifest, blocks, actor=CompositionActor.USER, layout_hints=layout_hints
                 )
 
-            try:
-                result = await studio.store.mutate_composition(
-                    principal, body.conversation_id, mutate
-                )
-            except StaleSessionError:
-                # `_COMPOSITION_MUTATE_RETRY_ATTEMPTS` fetch-rebuild-mutate
-                # cycles in a row all found another writer had landed first:
-                # the same conflict the expected_revision check above
-                # answers, just caught after sustained contention instead
-                # of at the first read.
-                logger.warning(
-                    "studio composition mutate: conversation %s stayed stale after retries; "
-                    "refusing as an edit conflict",
-                    body.conversation_id,
-                )
-                return _tool_error_response(
-                    ToolError(
-                        error=ErrorCode.EDIT_CONFLICT,
-                        retry=RetryMode.REFRESH_THEN_RETRY,
-                        detail="the composition changed since this request loaded it",
-                        fix="re-render from the current manifest and retry",
-                    ),
-                    status_code=409,
-                )
+            result = await studio.store.mutate_composition(principal, body.conversation_id, mutate)
             if isinstance(result, JSONResponse):
                 return result
             assert result is not None  # every non-refusal `mutate` return here is a manifest

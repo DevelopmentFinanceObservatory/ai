@@ -49,7 +49,7 @@ run is carried on no more.
 `RunLedger` is the storage interface. `InMemoryRunLedger` serves tests and the
 standalone harness, keeping each conversation's runs apart by the scope its
 caller names; `harness.run_ledger.StudioRunLedger` keeps runs in the
-conversation's ledger session.
+conversation's `runs` table.
 """
 
 from __future__ import annotations

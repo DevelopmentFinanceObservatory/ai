@@ -218,10 +218,10 @@ def bound_rows(refs: Mapping[str, object]) -> tuple[BoundEntity, ...]:
     `name` or `role_text`, so `identity` takes the text and `role` is
     unstated. A reader finds the row by its text, case-folded, with any role
     fitting, as it read the mapping. Only the string refs of an entry count,
-    each once, and an entry with no text or no such ref is left out. Blocks
-    stored as the mapping are rewritten by this rule too
-    (`harness.bound_refs_migration`), so a stored block holds the same rows
-    whichever way it was written.
+    each once, and an entry with no text or no such ref is left out. The
+    import job rewrites stored mapping-form blocks by this rule
+    (`harness.adk_import._convert_block`), so a stored block holds the same
+    rows whichever way it was written.
     """
     rows: list[BoundEntity] = []
     for text, value in refs.items():

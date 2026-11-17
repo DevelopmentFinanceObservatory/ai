@@ -281,9 +281,9 @@ a caller reading a model string having to import the service's MCP URLs and
 session backend. Recognised names include `DFO_APIS_URL`, `DFO_SITE_ORIGIN`
 (required on Cloud Run), `DATA_MCP_URL`, `ANALYSIS_MCP_URL`,
 `PRESENTATION_MCP_URL`, `PRESENTATION_PUBLIC_URL` (required), `MODEL_NAME`,
-`PLANNER_MODEL_NAME`, `DATABASE_URL` and the
-`SESSION_STORE_*` family (optional, for a durable harness session store;
-unset falls back to in-memory sessions, see `services/harness/README.md`),
+`PLANNER_MODEL_NAME`, `DATABASE_URL` or the `SESSION_STORE_*` family
+(required: the harness's Postgres database, `postgresql+asyncpg://...`,
+which `just pg-up` starts locally; see `services/harness/README.md`),
 the `LANGFUSE_*` family, and `PORT`. Each
 service exposes a console script (`harness-server`, `data-mcp`,
 `analysis-mcp`, `presentation-mcp`) and a liveness check equivalent to

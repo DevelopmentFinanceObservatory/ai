@@ -183,6 +183,7 @@ def _artifact_digest() -> str:
 
 async def test_a_frame_data_mcp_registers_resolves_through_a_mounted_analysis_mcp_verb(
     monkeypatch: pytest.MonkeyPatch,
+    pg_database_url: str,
 ) -> None:
     """`get_data`, called through the mounted `data_mcp` app, fetches and registers a
     frame in the shared `common.materialisation` store; a `filter` call through the
@@ -219,7 +220,7 @@ async def test_a_frame_data_mcp_registers_resolves_through_a_mounted_analysis_mc
 
     client_holder.set_client(data_mcp_client(mint_handler))
 
-    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    app = create_app(settings=Settings(database_url=pg_database_url, mcp_api_token="test-token"))
 
     async with _running_lifespan(app):
         data_transport = _mounted_mcp_transport(app, f"{DATA_MCP_MOUNT_PATH}/mcp")

@@ -46,6 +46,7 @@ from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+from harness.graph.state import AGENT_NAME
 from harness.graph.workflow import create_root_workflow
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.planner_adapter import PlannerAdapter
@@ -59,8 +60,10 @@ from harness.scripted import (
     use_compiled_proposals,
 )
 from harness.scripted_plan import scripted_fetch_series_stats, scripted_plan
+from harness.session_store import adk_turn_specs
 from harness.settings import Settings
 from harness.studio import StudioRunner, create_studio_router
+from harness.studio_store import StudioStore
 from harness.tool_contracts import ResolverError, resolver_digest
 from harness.wiring import handing_back_planner_failures
 from orchestrator.agent import create_orchestrator_agent
@@ -68,6 +71,7 @@ from planner.plan import Plan, SessionState, save_plan
 from planner.specs import planner_specs
 from planner.tool_spec import ToolSpec
 from pydantic import Field
+from sqlalchemy.ext.asyncio import AsyncEngine
 from translator.tool import build_translate
 
 # What a model says once its script runs out. The run records the exhaustion
@@ -459,10 +463,25 @@ def _planner_adapter(
     )
 
 
+class _NoAdk:
+    """The eval's conversations start in the tables, and ADK never held them."""
+
+    async def reimport(self, principal: str, conversation_id: str) -> None:
+        del principal, conversation_id
+
+    async def moved(self, principal: str, conversation_id: str) -> bool:
+        del principal, conversation_id
+        return False
+
+    async def take_copy(self, principal: str, conversation_id: str) -> None:
+        del principal, conversation_id
+
+
 def build_studio(
-    scenario: Mapping[str, Any], *, log: Log
+    scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine
 ) -> tuple[FastAPI, OrchestratorLlm, CannedResolver]:
-    """The studio for one case: the app, its model and its resolver."""
+    """The studio for one case: the app, its model and its resolver. Its
+    conversations are stored on `engine`."""
     settings = Settings()
     sessions = InMemorySessionService()
 
@@ -522,6 +541,11 @@ def build_studio(
         create_workflow=create_workflow,
         executor=LoggingExecutor(log=log),
         session_service=sessions,
+        store=StudioStore(
+            engine,
+            adk=_NoAdk(),
+            turn_specs=adk_turn_specs(sessions, app_name=AGENT_NAME),
+        ),
         tool_surface=surface,
     )
     app = FastAPI()
@@ -532,11 +556,12 @@ def build_studio(
 
 @asynccontextmanager
 async def orchestrator_client(
-    scenario: Mapping[str, Any],
+    scenario: Mapping[str, Any], *, engine: AsyncEngine
 ) -> AsyncIterator[tuple[httpx2.AsyncClient, Log]]:
-    """An in-process client on the studio for `scenario`, and its log."""
+    """An in-process client on the studio for `scenario`, and its log. The
+    studio stores its conversations on `engine`."""
     log = Log()
-    app, _llm, _resolver = build_studio(scenario, log=log)
+    app, _llm, _resolver = build_studio(scenario, log=log, engine=engine)
     token = app.state.settings.studio_api_token or _TOKEN
     transport = httpx2.ASGITransport(app=app)
     async with httpx2.AsyncClient(

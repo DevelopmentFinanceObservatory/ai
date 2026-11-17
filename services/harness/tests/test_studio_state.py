@@ -14,15 +14,10 @@ The canvas digest entry is pinned here too: what a card shows (its entities
 and span) travels in the digest the models read, from the names the
 component's own fact summary and stored intent carry.
 
-The ledger-backed store (`StudioStore.create`/`load`/`save`/`checkpoint`/
-`release`) and the segment lease (`claim_segment`/`renew`/`request_cancel`)
-are exercised at the bottom of this file, parametrised over
-`InMemorySessionService` and `DatabaseSessionService(sqlite+aiosqlite)` for
-tests whose behaviour is the same on either backend
-(`InMemorySessionService.append_event` has no compare-and-swap check at
-all). The stale-retry and concurrent-write tests run only over the database
-backend, where two `StudioStore`s sharing one `DatabaseSessionService` can
-actually race.
+The store (`StudioStore.create`/`load`/`save`/`checkpoint`/`release`) and
+the segment lease (`claim_segment`/`renew`/`request_cancel`) are exercised
+at the bottom of this file against Postgres (the `pg_engine` fixture), each
+test in a schema of its own.
 """
 
 from __future__ import annotations
@@ -31,9 +26,9 @@ import asyncio
 import copy
 import json
 import logging
-import sqlite3
 import time
-from contextlib import closing
+from collections.abc import Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -42,12 +37,12 @@ from unittest.mock import MagicMock
 import pytest
 from compiler.sources import source_from_spec_block
 from fastapi.responses import JSONResponse
-from google.adk.errors import StaleSessionError
-from google.adk.sessions import DatabaseSessionService, InMemorySessionService
-from harness import studio_state
+from google.adk.sessions import InMemorySessionService
+from harness import studio_state, studio_store
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.conversation import current_conversation_key
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY
+from harness.session_store import adk_turn_specs
 from harness.studio_state import (
     CANVAS_DIGEST_MAX_BYTES,
     CONVERSATION_DIGEST_MAX_BYTES,
@@ -55,7 +50,6 @@ from harness.studio_state import (
     Segment,
     SegmentBusy,
     SegmentLost,
-    StudioStore,
     _digest_entry,
     _next_manifest,
     _PendingInterrupt,
@@ -64,6 +58,7 @@ from harness.studio_state import (
     make_recall_part,
     remove_cards,
 )
+from harness.studio_store import SEQ_BLOCK, ConversationStale, StudioStore
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
 from harness.wire import (
     AddOp,
@@ -76,10 +71,13 @@ from harness.wire import (
 )
 from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from . import drawn_cards
+from .orchestrator_fakes import NO_ADK
 from .resolved_revision import resolved_revision
-from .sqlite_session import sqlite_session_service
+from .store_clock import StoreClock
 from .test_turn_records import _scoped_part, _top_donors
 
 CONVERSATION = "conv_01test0000"
@@ -181,26 +179,6 @@ def test_land_component_appends_a_block() -> None:
 
     assert action == "created"
     assert [b.component_id for b in state.composition.blocks] == ["cmp_two"]
-
-
-def test_land_component_first_card_op_replays_onto_none_identically() -> None:
-    """The op `land_component` records for the very first card on a fresh
-    canvas must be a pure function of its input: replayed against `None`
-    (a fresh checkpoint fetch that also found no composition yet), it
-    reproduces the exact same manifest, `composition_id` included, rather
-    than minting a second, different id."""
-    state = ConversationState(conversation_id=CONVERSATION)
-
-    action = studio_state.land_component(state, _component("cmp_one"))
-
-    assert action == "created"
-    live = state.composition
-    assert len(state._composition_ops) == 1
-
-    replayed = state._composition_ops[0](None)
-
-    assert replayed == live
-    assert replayed.composition_id == live.composition_id
 
 
 def test_land_component_held_when_auto_add_is_off() -> None:
@@ -978,8 +956,6 @@ def test_removing_cards_takes_the_named_blocks_off_and_reports_the_rest():
     assert [b.component_id for b in state.composition.blocks] == ["cmp_01", "cmp_03"]
     assert state.composition.revision == before.revision + 1
     assert state.composition.actor == CompositionActor.MODEL
-    # Recorded as a replayable op, so a concurrent `/composition` reconciles.
-    assert state._composition_ops[-1](before) == state.composition
     # The stream owes one update for it, once.
     assert state.take_unreported_removal() is True
     assert state.take_unreported_removal() is False
@@ -1573,25 +1549,28 @@ def test_recall_part_bounds_what_it_renders_of_a_turn_with_several_plans():
 
 
 async def test_recall_reads_an_executing_plans_status_from_its_run(
-    session_service, monkeypatch: pytest.MonkeyPatch
+    new_store,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A plan recorded executing states its run's status in the run ledger
     once the run has settled; one recorded with no run, or whose run is still
     unfinished, keeps its recorded status. The ledger is read only while a
     record awaits a run."""
-    store = StudioStore(session_service, app_name="app")
+    store = new_store()
     state = await store.create("principal", CONVERSATION)
     segment_id = store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
-    await store.append_run_items(
-        "principal",
-        CONVERSATION,
-        segment_id,
-        lambda items: {
-            f"{studio_state.RUN_ITEM_PREFIX}run_done": {"status": "completed"},
-            f"{studio_state.RUN_ITEM_PREFIX}run_held": {"status": "pending"},
-        },
-    )
+    async with store.fenced("principal", CONVERSATION, segment_id) as (conn, pk):
+        await conn.execute(
+            text(
+                "INSERT INTO runs (conversation, run_id, record) "
+                "VALUES (:pk, :run_id, CAST(:record AS jsonb))"
+            ),
+            [
+                {"pk": pk, "run_id": "run_done", "record": '{"status": "completed"}'},
+                {"pk": pk, "run_id": "run_held", "record": '{"status": "pending"}'},
+            ],
+        )
     executing = {**_PLAN_JSON, "status": PlanStatus.EXECUTING.value}
     plans = [
         {**executing, "run_id": "run_done"},
@@ -1623,7 +1602,7 @@ async def test_recall_reads_an_executing_plans_status_from_its_run(
     async def unread(*args: Any) -> dict[str, Any]:
         raise AssertionError("the ledger is read with no record awaiting a run")
 
-    monkeypatch.setattr(store, "run_items", unread)
+    monkeypatch.setattr(store, "_stored_statuses", unread)
     state.turns = [{"user": "q", "assistant": "a", "plans": [_PLAN_JSON, executing]}]
     assert await store.run_statuses("principal", CONVERSATION, conversation=state) == {}
 
@@ -1752,8 +1731,8 @@ def test_a_stored_pending_card_keeps_new_plan_beside_the_card(new_plan: bool) ->
     card = PlanProposed.model_validate({**raw, "new_plan": new_plan})
     pending = _PendingInterrupt(adk_id="adk_1", kind="plan", card=card)
 
-    entry = studio_state._serialize_pending({"int_1": pending})["int_1"]
-    restored = studio_state._deserialize_entry(json.loads(json.dumps(entry)))
+    entry = studio_store._serialize_pending({"int_1": pending})["int_1"]
+    restored = studio_store._deserialize_entry(json.loads(json.dumps(entry)))
 
     assert "new_plan" not in entry["card"]
     assert restored.card is not None
@@ -1790,20 +1769,35 @@ def test_drop_resuming_removes_only_entries_under_the_named_segment() -> None:
 # --- and the segment lease: claim_segment / renew / request_cancel ----------
 
 
-def _database_service(tmp_path, name: str = "studio") -> DatabaseSessionService:
-    return sqlite_session_service(tmp_path / f"{name}.db")
+@pytest.fixture
+def turn_sessions() -> InMemorySessionService:
+    """The per-turn ADK sessions, where an open turn's spec blocks live."""
+    return InMemorySessionService()
 
 
-@pytest.fixture(params=["memory", "database"])
-def session_service(request, tmp_path) -> Any:
-    """Both backends the ledger runs over. A test whose behaviour does not
-    depend on staleness enforcement (round trip, delta-only save, a missing
-    ledger, a non-JSON value) runs against both; a test of the stale-retry
-    path builds a `DatabaseSessionService` of its own instead, since
-    `InMemorySessionService.append_event` has no compare-and-swap check."""
-    if request.param == "memory":
-        return InMemorySessionService()
-    return _database_service(tmp_path)
+@pytest.fixture
+def new_store(
+    pg_engine: AsyncEngine, turn_sessions: InMemorySessionService
+) -> Callable[..., StudioStore]:
+    """A fresh `StudioStore` over the test's Postgres schema and turn
+    sessions: each call stands for another instance. With `clock`, the
+    store reads its leases' time from that clock instead of the database's."""
+
+    def build(*, clock: StoreClock | None = None) -> StudioStore:
+        return StudioStore(
+            pg_engine,
+            adk=NO_ADK,
+            turn_specs=adk_turn_specs(turn_sessions, app_name="app"),
+            **(clock.store_kwargs if clock is not None else {}),
+        )
+
+    return build
+
+
+@pytest.fixture
+async def clock(pg_engine: AsyncEngine) -> StoreClock:
+    """A clock both a store's lease time and instance time read, at 1000."""
+    return await StoreClock.start(pg_engine)
 
 
 def _approval(**overrides: Any) -> ApprovalRecord:
@@ -1821,19 +1815,21 @@ def _approval(**overrides: Any) -> ApprovalRecord:
     return ApprovalRecord(**fields)
 
 
-async def test_the_ledger_stores_a_turns_blocks_only_when_the_turn_closes(session_service) -> None:
-    """A checkpoint after a search writes no spec block to the ledger; closing
-    the turn on another instance stores the block of the source its plan
-    used, read from the turn's own session."""
+async def test_the_ledger_stores_a_turns_blocks_only_when_the_turn_closes(
+    new_store, turn_sessions, pg_engine
+) -> None:
+    """A checkpoint after a search writes no spec block to the conversation's
+    rows; closing the turn on another instance stores the block of the source
+    its plan used, read from the turn's own session."""
     used = _PLAN.sources[0].spec_id
     candidate = "spec_" + "d" * 32
     blocks = {used: {"spec_id": used, "note": "used block"}, candidate: {"note": "unused block"}}
-    store_a = StudioStore(session_service, app_name="app")
+    store_a = new_store()
     state = await store_a.create("principal", CONVERSATION)
     segment_id = store_a.claim_segment("principal", CONVERSATION)
     state.begin_turn()
     await store_a.save("principal", CONVERSATION)
-    await session_service.create_session(
+    await turn_sessions.create_session(
         app_name="app",
         user_id="principal",
         session_id=state.session_id,
@@ -1844,26 +1840,39 @@ async def test_the_ledger_stores_a_turns_blocks_only_when_the_turn_closes(sessio
 
     await store_a.checkpoint("principal", CONVERSATION, segment_id)
 
-    ledger = await session_service.get_session(
-        app_name="app.ledger", user_id="principal", session_id=CONVERSATION
-    )
-    written = json.dumps([ledger.state, *(e.actions.state_delta for e in ledger.events)])
+    written = await _stored_rows_text(pg_engine)
     assert "used block" not in written and "unused block" not in written
 
-    resumed = await StudioStore(session_service, app_name="app").load("principal", CONVERSATION)
+    resumed = await new_store().load("principal", CONVERSATION)
     assert resumed is not None
     resumed.close_turn(final_text="The top donor was the United States.")
 
     assert resumed.turns[-1]["specs"] == {used: blocks[used]}
 
 
+async def _stored_rows_text(engine: Any) -> str:
+    """Every row the conversation tables hold, as one JSON text."""
+    tables = (
+        "conversations",
+        "conversation_turns",
+        "conversation_components",
+        "conversation_write_tokens",
+        "conversation_approvals",
+    )
+    rows: list[Any] = []
+    async with engine.connect() as conn:
+        for table in tables:
+            rows += [list(row) for row in await conn.execute(text(f"SELECT * FROM {table}"))]
+    return json.dumps(rows, default=str)
+
+
 async def test_a_readings_scope_choices_survive_the_turns_close_and_a_reload(
-    session_service,
+    new_store,
 ) -> None:
     """A later turn on another instance reads the scope choices a search stored,
     which its searches carry."""
     scoped = SearchReading.from_part(_scoped_part())
-    store_a = StudioStore(session_service, app_name="app")
+    store_a = new_store()
     state = await store_a.create("principal", CONVERSATION)
     state.begin_turn()
     state.turn_user_message = "health aid to Africa, CRS 120 alone"
@@ -1871,7 +1880,7 @@ async def test_a_readings_scope_choices_survive_the_turns_close_and_a_reload(
     state.close_turn(final_text="Health aid to Africa was $1.2bn.")
     await store_a.save("principal", CONVERSATION)
 
-    loaded = await StudioStore(session_service, app_name="app").load("principal", CONVERSATION)
+    loaded = await new_store().load("principal", CONVERSATION)
 
     assert loaded is not None
     ledger = loaded.prior_ledger_state()
@@ -1880,11 +1889,11 @@ async def test_a_readings_scope_choices_survive_the_turns_close_and_a_reload(
     assert reading.scope == scoped.scope
 
 
-async def test_round_trip_of_every_durable_field(session_service) -> None:
+async def test_round_trip_of_every_durable_field(new_store) -> None:
     """Every durable field survives a save on one store and a load on a
     SECOND store over the same ledger -- the actual cross-instance case,
     not just a read of the same in-process object."""
-    store_a = StudioStore(session_service, app_name="app")
+    store_a = new_store()
     state = await store_a.create("principal", CONVERSATION)
     state.turn_index = 3
     state.seq = 7
@@ -1924,11 +1933,15 @@ async def test_round_trip_of_every_durable_field(session_service) -> None:
     block = CompositionBlock(
         component_id="cmp_1", revision=1, type=ComponentType.LINE_CHART, title="Aid to Kenya"
     )
-    state.composition = _next_manifest(None, [block], actor=CompositionActor.MODEL)
+    await store_a.mutate_composition(
+        "principal",
+        CONVERSATION,
+        lambda manifest: _next_manifest(manifest, [block], actor=CompositionActor.MODEL),
+    )
 
     await store_a.save("principal", CONVERSATION)
 
-    store_b = StudioStore(session_service, app_name="app")
+    store_b = new_store()
     loaded = await store_b.load("principal", CONVERSATION)
 
     assert loaded is not None
@@ -1982,57 +1995,23 @@ async def test_round_trip_of_every_durable_field(session_service) -> None:
 
 
 async def test_load_returns_none_for_a_conversation_the_ledger_does_not_hold(
-    session_service,
+    new_store,
 ) -> None:
-    store = StudioStore(session_service, app_name="app")
+    store = new_store()
 
     assert await store.load("principal", "conv_unknown") is None
 
 
-async def test_a_conversation_id_shaped_like_a_per_turn_session_id_does_not_collide(
-    session_service,
-) -> None:
-    """A per-turn ADK session already exists, literally named "A#t1" (the
-    session `StudioRunner._ensure_session` mints for conversation "A"'s
-    first turn), under the same app name a `StudioStore` built over this
-    session service uses for its own per-turn sessions. `create`ing a
-    brand-new conversation literally named "A#t1" must not collide with it
-    -- the ledger lives under its own, disjoint app name."""
-    await session_service.create_session(app_name="app", user_id="principal", session_id="A#t1")
-    store = StudioStore(session_service, app_name="app")
-
-    state = await store.create("principal", "A#t1")
-
-    assert state.turn_index == 0
-
-
-async def test_load_does_not_read_the_ledgers_event_history(session_service) -> None:
-    """`GetSessionConfig(num_recent_events=0)`: several saves accumulate
-    several event rows, and a later `load` must not read any of them back."""
-    store = StudioStore(session_service, app_name="app")
-    await store.create("principal", CONVERSATION)
-    state = store.current("principal", CONVERSATION)
-    for turn_index in range(1, 4):
-        state.turn_index = turn_index
-        await store.save("principal", CONVERSATION)
-
-    await store.load("principal", CONVERSATION)
-
-    entry = store._runtime[("principal", CONVERSATION)]
-    assert entry.session is not None
-    assert entry.session.events == []
-
-
-async def test_save_appends_only_the_keys_that_changed(session_service) -> None:
+async def test_save_appends_only_the_keys_that_changed(new_store) -> None:
     calls: list[dict[str, Any]] = []
-    real_append_event = session_service.append_event
+    store = new_store()
+    real_write = store._write
 
-    async def recording_append_event(session, event):
-        calls.append(dict(event.actions.state_delta or {}))
-        return await real_append_event(session, event)
+    async def recording_write(conn, pk, delta, **kwargs):
+        calls.append(dict(delta))
+        return await real_write(conn, pk, delta, **kwargs)
 
-    session_service.append_event = recording_append_event
-    store = StudioStore(session_service, app_name="app")
+    store._write = recording_write
     state = await store.create("principal", CONVERSATION)
     state.turn_index = 1
     state.turn_user_message = "first save touches many fields"
@@ -2048,29 +2027,15 @@ async def test_save_appends_only_the_keys_that_changed(session_service) -> None:
     await store.save("principal", CONVERSATION)
 
     assert len(calls) == 2
-    assert calls[1] == {studio_state._KEY_TURN_INDEX: 2}
+    assert calls[1] == {studio_store._KEY_TURN_INDEX: 2}
 
     # a save with nothing changed appends no event at all
     await store.save("principal", CONVERSATION)
     assert len(calls) == 2
 
 
-async def test_a_save_that_folds_the_composition_consumes_its_ops(session_service) -> None:
-    """The ops a save folds into its delta are spent, so a later checkpoint
-    does not replay them onto the manifest a second time."""
-    store = StudioStore(session_service, app_name="app")
-    state = await store.create("principal", CONVERSATION)
-    land_component(state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1})
-
-    await store.save("principal", CONVERSATION)
-
-    assert state._composition_ops == []
-    reloaded = await StudioStore(session_service, app_name="app").load("principal", CONVERSATION)
-    assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_one"]
-
-
-async def test_a_non_json_value_raises_rather_than_being_silently_coerced(session_service) -> None:
-    store = StudioStore(session_service, app_name="app")
+async def test_a_non_json_value_raises_rather_than_being_silently_coerced(new_store) -> None:
+    store = new_store()
     state = await store.create("principal", CONVERSATION)
     state.turn_components = [{"bad": object()}]
 
@@ -2078,14 +2043,13 @@ async def test_a_non_json_value_raises_rather_than_being_silently_coerced(sessio
         await store.save("principal", CONVERSATION)
 
 
-async def test_second_claim_over_one_database_service_raises_stale(tmp_path) -> None:
-    """Two `StudioStore`s share ONE `DatabaseSessionService`. Both load the
-    same brand-new ledger; the first to save its claimed `turn_index` wins,
-    and the second -- still holding its pre-claim snapshot -- raises
-    `StaleSessionError` rather than silently overwriting the first claim."""
-    service = _database_service(tmp_path)
-    store_a = StudioStore(service, app_name="app")
-    store_b = StudioStore(service, app_name="app")
+async def test_second_claim_over_one_database_service_raises_stale(new_store) -> None:
+    """Two `StudioStore`s over one database. Both load the same brand-new
+    conversation. The first to save its claimed `turn_index` wins, and the
+    second, which still holds its pre-claim snapshot, raises
+    `ConversationStale` instead of overwriting the first claim."""
+    store_a = new_store()
+    store_b = new_store()
     await store_a.create("principal", CONVERSATION)
     await store_b.load("principal", CONVERSATION)
 
@@ -2093,25 +2057,180 @@ async def test_second_claim_over_one_database_service_raises_stale(tmp_path) -> 
     await store_a.save("principal", CONVERSATION)
 
     store_b.current("principal", CONVERSATION).turn_index = 1
-    with pytest.raises(StaleSessionError):
+    with pytest.raises(ConversationStale):
         await store_b.save("principal", CONVERSATION)
+
+
+async def test_a_lease_less_save_during_another_instances_live_lease_is_refused(
+    new_store, clock
+) -> None:
+    """B saves with no lease of its own while A streams. The save is refused,
+    since A's stream alone writes the turn state. Once A's lease lapses, the
+    same save lands."""
+    store_a = new_store(clock=clock)
+    store_b = new_store(clock=clock)
+    await store_a.create("principal", CONVERSATION)
+    store_a.claim_segment("principal", CONVERSATION)
+    await store_a.save("principal", CONVERSATION)
+    state_b = await store_b.load("principal", CONVERSATION)
+
+    state_b.turn_final_text = "b's write"
+    with pytest.raises(ConversationStale):
+        await store_b.save("principal", CONVERSATION)
+
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+    await store_b.save("principal", CONVERSATION)
+    reloaded = await new_store(clock=clock).load("principal", CONVERSATION)
+    assert reloaded.turn_final_text == "b's write"
+
+
+async def test_the_lease_holders_own_save_is_not_refused(new_store) -> None:
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+
+    state.turn_final_text = "the holder's write"
+    await store.save("principal", CONVERSATION)
+
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert reloaded.turn_final_text == "the holder's write"
+
+
+async def test_instances_whose_clocks_disagree_agree_on_a_lease_by_the_databases_clock(
+    pg_engine, turn_sessions
+) -> None:
+    """B's own clock runs a day ahead of A's. A's lease is live by the
+    database's clock, so B can neither claim it nor miss it when cancelling."""
+    store_a = StudioStore(
+        pg_engine,
+        adk=NO_ADK,
+        turn_specs=adk_turn_specs(turn_sessions, app_name="app"),
+    )
+    store_b = StudioStore(
+        pg_engine,
+        adk=NO_ADK,
+        turn_specs=adk_turn_specs(turn_sessions, app_name="app"),
+        clock=lambda: time.time() + 86_400,
+    )
+    await store_a.create("principal", CONVERSATION)
+    store_a.claim_segment("principal", CONVERSATION)
+    await store_a.save("principal", CONVERSATION)
+    await store_b.load("principal", CONVERSATION)
+
+    with pytest.raises(SegmentBusy):
+        store_b.claim_segment("principal", CONVERSATION)
+    assert await store_b.request_cancel("principal", CONVERSATION) is True
+
+
+async def test_each_claim_numbers_its_frames_past_every_number_reserved_before(
+    new_store, clock
+) -> None:
+    """A turn's first claim numbers from 0. A resume on another instance
+    starts at the end of everything reserved before, however few numbers the
+    earlier segment used, and a segment past its reservation's headroom
+    reserves the next block before it sends more. A new turn numbers from 0
+    again."""
+    store_a = new_store(clock=clock)
+    state_a = await store_a.create("principal", CONVERSATION)
+    state_a.begin_turn()
+    first = store_a.claim_segment("principal", CONVERSATION)
+    await store_a.save("principal", CONVERSATION)
+    assert state_a.seq == 0
+    state_a.seq = 37
+    await store_a.release("principal", CONVERSATION, first)
+
+    store_b = new_store(clock=clock)
+    state_b = await store_b.load("principal", CONVERSATION)
+    assert state_b.seq == 37
+    second = store_b.claim_segment("principal", CONVERSATION)
+    await store_b.save("principal", CONVERSATION)
+    assert state_b.seq == SEQ_BLOCK
+
+    state_b.seq = 2 * SEQ_BLOCK - 10  # inside the headroom of [256, 512)
+    await store_b.reserve_frames("principal", CONVERSATION, second)
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)  # B dies mid-segment
+
+    store_c = new_store(clock=clock)
+    state_c = await store_c.load("principal", CONVERSATION)
+    store_c.claim_segment("principal", CONVERSATION)
+    await store_c.save("principal", CONVERSATION)
+    assert state_c.seq == 3 * SEQ_BLOCK - 10
+    state_b.seq = 3 * SEQ_BLOCK - 20  # B again inside its headroom, now fenced out
+    with pytest.raises(SegmentLost):
+        await store_b.reserve_frames("principal", CONVERSATION, second)
+
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+    state_c.segment = None
+    await store_c.save("principal", CONVERSATION)
+    state_c.begin_turn()
+    store_c.claim_segment("principal", CONVERSATION)
+    await store_c.save("principal", CONVERSATION)
+    assert state_c.seq == 0
+
+
+async def test_a_resuming_claim_starts_past_numbers_a_lapsed_stream_reserved_after_the_load(
+    new_store, clock
+) -> None:
+    """B loads the conversation once A's lease has lapsed and claims the turn
+    in memory. A's heartbeat then brings its lease back, A reserves another
+    block and lapses again before B's claim commits. B numbers from the end
+    A reserved, past every number A may have sent."""
+    store_a = new_store(clock=clock)
+    state_a = await store_a.create("principal", CONVERSATION)
+    state_a.begin_turn()
+    first = store_a.claim_segment("principal", CONVERSATION)
+    await store_a.save("principal", CONVERSATION)
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+
+    store_b = new_store(clock=clock)
+    state_b = await store_b.load("principal", CONVERSATION)
+    store_b.claim_segment("principal", CONVERSATION)
+    assert await store_a.renew("principal", CONVERSATION, first) == "ok"
+    state_a.seq = SEQ_BLOCK - 10  # inside the headroom of [0, 256)
+    await store_a.reserve_frames("principal", CONVERSATION, first)
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+    await store_b.save("principal", CONVERSATION)
+
+    assert state_b.seq == 2 * SEQ_BLOCK - 10
+
+
+async def test_a_stream_whose_lease_lapsed_reserves_no_more_frame_numbers(new_store, clock) -> None:
+    """Another instance may already have loaded the reserved end to claim the
+    turn from, so a lapsed stream's reservation is refused and the stored end
+    stays where it was."""
+    store = new_store(clock=clock)
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn()
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    state.seq = SEQ_BLOCK - 10
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+
+    with pytest.raises(SegmentLost):
+        await store.reserve_frames("principal", CONVERSATION, segment_id)
+
+    resumed = new_store(clock=clock)
+    state_resumed = await resumed.load("principal", CONVERSATION)
+    resumed.claim_segment("principal", CONVERSATION)
+    assert state_resumed.seq == SEQ_BLOCK
 
 
 # --- the segment lease: claim_segment / renew / request_cancel --------------
 
 
 async def test_claim_segment_raises_segment_busy_while_a_live_segment_exists(
-    session_service,
+    new_store,
+    clock,
 ) -> None:
-    clock = [1_000.0]
-    store_a = StudioStore(session_service, app_name="app", clock=lambda: clock[0])
-    store_b = StudioStore(session_service, app_name="app", clock=lambda: clock[0])
+    store_a = new_store(clock=clock)
+    store_b = new_store(clock=clock)
     await store_a.create("principal", CONVERSATION)
     store_a.claim_segment("principal", CONVERSATION)
     await store_a.save("principal", CONVERSATION)
 
+    await clock.advance(10)  # well inside the 45s TTL
     await store_b.load("principal", CONVERSATION)
-    clock[0] += 10  # well inside the 45s TTL
 
     with pytest.raises(SegmentBusy) as excinfo:
         store_b.claim_segment("principal", CONVERSATION)
@@ -2120,32 +2239,31 @@ async def test_claim_segment_raises_segment_busy_while_a_live_segment_exists(
 
 
 async def test_claim_segment_succeeds_once_the_live_segment_has_expired(
-    session_service,
+    new_store,
+    clock,
 ) -> None:
-    clock = [1_000.0]
-    store_a = StudioStore(session_service, app_name="app", clock=lambda: clock[0])
-    store_b = StudioStore(session_service, app_name="app", clock=lambda: clock[0])
+    store_a = new_store(clock=clock)
+    store_b = new_store(clock=clock)
     await store_a.create("principal", CONVERSATION)
     first_id = store_a.claim_segment("principal", CONVERSATION)
     await store_a.save("principal", CONVERSATION)
 
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)
     await store_b.load("principal", CONVERSATION)
-    clock[0] += studio_state.SEGMENT_TTL_S + 1
 
     second_id = store_b.claim_segment("principal", CONVERSATION)
 
     assert second_id != first_id
 
 
-async def test_renew_reports_lost_after_a_takeover(session_service) -> None:
-    clock = [1_000.0]
-    store_a = StudioStore(session_service, app_name="app", clock=lambda: clock[0])
-    store_b = StudioStore(session_service, app_name="app", clock=lambda: clock[0])
+async def test_renew_reports_lost_after_a_takeover(new_store, clock) -> None:
+    store_a = new_store(clock=clock)
+    store_b = new_store(clock=clock)
     await store_a.create("principal", CONVERSATION)
     segment_id = store_a.claim_segment("principal", CONVERSATION)
     await store_a.save("principal", CONVERSATION)
 
-    clock[0] += studio_state.SEGMENT_TTL_S + 1  # A's segment has expired
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)  # A's segment has expired
     await store_b.load("principal", CONVERSATION)
     store_b.claim_segment("principal", CONVERSATION)
     await store_b.save("principal", CONVERSATION)
@@ -2153,258 +2271,74 @@ async def test_renew_reports_lost_after_a_takeover(session_service) -> None:
     assert await store_a.renew("principal", CONVERSATION, segment_id) == "lost"
 
 
-async def test_renew_reports_ok_and_pushes_the_ttl_forward(session_service) -> None:
-    clock = [1_000.0]
-    store = StudioStore(session_service, app_name="app", clock=lambda: clock[0])
+async def test_renew_reports_ok_and_pushes_the_ttl_forward(new_store, clock) -> None:
+    store = new_store(clock=clock)
     await store.create("principal", CONVERSATION)
     segment_id = store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
 
-    clock[0] += 30
+    await clock.advance(30)
     assert await store.renew("principal", CONVERSATION, segment_id) == "ok"
 
-    reloaded = await StudioStore(session_service, app_name="app").load("principal", CONVERSATION)
+    reloaded = await new_store().load("principal", CONVERSATION)
     assert reloaded.segment is not None
     assert reloaded.segment.cancel is False
-    assert reloaded.segment.expires_at == clock[0] + studio_state.SEGMENT_TTL_S
+    assert reloaded.segment.expires_at == clock.at + studio_state.SEGMENT_TTL_S
 
 
-async def test_renew_reports_cancelled_and_still_pushes_the_ttl_forward(session_service) -> None:
+async def test_renew_reports_cancelled_and_still_pushes_the_ttl_forward(new_store, clock) -> None:
     """`request_cancel`, from another instance, sets the segment's `cancel`
     flag; the owner's next `renew` reports it -- and still renews, so the
     flag keeps being observed until the owner reacts to it."""
-    clock = [1_000.0]
-    store_a = StudioStore(session_service, app_name="app", clock=lambda: clock[0])
-    store_b = StudioStore(session_service, app_name="app", clock=lambda: clock[0])
+    store_a = new_store(clock=clock)
+    store_b = new_store(clock=clock)
     await store_a.create("principal", CONVERSATION)
     segment_id = store_a.claim_segment("principal", CONVERSATION)
     await store_a.save("principal", CONVERSATION)
 
     assert await store_b.request_cancel("principal", CONVERSATION) is True
 
-    clock[0] += 30
+    await clock.advance(30)
     assert await store_a.renew("principal", CONVERSATION, segment_id) == "cancelled"
 
-    reloaded = await StudioStore(session_service, app_name="app").load("principal", CONVERSATION)
+    reloaded = await new_store().load("principal", CONVERSATION)
     assert reloaded.segment is not None
     assert reloaded.segment.cancel is True
-    assert reloaded.segment.expires_at == clock[0] + studio_state.SEGMENT_TTL_S
+    assert reloaded.segment.expires_at == clock.at + studio_state.SEGMENT_TTL_S
 
 
-async def test_request_cancel_returns_false_with_no_live_segment(session_service) -> None:
-    store = StudioStore(session_service, app_name="app")
+async def test_request_cancel_returns_false_with_no_live_segment(new_store) -> None:
+    store = new_store()
     await store.create("principal", CONVERSATION)
 
     assert await store.request_cancel("principal", CONVERSATION) is False
 
 
-async def test_request_cancel_returns_false_once_the_segment_has_expired(session_service) -> None:
-    clock = [1_000.0]
-    store = StudioStore(session_service, app_name="app", clock=lambda: clock[0])
+async def test_request_cancel_returns_false_once_the_segment_has_expired(new_store, clock) -> None:
+    store = new_store(clock=clock)
     await store.create("principal", CONVERSATION)
     store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
 
-    clock[0] += studio_state.SEGMENT_TTL_S + 1
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)
 
     assert await store.request_cancel("principal", CONVERSATION) is False
 
 
-# --- checkpoint: fetch-then-merge reconcile, fencing, and release -----------
-
-
-async def test_checkpoint_merges_a_key_committed_by_another_writer_since_this_instance_last_saved(
-    tmp_path,
-) -> None:
-    """B's checkpoint always fetches the ledger fresh before merging, so a
-    key A committed after B's last save survives alongside B's own write."""
-    service = _database_service(tmp_path)
-    store_a = StudioStore(service, app_name="app")
-    store_b = StudioStore(service, app_name="app")
-    await store_a.create("principal", CONVERSATION)
-    await store_b.load("principal", CONVERSATION)
-    segment_id = store_b.claim_segment("principal", CONVERSATION)
-    await store_b.save("principal", CONVERSATION)
-
-    await store_a.load("principal", CONVERSATION)
-    store_a.current("principal", CONVERSATION).turn_index = 1
-    await store_a.save("principal", CONVERSATION)
-
-    store_b.current("principal", CONVERSATION).turn_final_text = "b's answer"
-    await store_b.checkpoint("principal", CONVERSATION, segment_id)
-
-    reloaded = await StudioStore(service, app_name="app").load("principal", CONVERSATION)
-    assert reloaded.turn_index == 1
-    assert reloaded.turn_final_text == "b's answer"
-
-
-async def test_checkpoint_keeps_a_composition_op_recorded_while_its_own_fetch_is_in_flight(
-    tmp_path,
-) -> None:
-    """B pins the seed block and commits, independently of A; at the same
-    moment, A's own live stream lands a new component on A's `entry.state`
-    -- through a hook on the session service standing in for "instance B"
-    committing concurrently while A's checkpoint's own ledger fetch is in
-    flight. Fetch-then-diff order catches A's late op instead of losing it
-    to a reload's wholesale overwrite of `entry.state`."""
-    service = _database_service(tmp_path)
-    store_a = StudioStore(service, app_name="app")
-    store_b = StudioStore(service, app_name="app")
-    await store_a.create("principal", CONVERSATION)
-
-    seed = CompositionBlock(
-        component_id="cmp_seed", revision=1, type=ComponentType.LINE_CHART, title="Seed"
-    )
-    state_a = store_a.current("principal", CONVERSATION)
-    state_a.composition = _next_manifest(None, [seed], actor=CompositionActor.MODEL)
-    segment_id = store_a.claim_segment("principal", CONVERSATION)
-    await store_a.save("principal", CONVERSATION)
-
-    state_b = await store_b.load("principal", CONVERSATION)
-
-    real_get_session = service.get_session
-    landed = []
-
-    async def get_session_then_interfere(*args: Any, **kwargs: Any) -> Any:
-        if not landed:
-            landed.append(True)
-            pinned = state_b.composition.blocks[0].model_copy(update={"pinned": True})
-            state_b.composition = _next_manifest(
-                state_b.composition, [pinned], actor=CompositionActor.USER
-            )
-            await store_b.save("principal", CONVERSATION)
-            action = land_component(
-                state_a, {"component_id": "cmp_added", "type": "line_chart", "revision": 1}
-            )
-            assert action == "created"
-        return await real_get_session(*args, **kwargs)
-
-    service.get_session = get_session_then_interfere
-
-    await store_a.checkpoint("principal", CONVERSATION, segment_id)
-
-    reloaded = await StudioStore(service, app_name="app").load("principal", CONVERSATION)
-    assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_seed", "cmp_added"]
-    assert reloaded.composition.blocks[0].pinned is True
-
-
-async def test_checkpoint_consumes_composition_ops_by_prefix_not_the_whole_list(
-    tmp_path,
-) -> None:
-    """An op landed on `entry.state` after the fold point (`n` already
-    captured) but before this checkpoint's append actually lands must
-    survive -- only `ops[:n]`, the prefix folded into THIS checkpoint, is
-    consumed, so it is not silently dropped nor replayed twice."""
-    service = _database_service(tmp_path)
-    store = StudioStore(service, app_name="app")
-    await store.create("principal", CONVERSATION)
-    segment_id = store.claim_segment("principal", CONVERSATION)
-    await store.save("principal", CONVERSATION)
-    state = store.current("principal", CONVERSATION)
-    action = land_component(state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1})
-    assert action == "created"
-    assert len(state._composition_ops) == 1
-
-    real_append_event = service.append_event
-
-    async def append_event_then_land(session: Any, event: Any) -> Any:
-        # A second op lands after `checkpoint` already captured `n` for
-        # this attempt's fold, but before the append itself commits.
-        land_component(state, {"component_id": "cmp_two", "type": "line_chart", "revision": 1})
-        return await real_append_event(session, event)
-
-    service.append_event = append_event_then_land
-
-    await store.checkpoint("principal", CONVERSATION, segment_id)
-
-    assert len(state._composition_ops) == 1
-    assert state._composition_ops[0].keywords["component_id"] == "cmp_two"
-    assert [b.component_id for b in state.composition.blocks] == ["cmp_one", "cmp_two"]
-
-
-async def test_checkpoint_warns_when_a_key_changed_on_both_sides(
-    tmp_path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Every durable key but the composition has exactly one writer by
-    design; this forces the one case that violates it, to prove the
-    checkpoint still writes this request's value (never drops it) and
-    warns loudly naming the key, rather than resolving the conflict
-    silently."""
-    service = _database_service(tmp_path)
-    store_a = StudioStore(service, app_name="app")
-    store_b = StudioStore(service, app_name="app")
-    await store_a.create("principal", CONVERSATION)
-    await store_b.load("principal", CONVERSATION)
-    segment_id = store_b.claim_segment("principal", CONVERSATION)
-    await store_b.save("principal", CONVERSATION)
-
-    await store_a.load("principal", CONVERSATION)
-    store_a.current("principal", CONVERSATION).turn_final_text = "a's answer"
-    await store_a.save("principal", CONVERSATION)
-
-    store_b.current("principal", CONVERSATION).turn_final_text = "b's answer"
-    with caplog.at_level(logging.WARNING, logger="harness.studio_state"):
-        await store_b.checkpoint("principal", CONVERSATION, segment_id)
-
-    assert "studio:turn_final_text" in caplog.text
-    reloaded = await StudioStore(service, app_name="app").load("principal", CONVERSATION)
-    assert reloaded.turn_final_text == "b's answer"
-
-
-async def test_checkpoint_retries_through_stale_appends_and_keeps_the_write(tmp_path) -> None:
-    """B always fetches fresh, but a third writer keeps landing a commit
-    right after B's own fetch and before B's append lands, so the append
-    itself goes stale -- the bounded retry loops past two such races and
-    keeps B's write on the third attempt."""
-    service = _database_service(tmp_path)
-    store_b = StudioStore(service, app_name="app")
-    store_c = StudioStore(service, app_name="app")
-    await store_b.create("principal", CONVERSATION)
-    segment_id = store_b.claim_segment("principal", CONVERSATION)
-    await store_b.save("principal", CONVERSATION)
-
-    store_b.current("principal", CONVERSATION).turn_final_text = "b's answer"
-
-    real_append_event = service.append_event
-    attempts = 0
-
-    async def append_event_then_interfere(session: Any, event: Any) -> Any:
-        nonlocal attempts
-        attempts += 1
-        if attempts in (1, 2):
-            # Land a real interfering commit without recursing back into
-            # this same mock (store_c's own save also calls append_event).
-            service.append_event = real_append_event
-            try:
-                await store_c.load("principal", CONVERSATION)
-                store_c.current("principal", CONVERSATION).seq = attempts
-                await store_c.save("principal", CONVERSATION)
-            finally:
-                service.append_event = append_event_then_interfere
-        return await real_append_event(session, event)
-
-    service.append_event = append_event_then_interfere
-
-    await store_b.checkpoint("principal", CONVERSATION, segment_id)
-
-    assert attempts == 3
-    reloaded = await StudioStore(service, app_name="app").load("principal", CONVERSATION)
-    assert reloaded.turn_final_text == "b's answer"
-    assert reloaded.seq == 2
+# --- checkpoint: fencing on the segment ------------------------------------
 
 
 async def test_checkpoint_raises_segment_lost_after_a_takeover_and_writes_nothing(
-    tmp_path,
+    new_store,
+    clock,
 ) -> None:
-    service = _database_service(tmp_path)
-    clock = [1_000.0]
-    store_a = StudioStore(service, app_name="app", clock=lambda: clock[0])
-    store_b = StudioStore(service, app_name="app", clock=lambda: clock[0])
+    store_a = new_store(clock=clock)
+    store_b = new_store(clock=clock)
     await store_a.create("principal", CONVERSATION)
     segment_id = store_a.claim_segment("principal", CONVERSATION)
     await store_a.save("principal", CONVERSATION)
 
-    clock[0] += studio_state.SEGMENT_TTL_S + 1  # A's segment has expired
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)  # A's segment has expired
     await store_b.load("principal", CONVERSATION)
     new_segment_id = store_b.claim_segment("principal", CONVERSATION)
     await store_b.save("principal", CONVERSATION)
@@ -2414,25 +2348,24 @@ async def test_checkpoint_raises_segment_lost_after_a_takeover_and_writes_nothin
     with pytest.raises(SegmentLost):
         await store_a.checkpoint("principal", CONVERSATION, segment_id)
 
-    reloaded = await StudioStore(service, app_name="app").load("principal", CONVERSATION)
+    reloaded = await new_store().load("principal", CONVERSATION)
     assert reloaded.turn_final_text == ""
 
 
-async def test_checkpoint_raises_segment_lost_when_the_ledger_is_gone(session_service) -> None:
-    store = StudioStore(session_service, app_name="app")
+async def test_checkpoint_raises_segment_lost_when_the_ledger_is_gone(new_store, pg_engine) -> None:
+    store = new_store()
     await store.create("principal", CONVERSATION)
     segment_id = store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
-    await session_service.delete_session(
-        app_name="app.ledger", user_id="principal", session_id=CONVERSATION
-    )
+    async with pg_engine.begin() as conn:
+        await conn.execute(text("DELETE FROM conversations"))
 
     store.current("principal", CONVERSATION).turn_final_text = "an answer with no ledger"
     with pytest.raises(SegmentLost):
         await store.checkpoint("principal", CONVERSATION, segment_id)
 
 
-# --- mutate_composition: /composition's fetch-rebuild-mutate-append cycle ---
+# --- canvas writes: change_canvas and mutate_composition ------------------
 
 
 def _one_block_manifest(
@@ -2444,15 +2377,11 @@ def _one_block_manifest(
     return _next_manifest(manifest, [block], actor=CompositionActor.USER)
 
 
-async def test_mutate_composition_appends_the_returned_manifest_and_consumes_its_ops(
-    tmp_path,
-) -> None:
-    service = _database_service(tmp_path)
-    store = StudioStore(service, app_name="app")
+async def test_mutate_composition_writes_the_returned_manifest(new_store) -> None:
+    store = new_store()
     await store.create("principal", CONVERSATION)
     state = store.current("principal", CONVERSATION)
-    land_component(state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1})
-    assert len(state._composition_ops) == 1
+    await store.mutate_composition("principal", CONVERSATION, _one_block_manifest)
 
     def mutate(manifest: CompositionManifest | None) -> CompositionManifest:
         assert manifest is not None
@@ -2463,105 +2392,119 @@ async def test_mutate_composition_appends_the_returned_manifest_and_consumes_its
 
     assert result is not None and result.blocks[0].pinned is True
     assert state.composition is result
-    assert state._composition_ops == []
 
-    reloaded = await StudioStore(service, app_name="app").load("principal", CONVERSATION)
+    reloaded = await new_store().load("principal", CONVERSATION)
     assert reloaded.composition.blocks[0].pinned is True
 
 
-async def test_mutate_composition_rebuilds_the_fetched_manifest_with_unsaved_ops_replayed(
-    tmp_path,
-) -> None:
-    """A's own live stream has recorded (but not yet saved) a
-    `land_component` op when `/composition` runs on the same instance
-    mid-turn: `mutate` must see that op already folded into the manifest
-    it is handed, not the bare (here, empty) ledger value."""
-    service = _database_service(tmp_path)
-    store = StudioStore(service, app_name="app")
-    await store.create("principal", CONVERSATION)
-    state = store.current("principal", CONVERSATION)
-    land_component(state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1})
-
-    seen: list[CompositionManifest | None] = []
-
-    def mutate(manifest: CompositionManifest | None) -> CompositionManifest | None:
-        seen.append(manifest)
-        return manifest  # a no-op: nothing appended
-
-    await store.mutate_composition("principal", CONVERSATION, mutate)
-
-    assert seen[0] is not None
-    assert [b.component_id for b in seen[0].blocks] == ["cmp_one"]
+_CARD = {"component_id": "cmp_two", "type": "table", "revision": 1}
 
 
-async def test_a_turn_op_landing_while_composition_appends_is_kept(tmp_path) -> None:
-    """A card the turn lands (or a removal it makes) while `/composition`
-    awaits its append must survive the mutation's result, in memory and once
-    the turn saves; it used to be overwritten and its op consumed unsaved."""
-    service = _database_service(tmp_path)
-    store = StudioStore(service, app_name="app")
-    await store.create("principal", CONVERSATION)
-    state = store.current("principal", CONVERSATION)
-    assert state is not None
-    land_component(state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1})
-    await store.save("principal", CONVERSATION)
-    real_append_event = service.append_event
-
-    async def append_while_the_turn_lands(*args: Any, **kwargs: Any) -> Any:
-        land_component(state, {"component_id": "cmp_two", "type": "table", "revision": 1})
-        return await real_append_event(*args, **kwargs)
-
-    service.append_event = append_while_the_turn_lands
+async def test_a_card_the_turn_lands_is_written_onto_the_canvas_as_stored(new_store) -> None:
+    """A streams a turn holding a canvas it read before B pinned a card on
+    another instance. A's card lands on the canvas as stored, so B's pin is
+    kept, and A's live canvas is the one written."""
+    store_a = new_store()
+    store_b = new_store()
+    state_a = await store_a.create("principal", CONVERSATION)
+    store_a.claim_segment("principal", CONVERSATION)
+    await store_a.save("principal", CONVERSATION)
+    await store_a.mutate_composition("principal", CONVERSATION, _one_block_manifest)
+    await store_b.load("principal", CONVERSATION)
 
     def pin(manifest: CompositionManifest | None) -> CompositionManifest:
         assert manifest is not None
         pinned = manifest.blocks[0].model_copy(update={"pinned": True})
         return _next_manifest(manifest, [pinned], actor=CompositionActor.USER)
 
-    result = await store.mutate_composition("principal", CONVERSATION, pin)
-    service.append_event = real_append_event
+    await store_b.mutate_composition("principal", CONVERSATION, pin)
 
-    assert result == state.composition
-    assert [b.component_id for b in result.blocks] == ["cmp_one", "cmp_two"]
+    landed = await store_a.change_canvas(
+        "principal", CONVERSATION, lambda work: land_component(work, _CARD)
+    )
 
-    assert state.composition is not None
-    assert [b.component_id for b in state.composition.blocks] == ["cmp_one", "cmp_two"]
-    assert state.composition.blocks[0].pinned is True
-    await store.save("principal", CONVERSATION)
-    reloaded = await StudioStore(service, app_name="app").load("principal", CONVERSATION)
-    assert reloaded is not None and reloaded.composition is not None
+    assert landed == "created"
+    reloaded = await new_store().load("principal", CONVERSATION)
     assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_one", "cmp_two"]
+    assert reloaded.composition.blocks[0].pinned is True
+    assert state_a.composition == reloaded.composition
+    assert "cmp_two" in state_a.components
+
+
+async def test_a_stream_whose_segment_was_taken_over_lands_no_card(new_store, clock) -> None:
+    """A's lease lapsed and B claimed the conversation. A's stream, still
+    running, cannot land a card on the canvas B now owns."""
+    store_a = new_store(clock=clock)
+    state_a = await store_a.create("principal", CONVERSATION)
+    store_a.claim_segment("principal", CONVERSATION)
+    await store_a.save("principal", CONVERSATION)
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+    store_b = new_store(clock=clock)
+    await store_b.load("principal", CONVERSATION)
+    store_b.claim_segment("principal", CONVERSATION)
+    await store_b.save("principal", CONVERSATION)
+
+    with pytest.raises(SegmentLost):
+        await store_a.change_canvas(
+            "principal", CONVERSATION, lambda work: land_component(work, _CARD)
+        )
+
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert reloaded.composition is None
+    assert state_a.composition is None
+    assert state_a.components == {}
+
+
+async def test_a_canvas_write_that_fails_leaves_the_live_state_as_it_was(new_store) -> None:
+    """The card's digest entry, turn record and block reach the live state
+    only once the canvas write commits, so a later checkpoint never stores a
+    card the canvas does not hold."""
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+
+    async def failing_write(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the database went away")
+
+    store._write_composition = failing_write
+
+    with pytest.raises(RuntimeError, match="went away"):
+        await store.change_canvas(
+            "principal", CONVERSATION, lambda work: land_component(work, _CARD)
+        )
+
+    assert state.composition is None
+    assert state.components == {}
+    assert state.turn_components == []
 
 
 async def test_mutate_composition_no_op_returns_the_same_manifest_without_appending(
-    tmp_path,
+    new_store,
 ) -> None:
-    service = _database_service(tmp_path)
-    store = StudioStore(service, app_name="app")
+    store = new_store()
     await store.create("principal", CONVERSATION)
     state = store.current("principal", CONVERSATION)
-    land_component(state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1})
+    await store.mutate_composition("principal", CONVERSATION, _one_block_manifest)
 
-    real_append_event = service.append_event
+    real_write = store._write_composition
     calls = 0
 
-    async def counting_append(*args: Any, **kwargs: Any) -> Any:
+    async def counting_write(*args: Any, **kwargs: Any) -> Any:
         nonlocal calls
         calls += 1
-        return await real_append_event(*args, **kwargs)
+        return await real_write(*args, **kwargs)
 
-    service.append_event = counting_append
+    store._write_composition = counting_write
 
     result = await store.mutate_composition("principal", CONVERSATION, lambda manifest: manifest)
 
     assert calls == 0
     assert result is state.composition
-    assert len(state._composition_ops) == 1  # not consumed: nothing was appended
 
 
-async def test_mutate_composition_refusal_returns_it_without_appending() -> None:
-    service = InMemorySessionService()
-    store = StudioStore(service, app_name="app")
+async def test_mutate_composition_refusal_returns_it_without_appending(new_store) -> None:
+    store = new_store()
     await store.create("principal", CONVERSATION)
     refusal = JSONResponse(status_code=404, content={"error": "not_found"})
 
@@ -2570,91 +2513,13 @@ async def test_mutate_composition_refusal_returns_it_without_appending() -> None
     assert result is refusal
 
 
-async def test_mutate_composition_retries_through_stale_appends_and_keeps_the_write(
-    tmp_path,
-) -> None:
-    """B always fetches fresh, but a third writer keeps landing a commit
-    right after B's own fetch and before B's append lands, so the append
-    itself goes stale -- the bounded retry loops past two such races and
-    keeps B's write on the third attempt."""
-    service = _database_service(tmp_path)
-    store_b = StudioStore(service, app_name="app")
-    store_c = StudioStore(service, app_name="app")
-    await store_b.create("principal", CONVERSATION)
-
-    real_append_event = service.append_event
-    attempts = 0
-
-    async def append_event_then_interfere(session: Any, event: Any) -> Any:
-        nonlocal attempts
-        attempts += 1
-        if attempts in (1, 2):
-            service.append_event = real_append_event
-            try:
-                await store_c.load("principal", CONVERSATION)
-                store_c.current("principal", CONVERSATION).seq = attempts
-                await store_c.save("principal", CONVERSATION)
-            finally:
-                service.append_event = append_event_then_interfere
-        return await real_append_event(session, event)
-
-    service.append_event = append_event_then_interfere
-
-    result = await store_b.mutate_composition("principal", CONVERSATION, _one_block_manifest)
-
-    assert attempts == 3
-    assert result is not None
-    assert [b.component_id for b in result.blocks] == ["cmp_one"]
-    reloaded = await StudioStore(service, app_name="app").load("principal", CONVERSATION)
-    assert reloaded.seq == 2
-    assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_one"]
-
-
-async def test_mutate_composition_raises_after_exhausted_retries_and_keeps_the_rebuild(
-    tmp_path,
-) -> None:
-    """Every attempt loses the race to a fourth writer: the bounded retry
-    gives up and raises rather than looping forever, and live state is left
-    holding the last rebuild -- here still empty, since the interfering
-    writer never touches the composition -- not the caller's edit."""
-    service = _database_service(tmp_path)
-    store_b = StudioStore(service, app_name="app")
-    store_c = StudioStore(service, app_name="app")
-    await store_b.create("principal", CONVERSATION)
-    state_b = store_b.current("principal", CONVERSATION)
-
-    real_append_event = service.append_event
-    attempts = 0
-
-    async def always_interfere(session: Any, event: Any) -> Any:
-        nonlocal attempts
-        attempts += 1
-        service.append_event = real_append_event
-        try:
-            await store_c.load("principal", CONVERSATION)
-            store_c.current("principal", CONVERSATION).seq = attempts
-            await store_c.save("principal", CONVERSATION)
-        finally:
-            service.append_event = always_interfere
-        return await real_append_event(session, event)
-
-    service.append_event = always_interfere
-
-    with pytest.raises(StaleSessionError):
-        await store_b.mutate_composition("principal", CONVERSATION, _one_block_manifest)
-
-    assert attempts == studio_state._COMPOSITION_MUTATE_RETRY_ATTEMPTS
-    assert state_b.composition is None
-
-
 # --- release: drop resuming entries, clear the segment, checkpoint ----------
 
 
 async def test_release_drops_resuming_entries_clears_the_segment_and_persists(
-    tmp_path,
+    new_store,
 ) -> None:
-    service = _database_service(tmp_path)
-    store = StudioStore(service, app_name="app")
+    store = new_store()
     await store.create("principal", CONVERSATION)
     segment_id = store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
@@ -2666,7 +2531,7 @@ async def test_release_drops_resuming_entries_clears_the_segment_and_persists(
 
     await store.release("principal", CONVERSATION, segment_id)
 
-    reloaded = await StudioStore(service, app_name="app").load("principal", CONVERSATION)
+    reloaded = await new_store().load("principal", CONVERSATION)
     assert set(reloaded.pending) == {"int_other"}
     assert reloaded.segment is None
     assert reloaded.turn_final_text == "done"
@@ -2674,67 +2539,69 @@ async def test_release_drops_resuming_entries_clears_the_segment_and_persists(
 
 @pytest.mark.parametrize("method", ["release", "renew"])
 async def test_a_cancelled_segment_write_still_lands_then_reraises_the_cancel(
-    session_service: Any, method: str
+    new_store,
+    method: str,
+    clock,
 ) -> None:
     """A disconnect cancels the task running `release`, and the stream's end
-    cancels the heartbeat running `renew`, while the write is on its read.
-    The write runs to the end and the caller's cancellation is raised once
-    it has."""
-    clock = [1_000.0]
-    store = StudioStore(session_service, app_name="app", clock=lambda: clock[0])
+    cancels the heartbeat running `renew`, while the write is opening its
+    transaction. The write runs to the end and the caller's cancellation is
+    raised once it has."""
+    store = new_store(clock=clock)
     await store.create("principal", CONVERSATION)
     segment_id = store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
-    clock[0] += 30
+    await clock.advance(30)
     reading = asyncio.Event()
-    real_get_session = session_service.get_session
+    real_transaction = store._transaction
 
-    async def slow_get_session(*args: Any, **kwargs: Any) -> Any:
+    @asynccontextmanager
+    async def slow_transaction() -> Any:
         reading.set()
         await asyncio.sleep(0.05)
-        return await real_get_session(*args, **kwargs)
+        async with real_transaction() as conn:
+            yield conn
 
-    session_service.get_session = slow_get_session
+    store._transaction = slow_transaction
     writing = asyncio.ensure_future(getattr(store, method)("principal", CONVERSATION, segment_id))
     await reading.wait()
     writing.cancel()
     with pytest.raises(asyncio.CancelledError):
         await writing
 
-    session_service.get_session = real_get_session
-    reloaded = await StudioStore(session_service, app_name="app").load("principal", CONVERSATION)
+    store._transaction = real_transaction
+    reloaded = await new_store().load("principal", CONVERSATION)
     if method == "release":
         assert reloaded.segment is None
     else:
         assert reloaded.segment is not None
-        assert reloaded.segment.expires_at == clock[0] + studio_state.SEGMENT_TTL_S
+        assert reloaded.segment.expires_at == clock.at + studio_state.SEGMENT_TTL_S
 
 
-async def test_release_never_raises_on_a_db_error(tmp_path) -> None:
-    service = _database_service(tmp_path)
-    store = StudioStore(service, app_name="app")
+async def test_release_never_raises_on_a_db_error(new_store) -> None:
+    store = new_store()
     await store.create("principal", CONVERSATION)
     segment_id = store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
 
-    async def broken_get_session(*args: Any, **kwargs: Any) -> Any:
+    @asynccontextmanager
+    async def broken_transaction() -> Any:
         raise RuntimeError("db is down")
+        yield
 
-    service.get_session = broken_get_session
+    store._transaction = broken_transaction
 
     await store.release("principal", CONVERSATION, segment_id)  # must not raise
 
 
-async def test_release_swallows_a_takeover_and_still_never_raises(tmp_path) -> None:
-    service = _database_service(tmp_path)
-    clock = [1_000.0]
-    store_a = StudioStore(service, app_name="app", clock=lambda: clock[0])
-    store_b = StudioStore(service, app_name="app", clock=lambda: clock[0])
+async def test_release_swallows_a_takeover_and_still_never_raises(new_store, clock) -> None:
+    store_a = new_store(clock=clock)
+    store_b = new_store(clock=clock)
     await store_a.create("principal", CONVERSATION)
     segment_id = store_a.claim_segment("principal", CONVERSATION)
     await store_a.save("principal", CONVERSATION)
 
-    clock[0] += studio_state.SEGMENT_TTL_S + 1  # A's segment has expired
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)  # A's segment has expired
     await store_b.load("principal", CONVERSATION)
     store_b.claim_segment("principal", CONVERSATION)
     await store_b.save("principal", CONVERSATION)
@@ -2742,56 +2609,32 @@ async def test_release_swallows_a_takeover_and_still_never_raises(tmp_path) -> N
     await store_a.release("principal", CONVERSATION, segment_id)  # must not raise
 
 
-async def test_a_reader_left_open_does_not_stall_a_release(tmp_path) -> None:
-    """A cancelled turn can leave a half-read `SELECT` holding its sqlite
-    connection open (`sqlite_session`). The test databases run in WAL mode,
-    so the release commits past it instead of waiting out sqlite's busy
-    timeout."""
-    service = _database_service(tmp_path)
-    store = StudioStore(service, app_name="app")
-    await store.create("principal", CONVERSATION)
-    segment_id = store.claim_segment("principal", CONVERSATION)
-    await store.save("principal", CONVERSATION)
-
-    with closing(sqlite3.connect(tmp_path / "studio.db")) as reader:
-        half_read = reader.execute("SELECT name FROM sqlite_master")
-        half_read.fetchone()  # the statement stays open, mid-result
-        started = time.monotonic()
-        await store.release("principal", CONVERSATION, segment_id)
-        elapsed = time.monotonic() - started
-
-    assert elapsed < 1
-    reloaded = await StudioStore(service, app_name="app").load("principal", CONVERSATION)
-    assert reloaded.segment is None
-
-
-async def test_a_release_past_its_timeout_cancels_the_checkpoint_once() -> None:
-    """The timeout cancels a stuck checkpoint once and lets the session
-    service's own cleanup finish. A timeout that re-cancels at every await
-    (anyio's `move_on_after`) cancels that cleanup too, and a SQLAlchemy
-    connection torn down twice over aiosqlite leaves a task that never
-    finishes."""
-    service = InMemorySessionService()
-    store = StudioStore(service, app_name="app")
+async def test_a_release_past_its_timeout_cancels_the_checkpoint_once(new_store) -> None:
+    """The timeout cancels a stuck checkpoint once and lets the driver's own
+    cleanup finish. A timeout that re-cancels at every await (anyio's
+    `move_on_after`) cancels that cleanup too."""
+    store = new_store()
     await store.create("principal", CONVERSATION)
     segment_id = store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
     cleanup_cancels = 0
     cleaned_up = False
 
-    async def stuck_get_session(*args: Any, **kwargs: Any) -> Any:
+    @asynccontextmanager
+    async def stuck_transaction() -> Any:
         nonlocal cleanup_cancels, cleaned_up
         try:
-            await asyncio.Event().wait()  # a read waiting on a database lock
+            await asyncio.Event().wait()  # a write waiting on a row lock
         finally:
             try:
-                await asyncio.sleep(0.05)  # the rollback and connection close
+                await asyncio.sleep(0.05)  # the rollback and connection return
             except asyncio.CancelledError:
                 cleanup_cancels += 1
                 raise
             cleaned_up = True
+        yield
 
-    service.get_session = stuck_get_session
+    store._transaction = stuck_transaction
 
     await store.release("principal", CONVERSATION, segment_id, timeout=0.05)
 
@@ -2802,7 +2645,7 @@ async def test_a_release_past_its_timeout_cancels_the_checkpoint_once() -> None:
 def test_a_pending_plan_saved_before_step_labels_were_kept_loads_with_none() -> None:
     entry = {"adk_id": "adk_1", "kind": "plan", "step_order": ["step_a"]}
 
-    pending = studio_state._deserialize_pending({"int_1": entry})["int_1"]
+    pending = studio_store._deserialize_pending({"int_1": entry})["int_1"]
 
     assert pending.step_order == ("step_a",)
     assert pending.step_labels == {}
@@ -2816,7 +2659,7 @@ def test_a_turns_choice_baseline_reloads_on_another_instance() -> None:
     state.turn_choice_baseline = {"aid:sector": "health (CRS 120)"}
     reloaded = ConversationState(conversation_id=CONVERSATION)
 
-    studio_state._apply_delta(reloaded, studio_state._serialize_durable(state))
+    studio_store._apply_delta(reloaded, studio_store._serialize_durable(state))
 
     assert reloaded.turn_choice_baseline == state.turn_choice_baseline
 
@@ -2826,7 +2669,7 @@ def test_a_pending_ask_saved_before_questions_were_kept_loads_as_one_legacy_ques
     and the pause is skippable as a whole."""
     entry = {"adk_id": "clarify", "kind": "elicitation", "option_ids": ["spec_a", "o2"]}
 
-    pending = studio_state._deserialize_pending({"int_1": entry})["int_1"]
+    pending = studio_store._deserialize_pending({"int_1": entry})["int_1"]
 
     assert pending.questions == (
         _PendingQuestion(id="q1", question="", options={"spec_a": None, "o2": None}),

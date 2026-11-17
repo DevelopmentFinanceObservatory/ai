@@ -244,23 +244,34 @@ async def test_an_unset_principal_refuses_every_caller(
 
 def test_a_server_without_the_principal_says_at_startup_that_the_route_is_closed(
     monkeypatch: pytest.MonkeyPatch,
+    pg_database_url: str,
 ) -> None:
     warnings: list[str] = []
     monkeypatch.setattr(
         server_module.logger, "warning", lambda msg, *args: warnings.append(msg % args)
     )
 
-    create_app(settings=Settings(studio_api_token=STUDIO_TOKEN))
+    create_app(settings=Settings(database_url=pg_database_url, studio_api_token=STUDIO_TOKEN))
     closed = [w for w in warnings if "LIVE REFRESH IS CLOSED" in w]
-    create_app(settings=Settings(studio_api_token=STUDIO_TOKEN, live_refresh_principal="set"))
+    create_app(
+        settings=Settings(
+            database_url=pg_database_url,
+            studio_api_token=STUDIO_TOKEN,
+            live_refresh_principal="set",
+        )
+    )
 
     assert len(closed) == 1
     assert len([w for w in warnings if "LIVE REFRESH IS CLOSED" in w]) == 1
 
 
-def test_the_studio_token_does_not_open_the_served_route() -> None:
+def test_the_studio_token_does_not_open_the_served_route(pg_database_url: str) -> None:
     app = create_app(
-        settings=Settings(studio_api_token=STUDIO_TOKEN, live_refresh_principal=LIVE_PRINCIPAL)
+        settings=Settings(
+            database_url=pg_database_url,
+            studio_api_token=STUDIO_TOKEN,
+            live_refresh_principal=LIVE_PRINCIPAL,
+        )
     )
     response = TestClient(app).post(
         "/api/studio/refresh",
@@ -272,8 +283,14 @@ def test_the_studio_token_does_not_open_the_served_route() -> None:
 
 
 @pytest.mark.parametrize("studio_api_token", [None, STUDIO_TOKEN])
-def test_the_live_principal_opens_no_other_studio_route(studio_api_token: str | None) -> None:
-    settings = Settings(studio_api_token=studio_api_token, live_refresh_principal=LIVE_PRINCIPAL)
+def test_the_live_principal_opens_no_other_studio_route(
+    studio_api_token: str | None, pg_database_url: str
+) -> None:
+    settings = Settings(
+        database_url=pg_database_url,
+        studio_api_token=studio_api_token,
+        live_refresh_principal=LIVE_PRINCIPAL,
+    )
 
     with pytest.raises(HTTPException) as refused:
         principal_for(f"Bearer {LIVE_PRINCIPAL}", settings=settings)

@@ -26,16 +26,16 @@ they do in a turn.
 
 from __future__ import annotations
 
-import functools
 import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 
-from harness.conversation import current_conversation_id
+from harness.conversation import current_conversation_id, current_conversation_key
 from harness.studio_state import (
     ConversationState,
+    SegmentLost,
     _block_title,
     _digest_entry,
     _next_manifest,
@@ -43,7 +43,12 @@ from harness.studio_state import (
     _turn_component_entry,
     drawn_series_ids,
 )
-from harness.studio_translate import _RecordingExecutor, _stream_fatal, failure_detail
+from harness.studio_translate import (
+    _checkpoint_failed_frame,
+    _RecordingExecutor,
+    _stream_fatal,
+    failure_detail,
+)
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.wire import (
     ActivityStep,
@@ -111,6 +116,15 @@ async def edit_frames(
             message=message,
         ):
             yield frame
+    except SegmentLost as exc:
+        # The card's write found another instance had taken the conversation
+        # over (`StudioStore.change_canvas`): that instance finishes it.
+        logger.warning(
+            "studio segment lost while writing the edited card (trace_id=%s): %s",
+            conversation.trace_id,
+            exc,
+        )
+        yield _checkpoint_failed_frame(conversation, exc)
     except Exception as exc:
         logger.exception("studio edit turn failed (trace_id=%s)", conversation.trace_id)
         yield _stream_fatal(conversation, exc)
@@ -241,17 +255,30 @@ async def _edit_flow(
                 "Apply the edit",
                 produced=StepProduced(component_id=component_id, revision=revised.revision),
             )
-            frames = [
-                *_revised_frames(
-                    conversation,
-                    component_id=component_id,
-                    component=component,
-                    patch=patch,
-                    revised=revised,
-                    caught_up=_is_no_op(component, current_revision),
+            caught_up = _is_no_op(component, current_revision)
+            frames = _revised_frames(
+                conversation,
+                component_id=component_id,
+                component=component,
+                patch=patch,
+                revised=revised,
+                caught_up=caught_up,
+            )
+            title = _block_title(component) if caught_up else patch.get("title")
+            key = current_conversation_key.get()
+            assert key is not None, "an edit runs only inside a conversation's stream"
+            if await recorder.store.change_canvas(
+                *key,
+                lambda work: _refresh_block(
+                    work, component_id=component_id, revision=revised.revision, title=title
                 ),
-                *_close(text or "Done -- the card was updated."),
-            ]
+            ):
+                frames.append(
+                    CompositionUpdated(
+                        event="composition.updated", seq=c.next_seq(), manifest=c.composition
+                    )
+                )
+            frames.extend(_close(text or "Done -- the card was updated."))
         for frame in frames:
             yield frame
         return
@@ -308,7 +335,12 @@ async def _edit_flow(
             window=entry.get("time"),
         )
     )
-    if _replace_block(conversation, old_component_id=component_id, component=component):
+    key = current_conversation_key.get()
+    assert key is not None, "an edit runs only inside a conversation's stream"
+    if await recorder.store.change_canvas(
+        *key,
+        lambda work: _replace_block(work, old_component_id=component_id, component=component),
+    ):
         yield CompositionUpdated(
             event="composition.updated", seq=c.next_seq(), manifest=c.composition
         )
@@ -431,13 +463,15 @@ def _revised_frames(
     revised: ComponentRevised,
     caught_up: bool = False,
 ) -> list[Any]:
-    """The frames of a landed revise. `revised` is the frame `component_revised`
-    built to check the card. `caught_up` marks a no-op write over a head above the
-    canvas (`_canvas_is_behind`). The title then comes from that head, which holds
-    what the earlier edit stored, and the patch's title is ignored."""
+    """The `component.revised` frame of a landed revise, with the card's
+    digest entry and turn record brought up to it. `revised` is the frame
+    `component_revised` built to check the card. `caught_up` marks a no-op
+    write over a head above the canvas (`_canvas_is_behind`). The title then
+    comes from that head, which holds what the earlier edit stored, and the
+    patch's title is ignored. The canvas block is refreshed by the caller
+    (`_refresh_block`)."""
     revision = revised.revision
     revised.seq = conversation.next_seq()
-    frames: list[Any] = [revised]
     entry = conversation.components.setdefault(component_id, _digest_entry(component))
     entry["revision"] = revision
     entry["fact_summary"] = component.get("fact_summary") or entry.get("fact_summary")
@@ -454,20 +488,7 @@ def _revised_frames(
             window=entry.get("time"),
         )
     )
-    if _refresh_block(
-        conversation,
-        component_id=component_id,
-        revision=revision,
-        title=title,
-    ):
-        frames.append(
-            CompositionUpdated(
-                event="composition.updated",
-                seq=conversation.next_seq(),
-                manifest=conversation.composition,
-            )
-        )
-    return frames
+    return [revised]
 
 
 def _refresh_block(
@@ -477,35 +498,12 @@ def _refresh_block(
     revision: int,
     title: str | None,
 ) -> bool:
-    """Update the edited component's block; True iff a block changed (a
-    not-composed card mints no empty manifest revision). Recorded as a
-    composition op (`ConversationState._composition_ops`), the same
-    contract `harness.studio_state.land_component`/`_replace_block` follow:
-    a checkpoint reconciling this segment's composition against a freshly
-    fetched ledger manifest replays this revise onto it, rather than
-    discarding it in favour of the fetch (`StudioStore.checkpoint`'s
-    docstring)."""
+    """Bring the edited component's block up to `revision`, and `title` when
+    given; True iff a block changed (a not-composed card mints no empty
+    manifest revision)."""
     previous = conversation.composition
     if previous is None:
         return False
-    op = functools.partial(
-        _refresh_block_at, component_id=component_id, revision=revision, title=title
-    )
-    updated = op(previous)
-    if updated is previous:
-        return False
-    conversation.composition = updated
-    conversation._composition_ops.append(op)
-    return True
-
-
-def _refresh_block_at(previous: Any, *, component_id: str, revision: int, title: str | None) -> Any:
-    """The next manifest with `component_id`'s block revised, a pure
-    function of `previous`. This is `_refresh_block`'s replay step,
-    reproducing this edit on top of whatever the ledger holds when a
-    checkpoint reconciles it."""
-    if previous is None:
-        return None
     blocks = [block.model_copy(deep=True) for block in previous.blocks]
     changed = False
     for block in blocks:
@@ -515,5 +513,6 @@ def _refresh_block_at(previous: Any, *, component_id: str, revision: int, title:
                 block.title = title
             changed = True
     if not changed:
-        return previous
-    return _next_manifest(previous, blocks, actor=CompositionActor.MODEL)
+        return False
+    conversation.composition = _next_manifest(previous, blocks, actor=CompositionActor.MODEL)
+    return True

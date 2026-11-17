@@ -34,6 +34,7 @@ from harness.wire import MessageDelta
 from langfuse import Langfuse
 from opentelemetry import trace
 from opentelemetry.proto.trace.v1.trace_pb2 import Span
+from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.responses import StreamingResponse
 
 from ..orchestrator_fakes import orchestrator_app, plan_call
@@ -199,7 +200,7 @@ async def test_a_response_torn_down_at_a_frame_still_exports_the_turn_once_and_c
 # --- a turn that pauses for approval and resumes ---------------------------------
 
 
-def _planned_app() -> Any:
+def _planned_app(engine: AsyncEngine) -> Any:
     """The studio with an agent that hands the question to the scripted
     planner, then answers once the approved plan is handed back."""
     app, _model = orchestrator_app(
@@ -207,6 +208,7 @@ def _planned_app() -> Any:
         types.Part.from_text(text=ANSWER),
         executor=ScriptedExecutor(),
         tool_surface=ScriptedSurface(),
+        engine=engine,
     )
     return app
 
@@ -221,10 +223,10 @@ async def _stream(client: httpx2.AsyncClient, path: str, body: dict[str, Any]) -
         ]
 
 
-async def _approve_a_planned_turn() -> list[dict]:
+async def _approve_a_planned_turn(engine: AsyncEngine) -> list[dict]:
     """Ask the planned studio `QUESTION`, approve the plan it proposes, and
     return the frames of the approval's stream."""
-    app = _planned_app()
+    app = _planned_app(engine)
     base = {"schema_version": 1, "conversation_id": CONVERSATION}
     async with httpx2.AsyncClient(
         transport=httpx2.ASGITransport(app=app), base_url="http://studio.test"
@@ -255,7 +257,7 @@ async def _approve_a_planned_turn() -> list[dict]:
 
 
 async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
-    fake_langfuse: Any,
+    fake_langfuse: Any, pg_engine: AsyncEngine
 ) -> None:
     """Both segments of a turn run ADK's real workflow. Each segment's
     `invoke_workflow` span is a child of `turn`, and every span on the wire has
@@ -264,7 +266,7 @@ async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
     or carries `gen_ai.*` attributes. `turn` carries the question and the
     answer as its input and output."""
     init_telemetry(service_name="harness")
-    second = await _approve_a_planned_turn()
+    second = await _approve_a_planned_turn(pg_engine)
 
     scoped = fake_langfuse.scoped_spans()
     spans = [span for _, span in scoped]
@@ -284,14 +286,16 @@ async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
         ), (scope, span.name)
 
 
-async def test_a_model_call_exports_its_prompt_and_response(fake_langfuse: Any) -> None:
+async def test_a_model_call_exports_its_prompt_and_response(
+    fake_langfuse: Any, pg_engine: AsyncEngine
+) -> None:
     """With no content setting in the environment, the `generate_content` span
     of the orchestrator's first call carries the user's question in its input
     messages and the `plan` call it made in its output messages, and the span
     of its last call carries the answer, so Langfuse shows each generation's
     prompt and response."""
     init_telemetry(service_name="harness")
-    await _approve_a_planned_turn()
+    await _approve_a_planned_turn(pg_engine)
 
     calls = sorted(
         (span for span in fake_langfuse.spans() if span.name.startswith("generate_content")),
@@ -385,7 +389,7 @@ async def _post_and_leave_at_the_pause(
 
 @pytest.mark.parametrize("how", ["cancel", "close"])
 async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_trace(
-    fake_langfuse: Any, monkeypatch: pytest.MonkeyPatch, how: str
+    fake_langfuse: Any, monkeypatch: pytest.MonkeyPatch, how: str, pg_engine: AsyncEngine
 ) -> None:
     """The client goes away right after `plan.proposed`, while the stream
     awaits the next frame. The turn stays open and unrecorded, so the
@@ -393,7 +397,7 @@ async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_
     one trace, one `turn` span ended once, the execution spans under it, and
     no cancellation on the turn's record."""
     init_telemetry(service_name="harness")
-    app = _planned_app()
+    app = _planned_app(pg_engine)
     studio: StudioRunner = app.state.studio
     at_pause = asyncio.Event()
     paused_once = False

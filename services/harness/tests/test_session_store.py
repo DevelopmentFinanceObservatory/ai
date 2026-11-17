@@ -4,33 +4,26 @@ from typing import Any
 
 import pytest
 from google.adk.events import Event, EventActions
-from google.adk.sessions import DatabaseSessionService, InMemorySessionService
+from google.adk.sessions import DatabaseSessionService
 from google.cloud.sql.connector import IPTypes
-from harness import session_store as session_store_module
+from harness.db import engine as engine_module
 from harness.session_store import build_session_service
 from harness.settings import Settings
 
 
-def test_unset_backend_yields_in_memory() -> None:
-    handle = build_session_service(settings=Settings())
-
-    assert isinstance(handle.service, InMemorySessionService)
-
-
-async def test_unset_backend_aclose_is_a_noop() -> None:
-    handle = build_session_service(settings=Settings())
-
-    await handle.aclose()
+def test_unset_backend_is_refused() -> None:
+    with pytest.raises(RuntimeError, match="Postgres"):
+        build_session_service(settings=Settings())
 
 
 async def test_database_url_round_trips_a_session_and_disposes_on_aclose(
-    tmp_path,
+    pg_database_url: str,
 ) -> None:
-    """`DATABASE_URL=sqlite+aiosqlite://...` yields a working
+    """`DATABASE_URL=<postgres url>` yields a working
     `DatabaseSessionService`: a session created, appended to, and reloaded
     carries the state the append wrote, and `aclose` disposes the engine it
     built for itself without raising."""
-    settings = Settings(database_url=f"sqlite+aiosqlite:///{tmp_path}/sessions.db")
+    settings = Settings(database_url=pg_database_url)
     handle = build_session_service(settings=settings)
 
     assert isinstance(handle.service, DatabaseSessionService)
@@ -80,7 +73,7 @@ def fake_connector(monkeypatch) -> _FakeConnector:
         captured_kwargs.update(kwargs)
         return connector
 
-    monkeypatch.setattr(session_store_module, "create_async_connector", fake_create_async_connector)
+    monkeypatch.setattr(engine_module, "create_async_connector", fake_create_async_connector)
     connector.create_async_connector_kwargs = captured_kwargs  # type: ignore[attr-defined]
     return connector
 

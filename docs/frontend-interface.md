@@ -292,8 +292,8 @@ Each answer in `answers` is one of:
   "interrupt_id": "elc_7a1c0e5b42d94f18",
   "decision": "answer",
   "answers": {
-    "q1": {"kind": "option", "option_id": "spec_4d5e6f7a33333333"},
-    "q2": {"kind": "skipped"}
+    "q1": { "kind": "option", "option_id": "spec_4d5e6f7a33333333" },
+    "q2": { "kind": "skipped" }
   }
 }
 ```
@@ -668,6 +668,11 @@ schema validation gets a 422 with `{"detail": [...]}` (FastAPI's format).
   claim (a crash, or a slow write) and another instance has since taken
   the conversation over. The turn continues there; the taking-over
   instance's own stream, if you have one open, is what finishes it.
+- 409 `constraint_violation` with `constraint_id: "conversation_diverged"`
+  and `retry: "do_not_retry"` means the conversation changed in two places
+  during a server upgrade and cannot continue until an operator repairs
+  it. Every route answers it, `/cancel` included unless a stream is live.
+  Do not retry. Show `detail`.
 
 ## 8. Card edits, follow-ups, and canvas questions
 
