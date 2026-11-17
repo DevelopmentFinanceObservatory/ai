@@ -25,6 +25,7 @@ from harness.sentences import StopCode, refusal_sentence
 from harness.turn_budget import TurnBudget
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from orchestrator.model import orchestrator_model
 from planner.model import planner_model
 from pydantic_ai.messages import (
     ModelRequest,
@@ -309,6 +310,59 @@ async def test_a_turn_put_in_place_of_a_resend_keeps_the_span_a_generation(
         "output": 5,
         "input_cached_tokens": 30,
     }
+
+
+# How each call ended, on the call's span, for both agents' models: Gemini's
+# finish reason, `none` when the stream carried none, and the exception's class
+# when the call raised. A row's replies are the call's attempts.
+_ENDINGS = [
+    pytest.param([reply(text_part("Accra"))], "STOP", None, id="stop-without-usage"),
+    pytest.param(
+        [reply(text_part("Accra"), finish_reason=None)], "none", None, id="no-finish-reason"
+    ),
+    pytest.param(
+        [malformed_call_reply(), reply(text_part("Accra"))], "STOP", None, id="malformed-resent"
+    ),
+    pytest.param(
+        [reply(text_part("Accra"), finish_reason=types.FinishReason.MAX_TOKENS)],
+        "MAX_TOKENS",
+        None,
+        id="max-tokens",
+    ),
+    pytest.param([Reply(open_error=client_error(400))], None, "ClientError", id="refused-at-open"),
+    pytest.param(
+        [Reply(chunks=[[text_part("Ac")], [text_part("cra")]], cut_after=1)],
+        None,
+        "StreamCutError",
+        id="cut-mid-stream",
+    ),
+]
+
+
+@pytest.mark.parametrize("build", [planner_model, orchestrator_model])
+@pytest.mark.parametrize(("replies", "finish", "error"), _ENDINGS)
+async def test_each_call_records_how_it_ended_on_its_span(
+    build: Any,
+    replies: list[Reply],
+    finish: str | None,
+    error: str | None,
+    exported_spans: InMemorySpanExporter,
+) -> None:
+    scripted = ScriptedGenai(replies)
+    model = build(MODEL, client=scripted.client, budget=_budget())
+
+    with trace.get_tracer(__name__).start_as_current_span("chat"):
+        if error is None:
+            await _pai(model)
+        else:
+            with pytest.raises(Exception):  # noqa: B017 -- Pydantic AI maps the error
+                await _pai(model)
+
+    (span,) = exported_spans.get_finished_spans()
+    attributes = span.attributes or {}
+    assert attributes.get("dfo.model.finish_reason") == finish
+    assert attributes.get("dfo.model.error") == error
+    assert len(scripted.requests) == len(replies)
 
 
 async def test_after_response_sees_the_reported_usage_and_its_turn_replaces_the_response() -> None:

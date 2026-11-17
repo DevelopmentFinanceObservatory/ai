@@ -13,19 +13,29 @@ first put in one fixed form (`in_canonical_form`). Each call, in order:
 3. sends the request under the turn's `TurnBudget` (`harness.turn_budget.bounded_by`),
    with the model-time, call-cap and wall-clock bounds, the first-chunk
    resend, and the HTTP retries (`model_retry_options`);
-4. holds every streamed chunk until the budget wrapper returns. Pydantic AI
-   would run a tool from the chunk that carried it, so a call the budget cuts
-   after a function call was streamed runs no tool. A call a bound closes
-   answers with the closing sentence `bounded_by` gives;
+4. passes the streamed chunks on by the stream's rule (`_Relay`). A stream
+   that holds (the planner's) holds every chunk until the call ends. Pydantic
+   AI would run a tool from the chunk that carried it, so a call the budget
+   cuts after a function call was streamed runs no tool. A stream that passes
+   text on (the orchestrator's, whose answer reaches the user as it arrives)
+   holds chunks until the first chunk of answer text and then passes them on
+   in order, so the thought summaries a call opens with stay ahead of its
+   text; from the first chunk holding a function call it holds again, to the
+   call's end, for the same reason. A call a bound closes answers with the
+   closing sentence `bounded_by` gives, as a paragraph of its own after text
+   already passed on (`Closing.shown`), and its held chunks are dropped;
 5. hands `after_response` the code of the bound that closed the call, if one
    did, and the usage the API reported for it; a model turn it returns
-   replaces the response;
-6. when Gemini ended the call on `MALFORMED_FUNCTION_CALL` and no bound closed
-   it, discards the held chunks and runs steps 1 to 5 once more, so the second
-   attempt is counted, bounded and logged as a call of its own. The span
-   carries both attempts' usage summed and the number of attempts discarded
-   (`_MALFORMED_DISCARDED`). Otherwise, and after the second attempt whatever
-   its outcome, the held chunks are delivered.
+   replaces the response. Only a stream that holds takes the hook, since
+   text passed on cannot be replaced;
+6. when Gemini ended the call on `MALFORMED_FUNCTION_CALL`, no bound closed
+   it and no chunk was passed on, discards the held chunks and runs steps 1
+   to 5 once more, so the second attempt is counted, bounded and logged as a
+   call of its own. The span carries both attempts' usage summed and the
+   number of attempts discarded (`_MALFORMED_DISCARDED`). Otherwise, and
+   after the second attempt whatever its outcome, the held chunks are
+   delivered. After answer text was passed on the call ends as Gemini ended
+   it, since what the user read cannot be taken back.
 
 A function call the model sent without an id reaches the caller with one the
 harness makes (`client_call_id`), so it is stored under that id, and each
@@ -39,11 +49,17 @@ Pydantic AI leaves out (`_record_usage`). That is the reasoning tokens and the
 usage Langfuse derives from such a span, set outright so that the usage
 details Pydantic AI adds are not summed into the call's total. A turn put in
 place of a request no attempt was sent for is no model call, so its span is
-marked a plain span for Langfuse.
+marked a plain span for Langfuse. Every attempt sent records on the span how
+it ended, whether or not Gemini reported usage for it: the finish reason
+Gemini gave (`_FINISH_REASON`, `none` when the stream carried none), or the
+class of the exception the call raised (`_ERROR`). Pydantic AI's own
+`gen_ai.response.finish_reasons` maps several of Gemini's reasons onto one
+and leaves out a response that carried none.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -89,6 +105,11 @@ _REASONING_TOKENS = "gen_ai.usage.reasoning.output_tokens"
 # The number of a call's attempts discarded for ending on a function call
 # Gemini could not parse, set only when one was.
 _MALFORMED_DISCARDED = "dfo.model.malformed_attempts_discarded"
+# How the latest attempt sent ended: Gemini's finish reason as it named it, or
+# `none` when no chunk carried one; and the class of the exception the call
+# raised, set only when it raised.
+_FINISH_REASON = "dfo.model.finish_reason"
+_ERROR = "dfo.model.error"
 
 # A model turn to answer the next request with in place of the model, or None
 # to send the request.
@@ -109,41 +130,81 @@ def model_retry_options(*, attempts: int = 3, max_delay: float = 2.0) -> types.H
 
 
 @dataclass
-class _Answer:
-    """One sent call: its streamed chunks, held, and the closing turn and code
-    when a bound closed it."""
+class _Relay:
+    """One sent attempt's streamed chunks: those held, whether any was passed
+    on, and how the call ended (step 4 of the module docstring).
 
-    chunks: list[Chunk] = field(default_factory=list)
-    closing: types.Content | None = None
-    closed_by: StopCode | None = None
+    `passes_text` says whether the stream passes answer text on as it arrives
+    or holds every chunk to the call's end.
+    """
+
+    passes_text: bool
+    held: list[Chunk] = field(default_factory=list)
+    passed: bool = False
+    calling: bool = False
+    usage: Usage | None = None
+    finish_reason: str | None = None
+    closing: Closing | None = None
+
+    def take(self, chunk: Chunk) -> list[Chunk]:
+        """The chunks to pass on now that `chunk` arrived, in order."""
+        if chunk.usage_metadata is not None:
+            # The last usage any chunk carried.
+            self.usage = chunk.usage_metadata
+        if chunk.candidates and (reason := chunk.candidates[0].finish_reason) is not None:
+            self.finish_reason = reason.value
+        self.calling = self.calling or any(part.function_call for part in _parts(chunk))
+        if not self.passes_text or self.calling or not (self.passed or _has_answer_text(chunk)):
+            self.held.append(chunk)
+            return []
+        passing = [*self.held, chunk]
+        self.held = []
+        self.passed = True
+        return passing
 
     @property
-    def usage(self) -> Usage | None:
-        """The last usage any of the call's chunks carried, as ADK's stream
-        aggregator reads it."""
-        usages = [chunk.usage_metadata for chunk in self.chunks if chunk.usage_metadata]
-        return usages[-1] if usages else None
+    def closed_by(self) -> StopCode | None:
+        """The bound that closed the call, if one did."""
+        return self.closing.code if self.closing is not None else None
 
     @property
     def malformed(self) -> bool:
         """Whether Gemini ended the call, no bound having closed it, on a function
         call it could not parse."""
-        return self.closed_by is None and any(
-            chunk.candidates
-            and chunk.candidates[0].finish_reason == types.FinishReason.MALFORMED_FUNCTION_CALL
-            for chunk in self.chunks
+        return (
+            self.closing is None
+            and self.finish_reason == types.FinishReason.MALFORMED_FUNCTION_CALL.value
         )
+
+    def closing_turn(self) -> types.Content:
+        """The closing sentence as the model's turn: a paragraph of its own after
+        text already passed on, else the sentence alone."""
+        assert self.closing is not None
+        text = self.closing.shown if self.passed else self.closing.sentence
+        return types.Content(role="model", parts=[types.Part(text=text)])
 
 
 @dataclass
 class GeminiStream:
-    """The streamed call `GoogleModel` makes, with its hooks, cache and budget."""
+    """The streamed call `GoogleModel` makes, with its hooks, cache and budget.
+
+    `passes_text` passes answer text on as it arrives; left false, every chunk
+    is held to the call's end (step 4 of the module docstring).
+
+    Raises:
+        ValueError: A stream that passes text on was given `after_response`.
+    """
 
     client: Client
     budget: TurnBudget | None
     prefix_cache: PrefixCache | None
     before_request: BeforeRequest | None
     after_response: AfterResponse | None
+    passes_text: bool = False
+
+    def __post_init__(self) -> None:
+        if self.passes_text and self.after_response is not None:
+            raise ValueError("a stream that passes text on cannot replace its response")
 
     async def __call__(
         self, *, model: str, contents: Any, config: Any = None
@@ -169,16 +230,37 @@ class GeminiStream:
                     span.set_attribute(_OBSERVATION_TYPE, "span")
                 yield _chunk(turn, usage=None)
                 return
-            answer = await self._send(model=model, contents=contents, config=config)
-            usage = answer.usage
+            relay = _Relay(passes_text=self.passes_text)
+            try:
+                async with aclosing(
+                    self._send(model=model, contents=contents, config=config)
+                ) as sent:
+                    async for item in sent:
+                        if isinstance(item, Closing):
+                            relay.closing = item
+                            continue
+                        for chunk in relay.take(item):
+                            yield chunk
+            except (Exception, asyncio.CancelledError) as exc:
+                if span.is_recording():
+                    span.set_attribute(_ERROR, type(exc).__name__)
+                raise
+            if span.is_recording():
+                span.set_attribute(_FINISH_REASON, relay.finish_reason or "none")
+            usage = relay.usage
             spent = _added(spent, usage)
             _record_usage(span, spent)
             replaced = (
-                self.after_response(answer.closed_by, usage)
+                self.after_response(relay.closed_by, usage)
                 if self.after_response is not None
                 else None
             )
-            if replaced is None and answer.malformed and attempt + 1 < _ATTEMPTS:
+            if (
+                replaced is None
+                and relay.malformed
+                and not relay.passed
+                and attempt + 1 < _ATTEMPTS
+            ):
                 logger.warning(
                     "model call to %s ended MALFORMED_FUNCTION_CALL after %s output tokens, "
                     "sending it again",
@@ -190,78 +272,71 @@ class GeminiStream:
                 continue
             if replaced is not None:
                 yield _chunk(replaced, usage=usage)
-            elif answer.closing is not None:
-                yield _chunk(answer.closing, usage=usage)
+            elif relay.closing is not None:
+                yield _chunk(relay.closing_turn(), usage=usage)
             else:
-                for chunk in answer.chunks:
+                for chunk in relay.held:
                     yield chunk
             return
 
     async def _send(
         self, *, model: str, contents: Any, config: types.GenerateContentConfig
-    ) -> _Answer:
+    ) -> AsyncGenerator[Chunk | Closing]:
         """The call sent against the request's cached prefix, and resent once,
         against a fresh cache or none, when the API reports the cache gone
         before any chunk arrived."""
         if self.prefix_cache is None:
-            return await self._bounded(model=model, contents=contents, config=config)
+            async with aclosing(
+                self._bounded(model=model, contents=contents, config=config)
+            ) as items:
+                async for item in items:
+                    yield item
+            return
         cached = await self.prefix_cache.lookup(client=self.client, model=model, config=config)
         if cached is None:
-            return await self._bounded(model=model, contents=contents, config=config)
+            async with aclosing(
+                self._bounded(model=model, contents=contents, config=config)
+            ) as items:
+                async for item in items:
+                    yield item
+            return
 
         key, name = cached
-        answer = _Answer()
+        arrived = False
         try:
-            return await self._bounded(
-                model=model, contents=contents, config=against_cache(config, name), answer=answer
-            )
+            async with aclosing(
+                self._bounded(model=model, contents=contents, config=against_cache(config, name))
+            ) as items:
+                async for item in items:
+                    arrived = True
+                    yield item
+            return
         except errors.ClientError as exc:
-            if answer.chunks or exc.code not in CACHE_GONE_CODES:
+            if arrived or exc.code not in CACHE_GONE_CODES:
                 raise
             logger.warning("prefix cache %s: %s gone (%s), recreating", key[:16], name, exc.code)
 
         self.prefix_cache.forget(key, name)
         cached = await self.prefix_cache.lookup(client=self.client, model=model, config=config)
         resent = config if cached is None else against_cache(config, cached[1])
-        return await self._bounded(model=model, contents=contents, config=resent)
-
-    async def _bounded(
-        self,
-        *,
-        model: str,
-        contents: Any,
-        config: types.GenerateContentConfig,
-        answer: _Answer | None = None,
-    ) -> _Answer:
-        """One call under the budget, its chunks held in `answer`."""
-        answer = answer or _Answer()
-
-        def request() -> AsyncGenerator[Chunk]:
-            return self._raw(model=model, contents=contents, config=config, held=answer.chunks)
-
-        async with aclosing(bounded_by(self.budget, request)) as items:
+        async with aclosing(self._bounded(model=model, contents=contents, config=resent)) as items:
             async for item in items:
-                if isinstance(item, Closing):
-                    answer.closing = item.content
-                    answer.closed_by = item.code
-        return answer
+                yield item
 
-    async def _raw(
-        self,
-        *,
-        model: str,
-        contents: Any,
-        config: types.GenerateContentConfig,
-        held: list[Chunk],
-    ) -> AsyncGenerator[Chunk]:
-        """One attempt at the call: each chunk held, and handed on to the budget."""
-        stream = await self.client.aio.models.generate_content_stream(
-            model=model, contents=contents, config=config
-        )
-        async with aclosing(cast(AsyncGenerator[Chunk], stream)) as chunks:
-            async for chunk in chunks:
-                held.append(chunk)
-                yield chunk
+    def _bounded(
+        self, *, model: str, contents: Any, config: types.GenerateContentConfig
+    ) -> AsyncGenerator[Chunk | Closing]:
+        """One call under the budget."""
+
+        async def request() -> AsyncGenerator[Chunk]:
+            stream = await self.client.aio.models.generate_content_stream(
+                model=model, contents=contents, config=config
+            )
+            async with aclosing(cast(AsyncGenerator[Chunk], stream)) as chunks:
+                async for chunk in chunks:
+                    yield chunk
+
+        return bounded_by(self.budget, request)
 
 
 class StreamResumedError(ConnectionError):
@@ -530,6 +605,12 @@ def _parts(chunk: Chunk) -> list[types.Part]:
     if not chunk.candidates or chunk.candidates[0].content is None:
         return []
     return chunk.candidates[0].content.parts or []
+
+
+def _has_answer_text(chunk: Chunk) -> bool:
+    """Whether `chunk` carries answer text, which the user reads, as opposed to
+    thought summaries."""
+    return any(part.text and not part.thought for part in _parts(chunk))
 
 
 def wrapped_client(client: Client, stream: GeminiStream) -> Client:

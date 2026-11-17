@@ -108,7 +108,7 @@ The planner reads skills through data-mcp's `get_skill`, wrapped as its own func
 
 ## Context discipline
 
-Models see digests, and rows stay in the materialisation store. The agent reads part readings, frame views, one-line summaries, and of a drawn card what it holds and the figures a reply may state (`harness.reply_figures`), and the executor returns frame references. Cross-turn context is two digests every agent request opens with (`orchestrator.agent.prepend_digests`): the canvas digest (block titles and fact summaries, newest 16 blocks) and the conversation digest (newest 10 turn records, byte-capped). The agent's `recall` tool serves what lies past either bound, answered by the store (`harness.studio_state.make_recall_part`) with turn records, readings or a card's entry.
+Models see digests, and rows stay in the materialisation store. The agent reads part readings, frame views, one-line summaries, and of a drawn card what it holds and the figures a reply may state (`harness.reply_figures`), and the executor returns frame references. Cross-turn context is two digests every orchestrator request opens with (`orchestrator.run.Opening`): the canvas digest (block titles and fact summaries, newest 16 blocks) and the conversation digest (newest 10 turn records, byte-capped). The agent's `recall` tool serves what lies past either bound, answered by the store (`harness.studio_state.make_recall_part`) with turn records, readings or a card's entry.
 
 ## In-process MCP server mounting
 

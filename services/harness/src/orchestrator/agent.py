@@ -1,46 +1,66 @@
-"""Builds the orchestrator `LlmAgent`."""
+"""The orchestrator: a Pydantic AI agent on the harness's orchestrator tools.
+
+`orchestrator_agent` builds the agent once per process; each run names its
+model (`orchestrator.model.orchestrator_model`) and is driven by
+`orchestrator.run.run_orchestrator`. Each tool is a function from
+`harness.orchestrator_tools.build_orchestrator_tools`, declared as
+`orchestrator.declarations.tool_declaration` states it, and run over the
+call's `orchestrator.call.OrchestratorCall` with the model's arguments as sent
+(`_tool_function`). A tool that raises is answered with `raised` and the run
+goes on. A `plan` or `ask_user` call that records its hand-off
+(`orchestrator.call.HANDED_OFF`) is deferred: the run ends on it, and the
+planner's result or the user's answer is the call's result when the run
+resumes.
+
+Every request replays the run's messages less unsigned thought summaries, with
+a call to a tool the agent lacks answered as
+`harness.gemini_agent.tool_not_found` (`harness.gemini_agent.replayed_history`).
+The instruction is the same on every request, so its prefix, with the tools,
+is served from the shared cache (`harness.prefix_cache`); what changes from
+turn to turn opens the contents (`orchestrator.run.Opening`).
+"""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from datetime import UTC, date, datetime
+import inspect
+import logging
+import sys
+from collections.abc import Awaitable, Callable, MutableMapping, Sequence
+from dataclasses import dataclass, field
+from types import FunctionType
 from typing import TYPE_CHECKING, Any
 
-from data_mcp.skills_client import name_get_skill_in_call_lines
-from google.adk.agents import LlmAgent
-from google.adk.agents.callback_context import CallbackContext
-from google.adk.models.google_llm import Gemini
-from google.adk.models.llm_request import LlmRequest
+from common.telemetry import current_trace_id
 from google.genai import types
-from harness.gemini_wire import model_retry_options
-from harness.graph.state import SEEDED_STATE_KEY
-from harness.orchestrator_tools import OrchestratorTool
-from harness.prefix_cache import gemini_model_name
+from harness.gemini_agent import RecordingState, as_function_response, replayed_history
+from harness.gemini_wire import NO_PARAMETERS
+from harness.orchestrator_tools import raised_answer
 from harness.settings import DEFAULT_ORCHESTRATOR_THINKING_LEVEL
-from harness.turn_budget import BoundedGemini
-from harness.turn_events import after_turn_question
+from pydantic_ai import (
+    Agent,
+    CallDeferred,
+    DeferredToolRequests,
+    InstrumentationSettings,
+    RunContext,
+    Tool,
+)
+from pydantic_ai.capabilities import Instrumentation, ProcessHistory
+from pydantic_ai.models.google import GoogleModelSettings
 
 from orchestrator import AGENT_NAME
-from orchestrator.tool_failures import answering_tool_failures
+from orchestrator.call import HANDED_OFF, OrchestratorCall
+from orchestrator.declarations import CALL_PARAMETER, tool_declaration
 
 if TYPE_CHECKING:
-    from harness.prefix_cache import PrefixCache
     from harness.settings import ThinkingLevelName
 
+logger = logging.getLogger(__name__)
 
-# The state key `_stamp_today` writes the UTC date to. The `temp:` prefix
-# keeps it out of persisted session state and past `harness.graph.state.GraphState`,
-# which validates unprefixed keys only.
-TODAY_STATE_KEY = "temp:today"
-
-# The session-state keys the content `prepend_digests` adds is built from, and
-# the label each line opens with: the date `_stamp_today` writes, then the
-# digests `harness.studio` seeds each turn with, as JSON.
-_DIGESTS = (
-    (TODAY_STATE_KEY, "Today's date (UTC)"),
-    ("canvas_digest", "The user's canvas"),
-    ("conversation_digest", "Earlier turns in this conversation"),
-)
+# Pydantic AI charges a call to a tool the agent lacks against the tool retry
+# budget and ends the run once it is spent. The agent answers every such call
+# (`tool_not_found`), and the turn budget's call cap ends a run that keeps
+# making them.
+_UNLIMITED_RETRIES = sys.maxsize
 
 INSTRUCTION = """\
 You are the analyst behind DFO Studio, the Development Finance Observatory's
@@ -307,167 +327,139 @@ the plan chose as a choice made, with its reason.
 """
 
 
-def prepend_digests(callback_context: CallbackContext, llm_request: LlmRequest) -> None:
-    """Open the request's contents with today's UTC date and the turn's
-    canvas and conversation digests, as one user content, and show the
-    turn's seed hand-back (`SEEDED_STATE_KEY`) as its own user content after
-    the user's message (`harness.turn_events.after_turn_question`), or first when the request holds
-    no such message.
+@dataclass
+class OrchestratorDeps:
+    """One run's dependencies, which every tool call of the run reads.
 
-    They change from turn to turn, so they travel in the contents and the
-    system instruction stays the same on every call, served from a shared
-    cache (`harness.prefix_cache`). Adds nothing when state holds none of
-    them.
+    `state` is the turn's state. The calls of one model response write it
+    through one `RecordingState` (`view`), which `run_orchestrator` replaces
+    before each model request, so the keys each response's calls wrote are
+    known. `turn_id` is the turn's id (`OrchestratorCall.turn_id`).
     """
-    if seeded := callback_context.state.get(SEEDED_STATE_KEY):
-        llm_request.contents.insert(
-            after_turn_question(callback_context, llm_request.contents),
-            types.Content(role="user", parts=[types.Part(text=seeded)]),
-        )
-    lines = [
-        f"{label}: {digest}"
-        for key, label in _DIGESTS
-        if (digest := callback_context.state.get(key))
-    ]
-    if lines:
-        llm_request.contents.insert(
-            0, types.Content(role="user", parts=[types.Part(text="\n\n".join(lines))])
-        )
+
+    state: MutableMapping[str, Any]
+    turn_id: str
+    view: RecordingState = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.view = RecordingState(self.state)
 
 
-def name_get_skill_in_history(callback_context: CallbackContext, llm_request: LlmRequest) -> None:
-    """Render the call lines of a skill page the turn's events already hold as
-    `get_skill` calls.
+@dataclass(frozen=True)
+class Orchestrator:
+    """The orchestrator's agent and its tools' names, in declared order."""
 
-    A turn paused on an `ask_user` or an approval and resumed after a deploy
-    replays its own earlier `get_skill` and `get_skill_file` answers, whose
-    printed `get_skill_file(` call lines name a tool the agent no longer holds
-    (`data_mcp.skills_client.name_get_skill_in_call_lines`).
-    """
-    del callback_context
-    for content in llm_request.contents:
-        for part in content.parts or ():
-            response = part.function_response
-            if response is None or not isinstance(response.response, dict):
-                continue
-            text = response.response.get("skill")
-            if isinstance(text, str) and (renamed := name_get_skill_in_call_lines(text)) != text:
-                part.function_response = response.model_copy(
-                    update={"response": {**response.response, "skill": renamed}}
-                )
+    agent: Agent[OrchestratorDeps, str | DeferredToolRequests]
+    tools: tuple[str, ...]
 
 
-def _without_adk_identity(name: str) -> Callable[[CallbackContext, LlmRequest], None]:
-    """A before-model callback that takes out of the system instruction the
-    line ADK appends to a chat-mode agent's
-    (`google.adk.flows.llm_flows.prompt._identity`, built here from the same
-    f-string for an agent with no description), so the model reads
-    `INSTRUCTION` as it is. ADK has no setting to leave the line out.
-
-    On gemini-3.8-flash the line alone switches the orchestrator's first call
-    into thinking: 98 to 703 reasoning tokens and 7 to 12 s a call with it, 0
-    tokens and about 2.5 s a call without.
-
-    It runs before the model is called, so the shared prefix cache
-    (`harness.prefix_cache`) holds the instruction without it."""
-    appended = f'\n\nYou are an agent. Your internal name is "{name}".'
-
-    def drop(callback_context: CallbackContext, llm_request: LlmRequest) -> None:
-        instruction = llm_request.config.system_instruction
-        if isinstance(instruction, str):
-            llm_request.config.system_instruction = instruction.replace(appended, "", 1)
-
-    return drop
-
-
-def _retrying(
-    model_name: str,
+def orchestrator_agent(
+    tools: Sequence[FunctionType],
     *,
-    prefix_cache: PrefixCache | None = None,
-    attempts: int = 3,
-    max_delay: float = 2.0,
-) -> str | Gemini:
-    """`model_name` with retries (`model_retry_options`) when ADK resolves it
-    to Gemini: ADK's Gemini makes one attempt unless told otherwise, so a
-    transient 503 or 429 would fail the turn. Every call keeps to the
-    request's budget (`harness.turn_budget.BoundedGemini`). On `prefix_cache`,
-    each call reads the system instruction and tools from the shared cache.
-    Any other model name is returned as it is, for ADK to resolve."""
-    retry_options = model_retry_options(attempts=attempts, max_delay=max_delay)
-    if prefix_cache is not None:
-        return prefix_cache.model_for(model_name, retry_options=retry_options)
-    gemini = gemini_model_name(model_name)
-    if gemini is None:
-        return model_name
-    return BoundedGemini(model=gemini, retry_options=retry_options)
-
-
-def _utc_today() -> date:
-    return datetime.now(UTC).date()
-
-
-def _stamp_today(today: Callable[[], date]) -> Callable[[CallbackContext], None]:
-    """A before-agent callback that puts `today()` in state as an ISO date.
-
-    `prepend_digests` reads it from state, so every runner that builds the
-    agent through `create_orchestrator_agent` shows the model the date."""
-
-    def stamp(callback_context: CallbackContext) -> None:
-        callback_context.state[TODAY_STATE_KEY] = today().isoformat()
-
-    return stamp
-
-
-def create_orchestrator_agent(
-    *,
-    model_name: str,
-    tools: Sequence[Callable[..., Any]] = (),
-    today: Callable[[], date] = _utc_today,
-    prefix_cache: PrefixCache | None = None,
     thinking_level: ThinkingLevelName = DEFAULT_ORCHESTRATOR_THINKING_LEVEL,
-) -> LlmAgent:
-    """Build the orchestrator on `model_name` with `tools`, reading its
-    static prefix from `prefix_cache` when one is given. `today` is the clock
-    whose UTC date opens each request's contents. `thinking_level` caps the
-    model's reasoning effort. A tool that raises answers the model with an
-    error (`answering_tool_failures`) and the turn goes on. Each tool runs as
-    an `OrchestratorTool`, which answers a call missing a required argument as
-    one to correct."""
-    agent_tools = [OrchestratorTool(tool) for tool in tools]
-    return LlmAgent(
-        name=AGENT_NAME,
-        model=_retrying(model_name, prefix_cache=prefix_cache),
-        instruction=INSTRUCTION,
-        before_agent_callback=_stamp_today(today),
-        tools=agent_tools,
-        on_tool_error_callback=answering_tool_failures({tool.name for tool in agent_tools}),
-        # A workflow node defaults to "none", which shows each run only its
-        # own input: after a question or a plan the model would lose the
-        # user's message and its earlier results. The workflow runs this
-        # agent on its own branch, so "default" is the turn so far without
-        # the planner's internal events.
-        include_contents="default",
-        # Chat mode: each run of the agent reads its branch's earlier runs,
-        # its own calls and their results included, which in Studio are the
-        # turn's alone, since each turn has a session of its own. A
-        # single_turn node run reads only the events on its own node path,
-        # which leaves out every hand-back (`harness.graph.orchestrate`).
-        mode="chat",
-        before_model_callback=[
-            _without_adk_identity(AGENT_NAME),
-            name_get_skill_in_history,
-            prepend_digests,
-        ],
-        # Thought summaries are requested for the traces. The studio stream
-        # does not carry them. A stream cut off mid-response resumes from a
-        # continuation token, one extra hop instead of a full retry.
-        # google-genai defaults this to true; it is set so a change of that
-        # default cannot turn the resume off.
-        generate_content_config=types.GenerateContentConfig(
-            automatic_continuation=True,
-            thinking_config=types.ThinkingConfig(
-                thinking_level=types.ThinkingLevel(thinking_level),
-                include_thoughts=True,
-            ),
+    include_content: bool = True,
+) -> Orchestrator:
+    """The orchestrator as a Pydantic AI agent with `INSTRUCTION` and `tools`.
+
+    With no model of its own, each run names its model
+    (`orchestrator.model.orchestrator_model`), so one agent serves concurrent
+    runs. Thinking runs at `thinking_level`, with thought summaries requested
+    for the traces; Studio does not show them. Each tool is declared not
+    strict, which keeps the request's function calling mode `AUTO`. A run ends
+    on a response with no tool call, or on a call that handed off.
+
+    The agent traces through the global tracer provider (`invoke_agent`,
+    `chat` and `execute_tool` spans); with `include_content` the spans carry
+    the messages. The request parameters are left off, since the tool
+    declarations are on each model call's span.
+    """
+    names = tuple(tool.__name__ for tool in tools)
+    agent: Agent[OrchestratorDeps, str | DeferredToolRequests] = Agent(
+        None,
+        instructions=INSTRUCTION,
+        tools=[_tool(tool) for tool in tools],
+        deps_type=OrchestratorDeps,
+        output_type=[str, DeferredToolRequests],
+        model_settings=GoogleModelSettings(
+            google_thinking_config=types.ThinkingConfig(
+                thinking_level=types.ThinkingLevel(thinking_level), include_thoughts=True
+            ).model_dump(mode="json", exclude_none=True)
         ),
+        retries={"tools": _UNLIMITED_RETRIES},
+        capabilities=[
+            ProcessHistory(replayed_history(names)),
+            Instrumentation(
+                InstrumentationSettings(
+                    include_content=include_content, include_model_request_parameters=False
+                )
+            ),
+        ],
+        name=AGENT_NAME,
     )
+    return Orchestrator(agent=agent, tools=names)
+
+
+def _tool(function: FunctionType) -> Tool[OrchestratorDeps]:
+    declaration = tool_declaration(function)
+    schema = declaration.parameters_json_schema
+    tool = Tool.from_schema(
+        _tool_function(function),
+        name=function.__name__,
+        description=declaration.description,
+        json_schema=dict(schema) if schema is not None else NO_PARAMETERS,
+        takes_ctx=True,
+    )
+    tool.strict = False
+    return tool
+
+
+def _tool_function(function: FunctionType) -> Callable[..., Awaitable[dict[str, Any]]]:
+    """The function Pydantic AI calls for `function`, taking the arguments as sent.
+
+    Arguments the function does not take are dropped. A function that takes
+    `call` runs over an `OrchestratorCall` on the response's state view. An answer that is no
+    dict is wrapped under `result`. A body that raises an `Exception` is
+    answered with `harness.orchestrator_tools.raised_answer` and logged at
+    ERROR with its traceback; a cancellation propagates and logs nothing. An
+    answer that records a hand-off (`HANDED_OFF`) defers the call, with the
+    answer as the deferral's `record`.
+    """
+    parameters = set(inspect.signature(function).parameters)
+    takes_call = CALL_PARAMETER in parameters
+    accepted = parameters - {CALL_PARAMETER}
+    is_async = inspect.iscoroutinefunction(function)
+
+    async def run(ctx: RunContext[OrchestratorDeps], **raw: Any) -> dict[str, Any]:
+        deps = ctx.deps
+        arguments = {name: value for name, value in raw.items() if name in accepted}
+        if takes_call:
+            arguments[CALL_PARAMETER] = OrchestratorCall(state=deps.view, turn_id=deps.turn_id)
+        try:
+            answer = function(**arguments)
+            if is_async:
+                answer = await answer
+        except Exception as error:
+            logger.error(
+                "orchestrator tool %s raised %s turn_id=%s trace_id=%s",
+                function.__name__,
+                type(error).__name__,
+                deps.turn_id,
+                current_trace_id(),
+                exc_info=error,
+            )
+            answer = raised_answer(function.__name__, error)
+        response = as_function_response(answer)
+        if response.get(HANDED_OFF):
+            raise CallDeferred(metadata={"record": response})
+        return response
+
+    run.__name__ = function.__name__
+    return run
+
+
+__all__ = [
+    "INSTRUCTION",
+    "Orchestrator",
+    "OrchestratorDeps",
+    "orchestrator_agent",
+]

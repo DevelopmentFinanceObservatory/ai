@@ -55,7 +55,6 @@ from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Self, cast
 
 from compiler.surface import ToolCallResult, ToolId, ToolSchema, ToolSurfaceUnavailableError
@@ -67,19 +66,18 @@ from data_mcp.search_tool import SearchContext
 from data_mcp.skills_client import name_get_skill_in_call_lines
 from google.adk import Event
 from google.adk.agents.run_config import RunConfig, StreamingMode
-from google.adk.events import EventActions
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService, Session
 from google.adk.workflow import START, Workflow
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import Client, types
 from google.genai.client import AsyncClient
+from harness.gemini_agent import RecordingState
 from harness.gemini_wire import model_retry_options
 from harness.graph.interfaces import PlannerModel
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, GraphState
 from harness.graph.workflow import planner_entry
 from harness.orchestrator_tools import (
-    HANDED_OFF,
     AskedOutput,
     Resolver,
     build_orchestrator_tools,
@@ -92,6 +90,7 @@ from harness.studio_state import ConversationState
 from harness.tool_contracts import resolver_digest
 from harness.turn_budget import TurnBudget, current_turn_budget
 from harness.wiring import handing_back_planner_failures
+from orchestrator.call import HANDED_OFF, OrchestratorCall
 from planner.call import PlannerCall
 from planner.plan import (
     Plan,
@@ -654,19 +653,17 @@ async def orchestrator_state(task: Task, resolver: Resolver) -> dict[str, Any]:
         tool.__name__: tool
         for tool in build_orchestrator_tools(resolver=resolver, executor=_NoExecutor())
     }
-    context = SimpleNamespace(state={}, actions=EventActions())
+    state: dict[str, Any] = {}
+    call = OrchestratorCall(state=RecordingState(state), turn_id=task.id)
     for search in task.searches:
-        found = await tools["search"](
-            tool_context=context, parts=search.parts or None, text=search.text
-        )
+        found = await tools["search"](call=call, parts=search.parts or None, text=search.text)
         if "error" in found:
             raise TaskStateError(
                 f"{task.id}: search {search.parts or search.text!r}: {found['error']}"
             )
-    handed = tools["plan"](brief=task.brief, asks=list(task.asks), tool_context=context)
+    handed = tools["plan"](brief=task.brief, asks=list(task.asks), call=call)
     if handed.get(HANDED_OFF) != "plan":
         raise TaskStateError(f"{task.id}: plan answered {handed}")
-    state: dict[str, Any] = context.state
     return state
 
 
