@@ -9,4 +9,8 @@ from __future__ import annotations
 
 __version__ = "0.1.0"
 
-__all__ = ["__version__"]
+# The name the orchestrator runs under: the author of its events in a stored
+# conversation, which Studio's translator reads them by.
+AGENT_NAME = "dfo_orchestrator"
+
+__all__ = ["AGENT_NAME", "__version__"]

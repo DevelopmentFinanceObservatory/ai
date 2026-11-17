@@ -88,6 +88,10 @@ ORCHESTRATOR_SPEC_WARNINGS_KEY = "orchestrator:spec_warnings"
 # prior_ledger_state`; unset when no earlier turn read any. The blocks
 # themselves resolve through `planner.plan.earlier_block`.
 ORCHESTRATOR_PRIOR_LEDGER_KEY = "orchestrator:prior_ledger"
+# The hand-back the `seed` node gave the turn (`harness.graph.orchestrate`),
+# which answers none of the agent's calls: the orchestrator shows it after
+# the user's message on every request of the turn.
+SEEDED_STATE_KEY = "orchestrator:seeded"
 # spec_id -> the refusal message of a fetch or a plan step that read it and
 # was refused `capability_unavailable` this turn; `fetch` refuses it again
 # without a call.

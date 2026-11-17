@@ -1,4 +1,4 @@
-"""One request's bounds on its model calls, and the Gemini model that keeps to them.
+"""One request's bounds on its model calls, applied to each streamed Gemini call.
 
 A request is one POST to `/api/studio/turn` or `/api/studio/interrupt`. The
 route builds one `TurnBudget` from `harness.settings.Settings` and sets it in
@@ -10,32 +10,34 @@ each meters):
 - model time, 90 s;
 - a cap of 30 model calls;
 - a wall-clock bound of 600 s from the request's start, tool time included;
-- a first-chunk deadline of 12 s on a streamed call, after which the call is
-  resent once. Only the first call in the request to miss it is resent, and
-  only before any chunk reached the caller. A provider slow period defeats a
-  retry, so later calls wait under the budget alone.
+- a first-chunk deadline of 12 s, after which the call is resent once. Only
+  the first call in the request to miss it is resent, and only before any
+  chunk reached the caller. A provider slow period defeats a retry, so later
+  calls wait under the budget alone.
 
-`BoundedGemini.generate_content_async` applies them around each model
-request, starting the clock before genai's own HTTP retries so it covers
-them. The budget cuts a call that is still streaming. A call that finds a
-bound spent, or that a bound cuts, makes no further request and answers with
-that bound's sentence (`harness.sentences.STOP_SENTENCES`) as the model's
-final text, so the orchestrator ends the turn on it. In the planner,
-`harness.planner_adapter` turns that response into a question to the user when
-the last referral names sources to choose from, and otherwise the run ends on
-it and the entry refuses with the code on `TurnBudget.closed`.
+`bounded_by` applies them around one streamed google-genai call, starting the
+clock before genai's own HTTP retries so it covers them. The budget cuts a call
+that is still streaming. A call that finds a bound spent, or that a bound cuts,
+makes no further request and ends on a `Closing`: that bound's sentence
+(`harness.sentences.STOP_SENTENCES`) as the model's final text. A caller that
+passes chunks on as they arrive shows `Closing.shown` after the text it
+already passed on. One that holds a call's chunks until it ends answers with
+`Closing.content` in their place, as the planner's model does
+(`harness.gemini_wire`). In the planner, `harness.planner_adapter` turns that
+answer into a question to the user when the last referral names sources to
+choose from, and otherwise the run ends on it and the entry refuses with the
+code on `TurnBudget.closed`.
 
 A user's stop or a client disconnect cancels the call. The cancellation
 propagates and closes the stream, and the call is not retried. The span current
-around the call (ADK's `generate_content`, or Pydantic AI's `chat` on the
-planner's model, `harness.gemini_wire`) is marked as an error
-when the call is cancelled or cut. It also carries
+around the call (Pydantic AI's `chat <model>`) is marked as an error when the
+call is cancelled or cut. It also carries
 `langfuse.observation.completion_start_time` at the first chunk and the gaps
 between chunks (`dfo.model.chunk_gaps_s`), so an idle rule can be sized from
 the traces.
 
-With no budget set (an eval runner, a test driving an agent directly) a call
-runs unbounded, as ADK's `Gemini` does.
+With no budget (an eval runner, a test driving a model directly) a call runs
+unbounded.
 """
 
 from __future__ import annotations
@@ -46,12 +48,10 @@ import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, override
+from typing import Any
 
-from google.adk.models.google_llm import Gemini
-from google.adk.models.llm_request import LlmRequest
-from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
@@ -64,10 +64,7 @@ from harness.settings import Settings
 # does not import the Langfuse client.
 COMPLETION_START_TIME = "langfuse.observation.completion_start_time"
 
-# The `LlmResponse.custom_metadata` key a closing response carries, holding the
-# code of the bound that closed the call, so a reader can tell it from text
-# the model wrote (`harness.gemini_wire`).
-CLOSED_BY_KEY = "dfo.turn_budget.closed_by"
+type Chunk = types.GenerateContentResponse
 
 
 class TurnBudget:
@@ -153,43 +150,37 @@ def start_turn_budget(settings: Settings) -> TurnBudget:
     return budget
 
 
-class BoundedGemini(Gemini):
-    """`Gemini` whose every request keeps to the current `TurnBudget`."""
+@dataclass(frozen=True, slots=True)
+class Closing:
+    """The end of a call the bound `code` closed: its sentence as the model's
+    final text. `after_text` says the call had already streamed answer text,
+    so a reader that streams shows the sentence as a paragraph of its own
+    (`shown`)."""
 
-    @override
-    async def generate_content_async(
-        self, llm_request: LlmRequest, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse]:
-        async with aclosing(
-            bounded(
-                lambda: super(BoundedGemini, self).generate_content_async(llm_request, stream),
-                stream=stream,
-            )
-        ) as responses:
-            async for response in responses:
-                yield response
+    code: StopCode
+    sentence: str
+    after_text: bool
 
+    @property
+    def shown(self) -> str:
+        """The sentence as streamed after what the call already sent."""
+        return f"\n\n{self.sentence}" if self.after_text else self.sentence
 
-def bounded(
-    request: Callable[[], AsyncGenerator[LlmResponse]], *, stream: bool
-) -> AsyncGenerator[LlmResponse]:
-    """The responses of one model call, `request()`, kept to the current `TurnBudget`
-    (`bounded_by`)."""
-    return bounded_by(current_turn_budget.get(), request, stream=stream)
+    @property
+    def content(self) -> types.Content:
+        """The sentence as the model turn a call that sends nothing answers with."""
+        return types.Content(role="model", parts=[types.Part(text=self.sentence)])
 
 
 async def bounded_by(
     budget: TurnBudget | None,
-    request: Callable[[], AsyncGenerator[LlmResponse]],
-    *,
-    stream: bool,
-) -> AsyncGenerator[LlmResponse]:
-    """The responses of one model call, `request()`, kept to `budget`.
+    request: Callable[[], AsyncGenerator[Chunk]],
+) -> AsyncGenerator[Chunk | Closing]:
+    """The chunks of one streamed model call, `request()`, kept to `budget`.
 
     `request` opens the call afresh each time it is invoked, so a first-chunk
     retry sends it again. With no budget the call runs unbounded. A call a
-    bound closes ends on the responses `_closing` builds, the last of which
-    carries the bound's code under `CLOSED_BY_KEY`.
+    bound closes ends on one `Closing`, after the chunks it delivered.
     """
     if budget is None:
         async with aclosing(request()) as responses:
@@ -199,13 +190,12 @@ async def bounded_by(
 
     if (spent := budget.spent_bound()) is not None:
         budget.close(spent)
-        for response in _closing(spent, stream=stream, after_text=False):
-            yield response
+        yield _closing(spent, after_text=False)
         return
     budget.model_calls += 1
     span = trace.get_current_span()
     while True:
-        may_retry = stream and not budget.retry_spent
+        may_retry = not budget.retry_spent
         opened = budget.clock()
         first_chunk_by = opened + budget.first_chunk_s
         delivered = False
@@ -218,8 +208,9 @@ async def bounded_by(
         try:
             async with aclosing(request()) as responses:
                 while True:
-                    # Only the waits on the stream count as model time. ADK runs
-                    # a response's tools while this generator sits at its yield.
+                    # Only the waits on the stream count as model time. A caller
+                    # that streams runs its own work while this generator sits
+                    # at its yield.
                     wall_left, model_left = budget.wall_left(), budget.model_time_left()
                     before = budget.clock()
                     first_chunk_left = first_chunk_by - before
@@ -279,51 +270,38 @@ async def bounded_by(
         assert cut is not None
         _mark_failed(span, cut.value)
         budget.close(cut)
-        for response in _closing(cut, stream=stream, after_text=delivered_text):
-            yield response
+        yield _closing(cut, after_text=delivered_text)
         return
 
 
-def _closing(code: StopCode, *, stream: bool, after_text: bool) -> list[LlmResponse]:
-    """The model's final text for a call the bound `code` closed: its sentence,
-    marked with `code` under `CLOSED_BY_KEY`.
-
-    A streamed call first sends it as a partial chunk, since Studio shows a
-    finished call's text only when no partial already carried text
-    (`harness.studio_translate`), and a call cut mid-answer has streamed some.
-    """
-    sentence = refusal_sentence({"code": code})
-    final = LlmResponse(
-        content=types.Content(role="model", parts=[types.Part(text=sentence)]),
-        custom_metadata={CLOSED_BY_KEY: code.value},
-    )
-    if not stream:
-        return [final]
-    shown = f"\n\n{sentence}" if after_text else sentence
-    partial = LlmResponse(
-        content=types.Content(role="model", parts=[types.Part(text=shown)]), partial=True
-    )
-    return [partial, final]
+def _closing(code: StopCode, *, after_text: bool) -> Closing:
+    """The end of a call the bound `code` closed, after answer text or none."""
+    return Closing(code=code, sentence=refusal_sentence({"code": code}), after_text=after_text)
 
 
-def _has_text(response: LlmResponse) -> bool:
-    """Whether `response` carries answer text, which Studio streams to the user."""
-    parts = response.content.parts if response.content and response.content.parts else []
-    return any(part.text and not part.thought for part in parts)
+def _parts(chunk: Chunk) -> list[types.Part]:
+    """The parts of `chunk`'s first candidate, the one Pydantic AI reads."""
+    if not chunk.candidates or chunk.candidates[0].content is None:
+        return []
+    return chunk.candidates[0].content.parts or []
 
 
-def _has_thought(response: LlmResponse) -> bool:
-    """Whether `response` carries thought-summary text, which Studio hides."""
-    parts = response.content.parts if response.content and response.content.parts else []
-    return any(part.text and part.thought for part in parts)
+def _has_text(chunk: Chunk) -> bool:
+    """Whether `chunk` carries answer text, which Studio streams to the user."""
+    return any(part.text and not part.thought for part in _parts(chunk))
+
+
+def _has_thought(chunk: Chunk) -> bool:
+    """Whether `chunk` carries thought-summary text, which Studio hides."""
+    return any(part.text and part.thought for part in _parts(chunk))
 
 
 def _record_streamed(span: trace.Span, key: str, *, seconds: float) -> None:
     """Stamp `key` on `span` with `seconds`, the time this attempt waited on
     the stream up to the chunk at hand.
 
-    Measured as `dfo.model.first_chunk_s` is, on the waits alone, so time ADK
-    spends at the generator's yield is left out and the three compare.
+    Measured as `dfo.model.first_chunk_s` is, on the waits alone, so time the
+    caller spends at the generator's yield is left out and the three compare.
     `dfo.model.first_thought_s` and `dfo.model.first_text_s` beside
     `dfo.model.first_chunk_s` tell a model thinking apart from a provider
     queueing before it sends anything."""
@@ -331,7 +309,7 @@ def _record_streamed(span: trace.Span, key: str, *, seconds: float) -> None:
         span.set_attribute(key, round(seconds, 3))
 
 
-def _record_thoughts_tokens(span: trace.Span, response: LlmResponse) -> None:
+def _record_thoughts_tokens(span: trace.Span, response: Chunk) -> None:
     """Stamp the thought tokens the response's usage reports as
     `dfo.model.thoughts_token_count`, on the span that carries the call's
     `dfo.model.first_*` times, so one span tells how long the model thought
@@ -345,9 +323,8 @@ def _record_chunk_gaps(span: trace.Span, gaps: list[float]) -> None:
     """Stamp the gaps between the call's chunks so far as
     `dfo.model.chunk_gaps_s`, before the latest chunk is yielded.
 
-    ADK ends the `generate_content` span when it receives the response that
-    carries a finish reason, before the stream itself ends, so the attribute
-    is rewritten at each chunk while the span is still open."""
+    The attribute is rewritten at each chunk, so a span that ends before the
+    stream does still carries the gaps so far."""
     if span.is_recording():
         span.set_attribute("dfo.model.chunk_gaps_s", gaps)
 
@@ -364,11 +341,10 @@ def _mark_failed(span: trace.Span, reason: str) -> None:
 
 
 __all__ = [
-    "CLOSED_BY_KEY",
     "COMPLETION_START_TIME",
-    "BoundedGemini",
+    "Chunk",
+    "Closing",
     "TurnBudget",
-    "bounded",
     "bounded_by",
     "current_turn_budget",
     "start_turn_budget",

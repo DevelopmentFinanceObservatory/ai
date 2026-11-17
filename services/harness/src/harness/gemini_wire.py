@@ -9,8 +9,7 @@ first put in one fixed form (`in_canonical_form`). Each call, in order:
 2. looks the request's static prefix up in the shared `PrefixCache` and sends
    the request against it (`harness.prefix_cache.against_cache`). A cache the
    API reports gone (`CACHE_GONE_CODES`) before any chunk arrived is
-   forgotten, looked up again and the request resent once, as
-   `PrefixCachedGemini` does;
+   forgotten, looked up again and the request resent once;
 3. sends the request under the turn's `TurnBudget` (`harness.turn_budget.bounded_by`),
    with the model-time, call-cap and wall-clock bounds, the first-chunk
    resend, and the HTTP retries (`model_retry_options`);
@@ -28,10 +27,10 @@ first put in one fixed form (`in_canonical_form`). Each call, in order:
    (`_MALFORMED_DISCARDED`). Otherwise, and after the second attempt whatever
    its outcome, the held chunks are delivered.
 
-A function call the model sent without an id reaches the caller with one of
-the form ADK gives it (`_with_client_call_ids`), so it is stored under such an
-id, and each request is sent less those ids, as ADK sends one
-(`_without_client_call_ids`). Every request streams. A non-streamed call
+A function call the model sent without an id reaches the caller with one the
+harness makes (`client_call_id`), so it is stored under that id, and each
+request is sent less those ids (`_without_client_call_ids`), so the model
+reads its calls as it sent them. Every request streams. A non-streamed call
 refuses, since it would bypass all of the above.
 
 Each call's span, Pydantic AI's `chat <model>`, is current while the call runs
@@ -47,20 +46,19 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from google.adk.flows.llm_flows import functions as adk_functions
-from google.adk.models.llm_response import LlmResponse
 from google.genai import Client, errors, types
 from opentelemetry import trace
 from pydantic_ai.exceptions import ModelAPIError
 
 from harness.prefix_cache import CACHE_GONE_CODES, PrefixCache, against_cache
 from harness.sentences import StopCode
-from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, bounded_by
+from harness.turn_budget import Chunk, Closing, TurnBudget, bounded_by
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +68,11 @@ logger = logging.getLogger(__name__)
 NO_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
 
 type Usage = types.GenerateContentResponseUsageMetadata
+
+# What every id `client_call_id` makes starts with. It is the prefix google-adk
+# gave such ids, so the planner records and conversations stored under them
+# read the same.
+CLIENT_CALL_ID_PREFIX = "adk-"
 
 # A planner call is sent at most this many times. The second send happens when
 # Gemini ends the first on a function call it could not parse.
@@ -110,7 +113,7 @@ class _Answer:
     """One sent call: its streamed chunks, held, and the closing turn and code
     when a bound closed it."""
 
-    chunks: list[types.GenerateContentResponse] = field(default_factory=list)
+    chunks: list[Chunk] = field(default_factory=list)
     closing: types.Content | None = None
     closed_by: StopCode | None = None
 
@@ -144,7 +147,7 @@ class GeminiStream:
 
     async def __call__(
         self, *, model: str, contents: Any, config: Any = None
-    ) -> AsyncIterator[types.GenerateContentResponse]:
+    ) -> AsyncIterator[Chunk]:
         return _with_client_call_ids(
             self._respond(
                 model=model,
@@ -155,7 +158,7 @@ class GeminiStream:
 
     async def _respond(
         self, *, model: str, contents: Any, config: types.GenerateContentConfig
-    ) -> AsyncGenerator[types.GenerateContentResponse]:
+    ) -> AsyncGenerator[Chunk]:
         span = trace.get_current_span()
         spent: Usage | None = None
         for attempt in range(_ATTEMPTS):
@@ -233,15 +236,14 @@ class GeminiStream:
         """One call under the budget, its chunks held in `answer`."""
         answer = answer or _Answer()
 
-        def request() -> AsyncGenerator[LlmResponse]:
+        def request() -> AsyncGenerator[Chunk]:
             return self._raw(model=model, contents=contents, config=config, held=answer.chunks)
 
-        async with aclosing(bounded_by(self.budget, request, stream=True)) as responses:
-            async for response in responses:
-                code = (response.custom_metadata or {}).get(CLOSED_BY_KEY)
-                if code is not None:
-                    answer.closing = response.content
-                    answer.closed_by = StopCode(code)
+        async with aclosing(bounded_by(self.budget, request)) as items:
+            async for item in items:
+                if isinstance(item, Closing):
+                    answer.closing = item.content
+                    answer.closed_by = item.code
         return answer
 
     async def _raw(
@@ -250,20 +252,16 @@ class GeminiStream:
         model: str,
         contents: Any,
         config: types.GenerateContentConfig,
-        held: list[types.GenerateContentResponse],
-    ) -> AsyncGenerator[LlmResponse]:
-        """One attempt at the call: each chunk held, and handed to the budget as
-        the partial response ADK's `Gemini` would make of it."""
+        held: list[Chunk],
+    ) -> AsyncGenerator[Chunk]:
+        """One attempt at the call: each chunk held, and handed on to the budget."""
         stream = await self.client.aio.models.generate_content_stream(
             model=model, contents=contents, config=config
         )
-        async with aclosing(cast(AsyncGenerator[types.GenerateContentResponse], stream)) as chunks:
+        async with aclosing(cast(AsyncGenerator[Chunk], stream)) as chunks:
             async for chunk in chunks:
                 held.append(chunk)
-                content = chunk.candidates[0].content if chunk.candidates else None
-                yield LlmResponse(
-                    content=content, usage_metadata=chunk.usage_metadata, partial=True
-                )
+                yield chunk
 
 
 class StreamResumedError(ConnectionError):
@@ -290,18 +288,21 @@ def resumed_over_output(exc: BaseException) -> bool:
     return type(exc) is ModelAPIError and exc.__cause__ is None
 
 
-async def _with_client_call_ids(
-    chunks: AsyncIterator[types.GenerateContentResponse],
-) -> AsyncGenerator[types.GenerateContentResponse]:
-    """`chunks`, each function call that arrived without an id given one as ADK
-    gives it (`generate_client_function_call_id`).
+def client_call_id() -> str:
+    """A new id for a function call the model sent without one:
+    `CLIENT_CALL_ID_PREFIX` and a random UUID."""
+    return f"{CLIENT_CALL_ID_PREFIX}{uuid.uuid4()}"
 
-    The planner stores such a call under an `adk-` id, given before its tools
-    run, as ADK gives one. Pydantic AI would invent an id of its own form, so
-    this runs on every chunk the model hands Pydantic AI, a turn put in the
-    model's place and a closing turn included. A chunk carries each call whole
-    in one part, and both frameworks read each function call part as one call,
-    so one part gets one id.
+
+async def _with_client_call_ids(chunks: AsyncIterator[Chunk]) -> AsyncGenerator[Chunk]:
+    """`chunks`, each function call that arrived without an id given one
+    (`client_call_id`).
+
+    The call is stored under that id, given before its tool runs. Pydantic AI
+    would invent an id of its own form, so this runs on every chunk the model
+    hands Pydantic AI, a turn put in the model's place and a closing turn
+    included. A chunk carries each call whole in one part, and Pydantic AI
+    reads each function call part as one call, so one part gets one id.
     """
     async for chunk in chunks:
         if not any(_id_less_calls(chunk)):
@@ -309,11 +310,11 @@ async def _with_client_call_ids(
             continue
         named = chunk.model_copy(deep=True)
         for call in _id_less_calls(named):
-            call.id = adk_functions.generate_client_function_call_id()
+            call.id = client_call_id()
         yield named
 
 
-def _id_less_calls(chunk: types.GenerateContentResponse) -> list[types.FunctionCall]:
+def _id_less_calls(chunk: Chunk) -> list[types.FunctionCall]:
     """The function calls of `chunk`'s first candidate that carry no id."""
     return [
         part.function_call
@@ -377,18 +378,23 @@ def _record_usage(span: trace.Span, usage: Usage | None) -> None:
 
 
 def _without_client_call_ids(contents: Any) -> list[types.Content]:
-    """`contents`, as `GoogleModel` built them, less the call ids ADK gives a
-    call the model sent without one.
+    """A copy of `contents`, as `GoogleModel` built them, less every function
+    call and function response id that starts with `CLIENT_CALL_ID_PREFIX`.
 
-    A turn put in the model's place carries such an id
+    A call the model sent without an id carries one (`_with_client_call_ids`),
+    as does a turn put in the model's place
     (`harness.planner_node.directive_turn`), and a later request of the run
-    replays it when the call does not end the run. ADK strips those ids from
-    every request it sends (`remove_client_function_call_id`), and this applies
-    ADK's own rule to a copy of each content.
+    replays it. The model sent no id, so it is sent none.
     """
     stripped = [types.Content.model_validate(content).model_copy(deep=True) for content in contents]
     for content in stripped:
-        adk_functions.remove_client_function_call_id(content)
+        for part in content.parts or ():
+            if (call := part.function_call) and (call.id or "").startswith(CLIENT_CALL_ID_PREFIX):
+                call.id = None
+            if (response := part.function_response) and (response.id or "").startswith(
+                CLIENT_CALL_ID_PREFIX
+            ):
+                response.id = None
     return stripped
 
 
@@ -511,7 +517,7 @@ def _require_only_text(modalities: list[str] | None) -> None:
         )
 
 
-def _chunk(content: types.Content, *, usage: Usage | None) -> types.GenerateContentResponse:
+def _chunk(content: types.Content, *, usage: Usage | None) -> Chunk:
     """A model turn as the one streamed chunk google-genai would deliver for it."""
     return types.GenerateContentResponse(
         candidates=[types.Candidate(content=content, finish_reason=types.FinishReason.STOP)],
@@ -519,8 +525,8 @@ def _chunk(content: types.Content, *, usage: Usage | None) -> types.GenerateCont
     )
 
 
-def _parts(chunk: types.GenerateContentResponse) -> list[types.Part]:
-    """The parts of `chunk`'s first candidate, the one ADK and Pydantic AI read."""
+def _parts(chunk: Chunk) -> list[types.Part]:
+    """The parts of `chunk`'s first candidate, the one Pydantic AI reads."""
     if not chunk.candidates or chunk.candidates[0].content is None:
         return []
     return chunk.candidates[0].content.parts or []
@@ -573,6 +579,7 @@ class _Client:
 
 
 __all__ = [
+    "CLIENT_CALL_ID_PREFIX",
     "NO_PARAMETERS",
     "AfterResponse",
     "BeforeRequest",
@@ -580,6 +587,7 @@ __all__ = [
     "StreamResumedError",
     "UnexpectedRequestFormError",
     "Usage",
+    "client_call_id",
     "in_canonical_form",
     "model_retry_options",
     "resumed_over_output",

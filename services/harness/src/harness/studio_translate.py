@@ -66,7 +66,7 @@ from executor.classify import internal_fault
 from executor.outcomes import RefusalKind
 from executor.run import RESULT_RECEIVED, current_step_id
 from google.adk.events import Event
-from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
+from orchestrator import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.phrasing import entities_phrase
 from planner.plan import PLAN_STATE_KEY, DatasetRequirement, Decision
 from planner.plan import Plan as PlannerPlan

@@ -190,7 +190,7 @@ class Settings(BaseServiceSettings):
     The `turn_*` and `model_first_chunk_s` fields bound one request (one POST
     to `/api/studio/turn` or `/api/studio/interrupt`) through
     `harness.turn_budget.TurnBudget`, which every orchestrator and planner
-    model call reads (`harness.turn_budget.BoundedGemini`):
+    model call reads (`harness.turn_budget.bounded_by`):
 
     - `turn_model_time_s` (90) meters model time: the seconds the request's
       model calls spend waiting on their streams, from the moment each request

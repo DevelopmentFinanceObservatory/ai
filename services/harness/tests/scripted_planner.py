@@ -15,6 +15,7 @@ from unittest import mock
 from compiler.surface import FixtureSurface, ToolSurface
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.flows.llm_flows import functions as adk_functions
+from harness import gemini_wire
 from harness.planner_adapter import PlannerAdapter
 from harness.settings import Settings
 from planner.settings import AgentSettings
@@ -35,11 +36,17 @@ SIGNED = b"scripted-signature"
 
 @contextlib.contextmanager
 def numbered_call_ids() -> Iterator[None]:
-    """Number the ids ADK gives a call that has none from 1, so a turn put in the
-    model's place carries the same call id every time a test runs."""
+    """Number the ids given a call that has none from 1, the model's
+    (`harness.gemini_wire.client_call_id`) and a turn put in the model's
+    place alike, so each carries the same call id every time a test runs."""
     counter = itertools.count(1)
-    with mock.patch.object(
-        adk_functions, "generate_client_function_call_id", lambda: f"adk-{next(counter)}"
+
+    def numbered() -> str:
+        return f"adk-{next(counter)}"
+
+    with (
+        mock.patch.object(adk_functions, "generate_client_function_call_id", numbered),
+        mock.patch.object(gemini_wire, "client_call_id", numbered),
     ):
         yield
 

@@ -44,6 +44,8 @@ from typing import Any
 import pytest
 from harness.planner_adapter import _READINGS_CONTEXT
 
+from .scripted_genai import Request
+
 PLANNER_RUNS = Path(__file__).parent / "fixtures" / "planner_runs"
 _SHARED = PLANNER_RUNS / "shared"
 _WRITING = os.environ.get("PLANNER_EXPECTATIONS") == "write"
@@ -106,6 +108,31 @@ def versionless_headers(config: Mapping[str, Any]) -> dict[str, Any]:
         for name, value in options["headers"].items()
     }
     return {**config, "http_options": {**options, "headers": headers}}
+
+
+def request_dumped(request: Request) -> dict[str, Any]:
+    """`request`'s model, config and contents, dumped, each package version in the
+    config's HTTP headers put as `<version>` (`versionless_headers`)."""
+    return {
+        "model": request.model,
+        "config": versionless_headers(
+            request.generate_config.model_dump(mode="json", exclude_none=True)
+        ),
+        "contents": [
+            content.model_dump(mode="json", exclude_none=True) for content in request.content_list
+        ],
+    }
+
+
+def briefs(request: Request) -> list[str]:
+    """The text of each part of `request` that holds the planner brief."""
+    return [
+        part.text
+        for content in request.content_list
+        if content.role == "user"
+        for part in content.parts or ()
+        if part.text is not None and part.text.startswith(BRIEF_OPENING)
+    ]
 
 
 def _dumped(value: Any) -> str:

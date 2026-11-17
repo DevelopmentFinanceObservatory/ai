@@ -15,7 +15,6 @@ from typing import Any
 
 from compiler.surface import ToolSurface
 from google.adk import Context
-from orchestrator.agent import SEEDED_STATE_KEY
 from planner.plan import (
     SEEDS_STATE_KEY,
 )
@@ -31,6 +30,7 @@ from harness.graph.orchestrate import AgentHandBack
 from harness.graph.resume import ResumeRuns
 from harness.graph.state import (
     APPLY_CHOICE_STATE_KEY,
+    SEEDED_STATE_KEY,
     state_json,
     store_search,
     turn_budgets,

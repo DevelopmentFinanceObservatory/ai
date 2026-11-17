@@ -1,7 +1,7 @@
 """The Pydantic AI planner run on a script, for tests that check what it sends and leaves.
 
 `pydantic_run` runs the Pydantic AI planner (`planner_agent` on
-`harness.planner_model.planner_model` over the scripted client) once per brief,
+`planner.model.planner_model` over the scripted client) once per brief,
 each run after the first handed the steps of the runs before it. It returns the
 requests the scripted client recorded and the conversation each run leaves
 (`Turn`), read off the planner's items.
@@ -17,8 +17,8 @@ from typing import Any
 from compiler.surface import ToolSurface
 from google.adk.events import Event
 from google.genai import types
-from harness.planner_model import planner_model
 from planner.instruction import planner_instruction
+from planner.model import planner_model
 from planner.pydantic_agent import (
     PlannerDeps,
     PlannerItem,

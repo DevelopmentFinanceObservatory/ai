@@ -92,7 +92,7 @@ from harness.wire import (
 )
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR
-from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
+from orchestrator import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,

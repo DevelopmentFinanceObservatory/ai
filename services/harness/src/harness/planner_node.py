@@ -2,7 +2,7 @@
 
 `harness.planner_adapter.PlannerAdapter` runs the planner through `ctx.run_node`.
 That node is a function node named `planner.settings.AGENT_NAME` that drives
-`planner.pydantic_agent.run_planner` on `harness.planner_model.planner_model`
+`planner.pydantic_agent.run_planner` on `planner.model.planner_model`
 and yields events holding what an ADK `LlmAgent` stores for the same
 exchange, as far as the session's readers read it (`harness.planner_events`).
 ADK's node runner stamps each with the author the node sets, the branch of the
@@ -35,6 +35,7 @@ from google.adk.flows.llm_flows import functions as adk_functions
 from google.adk.telemetry import TelemetryConfig
 from google.adk.workflow import BaseNode, node
 from google.genai import Client, types
+from planner.model import planner_model
 from planner.pydantic_agent import (
     PlannerAnswers,
     PlannerDeps,
@@ -49,7 +50,6 @@ from planner.tool_spec import ToolSpec
 
 from harness.gemini_wire import StreamResumedError, Usage, resumed_over_output
 from harness.planner_events import model_response_event, tool_answers_event
-from harness.planner_model import planner_model
 from harness.planner_run import Ask, Directive, PlannerRun, Stop
 from harness.prefix_cache import PrefixCache
 from harness.sentences import StopCode, refusal_sentence

@@ -11,7 +11,7 @@ is behaviour the library's guides do not state: how a request is shaped on the w
 which calls a run retries, when a tool runs within the run, how streamed chunks
 merge, when a run stops, and which span is current and what Pydantic AI writes on
 it. Each test drives that behaviour through
-`planner.pydantic_agent.run_planner` or `harness.planner_model.planner_model` over a
+`planner.pydantic_agent.run_planner` or `planner.model.planner_model` over a
 scripted google-genai client (`ScriptedGenai`), so nothing reaches the network. A
 test marked as a control runs Pydantic AI without the planner's setting and shows the
 behaviour the setting exists to change.
@@ -29,21 +29,20 @@ from unittest import mock
 import pytest
 from google.genai import types
 from harness import gemini_wire
-from harness.planner_model import planner_model
+from harness.gemini_agent import GEMINI_PROFILE, tool_not_found
 from harness.planner_node import SKIP_THOUGHT_SIGNATURE
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 from planner.call import PlannerCall
+from planner.model import planner_model
 from planner.pydantic_agent import (
-    PLANNER_PROFILE,
     PlannerAnswers,
     PlannerDeps,
     PlannerItem,
     PlannerResponse,
     planner_agent,
     run_planner,
-    tool_not_found,
 )
 from planner.session import SessionCall
 from planner.tool_spec import Parameter, ToolSpec, function_declaration
@@ -244,7 +243,7 @@ async def _stream_run(agent: Agent[Any, Any], prompt: str = BRIEF, **options: An
 def _plain_agent(scripted: ScriptedGenai, **options: Any) -> Agent[Any, Any]:
     """An agent on the planner's model profile with none of the planner's other settings."""
     model = GoogleModel(
-        MODEL, provider=GoogleProvider(client=scripted.client), profile=PLANNER_PROFILE
+        MODEL, provider=GoogleProvider(client=scripted.client), profile=GEMINI_PROFILE
     )
     options.setdefault("output_type", str | None)
     return Agent(model, instructions=INSTRUCTION, **options)
@@ -497,7 +496,7 @@ async def test_the_first_unsigned_call_of_a_response_replays_with_the_skip_signa
 
 async def test_consecutive_thought_chunks_make_one_part_that_keeps_the_signature() -> None:
     # The planner drops unsigned thoughts from the parts this merge makes
-    # (`planner.pydantic_agent._without_unsigned_thoughts`), so a run of thought
+    # (`harness.gemini_agent.without_unsigned_thoughts`), so a run of thought
     # chunks with a signature on one chunk stays whole.
     chunks = Reply(
         chunks=[
@@ -518,7 +517,7 @@ async def test_consecutive_thought_chunks_make_one_part_that_keeps_the_signature
 
 async def test_an_unsigned_thought_summary_is_left_out_of_the_next_request() -> None:
     # The planner's session keeps no unsigned thought summary, so the next request
-    # carries none (`planner.settings.without_unsigned_thoughts`).
+    # carries none (`harness.gemini_agent.without_unsigned_thoughts`).
     unsigned = reply(thought_part("musing", signature=None), call_part("bare", id="c"))
 
     items, scripted = await _run([_BARE], [unsigned, reply(text_part("done"))])

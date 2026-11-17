@@ -13,13 +13,12 @@ from __future__ import annotations
 import os
 
 from google.genai import Client
-from planner.pydantic_agent import PLANNER_PROFILE
-from pydantic_ai.models.google import GoogleModel
-from pydantic_ai.providers.google import GoogleProvider
-
+from harness.gemini_agent import GEMINI_PROFILE
 from harness.gemini_wire import AfterResponse, BeforeRequest, GeminiStream, wrapped_client
 from harness.prefix_cache import PrefixCache
 from harness.turn_budget import TurnBudget
+from pydantic_ai.models.google import GoogleModel
+from pydantic_ai.providers.google import GoogleProvider
 
 
 def planner_model(
@@ -45,8 +44,9 @@ def planner_model(
             closed (`AfterResponse`).
 
     Returns:
-        A `GoogleModel` on `PLANNER_PROFILE`, the profile `harness.gemini_wire.in_canonical_form`
-        expects, whose streamed calls go through `GeminiStream`.
+        A `GoogleModel` on `harness.gemini_agent.GEMINI_PROFILE`, the profile
+        `harness.gemini_wire.in_canonical_form` expects, whose streamed calls
+        go through `GeminiStream`.
     """
     stream = GeminiStream(
         client=client,
@@ -56,7 +56,7 @@ def planner_model(
         after_response=after_response,
     )
     provider = GoogleProvider(client=wrapped_client(client, stream))
-    return GoogleModel(model_name, provider=provider, profile=PLANNER_PROFILE)
+    return GoogleModel(model_name, provider=provider, profile=GEMINI_PROFILE)
 
 
 def refuse_vertex_ai(model_name: str, client: Client | None = None) -> None:

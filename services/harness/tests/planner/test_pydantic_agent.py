@@ -15,10 +15,10 @@ from typing import Any, cast
 import pytest
 from compiler.surface import ToolSurface
 from google.genai import types
+from harness.gemini_agent import GEMINI_PROFILE
 from harness.turn_events import PLANNER_ASK
 from planner.call import PlannerCall
 from planner.pydantic_agent import (
-    PLANNER_PROFILE,
     PlannerAnswers,
     PlannerDeps,
     PlannerItem,
@@ -35,6 +35,7 @@ from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
 from ..planner_expectations import expect, expectation_name, shared
+from ..planner_expectations import request_dumped as _request_dumped
 from ..scripted_genai import (
     Reply,
     Request,
@@ -45,7 +46,6 @@ from ..scripted_genai import (
     thought_part,
     usage_metadata,
 )
-from ..test_planner_node import _request_dumped
 from .planner_pairs import BRIEF, QUESTION, pydantic_run
 
 _MODEL = "gemini-3.8-flash"
@@ -114,7 +114,7 @@ def _ask_spec() -> ToolSpec:
 
 def _google_model(scripted: ScriptedGenai) -> GoogleModel:
     return GoogleModel(
-        _MODEL, provider=GoogleProvider(client=scripted.client), profile=PLANNER_PROFILE
+        _MODEL, provider=GoogleProvider(client=scripted.client), profile=GEMINI_PROFILE
     )
 
 

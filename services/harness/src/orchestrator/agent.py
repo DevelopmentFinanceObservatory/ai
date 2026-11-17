@@ -13,28 +13,25 @@ from google.adk.models.google_llm import Gemini
 from google.adk.models.llm_request import LlmRequest
 from google.genai import types
 from harness.gemini_wire import model_retry_options
+from harness.graph.state import SEEDED_STATE_KEY
 from harness.orchestrator_tools import OrchestratorTool
 from harness.prefix_cache import gemini_model_name
 from harness.settings import DEFAULT_ORCHESTRATOR_THINKING_LEVEL
 from harness.turn_budget import BoundedGemini
 from harness.turn_events import after_turn_question
 
+from orchestrator import AGENT_NAME
 from orchestrator.tool_failures import answering_tool_failures
 
 if TYPE_CHECKING:
     from harness.prefix_cache import PrefixCache
     from harness.settings import ThinkingLevelName
 
-AGENT_NAME = "dfo_orchestrator"
 
 # The state key `_stamp_today` writes the UTC date to. The `temp:` prefix
 # keeps it out of persisted session state and past `harness.graph.state.GraphState`,
 # which validates unprefixed keys only.
 TODAY_STATE_KEY = "temp:today"
-# The hand-back the `seed` node gave the turn (`harness.graph.orchestrate`),
-# which answers none of the agent's calls: `prepend_digests` shows it after
-# the user's message on every request of the turn.
-SEEDED_STATE_KEY = "orchestrator:seeded"
 
 # The session-state keys the content `prepend_digests` adds is built from, and
 # the label each line opens with: the date `_stamp_today` writes, then the

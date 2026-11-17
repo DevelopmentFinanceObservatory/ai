@@ -68,13 +68,9 @@ from translator.tool import Translate, build_translate
 
 from .orchestrator_fakes import plan_call, stream, studio_client, turn_body
 from .planner.planner_pairs import adapter_specs
-from .planner_expectations import (
-    BRIEF_OPENING,
-    expect,
-    expectation_name,
-    shared,
-    versionless_headers,
-)
+from .planner_expectations import briefs as _briefs
+from .planner_expectations import expect, expectation_name, shared
+from .planner_expectations import request_dumped as _request_dumped
 from .scripted_genai import (
     Reply,
     Request,
@@ -274,31 +270,6 @@ def _read(events: Sequence[Event]) -> list[dict[str, Any]]:
 def _steps(events: Sequence[Event]) -> list[dict[str, Any]]:
     """The steps `session_steps` reads from `events`, each by its fields."""
     return [step._asdict() for step in session_steps(events)]
-
-
-def _request_dumped(request: Request) -> dict[str, Any]:
-    """`request`'s model, config and contents, dumped, each package version in the
-    config's HTTP headers put as `<version>` (`versionless_headers`)."""
-    return {
-        "model": request.model,
-        "config": versionless_headers(
-            request.generate_config.model_dump(mode="json", exclude_none=True)
-        ),
-        "contents": [
-            content.model_dump(mode="json", exclude_none=True) for content in request.content_list
-        ],
-    }
-
-
-def _briefs(request: Request) -> list[str]:
-    """The text of each part of `request` that holds the planner brief."""
-    return [
-        part.text
-        for content in request.content_list
-        if content.role == "user"
-        for part in content.parts or ()
-        if part.text is not None and part.text.startswith(BRIEF_OPENING)
-    ]
 
 
 def _view(entry: _Entry) -> dict[str, Any]:

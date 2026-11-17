@@ -18,7 +18,6 @@ from google.adk import Context, Event
 from google.adk.agents import LlmAgent
 from google.adk.events import RequestInput
 from google.genai import types
-from orchestrator.agent import SEEDED_STATE_KEY
 from pydantic import BaseModel, Field, model_validator
 
 from harness.graph.state import (
@@ -28,6 +27,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_STATUS_FAILURE_KEY,
     ORCHESTRATOR_STATUS_KEY,
+    SEEDED_STATE_KEY,
     AskOption,
     AskQuestion,
     PendingAsk,

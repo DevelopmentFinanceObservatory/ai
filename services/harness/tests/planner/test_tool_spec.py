@@ -19,9 +19,9 @@ from typing import Annotated, Any
 
 import pytest
 from google.adk.tools.function_tool import FunctionTool
-from harness.planner_model import refuse_vertex_ai
 from harness.scripted import use_compiled_proposals
 from planner.declaration import compact_schema
+from planner.model import refuse_vertex_ai
 from planner.plan import AskAnswer, Decline
 from planner.specs import PROPOSE_PLAN, planner_tool_specs, skill_tool_spec
 from planner.tool_spec import (

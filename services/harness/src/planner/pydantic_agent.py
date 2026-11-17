@@ -13,45 +13,41 @@ Pydantic AI shapes a request its own way: the system instruction as a
 `Content`, one `Tool` per declaration, an empty parameters schema on a tool
 that takes none, an explicit `AUTO` tool config and `response_modalities`.
 The planner's model (`harness.gemini_wire`) puts each request in one fixed
-form before it is sent. The model is built with `PLANNER_PROFILE`, which
-sends each declaration's schema as given and adds nothing to the
-instruction.
+form before it is sent. The model is built with
+`harness.gemini_agent.GEMINI_PROFILE`, which sends each declaration's schema
+as given and adds nothing to the instruction.
 """
 
 from __future__ import annotations
 
-import base64
 import copy
 import logging
 import sys
-from collections.abc import AsyncGenerator, Awaitable, Callable, MutableMapping, Sequence
-from dataclasses import dataclass, field, replace
-from typing import Any, cast
+from collections.abc import AsyncGenerator, Callable, MutableMapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any
 
 from google.genai import types
+from harness.gemini_agent import (
+    RecordingState,
+    as_function_response,
+    replayed_history,
+    response_parts,
+    tool_not_found,
+    without_unsigned_thoughts,
+)
 from harness.gemini_wire import NO_PARAMETERS
 from pydantic_ai import Agent, InstrumentationSettings, RunContext, Tool
 from pydantic_ai.capabilities import Instrumentation, ProcessHistory
 from pydantic_ai.exceptions import UnexpectedModelBehavior
-from pydantic_ai.messages import (
-    ModelMessage,
-    ModelRequest,
-    ModelRequestPart,
-    ModelResponse,
-    TextPart,
-    ThinkingPart,
-    ToolCallPart,
-    ToolReturnPart,
-    UserPromptPart,
-)
+from pydantic_ai.messages import ModelRequest, ModelResponse, ToolReturnPart, UserPromptPart
 from pydantic_ai.models import Model
 from pydantic_ai.models.google import GoogleModelSettings
-from pydantic_ai.profiles.google import GoogleModelProfile
 from pydantic_ai.usage import UsageLimits
 
-from planner.call import PlannerCall, RecordingState
+from planner.call import PlannerCall
 from planner.plan import SessionState
-from planner.settings import AGENT_THINKING_CONFIG, without_unsigned_thoughts
+from planner.settings import AGENT_THINKING_CONFIG
 from planner.tool_spec import ToolSpec, function_declaration, serve_tool
 
 logger = logging.getLogger(__name__)
@@ -80,15 +76,6 @@ _QUESTION_INSTRUCTIONS = "The user's message, which opened the turn."
 type CallFor = Callable[[SessionState, str | None], PlannerCall]
 type ToolAnswered = Callable[[str, dict[str, Any]], None]
 type ToolFailed = Callable[[str, BaseException], dict[str, Any]]
-
-
-# The planner's changes to Gemini's profile, which `GoogleModel(profile=...)`
-# merges over the provider's own for the model. Declarations are sent as given
-# (no JSON schema transformer), and nothing is added to the instruction about
-# system messages mid-conversation (inline system prompts supported).
-PLANNER_PROFILE = GoogleModelProfile(
-    json_schema_transformer=None, supports_inline_system_prompts=True
-)
 
 
 @dataclass
@@ -126,7 +113,8 @@ class PlannerResponse:
 
     `parts` are its parts as google-genai parts: each function call with its
     id, text, and each thought with `thought` set, each with its thought
-    signature, less its unsigned thought summaries (`_without_unsigned_thoughts`).
+    signature, less its unsigned thought summaries
+    (`harness.gemini_agent.without_unsigned_thoughts`).
     A blocked prompt is a response with no parts. The usage the API reported is
     read off the stream by `harness.gemini_wire`.
     """
@@ -160,20 +148,6 @@ class PydanticPlanner:
     tools: tuple[str, ...]
 
 
-def tool_not_found(name: str, tools: Sequence[str]) -> dict[str, str]:
-    """The answer to a call of `name`, a tool the planner lacks, naming the tools
-    it can call in the order they are declared. It is ADK's answer to a call
-    of a tool an `LlmAgent` lacks, word for word."""
-    available = ", ".join(tools) or "none"
-    return {
-        "error": (
-            f"Invoking `{name}()` failed as no tool with that name is available. "
-            f"The tools you can call are: {available}. You could retry, but it is "
-            "IMPORTANT that you only call a tool from that list."
-        )
-    }
-
-
 def planner_agent(
     specs: Sequence[ToolSpec],
     *,
@@ -194,11 +168,11 @@ def planner_agent(
     A response with no tool call ends the run, an empty one included.
     Thinking is `planner.settings.AGENT_THINKING_CONFIG`.
 
-    A call to a tool the planner lacks is answered with `tool_not_found`, and
-    the run goes on however many such calls the model makes
-    (`_UNLIMITED_RETRIES`). Each request replays the run's earlier responses
-    less their unsigned thought summaries, as the session keeps them
-    (`_as_replayed`).
+    A call to a tool the planner lacks is answered with
+    `harness.gemini_agent.tool_not_found`, and the run goes on however many
+    such calls the model makes (`_UNLIMITED_RETRIES`). Each request replays
+    the run's earlier responses less their unsigned thought summaries, as the
+    session keeps them (`harness.gemini_agent.replayed_history`).
 
     The agent traces through the global tracer provider: a span per run
     (`invoke_agent <name>`), per model call (`chat <model>`) and per tool call
@@ -220,7 +194,7 @@ def planner_agent(
         ),
         retries={"tools": _UNLIMITED_RETRIES},
         capabilities=[
-            ProcessHistory(_as_replayed(tools)),
+            ProcessHistory(replayed_history(tools)),
             Instrumentation(
                 InstrumentationSettings(
                     include_content=include_content, include_model_request_parameters=False
@@ -230,39 +204,6 @@ def planner_agent(
         name=name,
     )
     return PydanticPlanner(agent=agent, tools=tools)
-
-
-def _as_replayed(
-    tools: Sequence[str],
-) -> Callable[[list[ModelMessage]], Awaitable[list[ModelMessage]]]:
-    """A history processor that puts the run's messages in the form the session
-    keeps them: each call to a tool not in `tools` answered with
-    `tool_not_found`, in place of the retry Pydantic AI answers it with, and
-    each response less its unsigned thought summaries
-    (`_without_unsigned_thoughts`). It runs before every model request, and
-    Pydantic AI keeps what it returns as the run's messages."""
-
-    async def process(messages: list[ModelMessage]) -> list[ModelMessage]:
-        return [
-            replace(message, parts=[_answered_if_unknown(part, tools) for part in message.parts])
-            if isinstance(message, ModelRequest)
-            else _without_unsigned_thoughts(message)
-            for message in messages
-        ]
-
-    return process
-
-
-def _answered_if_unknown(part: ModelRequestPart, tools: Sequence[str]) -> ModelRequestPart:
-    """`part`, or `tool_not_found`'s answer in its place when it answers a call
-    to a tool not in `tools`."""
-    if not isinstance(part, ToolReturnPart) or part.tool_name in tools:
-        return part
-    return ToolReturnPart(
-        tool_name=part.tool_name,
-        content=tool_not_found(part.tool_name, tools),
-        tool_call_id=part.tool_call_id,
-    )
 
 
 def _tool(spec: ToolSpec) -> Tool[PlannerDeps]:
@@ -415,28 +356,7 @@ def _question_prompt(question: types.Content | str) -> str | list[str]:
 
 
 def _planner_response(response: ModelResponse) -> PlannerResponse:
-    return PlannerResponse(parts=response_parts(_without_unsigned_thoughts(response)))
-
-
-def _without_unsigned_thoughts(response: ModelResponse) -> ModelResponse:
-    """`response` less the thought summaries `without_unsigned_thoughts` drops
-    from its parts: each thought with no signature, unless every part is one.
-
-    Pydantic AI's parts manager merges a run of streamed thought chunks into
-    one `ThinkingPart`, signed when any chunk of the run was, as ADK's stream
-    aggregator merges them.
-    """
-    parts = response_parts(response)
-    kept = without_unsigned_thoughts(parts)
-    if kept is None:
-        return response
-    kept_ids = {id(part) for part in kept}
-    return replace(
-        response,
-        parts=[
-            part for part, sent in zip(response.parts, parts, strict=True) if id(sent) in kept_ids
-        ],
-    )
+    return PlannerResponse(parts=response_parts(without_unsigned_thoughts(response)))
 
 
 def _answers(
@@ -459,43 +379,3 @@ def _answers(
         ),
         state={key: copy.deepcopy(deps.state[key]) for key in view.written if key in deps.state},
     )
-
-
-def as_function_response(value: object) -> dict[str, Any]:
-    """`value` as a function response carries it: a dict as it is, anything else
-    under `result`, as ADK wraps a tool's answer that is no dict."""
-    if isinstance(value, dict):
-        # A function response's keys are the JSON object's, so strings.
-        return cast("dict[str, Any]", value)
-    return {"result": value}
-
-
-def response_parts(response: ModelResponse) -> tuple[types.Part, ...]:
-    """`response`'s parts as the google-genai parts Gemini sent for them.
-
-    A thought signature is restored to the part that carried it, which
-    Pydantic AI keeps in the part's `provider_details`.
-
-    Raises:
-        ValueError: A part is none of a function call, text or a thought.
-    """
-    parts: list[types.Part] = []
-    for part in response.parts:
-        details = part.provider_details or {}
-        encoded = details.get("thought_signature")
-        signature = base64.b64decode(encoded) if encoded else None
-        match part:
-            case ToolCallPart():
-                call = types.FunctionCall(
-                    id=part.tool_call_id, name=part.tool_name, args=part.args_as_dict()
-                )
-                parts.append(types.Part(function_call=call, thought_signature=signature))
-            case TextPart():
-                parts.append(types.Part(text=part.content, thought_signature=signature))
-            case ThinkingPart():
-                parts.append(
-                    types.Part(text=part.content, thought=True, thought_signature=signature)
-                )
-            case _:
-                raise ValueError(f"the planner's response holds a {part.part_kind} part")
-    return tuple(parts)

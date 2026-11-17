@@ -41,7 +41,7 @@ def model_response_event(response: PlannerResponse) -> Event:
     Those are the parts Pydantic AI kept, so an empty text chunk Gemini streams
     after a function call is not among them, where ADK's stream aggregator
     keeps it as a part. `response` holds at least one part, its unsigned
-    thoughts already dropped (`planner.settings.without_unsigned_thoughts`).
+    thoughts already dropped (`harness.gemini_agent.without_unsigned_thoughts`).
     """
     parts = [part.model_copy(deep=True) for part in response.parts]
     return Event(content=types.Content(role="model", parts=parts))

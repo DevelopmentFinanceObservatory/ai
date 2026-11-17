@@ -5471,7 +5471,7 @@ async def test_a_run_whose_model_call_the_budget_closed_ends_the_entry_on_that_b
     spent: dict[str, float], code: StopCode
 ) -> None:
     """The model answers a closed call with the bound's sentence
-    (`harness.turn_budget.bounded`) and makes no request. With no referral to
+    (`harness.turn_budget.bounded_by`) and makes no request. With no referral to
     ask about, that ends the planner's run, and the entry refuses on the
     bound, final for the request, in place of `StopCode.PLAN_NOT_READY`."""
     budget = _request_budget()

@@ -66,6 +66,7 @@ from google.adk import Context, Event
 from google.genai import Client
 from planner.call import CallSession
 from planner.instruction import planner_instruction
+from planner.model import refuse_vertex_ai
 from planner.operations import OperationKind
 from planner.plan import (
     AMENDMENT_ENTRY_STATE_KEY,
@@ -162,7 +163,6 @@ from harness.graph.state import (
     stored_mapping,
     stored_sequence,
 )
-from harness.planner_model import refuse_vertex_ai
 from harness.planner_node import planner_node, pydantic_planner
 from harness.planner_run import (
     PlannerAdapterError,
@@ -353,7 +353,7 @@ class PlannerAdapter:
         # model calls go through. None builds one from the environment on the
         # first run. A planner whose client uses Vertex AI, the given one or
         # the one the environment selects, or whose model's name is a Vertex
-        # AI resource path, is refused (`harness.planner_model.refuse_vertex_ai`).
+        # AI resource path, is refused (`planner.model.refuse_vertex_ai`).
         # The planner's model sets its retries on each request
         # (`harness.gemini_wire`).
         #

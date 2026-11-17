@@ -10,19 +10,17 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import contextmanager
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from google.adk.models.llm_request import LlmRequest
-from google.adk.models.llm_response import LlmResponse
-from google.genai import Client, types
+from google.genai import types
 from harness.sentences import StopCode, refusal_sentence
 from harness.turn_budget import (
     COMPLETION_START_TIME,
-    BoundedGemini,
+    Chunk,
+    Closing,
     TurnBudget,
-    bounded,
+    bounded_by,
     current_turn_budget,
 )
 from langfuse import LangfuseOtelSpanAttributes
@@ -39,19 +37,24 @@ class _Calls:
         self.opened = 0
         self._scripts = list(scripts)
 
-    def __call__(self) -> AsyncGenerator[LlmResponse]:
+    def __call__(self) -> AsyncGenerator[Chunk]:
         script = self._scripts[self.opened]
         self.opened += 1
         return _stream(script)
 
 
-async def _stream(script: list[str | None]) -> AsyncGenerator[LlmResponse]:
+def _chunk(*parts: types.Part, usage: Any = None) -> Chunk:
+    return types.GenerateContentResponse(
+        candidates=[types.Candidate(content=types.Content(role="model", parts=list(parts)))],
+        usage_metadata=usage,
+    )
+
+
+async def _stream(script: list[str | None]) -> AsyncGenerator[Chunk]:
     for step in script:
         if step is _STALL:
             await asyncio.Event().wait()
-        yield LlmResponse(
-            content=types.Content(role="model", parts=[types.Part(text=step)]), partial=True
-        )
+        yield _chunk(types.Part(text=step))
 
 
 class _Clock:
@@ -89,12 +92,15 @@ def _generate_content_span() -> Iterator[Span]:
         yield span
 
 
-async def _texts(calls: _Calls, *, stream: bool = True) -> list[str]:
-    return [
-        "".join(part.text or "" for part in response.content.parts)
-        async for response in bounded(calls, stream=stream)
-        if response.content and response.content.parts
-    ]
+def _text(item: Chunk | Closing) -> str:
+    if isinstance(item, Closing):
+        return item.shown
+    content = item.candidates[0].content if item.candidates else None
+    return "".join(part.text or "" for part in (content.parts or [])) if content else ""
+
+
+async def _texts(calls: _Calls) -> list[str]:
+    return [_text(item) async for item in bounded_by(current_turn_budget.get(), calls)]
 
 
 def _closed(code: StopCode) -> str:
@@ -132,9 +138,8 @@ async def test_a_call_that_delivered_a_chunk_is_not_resent_and_the_budget_cuts_i
     assert calls.opened == 1
     assert not budget.retry_spent
     sentence = _closed(StopCode.TURN_MODEL_TIME_SPENT)
-    # A partial chunk shows the sentence after the streamed text; the final
-    # response is the sentence alone.
-    assert texts == ["thinking", f"\n\n{sentence}", sentence]
+    # The closing shows the sentence after the streamed text.
+    assert texts == ["thinking", f"\n\n{sentence}"]
     assert budget.closed == {"code": StopCode.TURN_MODEL_TIME_SPENT, "detail": {}}
     assert span.status.status_code is StatusCode.ERROR
 
@@ -155,17 +160,6 @@ async def test_a_second_call_in_the_request_gets_no_retry() -> None:
     assert budget.model_time_spent >= 0.2
 
 
-async def test_a_non_streamed_call_has_no_first_chunk_deadline() -> None:
-    budget = _budget(first_chunk_s=0.01, model_time_s=0.1)
-    calls = _Calls([_STALL], ["never sent"])
-
-    with _current(budget):
-        texts = await _texts(calls, stream=False)
-
-    assert calls.opened == 1
-    assert texts == [_closed(StopCode.TURN_MODEL_TIME_SPENT)]
-
-
 @pytest.mark.parametrize(
     ("spend", "code"),
     [
@@ -183,7 +177,7 @@ async def test_a_spent_budget_ends_on_its_sentence_with_no_model_call(
     calls = _Calls(["never sent"])
 
     with _current(budget):
-        texts = await _texts(calls, stream=False)
+        texts = await _texts(calls)
 
     assert calls.opened == 0
     assert texts == [_closed(code)]
@@ -191,8 +185,8 @@ async def test_a_spent_budget_ends_on_its_sentence_with_no_model_call(
 
 
 async def test_model_time_leaves_out_what_the_caller_does_between_chunks() -> None:
-    """ADK runs a response's tools while the model's generator waits at its
-    yield, so only the waits on the stream count. A caller that spends 100 s
+    """A caller that streams runs its own work while the generator waits at
+    its yield, so only the waits on the stream count. A caller that spends 100 s
     after each chunk, more than the whole budget, neither cuts the call nor
     spends any model time."""
     clock = _Clock()
@@ -200,9 +194,8 @@ async def test_model_time_leaves_out_what_the_caller_does_between_chunks() -> No
     texts = []
 
     with _current(budget):
-        async for response in bounded(_Calls(["a", "b"]), stream=True):
-            assert response.content is not None and response.content.parts is not None
-            texts.append(response.content.parts[0].text)
+        async for response in bounded_by(budget, _Calls(["a", "b"])):
+            texts.append(_text(response))
             clock.now += 100.0
 
     assert texts == ["a", "b"]
@@ -219,7 +212,7 @@ async def test_the_wall_bound_counts_time_outside_model_calls() -> None:
         assert await _texts(calls) == ["a"]
         # A tool call ran for ten minutes between the two model calls.
         clock.now += 600.0
-        texts = await _texts(calls, stream=False)
+        texts = await _texts(calls)
 
     assert calls.opened == 1
     assert texts == [_closed(StopCode.TURN_WALL_TIME_SPENT)]
@@ -232,7 +225,7 @@ async def test_the_wall_bound_cuts_a_streaming_call_when_it_comes_first() -> Non
     with _current(budget):
         texts = await _texts(calls)
 
-    assert texts[-1] == _closed(StopCode.TURN_WALL_TIME_SPENT)
+    assert texts == ["thinking", f"\n\n{_closed(StopCode.TURN_WALL_TIME_SPENT)}"]
     assert budget.closed == {"code": StopCode.TURN_WALL_TIME_SPENT, "detail": {}}
 
 
@@ -276,89 +269,21 @@ async def test_the_span_records_thought_tokens_and_when_thought_and_text_first_a
     clock = _Clock()
     budget = _budget(clock=clock, model_time_s=60.0)
 
-    async def thinks_then_answers() -> AsyncGenerator[LlmResponse]:
+    async def thinks_then_answers() -> AsyncGenerator[Chunk]:
         clock.now += 1.0
-        yield LlmResponse(
-            content=types.Content(role="model", parts=[types.Part(text="hm", thought=True)]),
-            partial=True,
-        )
+        yield _chunk(types.Part(text="hm", thought=True))
         clock.now += 3.0
-        yield LlmResponse(
-            content=types.Content(role="model", parts=[types.Part(text="answer")]), partial=True
-        )
-        yield LlmResponse(
-            content=types.Content(role="model", parts=[types.Part(text="answer")]),
-            usage_metadata=types.GenerateContentResponseUsageMetadata(thoughts_token_count=321),
+        yield _chunk(types.Part(text="answer"))
+        yield _chunk(
+            types.Part(text="answer"),
+            usage=types.GenerateContentResponseUsageMetadata(thoughts_token_count=321),
         )
 
     with _current(budget), _generate_content_span() as span:
-        async for _ in bounded(thinks_then_answers, stream=True):
+        async for _ in bounded_by(budget, thinks_then_answers):
             clock.now += 10.0
 
     assert span.attributes is not None
     assert span.attributes["dfo.model.first_thought_s"] == 1.0
     assert span.attributes["dfo.model.first_text_s"] == 4.0
     assert span.attributes["dfo.model.thoughts_token_count"] == 321
-
-
-class _StallingModels:
-    """genai's `aio.models`: the first stream stalls before its first chunk."""
-
-    def __init__(self) -> None:
-        self.streams = 0
-
-    async def generate_content_stream(self, *, model: str, contents: Any, config: Any) -> Any:
-        self.streams += 1
-        stalls = self.streams == 1
-
-        async def chunks() -> AsyncGenerator[types.GenerateContentResponse]:
-            if stalls:
-                await asyncio.Event().wait()
-            yield types.GenerateContentResponse(
-                candidates=[
-                    types.Candidate(
-                        content=types.Content(role="model", parts=[types.Part(text="done")]),
-                        finish_reason=types.FinishReason.STOP,
-                    )
-                ]
-            )
-
-        return chunks()
-
-
-class _FakeClient(Client):
-    def __init__(self) -> None:
-        self.models_calls = _StallingModels()
-
-    @property
-    def aio(self) -> Any:
-        return SimpleNamespace(models=self.models_calls)
-
-    @property
-    def vertexai(self) -> bool:
-        return False
-
-    def close(self) -> None:
-        pass
-
-
-async def test_bounded_gemini_resends_the_genai_request_after_a_first_chunk_timeout() -> None:
-    client = _FakeClient()
-    model = BoundedGemini(model="gemini-3.8-flash", client=client)
-    request = LlmRequest(
-        model="gemini-3.8-flash",
-        contents=[types.Content(role="user", parts=[types.Part(text="question")])],
-        config=types.GenerateContentConfig(),
-    )
-
-    with _current(_budget()):
-        responses = [
-            response
-            async for response in model.generate_content_async(request, stream=True)
-            if not response.partial
-        ]
-
-    assert client.models_calls.streams == 2
-    assert responses[-1].content is not None
-    assert responses[-1].content.parts is not None
-    assert responses[-1].content.parts[0].text == "done"
