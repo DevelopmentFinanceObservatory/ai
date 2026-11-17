@@ -287,7 +287,7 @@ class ModelRequest:
     @property
     def system_text(self) -> str:
         """The system instruction's text, in whichever shape it was sent. The
-        planner sends a string (`harness.planner_model._in_canonical_form`)."""
+        planner sends a string (`harness.gemini_wire.in_canonical_form`)."""
         return instruction_text(self.config.system_instruction)
 
 

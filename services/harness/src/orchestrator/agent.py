@@ -12,6 +12,7 @@ from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.google_llm import Gemini
 from google.adk.models.llm_request import LlmRequest
 from google.genai import types
+from harness.gemini_wire import model_retry_options
 from harness.orchestrator_tools import OrchestratorTool
 from harness.prefix_cache import gemini_model_name
 from harness.settings import DEFAULT_ORCHESTRATOR_THINKING_LEVEL
@@ -380,13 +381,6 @@ def _without_adk_identity(name: str) -> Callable[[CallbackContext, LlmRequest], 
             llm_request.config.system_instruction = instruction.replace(appended, "", 1)
 
     return drop
-
-
-def model_retry_options(*, attempts: int = 3, max_delay: float = 2.0) -> types.HttpRetryOptions:
-    """The HTTP retries a Gemini model call makes: up to `attempts` attempts on a
-    transient error (408, 429, 5xx), the first wait one second, no wait longer
-    than `max_delay` seconds."""
-    return types.HttpRetryOptions(attempts=attempts, initial_delay=1.0, max_delay=max_delay)
 
 
 def _retrying(

@@ -19,18 +19,19 @@ from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import Client, _api_client, errors, types
-from harness.planner_model import (
+from harness.gemini_wire import (
     UnexpectedRequestFormError,
     Usage,
-    _in_canonical_form,
-    planner_model,
+    in_canonical_form,
+    model_retry_options,
 )
+from harness.planner_model import planner_model
 from harness.prefix_cache import PrefixCache, PrefixCachedGemini
 from harness.sentences import StopCode, refusal_sentence
 from harness.turn_budget import BoundedGemini, TurnBudget, current_turn_budget
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from orchestrator.agent import _retrying, model_retry_options
+from orchestrator.agent import _retrying
 from planner.pydantic_agent import _without_unsigned_thoughts
 from planner.settings import without_unsigned_thoughts
 from pydantic_ai.messages import (
@@ -613,7 +614,7 @@ def _expected_config(**overrides: Any) -> types.GenerateContentConfig:
 def test_the_canonical_form_keeps_a_parameters_schema_that_is_not_the_empty_object(
     schema: dict[str, Any],
 ) -> None:
-    rewritten = _in_canonical_form(_expected_config(tools=[_declared(schema)]))
+    rewritten = in_canonical_form(_expected_config(tools=[_declared(schema)]))
 
     assert rewritten.tools == [_declared(schema)]
 
@@ -672,4 +673,4 @@ def test_the_canonical_form_refuses_any_value_it_does_not_expect(field: str, val
     config = _expected_config(**{field: value})
 
     with pytest.raises(UnexpectedRequestFormError):
-        _in_canonical_form(config)
+        in_canonical_form(config)

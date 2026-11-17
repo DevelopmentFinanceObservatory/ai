@@ -63,7 +63,7 @@ _THE_SESSION = "<the session>"
 _OBSERVATION_TYPE = "langfuse.observation.type"
 _USAGE_DETAILS = "langfuse.observation.usage_details"
 # The number of a call's attempts discarded for a malformed function call
-# (`harness.planner_model`).
+# (`harness.gemini_wire`).
 _MALFORMED_DISCARDED = "dfo.model.malformed_attempts_discarded"
 
 # The observation type Langfuse gives each GenAI operation

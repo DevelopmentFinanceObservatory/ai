@@ -74,6 +74,7 @@ from google.adk.workflow import START, Workflow
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import Client, types
 from google.genai.client import AsyncClient
+from harness.gemini_wire import model_retry_options
 from harness.graph.interfaces import PlannerModel
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, GraphState
 from harness.graph.workflow import planner_entry
@@ -91,7 +92,6 @@ from harness.studio_state import ConversationState
 from harness.tool_contracts import resolver_digest
 from harness.turn_budget import TurnBudget, current_turn_budget
 from harness.wiring import handing_back_planner_failures
-from orchestrator.agent import model_retry_options
 from planner.call import PlannerCall
 from planner.plan import (
     Plan,
@@ -711,7 +711,7 @@ class ModelRequest:
     """One request the planner's model client is sent, in google-genai's types.
 
     The planner sends the system instruction as a string and every declaration in
-    one `Tool` (`harness.planner_model`). `system_text` and `declarations` read
+    one `Tool` (`harness.gemini_wire.in_canonical_form`). `system_text` and `declarations` read
     any shape google-genai takes, so an edit reads a request the same way
     whichever form it arrives in.
     """
@@ -984,7 +984,7 @@ class _Watched:
 def live_client() -> Client:
     """The google-genai client a live entry's planner calls go through, built from the
     environment with the HTTP retries the served planner's model makes
-    (`orchestrator.agent.model_retry_options`)."""
+    (`harness.gemini_wire.model_retry_options`)."""
     return Client(http_options=types.HttpOptions(retry_options=model_retry_options()))
 
 

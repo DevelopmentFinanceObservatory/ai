@@ -620,7 +620,7 @@ async def test_a_request_sends_the_instruction_as_a_string_and_every_declaration
 ):
     """The planner's request reaches the eval's probe with the instruction as a
     string and every declaration in one `Tool`
-    (`harness.planner_model._in_canonical_form`), so `ModelRequest` reads the
+    (`harness.gemini_wire.in_canonical_form`), so `ModelRequest` reads the
     instruction and every declaration from it."""
     entry.quiet_logs()
     task = _task(_PLAIN)

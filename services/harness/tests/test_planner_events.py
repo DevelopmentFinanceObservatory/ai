@@ -334,7 +334,7 @@ _DRAWN_CALL_ID = "adk-<drawn>"
 
 async def test_calls_without_ids_get_ids_starting_adk(request: pytest.FixtureRequest) -> None:
     """Gemini may send a call without an id. The planner's model
-    (`harness.planner_model`) gives it one starting `adk-`, so the stored session
+    (`harness.gemini_wire`) gives it one starting `adk-`, so the stored session
     differs between runs only in the random part of the id, which is read as
     `_DRAWN_CALL_ID`."""
     stored = await _on([reply(call_part(PROPOSE_PLAN, {"question": "q"}))], _ACCEPTED)

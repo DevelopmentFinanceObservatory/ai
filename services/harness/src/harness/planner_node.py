@@ -47,13 +47,9 @@ from planner.session import SessionCall
 from planner.settings import AGENT_NAME
 from planner.tool_spec import ToolSpec
 
+from harness.gemini_wire import StreamResumedError, Usage, resumed_over_output
 from harness.planner_events import model_response_event, tool_answers_event
-from harness.planner_model import (
-    StreamResumedError,
-    Usage,
-    planner_model,
-    resumed_over_output,
-)
+from harness.planner_model import planner_model
 from harness.planner_run import Ask, Directive, PlannerRun, Stop
 from harness.prefix_cache import PrefixCache
 from harness.sentences import StopCode, refusal_sentence
@@ -123,7 +119,7 @@ def planner_node(
         (`PlannerAdapter._FINAL_CODES`), so the orchestrator may ask for a plan
         again and meet the same refusal. Studio sends only text.
         A stream google-genai resumed over output no continuation token
-        covers (`harness.planner_model.resumed_over_output`) raises
+        covers (`harness.gemini_wire.resumed_over_output`) raises
         `StreamResumedError`, a dropped connection, from Pydantic AI's
         error.
     """

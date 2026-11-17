@@ -12,7 +12,7 @@ before the next model request.
 Pydantic AI shapes a request its own way: the system instruction as a
 `Content`, one `Tool` per declaration, an empty parameters schema on a tool
 that takes none, an explicit `AUTO` tool config and `response_modalities`.
-The planner's model (`harness.planner_model`) puts each request in one fixed
+The planner's model (`harness.gemini_wire`) puts each request in one fixed
 form before it is sent. The model is built with `PLANNER_PROFILE`, which
 sends each declaration's schema as given and adds nothing to the
 instruction.
@@ -29,6 +29,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
 from google.genai import types
+from harness.gemini_wire import NO_PARAMETERS
 from pydantic_ai import Agent, InstrumentationSettings, RunContext, Tool
 from pydantic_ai.capabilities import Instrumentation, ProcessHistory
 from pydantic_ai.exceptions import UnexpectedModelBehavior
@@ -54,11 +55,6 @@ from planner.settings import AGENT_THINKING_CONFIG, without_unsigned_thoughts
 from planner.tool_spec import ToolSpec, function_declaration, serve_tool
 
 logger = logging.getLogger(__name__)
-
-# The schema Pydantic AI declares a tool with when its declaration has none.
-# Pydantic AI always sends `parameters_json_schema`, and the planner's model
-# strips this value (`harness.planner_model`).
-NO_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
 
 # The turn budget bounds a run's model calls (`harness.turn_budget`), so Pydantic
 # AI's own default cap of 50 requests is lifted.
@@ -132,7 +128,7 @@ class PlannerResponse:
     id, text, and each thought with `thought` set, each with its thought
     signature, less its unsigned thought summaries (`_without_unsigned_thoughts`).
     A blocked prompt is a response with no parts. The usage the API reported is
-    read off the stream by `harness.planner_model`.
+    read off the stream by `harness.gemini_wire`.
     """
 
     parts: tuple[types.Part, ...]

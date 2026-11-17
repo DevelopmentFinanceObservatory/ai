@@ -1,0 +1,128 @@
+"""The node API of the turn loop (`harness.turn.loop`).
+
+A node is a plain async function of a `NodeCtx` and its input that returns
+where the turn goes next: `Next` (an edge label and the next node's input)
+or `Pause` (a question for the user). A node that pauses also has a
+`resume` function, which the loop calls with the user's answer in place of
+`run`, so the work a node does before its pause runs once. An error is a
+raised exception: the loop records it on the turn's cursor and ends the
+turn.
+
+A node never writes the store. It reads and changes `ctx.state`,
+`ctx.specs` and `ctx.transcript`, and the loop writes all three with the
+cursor at the node's boundary. Changes since the last boundary die with the
+process, and the node then runs again from its start.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from harness.turn.events import TurnEvent
+from harness.turn.transcript import Transcript
+
+
+@dataclass(frozen=True)
+class TurnKey:
+    """The conversation a turn belongs to, and the turn's number in it."""
+
+    principal: str
+    conversation_id: str
+    turn_index: int
+
+
+@dataclass(frozen=True)
+class Next:
+    """Go on along the edge `label`, handing `output` to the node it reaches."""
+
+    label: str
+    output: Any = None
+
+
+@dataclass(frozen=True)
+class Pause:
+    """Pause the turn on a question of `kind` to the user. The loop mints the
+    wire interrupt id the client answers, and stores `payload` and
+    `message` with the pause."""
+
+    kind: Literal["ask", "planner_ask", "approve"]
+    payload: dict[str, Any]
+    message: str = ""
+
+
+class StopScope:
+    """The work a node runs under a Stop that ends only that work (a
+    plan-card switch, a pick's replan), not the turn.
+
+    While a node holds the scope open, the first Stop sets the event `open`
+    yielded, and the node goes on along its own edge. Any Stop while no
+    scope is open, or once the open scope's event is set, ends the turn."""
+
+    def __init__(self) -> None:
+        self._event: asyncio.Event | None = None
+
+    @contextlib.asynccontextmanager
+    async def open(self) -> AsyncIterator[asyncio.Event]:
+        """Hold the scope open for the block; the event is set on a Stop."""
+        self._event = asyncio.Event()
+        try:
+            yield self._event
+        finally:
+            self._event = None
+
+    @property
+    def armed(self) -> bool:
+        """Whether a Stop now would end only the open scope's work."""
+        return self._event is not None and not self._event.is_set()
+
+    def take(self) -> bool:
+        """Stop the open scope's work. Returns whether the scope was armed;
+        when it was not, the Stop is the turn's."""
+        if self._event is None or self._event.is_set():
+            return False
+        self._event.set()
+        return True
+
+
+@dataclass
+class NodeCtx:
+    """What a node reads and writes.
+
+    `inputs` are the turn's inputs, fixed when it opened. `state` is the
+    turn-scoped state the nodes share and `specs` the turn's spec blocks by
+    spec id; `transcript` holds the agents' records. The loop writes all
+    three with the cursor at the node's boundary. `emit` streams an event to
+    the client at once. `stop` is the turn's `StopScope`. `after_commit`
+    registers work that must follow the boundary's write, such as
+    acknowledging what a hand-back delivered.
+    """
+
+    key: TurnKey
+    inputs: dict[str, Any]
+    state: dict[str, Any]
+    specs: dict[str, dict[str, Any]]
+    transcript: Transcript
+    emit: Callable[[TurnEvent], None]
+    stop: StopScope
+    committed: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
+
+    def after_commit(self, work: Callable[[], Awaitable[None]]) -> None:
+        """Run `work` once the write at this node's boundary commits."""
+        self.committed.append(work)
+
+
+type Run = Callable[[NodeCtx, Any], Awaitable[Next | Pause]]
+type Resume = Callable[[NodeCtx, Any, dict[str, Any]], Awaitable[Next | Pause]]
+
+
+@dataclass(frozen=True)
+class Node:
+    """One node: `run` on entry with the node's input, and, for a node that
+    pauses, `resume` with the same input and the user's answer."""
+
+    run: Run
+    resume: Resume | None = None

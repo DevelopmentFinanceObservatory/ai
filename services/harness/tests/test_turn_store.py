@@ -1,0 +1,387 @@
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+import pytest
+from harness.db.migrate import MIGRATIONS_DIR, apply_pending
+from harness.studio_state import SegmentLost
+from harness.turn.store import (
+    AgentRecord,
+    Cursor,
+    CursorStale,
+    OpenPause,
+    OwedAnswer,
+    PauseNotOpen,
+    TurnAlreadyOpen,
+    TurnStatus,
+    TurnStore,
+)
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+PRINCIPAL = "user-1"
+CONVERSATION = "conv-1"
+SEGMENT = "segment-a"
+
+
+async def _conversation(engine: AsyncEngine, *, segment_id: str | None = SEGMENT) -> int:
+    """Insert the conversation row, its lease held by `segment_id`."""
+    async with engine.begin() as conn:
+        return (
+            await conn.execute(
+                text(
+                    "INSERT INTO conversations (principal, conversation_id, lease_segment_id, "
+                    "lease_owner, lease_expires_at) VALUES (:principal, :conversation_id, "
+                    ":segment_id, 'owner', CASE WHEN CAST(:segment_id AS text) IS NULL "
+                    "THEN NULL ELSE extract(epoch FROM now()) + 60 END) RETURNING id"
+                ),
+                {"principal": PRINCIPAL, "conversation_id": CONVERSATION, "segment_id": segment_id},
+            )
+        ).scalar_one()
+
+
+async def _move_lease(engine: AsyncEngine, segment_id: str) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE conversations SET lease_segment_id = :segment_id"),
+            {"segment_id": segment_id},
+        )
+
+
+async def _open(store: TurnStore, *, turn_index: int = 0) -> Cursor:
+    return await store.open_turn(
+        PRINCIPAL,
+        CONVERSATION,
+        segment_id=SEGMENT,
+        turn_index=turn_index,
+        node="seed",
+        inputs={"message": "aid to Kenya"},
+        state={"plan": None},
+        records=[AgentRecord(agent="loop", kind="user", body={"text": "aid to Kenya"})],
+    )
+
+
+async def _paused(store: TurnStore, cursor: Cursor, *, interrupt_id: str = "int_1") -> Cursor:
+    return await store.pause(
+        cursor,
+        segment_id=SEGMENT,
+        node="ask",
+        node_input={"question": "which donor?"},
+        kind="ask",
+        interrupt_id=interrupt_id,
+        payload={"question": "which donor?"},
+        state=cursor.state,
+        specs={},
+    )
+
+
+async def test_the_turn_tables_apply_on_top_of_the_conversation_tables(
+    pg_empty_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    for name in ("0001_conversations.sql", "0002_adk_ledger_imports.sql"):
+        shutil.copy(MIGRATIONS_DIR / name, tmp_path / name)
+    await apply_pending(pg_empty_engine, directory=tmp_path)
+
+    assert await apply_pending(pg_empty_engine) == ["0003_turns.sql"]
+    await _conversation(pg_empty_engine)
+    cursor = await _open(TurnStore(pg_empty_engine))
+    assert cursor.status is TurnStatus.RUNNING
+
+
+async def test_a_turn_runs_pauses_resumes_and_closes_with_its_transcript_in_order(
+    pg_engine: AsyncEngine,
+) -> None:
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    opened = await _open(store)
+
+    advanced = await store.advance(
+        opened,
+        segment_id=SEGMENT,
+        node="planner",
+        node_input={"brief": "b"},
+        state={"plan": {"steps": 1}},
+        specs={"spec_a": {"spec_id": "spec_a"}},
+        records=[AgentRecord(agent="planner", kind="response", body={"parts": [1]})],
+    )
+    paused = await store.pause(
+        advanced,
+        segment_id=SEGMENT,
+        node="planner",
+        node_input={"brief": "b"},
+        kind="planner_ask",
+        interrupt_id="int_1",
+        payload={"question": "which donor?"},
+        state=advanced.state,
+        specs={"spec_a": {"spec_id": "spec_a"}},
+        records=[AgentRecord(agent="loop", kind="pause", body={"question": "which donor?"})],
+    )
+    resumed = await store.record_answer(
+        paused,
+        segment_id=SEGMENT,
+        interrupt_id="int_1",
+        round=1,
+        answer={"choice": "DAC"},
+        records=[AgentRecord(agent="loop", kind="answer", body={"choice": "DAC"})],
+    )
+    closed = await store.finish(resumed, segment_id=SEGMENT, status=TurnStatus.DONE)
+
+    assert (paused.status, paused.round, paused.pause) == (
+        TurnStatus.PAUSED,
+        1,
+        OpenPause(
+            kind="planner_ask", interrupt_id="int_1", round=1, payload={"question": "which donor?"}
+        ),
+    )
+    assert (resumed.status, resumed.node, resumed.pause) == (TurnStatus.RUNNING, "planner", None)
+    assert (closed.status, closed.error, closed.version) == (TurnStatus.DONE, None, 4)
+    assert closed.state == {"plan": {"steps": 1}}
+    assert await store.specs(closed) == {"spec_a": {"spec_id": "spec_a"}}
+    assert [(r.agent, r.kind) for r in await store.records(closed)] == [
+        ("loop", "user"),
+        ("planner", "response"),
+        ("loop", "pause"),
+        ("loop", "answer"),
+    ]
+    assert await store.open_cursor(PRINCIPAL, CONVERSATION) is None
+
+
+async def test_a_write_from_a_stale_cursor_is_refused_and_leaves_the_row_as_written(
+    pg_engine: AsyncEngine,
+) -> None:
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    opened = await _open(store)
+    await store.advance(
+        opened,
+        segment_id=SEGMENT,
+        node="planner",
+        node_input=None,
+        state={"winner": True},
+        specs={"spec_a": {"by": "winner"}},
+    )
+
+    with pytest.raises(CursorStale):
+        await store.advance(
+            opened,
+            segment_id=SEGMENT,
+            node="orchestrate",
+            node_input=None,
+            state={"winner": False},
+            specs={"spec_a": {"by": "loser"}, "spec_b": {}},
+            records=[AgentRecord(agent="planner", kind="response", body={})],
+        )
+
+    stored = await store.open_cursor(PRINCIPAL, CONVERSATION)
+    assert stored is not None
+    assert (stored.node, stored.state, stored.version, stored.record_count) == (
+        "planner",
+        {"winner": True},
+        1,
+        1,
+    )
+    assert await store.specs(stored) == {"spec_a": {"by": "winner"}}
+
+
+async def test_writes_are_refused_once_another_segment_holds_the_lease(
+    pg_engine: AsyncEngine,
+) -> None:
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    opened = await _open(store)
+    await _move_lease(pg_engine, "segment-b")
+
+    with pytest.raises(SegmentLost):
+        await store.advance(
+            opened, segment_id=SEGMENT, node="planner", node_input=None, state={}, specs={}
+        )
+    with pytest.raises(SegmentLost):
+        await store.finish(opened, segment_id=SEGMENT, status=TurnStatus.CANCELLED)
+
+    stored = await store.open_cursor(PRINCIPAL, CONVERSATION)
+    assert stored == opened
+
+
+async def test_a_turn_opens_only_under_the_conversation_lease(pg_engine: AsyncEngine) -> None:
+    await _conversation(pg_engine, segment_id="segment-b")
+
+    with pytest.raises(SegmentLost):
+        await _open(TurnStore(pg_engine))
+
+    assert await TurnStore(pg_engine).open_cursor(PRINCIPAL, CONVERSATION) is None
+
+
+async def test_one_open_turn_per_conversation(pg_engine: AsyncEngine) -> None:
+    conversation = await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    first = await _paused(store, await _open(store))
+
+    with pytest.raises(TurnAlreadyOpen):
+        await _open(store, turn_index=1)
+    with pytest.raises(IntegrityError, match="turn_cursors_one_open"):
+        async with pg_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO turn_cursors (conversation, turn_index, node, status, inputs, "
+                    "state) VALUES (:conversation, 1, 'seed', 'running', '{}', '{}')"
+                ),
+                {"conversation": conversation},
+            )
+
+    abandoned = await store.finish(
+        first,
+        segment_id=SEGMENT,
+        status=TurnStatus.ABANDONED,
+        error={"type": "abandoned", "message": "a new turn began"},
+    )
+    second = await _open(store, turn_index=1)
+
+    assert (abandoned.status, abandoned.pause) == (TurnStatus.ABANDONED, None)
+    assert await store.open_cursor(PRINCIPAL, CONVERSATION) == second
+    with pytest.raises(PauseNotOpen):
+        await store.record_answer(
+            abandoned, segment_id=SEGMENT, interrupt_id="int_1", round=1, answer={}
+        )
+
+
+@pytest.mark.parametrize("next_write", ["advance", "pause", "finish"])
+async def test_an_accepted_answer_is_owed_until_the_next_write_moves_the_cursor(
+    pg_engine: AsyncEngine, next_write: str
+) -> None:
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    paused = await _paused(store, await _open(store))
+    resumed = await store.record_answer(
+        paused, segment_id=SEGMENT, interrupt_id="int_1", round=1, answer={"pick": "a"}
+    )
+    owed = OwedAnswer(interrupt_id="int_1", round=1)
+    taken_over = await store.open_cursor(PRINCIPAL, CONVERSATION)
+
+    if next_write == "advance":
+        moved = await store.advance(
+            resumed, segment_id=SEGMENT, node="planner", node_input=None, state={}, specs={}
+        )
+    elif next_write == "pause":
+        moved = await _paused(store, resumed, interrupt_id="int_2")
+    else:
+        moved = await store.finish(resumed, segment_id=SEGMENT, status=TurnStatus.DONE)
+
+    assert (paused.owed, resumed.owed) == (None, owed)
+    assert taken_over is not None and taken_over.owed == owed
+    assert moved.owed is None
+
+
+async def test_only_a_running_turn_can_owe_an_answer(pg_engine: AsyncEngine) -> None:
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    await _paused(store, await _open(store))
+
+    with pytest.raises(IntegrityError):
+        async with pg_engine.begin() as conn:
+            await conn.execute(text("UPDATE turn_cursors SET owed_interrupt_id = 'int_1'"))
+
+
+async def test_answers_are_kept_per_turn_interrupt_and_round(pg_engine: AsyncEngine) -> None:
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    first_pause = await _paused(store, await _open(store))
+    resumed = await store.record_answer(
+        first_pause, segment_id=SEGMENT, interrupt_id="int_1", round=1, answer={"pick": "a"}
+    )
+    second_pause = await _paused(store, resumed)
+    await store.record_answer(
+        second_pause, segment_id=SEGMENT, interrupt_id="int_1", round=2, answer={"pick": "b"}
+    )
+
+    assert second_pause.pause is not None and second_pause.pause.round == 2
+    assert await store.answer(resumed, interrupt_id="int_1", round=1) == {"pick": "a"}
+    assert await store.answer(resumed, interrupt_id="int_1", round=2) == {"pick": "b"}
+    assert await store.answer(resumed, interrupt_id="int_2", round=1) is None
+    # The same answer again from the cursor it was accepted on: the pause has
+    # moved on, so a retried /interrupt reads the stored answer instead.
+    with pytest.raises(CursorStale):
+        await store.record_answer(
+            first_pause, segment_id=SEGMENT, interrupt_id="int_1", round=1, answer={"pick": "a"}
+        )
+    with pytest.raises(PauseNotOpen):
+        await store.record_answer(
+            second_pause, segment_id=SEGMENT, interrupt_id="int_1", round=1, answer={"pick": "a"}
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [
+        (TurnStatus.DONE, None),
+        (TurnStatus.CANCELLED, None),
+        (TurnStatus.FAILED, {"node": "planner", "type": "ValueError", "message": "boom"}),
+        (TurnStatus.ABANDONED, {"type": "abandoned", "message": "lease lapsed"}),
+    ],
+)
+async def test_a_turn_closes_with_an_error_exactly_when_it_failed_or_was_abandoned(
+    pg_engine: AsyncEngine, status: TurnStatus, error: dict[str, str] | None
+) -> None:
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    opened = await _open(store)
+    wrong = None if error is not None else {"type": "x", "message": "y"}
+
+    with pytest.raises(IntegrityError):
+        await store.finish(opened, segment_id=SEGMENT, status=status, error=wrong)
+    closed = await store.finish(opened, segment_id=SEGMENT, status=status, error=error)
+
+    assert (closed.status, closed.error) == (status, error)
+    with pytest.raises(CursorStale):
+        await store.finish(closed, segment_id=SEGMENT, status=status, error=error)
+
+
+async def _spec_rows(engine: AsyncEngine) -> dict[str, tuple[int, int]]:
+    """Each stored spec block's (insertion seq, writing transaction id)."""
+    async with engine.connect() as conn:
+        rows = await conn.execute(
+            text("SELECT spec_id, seq, xmin::text::bigint AS written_by FROM turn_specs")
+        )
+        return {row.spec_id: (row.seq, row.written_by) for row in rows}
+
+
+async def test_a_checkpoint_writes_only_the_spec_blocks_that_changed(
+    pg_engine: AsyncEngine,
+) -> None:
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    first = await store.advance(
+        await _open(store),
+        segment_id=SEGMENT,
+        node="orchestrate",
+        node_input=None,
+        state={},
+        specs={"spec_a": {"v": 1}, "spec_b": {"v": 1}, "spec_c": {"v": 1}},
+    )
+    before = await _spec_rows(pg_engine)
+
+    # A search re-reading rewrites spec_b, a switch's restore drops spec_c,
+    # and a new search adds spec_d; spec_a is carried unchanged.
+    second = await store.advance(
+        first,
+        segment_id=SEGMENT,
+        node="planner",
+        node_input=None,
+        state={},
+        specs={"spec_a": {"v": 1}, "spec_b": {"v": 2}, "spec_d": {"v": 1}},
+    )
+    after = await _spec_rows(pg_engine)
+
+    assert after["spec_a"] == before["spec_a"]
+    assert after["spec_b"][0] == before["spec_b"][0]
+    assert after["spec_b"][1] != before["spec_b"][1]
+    assert "spec_c" not in after
+    assert await store.specs(second) == {
+        "spec_a": {"v": 1},
+        "spec_b": {"v": 2},
+        "spec_d": {"v": 1},
+    }
+    # A segment that takes the turn over reads the digests the writer held,
+    # so its first checkpoint diffs against what is stored.
+    assert await store.open_cursor(PRINCIPAL, CONVERSATION) == second

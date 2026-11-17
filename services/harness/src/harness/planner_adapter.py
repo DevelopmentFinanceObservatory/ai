@@ -355,7 +355,7 @@ class PlannerAdapter:
         # the one the environment selects, or whose model's name is a Vertex
         # AI resource path, is refused (`harness.planner_model.refuse_vertex_ai`).
         # The planner's model sets its retries on each request
-        # (`harness.planner_model`).
+        # (`harness.gemini_wire`).
         #
         # `on_tool_answered` observes each planner tool's name and the answer
         # the model reads for the call (`PlannerRun.tool_answered`).
