@@ -18,6 +18,7 @@ from dataclasses import replace
 from typing import Any, cast
 
 from google.genai import types
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -69,6 +70,28 @@ class RecordingState:
 
     def __contains__(self, key: str) -> bool:
         return key in self._state
+
+
+class EmptyResponseError(UnexpectedModelBehavior):
+    """The model's response held neither answer text nor a function call
+    (`holds_no_answer`), so the run has nothing to go on with."""
+
+
+def holds_no_answer(response: ModelResponse) -> bool:
+    """Whether `response` holds neither answer text nor a function call: no
+    parts, thoughts alone, or text that is empty.
+
+    Neither agent sends such a response back for another try. Pydantic AI
+    would, with a retry prompt added to the instruction, which breaks the
+    one request form (`harness.gemini_wire.in_canonical_form`) and the cached
+    prefix, and which no Gemini model of the harness was ever sent. The
+    planner's run ends on it with no output (`planner.pydantic_agent`), and
+    the orchestrator's raises `EmptyResponseError` (`orchestrator.run`).
+    """
+    return not any(
+        isinstance(part, ToolCallPart) or (isinstance(part, TextPart) and part.content)
+        for part in response.parts
+    )
 
 
 def tool_not_found(name: str, tools: Sequence[str]) -> dict[str, str]:
@@ -183,8 +206,10 @@ def as_function_response(value: object) -> dict[str, Any]:
 
 __all__ = [
     "GEMINI_PROFILE",
+    "EmptyResponseError",
     "RecordingState",
     "as_function_response",
+    "holds_no_answer",
     "replayed_history",
     "response_parts",
     "tool_not_found",

@@ -15,10 +15,12 @@ from typing import Any
 
 import pytest
 from google.genai import types
+from harness.gemini_agent import EmptyResponseError
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.prefix_cache import PrefixCache
 from harness.sentences import StopCode, refusal_sentence
 from harness.turn_budget import TurnBudget
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from orchestrator.agent import INSTRUCTION, orchestrator_agent
 from orchestrator.model import orchestrator_model
 from orchestrator.run import (
@@ -38,6 +40,7 @@ from pydantic_ai.messages import ModelMessagesTypeAdapter
 from ..scripted_genai import (
     ScriptedGenai,
     call_part,
+    empty_reply,
     malformed_call_reply,
     reply,
     text_part,
@@ -455,6 +458,73 @@ async def test_a_second_hand_off_in_one_response_is_answered_refused() -> None:
     assert handed.tool == "ask_user"
     assert state["orchestrator:pending"]["kind"] == "ask"
     assert len(scripted.requests) == 1
+
+
+async def test_a_resumed_run_names_the_conversation_its_caller_gives(
+    exported_spans: InMemorySpanExporter,
+) -> None:
+    """A stored history carries the conversation id its first run opened with;
+    a resume given the turn's conversation id runs under that id."""
+    scripted = ScriptedGenai(
+        [reply(call_part("plan", {"brief": "rank", "asks": ["rank"]})), reply(text_part("Done."))]
+    )
+    orchestrator = orchestrator_agent(
+        build_orchestrator_tools(resolver=_Searches(), executor=_no_executor)
+    )
+    state: dict[str, Any] = {"surface": "studio"}
+    model = orchestrator_model("gemini-test", client=scripted.client, budget=None)
+    (handed,) = [
+        e
+        async for e in run_orchestrator(
+            orchestrator,
+            state=state,
+            turn_id="conv_1/1",
+            model=model,
+            opening=Opening("Rank Kenya", TODAY),
+            conversation_id="conv_1",
+        )
+        if isinstance(e, HandedOff)
+    ]
+    stored = StoredHistory.model_validate_json(handed.history.model_dump_json())
+
+    resumed = [
+        e
+        async for e in run_orchestrator(
+            orchestrator,
+            state=state,
+            turn_id="conv_1/1",
+            model=model,
+            history=stored,
+            hand_back=HandBack(answers="plan", result={"result": "Kenya is 3rd."}),
+            conversation_id="conv_1",
+        )
+    ]
+
+    assert resumed[-1] == Answered(text="Done.")
+    runs = [s for s in exported_spans.get_finished_spans() if s.name.startswith("invoke_agent")]
+    assert [(s.attributes or {}).get("gen_ai.conversation.id") for s in runs] == ["conv_1"] * 2
+
+
+@pytest.mark.parametrize(
+    "replies",
+    [
+        [empty_reply()],
+        [reply(thought_part("Thinking."))],
+        [reply(_SEARCH), empty_reply()],
+    ],
+    ids=["no-parts", "thought-only", "after-a-tool"],
+)
+async def test_a_response_with_no_answer_ends_the_run_on_a_typed_failure(
+    replies: list[Any],
+) -> None:
+    """A response with neither answer text nor a function call is not retried:
+    no further request is sent and the run raises `EmptyResponseError`."""
+    scripted = ScriptedGenai(replies)
+
+    with pytest.raises(EmptyResponseError):
+        await _run(scripted, budget=_budget())
+
+    assert len(scripted.requests) == len(replies)
 
 
 async def test_a_hand_back_for_a_call_that_does_not_wait_is_refused() -> None:

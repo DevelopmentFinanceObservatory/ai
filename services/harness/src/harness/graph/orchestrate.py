@@ -114,8 +114,9 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
 
         A run that hands off stores its conversation and takes the action
         its call recorded (`ORCHESTRATOR_PENDING_KEY`) as the edge and the
-        next node's input. Anything the run raises fails the turn, a model
+        next node's input. Anything the run raises fails the turn: a model
         response Gemini blocked (`pydantic_ai.exceptions.ContentFilterError`)
+        and one that held no answer (`harness.gemini_agent.EmptyResponseError`)
         included.
 
         Raises:
@@ -153,8 +154,7 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
             opening=opening,
             history=history,
             hand_back=resumed,
-            # A stored conversation carries the id it opened with.
-            conversation_id=ctx.key.conversation_id if history is None else None,
+            conversation_id=ctx.key.conversation_id,
         )
         async for event in run:
             if isinstance(event, HandedOff):

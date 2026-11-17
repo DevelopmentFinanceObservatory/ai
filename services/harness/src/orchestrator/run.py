@@ -30,8 +30,10 @@ from typing import Any, Literal
 
 from google.genai import types
 from harness.gemini_agent import (
+    EmptyResponseError,
     RecordingState,
     as_function_response,
+    holds_no_answer,
     response_parts,
     without_unsigned_thoughts,
 )
@@ -216,13 +218,19 @@ async def run_orchestrator(
     `orchestrator.call.OrchestratorCall`. `model` is the run's model
     (`orchestrator.model.orchestrator_model`, on the turn's budget).
     `conversation_id` is the conversation the run's spans name
-    (`gen_ai.conversation.id`).
+    (`gen_ai.conversation.id`); on a resume it takes the place of the id the
+    stored conversation opened with. None keeps the stored id, or leaves
+    Pydantic AI to make one up for a first run.
 
     The first request opens with the date and the digests as one user content,
     then the user's message as its own, then the seed hand-back when there is
-    one. Any exception the model or Pydantic AI raises propagates.
+    one. A response with neither answer text nor a function call ends the run
+    (`harness.gemini_agent.holds_no_answer`) and is not sent back for another
+    try. Any other exception the model or Pydantic AI raises propagates.
 
     Raises:
+        EmptyResponseError: A model response held neither answer text nor a
+            function call.
         NoCallWaitsError: `hand_back` answers no call `history` waits on.
         ValueError: Neither or both of an opening and a resume were given.
     """
@@ -233,6 +241,11 @@ async def run_orchestrator(
     elif opening is None and history is not None and hand_back is not None:
         prompt, messages = None, None
         conversation = history.conversation
+        if conversation_id is not None:
+            # Pydantic AI takes the id from the conversation, and refuses one
+            # passed beside it.
+            conversation = replace(conversation, conversation_id=conversation_id)
+            conversation_id = None
         results = DeferredToolResults(calls={_waiting(history, hand_back): hand_back.result})
     else:
         raise ValueError("give an opening for a turn's first run, or a history and a hand-back")
@@ -255,6 +268,10 @@ async def run_orchestrator(
                         if (text := _text(event)) is not None:
                             yield TextDelta(text)
                     response = stream.response
+                if holds_no_answer(response):
+                    raise EmptyResponseError(
+                        "the model's response held neither answer text nor a function call"
+                    )
                 yield ModelResponded(parts=response_parts(without_unsigned_thoughts(response)))
             elif Agent.is_call_tools_node(node):
                 async with node.stream(run.ctx) as stream:

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from harness.gemini_agent import EmptyResponseError
 from harness.graph.events import AgentStatus
 from harness.graph.orchestrate import turn_id
 from harness.graph.resume import Resumed
@@ -256,6 +257,10 @@ async def test_a_model_response_with_no_answer_fails_the_turn_at_orchestrate(
     assert run.cursor.error["node"] == "orchestrate"
     if answer is blocked_reply:
         assert isinstance(failed.error, UnexpectedModelBehavior)
+    else:
+        assert isinstance(failed.error, EmptyResponseError)
+        assert run.cursor.error["type"] == "EmptyResponseError"
+        assert len(models.orchestrator.requests) == 1
 
 
 async def test_seed_hands_the_runs_it_carried_on_to_the_agent_and_acknowledges_after_the_commit(
