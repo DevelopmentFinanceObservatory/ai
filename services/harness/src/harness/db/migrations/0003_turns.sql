@@ -67,15 +67,15 @@ CREATE TABLE turn_specs (
 );
 
 -- An accepted answer to one pause, inserted in the transaction that moves
--- the turn from paused to running. The primary key accepts one answer per
--- pause round.
+-- the turn from paused to running. The primary key holds one answer per
+-- pause round, whatever its interrupt id.
 CREATE TABLE turn_answers (
     turn bigint NOT NULL REFERENCES turn_cursors (id) ON DELETE CASCADE,
     interrupt_id text NOT NULL,
     round integer NOT NULL CHECK (round >= 1),
     answer jsonb NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (turn, interrupt_id, round)
+    PRIMARY KEY (turn, round)
 );
 
 -- The turn's transcript in order: the loop's entries (the user's message,

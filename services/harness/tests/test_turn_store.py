@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -328,8 +329,15 @@ async def test_a_turn_closes_with_an_error_exactly_when_it_failed_or_was_abandon
     opened = await _open(store)
     wrong = None if error is not None else {"type": "x", "message": "y"}
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(ValueError):
         await store.finish(opened, segment_id=SEGMENT, status=status, error=wrong)
+    # The table holds the same rule for a writer that bypasses `finish`.
+    with pytest.raises(IntegrityError):
+        async with pg_engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE turn_cursors SET status = :status, error = CAST(:error AS jsonb)"),
+                {"status": status.value, "error": json.dumps(wrong) if wrong else None},
+            )
     closed = await store.finish(opened, segment_id=SEGMENT, status=status, error=error)
 
     assert (closed.status, closed.error) == (status, error)
@@ -385,3 +393,43 @@ async def test_a_checkpoint_writes_only_the_spec_blocks_that_changed(
     # A segment that takes the turn over reads the digests the writer held,
     # so its first checkpoint diffs against what is stored.
     assert await store.open_cursor(PRINCIPAL, CONVERSATION) == second
+
+
+async def test_a_pause_round_takes_one_answer(pg_engine: AsyncEngine) -> None:
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    paused = await _paused(store, await _open(store))
+    await store.record_answer(
+        paused, segment_id=SEGMENT, interrupt_id="int_1", round=1, answer={"pick": "a"}
+    )
+
+    with pytest.raises(IntegrityError):
+        async with pg_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO turn_answers (turn, interrupt_id, round, answer) "
+                    "VALUES (:turn, 'int_2', 1, '{}')"
+                ),
+                {"turn": paused.id},
+            )
+
+
+@pytest.mark.parametrize("where", ["state", "spec block"])
+async def test_a_value_json_cannot_hold_is_refused_before_the_write(
+    pg_engine: AsyncEngine, where: str
+) -> None:
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    opened = await _open(store)
+    nan = float("nan")
+
+    with pytest.raises(ValueError):
+        await store.advance(
+            opened,
+            segment_id=SEGMENT,
+            node="planner",
+            node_input=None,
+            state={"share": nan} if where == "state" else {},
+            specs={"spec_a": {"share": nan}} if where == "spec block" else {},
+        )
+    assert await store.open_cursor(PRINCIPAL, CONVERSATION) == opened

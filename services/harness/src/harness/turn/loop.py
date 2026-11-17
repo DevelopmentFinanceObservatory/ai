@@ -7,13 +7,17 @@ node the turn moves to and that node's input, the state, the whole spec
 mapping and the transcript records appended since the last write; a pause
 writes the question and an end closes the turn. Only then does it run the
 node's `after_commit` work and emit the event that reports the boundary, so
-a client never sees a step the store does not hold.
+a client never sees a step the store does not hold. The next node takes its
+input as the cursor stored it.
 
-A node that raises closes the turn `failed`, with `{node, type, message}` as
+A node that raises, a boundary write that fails for any reason but a lost
+lease, a moved cursor or an answer to no open pause, and an owed answer the
+store lacks each close the turn `failed`, with `{node, type, message}` as
 its error. A cursor naming a node the running `Graph` lacks, or paused at a
 node that can no longer resume, closes the turn `abandoned` with a
 `TurnExpired` error: no turn is carried across a graph change.
 
+A segment runs a node only on a cursor that is current (`TurnStore.load`).
 A crash leaves the cursor as last written. The segment that takes the turn
 over runs the node at the cursor again from its start, with the state, specs
 and transcript as of that write: from `run`, or from `resume` with the
@@ -25,7 +29,9 @@ reports a Stop from any instance (the conversation's cancel flag). While a
 node holds the turn's `StopScope` armed, the renewal consumes the flag and
 the Stop ends only the scope's work; any other Stop cancels the node and
 closes the turn `cancelled`. A lost lease cancels the node and leaves the
-cursor to the instance that holds the lease now.
+cursor to the instance that holds the lease now. Either way the segment
+then reads the turn back, and reports a close or a pause that committed
+before the cut as the store holds it.
 """
 
 from __future__ import annotations
@@ -43,7 +49,7 @@ from harness.studio_store import StudioStore
 from harness.turn import transcript as entries
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
 from harness.turn.node import Next, Node, NodeCtx, Pause, StopScope, TurnKey
-from harness.turn.store import Cursor, CursorStale, TurnStatus, TurnStore
+from harness.turn.store import CLOSED, Cursor, CursorStale, PauseNotOpen, TurnStatus, TurnStore
 from harness.turn.transcript import Transcript
 
 logger = logging.getLogger(__name__)
@@ -158,6 +164,139 @@ def _following(graph: Graph, node: str, result: Next | Pause) -> str | None:
     return following
 
 
+# The failures a boundary write passes up rather than closing the turn on:
+# the turn now belongs to another writer, or the answer named no open pause.
+_NOT_THE_TURNS = (SegmentLost, CursorStale, PauseNotOpen)
+
+
+async def _write_boundary(
+    store: TurnStore,
+    cursor: Cursor,
+    *,
+    segment_id: str,
+    node: str,
+    node_input: Any,
+    result: Next | Pause,
+    following: str | None,
+    interrupt_id: str,
+    ctx: NodeCtx,
+) -> Cursor:
+    """The write that records `node`'s `result`: a pause under
+    `interrupt_id`, the turn's end, or the move to `following`."""
+    if isinstance(result, Pause):
+        ctx.transcript.append(
+            entries.pause(
+                kind=result.kind,
+                interrupt_id=interrupt_id,
+                round=cursor.round + 1,
+                payload=result.payload,
+                message=result.message,
+            )
+        )
+        return await store.pause(
+            cursor,
+            segment_id=segment_id,
+            node=node,
+            node_input=node_input,
+            kind=result.kind,
+            interrupt_id=interrupt_id,
+            payload=result.payload,
+            state=ctx.state,
+            specs=ctx.specs,
+            records=ctx.transcript.take(),
+        )
+    if following == END:
+        return await store.finish(
+            cursor,
+            segment_id=segment_id,
+            status=TurnStatus.DONE,
+            state=ctx.state,
+            specs=ctx.specs,
+            records=ctx.transcript.take(),
+        )
+    assert following is not None
+    return await store.advance(
+        cursor,
+        segment_id=segment_id,
+        node=following,
+        node_input=result.output,
+        state=ctx.state,
+        specs=ctx.specs,
+        records=ctx.transcript.take(),
+    )
+
+
+class _Closes(Exception):  # noqa: N818 -- carries the close, not an error kind
+    """`_enter` found the turn cannot go on: close it with `status` and
+    `error`."""
+
+    def __init__(self, status: TurnStatus, error: BaseException) -> None:
+        super().__init__(str(error))
+        self.status = status
+        self.error = error
+
+
+async def _enter(
+    store: TurnStore,
+    segment: Segment,
+    transcript: Transcript,
+    *,
+    key: TurnKey,
+    graph: Graph,
+    segment_id: str,
+    answer: Answer | None,
+) -> tuple[Node, dict[str, Any] | None]:
+    """The node at the cursor and the answer it owes its `resume`, if any:
+    `answer`, accepted here, or the answer the cursor owes from before a
+    crash.
+
+    Raises:
+        _Closes: accepting the answer failed (`failed`), the owed answer is
+            not stored (`failed`), or the running graph cannot run or
+            resume the node (`abandoned`).
+    """
+    cursor = segment.cursor
+    node = cursor.node
+    owed: dict[str, Any] | None = None
+    if answer is not None:
+        transcript.append(
+            entries.answer(interrupt_id=answer.interrupt_id, round=answer.round, value=answer.value)
+        )
+        try:
+            segment.cursor = await store.record_answer(
+                cursor,
+                segment_id=segment_id,
+                interrupt_id=answer.interrupt_id,
+                round=answer.round,
+                answer=answer.value,
+                records=transcript.take(),
+            )
+        except _NOT_THE_TURNS:
+            raise
+        except Exception as exc:
+            logger.exception("turn %s: accepting the answer at node %s failed", key, node)
+            raise _Closes(TurnStatus.FAILED, exc) from exc
+        owed = answer.value
+    elif cursor.owed is not None:
+        owed = await store.answer(
+            cursor, interrupt_id=cursor.owed.interrupt_id, round=cursor.owed.round
+        )
+        if owed is None:
+            missing = RuntimeError(
+                f"turn {cursor.turn_index} owes {node!r} the answer to "
+                f"{cursor.owed.interrupt_id!r} round {cursor.owed.round}, which is not stored"
+            )
+            logger.error("turn %s: %s", key, missing)
+            raise _Closes(TurnStatus.FAILED, missing)
+
+    target = graph.nodes.get(node)
+    if target is None or (owed is not None and target.resume is None):
+        expired = TurnExpired(f"the running graph cannot {'resume' if owed else 'run'} {node!r}")
+        logger.warning("turn %s expired: %s", key, expired)
+        raise _Closes(TurnStatus.ABANDONED, expired)
+    return target, owed
+
+
 async def drive(
     store: TurnStore,
     segment: Segment,
@@ -173,9 +312,16 @@ async def drive(
     ends, writing each boundary under `segment_id`'s lease, and return
     `segment` with its last cursor and outcome.
 
-    A paused cursor takes `answer`, which the first write accepts
-    (`TurnStore.record_answer`) before the paused node's `resume` runs. A
-    running cursor runs its node again from its start.
+    The turn's specs and transcript are read in one snapshot that also
+    checks the cursor is still current (`TurnStore.load`), so the caller
+    reads the cursor after claiming the lease and no node runs on a cursor
+    another write has moved. A paused cursor takes `answer`, which the first
+    write accepts (`TurnStore.record_answer`) before the paused node's
+    `resume` runs. A running cursor runs its node again from its start.
+
+    A write that fails for any reason but those `_NOT_THE_TURNS` names (a
+    value JSON cannot hold, a database error) closes the turn `failed` at
+    the node whose outcome it was writing.
 
     Raises:
         ValueError: the cursor is paused and no `answer` was given.
@@ -186,46 +332,22 @@ async def drive(
     cursor = segment.cursor
     if cursor.status is TurnStatus.PAUSED and answer is None:
         raise ValueError(f"turn {cursor.turn_index} is paused and needs an answer")
-    specs = await store.specs(cursor)
-    transcript = Transcript(await store.records(cursor))
+    specs, stored = await store.load(cursor)
+    transcript = Transcript(stored)
     node, node_input = cursor.node, cursor.node_input
-    if answer is not None:
-        transcript.append(
-            entries.answer(
-                interrupt_id=answer.interrupt_id,
-                round=answer.round,
-                value=answer.value,
-            )
-        )
-        cursor = segment.cursor = await store.record_answer(
-            cursor,
-            segment_id=segment_id,
-            interrupt_id=answer.interrupt_id,
-            round=answer.round,
-            answer=answer.value,
-            records=transcript.take(),
-        )
-        owed: dict[str, Any] | None = answer.value
-    elif cursor.owed is not None:
-        owed = await store.answer(
-            cursor, interrupt_id=cursor.owed.interrupt_id, round=cursor.owed.round
-        )
-    else:
-        owed = None
 
-    target = graph.nodes.get(node)
-    if target is None or (owed is not None and target.resume is None):
-        expired = TurnExpired(f"the running graph cannot {'resume' if owed else 'run'} {node!r}")
-        logger.warning("turn %s expired: %s", key, expired)
+    async def close(status: TurnStatus, node: str, error: BaseException) -> Segment:
         return await _close_on_error(
-            store,
-            segment,
-            segment_id=segment_id,
-            status=TurnStatus.ABANDONED,
-            node=node,
-            error=expired,
-            emit=emit,
+            store, segment, segment_id=segment_id, status=status, node=node, error=error, emit=emit
         )
+
+    try:
+        target, owed = await _enter(
+            store, segment, transcript, key=key, graph=graph, segment_id=segment_id, answer=answer
+        )
+    except _Closes as closing:
+        return await close(closing.status, node, closing.error)
+    cursor = segment.cursor
 
     while True:
         ctx = NodeCtx(
@@ -245,42 +367,31 @@ async def drive(
             following = _following(graph, node, result)
         except Exception as exc:
             logger.exception("turn %s: node %s failed", key, node)
-            return await _close_on_error(
-                store,
-                segment,
-                segment_id=segment_id,
-                status=TurnStatus.FAILED,
-                node=node,
-                error=exc,
-                emit=emit,
-            )
+            return await close(TurnStatus.FAILED, node, exc)
         owed = None
 
-        if isinstance(result, Pause):
-            interrupt_id = _wire_id("int")
-            transcript.append(
-                entries.pause(
-                    kind=result.kind,
-                    interrupt_id=interrupt_id,
-                    round=cursor.round + 1,
-                    payload=result.payload,
-                    message=result.message,
-                )
-            )
-            cursor = segment.cursor = await store.pause(
+        interrupt_id = _wire_id("int")
+        try:
+            cursor = segment.cursor = await _write_boundary(
+                store,
                 cursor,
                 segment_id=segment_id,
                 node=node,
                 node_input=node_input,
-                kind=result.kind,
+                result=result,
+                following=following,
                 interrupt_id=interrupt_id,
-                payload=result.payload,
-                state=ctx.state,
-                specs=ctx.specs,
-                records=transcript.take(),
+                ctx=ctx,
             )
+        except _NOT_THE_TURNS:
+            raise
+        except Exception as exc:
+            logger.exception("turn %s: the write after node %s failed", key, node)
+            return await close(TurnStatus.FAILED, node, exc)
+        await _after_commit(ctx, node)
+
+        if isinstance(result, Pause):
             segment.outcome = Outcome.PAUSED
-            await _after_commit(ctx, node)
             emit(
                 Paused(
                     kind=result.kind,
@@ -291,55 +402,31 @@ async def drive(
                 )
             )
             return segment
-
-        assert isinstance(result, Next) and following is not None
-        if following == END:
-            cursor = segment.cursor = await store.finish(
-                cursor,
-                segment_id=segment_id,
-                status=TurnStatus.DONE,
-                state=ctx.state,
-                specs=ctx.specs,
-                records=transcript.take(),
-            )
-            segment.outcome = Outcome.DONE
-        else:
-            cursor = segment.cursor = await store.advance(
-                cursor,
-                segment_id=segment_id,
-                node=following,
-                node_input=result.output,
-                state=ctx.state,
-                specs=ctx.specs,
-                records=transcript.take(),
-            )
-        await _after_commit(ctx, node)
         emit(NodeDone(node=node, label=result.label, output=result.output))
         if following == END:
+            segment.outcome = Outcome.DONE
             return segment
-        node, node_input, target = following, result.output, graph.nodes[following]
+        assert following is not None
+        # The next node takes its input as stored, as a rerun reads it back.
+        node, node_input, target = following, cursor.node_input, graph.nodes[following]
 
 
-async def _close_cancelled(
-    store: TurnStore, segment: Segment, *, key: TurnKey, segment_id: str
-) -> None:
-    """Close the turn `cancelled` after a Stop cancelled its node. The
-    cancelled node may have been inside a boundary's write, which may have
-    committed, so a stale cursor is read again and closed when it is still
-    this turn's open one."""
-    try:
+async def _settle(store: TurnStore, segment: Segment, *, cut_by: Outcome, segment_id: str) -> None:
+    """Set `segment`'s cursor and outcome after the heartbeat cut its node
+    off for a Stop or a lost lease. The node may have been inside a
+    boundary's write, which may have committed, so the turn is read again
+    as stored: one the store closed or paused keeps that outcome; a Stop
+    closes one still open `cancelled`; a lost lease leaves it to the
+    instance that holds the lease now."""
+    stored = await store.turn(segment.cursor.id)
+    if stored.status in CLOSED or (stored.status is TurnStatus.PAUSED and cut_by is Outcome.LOST):
+        segment.cursor, segment.outcome = stored, Outcome(stored.status.value)
+        return
+    segment.cursor, segment.outcome = stored, cut_by
+    if cut_by is Outcome.CANCELLED:
         segment.cursor = await store.finish(
-            segment.cursor, segment_id=segment_id, status=TurnStatus.CANCELLED
+            stored, segment_id=segment_id, status=TurnStatus.CANCELLED
         )
-    except CursorStale:
-        current = await store.open_cursor(key.principal, key.conversation_id)
-        if current is None or current.id != segment.cursor.id:
-            segment.outcome = Outcome.CANCELLED
-            return
-        segment.cursor = await store.finish(
-            current, segment_id=segment_id, status=TurnStatus.CANCELLED
-        )
-    segment.outcome = Outcome.CANCELLED
 
 
 async def run_segment(
@@ -366,7 +453,12 @@ async def run_segment(
     of the segment running, and closes the turn `cancelled`. A renewal that
     finds the lease taken, or that keeps failing until `_RENEWAL_SLACK_S`
     before the lease would lapse, cancels the node and ends the segment
-    `lost` without writing the cursor.
+    `lost` without writing the cursor. After either cut the turn is read
+    back (`_settle`), so a close or pause that committed before the cut is
+    reported as stored.
+
+    `cursor` must be read after the caller claimed the lease; `drive`
+    refuses one another write has moved since (`CursorStale`).
 
     Cancelling the caller cancels the node and leaves the cursor as last
     written, for a later segment to take over.
@@ -431,9 +523,16 @@ async def run_segment(
         if not ended or (current is not None and current.cancelling()):
             raise
         segment.outcome = Outcome.LOST
-        if ended[0] is Outcome.CANCELLED:
-            with contextlib.suppress(SegmentLost):
-                await _close_cancelled(store, segment, key=key, segment_id=segment_id)
+        try:
+            await _settle(store, segment, cut_by=ended[0], segment_id=segment_id)
+        except SegmentLost:
+            segment.outcome = Outcome.LOST
+        except Exception:
+            # A lease lost to failing renewals usually means the database
+            # is unreachable, so the read can fail too; the segment is lost.
+            if ended[0] is not Outcome.LOST:
+                raise
+            logger.exception("turn %s: reading the turn after losing the lease failed", key)
         return segment
     except SegmentLost:
         segment.outcome = Outcome.LOST

@@ -62,6 +62,7 @@ class TurnStatus(StrEnum):
 # The statuses `finish` closes a turn with. `FAILED` and `ABANDONED` carry an
 # error and the others none, which the table's check constraint enforces.
 CLOSED = frozenset({TurnStatus.DONE, TurnStatus.FAILED, TurnStatus.CANCELLED, TurnStatus.ABANDONED})
+_ERRORED = frozenset({TurnStatus.FAILED, TurnStatus.ABANDONED})
 
 
 class CursorStale(Exception):  # noqa: N818 -- named for the wire 409
@@ -138,8 +139,11 @@ class Cursor:
 
 
 def _jsonb(value: Any) -> str | None:
-    """`value` as a jsonb parameter: JSON text, or SQL NULL for `None`."""
-    return None if value is None else json.dumps(value)
+    """`value` as a jsonb parameter: JSON text, or SQL NULL for `None`.
+    Raises `ValueError` for a NaN or an infinity, which jsonb cannot hold,
+    and `TypeError` for a value JSON cannot encode, before any statement
+    runs."""
+    return None if value is None else json.dumps(value, allow_nan=False)
 
 
 _COLUMNS = (
@@ -230,7 +234,7 @@ _UPSERT_SPEC = text(
 
 def _spec_digest(block: Mapping[str, Any]) -> tuple[str, str]:
     """`block`'s canonical JSON and its SHA-256."""
-    body = json.dumps(block, sort_keys=True, separators=(",", ":"))
+    body = json.dumps(block, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return body, hashlib.sha256(body.encode()).hexdigest()
 
 
@@ -253,6 +257,42 @@ async def _write_specs(conn: AsyncConnection, cursor: Cursor, specs: Specs) -> d
             {"turn": cursor.id, "gone": gone},
         )
     return digests
+
+
+async def _read_cursor(conn: AsyncConnection, where: str, params: dict[str, Any]) -> Cursor | None:
+    """The one turn matching `where` (over `turn_cursors t`), or `None`."""
+    row = (
+        await conn.execute(
+            text(
+                f"SELECT {_COLUMNS}, "
+                "(SELECT count(*) FROM agent_records r WHERE r.turn = t.id) "
+                f"AS record_count FROM turn_cursors t WHERE {where}"
+            ),
+            params,
+        )
+    ).first()
+    if row is None:
+        return None
+    digests = await conn.execute(
+        text("SELECT spec_id, digest FROM turn_specs WHERE turn = :turn"), {"turn": row.id}
+    )
+    return _cursor(row, row.record_count, dict(digests.tuples().all()))
+
+
+async def _specs(conn: AsyncConnection, turn: int) -> dict[str, dict[str, Any]]:
+    rows = await conn.execute(
+        text("SELECT spec_id, block FROM turn_specs WHERE turn = :turn ORDER BY seq"),
+        {"turn": turn},
+    )
+    return dict(rows.tuples().all())
+
+
+async def _records(conn: AsyncConnection, turn: int) -> list[AgentRecord]:
+    rows = await conn.execute(
+        text("SELECT agent, kind, body FROM agent_records WHERE turn = :turn ORDER BY seq"),
+        {"turn": turn},
+    )
+    return [AgentRecord(agent=row.agent, kind=row.kind, body=row.body) for row in rows]
 
 
 class TurnStore:
@@ -367,45 +407,58 @@ class TurnStore:
     async def open_cursor(self, principal: str, conversation_id: str) -> Cursor | None:
         """The conversation's open (running or paused) turn, or `None`."""
         async with self._engine.connect() as conn:
-            row = (
-                await conn.execute(
-                    text(
-                        f"SELECT {_COLUMNS}, "
-                        "(SELECT count(*) FROM agent_records r WHERE r.turn = t.id) "
-                        "AS record_count FROM turn_cursors t WHERE t.conversation = "
-                        "(SELECT id FROM conversations WHERE principal = :principal "
-                        "AND conversation_id = :conversation_id) "
-                        "AND t.status IN ('running', 'paused')"
-                    ),
-                    {"principal": principal, "conversation_id": conversation_id},
-                )
-            ).first()
-            if row is None:
-                return None
-            digests = await conn.execute(
-                text("SELECT spec_id, digest FROM turn_specs WHERE turn = :turn"),
-                {"turn": row.id},
+            return await _read_cursor(
+                conn,
+                "t.conversation = (SELECT id FROM conversations WHERE principal = :principal "
+                "AND conversation_id = :conversation_id) AND t.status IN ('running', 'paused')",
+                {"principal": principal, "conversation_id": conversation_id},
             )
-            return _cursor(row, row.record_count, dict(digests.tuples().all()))
+
+    async def turn(self, turn_id: int) -> Cursor:
+        """The turn `turn_id` as stored, open or closed.
+
+        Raises:
+            LookupError: no turn has that id.
+        """
+        async with self._engine.connect() as conn:
+            cursor = await _read_cursor(conn, "t.id = :id", {"id": turn_id})
+        if cursor is None:
+            raise LookupError(f"no turn {turn_id}")
+        return cursor
+
+    async def load(self, cursor: Cursor) -> tuple[dict[str, dict[str, Any]], list[AgentRecord]]:
+        """The turn's spec blocks and transcript (`specs`, `records`), read in
+        one snapshot that also holds the cursor at `cursor.version`, so a
+        segment runs a node only on the turn as its cursor describes it.
+
+        Raises:
+            CursorStale: a write moved the cursor past `cursor.version`.
+        """
+        async with self._engine.connect() as plain:
+            conn = await plain.execution_options(isolation_level="REPEATABLE READ")
+            async with conn.begin():
+                version = (
+                    await conn.execute(
+                        text("SELECT version FROM turn_cursors WHERE id = :id"),
+                        {"id": cursor.id},
+                    )
+                ).scalar_one_or_none()
+                if version != cursor.version:
+                    raise CursorStale(
+                        f"turn {cursor.turn_index} moved past version {cursor.version}"
+                    )
+                return await _specs(conn, cursor.id), await _records(conn, cursor.id)
 
     async def specs(self, cursor: Cursor) -> dict[str, dict[str, Any]]:
         """The turn's spec blocks by spec id, in the order the turn first
         stored each."""
         async with self._engine.connect() as conn:
-            rows = await conn.execute(
-                text("SELECT spec_id, block FROM turn_specs WHERE turn = :turn ORDER BY seq"),
-                {"turn": cursor.id},
-            )
-            return dict(rows.tuples().all())
+            return await _specs(conn, cursor.id)
 
     async def records(self, cursor: Cursor) -> list[AgentRecord]:
         """The turn's transcript, in the order it was appended."""
         async with self._engine.connect() as conn:
-            rows = await conn.execute(
-                text("SELECT agent, kind, body FROM agent_records WHERE turn = :turn ORDER BY seq"),
-                {"turn": cursor.id},
-            )
-            return [AgentRecord(agent=row.agent, kind=row.kind, body=row.body) for row in rows]
+            return await _records(conn, cursor.id)
 
     async def answer(
         self, cursor: Cursor, *, interrupt_id: str, round: int
@@ -543,7 +596,7 @@ class TurnStore:
                     "turn": cursor.id,
                     "interrupt_id": interrupt_id,
                     "round": round,
-                    "answer": json.dumps(answer),
+                    "answer": _jsonb(answer),
                 },
             )
             return running
@@ -566,12 +619,15 @@ class TurnStore:
         pause is dropped, so no answer can reach it.
 
         Raises:
-            ValueError: `status` is not a closing status.
+            ValueError: `status` is not a closing status, or `error` is
+                missing for `FAILED` or `ABANDONED` or given for another.
             SegmentLost: `segment_id` does not hold the conversation's lease.
             CursorStale: the cursor moved, or the turn is already closed.
         """
         if status not in CLOSED:
             raise ValueError(f"{status!r} does not close a turn")
+        if (status in _ERRORED) != (error is not None):
+            raise ValueError(f"a turn closed {status.value} takes an error only when it failed")
         state_set = ", state = CAST(:state AS jsonb)" if state is not None else ""
         async with self._engine.begin() as conn:
             await self._fence(conn, cursor.conversation, segment_id)
