@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import random
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -1222,6 +1223,123 @@ async def test_a_card_whose_resolved_frame_the_store_lacks_reads_it_once_after_t
         "src:8",
     ]
     assert drawn["component"]["fact_summary"]["attribution"]["indicator_count"] == 1
+
+
+async def test_a_write_reads_a_frame_it_already_read_and_missed_only_once(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """The write names F, which neither the store nor any card holds, and the
+    platform draws the card from F: the read before the write found nothing,
+    so none follows it."""
+    scripted_presentation_client([_written_on_f("cmp_2")])
+    current_conversation_key.set(("principal", current_conversation_id.get()))
+    lineages = _CardLineages()
+    executor = McpExecutor(
+        settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages
+    )
+
+    written = await executor(
+        tool="write_component",
+        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F}},
+    )
+
+    assert written["refusal"]["code"] == HarnessCode.PROVENANCE_UNAVAILABLE
+    assert lineages.reads == [{"component_id": None, "frame": _KEY_F}]
+
+
+class _StalledLineages(_CardLineages):
+    """A store whose connection stalls: the read hangs, and so does its
+    cleanup once the read is cancelled."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cleaned_up = asyncio.Event()
+
+    async def card_lineage(self, *args: Any, **kwargs: Any) -> CardLineage | None:
+        try:
+            await asyncio.sleep(60)
+        finally:
+            await asyncio.sleep(0.5)
+            self.cleaned_up.set()
+        return None  # pragma: no cover -- the read is always cancelled
+
+
+async def test_a_lineage_read_on_a_stalled_connection_returns_at_its_budget(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The write waits for the read at most its budget, however long the
+    cancelled read takes to clean up; the cleanup runs on in the
+    background."""
+    monkeypatch.setattr(mcp_client, "_LINEAGE_READ_BUDGET_S", 0.05)
+    scripted_presentation_client([_written_on_f("cmp_2")])
+    current_conversation_key.set(("principal", current_conversation_id.get()))
+    lineages = _StalledLineages()
+    executor = McpExecutor(
+        settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages
+    )
+
+    started = time.monotonic()
+    written = await executor(
+        tool="write_component",
+        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F}},
+    )
+
+    assert time.monotonic() - started < 0.4
+    assert written["refusal"]["code"] == HarnessCode.PROVENANCE_UNAVAILABLE
+    assert not lineages.cleaned_up.is_set()
+    await asyncio.wait_for(lineages.cleaned_up.wait(), timeout=5)
+    await asyncio.sleep(0)
+    assert executor._abandoned_reads == set()
+
+
+async def test_the_resolved_frames_read_runs_outside_the_write_retrys_deadline(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retried write the platform stored with 0.05 s of its call deadline
+    left draws its card even when the read of its resolved frame takes
+    longer: the read runs once the retried call has returned."""
+    monkeypatch.setattr(mcp_client, "_LINEAGE_READ_BUDGET_S", 2.0)
+    scripted_presentation_client(
+        [
+            _presentation_refusal("retry_after_delay", fix={"rows_requested": 250_000}),
+            _written_on_f("cmp_2"),
+        ]
+    )
+    current_conversation_key.set(("principal", current_conversation_id.get()))
+    conversation = current_conversation_id.get()
+    lineages = _CardLineages()
+    lineage_f = _drawn_on_f().get(conversation=conversation, **_FRAME_F)
+    assert lineage_f is not None
+    lineages.commit(
+        CardLineage(component_id="cmp_1", frame=_KEY_F, lineage=lineage_f, stat_var_count=1)
+    )
+    lineages.delay_s = 0.3
+    store = ProvenanceStore()
+    store.put(conversation=conversation, manifest={}, **_FRAME_G)
+    clock = _Clock()
+    deadline_s = McpTimeoutPolicy(settings=Settings()).call_timeout_s("write_component")
+
+    async def wait(seconds: float) -> None:
+        clock.now = deadline_s - 0.05
+
+    executor = McpExecutor(
+        settings=Settings(),
+        provenance=store,
+        card_lineages=lineages,
+        sleep=wait,
+        jitter=random.Random(7).uniform,
+        clock=clock,
+    )
+
+    drawn = await executor(
+        tool="write_component",
+        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_G}},
+    )
+
+    assert drawn["outcome"] == "ok", drawn
+    assert lineages.reads == [{"component_id": None, "frame": _KEY_F}]
 
 
 async def test_a_revise_that_read_its_cards_own_row_commits_no_lineage(

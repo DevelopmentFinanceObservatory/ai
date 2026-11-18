@@ -43,7 +43,6 @@ from harness.graph.state import ORCHESTRATOR_PRIOR_LEDGER_KEY
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import decision_choice_id, decision_option_id
 from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
-from harness.provenance import CardLineage, ProvenanceInput
 from harness.scope_choices import PartScope, carried_entries
 from harness.scripted import ScriptedSurface
 from harness.scripted_plan import scripted_plan
@@ -1924,7 +1923,6 @@ async def _component_frames_of(
     *,
     land: bool,
     write_token: str | None = None,
-    card_lineage: CardLineage | None = None,
 ) -> list[Any]:
     """`translator._component_frames` for a component that passed the wire contract."""
     return await translator._component_frames(
@@ -1932,7 +1930,6 @@ async def _component_frames_of(
         land=land,
         created=component_created(component, step_id="s1"),
         write_token=write_token,
-        card_lineage=card_lineage,
     )
 
 
@@ -2079,75 +2076,6 @@ async def test_component_frames_land_false_emits_only_component_created() -> Non
     assert events == ["component.created"]
     assert translator._conversation.composition is before
     assert translator._conversation.turn_components == []
-
-
-async def test_component_frames_land_false_commits_the_token_and_lineage_of_a_drawn_card(
-    pg_engine: AsyncEngine,
-) -> None:
-    """A card that does not land can still be edited from its
-    `component.created`, so its write token and frame lineage commit at once,
-    and the canvas is untouched."""
-    current_conversation_id.set("c1")
-    store, conversation = await _stored_conversation(pg_engine)
-    translator = _Translator(
-        conversation=conversation, recorder=_RecordingExecutor(_dummy_executor, store=store)
-    )
-    lineage = CardLineage(
-        component_id="cmp_two",
-        frame=("ops_f", "ocv_f"),
-        lineage=(ProvenanceInput("spec_a", "cv_a", {"citation": {"text": "a"}}),),
-        stat_var_count=1,
-    )
-
-    frames = await _component_frames_of(
-        translator,
-        _written_component("cmp_two"),
-        land=False,
-        write_token="token-two",
-        card_lineage=lineage,
-    )
-
-    assert [getattr(f, "event", None) for f in frames] == ["component.created"]
-    other = StudioStore(pg_engine)
-    stored = await other.load("principal", "c1")
-    assert stored is not None
-    assert stored.composition is None
-    assert stored.write_tokens == {"cmp_two": "token-two"}
-    assert await other.card_lineage("principal", "c1", component_id="cmp_two") == lineage
-
-
-async def test_component_frames_land_false_leaves_the_token_for_the_closing_write_when_its_commit_fails(
-    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Committing a card that did not land is best effort: a write that fails
-    leaves the token with the conversation, as for a card with no lineage."""
-    current_conversation_id.set("c1")
-    store, conversation = await _stored_conversation(pg_engine)
-    translator = _Translator(
-        conversation=conversation, recorder=_RecordingExecutor(_dummy_executor, store=store)
-    )
-
-    async def unreachable(*args: Any, **kwargs: Any) -> None:
-        raise ConnectionRefusedError("refused")
-
-    monkeypatch.setattr(store, "change_canvas", unreachable)
-    lineage = CardLineage(
-        component_id="cmp_two",
-        frame=("ops_f", "ocv_f"),
-        lineage=(ProvenanceInput("spec_a", "cv_a", {"citation": {"text": "a"}}),),
-        stat_var_count=1,
-    )
-
-    frames = await _component_frames_of(
-        translator,
-        _written_component("cmp_two"),
-        land=False,
-        write_token="token-two",
-        card_lineage=lineage,
-    )
-
-    assert [getattr(f, "event", None) for f in frames] == ["component.created"]
-    assert translator._conversation.write_tokens == {"cmp_two": "token-two"}
 
 
 # --- `_RecordingExecutor.land_component`: stamps the record, decides nothing -

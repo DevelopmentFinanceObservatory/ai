@@ -2070,15 +2070,11 @@ class _Translator:
         itself, also only `component.created`, and writes the card's entry
         with no block. The card's `write_token` is kept with it, in its
         write, and its `card_lineage` commits in that write. A card that does
-        not land keeps its token in the conversation for the closing write.
-        When it has a lineage, the client can still ask to edit it, so both
-        commit in a write of their own first (`_keep_unlanded`), best effort."""
+        not land keeps its token in the conversation for the closing write,
+        and stores no lineage."""
         created.seq = self._conversation.next_seq()
         if not land:
-            kept = card_lineage is not None and await self._keep_unlanded(
-                created.component_id, write_token, card_lineage
-            )
-            if not kept and write_token:
+            if write_token:
                 self._conversation.write_tokens[created.component_id] = write_token
             return [created]
         landed = await self._land(
@@ -2088,32 +2084,6 @@ class _Translator:
             return [created]
         # Read with no await since the landing, so this is the manifest it wrote.
         return [created, *self._composition_update()]
-
-    async def _keep_unlanded(
-        self, component_id: str, write_token: str | None, card_lineage: CardLineage
-    ) -> bool:
-        """Commit the write token and frame lineage of a card that did not
-        land, in one card write (`StudioStore.change_canvas`) that changes
-        nothing else, and return whether it committed. A write that fails is
-        logged, and the token is left to the closing write."""
-        key = current_conversation_key.get()
-        assert key is not None, "a card is kept only inside a conversation's stream"
-
-        def keep(work: ConversationState) -> None:
-            if write_token:
-                work.write_tokens = {**work.write_tokens, component_id: write_token}
-
-        try:
-            await self._recorder.store.change_canvas(*key, keep, lineage=card_lineage)
-        except Exception:
-            logger.warning(
-                "the write token and lineage of component_id=%r, which did not land, "
-                "were not stored; the token waits for the closing write",
-                component_id,
-                exc_info=True,
-            )
-            return False
-        return True
 
     async def _land(
         self,
@@ -2127,8 +2097,9 @@ class _Translator:
         conversation, inside the store's card write
         (`StudioStore.change_canvas`), which hands it the canvas as stored
         and commits the block it appends with the card's digest entry, turn
-        line, write token and frame lineage (`card_lineage`). A held card appends no block, and its entry,
-        line and token commit the same way."""
+        line, write token and frame lineage (`card_lineage`). A held card
+        appends no block, and its entry, line, token and lineage commit the
+        same way."""
         key = current_conversation_key.get()
         assert key is not None, "a card lands only inside a conversation's stream"
 

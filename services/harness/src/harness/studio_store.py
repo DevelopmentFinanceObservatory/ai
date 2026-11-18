@@ -85,7 +85,7 @@ from typing import Any
 from compiler.surface import transient
 from executor.ledger import RunStatus
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
+from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.approval import ApprovalRecord
@@ -874,7 +874,7 @@ _INSERT_CARD_LINEAGE = text(
 # A card's stored lineage in conversation `:pk`: the row of card
 # `:component_id`, else one drawn from the frame `:spec_id`/`:content_version`,
 # else one whose write named that frame, the latest written first among equals,
-# at most `:limit` of them.
+# leaving out the cards in `:skipped`, whose rows did not decode.
 # Cards on one frame share one lineage, so any of them serves.
 _SELECT_CARD_LINEAGE = text(
     "SELECT component_id, spec_id, content_version, requested_spec_id, "
@@ -883,15 +883,12 @@ _SELECT_CARD_LINEAGE = text(
     "component_id = :component_id "
     "OR (spec_id = :spec_id AND content_version = :content_version) "
     "OR (requested_spec_id = :spec_id AND requested_content_version = :content_version)) "
+    "AND component_id <> ALL(:skipped) "
     "ORDER BY COALESCE(component_id = :component_id, false) DESC, "
     "COALESCE(spec_id = :spec_id AND content_version = :content_version, false) DESC, "
     "created_at DESC, component_id "
-    "LIMIT :limit"
-)
-
-# How many matching rows `StudioStore.card_lineage` reads, so a row that does
-# not decode leaves the next to serve.
-_CARD_LINEAGE_CANDIDATES = 5
+    "LIMIT 1"
+).bindparams(bindparam("skipped", type_=ARRAY(Text)))
 
 
 def _card_lineage_row(lineage: CardLineage) -> dict[str, Any] | None:
@@ -1025,10 +1022,15 @@ class StudioStore:
         self,
         engine: AsyncEngine,
         *,
+        lineage_engine: AsyncEngine | None = None,
         clock: Callable[[], float] = time.time,
         time_sql: str = DATABASE_NOW,
     ) -> None:
         self._engine = engine
+        # Card lineage reads run over their own pool
+        # (`harness.db.engine.DatabaseHandle.lineage_engine`); a test store
+        # passes none and reads over `engine`.
+        self._lineage_engine = lineage_engine or engine
         self._runtime: dict[tuple[str, str], _RuntimeEntry] = {}
         self._clock = clock
         self._time_sql = time_sql
@@ -2071,11 +2073,11 @@ class StudioStore:
     ) -> CardLineage | None:
         """The stored lineage of card `component_id`, else of a card drawn from
         `frame`, else of a card whose write named `frame`
-        (`harness.provenance.CardLineages`), read in one statement and one
-        attempt on the conversation this instance loaded, with no lock and no
-        retry: the caller bounds the read and goes on without it. The first of
-        the matching rows that decodes serves; one that does not is logged with
-        its key and skipped. `None` when none is stored or none decodes.
+        (`harness.provenance.CardLineages`), read on the conversation this
+        instance loaded over the lineage engine, in one attempt with no lock
+        and no retry: the caller bounds the read and goes on without it. One
+        row is read; only when it does not decode, logged with its key, is the
+        next read, leaving it out. `None` when none is stored or none decodes.
 
         Raises:
             LookupError: This instance has not loaded the conversation.
@@ -2086,39 +2088,43 @@ class StudioStore:
         entry = self._runtime.get((principal, conversation_id))
         if entry is None or entry.pk is None:
             raise LookupError(f"conversation {conversation_id!r} is not loaded here")
-        async with self._engine.begin() as conn:
-            rows = (
-                await conn.execute(
-                    _SELECT_CARD_LINEAGE,
-                    {
-                        "pk": entry.pk,
-                        "component_id": component_id,
-                        "spec_id": spec_id,
-                        "content_version": content_version,
-                        "limit": _CARD_LINEAGE_CANDIDATES,
-                    },
-                )
-            ).all()
-        for row in rows:
-            try:
-                lineage = lineage_from_json(row.members)
-            except CardLineageDecodeError:
-                logger.exception(
-                    "studio store: skipping the lineage row of conversation %s "
-                    "component_id=%r, which does not decode",
-                    conversation_id,
-                    row.component_id,
-                )
-                continue
-            requested = (row.requested_spec_id, row.requested_content_version)
-            return CardLineage(
-                component_id=row.component_id,
-                frame=(row.spec_id, row.content_version),
-                lineage=lineage,
-                stat_var_count=row.stat_var_count,
-                requested=requested if requested != (None, None) else None,
-            )
-        return None
+        skipped: list[str] = []
+        async with self._lineage_engine.begin() as conn:
+            while True:
+                row = (
+                    await conn.execute(
+                        _SELECT_CARD_LINEAGE,
+                        {
+                            "pk": entry.pk,
+                            "component_id": component_id,
+                            "spec_id": spec_id,
+                            "content_version": content_version,
+                            "skipped": skipped,
+                        },
+                    )
+                ).first()
+                if row is None:
+                    return None
+                try:
+                    lineage = lineage_from_json(row.members)
+                except CardLineageDecodeError:
+                    logger.exception(
+                        "studio store: skipping the lineage row of conversation %s "
+                        "component_id=%r, which does not decode",
+                        conversation_id,
+                        row.component_id,
+                    )
+                    skipped.append(row.component_id)
+                    continue
+                break
+        requested = (row.requested_spec_id, row.requested_content_version)
+        return CardLineage(
+            component_id=row.component_id,
+            frame=(row.spec_id, row.content_version),
+            lineage=lineage,
+            stat_var_count=row.stat_var_count,
+            requested=requested if requested != (None, None) else None,
+        )
 
     async def run_statuses(
         self, principal: str, conversation_id: str, *, conversation: ConversationState

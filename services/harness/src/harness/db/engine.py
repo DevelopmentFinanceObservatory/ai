@@ -38,17 +38,27 @@ logger = logging.getLogger(__name__)
 # SQLAlchemy an async engine.
 _CONNECTOR_DRIVER = "asyncpg"
 
+# The pool of `DatabaseHandle.lineage_engine`: one connection and no
+# overflow. A read that finds it busy waits, and its caller's budget
+# (`harness.mcp_client._LINEAGE_READ_BUDGET_S`) lets the write go on without it.
+_LINEAGE_POOL: dict[str, Any] = {"pool_size": 1, "max_overflow": 0}
+
 
 @dataclass
 class DatabaseHandle:
-    """The engine plus its async teardown.
+    """The engines plus their async teardown.
 
-    `aclose` disposes the engine and, on the Cloud SQL Connector path, closes
-    the connector the engine's connections were dialled through. Call it from
-    the harness lifespan's shutdown phase.
+    `engine` holds the session store's pool. `lineage_engine` is a pool of
+    one connection, no overflow, on the same settings, for the best-effort
+    reads of a card's stored lineage (`StudioStore.card_lineage`), so those
+    reads never take a connection the lease renewals and card writes need.
+    `aclose` disposes both and, on the Cloud SQL Connector path, closes the
+    connector their connections were dialled through. Call it from the
+    harness lifespan's shutdown phase.
     """
 
     engine: AsyncEngine
+    lineage_engine: AsyncEngine
     aclose: Callable[[], Awaitable[None]]
 
 
@@ -107,7 +117,15 @@ def build_database(*, settings: Settings) -> DatabaseHandle | None:
         # `pool_pre_ping` drops a connection the server closed while it sat in
         # the pool.
         engine = create_async_engine(settings.database_url, pool_pre_ping=True)
-        return DatabaseHandle(engine=engine, aclose=engine.dispose)
+        lineage_engine = create_async_engine(
+            settings.database_url, pool_pre_ping=True, **_LINEAGE_POOL
+        )
+
+        async def aclose_url() -> None:
+            await engine.dispose()
+            await lineage_engine.dispose()
+
+        return DatabaseHandle(engine=engine, lineage_engine=lineage_engine, aclose=aclose_url)
     return None
 
 
@@ -138,10 +156,17 @@ def _build_connector_backed_database(*, settings: Settings) -> DatabaseHandle:
         max_overflow=settings.session_store_max_overflow,
         pool_pre_ping=True,
     )
+    lineage_engine = create_async_engine(
+        "postgresql+asyncpg://",
+        async_creator=source.connect,
+        pool_pre_ping=True,
+        **_LINEAGE_POOL,
+    )
 
     async def aclose() -> None:
         await engine.dispose()
+        await lineage_engine.dispose()
         await source.aclose()
 
     logger.info("Using the database over the Cloud SQL Connector")
-    return DatabaseHandle(engine=engine, aclose=aclose)
+    return DatabaseHandle(engine=engine, lineage_engine=lineage_engine, aclose=aclose)

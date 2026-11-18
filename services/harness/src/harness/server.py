@@ -479,7 +479,7 @@ def create_app(
     # with each card through it, and before the graph, because the recall
     # function is bound to it (conversation resolved per request via
     # contextvar).
-    store = StudioStore(engine)
+    store = StudioStore(engine, lineage_engine=database.lineage_engine)
     # The executor replays a rolling frame through the refresh's clients when
     # a card draws other series than the frame's latest period was taken over.
     executor = McpExecutor(

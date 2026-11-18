@@ -3349,11 +3349,37 @@ async def test_a_card_lineage_read_makes_one_attempt_and_leaves_the_lease_alone(
         lambda work: land_component(work, _CARD),
         lineage=_card_lineage("cmp_two", count=1),
     )
-    store._engine = _FailingCheckout(store._engine, ConnectionRefusedError("refused"))
+    store._lineage_engine = _FailingCheckout(
+        store._lineage_engine, ConnectionRefusedError("refused")
+    )
 
     with pytest.raises(ConnectionRefusedError):
         await store.card_lineage("principal", CONVERSATION, component_id="cmp_two")
     assert not state.renew_now.is_set()
+
+
+class _NoCheckout:
+    """An engine that refuses every connection, standing for a session-store
+    pool no lineage read may take one from."""
+
+    def begin(self) -> Any:
+        raise AssertionError("a lineage read took a session-store connection")
+
+    connect = begin
+
+
+async def test_a_card_lineage_read_takes_no_connection_from_the_session_store_pool(
+    pg_engine,
+) -> None:
+    """Lineage reads run over the lineage engine alone, so the lease renewals
+    and card writes keep every connection of the session-store pool."""
+    store = StudioStore(pg_engine, lineage_engine=pg_engine)
+    await _claimed(store)
+    lineage = _card_lineage("cmp_two", count=1)
+    await store.change_canvas("principal", CONVERSATION, _landing("cmp_two"), lineage=lineage)
+    store._engine = _NoCheckout()
+
+    assert await store.card_lineage("principal", CONVERSATION, component_id="cmp_two") == lineage
 
 
 async def test_a_removal_whose_commit_lost_its_acknowledgement_reports_the_cards_it_removed(
