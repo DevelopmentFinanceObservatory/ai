@@ -70,6 +70,7 @@ from collections.abc import (
     Collection,
     Coroutine,
     Iterable,
+    Iterator,
 )
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
@@ -183,8 +184,8 @@ SEQ_BLOCK = 256
 # Stop) still fall inside the reservation.
 _SEQ_HEADROOM = 64
 
-# The backoff between retries of a write fenced on the live segment
-# (`StudioStore._retrying`), doubling from the first delay to the last.
+# The backoff between retries (`retry_delays`), doubling from the first
+# delay to the last.
 _RETRY_FIRST_DELAY_S = 0.25
 _RETRY_MAX_DELAY_S = 4.0
 # How long before its lease lapses an instance stops trusting it holds the
@@ -482,6 +483,19 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             _set_list_item(state.approvals, index, ApprovalRecord.model_validate(value))
         else:
             logger.warning("studio store: ignoring unknown turn state key %r", key)
+
+
+def retry_delays() -> Iterator[float]:
+    """The backoff between attempts at a write that met a transient fault or
+    lost to another writer: `_RETRY_FIRST_DELAY_S`, doubling up to
+    `_RETRY_MAX_DELAY_S`, without end. A write fenced on the live segment
+    waits these (`StudioStore._retrying`), as does `/cancel` between claims
+    it loses (`harness.studio`); each caller bounds the total by its own
+    deadline."""
+    delay = _RETRY_FIRST_DELAY_S
+    while True:
+        yield delay
+        delay = min(delay * 2, _RETRY_MAX_DELAY_S)
 
 
 class ConversationStale(Exception):  # noqa: N818 -- named for the wire 409
@@ -1378,7 +1392,8 @@ class StudioStore:
         lost is retried as well, so every attempt must leave the stored row
         as one attempt would. `attempt` is told whether an earlier attempt
         met a fault, so it may have committed."""
-        delay = _RETRY_FIRST_DELAY_S
+        delays = retry_delays()
+        delay = next(delays)
         retried = False
         while True:
             try:
@@ -1398,7 +1413,7 @@ class StudioStore:
                     exc,
                 )
             await asyncio.sleep(delay)
-            delay = min(delay * 2, _RETRY_MAX_DELAY_S)
+            delay = next(delays)
             retried = True
 
     async def _fenced_save[T](

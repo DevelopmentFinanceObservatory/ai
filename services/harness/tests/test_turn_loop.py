@@ -110,9 +110,10 @@ async def _until(check: Callable[[], Awaitable[bool]]) -> None:
     raise TimeoutError
 
 
-def _stays(node: str, *, ran: list[str]) -> Node:
+def _stays(node: str, *, ran: list[str], pauses: bool = False) -> Node:
     """A node that records its run, writes `state[node]` and appends a
-    planner record, then waits until it is cancelled."""
+    planner record, then waits until it is cancelled. With `pauses`, it is a
+    node that can pause (it has a `resume`), as a stop edge must reach."""
 
     async def run(ctx: NodeCtx, node_input: Any) -> Next:
         ran.append(node)
@@ -121,7 +122,10 @@ def _stays(node: str, *, ran: list[str]) -> Node:
         await asyncio.sleep(3600)
         raise AssertionError("unreachable")
 
-    return Node(run=run)
+    async def resume(ctx: NodeCtx, node_input: Any, answer: dict[str, Any]) -> Next:
+        return await run(ctx, node_input)
+
+    return Node(run=run, resume=resume if pauses else None)
 
 
 @pytest.fixture
@@ -565,7 +569,10 @@ async def test_the_first_stop_ends_only_the_scoped_work_and_the_second_ends_the_
 
     graph = Graph(
         start="switch",
-        nodes={"switch": Node(run=switch), "approve": _stays("approve", ran=ran)},
+        nodes={
+            "switch": Node(run=switch, stop_edges=frozenset({"offer"})),
+            "approve": _stays("approve", ran=ran, pauses=True),
+        },
         edges={("switch", "offer"): "approve", ("approve", "next"): END},
     )
     events: list[TurnEvent] = []
@@ -617,7 +624,10 @@ async def test_the_pause_after_a_scope_took_a_stop_records_it_taken(
 
     graph = Graph(
         start="switch",
-        nodes={"switch": Node(run=switch), "offer": Node(run=offer, resume=offer)},
+        nodes={
+            "switch": Node(run=switch, stop_edges=frozenset({"offer"})),
+            "offer": Node(run=offer, resume=offer),
+        },
         edges={("switch", "offer"): "offer"},
     )
     running = asyncio.create_task(
@@ -635,15 +645,40 @@ async def test_the_pause_after_a_scope_took_a_stop_records_it_taken(
     assert not await lease_b.stop_live(PRINCIPAL, CONVERSATION)
 
 
-@pytest.mark.parametrize("after", ["work", "end"], ids=["goes-on-to-work", "ends-the-turn"])
+class _CloseUnacknowledged(TurnStore):
+    """A turn store whose first `cancelled` close commits and then raises,
+    as a close whose acknowledgement was lost does."""
+
+    lost = False
+
+    async def finish(self, cursor: Cursor, **kwargs: Any) -> Cursor:
+        closed = await super().finish(cursor, **kwargs)
+        if kwargs["status"] is TurnStatus.CANCELLED and not self.lost:
+            self.lost = True
+            raise ConnectionError("the close's acknowledgement was lost")
+        return closed
+
+
+@pytest.mark.parametrize(
+    ("leaves", "ran_after"),
+    [
+        pytest.param("end", [], id="ends-the-turn"),
+        pytest.param("end-unacknowledged", [], id="ends-the-turn-close-unacknowledged"),
+        pytest.param("other-edge", [], id="leaves-on-another-edge"),
+        pytest.param("offer-goes-on", ["offer"], id="the-offer-goes-on-without-pausing"),
+    ],
+)
 async def test_a_stop_the_scope_took_closes_the_turn_when_no_pause_records_it(
-    pg_engine: AsyncEngine, clock: StoreClock, after: str
+    pg_engine: AsyncEngine, clock: StoreClock, leaves: str, ran_after: list[str]
 ) -> None:
-    """The scope takes the first Stop, and the turn does not pause next: the
-    node that took it ends the turn, or the node its edge leads to returns
-    on along another edge. The loop closes the turn `cancelled` in place of
-    that write, and runs nothing past it."""
-    store = TurnStore(pg_engine)
+    """The scope takes the first Stop, and no pause records it: the node
+    that took it ends the turn or leaves on an edge that is not a stop edge,
+    or the node its stop edge leads to returns on. The loop closes the turn
+    `cancelled` in place of that write and runs nothing past it, also when
+    the close commits and its acknowledgement is lost."""
+    store = (
+        _CloseUnacknowledged(pg_engine) if leaves == "end-unacknowledged" else TurnStore(pg_engine)
+    )
     lease_a, lease_b = await _instance(pg_engine, clock), await _instance(pg_engine, clock)
     segment_id = await _claim(lease_a)
     switching = asyncio.Event()
@@ -653,20 +688,27 @@ async def test_a_stop_the_scope_took_closes_the_turn_when_no_pause_records_it(
         async with ctx.stop.open() as stopped:
             switching.set()
             await stopped.wait()
+        return Next("offer" if leaves == "offer-goes-on" else "on")
+
+    async def offer(ctx: NodeCtx, node_input: Any) -> Next:
+        ran.append("offer")
         return Next("on")
 
-    async def work(ctx: NodeCtx, node_input: Any) -> Next:
-        ran.append("work")
+    async def offered(ctx: NodeCtx, node_input: Any, answer: dict[str, Any]) -> Next:
         return Next("on")
 
     graph = Graph(
         start="switch",
         nodes={
-            "switch": Node(run=switch),
-            "work": Node(run=work),
+            "switch": Node(run=switch, stop_edges=frozenset({"offer"})),
+            "offer": Node(run=offer, resume=offered),
             "after": _stays("after", ran=ran),
         },
-        edges={("switch", "on"): END if after == "end" else "work", ("work", "on"): "after"},
+        edges={
+            ("switch", "offer"): "offer",
+            ("switch", "on"): "after" if leaves == "other-edge" else END,
+            ("offer", "on"): "after",
+        },
     )
     running = asyncio.create_task(
         _segment(store, lease_a, await _open(store, segment_id, graph), segment_id, graph, [])
@@ -677,8 +719,30 @@ async def test_a_stop_the_scope_took_closes_the_turn_when_no_pause_records_it(
 
     assert segment.outcome is Outcome.CANCELLED
     assert segment.cursor.status is TurnStatus.CANCELLED
-    assert ran == ([] if after == "end" else ["work"])
+    assert ran == ran_after
     assert not await lease_b.stop_live(PRINCIPAL, CONVERSATION)
+
+
+@pytest.mark.parametrize(
+    "reaches", ["work", "end"], ids=["a-node-that-cannot-pause", "the-turns-end"]
+)
+def test_a_stop_edge_that_reaches_no_node_that_pauses_fails_the_graph(reaches: str) -> None:
+    """A node that holds the turn's `StopScope` open names its stop edges;
+    one that reaches a node with no `resume`, or the turn's end, is refused
+    when the graph is built, since no pause there would record the Stop."""
+
+    async def work(ctx: NodeCtx, node_input: Any) -> Next:
+        return Next("on")
+
+    with pytest.raises(ValueError, match="stop edge"):
+        Graph(
+            start="switch",
+            nodes={
+                "switch": Node(run=work, stop_edges=frozenset({"offer"})),
+                "work": Node(run=work),
+            },
+            edges={("switch", "offer"): "work" if reaches == "work" else END},
+        )
 
 
 async def _at(store: TurnStore, node: str) -> bool:

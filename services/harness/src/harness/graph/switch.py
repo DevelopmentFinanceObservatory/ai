@@ -294,7 +294,8 @@ def switch_node(*, planner: PlannerModel, definition_surface: ToolSurface) -> No
             output = switch_failed_offer(plan, choice_id=choice_id, option_id=option_id, error=exc)
         return Next("offer", output)
 
-    return Node(run=switch)
+    # A stopped switch offers the unchanged plan, whose pause records the Stop.
+    return Node(run=switch, stop_edges=frozenset({"offer"}))
 
 
 def switch_failed_offer(

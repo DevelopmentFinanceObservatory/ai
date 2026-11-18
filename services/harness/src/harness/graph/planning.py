@@ -59,7 +59,9 @@ def planner_node(*, planner: PlannerModel) -> Node[GraphEvent]:
     ) -> Next | Pause:
         return await _draft(ctx, node_input, planner=planner, answer=answer)
 
-    return Node(run=run, resume=resume)
+    # A pick's replan the user stops offers the unchanged plan, whose pause
+    # records the Stop.
+    return Node(run=run, resume=resume, stop_edges=frozenset({"pending_refusal"}))
 
 
 async def _draft(

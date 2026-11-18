@@ -102,8 +102,11 @@ class NoEdge(Exception):  # noqa: N818 -- names the missing edge
 @dataclass(frozen=True)
 class Graph[E]:
     """The nodes by name, the edges by `(node, label)`, and the node a turn
-    opens at. Every edge leaves a node and reaches a node or `END`. `E` is
-    the type of the events the nodes emit beside the loop's own."""
+    opens at. Every edge leaves a node and reaches a node or `END`. Every
+    edge a node names in `Node.stop_edges` reaches a node that pauses (one
+    with a `resume`), so the Stop its `StopScope` took is recorded by that
+    node's pause. `E` is the type of the events the nodes emit beside the
+    loop's own."""
 
     start: str
     nodes: Mapping[str, Node[E]]
@@ -115,6 +118,13 @@ class Graph[E]:
         for (source, label), target in self.edges.items():
             if source not in self.nodes or (target != END and target not in self.nodes):
                 raise ValueError(f"edge {source!r} -{label}-> {target!r} joins an unknown node")
+        for name, node in self.nodes.items():
+            for label in node.stop_edges:
+                target = self.edges.get((name, label))
+                if target is None or target == END or self.nodes[target].resume is None:
+                    raise ValueError(
+                        f"stop edge {name!r} -{label}-> {target!r} reaches no node that pauses"
+                    )
 
 
 class Outcome(StrEnum):
@@ -220,9 +230,13 @@ async def _close_on_taken_stop(
 ) -> Segment:
     """Close the turn `cancelled` on the Stop its `StopScope` took, whose
     pause never came, without writing the node's outcome. A close the store
-    refuses for any reason but those `_NOT_THE_TURNS` names is logged and
-    leaves the turn running with the Stop live, for the release of the
-    lease to close (`StudioStore.release`); the segment ends `unclosed`."""
+    refuses for any reason but those `_NOT_THE_TURNS` names may still have
+    committed (its acknowledgement lost), so the turn is read again as
+    stored, as `_settle` does: a turn the store closed keeps that outcome.
+    One still open, or one that cannot be read, is logged and left running
+    with the Stop live, for the release of the lease to close
+    (`StudioStore.release`); the segment ends `unclosed`, and emits no
+    `TurnFailed`."""
     try:
         segment.cursor = await store.finish(
             segment.cursor, segment_id=segment_id, status=TurnStatus.CANCELLED
@@ -231,7 +245,16 @@ async def _close_on_taken_stop(
         raise
     except Exception:
         logger.exception("turn %s: closing the turn on the Stop its scope took failed", key)
-        segment.outcome = Outcome.UNCLOSED
+        try:
+            stored = await store.turn(segment.cursor.id)
+        except Exception:
+            logger.exception("turn %s: reading the turn after its close failed", key)
+            segment.outcome = Outcome.UNCLOSED
+            return segment
+        segment.cursor = stored
+        segment.outcome = (
+            Outcome(stored.status.value) if stored.status in CLOSED else Outcome.UNCLOSED
+        )
         return segment
     segment.outcome = Outcome.CANCELLED
     return segment
@@ -428,10 +451,11 @@ async def drive[E](
     the node whose outcome it was writing.
 
     A Stop the turn's `StopScope` took (`StopScope.taken`) must be recorded
-    by a pause of the node that took it or of the node its edge leads to.
-    When the node that took it ends the turn, or the next node returns
-    anything but a pause, the turn closes `cancelled` in place of that
-    node's write.
+    by a pause of the node that took it, or of the node one of its stop
+    edges leads to (`Node.stop_edges`, which `Graph` checks reach a node
+    that pauses). When the node that took it ends the turn or leaves on
+    another edge, or the node after it returns anything but a pause, the
+    turn closes `cancelled` in place of that node's write.
 
     Raises:
         ValueError: the cursor is paused and no `answer` was given.
@@ -494,11 +518,15 @@ async def drive[E](
         if (
             stop.taken is not None
             and not isinstance(result, Pause)
-            and (stop.taken == taken_before or following == END)
+            and (
+                stop.taken == taken_before
+                or following == END
+                or result.label not in target.stop_edges
+            )
         ):
             # The scope's Stop is recorded by a pause of the node that took it
-            # or of the node its edge leads to (a switch's offer). A turn
-            # that goes past that without pausing, or ends, is stopped.
+            # or of the node one of its stop edges leads to. A turn that
+            # leaves another way, ends, or goes past that node is stopped.
             return await _close_on_taken_stop(store, segment, key=key, segment_id=segment_id)
 
         interrupt_id = _wire_id("int")
@@ -677,12 +705,12 @@ async def run_segment[E](
     sets the scope's event and the scope keeps its id (`StopScope.take`),
     with no write: the node goes on, and the turn's next pause write records
     the id taken (`TurnStore.pause`), so renewals stop reporting it. That
-    pause is the node's own or that of the node its edge leads to (a
-    switch's offer); a turn that goes further, or ends, without it closes
-    `cancelled` (`drive`). Until then the Stop stays live, and a client
-    that leaves first leaves it to the release of the lease. Any other Stop
-    cancels the node, leaves no task of the segment running, and
-    closes the turn `cancelled`. One a renewal reads after the drive
+    pause is the node's own or that of the node one of its stop edges leads
+    to (a switch's offer, `Node.stop_edges`); a turn that leaves another
+    way, ends, or goes further without it closes `cancelled` (`drive`).
+    Until then the Stop stays live, and a client that leaves first leaves
+    it to the release of the lease. Any other Stop cancels the node, leaves
+    no task of the segment running, and closes the turn `cancelled`. One a renewal reads after the drive
     finished is left to the release of the lease, which acts on a Stop
     still live (`StudioStore.release`). A renewal that finds the lease
     taken, or that keeps failing until the lease's deadline

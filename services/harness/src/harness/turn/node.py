@@ -147,7 +147,14 @@ type Resume[E] = Callable[[NodeCtx[E], Any, dict[str, Any]], Awaitable[Next | Pa
 @dataclass(frozen=True)
 class Node[E]:
     """One node: `run` on entry with the node's input, and, for a node that
-    pauses, `resume` with the same input and the user's answer."""
+    pauses, `resume` with the same input and the user's answer.
+
+    A node that holds the turn's `StopScope` open names in `stop_edges` the
+    edges it may leave on once its scope took a Stop. Each must lead to a
+    node that pauses (`Graph` checks), whose pause records the Stop taken;
+    leaving any other way closes the turn `cancelled`
+    (`harness.turn.loop.drive`)."""
 
     run: Run[E]
     resume: Resume[E] | None = None
+    stop_edges: frozenset[str] = frozenset()
