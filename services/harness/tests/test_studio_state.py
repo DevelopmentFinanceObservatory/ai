@@ -3134,7 +3134,7 @@ async def test_a_write_whose_caller_is_cancelled_ends_in_the_cancellation_whatev
         await proceed.wait()
         raise TimeoutError("the renewal timed out")
 
-    caller = asyncio.ensure_future(studio_store._run_to_completion(failing()))
+    caller = asyncio.ensure_future(studio_store.run_to_completion(failing()))
     await started.wait()
     caller.cancel()
     await asyncio.sleep(0)

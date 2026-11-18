@@ -204,7 +204,7 @@ def _shallow_copy(state: ConversationState) -> ConversationState:
     )
 
 
-async def _run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
+async def run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
     """Run `work` in a task of its own and wait for it to finish even when
     the caller is cancelled, then re-raise the caller's cancellation.
 
@@ -503,6 +503,22 @@ class Renewal:
     stop_id: str | None
 
 
+@dataclass(frozen=True)
+class StopRead:
+    """The Stop request a release found on the lease it cleared, read under
+    the row lock in the transaction that clears it: the id a renewal
+    recorded (`stop_id`), and whether `lease_cancel` was still set, a
+    request no renewal has recorded yet (`flagged`)."""
+
+    stop_id: str | None
+    flagged: bool
+
+    def unread(self, acted: str | None) -> bool:
+        """Whether this holds a Stop the segment, which acted on `acted`,
+        did not act on."""
+        return self.flagged or (self.stop_id is not None and self.stop_id != acted)
+
+
 def _jsonb(value: Any) -> str | None:
     """`value` as a jsonb parameter: JSON text, or SQL NULL for `None`."""
     return None if value is None else json.dumps(value)
@@ -510,7 +526,7 @@ def _jsonb(value: Any) -> str | None:
 
 _CONVERSATION_COLUMNS = (
     "id, version, turn_state, composition, lease_segment_id, lease_owner, "
-    "lease_expires_at, lease_stop_id, seq_next, seq_reserved"
+    "lease_expires_at, lease_stop_id, lease_cancel, seq_next, seq_reserved"
 )
 
 
@@ -1306,6 +1322,7 @@ class StudioStore:
         change: Callable[[ConversationState], T],
         *,
         retried: bool = False,
+        seen: Callable[[StopRead], None] | None = None,
     ) -> T:
         """`checkpoint` and `change_canvas`'s one write. Under the row lock,
         fenced on `segment_id`: run `change` on a one-level copy of the live
@@ -1325,7 +1342,10 @@ class StudioStore:
         would have written (`entry.version` + 1) was saved by that attempt,
         whose acknowledgement was lost. It writes nothing and records the
         write as made. Any other row, another instance's claim and release
-        since included, fences the write out."""
+        since included, fences the write out.
+
+        `seen`, when given, is told the Stop request the locked row holds
+        (`StopRead`) before a write fenced on `segment_id` is made."""
         state = entry.state
         assert entry.pk is not None and state is not None
         async with entry.write_lock:
@@ -1344,6 +1364,8 @@ class StudioStore:
                     raise SegmentLost(
                         f"conversation {conversation_id!r} segment {segment_id!r} is not the lease"
                     )
+                if seen is not None and not landed:
+                    seen(StopRead(stop_id=row.lease_stop_id, flagged=row.lease_cancel))
                 stored = (
                     CompositionManifest.model_validate(row.composition) if row.composition else None
                 )
@@ -1409,10 +1431,10 @@ class StudioStore:
         long to keep trying.
 
         Runs to the end even when the caller is cancelled
-        (`_run_to_completion`), since the heartbeat that calls it is
+        (`run_to_completion`), since the heartbeat that calls it is
         cancelled whenever its stream ends.
         """
-        return await _run_to_completion(
+        return await run_to_completion(
             self._renew(principal, conversation_id, segment_id, timeout=timeout)
         )
 
@@ -1469,7 +1491,14 @@ class StudioStore:
         if live is not None and live.segment is not None and live.segment.id == segment.id:
             live.segment = segment
 
-    async def checkpoint(self, principal: str, conversation_id: str, segment_id: str) -> None:
+    async def checkpoint(
+        self,
+        principal: str,
+        conversation_id: str,
+        segment_id: str,
+        *,
+        seen: Callable[[StopRead], None] | None = None,
+    ) -> None:
         """The save of a streaming segment: this instance's changed keys,
         fenced on `segment_id`. Runs before every actionable pause frame and
         before `done` (never `message.complete`), and once more, with the
@@ -1485,6 +1514,8 @@ class StudioStore:
         a `/composition` edit another instance made since this one last
         wrote the canvas reaches the stream's next frame. A transient
         database fault is retried until the lease's deadline (`_retrying`).
+        `seen` is told the Stop request each attempt's locked row holds
+        (`_fenced_save`).
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
@@ -1492,19 +1523,19 @@ class StudioStore:
             entry,
             conversation_id,
             lambda retried: self._fenced_save(
-                entry, conversation_id, segment_id, lambda _work: None, retried=retried
+                entry, conversation_id, segment_id, lambda _work: None, retried=retried, seen=seen
             ),
         )
 
     async def release(
         self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0
-    ) -> None:
+    ) -> StopRead | None:
         """The end-of-segment save: drop this segment's still-resuming
         pending entries, unless the stream stopped reading it while it ran
         (`ConversationState.unfinished_segment`), so a retry of the same
         answer carries the turn on; clear the segment if it is still ours; then
         `checkpoint`. Runs to the end even when the caller is cancelled
-        (`_run_to_completion`), since it runs in a `finally` on
+        (`run_to_completion`), since it runs in a `finally` on
         client-disconnect and generator-finaliser paths, where a disconnect
         cancels the task running it (`_unwind`'s `Task.cancel`). Cancelled
         mid-checkpoint, the segment would stay live until its TTL. The
@@ -1518,11 +1549,16 @@ class StudioStore:
         the timeout above) is logged, each as what it is, and swallowed. The segment
         then expires by its own TTL, which is what makes it safe to give up
         here.
+
+        Returns the Stop request the cleared lease held (`StopRead`), read
+        under the row lock in the transaction that clears it, so a Stop
+        either commits before that read and is returned here, or finds no
+        live lease. `None` when nothing was saved.
         """
         entry = self._runtime.get((principal, conversation_id))
         if entry is None or entry.state is None:
-            return
-        await _run_to_completion(
+            return None
+        return await run_to_completion(
             self._save_release(entry.state, principal, conversation_id, segment_id, timeout=timeout)
         )
 
@@ -1534,8 +1570,9 @@ class StudioStore:
         segment_id: str,
         *,
         timeout: float,
-    ) -> None:
+    ) -> StopRead | None:
         """`release`'s save, run as its own task."""
+        read: list[StopRead] = []
         try:
             async with asyncio.timeout(timeout):
                 if state.unfinished_segment != segment_id:
@@ -1543,7 +1580,8 @@ class StudioStore:
                 if state.segment is not None and state.segment.id == segment_id:
                     state.segment = None
                 try:
-                    await self.checkpoint(principal, conversation_id, segment_id)
+                    await self.checkpoint(principal, conversation_id, segment_id, seen=read.append)
+                    return read[-1] if read else None
                 except SegmentLost:
                     logger.warning(
                         "studio store release: conversation %s segment %s was already "
@@ -1573,6 +1611,7 @@ class StudioStore:
                 conversation_id,
                 timeout,
             )
+        return None
 
     def _lose_segment(self, state: ConversationState, principal: str, conversation_id: str) -> None:
         """A release saved nothing because the segment was lost or the
@@ -1607,7 +1646,7 @@ class StudioStore:
         anything but that cancellation, as `release`: a clear that cannot
         land is logged, and the lease then expires by its own TTL.
         """
-        await _run_to_completion(
+        await run_to_completion(
             self._drop_lease(principal, conversation_id, segment_id, timeout=timeout)
         )
 

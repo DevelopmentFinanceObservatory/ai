@@ -470,6 +470,11 @@ class ConversationState:
     # resuming under it, as a crash leaves them, so a retry of the same
     # answer carries the turn on. Not durable.
     unfinished_segment: str | None = None
+    # The Stop request this instance's stream acted on
+    # (`harness.turn.loop.Segment.stop_id`), which `StudioRunner._locked`
+    # compares with the one the release of the lease reads
+    # (`StudioStore.release`). Not durable.
+    stop_acted: str | None = None
     # The current turn's auto-add preference (delta 11); reset per turn.
     auto_add: bool = True
     # Digest entries for every component this conversation streamed,

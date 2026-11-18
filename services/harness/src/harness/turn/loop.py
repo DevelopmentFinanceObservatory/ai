@@ -143,12 +143,15 @@ class Answer:
 @dataclass
 class Segment:
     """One run of the loop under one lease: the cursor as last written, how
-    the run ended (`None` while it runs), and the `Paused` event of a pause
-    the segment is writing and has not yet reported."""
+    the run ended (`None` while it runs), the `Paused` event of a pause
+    the segment is writing and has not yet reported, and the Stop request
+    the segment last acted on (`stop_id`), which the release of its lease
+    compares with the one it reads (`harness.studio_store.StopRead`)."""
 
     cursor: Cursor
     outcome: Outcome | None = None
     pausing: Paused | None = None
+    stop_id: str | None = None
 
 
 # The attributes an exception sets to name the MCP call whose pinned timeout
@@ -633,7 +636,9 @@ async def run_segment[E](
     task of the segment running, and closes the turn `cancelled`. A renewal
     that reports a request the segment already acted on changes nothing, so
     a renewal retried after a lost acknowledgement neither drops a Stop nor
-    acts on it twice. A renewal that
+    acts on it twice. The segment records the request it acted on
+    (`Segment.stop_id`); one a renewal reads after the drive finished is not
+    acted on, and the release of the lease reads it. A renewal that
     finds the lease taken, or that keeps failing until the lease's deadline
     (`StudioStore.lease_deadline`, dated from the claim or the last renewal
     that landed), cancels the node and ends the segment
@@ -677,8 +682,6 @@ async def run_segment[E](
     )
     # Why the heartbeat cancelled the node, when it did.
     ended: list[Outcome] = []
-    # The Stop request the segment last acted on.
-    acted: str | None = None
 
     def end(outcome: Outcome) -> None:
         if outcome is Outcome.CANCELLED:
@@ -687,7 +690,6 @@ async def run_segment[E](
             ended.append(outcome)
 
     async def heartbeat() -> None:
-        nonlocal acted
         while True:
             await _next_beat(heartbeat_seconds, renew_now)
             try:
@@ -701,12 +703,19 @@ async def run_segment[E](
             if not renewal.held:
                 end(Outcome.LOST)
                 return
-            if renewal.stop_id is None or renewal.stop_id == acted:
+            if renewal.stop_id is None or renewal.stop_id == segment.stop_id:
                 continue
-            acted = renewal.stop_id
-            if not stop.take():
-                end(Outcome.CANCELLED)
+            if stop.take():
+                segment.stop_id = renewal.stop_id
+                continue
+            if task.done():
+                # The turn's last write landed before this renewal read the
+                # Stop, so the segment acts on none: the release of the
+                # lease reads it (`harness.studio_store.StopRead`).
                 return
+            segment.stop_id = renewal.stop_id
+            end(Outcome.CANCELLED)
+            return
 
     beat = asyncio.create_task(heartbeat())
     try:
