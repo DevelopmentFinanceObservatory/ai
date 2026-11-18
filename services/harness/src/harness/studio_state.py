@@ -1250,6 +1250,8 @@ def span_level(status: str) -> EventLevel:
     | before the stream ends       |             |                        |         |             |
     | `done` sent, a Stop before   | `done`      | `done`                 | DEFAULT | `done`      |
     | the stream ends              |             |                        |         |             |
+    | Turn recorded `done`, a Stop | `done`      | `done`                 | DEFAULT | `done`      |
+    | before `done` is sent        |             |                        |         |             |
     | Heartbeat, card write or     | transient   | the loss               | WARNING | `open`      |
     | card removal loss mid-run    |             |                        |         |             |
     | Stop mid-run, release saves  | `cancelled` | `cancelled`            | WARNING | `cancelled` |
@@ -1264,6 +1266,8 @@ def span_level(status: str) -> EventLevel:
     | `state_not_saved`)           |             |                        |         | or `open`   |
     |                              |             |                        |         | when        |
     |                              |             |                        |         | unsaved     |
+    | Frames end cancelled with    | error       | `failed`               | ERROR   | the code    |
+    | nothing cancelling them      |             |                        |         |             |
     | Client gone mid-run, while   | none        | `disconnected`         | WARNING | `cancelled` |
     | waiting or at a frame        |             |                        |         |             |
     | Client gone after the pause  | pause       | `paused`               | DEFAULT | `paused`    |
