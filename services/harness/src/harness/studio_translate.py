@@ -109,6 +109,7 @@ from harness.studio_state import (
     _PendingOption,
     _PendingQuestion,
     _wire_id,
+    mark_segment_ending,
 )
 from harness.studio_state import (
     land_component as state_land_component,
@@ -343,6 +344,7 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
     conversation.close_turn(
         final_text=conversation.turn_final_text or detail, error=error_code.value
     )
+    mark_segment_ending()
     return ErrorFrame(
         event="error",
         seq=conversation.next_seq(),
@@ -2800,6 +2802,7 @@ class _Translator:
         )
         self._record_chips(chips)
         self._conversation.close_turn(final_text=answer, match_notes=notes, basis_line=basis)
+        mark_segment_ending()
         frames.append(
             Suggestions(event="suggestions", seq=self._conversation.next_seq(), items=chips)
         )

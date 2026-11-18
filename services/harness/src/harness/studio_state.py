@@ -26,6 +26,7 @@ import re
 import uuid
 from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -1248,10 +1249,14 @@ def span_level(status: str) -> EventLevel:
     | `done` sent, release fails   |             |                        |         |             |
     | `done` sent, a loss armed    | `done`      | `done`                 | DEFAULT | `done`      |
     | before the stream ends       |             |                        |         |             |
+    | `done` recorded, its         | transient   | `transient_            | ERROR   | `done`      |
+    | checkpoint fails, release    |             | unavailable`           |         |             |
+    | saves                        |             |                        |         |             |
     | `done` sent, a Stop before   | `done`      | `done`                 | DEFAULT | `done`      |
     | the stream ends              |             |                        |         |             |
-    | Turn recorded `done`, a Stop | `done`      | `done`                 | DEFAULT | `done`      |
-    | before `done` is sent        |             |                        |         |             |
+    | `done` decided by the        | `done`      | `done`                 | DEFAULT | `done`      |
+    | segment, a Stop before       |             |                        |         |             |
+    | `done` is sent               |             |                        |         |             |
     | Heartbeat, card write or     | transient   | the loss               | WARNING | `open`      |
     | card removal loss mid-run    |             |                        |         |             |
     | Stop mid-run, release saves  | `cancelled` | `cancelled`            | WARNING | `cancelled` |
@@ -1266,8 +1271,8 @@ def span_level(status: str) -> EventLevel:
     | `state_not_saved`)           |             |                        |         | or `open`   |
     |                              |             |                        |         | when        |
     |                              |             |                        |         | unsaved     |
-    | Frames end cancelled with    | error       | `failed`               | ERROR   | the code    |
-    | nothing cancelling them      |             |                        |         |             |
+    | Frames end cancelled, the    | error       | `failed`               | ERROR   | the code    |
+    | segment's task uncancelled   |             |                        |         |             |
     | Client gone mid-run, while   | none        | `disconnected`         | WARNING | `cancelled` |
     | waiting or at a frame        |             |                        |         |             |
     | Client gone after the pause  | pause       | `paused`               | DEFAULT | `paused`    |
@@ -1291,6 +1296,32 @@ def span_level(status: str) -> EventLevel:
     | (`record_closed_turn_span`)  |             |                        |         |             |
     """
     return _SPAN_STATUS_LEVELS.get(status, "ERROR")
+
+
+@dataclass
+class EndingMark:
+    """Whether the running segment's own frames have decided how its stream
+    ends: they closed the turn on their way to `done` or a stream-fatal
+    frame. Set by `mark_segment_ending` and nowhere else, and read by
+    `harness.studio.StudioRunner._locked`, which ignores a Stop once it is
+    set."""
+
+    decided: bool = False
+
+
+# The running segment's `EndingMark`, set by `harness.studio.StudioRunner._locked`
+# for the frames it pulls.
+segment_ending: ContextVar[EndingMark | None] = ContextVar("segment_ending", default=None)
+
+
+def mark_segment_ending() -> None:
+    """Record that the running segment's frames decided how its stream
+    ends (`EndingMark`). Called where they close the turn: the translator's
+    finish, `harness.studio_translate._stream_fatal`, an Edit Card stream's
+    close, a rejected plan's stream, and a segment whose frames failed."""
+    mark = segment_ending.get()
+    if mark is not None:
+        mark.decided = True
 
 
 def stream_loss(exc: SegmentLost | DatabaseUnavailable) -> StreamLoss:

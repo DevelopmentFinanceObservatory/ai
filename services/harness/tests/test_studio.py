@@ -26,7 +26,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager, suppress
+from contextlib import aclosing, asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from types import SimpleNamespace
@@ -3992,6 +3992,15 @@ async def _stream_stopped_after_the_turn_is_recorded(
         return await _stream(client, "/api/studio/turn", _turn_body("hi"))
 
 
+async def _stream_done_checkpoint_fails(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    app = _app(_text("Hello."))
+    # The checkpoint before `done` fails with a fault no retry mends; the
+    # release's own checkpoint saves.
+    _fail_checkpoint(app.state.studio.store, RuntimeError("a lock timeout"))
+    async with _client(app) as client:
+        return await _stream(client, "/api/studio/turn", _turn_body("hi"))
+
+
 async def _stream_lost_after_the_pause_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[dict[str, Any]]:
@@ -4239,6 +4248,13 @@ _ENDING_FRAME_OF = {
             ("done", "DEFAULT"),
             "done",
             id="stop-after-the-turn-is-recorded-before-done",
+        ),
+        pytest.param(
+            _stream_done_checkpoint_fails,
+            "transient_unavailable",
+            ("transient_unavailable", "ERROR"),
+            "done",
+            id="done-recorded-its-checkpoint-fails-release-saves",
         ),
         pytest.param(
             _stream_lost_after_the_pause_frame,
@@ -9922,23 +9938,172 @@ async def test_a_stop_read_as_the_client_leaves_an_unsent_pause_closes_the_turn(
         await asyncio.Event().wait()
 
     ending = studio_module._StreamEnding()
+    yielded = asyncio.Event()
+
+    async def relayed() -> Any:
+        # `_locked`'s frames as the parked stream's task receives them.
+        async with aclosing(
+            studio._locked("u_a", CONVERSATION, conversation, segment_id, segment(), ending)
+        ) as locked:
+            async for frame in locked:
+                if isinstance(frame, PlanProposed):
+                    yielded.set()
+                yield frame
+
     stream = _sse_stream(
-        studio._locked("u_a", CONVERSATION, conversation, segment_id, segment(), ending),
-        conversation=conversation,
-        ending=ending,
-        heartbeat_seconds=0.02,
+        relayed(), conversation=conversation, ending=ending, heartbeat_seconds=0.02
     )
     assert (await anext(stream)).startswith("data: ")
     assert (await anext(stream)).startswith(": ka")
     go.set()
-    while ending._offered is None:
-        await asyncio.sleep(0.005)
-    await asyncio.sleep(0.02)  # the frame is yielded to the parked stream
+    await asyncio.wait_for(yielded.wait(), timeout=5)
     ending.read_stop("cancelled")
     await stream.aclose()
 
     assert studio.store.stored_turn("u_a", CONVERSATION) == "cancelled"
     assert not conversation.awaiting_answer
+
+
+async def test_a_stop_ends_a_resumed_segment_of_a_turn_already_recorded(
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The graph failed after the pause frame, so the turn is recorded while
+    its plan stays answerable. `/interrupt` resumes it, and a Stop mid-step
+    still ends that segment on `cancelled`: its own frames decided no
+    ending."""
+    hanging = _HangingSurface()
+    app = _app(*_plan(), tool_surface=hanging)
+    store = app.state.studio.store
+    async with _client(app) as client:
+        plan = _frame(await _stream(client, "/api/studio/turn", _turn_body("q")), "plan.proposed")
+        live = store.current(PRINCIPAL, CONVERSATION)
+        assert live is not None
+        live.close_turn(final_text="", error="capability_unavailable")
+        await store.save(PRINCIPAL, CONVERSATION)
+        assert live.turn_recorded and live.awaiting_answer
+        ended = _recording_span_ends(monkeypatch)
+        resumed = asyncio.ensure_future(
+            _stream(
+                client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+            )
+        )
+        await asyncio.wait_for(hanging.entered.wait(), timeout=5)
+        await client.post("/api/studio/cancel", json=_cancel_body(), headers=AUTH)
+        frames = await asyncio.wait_for(resumed, timeout=5)
+
+    assert _ending_frame(frames) == "cancelled"
+    assert ended == [("cancelled", "WARNING")]
+
+
+async def test_a_stop_taken_holds_when_the_frames_record_the_turn_as_they_unwind(
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Stop ends the frames, and they close the turn on their way out as
+    if they had finished. The Stop was taken when the relay broke on it, so
+    the stream still ends on `cancelled`."""
+    studio, conversation, segment_id = await _claimed_segment()
+    ended = _recording_span_ends(monkeypatch)
+
+    async def segment() -> Any:
+        yield MessageDelta(event="message.delta", seq=conversation.next_seq(), text="one")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            conversation.close_turn(final_text="one")
+            studio_state_module.mark_segment_ending()
+
+    stream = _segment_sse(studio, conversation, segment_id, segment(), heartbeat_seconds=0.02)
+    sent = [await anext(stream)]
+    _end_stream(conversation, "cancelled")
+
+    async def rest() -> list[str]:
+        return [chunk async for chunk in stream]
+
+    sent += await asyncio.wait_for(rest(), timeout=5)
+
+    assert _ending_frame(_data_frames(sent)) == "cancelled"
+    assert ended == [("cancelled", "WARNING")]
+
+
+@pytest.mark.parametrize(
+    ("before", "frames", "status", "stored"),
+    [
+        pytest.param("done", ["done"], "done", "done", id="after-done"),
+        pytest.param(
+            "pause",
+            ["plan.proposed", "error"],
+            "failed",
+            "cancelled",
+            id="after-a-pause-frame",
+        ),
+    ],
+)
+async def test_frames_that_end_cancelled_follow_the_ending_already_sent(
+    otlp_spans: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+    before: str,
+    frames: list[str],
+    status: str,
+    stored: str,
+) -> None:
+    """The frames end with a cancellation of their own after an ending
+    frame went out. After `done`, nothing more is sent and the span keeps
+    `done`. After a pause frame, the turn closes as a Stop closes it, with
+    no interrupt left to answer, before the stream-fatal frame."""
+    studio, conversation, segment_id = await _claimed_segment()
+    ended = _recording_span_ends(monkeypatch)
+
+    async def segment() -> Any:
+        if before == "done":
+            conversation.close_turn(final_text="Hello.")
+            yield Done(event="done", seq=conversation.next_seq(), trace_id=conversation.trace_id)
+        else:
+            conversation.pending["int_1"] = _PendingInterrupt(adk_id="adk_1", kind="plan")
+            yield PlanProposed(
+                event="plan.proposed",
+                seq=conversation.next_seq(),
+                interrupt_id="int_1",
+                plan_version_id="plan_1",
+                version=1,
+                title="Research plan",
+                steps=[],
+                actions=[],
+            )
+        raise asyncio.CancelledError
+
+    sent = _data_frames(
+        [chunk async for chunk in _segment_sse(studio, conversation, segment_id, segment())]
+    )
+
+    assert [frame["event"] for frame in sent] == frames
+    assert ended[-1][0] == status
+    assert studio.store.stored_turn("u_a", CONVERSATION) == stored
+    assert not conversation.awaiting_answer
+
+
+async def test_an_offered_loss_frame_keeps_blocking_a_stop_when_withdrawn() -> None:
+    """A loss frame offered and then left unsent stays offered: the segment
+    is another instance's to end, so a Stop read then leaves the live turn
+    as it was."""
+    ending = studio_module._StreamEnding()
+    frame = ErrorFrame(
+        event="error",
+        seq=0,
+        error=ToolError(
+            error=ErrorCode.TRANSIENT_UNAVAILABLE,
+            retry=RetryMode.RETRY_AFTER_DELAY,
+            detail="lost",
+            retry_after_seconds=30,
+        ),
+    )
+    ending.offer(frame, "segment_lost")
+    ending.withdraw()
+    ending.read_stop("cancelled")
+    assert not ending.stop_applies()
+
+    ending.offer(frame, "transient_unavailable")
+    ending.withdraw()
+    assert ending.stop_applies()
 
 
 async def test_a_stop_ends_the_stream_on_its_frame_when_closing_the_frames_raises(

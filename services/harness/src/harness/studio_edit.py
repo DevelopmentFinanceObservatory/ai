@@ -43,6 +43,7 @@ from harness.studio_state import (
     _replace_block,
     _turn_component_entry,
     drawn_series_ids,
+    mark_segment_ending,
 )
 from harness.studio_translate import (
     _RecordingExecutor,
@@ -164,6 +165,7 @@ async def _edit_flow(
     def _close(text: str) -> list[Any]:
         c.turn_final_text = text
         c.close_turn(final_text=text)
+        mark_segment_ending()
         return [
             MessageComplete(event="message.complete", seq=c.next_seq(), text=text),
             Suggestions(event="suggestions", seq=c.next_seq(), items=[]),

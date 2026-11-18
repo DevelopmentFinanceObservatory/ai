@@ -92,6 +92,7 @@ from harness.studio_state import (
     ClosedTurn,
     ConversationState,
     DatabaseUnavailable,
+    EndingMark,
     SegmentBusy,
     SegmentLost,
     StreamLoss,
@@ -101,7 +102,9 @@ from harness.studio_state import (
     _PendingInterrupt,
     _PendingQuestion,
     _tool_error_response,
+    mark_segment_ending,
     record_closed_turn_span,
+    segment_ending,
     stream_loss,
 )
 from harness.studio_store import (
@@ -671,10 +674,10 @@ async def _sse_stream(
                                 # reads its frames to their end.
                                 cancel_wait = reoffer_by = None
                                 if ending.final or (ending.status == "paused" and lost):
-                                    # The stream's ending frame went out: a
-                                    # later Stop or loss sends nothing and
-                                    # changes nothing. With no stream
-                                    # listening, `/cancel` takes its own path.
+                                    # The stream's ending frame went out
+                                    # first, and stands. The stream stops
+                                    # listening, so `/cancel` takes its own
+                                    # path.
                                     if conversation.cancel_event is armed_cancel:
                                         conversation.cancel_event = None
                                     continue
@@ -1227,8 +1230,8 @@ class StudioRunner:
         `transient_unavailable` frame, are numbered (reserved first for a Stop)
         before the release, which saves the turn as the Stop left it, and are
         sent after it. A Stop read while the release writes is applied the same
-        way once it has, with a save of its own (`_stop_frames`); a loss read
-        then changes nothing. A client that leaves before the stream sent an
+        way once it has, with a save of its own (`_stop_frames`); the turn
+        stays as released after a loss read then. A client that leaves before the stream sent an
         ending frame closes a running turn as `cancelled` before the release; a
         turn paused for an answer stays open.
 
@@ -1256,7 +1259,11 @@ class StudioRunner:
         )
 
         def stops() -> bool:
-            return ending.stop_applies(recorded=conversation.turn_recorded)
+            return ending.stop_applies()
+
+        # Set once the relay broke on a Stop or loss, and held, so it
+        # outlasts frames that record the turn as they unwind.
+        stop_taken = False
 
         reading: asyncio.Future[Any] | None = None
         try:
@@ -1276,12 +1283,16 @@ class StudioRunner:
                             ending.drop_stop()
                             conversation.cancel_event = None
                         if stops():
+                            stop_taken = True
                             break
+                        # The frames this pull runs mark the segment's ending
+                        # on it (`mark_segment_ending`).
+                        segment_ending.set(ending.mark)
                         pulling = asyncio.ensure_future(anext(checked))
                         while not pulling.done():
                             if ending.stop is not None:
-                                # Read, and it does not apply yet: the frames
-                                # are ending on their own.
+                                # Read while the frames end on their own:
+                                # they run on to their ending frame.
                                 await asyncio.wait({pulling})
                                 break
                             if reading is None:
@@ -1292,6 +1303,7 @@ class StudioRunner:
                             if reading.done():
                                 reading = None
                             if not pulling.done() and stops():
+                                stop_taken = True
                                 break
                         if not pulling.done():
                             # A Stop or loss ends the frames where they are.
@@ -1301,16 +1313,16 @@ class StudioRunner:
                         except StopAsyncIteration:
                             ran_out = True
                             break
-                        except asyncio.CancelledError:
+                        except asyncio.CancelledError as exc:
                             task = asyncio.current_task()
                             if task is not None and task.cancelling():
                                 raise
-                            # Nothing cancelled this segment: the frames
-                            # failed with a cancellation of their own.
+                            # The frames failed with a cancellation of their
+                            # own, this segment's task uncancelled.
                             pulling = None
                             ran_out = True
                             closing_failed = await self._frames_failed(
-                                principal, conversation_id, segment_id, conversation, ending
+                                principal, conversation_id, segment_id, conversation, ending, exc
                             )
                             for frame in closing_failed:
                                 yield frame
@@ -1319,10 +1331,9 @@ class StudioRunner:
                         yield item
                 finally:
                     if pulling is not None and not pulling.done():
-                        # Cancelled in a task of its own, so the frames
-                        # cannot hand the cancellation to this generator.
-                        # Frames that swallow it, or raise in its place, are
-                        # not relayed after it.
+                        # Cancelled in a task of its own, which keeps the
+                        # cancellation inside the frames. What they yield or
+                        # raise from here stays unrelayed.
                         cause = "a Stop" if stops() else "the client leaving"
                         try:
                             await _unwind(pulling)
@@ -1334,14 +1345,13 @@ class StudioRunner:
                                 conversation_id,
                                 cause,
                             )
-                    # An ending frame offered and not sent is not the
-                    # stream's ending.
+                    # An offered ending frame left unsent is withdrawn.
                     ending.withdraw()
                     if reading is not None:
                         await _unwind(reading)
             await _unwind(heartbeat)
             closing: list[Any] = []
-            if stops():
+            if stop_taken or stops():
                 stop_applied = True
                 closing = await self._stop_frames(
                     principal, conversation_id, segment_id, conversation, ending
@@ -1363,7 +1373,11 @@ class StudioRunner:
                     try:
                         await _unwind(heartbeat)
                     finally:
-                        if not stop_applied and ending.stop == "cancelled" and stops():
+                        if (
+                            not stop_applied
+                            and ending.stop == "cancelled"
+                            and (stop_taken or stops())
+                        ):
                             # A Stop the segment's exit kept from its own
                             # path still closes the turn.
                             _apply_stop(conversation)
@@ -1396,19 +1410,30 @@ class StudioRunner:
         segment_id: str,
         conversation: ConversationState,
         ending: _StreamEnding,
+        exc: asyncio.CancelledError,
     ) -> list[Any]:
         """The frames that end a stream whose frames failed with a
-        cancellation of their own, nothing having cancelled the segment
-        (an awaited future cancelled under them, say): the turn closed with
-        a stream-fatal frame (`_stream_fatal`), after a `failed` frame for
-        every open Activity line, its number reserved (logged when that
-        fails). The span ends `failed`, as for frames that ran out."""
+        cancellation of their own, the segment's task uncancelled (an
+        awaited future cancelled under them, say), by the rule every ending
+        follows. After `done` or a stream-fatal frame, it sends nothing and
+        keeps the status. Otherwise the turn closes with a stream-fatal frame
+        (`_stream_fatal`), after a `failed` frame for every open Activity
+        line, its number reserved (logged when that fails); a turn paused
+        on a frame already sent is first closed as a Stop closes it
+        (`_apply_stop`). The span ends `failed`, as for frames that ran
+        out."""
         logger.error(
-            "studio: conversation %s's frames ended cancelled with nothing cancelling them "
+            "studio: conversation %s's frames ended cancelled, the segment's task uncancelled "
             "(trace_id=%s)",
             conversation_id,
             conversation.trace_id,
+            exc_info=exc,
         )
+        if ending.final:
+            return []
+        ending.mark.decided = True
+        if ending.status == "paused":
+            _apply_stop(conversation)
         frames = _ending_frames(
             conversation,
             ending,
@@ -1417,8 +1442,8 @@ class StudioRunner:
         )
         try:
             await self.store.reserve_frames(principal, conversation_id, segment_id)
-        except Exception as exc:
-            _log_save_failure("frame reservation", conversation, segment_id, exc)
+        except Exception as reservation:
+            _log_save_failure("frame reservation", conversation, segment_id, reservation)
         return frames
 
     async def _stop_frames(
@@ -1522,9 +1547,9 @@ class _StreamEnding:
     turn record's vocabulary (`harness.studio_state.span_level`'s table),
     `None` while it sent none. Each ending frame is offered with its cause
     before it is relayed (`offer`), and `_sse_stream` sets `status` as that
-    frame goes out (`sent`). It is set on sending, and not where `_locked`
-    yields the frame, because `_sse_stream` can be closed at a heartbeat's
-    yield while the frame `_locked` yielded waits unread. `stop` is a Stop
+    frame goes out (`sent`). It is set on sending, since `_sse_stream` can
+    be closed at a heartbeat's yield while a frame `_locked` yielded waits
+    unread. `stop` is a Stop
     or a loss the stream read (`read_stop`), which `_locked` acts on, and
     `client_gone` a client that left. `open_steps` are the Activity lines
     the stream has sent open."""
@@ -1534,6 +1559,7 @@ class _StreamEnding:
     client_gone: bool = False
     open_steps: _OpenSteps = field(default_factory=_OpenSteps)
     stop_read: asyncio.Event = field(default_factory=asyncio.Event)
+    mark: EndingMark = field(default_factory=EndingMark)
     _offered: tuple[Any, str] | None = None
 
     def offer(self, frame: Any, status: str) -> None:
@@ -1548,8 +1574,14 @@ class _StreamEnding:
             self._offered = None
 
     def withdraw(self) -> None:
-        """Withdraw an offered ending frame that will not be relayed."""
-        self._offered = None
+        """Withdraw an offered ending frame that will not be relayed. An
+        offered loss frame stays: the segment is another instance's to end,
+        and it keeps blocking a Stop."""
+        if self._offered is not None and self._offered[1] not in (
+            "segment_lost",
+            "database_unavailable",
+        ):
+            self._offered = None
 
     @property
     def final(self) -> bool:
@@ -1568,15 +1600,15 @@ class _StreamEnding:
             self.final or (self.status == "paused" and self.stop != "cancelled")
         )
 
-    def stop_applies(self, *, recorded: bool) -> bool:
-        """Whether the Stop or loss read ends the segment now. Not once it
-        is spent (`stop_spent`), nor while the frames are ending on their
-        own: an offered ending frame waits to go out, or the turn is
-        `recorded` and its `done` or stream-fatal frame is on its way."""
+    def stop_applies(self) -> bool:
+        """Whether the Stop or loss read ends the segment now: one was read,
+        it came in time (`stop_spent`), and the frames are still running,
+        with no offered ending frame waiting to go out and no ending decided
+        by this segment's frames (`mark`)."""
         return (
             self.stop is not None
             and self._offered is None
-            and not recorded
+            and not self.mark.decided
             and not self.stop_spent()
         )
 
@@ -2390,6 +2422,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 async def _rejected() -> AsyncGenerator[Any]:
                     text = "Plan rejected."
                     conversation.close_turn(final_text=text)
+                    mark_segment_ending()
                     yield MessageComplete(
                         event="message.complete",
                         seq=conversation.next_seq(),
