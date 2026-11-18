@@ -33,11 +33,17 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator, Callable, Coroutine
-from contextlib import AbstractContextManager, aclosing, nullcontext, suppress
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
+from contextlib import (
+    AbstractContextManager,
+    aclosing,
+    asynccontextmanager,
+    nullcontext,
+    suppress,
+)
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 from common.telemetry import flush_telemetry
@@ -128,6 +134,7 @@ from harness.wire import (
     CompositionMutation,
     Done,
     ElicitationAnswer,
+    ElicitationRequest,
     ErrorCode,
     ErrorFrame,
     InterruptDecision,
@@ -580,6 +587,17 @@ async def _sse_stream(
     closed, and the segment's own `finally` discards its unsent step
     records.
 
+    An ending frame, once sent, fixes how the stream ended, with one
+    exception. After `done` or a stream-fatal error frame, a Stop or a
+    loss sends nothing and changes nothing; after a pause frame, a Stop
+    still ends the stream on `cancelled` and a loss changes nothing. A
+    disconnect at any point closes a running turn only while the stream has
+    sent no ending frame. Once the segment's release has started
+    (`_StreamEnding.releasing`), neither a Stop nor a disconnect touches
+    the live state, which the release may already have read: a Stop sends
+    the `cancelled` frame alone, and the turn stays as the release saves
+    it.
+
     A stream that has a `conversation` runs inside its segment's telemetry
     span (`ConversationState.in_turn_span`), on the turn's trace, so a turn
     resumed by a second request exports on the same trace, and the task
@@ -596,6 +614,7 @@ async def _sse_stream(
     turn_span: AbstractContextManager[None] = (
         conversation.in_turn_span() if conversation is not None else nullcontext()
     )
+    ending = ending or _StreamEnding()
     cancel_wait: asyncio.Future[Any] | None = None
     # The loop time by which a stopped switch must have ended the stream.
     reoffer_by: float | None = None
@@ -606,6 +625,12 @@ async def _sse_stream(
     # that one and not the event of a request that took the conversation after
     # `_locked` released it.
     armed_cancel: asyncio.Event | None = None
+    # The last ending frame this stream sent: a pause frame, or `done` or a
+    # stream-fatal error frame (`final`).
+    sent: Literal["pause", "final"] | None = None
+    # Whether the cancel branch unwound the segment, which ran its release.
+    unwound = False
+    next_frame: asyncio.Future[Any] | None = None
     if conversation is not None:
         armed_cancel = conversation.cancel_event = asyncio.Event()
         # A reason left by an earlier stream was aimed at that stream.
@@ -620,9 +645,9 @@ async def _sse_stream(
         try:
             async with aclosing(frames) as source:
                 iterator = source.__aiter__()
-                while True:
-                    next_frame = asyncio.ensure_future(anext(iterator))
-                    try:
+                try:
+                    while True:
+                        next_frame = asyncio.ensure_future(anext(iterator))
                         while True:
                             race = {next_frame, cancel_wait} if cancel_wait else {next_frame}
                             done, _ = await asyncio.wait(
@@ -665,12 +690,19 @@ async def _sse_stream(
                                     continue
                                 reason = conversation.cancel_reason
                                 lost = reason in ("segment_lost", "database_unavailable")
-                                if ending is not None:
-                                    # The branch's frame is the stream's
-                                    # ending, set before the unwind ends the
-                                    # segment's span.
-                                    ending.status = reason if lost else "cancelled"
-                                if not lost:
+                                if sent == "final" or (sent == "pause" and lost):
+                                    # The stream's ending frame went out: a
+                                    # later Stop or loss sends nothing and
+                                    # changes nothing, and the stream reads
+                                    # on to its end.
+                                    cancel_wait = reoffer_by = None
+                                    continue
+                                # The branch's frame is the stream's ending,
+                                # set before the unwind ends the segment's
+                                # span.
+                                ending.status = reason if lost else "cancelled"
+                                releasing = ending.releasing
+                                if not lost and not releasing:
                                     # Closed before the segment unwinds, so
                                     # its release saves the turn as stopped,
                                     # with no pause left to answer, as
@@ -680,7 +712,11 @@ async def _sse_stream(
                                         error=ErrorCode.CANCELLED.value,
                                     )
                                     conversation.pending.clear()
-                                await _unwind(next_frame)
+                                # The segment may finish its frames before
+                                # the cancellation reaches it.
+                                with suppress(StopAsyncIteration):
+                                    await _unwind(next_frame)
+                                unwound = True
                                 if lost:
                                     # Another instance took the segment over,
                                     # or this one could not reach the database
@@ -694,12 +730,21 @@ async def _sse_stream(
                                 stopped = failure_sentence(
                                     ErrorCode.CANCELLED, RetryMode.DO_NOT_RETRY
                                 )
-                                for closing in open_steps.close(conversation, detail=stopped):
-                                    yield _sse_data(closing)
+                                if releasing:
+                                    # The release may already have read the
+                                    # turn, so the live state is left as it
+                                    # read it: the `cancelled` frame alone
+                                    # goes out, numbered without advancing
+                                    # the turn's numbering.
+                                    seq = conversation.seq
+                                else:
+                                    for closing in open_steps.close(conversation, detail=stopped):
+                                        yield _sse_data(closing)
+                                    seq = conversation.next_seq()
                                 yield _sse_data(
                                     ErrorFrame(
                                         event="error",
-                                        seq=conversation.next_seq(),
+                                        seq=seq,
                                         error=ToolError(
                                             error=ErrorCode.CANCELLED,
                                             retry=RetryMode.DO_NOT_RETRY,
@@ -709,35 +754,49 @@ async def _sse_stream(
                                 )
                                 return
                             yield ": ka\n\n"
-                    except (asyncio.CancelledError, GeneratorExit):
-                        # CancelledError: the response task was cancelled.
-                        # GeneratorExit: the consumer closed us AT the heartbeat
-                        # yield above. Without unwinding here, aclosing(source)
-                        # would find the anext still running and raise. Either
-                        # way the client is gone. A running turn is recorded as
-                        # cancelled (a completed turn's close_turn already ran
-                        # and this is a no-op). A turn paused for an answer
-                        # stays open: its `plan.proposed` or elicitation frame
-                        # was sent, and `/interrupt` can still resume it.
-                        if conversation is not None and not conversation.awaiting_answer:
-                            conversation.close_turn(
-                                final_text=conversation.turn_final_text,
-                                error=ErrorCode.CANCELLED.value,
-                            )
-                        await _unwind(next_frame)
-                        raise
-                    try:
-                        frame = next_frame.result()
-                    except StopAsyncIteration:
-                        return
-                    if conversation is not None and isinstance(frame, ErrorFrame):
-                        closed = open_steps.close(conversation, detail=frame.error.detail)
-                        for closing in closed:
-                            yield _sse_data(closing)
-                        if closed:
-                            frame = frame.model_copy(update={"seq": conversation.next_seq()})
-                    open_steps.observe(frame)
-                    yield _sse_data(frame)
+                        try:
+                            frame = next_frame.result()
+                        except StopAsyncIteration:
+                            return
+                        if conversation is not None and isinstance(frame, ErrorFrame):
+                            closed = open_steps.close(conversation, detail=frame.error.detail)
+                            for closing in closed:
+                                yield _sse_data(closing)
+                            if closed:
+                                frame = frame.model_copy(update={"seq": conversation.next_seq()})
+                        open_steps.observe(frame)
+                        if isinstance(frame, (PlanProposed, ElicitationRequest)):
+                            sent = "pause"
+                        elif isinstance(frame, (Done, ErrorFrame)):
+                            sent = "final"
+                        yield _sse_data(frame)
+                except (asyncio.CancelledError, GeneratorExit):
+                    # CancelledError: the response task was cancelled while
+                    # this waited. GeneratorExit: the consumer closed us at a
+                    # yield, a frame's or a heartbeat's. Without unwinding
+                    # here, aclosing(source) would find the anext still
+                    # running and raise. Either way the client is gone. A
+                    # running turn is recorded as cancelled, before the
+                    # segment's release saves it. A stream that sent its
+                    # ending frame, or whose release already started, leaves
+                    # the turn as that frame or the release has it, and a turn
+                    # paused for an answer stays open: `/interrupt` can still
+                    # resume it.
+                    if (
+                        conversation is not None
+                        and sent is None
+                        and not unwound
+                        and not ending.releasing
+                        and not conversation.awaiting_answer
+                    ):
+                        conversation.close_turn(
+                            final_text=conversation.turn_final_text,
+                            error=ErrorCode.CANCELLED.value,
+                        )
+                    if next_frame is not None:
+                        with suppress(StopAsyncIteration):
+                            await _unwind(next_frame)
+                    raise
         finally:
             if cancel_wait is not None:
                 await _unwind(cancel_wait)
@@ -791,6 +850,24 @@ async def _unwind(pending: asyncio.Future[Any]) -> None:
     pending.cancel()
     with anyio.CancelScope(shield=True), suppress(asyncio.CancelledError):
         await pending
+
+
+@asynccontextmanager
+async def _closing(source: AsyncGenerator[Any], what: str) -> AsyncIterator[AsyncGenerator[Any]]:
+    """`aclosing(source)`, except that a close that raises while another
+    exception is leaving the block (most often the stream's cancellation)
+    is logged and dropped, so the exception in flight goes on and the stream
+    still unwinds to its ending frame. A close that raises on a clean exit
+    raises."""
+    try:
+        yield source
+    except BaseException:
+        try:
+            await source.aclose()
+        except Exception:
+            logger.exception("studio: closing %s failed while the stream was ending", what)
+        raise
+    await source.aclose()
 
 
 # The frames `StudioRunner._checkpointed` durably saves the conversation
@@ -1090,9 +1167,10 @@ class StudioRunner:
         segment, or cannot reach the database, ends `frames` with the same
         frame, which is relayed, its number reserved first, like any other;
         when that reservation fails too, the card write's frame goes out
-        alone, logged once. `frames` is closed whenever this stops relaying
-        it. This is the one interception point for every route this runs
-        under (`/turn`, its edit-card branch, and `/interrupt`).
+        alone, and the reservation's failure is logged with it. `frames` is
+        closed whenever this stops relaying it (`_closing`). This is the one
+        interception point for every route this runs under (`/turn`, its
+        edit-card branch, and `/interrupt`).
 
         Every ending frame this relays or builds sets `ending` to its cause
         before it goes out: `done` and `paused` for those frames once their
@@ -1114,7 +1192,7 @@ class StudioRunner:
 
         async def relayed() -> AsyncGenerator[Any]:
             nonlocal card_write_lost
-            async with aclosing(frames):
+            async with _closing(frames, "the segment's frames"):
                 try:
                     async for frame in frames:
                         yield frame
@@ -1122,14 +1200,18 @@ class StudioRunner:
                     card_write_lost = failed("card write", exc)
                     yield card_write_lost
 
-        async with aclosing(relayed()) as source:
+        async with _closing(relayed(), "the relayed frames") as source:
             async for frame in source:
                 try:
                     await self.store.reserve_frames(principal, conversation_id, segment_id)
                 except Exception as exc:
-                    # A card write that lost the segment has logged, reported
-                    # and built its frame already.
-                    yield frame if frame is card_write_lost else failed("frame reservation", exc)
+                    if frame is card_write_lost:
+                        # The card write that lost the segment has named the
+                        # stream's ending and built its frame already.
+                        _log_save_failure("frame reservation", conversation, segment_id, exc)
+                        yield frame
+                    else:
+                        yield failed("frame reservation", exc)
                     return
                 event = getattr(frame, "event", None)
                 outgoing = frame
@@ -1213,16 +1295,21 @@ class StudioRunner:
             self._heartbeat(principal, conversation_id, segment_id, conversation)
         )
         try:
-            async for frame in self._checkpointed(
-                principal, conversation_id, segment_id, conversation, frames, ending=ending
-            ):
-                yield frame
+            async with _closing(
+                self._checkpointed(
+                    principal, conversation_id, segment_id, conversation, frames, ending=ending
+                ),
+                "the segment's frames",
+            ) as checked:
+                async for frame in checked:
+                    yield frame
             ran_out = True
         finally:
             try:
                 await _unwind(heartbeat)
             finally:
                 try:
+                    ending.releasing = True
                     await self.store.release(principal, conversation_id, segment_id)
                 finally:
                     try:
@@ -1231,10 +1318,41 @@ class StudioRunner:
                         # (`_sse_stream`).
                         conversation.end_segment_span(
                             ending.status or ("failed" if ran_out else "disconnected"),
-                            stored=self.store.stored_turn(principal, conversation_id),
+                            stored=self._stored_turn(principal, conversation_id),
                         )
                     finally:
                         conversation.lock.release()
+
+    def _stored_turn(self, principal: str, conversation_id: str) -> str | None:
+        """`StudioStore.stored_turn`, or `None` (logged) when it fails, so
+        reading it never keeps the segment's span from ending."""
+        try:
+            return self.store.stored_turn(principal, conversation_id)
+        except Exception:
+            logger.exception(
+                "studio: could not read how conversation %s was stored", conversation_id
+            )
+            return None
+
+    def _segment_stream(
+        self,
+        principal: str,
+        conversation_id: str,
+        conversation: ConversationState,
+        segment_id: str,
+        frames: AsyncGenerator[Any],
+        *,
+        switch: bool = False,
+    ) -> AsyncGenerator[str]:
+        """The SSE stream of a claimed segment: `frames` under `_locked`,
+        relayed by `_sse_stream`, both sharing one `_StreamEnding`."""
+        ending = _StreamEnding()
+        return _sse_stream(
+            self._locked(principal, conversation_id, conversation, segment_id, frames, ending),
+            conversation=conversation,
+            switch=switch,
+            ending=ending,
+        )
 
 
 @dataclass
@@ -1244,9 +1362,11 @@ class _StreamEnding:
     table): set by `StudioRunner._checkpointed` for the frames it relays or
     builds and by `_sse_stream`'s cancel branch when it takes it, and read
     once, as the segment's span ends (`StudioRunner._locked`). `None` while
-    the stream chose none."""
+    the stream chose none. `releasing` is set by `_locked` as the segment's
+    release starts, after which the stream leaves the live state alone."""
 
     status: str | None = None
+    releasing: bool = False
 
 
 def _failure_status(conversation: ConversationState, frame: ErrorFrame) -> str:
@@ -1719,46 +1839,34 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # model's patch-or-recreate decision, and the platform write.
                 # It streams under the same segment the claim save above
                 # just persisted.
-                ending = _StreamEnding()
                 return StreamingResponse(
-                    _sse_stream(
-                        studio._locked(
-                            principal,
-                            body.conversation_id,
-                            conversation,
-                            segment_id,
-                            edit_frames(
-                                recorder=studio.recorder,
-                                edit_model=studio.edit_model,
-                                conversation=conversation,
-                                component_id=body.component_ref.component_id,
-                                message=body.message,
-                            ),
-                            ending,
+                    studio._segment_stream(
+                        principal,
+                        body.conversation_id,
+                        conversation,
+                        segment_id,
+                        edit_frames(
+                            recorder=studio.recorder,
+                            edit_model=studio.edit_model,
+                            conversation=conversation,
+                            component_id=body.component_ref.component_id,
+                            message=body.message,
                         ),
-                        conversation=conversation,
-                        ending=ending,
                     ),
                     media_type=SSE_MEDIA_TYPE,
                 )
             text = body.message if chip_label is None else f"Count {chip_label}."
             message = types.Content(role="user", parts=[types.Part.from_text(text=text)])
-            ending = _StreamEnding()
             return StreamingResponse(
                 studio._settling(
-                    _sse_stream(
-                        studio._locked(
-                            principal,
-                            body.conversation_id,
-                            conversation,
-                            segment_id,
-                            studio._frames(
-                                principal=principal, conversation=conversation, message=message
-                            ),
-                            ending,
+                    studio._segment_stream(
+                        principal,
+                        body.conversation_id,
+                        conversation,
+                        segment_id,
+                        studio._frames(
+                            principal=principal, conversation=conversation, message=message
                         ),
-                        conversation=conversation,
-                        ending=ending,
                     )
                 ),
                 media_type=SSE_MEDIA_TYPE,
@@ -2063,10 +2171,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     )
 
                 return StreamingResponse(
-                    _sse_stream(
-                        studio._locked(
-                            principal, body.conversation_id, conversation, segment_id, _rejected()
-                        )
+                    studio._segment_stream(
+                        principal, body.conversation_id, conversation, segment_id, _rejected()
                     ),
                     media_type=SSE_MEDIA_TYPE,
                 )
@@ -2145,21 +2251,15 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 message=message,
                 approving=approving,
             )
-            ending = _StreamEnding()
             return StreamingResponse(
                 studio._settling(
-                    _sse_stream(
-                        studio._locked(
-                            principal,
-                            body.conversation_id,
-                            conversation,
-                            segment_id,
-                            frames,
-                            ending,
-                        ),
-                        conversation=conversation,
+                    studio._segment_stream(
+                        principal,
+                        body.conversation_id,
+                        conversation,
+                        segment_id,
+                        frames,
                         switch=switching,
-                        ending=ending,
                     )
                 ),
                 media_type=SSE_MEDIA_TYPE,

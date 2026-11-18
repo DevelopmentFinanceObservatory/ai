@@ -91,7 +91,6 @@ from harness.studio_state import (
     _PendingOption,
     _PendingQuestion,
     _wire_id,
-    turn_status,
 )
 from harness.wire import CompositionManifest, PlanProposed
 
@@ -1626,14 +1625,21 @@ class StudioStore:
 
     def stored_turn(self, principal: str, conversation_id: str) -> str:
         """How the conversation's current turn stands as this instance last
-        saved it (`harness.studio_state.turn_status` of its baseline): `done`
-        or the recorded error code, `paused`, or `open`. A save that failed
-        leaves the baseline at the last one that committed."""
+        saved it, read from three fields of its baseline: `done` or the
+        error code the turn's record names once recorded, `paused` while a
+        pending interrupt awaits an answer (one not resuming under a
+        segment, as `ConversationState.awaiting_answer` has it), and `open`
+        otherwise. A save that failed leaves the baseline at the last one
+        that committed."""
         entry = self._runtime.get((principal, conversation_id))
-        saved = ConversationState(conversation_id=conversation_id)
-        if entry is not None:
-            _apply_delta(saved, entry.baseline)
-        return turn_status(saved)
+        baseline = entry.baseline if entry is not None else {}
+        turns = sum(1 for key in baseline if key.startswith(_TURN_ITEM_PREFIX))
+        if baseline.get(_KEY_TURN_RECORDED) and turns:
+            return baseline[f"{_TURN_ITEM_PREFIX}{turns - 1}"].get("error") or "done"
+        pending = baseline.get(_KEY_PENDING) or {}
+        if any(interrupt["resuming_segment"] is None for interrupt in pending.values()):
+            return "paused"
+        return "open"
 
     async def _save_release(
         self,

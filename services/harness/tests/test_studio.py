@@ -3673,6 +3673,34 @@ def _before_the_release(store: StudioStore, act: Callable[[], None]) -> None:
     store.release = release  # type: ignore[method-assign]
 
 
+def _as_the_heartbeat_stops(studio: Any, act: Callable[[], None]) -> None:
+    """Run `act` once the segment's frames have ended, as its heartbeat is
+    stopped and before its release starts, then give the stream a moment to
+    act on it."""
+    real = studio._heartbeat
+
+    async def heartbeat(*args: Any, **kwargs: Any) -> None:
+        try:
+            await real(*args, **kwargs)
+        except asyncio.CancelledError:
+            act()
+            await asyncio.sleep(0.05)
+            raise
+
+    studio._heartbeat = heartbeat
+
+
+def _lose_here(store: StudioStore) -> Callable[[], None]:
+    """A loss as the heartbeat reports it to the stream."""
+
+    def lose() -> None:
+        live = store.current(PRINCIPAL, CONVERSATION)
+        assert live is not None
+        studio_state_module._end_stream(live, "segment_lost")
+
+    return lose
+
+
 def _stop_here(store: StudioStore) -> Callable[[], None]:
     """A Stop as `/cancel` delivers it to the stream on this instance."""
 
@@ -3754,9 +3782,7 @@ async def _stream_loss_armed_after_done(
         # Armed once the release saved, as the stream is about to end on
         # the `done` it already sent.
         await real_release(*args, **kwargs)
-        live = store.current(PRINCIPAL, CONVERSATION)
-        assert live is not None
-        studio_state_module._end_stream(live, "segment_lost")
+        _lose_here(store)()
 
     store.release = release_then_lose  # type: ignore[method-assign]
     async with _client(app) as client:
@@ -3853,7 +3879,38 @@ async def _stream_stopped_after_the_pause_frame(
 ) -> list[dict[str, Any]]:
     app = _app(*_plan())
     store = app.state.studio.store
+    _as_the_heartbeat_stops(app.state.studio, _stop_here(store))
+    async with _client(app) as client:
+        return await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+
+
+async def _stream_stopped_while_the_release_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, Any]]:
+    app = _app(*_plan())
+    store = app.state.studio.store
     _before_the_release(store, _stop_here(store))
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+    live = store.current(PRINCIPAL, CONVERSATION)
+    assert live is not None
+    # The live state is the turn as the release saved it.
+    assert live.awaiting_answer and not live.turn_recorded
+    return frames
+
+
+async def _stream_stopped_after_done(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    app = _app(_text("Hello."))
+    _as_the_heartbeat_stops(app.state.studio, _stop_here(app.state.studio.store))
+    async with _client(app) as client:
+        return await _stream(client, "/api/studio/turn", _turn_body("hi"))
+
+
+async def _stream_lost_after_the_pause_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, Any]]:
+    app = _app(*_plan())
+    _as_the_heartbeat_stops(app.state.studio, _lose_here(app.state.studio.store))
     async with _client(app) as client:
         return await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
 
@@ -3914,6 +3971,24 @@ async def _stream_client_gone_mid_run(monkeypatch: pytest.MonkeyPatch) -> list[d
     resolver = _HangingResolver()
     app = _app(*_card(), resolver=resolver)
     return await _read_until(app, lambda frames: False, resolver.entered)
+
+
+async def _stream_client_gone_at_a_frame(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """The client takes the stream's first frame and leaves while the stream
+    waits at that frame's yield: the response's body is closed there, as
+    Starlette closes one it abandoned."""
+    app = _app(_text("Hello."))
+    response = await _turn_endpoint(app.state.studio)(
+        TurnRequest.model_validate(_turn_body("hi")), authorization=AUTH["Authorization"]
+    )
+    body = response.body_iterator
+    chunks: list[Any] = []
+    async for chunk in body:
+        chunks.append(chunk)
+        if await _sse_frames(chunks):
+            break
+    await body.aclose()
+    return await _sse_frames(chunks)
 
 
 async def _stream_client_gone_after_the_pause_frame(
@@ -4056,6 +4131,23 @@ _ENDING_FRAME_OF = {
             id="stop-after-the-pause-frame",
         ),
         pytest.param(
+            _stream_stopped_while_the_release_writes,
+            "cancelled",
+            ("cancelled", "WARNING"),
+            "paused",
+            id="stop-while-the-release-writes",
+        ),
+        pytest.param(
+            _stream_stopped_after_done, "done", ("done", "DEFAULT"), "done", id="stop-after-done"
+        ),
+        pytest.param(
+            _stream_lost_after_the_pause_frame,
+            "pause",
+            ("paused", "DEFAULT"),
+            "paused",
+            id="loss-after-the-pause-frame",
+        ),
+        pytest.param(
             _stream_failed_by_the_model,
             "capability_unavailable",
             ("capability_unavailable", "ERROR"),
@@ -4075,6 +4167,13 @@ _ENDING_FRAME_OF = {
             ("disconnected", "WARNING"),
             "cancelled",
             id="client-gone-mid-run",
+        ),
+        pytest.param(
+            _stream_client_gone_at_a_frame,
+            None,
+            ("disconnected", "WARNING"),
+            "cancelled",
+            id="client-gone-at-a-frame",
         ),
         pytest.param(
             _stream_client_gone_after_the_pause_frame,
@@ -7055,7 +7154,7 @@ async def test_a_second_stop_after_the_re_offered_plan_closes_the_turn_cancelled
     async with _client(app) as client:
         plan = await _plan_with_a_choice(app, client)
         conversation = store.current(PRINCIPAL, CONVERSATION)
-        _before_the_release(store, _stop_here(store))
+        _as_the_heartbeat_stops(app.state.studio, _stop_here(store))
         resumed = asyncio.ensure_future(
             _stream(client, "/api/studio/interrupt", _switch_body(plan))
         )
@@ -9187,9 +9286,10 @@ async def test_a_card_write_that_loses_the_segment_reserves_its_frame_s_number(
 ) -> None:
     """A card write in the relayed frames finds the database unreachable. Its
     stream-fatal frame goes out like any other, once its number lies inside
-    the segment's reservation, and the loss is logged and reported once, by
-    its cause. When that reservation finds the database unreachable too,
-    the card write's frame still goes out alone, logged and reported once."""
+    the segment's reservation, and the loss is logged once and names the
+    stream's ending by its cause. When that reservation finds the database
+    unreachable too, the card write's frame still goes out alone, and the
+    reservation's own failure is logged beside the loss."""
     studio = _app().state.studio
     conversation = await studio.store.create("u_a", CONVERSATION)
     segment_id = studio.store.claim_segment("u_a", CONVERSATION)
@@ -9220,7 +9320,130 @@ async def test_a_card_write_that_loses_the_segment_reserves_its_frame_s_number(
     ]
     assert reserved == [1]
     assert ending.status == "database_unavailable"
-    assert len(caplog.records) == 1
+    assert [record.getMessage().split(" ")[1] for record in caplog.records] == (
+        ["card", "frame"] if reservation_fails else ["card"]
+    )
+
+
+async def test_a_client_leaving_at_a_frame_closes_the_frames_before_the_release() -> None:
+    """The consumer closes `_locked` at a frame's yield. The segment's frames
+    are closed first, so their `finally` (`_frames`' drain of this
+    conversation's recorded steps) runs in the stream's own context before
+    the release starts and while the conversation lock is still held."""
+    studio = _app().state.studio
+    store = studio.store
+    conversation = await store.create("u_a", CONVERSATION)
+    await conversation.lock.acquire()
+    segment_id = store.claim_segment("u_a", CONVERSATION)
+    await store.save("u_a", CONVERSATION)
+    order: list[tuple[str, bool]] = []
+    real_release = store.release
+
+    async def release(*args: Any, **kwargs: Any) -> None:
+        order.append(("release", conversation.lock.locked()))
+        await real_release(*args, **kwargs)
+
+    store.release = release  # type: ignore[method-assign]
+
+    async def frames() -> Any:
+        try:
+            yield MessageDelta(event="message.delta", seq=0, text="one")
+            await asyncio.Event().wait()
+        finally:
+            order.append(("frames closed", conversation.lock.locked()))
+
+    stream = studio._locked("u_a", CONVERSATION, conversation, segment_id, frames())
+    await anext(stream)
+    await stream.aclose()
+
+    assert order == [("frames closed", True), ("release", True)]
+    assert not conversation.lock.locked()
+
+
+async def test_a_stored_turn_that_cannot_be_read_still_ends_the_segment_s_span(
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading how the turn was stored fails as the segment ends. The span
+    still ends, without `dfo.stored`, and the lock frees."""
+    studio = _app().state.studio
+    conversation = await studio.store.create("u_a", CONVERSATION)
+    await conversation.lock.acquire()
+    segment_id = studio.store.claim_segment("u_a", CONVERSATION)
+    await studio.store.save("u_a", CONVERSATION)
+    conversation.open_segment_span()
+    ended = _recording_span_ends(monkeypatch)
+
+    def unreadable(*args: Any) -> str:
+        raise RuntimeError("a baseline that does not parse")
+
+    studio.store.stored_turn = unreadable  # type: ignore[method-assign]
+
+    async def one_frame() -> Any:
+        yield MessageDelta(event="message.delta", seq=0, text="one")
+
+    async for _ in studio._locked("u_a", CONVERSATION, conversation, segment_id, one_frame()):
+        pass
+
+    assert ended == [("failed", "ERROR")]
+    (span,) = [span for span in otlp_spans.get_finished_spans() if span.name == "turn"]
+    assert "dfo.stored" not in (span.attributes or {})
+    assert not conversation.lock.locked()
+
+
+async def test_a_stop_ends_the_stream_on_its_frame_when_closing_the_frames_raises(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A Stop cancels the segment while it waits on a frame number, and the
+    segment's frames raise as they are closed. The close's exception is
+    logged and dropped, and the stream still ends on the `cancelled`
+    frame."""
+    studio = _app().state.studio
+    conversation = await studio.store.create("u_a", CONVERSATION)
+    await conversation.lock.acquire()
+    segment_id = studio.store.claim_segment("u_a", CONVERSATION)
+    await studio.store.save("u_a", CONVERSATION)
+    reserving = asyncio.Event()
+    reservations: list[int] = []
+
+    async def reserve(*args: Any, **kwargs: Any) -> None:
+        reservations.append(1)
+        if len(reservations) > 1:
+            reserving.set()
+            await asyncio.Event().wait()
+
+    studio.store.reserve_frames = reserve  # type: ignore[method-assign]
+
+    async def frames() -> Any:
+        try:
+            yield MessageDelta(event="message.delta", seq=conversation.next_seq(), text="one")
+            yield MessageDelta(event="message.delta", seq=conversation.next_seq(), text="two")
+        finally:
+            raise RuntimeError("cleanup failed")
+
+    ending = studio_module._StreamEnding()
+
+    async def read() -> list[str]:
+        return [
+            chunk
+            async for chunk in _sse_stream(
+                studio._locked("u_a", CONVERSATION, conversation, segment_id, frames(), ending),
+                conversation=conversation,
+                ending=ending,
+            )
+        ]
+
+    with caplog.at_level("ERROR", logger="harness.studio"):
+        reading = asyncio.ensure_future(read())
+        await asyncio.wait_for(reserving.wait(), timeout=5)
+        assert conversation.cancel_event is not None
+        conversation.cancel_reason = "cancelled"
+        conversation.cancel_event.set()
+        sent = await asyncio.wait_for(reading, timeout=5)
+
+    assert _ending_frame(await _sse_frames(sent)) == "cancelled"
+    assert ending.status == "cancelled"
+    assert any("closing" in record.getMessage() for record in caplog.records)
+    assert not conversation.lock.locked()
 
 
 async def test_a_failed_checkpoint_closes_the_frames_it_relayed() -> None:

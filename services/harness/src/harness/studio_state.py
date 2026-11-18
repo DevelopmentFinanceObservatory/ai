@@ -1077,7 +1077,8 @@ class ConversationState:
         `status` at the level `span_level` gives it, and the turn's message
         and, once the turn is recorded, its reply as the span's input and
         output. `stored`, the turn as this instance last saved it
-        (`turn_status`), goes on the span as `dfo.stored`. Returns whether a
+        (`harness.studio_store.StudioStore.stored_turn`), goes on the span as
+        `dfo.stored`. Returns whether a
         span was open to end, for the caller to flush.
         """
         span = self._telemetry_span
@@ -1217,7 +1218,7 @@ def span_level(status: str) -> EventLevel:
     (`ConversationState.end_segment_span`). A segment's status is the cause
     of the last ending frame its stream chose to send, in the turn record's
     vocabulary (`harness.studio.StudioRunner._locked`). `stored` is the turn
-    as this instance last saved it (`turn_status`), read after its release
+    as this instance last saved it (`StudioStore.stored_turn`), read after its release
     ran, whether or not the release saved. A release's own outcome is only
     logged.
 
@@ -1238,17 +1239,24 @@ def span_level(status: str) -> EventLevel:
     | `done` sent, release fails   |             |                        |         |             |
     | `done` sent, a loss armed    | `done`      | `done`                 | DEFAULT | `done`      |
     | before the stream ends       |             |                        |         |             |
+    | `done` sent, a Stop before   | `done`      | `done`                 | DEFAULT | `done`      |
+    | the stream ends              |             |                        |         |             |
     | Heartbeat, card write or     | transient   | the loss               | WARNING | `open`      |
     | card removal loss mid-run    |             |                        |         |             |
     | Stop mid-run, release saves  | `cancelled` | `cancelled`            | WARNING | `cancelled` |
     | Stop mid-run, release fails  | `cancelled` | `cancelled`            | WARNING | `open`      |
     | Stop after the pause frame   | pause, then | `cancelled`            | WARNING | `cancelled` |
     |                              | `cancelled` |                        |         |             |
+    | Stop while the release       | `cancelled` | `cancelled`            | WARNING | as the      |
+    | writes                       |             |                        |         | release     |
+    |                              |             |                        |         | saved it    |
+    | Loss after the pause frame   | pause       | `paused`               | DEFAULT | `paused`    |
     | Turn fails (model fault,     | error       | the recorded code      | ERROR   | the code,   |
     | `state_not_saved`)           |             |                        |         | or `open`   |
     |                              |             |                        |         | when        |
     |                              |             |                        |         | unsaved     |
-    | Client gone mid-run          | none        | `disconnected`         | WARNING | `cancelled` |
+    | Client gone mid-run, while   | none        | `disconnected`         | WARNING | `cancelled` |
+    | waiting or at a frame        |             |                        |         |             |
     | Client gone after the pause  | pause       | `paused`               | DEFAULT | `paused`    |
     | frame                        |             |                        |         |             |
     | Frames run out with no       | none        | `failed`               | ERROR   | as last     |
@@ -1277,15 +1285,6 @@ def stream_loss(exc: SegmentLost | DatabaseUnavailable) -> StreamLoss:
     ends its segment. Every place that ends a stream for either cause names
     it through this, so one cause gives one status."""
     return "segment_lost" if isinstance(exc, SegmentLost) else "database_unavailable"
-
-
-def turn_status(state: ConversationState) -> str:
-    """How `state`'s current turn stands: `done` or the error code its
-    record names once recorded, `paused` while it awaits an answer, and
-    `open` otherwise."""
-    if state.turn_recorded and state.turns:
-        return state.turns[-1].get("error") or "done"
-    return "paused" if state.awaiting_answer else "open"
 
 
 @dataclass(frozen=True)
@@ -1320,9 +1319,9 @@ def _recorded_reply(record: dict[str, Any]) -> str:
 
 def _end_stream(conversation: ConversationState, reason: Literal["cancelled"] | StreamLoss) -> None:
     """Arm `conversation.cancel_event` with `reason`, read back by
-    `harness.studio._sse_stream`'s cancel branch to pick the frame and by
-    `harness.studio.StudioRunner._locked` to name how a lost segment ended
-    (`stream_loss`). A no-op when no stream is currently armed to receive it
+    `harness.studio._sse_stream`'s cancel branch to pick the frame it sends
+    and the cause it names for the segment's span (`stream_loss` for a lost
+    segment). A no-op when no stream is currently armed to receive it
     (the segment ended some other way in the gap between the caller's check
     and this call)."""
     conversation.cancel_reason = reason
