@@ -2772,6 +2772,44 @@ async def test_an_answer_runs_on_the_cursor_read_after_its_claim(moved: str, str
     assert stored.pending[plan["interrupt_id"]].resuming_segment is None
 
 
+async def test_an_answer_whose_save_finds_the_conversation_moved_is_refused_to_reload() -> None:
+    """The answer's own save, after the claim's, finds the conversation
+    moved (only a takeover after the claim lapsed can do that): the answer
+    is refused with a 409 to reload, and nothing of it is kept."""
+    app = _app(*_plan(), tool_surface=ScriptedSurface())
+    store = app.state.studio.store
+    real_save = store.save
+    saves = 0
+
+    async def second_save_stale(*args: Any, **kwargs: Any) -> Any:
+        nonlocal saves
+        saves += 1
+        if saves == 2:
+            raise ConversationStale("moved")
+        return await real_save(*args, **kwargs)
+
+    async with _client(app) as client:
+        plan = _frame(
+            await _stream(client, "/api/studio/turn", _turn_body("q with forks")), "plan.proposed"
+        )
+        store.save = second_save_stale
+        refused = await client.post(
+            "/api/studio/interrupt",
+            json=_interrupt_body(plan["interrupt_id"], "approve"),
+            headers=AUTH,
+        )
+
+    assert refused.status_code == 409
+    assert (refused.json()["error"], refused.json()["retry"]) == (
+        "edit_conflict",
+        "refresh_then_retry",
+    )
+    stored = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert stored is not None and stored.segment is None
+    assert stored.approvals == []
+    assert stored.pending[plan["interrupt_id"]].resuming_segment is None
+
+
 async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable_answer() -> None:
     """A's resume of a plan approval crashes (`_approve_plan_then_hang`)
     strictly after `/interrupt`'s own save landed -- the segment claimed,

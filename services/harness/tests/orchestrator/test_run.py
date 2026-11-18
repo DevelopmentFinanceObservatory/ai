@@ -117,13 +117,14 @@ async def _run(
     prefix_cache: PrefixCache | None = None,
     tools: Any = None,
     seeded: str | None = None,
+    held: dict[str, Any] | None = None,
 ) -> tuple[list[Any], dict[str, Any]]:
     orchestrator = orchestrator_agent(
         tools
         if tools is not None
         else build_orchestrator_tools(resolver=searches or _Searches(), executor=_no_executor)
     )
-    state: dict[str, Any] = {"surface": "studio"}
+    state: dict[str, Any] = {"surface": "studio", **(held or {})}
     model = orchestrator_model(
         "gemini-test", client=scripted.client, budget=budget, prefix_cache=prefix_cache
     )
@@ -334,9 +335,14 @@ async def test_a_call_to_a_tool_the_agent_lacks_is_answered_with_the_tools_it_ha
 
 
 async def test_a_response_s_tool_answers_carry_the_state_its_calls_wrote() -> None:
+    """The event holds a copy of what the calls wrote: later changes to the
+    state, a block the calls wrote changed in place included, leave it as
+    sent. A spec block held before the response is shared, since a block is
+    replaced whole."""
     scripted = ScriptedGenai([reply(_SEARCH), reply(text_part("Done."))])
+    held = {"spec_id": "spec_held"}
 
-    events, state = await _run(scripted)
+    events, state = await _run(scripted, held={ORCHESTRATOR_SPECS_KEY: {"spec_held": held}})
 
     (answered,) = [e for e in events if isinstance(e, ToolsAnswered)]
     assert answered.state
@@ -345,9 +351,12 @@ async def test_a_response_s_tool_answers_carry_the_state_its_calls_wrote() -> No
     sent = json.dumps(answered.state, sort_keys=True)
     state["orchestrator:searches"].append({"written": "later"})
     state[ORCHESTRATOR_SPECS_KEY]["spec_later"] = {"written": "later"}
-    assert answered.state[ORCHESTRATOR_SPECS_KEY]
-    for block in state[ORCHESTRATOR_SPECS_KEY].values():
-        block["changed"] = "in place"
+    specs = answered.state[ORCHESTRATOR_SPECS_KEY]
+    assert specs["spec_held"] is held
+    wrote = [spec_id for spec_id in specs if spec_id != "spec_held"]
+    assert wrote
+    for spec_id in wrote:
+        state[ORCHESTRATOR_SPECS_KEY][spec_id]["changed"] = "in place"
     assert json.dumps(answered.state, sort_keys=True) == sent
 
 

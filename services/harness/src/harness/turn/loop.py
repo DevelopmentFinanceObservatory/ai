@@ -18,8 +18,8 @@ paused at a node that can no longer resume, closes the turn `abandoned` with
 a `TurnExpired` error, before any answer to it is accepted: no turn is
 carried across a graph change. A close that cannot be written is logged and
 leaves the turn running or paused as last written, for a Stop or the
-conversation's next turn to close; the segment ends with that status and
-still reports the error (`TurnFailed`).
+conversation's next turn to close; the segment ends `unclosed` and still
+reports the error (`TurnFailed`).
 
 A segment runs a node only on a cursor that is current (`TurnStore.load`).
 A crash leaves the cursor as last written. The segment that takes the turn
@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -117,12 +118,12 @@ class Graph[E]:
 
 class Outcome(StrEnum):
     """How a segment ended: the turn's closing status, `paused`, `lost`
-    when another instance took the conversation's lease, or `running` when
-    a node failed and the turn's close could not be written. A failed close
-    of a paused turn ends `paused`, the status the store holds."""
+    when another instance took the conversation's lease, or `unclosed` when
+    a node failed and the turn's close could not be written, which leaves
+    the turn running or paused as last written."""
 
     PAUSED = "paused"
-    RUNNING = TurnStatus.RUNNING.value
+    UNCLOSED = "unclosed"
     DONE = TurnStatus.DONE.value
     FAILED = TurnStatus.FAILED.value
     ABANDONED = TurnStatus.ABANDONED.value
@@ -198,8 +199,8 @@ async def _close_on_error(
     """Close the turn `status` on `error` at `node` and report `error`. A
     close the store refuses for any reason but those `_NOT_THE_TURNS` names
     is logged and leaves the turn as last written, running or paused, for a
-    Stop or the conversation's next turn to close: the segment ends with the
-    status the store holds, and `error` is still reported."""
+    Stop or the conversation's next turn to close: the segment ends
+    `unclosed`, and `error` is still reported."""
     try:
         segment.cursor = await store.finish(
             segment.cursor, segment_id=segment_id, status=status, error=failure(node, error)
@@ -208,7 +209,7 @@ async def _close_on_error(
         raise
     except Exception:
         logger.exception("turn %s: closing the turn %s at node %s failed", key, status, node)
-        segment.outcome = Outcome(segment.cursor.status.value)
+        segment.outcome = Outcome.UNCLOSED
         emit(TurnFailed(node=node, error=error))
         return segment
     segment.outcome = Outcome(status.value)
@@ -440,10 +441,12 @@ async def drive[E](
     cursor = segment.cursor
 
     while True:
+        # The node works on a copy, so whatever it changes in place, the
+        # cursor keeps the state as stored until a write stores the node's.
         ctx = NodeCtx[E](
             key=key,
             inputs=cursor.inputs,
-            state=cursor.state,
+            state=copy.deepcopy(cursor.state),
             transcript=transcript,
             emit=emit,
             stop=stop,

@@ -528,7 +528,7 @@ def store_search(
     skill_ids = [skill["id"] for skill in digest.get("skills") or []]
     observed_at = datetime.now(UTC)
     readings = []
-    found: dict[str, dict[str, Any]] = {}
+    found: dict[str, Mapping[str, Any]] = {}
     for index, part in enumerate(digest.get("part_digests") or []):
         reading = {
             key: value

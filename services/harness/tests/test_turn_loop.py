@@ -176,6 +176,49 @@ async def test_a_turn_writes_each_boundary_before_it_reports_it(
     assert [r.kind for r in await store.records(segment.cursor)] == [entries.USER, "response"]
 
 
+@pytest.mark.parametrize("ends", ["raises", "goes-on"])
+async def test_a_node_s_change_in_place_leaves_the_cursor_as_stored(
+    pg_engine: AsyncEngine, clock: StoreClock, ends: str
+) -> None:
+    """A node works on a copy of the state. One that changes a spec block in
+    place and raises leaves the closed cursor's state as stored; one that
+    puts a tuple where a list is stored and goes on hands the next node the
+    list a rerun would read."""
+    store, lease = TurnStore(pg_engine), await _instance(pg_engine, clock)
+    segment_id = await _claim(lease)
+    stored = {"spec_a": {"v": 1, "pair": [1, 2]}}
+    seen: list[Any] = []
+
+    async def seed(ctx: NodeCtx, node_input: Any) -> Next:
+        ctx.state[SPECS_KEY] = stored
+        return Next("next")
+
+    async def change(ctx: NodeCtx, node_input: Any) -> Next:
+        block = ctx.state[SPECS_KEY]["spec_a"]
+        if ends == "raises":
+            block["v"] = 2
+            raise RuntimeError("change broke")
+        block["pair"] = (1, 2)
+        return Next("next")
+
+    async def read(ctx: NodeCtx, node_input: Any) -> Next:
+        seen.append(ctx.state[SPECS_KEY]["spec_a"]["pair"])
+        return Next("done")
+
+    graph = Graph(
+        start="seed",
+        nodes={"seed": Node(run=seed), "change": Node(run=change), "read": Node(run=read)},
+        edges={("seed", "next"): "change", ("change", "next"): "read", ("read", "done"): END},
+    )
+    segment = await _segment(
+        store, lease, await _open(store, segment_id, graph), segment_id, graph, []
+    )
+
+    assert segment.cursor.state[SPECS_KEY] == stored
+    assert segment.cursor.spec_blocks == stored
+    assert seen == ([] if ends == "raises" else [[1, 2]])
+
+
 def _asking(calls: list[str]) -> Node:
     async def ask(ctx: NodeCtx, node_input: Any) -> Pause:
         calls.append("run")
@@ -936,9 +979,9 @@ async def test_a_close_that_cannot_be_written_still_reports_the_nodes_error(
     pg_engine: AsyncEngine, clock: StoreClock, paused: bool
 ) -> None:
     """The node's exception, or the expiry of a pause its node can no longer
-    resume, reaches the client, and the segment ends with the status the
-    store still holds: the turn stays open, as last written, for a Stop or
-    the conversation's next turn to close."""
+    resume, reaches the client, and the segment ends `unclosed`, never
+    `paused`: the turn stays open, running or paused as last written, for a
+    Stop or the conversation's next turn to close."""
     store, lease = _ClosesNothing(pg_engine), await _instance(pg_engine, clock)
     segment_id = await _claim(lease)
     refused = RuntimeError("plan_start broke")
@@ -969,7 +1012,7 @@ async def test_a_close_that_cannot_be_written_still_reports_the_nodes_error(
     assert isinstance(failed, TurnFailed)
     assert isinstance(failed.error, TurnExpired) if paused else failed.error is refused
     held = TurnStatus.PAUSED if paused else TurnStatus.RUNNING
-    assert segment.outcome == Outcome(held.value)
+    assert segment.outcome is Outcome.UNCLOSED
     assert (await _open_cursor(store)).status is held
 
 

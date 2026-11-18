@@ -6594,12 +6594,14 @@ def _scope_rank(block: Mapping[str, Any] | None) -> int:
 
 def with_blocks(
     held: Mapping[str, Mapping[str, Any]], blocks: Mapping[str, Mapping[str, Any]]
-) -> dict[str, dict[str, Any]]:
+) -> dict[str, Mapping[str, Any]]:
     """`held`, spec blocks by spec_id, with each of `blocks`, a newer answer,
     held for its spec_id: the newer answer holds it, and the held block's
-    scope content stands where it says more (`standing_block`)."""
+    scope content stands where it says more (`standing_block`). A held
+    block `blocks` does not answer is kept as the same object, since a
+    block is replaced whole, never changed in place."""
     return {
-        **{spec_id: dict(block) for spec_id, block in held.items()},
+        **held,
         **{
             spec_id: dict(standing_block(block, held.get(spec_id)))
             for spec_id, block in blocks.items()

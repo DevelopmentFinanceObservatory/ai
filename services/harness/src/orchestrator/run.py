@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from collections.abc import AsyncGenerator, MutableMapping, Sequence
+from collections.abc import AsyncGenerator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any, Literal
@@ -44,6 +44,7 @@ from harness.gemini_agent import (
     without_unsigned_thoughts,
 )
 from harness.gemini_wire import StreamResumedError, resumed_over_output
+from harness.graph.state import ORCHESTRATOR_SPECS_KEY
 from pydantic import BaseModel, SerializerFunctionWrapHandler, field_serializer, field_validator
 from pydantic_ai import (
     Agent,
@@ -268,9 +269,13 @@ async def run_orchestrator(
             usage_limits=NO_REQUEST_LIMIT,
             conversation_id=conversation_id,
         ) as run:
+            # The spec blocks before the current response, which its calls
+            # may replace (`_written_state`).
+            held = dict(deps.state.get(ORCHESTRATOR_SPECS_KEY) or {})
             async for node in run:
                 if Agent.is_model_request_node(node):
                     deps.view = RecordingState(deps.state)
+                    held = dict(deps.state.get(ORCHESTRATOR_SPECS_KEY) or {})
                     async with node.stream(run.ctx) as stream:
                         async for event in stream:
                             if (text := _text(event)) is not None:
@@ -291,7 +296,7 @@ async def run_orchestrator(
                     if answered:
                         yield ToolsAnswered(
                             answers=tuple(answered),
-                            state=_written_state(deps),
+                            state=_written_state(deps, held),
                         )
             result = run.result
     except Exception as exc:
@@ -363,11 +368,27 @@ def _text(event: object) -> str | None:
     return None
 
 
-def _written_state(deps: OrchestratorDeps) -> dict[str, Any]:
-    """A deep copy of each state key the response's calls wrote, for a
+def _written_state(deps: OrchestratorDeps, held: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of each state key the response's calls wrote, for a
     `ToolsAnswered` event that may wait in the translator's queue while
-    later calls change the state, in place or not."""
-    return {key: copy.deepcopy(deps.state[key]) for key in deps.view.written if key in deps.state}
+    later calls change the state. Each key is copied deep, except the spec
+    blocks: a block the calls wrote (one that is not the object `held`, the
+    blocks before the response, holds under its id) is copied deep, and the
+    rest are shared, since a block is replaced whole, never changed in place
+    (`harness.graph.state.stored_mapping`)."""
+    written: dict[str, Any] = {}
+    for key in deps.view.written:
+        if key not in deps.state:
+            continue
+        value = deps.state[key]
+        if key == ORCHESTRATOR_SPECS_KEY and isinstance(value, Mapping):
+            written[key] = {
+                spec_id: block if held.get(spec_id) is block else copy.deepcopy(block)
+                for spec_id, block in value.items()
+            }
+        else:
+            written[key] = copy.deepcopy(value)
+    return written
 
 
 def _answer(event: FunctionToolResultEvent, tools: Sequence[str]) -> types.FunctionResponse:

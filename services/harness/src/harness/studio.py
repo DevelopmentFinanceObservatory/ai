@@ -849,11 +849,10 @@ class StudioRunner:
                     yield _Stopped("segment_lost")
                 case Outcome.FAILED if not failed:
                     yield recorded_fatal(conversation, segment.cursor.error or {})
-                case _ if failed:
+                case Outcome.FAILED | Outcome.ABANDONED | Outcome.UNCLOSED:
                     # The translator sent the `TurnFailed` event's error
-                    # frame. A segment that ends `running` or `paused` here
-                    # could not write the turn's close, and the turn stays
-                    # open for a Stop or the next turn.
+                    # frame. An `unclosed` turn's close could not be
+                    # written, and it stays open for a Stop or the next turn.
                     pass
                 case _:
                     for frame in await translator.finish():
@@ -2033,12 +2032,21 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             try:
                 await studio.store.save(principal, body.conversation_id, work)
             except ConversationStale:
+                # The lease this request holds refuses every other save, so
+                # only a takeover after it lapsed moves the conversation
+                # here; nothing of the answer was stored.
                 studio.store.drop_draft(principal, body.conversation_id)
                 await _abandon_claim(
                     studio.store, principal, body.conversation_id, segment_id, lock
                 )
-                return _streaming_conflict_response(
-                    "another request already answered this interrupt"
+                return _tool_error_response(
+                    ToolError(
+                        error=ErrorCode.EDIT_CONFLICT,
+                        retry=RetryMode.REFRESH_THEN_RETRY,
+                        detail="the conversation changed before this answer was saved",
+                        fix="reload the conversation and answer what it now shows",
+                    ),
+                    status_code=409,
                 )
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None

@@ -306,11 +306,13 @@ async def _write_specs(conn: AsyncConnection, cursor: Cursor, specs: Specs) -> _
     for position, (spec_id, block) in enumerate(specs.items()):
         body = json.dumps(block, allow_nan=False)
         digests[spec_id] = digest = _spec_digest(body)
-        if cursor.spec_digests.get(spec_id) == digest and spec_id in cursor.spec_blocks:
+        if cursor.spec_digests.get(spec_id) == digest:
+            # `spec_blocks` holds a block for every digest the cursor holds.
             blocks[spec_id] = cursor.spec_blocks[spec_id]
+            if stored_at[spec_id] != position:
+                moved.append({"turn": cursor.id, "spec_id": spec_id, "seq": position})
         else:
             blocks[spec_id] = json.loads(body)
-        if cursor.spec_digests.get(spec_id) != digest:
             changed.append(
                 {
                     "turn": cursor.id,
@@ -320,8 +322,6 @@ async def _write_specs(conn: AsyncConnection, cursor: Cursor, specs: Specs) -> _
                     "digest": digest,
                 }
             )
-        elif stored_at.get(spec_id) != position:
-            moved.append({"turn": cursor.id, "spec_id": spec_id, "seq": position})
     if gone := [spec_id for spec_id in cursor.spec_digests if spec_id not in digests]:
         await conn.execute(
             text("DELETE FROM turn_specs WHERE turn = :turn AND spec_id = ANY(:gone)"),

@@ -1452,8 +1452,7 @@ class StudioStore:
                             text(
                                 "UPDATE conversations"
                                 f" SET lease_expires_at = {self._time_sql} + :ttl,"
-                                " lease_stop_id = CASE WHEN lease_cancel THEN 'stop_' ||"
-                                " left(replace(gen_random_uuid()::text, '-', ''), 16)"
+                                " lease_stop_id = CASE WHEN lease_cancel THEN :minted"
                                 " ELSE lease_stop_id END,"
                                 " lease_cancel = false"
                                 " WHERE principal = :principal"
@@ -1466,6 +1465,7 @@ class StudioStore:
                                 "conversation_id": conversation_id,
                                 "segment_id": segment_id,
                                 "ttl": SEGMENT_TTL_S,
+                                "minted": _wire_id("stop"),
                             },
                         )
                     ).first()
