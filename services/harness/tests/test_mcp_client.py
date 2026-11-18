@@ -1017,6 +1017,7 @@ class _CardLineages:
         for matches in (
             lambda card: component_id is not None and card.component_id == component_id,
             lambda card: frame is not None and card.frame == frame,
+            lambda card: frame is not None and card.requested == frame,
         ):
             found = next((card for card in latest if matches(card)), None)
             if found is not None:
@@ -1374,9 +1375,8 @@ async def test_a_card_on_a_retrieval_served_under_another_pair_restores_by_eithe
 ) -> None:
     """A retrieval minted with extra columns is named by its `frame_ref` and
     served under the manifest's own pair, which the platform draws the card
-    from. The card's row is keyed on the served pair, so a fresh executor
-    writing on either pair restores the card's lineage once the platform
-    names the served pair it draws from."""
+    from. The card's row keeps both, so a fresh executor writing on either
+    pair restores the card's lineage."""
     served = {"spec_id": "spec_" + "9" * 32, "content_version": "cv_" + "9" * 32}
     named = {"spec_id": served["spec_id"], "content_version": "cv_" + "a" * 32}
     citation = {"text": "src:9", "sources": [{"ref": "src:9", "label": "src:9"}]}
@@ -1423,6 +1423,7 @@ async def test_a_card_on_a_retrieval_served_under_another_pair_restores_by_eithe
         )
 
     assert stored.frame == (served["spec_id"], served["content_version"])
+    assert stored.requested == (named["spec_id"], named["content_version"])
     assert [outcome["outcome"] for outcome in redrawn] == ["ok", "ok"], redrawn
     for outcome in redrawn:
         assert (
@@ -1436,7 +1437,6 @@ async def test_a_card_on_a_retrieval_served_under_another_pair_restores_by_eithe
     [
         pytest.param("replayed", id="recreate-on-the-stored-intents-frame"),
         pytest.param("named", id="redraw-on-the-frame-the-first-create-named"),
-        pytest.param("unreplayed", id="create-drawn-on-the-named-frame-itself"),
     ],
 )
 async def test_a_rolling_recreate_on_a_fresh_executor_states_the_first_draws_sources_and_count(
@@ -1449,11 +1449,8 @@ async def test_a_rolling_recreate_on_a_fresh_executor_states_the_first_draws_sou
     executor, its provenance store empty, writes a card asking for R (an Edit
     Card recreate from the stored intent), which the rolling rules replay onto
     R2, or for N (a redraw from the canvas), replayed onto R again. It reads the first card's stored
-    lineage, read by the frame the card is drawn from, so the new card states
-    the same sources and indicator count. A card drawn on N itself, which no
-    stored card was drawn from, finds no lineage and is withheld, as with no
-    store: the first card's row holds R's lineage, which N's card must not
-    be assembled from."""
+    lineage before the write, so the new card states the same sources and
+    indicator count."""
     named = {"spec_id": "ops_" + "1" * 32, "content_version": "ocv_" + "1" * 32}
     replayed = {"spec_id": "ops_" + "2" * 32, "content_version": "ocv_" + "2" * 32}
     replayed_again = {"spec_id": "ops_" + "3" * 32, "content_version": "ocv_" + "3" * 32}
@@ -1465,22 +1462,14 @@ async def test_a_rolling_recreate_on_a_fresh_executor_states_the_first_draws_sou
     async def admit(self: RollingCards, args: dict[str, Any], **_: Any) -> AdmittedWrite:
         intent = args["intent"]
         frame = intent["frame_ref"]
-        if asked == "unreplayed" and admitted:
-            return AdmittedWrite(args=args)
-        admitted.append(frame)
         target = moves[(frame["spec_id"], frame["content_version"])]
         return AdmittedWrite(
             args={**args, "intent": {**intent, "frame_ref": target}}, replayed_from=dict(frame)
         )
 
-    admitted: list[dict[str, Any]] = []
     monkeypatch.setattr(RollingCards, "admit", admit)
     redraw_frame = replayed if asked == "replayed" else named
-    written_on = (
-        named
-        if asked == "unreplayed"
-        else moves[(redraw_frame["spec_id"], redraw_frame["content_version"])]
-    )
+    written_on = moves[(redraw_frame["spec_id"], redraw_frame["content_version"])]
     scripted_presentation_client(
         [
             _tool_result(
@@ -1524,10 +1513,6 @@ async def test_a_rolling_recreate_on_a_fresh_executor_states_the_first_draws_sou
         },
     )
 
-    if asked == "unreplayed":
-        assert redrawn["outcome"] == "refusal"
-        assert redrawn["refusal"]["code"] == "provenance_unavailable"
-        return
     assert redrawn["outcome"] == "ok", redrawn
     first_card, new_card = drawn_card["component"], redrawn["component"]
     assert [source["id"] for source in first_card["provenance"]["sources"]] == ["src:4", "src:5"]

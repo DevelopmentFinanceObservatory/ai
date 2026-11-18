@@ -71,12 +71,10 @@ from harness.conversation import (
 )
 from harness.decision_pick import is_decision_choice
 from harness.early_mint import EarlyMints
-from harness.graph.approve import cancel_offered
 from harness.graph.events import GraphEvent, StepProgress
 from harness.graph.interfaces import Executor
 from harness.graph.state import (
     APPLY_CHOICE_STATE_KEY,
-    APPROVE_PAUSE,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     TurnInput,
 )
@@ -1214,8 +1212,7 @@ async def _stop_turn_at(
     then stays open with a Stop live, so the next claimant closes it
     (`_act_on_stop`) and no later turn carries its runs on. A turn closed
     here ran no segment of its own, so its trace ends on a closing span
-    (`_record_closed`). A turn paused on a plan card has the card's early
-    retrievals cancelled (`harness.graph.approve.cancel_offered`).
+    (`_record_closed`).
 
     Raises:
         _ClaimLost: the claim lost to another request, the lease was taken
@@ -1254,17 +1251,6 @@ async def _stop_turn_at(
             )
     finally:
         await studio.store.drop_lease(principal, conversation_id, segment_id)
-    if (
-        studio.early_mints is not None
-        and cursor.pause is not None
-        and cursor.pause.kind == APPROVE_PAUSE
-    ):
-        # The plan card the turn paused on fetches nothing more for it.
-        cancel_offered(
-            studio.early_mints,
-            cursor.state,
-            conversation=ledger_conversation_id(principal, conversation_id),
-        )
     await _record_closed(conversation_id, closed)
     return None
 
@@ -1639,12 +1625,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # is recorded as its cursor holds it, as `StudioStore.load`
             # records one with no lease live. A turn the tables record as
             # open with no cursor closes on what the conversation holds.
-            # The conversation is read again only when the row moved since
-            # the load (`TurnLease.moved`). Every change is made on a working
-            # copy, which the save swaps into the live state once it commits,
-            # with the new turn's frame numbers reserved.
-            if lease.moved:
-                await studio.store.load(principal, body.conversation_id)
+            # The conversation is read again under the lease: an edit on
+            # another instance can change the canvas without moving the
+            # version. Every change is made on a working copy, which the save
+            # swaps into the live state once it commits, with the new turn's
+            # frame numbers reserved.
+            await studio.store.load(principal, body.conversation_id)
             work = studio.store.draft(principal, body.conversation_id)
             left_open = await studio.turns.open_cursor(principal, body.conversation_id)
             if left_open is not None:

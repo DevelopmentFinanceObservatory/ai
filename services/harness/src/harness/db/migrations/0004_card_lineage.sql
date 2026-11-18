@@ -7,11 +7,12 @@
 -- updated.
 --
 -- `spec_id` and `content_version` name the frame the platform's resolved
--- revision names, the one frame a row restores under, so no card is
--- assembled from another frame's lineage. `members` is the frame's lineage,
--- each retrieval's frame key and whole manifest
--- (`harness.provenance.CardLineage`), and `stat_var_count` the StatVar count
--- stored with it, null when none was.
+-- revision names, and `requested_spec_id` and `requested_content_version`
+-- the frame the write named: a rolling card's frame before its replay
+-- (`harness.rolling_cards`), or a retrieval's `frame_ref` beside the pair it
+-- is served under. `members` is the frame's lineage, each retrieval's frame
+-- key and whole manifest (`harness.provenance.CardLineage`), and
+-- `stat_var_count` the StatVar count stored with it, null when none was.
 -- `members` is `json` so a manifest keeps its text as written.
 --
 -- Rows are best effort, and a card can have none: one written before this
@@ -34,6 +35,8 @@ CREATE TABLE conversation_card_lineage (
     component_id text NOT NULL,
     spec_id text,
     content_version text,
+    requested_spec_id text,
+    requested_content_version text,
     members json NOT NULL,
     stat_var_count integer,
     created_at timestamptz NOT NULL DEFAULT now(),

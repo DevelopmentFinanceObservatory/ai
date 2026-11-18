@@ -874,28 +874,6 @@ async def test_the_stream_that_offers_a_card_closes_once_its_early_mints_are_pos
     assert _events(frames)[-1] == "plan.proposed"
 
 
-async def test_a_stop_on_a_turn_paused_at_a_plan_card_cancels_the_card_s_early_mints() -> None:
-    """The card's stream ends while its early call is still running. A Stop
-    then closes the turn paused on the card, and the call is cancelled, so
-    nothing fetches for the closed turn."""
-    sends = _HeldSends()
-    early = EarlyMints(send=sends, max_concurrent=4, settle_s=0.05)
-    app = _app(*_plan("q with forks"), tool_surface=ScriptedSurface(), early_mints=early)
-    async with _client(app) as client:
-        frames = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
-        assert _events(frames)[-1] == "plan.proposed"
-        (running,) = early._tasks
-        assert sends.sent and not running.done()
-
-        stop = await _post_stop(client)
-        await asyncio.wait({running}, timeout=2)
-        cancelled = running.cancelled()
-        sends.release.set()
-
-    assert stop.status_code == 204
-    assert cancelled
-
-
 async def test_the_stream_that_waits_on_early_mints_flushes_telemetry_after_they_end(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4454,30 +4432,6 @@ async def test_a_turn_that_fails_after_its_claim_leaves_the_paused_turn_s_frame_
 
     sent = [frame["seq"] for frame in (*first, *paused)]
     assert min(frame["seq"] for frame in resumed) > max(sent)
-
-
-async def test_a_turn_on_a_row_nothing_moved_reads_the_conversation_once(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A second `/turn` on a conversation whose row no one wrote since its
-    load reads the conversation once: the claim finds the row as loaded, so
-    the turn opens on that load."""
-    app = _app(_text("Hello."), _text("Again."))
-    store = app.state.studio.store
-    async with _client(app) as client:
-        await _stream(client, "/api/studio/turn", _turn_body("hi"))
-        loads: list[str] = []
-        load = store.load
-
-        async def counted(principal: str, conversation_id: str) -> Any:
-            loads.append(conversation_id)
-            return await load(principal, conversation_id)
-
-        monkeypatch.setattr(store, "load", counted)
-        second = await _stream(client, "/api/studio/turn", _turn_body("again"))
-
-    assert _events(second)[-1] == "done"
-    assert loads == [CONVERSATION]
 
 
 class _CallingSurface(ScriptedSurface):
