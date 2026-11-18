@@ -313,11 +313,14 @@ async def _commit_boundary(
     following: str | None,
     interrupt_id: str,
     ctx: NodeCtx[Any],
+    segment: Segment,
 ) -> Cursor:
-    """Write the boundary after `node` (`_write_boundary`), then run the
-    node's work after the commit (`_after_commit`). `drive` awaits the two
-    as one step, so a write that caught a cut and returned still runs the
-    work its commit is owed before the cut is raised again."""
+    """Write the boundary after `node` (`_write_boundary`), hold the written
+    cursor on `segment`, then run the node's work after the commit
+    (`_after_commit`). `drive` awaits the two as one step, so a write that
+    caught a cut and returned still runs the work its commit is owed before
+    the cut is raised again, and a cut during that work leaves `segment`
+    holding the cursor the write committed."""
     written = await _write_boundary(
         store,
         cursor,
@@ -329,6 +332,7 @@ async def _commit_boundary(
         interrupt_id=interrupt_id,
         ctx=ctx,
     )
+    segment.cursor = written
     await _after_commit(ctx, node)
     return written
 
@@ -656,6 +660,7 @@ async def drive[E](
                     following=following,
                     interrupt_id=interrupt_id,
                     ctx=ctx,
+                    segment=segment,
                 )
             )
         except _NOT_THE_TURNS:
@@ -762,8 +767,8 @@ async def _settle(
     boundary's write, which may have committed, so the turn is read back
     as stored. A turn the store closed keeps that outcome. A Stop closes
     any other `cancelled`, a pause the segment wrote included, since the
-    user stopped the turn and the work after the pause's write was cut off
-    as a Stop. After a lost lease a pause the segment was writing that
+    user stopped the turn; work the pause's commit started (early mints)
+    runs to completion and is discarded. After a lost lease a pause the segment was writing that
     committed keeps the turn paused, and its `Paused` is emitted here when
     the cut came before `drive` emitted it, so the client gets the
     question the store holds. A turn still running is left to the instance

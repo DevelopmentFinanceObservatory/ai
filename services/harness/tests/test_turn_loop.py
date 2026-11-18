@@ -1508,6 +1508,56 @@ async def test_a_cut_reports_no_node_done_for_a_move_another_segment_wrote(
     assert events == []
 
 
+class _ReadBackFails(TurnStore):
+    """A `TurnStore` whose `turn` reads fail once `failing` is set, as a
+    database the lease was lost to is unreachable for the read back."""
+
+    failing = False
+
+    async def turn(self, turn_id: int) -> Cursor:
+        if self.failing:
+            raise ConnectionError("the turn could not be read back")
+        return await super().turn(turn_id)
+
+
+async def test_a_lost_lease_during_after_commit_work_leaves_the_segment_on_the_committed_cursor(
+    pg_engine: AsyncEngine, clock: StoreClock
+) -> None:
+    """`work`'s move to `later` commits, and the lease is lost while its
+    work after the commit awaits. The read back that would settle the turn
+    fails, so the segment is lost holding the cursor the write committed,
+    whose records the next turn keeps."""
+    store = _ReadBackFails(pg_engine)
+    lease_a = _RenewalsFail(pg_engine, **clock.store_kwargs)
+    lease_b = await _instance(pg_engine, clock)
+    segment_id = await _claim(lease_a)
+
+    async def cut_while_working() -> None:
+        store.failing = True
+        await _make_cut(lease_a, lease_b, "lost")
+        await asyncio.sleep(3600)
+
+    async def work(ctx: NodeCtx, node_input: Any) -> Next:
+        ctx.after_commit(cut_while_working)
+        return Next("next")
+
+    async def later(ctx: NodeCtx, node_input: Any) -> Next:
+        return Next("done")
+
+    graph = Graph(
+        start="work",
+        nodes={"work": Node(run=work), "later": Node(run=later)},
+        edges={("work", "next"): "later", ("later", "done"): END},
+    )
+    opened = await _open(store, segment_id, graph)
+    segment = await asyncio.wait_for(_segment(store, lease_a, opened, segment_id, graph, []), 5)
+
+    assert segment.outcome is Outcome.LOST
+    committed = await TurnStore(pg_engine).turn(opened.id)
+    assert (committed.node, committed.version) == ("later", opened.version + 1)
+    assert (segment.cursor.node, segment.cursor.version) == ("later", committed.version)
+
+
 class _CloseFailsUnderACut(TurnStore):
     """A `TurnStore` whose first close cuts the segment through `cut`,
     catches the cancellation, and raises an error of its own, writing
