@@ -1365,7 +1365,7 @@ async def test_a_step_refused_after_its_own_call_succeeded_is_amended_to_failed(
 
     # Before the amendment: the raw call succeeded, and that is all
     # `_RecordingSurface` knows -- the exact defect.
-    assert [record.result["outcome"] for record in surface._records] == ["ok"]
+    assert [record.result["outcome"] for record in surface._records.items] == ["ok"]
 
     _mark_masked_step_failed(surface, outcome, tools={"debt": "get_data"})
 
