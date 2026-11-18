@@ -89,9 +89,10 @@ def _abandoned_streams() -> Iterator[Callable[[], list[AsyncGeneratorType]]]:
     taken over for closing: a generator dropped while suspended is handed to
     the loop, which closes it later on a task of its own. The loop takes over
     only the response's outermost generator: `_sse_stream` when a test serves
-    it bare, `StudioRunner._settling` when a Studio route wraps it, in which
-    case `_settling` closes `_sse_stream` itself on the loop's task. Only
-    generators first iterated inside the block are seen."""
+    it bare through a plain `StreamingResponse`. A Studio route's response
+    (`harness.studio._ClaimedStream`) closes its body itself as it ends, so
+    the loop takes over none of it. Only generators first iterated inside the
+    block are seen."""
     hooks = sys.get_asyncgen_hooks()
     handed_over: list[AsyncGeneratorType] = []
 
@@ -104,6 +105,26 @@ def _abandoned_streams() -> Iterator[Callable[[], list[AsyncGeneratorType]]]:
     try:
         responses = (_sse_stream.__code__, StudioRunner._settling.__code__)
         yield lambda: [g for g in handed_over if g.ag_code in responses]
+    finally:
+        sys.set_asyncgen_hooks(firstiter=hooks.firstiter, finalizer=hooks.finalizer)
+
+
+@contextmanager
+def _route_bodies() -> Iterator[Callable[[], list[AsyncGeneratorType]]]:
+    """Yield a function returning the Studio route bodies
+    (`StudioRunner._settling`) first iterated inside the block."""
+    hooks = sys.get_asyncgen_hooks()
+    started: list[AsyncGeneratorType] = []
+
+    def firstiter(generator: AsyncGeneratorType) -> None:
+        if generator.ag_code is StudioRunner._settling.__code__:
+            started.append(generator)
+        if hooks.firstiter is not None:
+            hooks.firstiter(generator)
+
+    sys.set_asyncgen_hooks(firstiter=firstiter, finalizer=hooks.finalizer)
+    try:
+        yield lambda: list(started)
     finally:
         sys.set_asyncgen_hooks(firstiter=hooks.firstiter, finalizer=hooks.finalizer)
 
@@ -338,8 +359,9 @@ async def _post_and_leave_at_the_pause(
     `how="cancel"` cancels the response task while the stream awaits its next
     frame (`asyncio.CancelledError` at the wait); `how="close"` lets the stream
     emit a heartbeat that never finishes sending, then cancels the response
-    task, so the event loop closes the abandoned generator at the heartbeat
-    `yield` (`GeneratorExit`)."""
+    task while the generator sits at the heartbeat `yield`, so the response
+    (`harness.studio._ClaimedStream`) closes it there as it ends
+    (`GeneratorExit`)."""
     raw = json.dumps(body).encode()
     sent = False
     disconnect = asyncio.Event()
@@ -435,19 +457,18 @@ async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_
         "message": "comprehensive overview of life expectancy in Kenya",
     }
 
-    with _abandoned_streams() as abandoned:
+    with _abandoned_streams() as abandoned, _route_bodies() as bodies:
         interrupt_id = await _post_and_leave_at_the_pause(app, body, how=how, at_pause=at_pause)
         principal = "u_" + hashlib.sha256(b"test").hexdigest()[:16]
         conversation = studio.store.current(principal, CONVERSATION)
         assert conversation is not None
         await _until(lambda: not conversation.lock.locked() and conversation.cancel_event is None)
         if how == "close":
-            await _until(
-                lambda: any(
-                    inspect.getasyncgenstate(generator) == inspect.AGEN_CLOSED
-                    for generator in abandoned()
-                )
-            )
+            # The response closed the body as it ended, in the request task,
+            # so the event loop was handed none of it to close.
+            (route_body,) = bodies()
+            assert inspect.getasyncgenstate(route_body) == inspect.AGEN_CLOSED
+            assert abandoned() == []
     assert conversation.awaiting_answer
 
     async with httpx2.AsyncClient(
