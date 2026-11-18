@@ -552,9 +552,11 @@ class ConversationState:
     # as `changed_from` for a choice that holds another label now.
     turn_choice_baseline: dict[str, str] = field(default_factory=dict)
     turn_recorded: bool = False
-    # The current turn's telemetry root span, opened by `begin_turn` on the
-    # freshly minted `trace_id`, kept open across a pause for approval, and
-    # closed by `close_turn`. Streams make it current with `in_turn_span`.
+    # This instance's telemetry span for the turn's current segment, on the
+    # turn's `trace_id`: opened by `begin_turn` or `ensure_turn_span`, and
+    # ended once when the segment ends on this instance (`end_segment_span`),
+    # so no span outlives the segment. Streams make it current with
+    # `in_turn_span`.
     # Excluded from repr so a log of the state doesn't dump SDK internals.
     _telemetry_span: Any = field(default=None, repr=False, compare=False)
     # Whether a `remove_cards` of this turn changed the canvas since the
@@ -841,9 +843,9 @@ class ConversationState:
         basis_line: str | None = None,
     ) -> None:
         """Append the turn's record, once -- the resume protocol can end a
-        turn from more than one code path. The turn's telemetry span ends
-        with the user's message and the reply as its input and output, and
-        at level `ERROR` naming the `error` code when there is one.
+        turn from more than one code path. The segment's telemetry span ends
+        when the segment does (`end_segment_span`), with the record's
+        message and reply as its input and output.
 
         `match_notes` (`harness.turn_records.loose_match_notes`) and
         `basis_line` (`harness.turn_records.basis_line`) are the text the code
@@ -854,14 +856,6 @@ class ConversationState:
         if self.turn_recorded:
             return
         self.turn_recorded = True
-        appended = [text for text in (match_notes, basis_line) if text]
-        end_turn_span(
-            self._telemetry_span,
-            request=self.turn_user_message,
-            response="\n\n".join([final_text, *appended]) if appended else final_text,
-            error=error,
-        )
-        self._telemetry_span = None
         record: dict[str, Any] = {
             "user": self.turn_user_message,
             "assistant": final_text,
@@ -1006,9 +1000,7 @@ class ConversationState:
     @property
     def awaiting_answer(self) -> bool:
         """Whether the turn is paused on an interrupt that `/interrupt` can
-        still answer. A paused turn keeps its telemetry span open until the
-        resumed segment ends it, `/cancel` closes it, or the next `begin_turn`
-        abandons it. Excludes an entry already resuming under a segment: a
+        still answer. Excludes an entry already resuming under a segment: a
         disconnect mid-resume closes the turn as cancelled rather than
         looking paused for `/interrupt` to answer again."""
         return any(p.resuming_segment is None for p in self.pending.values())
@@ -1073,42 +1065,40 @@ class ConversationState:
         self.turn_recorded = False
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
-    def end_turn_span_unrecorded(
-        self, status: str | None, *, level: EventLevel = "WARNING"
-    ) -> None:
-        """End the turn's telemetry span, when this instance holds one, with
-        `status` at `level`, without recording the turn: the stream lost its
-        segment (`segment_lost`), the request that opened the span claimed
-        nothing (`not_started`), or a turn begun on a working copy closed
-        this one (`abandoned`, as `close_turn` marks it). No `status` ends
-        it with none, for a turn another instance recorded. Whichever instance
-        goes on with the turn opens a span of its own (`ensure_turn_span`)."""
+    def end_segment_span(self, ending: SegmentEnding) -> bool:
+        """End this instance's span for the turn's segment, once, as the
+        segment ended (`segment_span_status`), with the turn's message and,
+        once the turn is recorded, its reply as the span's input and output.
+        Returns whether a span was open to end, for the caller to flush."""
+        span = self._telemetry_span
+        if span is None:
+            return False
+        self._telemetry_span = None
+        status, level = segment_span_status(self, ending)
         end_turn_span(
-            self._telemetry_span,
+            span,
             request=self.turn_user_message,
-            response=self.turn_final_text,
+            response=_recorded_reply(self.turns[-1]) if self.turn_recorded and self.turns else None,
             error=status,
             level=level,
         )
-        self._telemetry_span = None
+        return True
 
     def ensure_turn_span(self) -> None:
-        """Open a turn span on this conversation's `trace_id` when it holds
-        none. `begin_turn` opens the span for the instance that starts a
-        turn; an instance that resumes a paused turn through `/interrupt`
-        after loading it fresh from storage holds no span, since
-        `_telemetry_span` is process-local and never persists, so the
-        resumed segment would otherwise export on no trace. A no-op once
-        the instance already holds a span."""
+        """Open a span for the segment about to run on this conversation's
+        `trace_id` when this instance holds none. `begin_turn` opens the
+        first segment's; each later segment of the turn, the `/interrupt`
+        that resumes a pause on any instance, opens its own here, on the
+        same trace."""
         if self._telemetry_span is None:
             self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
     def in_turn_span(self) -> AbstractContextManager[None]:
-        """Make this turn's telemetry span current for a `with` block. Every
-        stream that runs graph or executor work for the turn (the `/turn`
-        stream and the `/interrupt` stream that resumes it) enters this, so
-        their spans and events share the one `turn` span and its trace. A
-        no-op when telemetry is off or the turn's span has closed."""
+        """Make this segment's telemetry span current for a `with` block.
+        Every stream that runs graph or executor work for the turn (the
+        `/turn` stream and the `/interrupt` stream that resumes it) enters
+        its own segment's span, and every segment's span is on the turn's
+        trace. A no-op when telemetry is off or the span has ended."""
         return use_turn_span(self._telemetry_span)
 
     def next_seq(self) -> int:
@@ -1170,6 +1160,46 @@ def make_canvas_cards(store: StudioStore) -> Any:
         return conversation.canvas_cards() if conversation is not None else []
 
     return canvas_cards
+
+
+# How a segment ended on this instance, as its release or the request that
+# claimed it saw: its release saved the turn (`saved`), another instance had
+# taken the segment over (`segment_lost`), the database stayed unreachable
+# (`database_unavailable`), the save failed otherwise or the segment never
+# started streaming (`failed`), or the claim never committed (`not_started`).
+type SegmentEnding = Literal[
+    "saved", "segment_lost", "database_unavailable", "failed", "not_started"
+]
+
+
+def segment_span_status(state: ConversationState, ending: SegmentEnding) -> tuple[str, EventLevel]:
+    """The status and level a segment's span ends with. A release that
+    saved names how the turn stood: recorded (`done`, or `cancelled`, or
+    `failed` for any other error the record names), paused on an answer
+    (`paused`), or left running because the stream lost its segment
+    (`segment_lost`). Any other ending names itself. Only a failure is at
+    level `ERROR`."""
+    status: str = ending
+    if ending == "saved":
+        if state.turn_recorded and state.turns:
+            error = state.turns[-1].get("error")
+            status = "done" if error is None else "cancelled" if error == "cancelled" else "failed"
+        elif state.awaiting_answer:
+            status = "paused"
+        elif state.cancel_reason == "segment_lost":
+            status = "segment_lost"
+        else:
+            status = "failed"
+    if status in ("done", "paused"):
+        return status, "DEFAULT"
+    return status, "ERROR" if status == "failed" else "WARNING"
+
+
+def _recorded_reply(record: dict[str, Any]) -> str:
+    """The reply a turn record holds: the model's answer and the text the
+    code appended to it, in that order (`ConversationState.close_turn`)."""
+    parts = [record.get("assistant") or "", record.get("match_notes"), record.get("basis_line")]
+    return "\n\n".join(part for part in parts if part)
 
 
 def _end_stream(conversation: ConversationState, reason: str) -> None:

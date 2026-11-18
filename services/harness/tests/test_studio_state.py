@@ -109,7 +109,9 @@ def test_a_turn_span_opens_on_the_new_trace_id_in_the_conversations_session(monk
     assert state._telemetry_span is fake_span
 
 
-def test_close_turn_ends_the_span_exactly_once(monkeypatch):
+def test_a_segment_s_span_ends_once_when_the_segment_ends(monkeypatch):
+    """Closing the turn records it and leaves the span to the segment's end,
+    which ends it once with the turn's question and reply."""
     fake_span = MagicMock()
     ended = []
     monkeypatch.setattr(
@@ -118,53 +120,77 @@ def test_close_turn_ends_the_span_exactly_once(monkeypatch):
     monkeypatch.setattr(
         studio_state,
         "end_turn_span",
-        lambda handle, *, request, response, error: ended.append(
-            (handle, request, response, error)
-        ),
+        lambda handle, **kwargs: ended.append((handle, kwargs)),
     )
 
     state = ConversationState(conversation_id=CONVERSATION)
     state.begin_turn()
     state.turn_user_message = "life expectancy in Kenya"
-    state.close_turn(final_text="done")
-    state.close_turn(final_text="done again")  # the resume protocol can call this twice
+    state.close_turn(final_text="done", basis_line="Source: WDI.")
+    assert ended == []
 
-    # The span ends once, carrying the turn's question and answer and no error.
-    assert ended == [(fake_span, "life expectancy in Kenya", "done", None)]
-    assert state._telemetry_span is None
+    assert state.end_segment_span("saved") is True
+    assert state.end_segment_span("saved") is False
+
+    assert ended == [
+        (
+            fake_span,
+            {
+                "request": "life expectancy in Kenya",
+                "response": "done\n\nSource: WDI.",
+                "error": "done",
+                "level": "DEFAULT",
+            },
+        )
+    ]
 
 
-def test_abandoned_turn_closes_its_span_before_the_next_one_opens(monkeypatch):
-    """A turn that never reached a terminal frame gets its span closed by
-    the NEXT turn's `begin_turn`, before that next turn's own span opens --
-    `begin_turn` mints the new `trace_id` first, but the abandoned-turn
-    cleanup must still act on the span belonging to the OLD turn."""
-    turn_1_span, turn_2_span = MagicMock(name="turn_1_span"), MagicMock(name="turn_2_span")
-    remaining = [turn_1_span, turn_2_span]
-    opened = []
-    ended = []
-    monkeypatch.setattr(
-        studio_state,
-        "start_turn_span",
-        lambda trace_id, *, session_id=None: (opened.append(trace_id), remaining.pop(0))[1],
-    )
-    monkeypatch.setattr(
-        studio_state,
-        "end_turn_span",
-        lambda handle, *, error, **_: ended.append((handle, error)),
-    )
-
+def _segment_state(*, recorded: str | None = None, paused: bool = False) -> ConversationState:
     state = ConversationState(conversation_id=CONVERSATION)
-    state.begin_turn()  # turn 1, never closed
-    turn_1_trace_id = state.trace_id
-    assert state._telemetry_span is turn_1_span
-    state.begin_turn()  # turn 2: triggers begin_turn's own abandoned-turn cleanup
-    turn_2_trace_id = state.trace_id
+    state.begin_turn()
+    if recorded is not None:
+        state.close_turn(final_text="", error=recorded or None)
+    if paused:
+        state.pending["int_1"] = _PendingInterrupt(adk_id="adk_1", kind="plan")
+    return state
 
-    assert opened == [turn_1_trace_id, turn_2_trace_id]
-    assert ended == [(turn_1_span, "abandoned")]
-    assert state._telemetry_span is turn_2_span
-    assert state.turns[-1] == {"user": "", "assistant": "", "error": "abandoned"}
+
+@pytest.mark.parametrize(
+    ("state", "ending", "status"),
+    [
+        pytest.param(_segment_state(recorded=""), "saved", ("done", "DEFAULT"), id="done"),
+        pytest.param(
+            _segment_state(recorded="cancelled"), "saved", ("cancelled", "WARNING"), id="cancelled"
+        ),
+        pytest.param(
+            _segment_state(recorded="state_not_saved"), "saved", ("failed", "ERROR"), id="failed"
+        ),
+        pytest.param(_segment_state(paused=True), "saved", ("paused", "DEFAULT"), id="paused"),
+        pytest.param(_segment_state(), "saved", ("failed", "ERROR"), id="left-running"),
+        pytest.param(
+            _segment_state(paused=True),
+            "segment_lost",
+            ("segment_lost", "WARNING"),
+            id="taken-over",
+        ),
+        pytest.param(
+            _segment_state(paused=True),
+            "database_unavailable",
+            ("database_unavailable", "WARNING"),
+            id="unreachable",
+        ),
+        pytest.param(_segment_state(), "failed", ("failed", "ERROR"), id="release-failed"),
+        pytest.param(
+            _segment_state(), "not_started", ("not_started", "WARNING"), id="never-claimed"
+        ),
+    ],
+)
+def test_a_segment_s_span_status_names_how_the_segment_ended(
+    state: ConversationState, ending: Any, status: tuple[str, str]
+) -> None:
+    """A release that saved names how the turn stood; any other ending names
+    itself. Only a failure is an error."""
+    assert studio_state.segment_span_status(state, ending) == status
 
 
 # --- land_component: the one place a card lands on the canvas -------------
@@ -3139,61 +3165,6 @@ async def test_release_swallows_a_takeover_and_still_never_raises(new_store, clo
     await store_a.release("principal", CONVERSATION, segment_id)  # must not raise
 
 
-def _recorded_span_ends(monkeypatch) -> list[str | None]:
-    """The status each turn span that ends carries, recorded in order."""
-    calls: list[str | None] = []
-
-    def recording_end(handle: Any, **kwargs: Any) -> None:
-        if handle is not None:
-            calls.append(kwargs.get("error"))
-
-    monkeypatch.setattr(studio_state, "end_turn_span", recording_end)
-    return calls
-
-
-@pytest.mark.parametrize(
-    ("how", "paused", "ended"),
-    [
-        ("taken-over", False, ["segment_lost"]),
-        ("taken-over", True, ["segment_lost"]),
-        ("unreachable", False, ["segment_lost"]),
-        ("unreachable", True, []),
-    ],
-)
-async def test_a_release_that_saved_nothing_ends_the_span_unless_the_pause_is_still_ours(
-    new_store, clock, monkeypatch, how: str, paused: bool, ended: list[str]
-) -> None:
-    """A's release saves nothing. Taken over by B, A's span ends as lost
-    whatever the turn's state: B goes on with it. With the database out of
-    reach, the lease is still A's, so a turn whose pause A stored keeps its
-    span for the answer that resumes it, and a running turn's ends."""
-    calls = _recorded_span_ends(monkeypatch)
-    store_a = new_store(clock=clock)
-    state = await store_a.create("principal", CONVERSATION)
-    segment_id = store_a.claim_segment("principal", CONVERSATION)
-    if paused:
-        state.pending["int_1"] = _PendingInterrupt(adk_id="adk_1", kind="plan")
-    await store_a.save("principal", CONVERSATION)
-    state._telemetry_span = object()
-
-    if how == "taken-over":
-        await clock.advance(studio_state.SEGMENT_TTL_S + 1)
-        store_b = new_store(clock=clock)
-        await store_b.load("principal", CONVERSATION)
-        store_b.claim_segment("principal", CONVERSATION)
-        await store_b.save("principal", CONVERSATION)
-    else:
-        await clock.set(store_a.lease_deadline("principal", CONVERSATION))
-
-        async def dropped(*args: Any, **kwargs: Any) -> None:
-            raise _connection_reset("UPDATE")
-
-        store_a._write = dropped
-    await store_a.release("principal", CONVERSATION, segment_id)
-
-    assert calls == ended
-
-
 async def test_a_release_that_saved_nothing_holds_the_lease_no_longer(new_store, clock) -> None:
     """The database is out of reach for the release, so the stored lease is
     still this instance's segment until its TTL. The instance gives it up
@@ -3217,31 +3188,6 @@ async def test_a_release_that_saved_nothing_holds_the_lease_no_longer(new_store,
     state.turn_final_text = "written without the lease"
     with pytest.raises(ConversationStale):
         await store.save("principal", CONVERSATION)
-
-
-@pytest.mark.parametrize(("recorded", "ended"), [(False, ["abandoned"]), (True, [None])])
-async def test_a_turn_begun_over_a_leftover_span_ends_it_as_the_loaded_turn_stood(
-    new_store, monkeypatch, recorded: bool, ended: list[str | None]
-) -> None:
-    """The live state holds a span from an earlier turn, and a claim save
-    begins a new turn over it. A loaded turn still open was abandoned, so
-    its span ends as such; one another instance recorded ends with no error
-    status."""
-    monkeypatch.setattr(studio_state, "start_turn_span", lambda *args, **kwargs: object())
-    calls = _recorded_span_ends(monkeypatch)
-    store = new_store()
-    state = await store.create("principal", CONVERSATION)
-    state.turn_index = 1
-    state.turn_recorded = recorded
-    await store.save("principal", CONVERSATION)
-    state._telemetry_span = object()
-
-    work = store.draft("principal", CONVERSATION)
-    work.begin_turn()
-    store.claim_segment("principal", CONVERSATION, work)
-    await store.save("principal", CONVERSATION, work)
-
-    assert calls == ended
 
 
 async def test_a_release_past_its_timeout_cancels_the_checkpoint_once(new_store) -> None:

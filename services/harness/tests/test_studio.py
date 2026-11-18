@@ -1110,13 +1110,14 @@ def otlp_spans(monkeypatch: pytest.MonkeyPatch) -> InMemorySpanExporter:
     return exporter
 
 
-async def test_a_turn_paused_for_approval_exports_as_one_trace(
+async def test_a_turn_paused_for_approval_exports_a_span_per_segment(
     otlp_spans: InMemorySpanExporter,
 ) -> None:
     """`/turn` and the `/interrupt` that resumes it are separate requests on
-    separate tasks. Spans and events made in the search of the first segment
-    and in the executor of the resumed one all nest under the one `turn`
-    span, whose `dfo.external_id` is the turn's wire `trace_id`."""
+    separate tasks, each a segment with a `turn` span of its own whose
+    `dfo.external_id` is the turn's wire `trace_id`. Spans and events made in
+    the search of the first segment nest under the first, and those made in
+    the executor of the resumed one under the second."""
 
     class ProbingSearch(CannedSearch):
         async def __call__(self, **kwargs: Any) -> dict[str, Any]:
@@ -1146,14 +1147,19 @@ async def test_a_turn_paused_for_approval_exports_as_one_trace(
         )
 
     spans = list(otlp_spans.get_finished_spans())
-    (turn,) = [span for span in spans if span.name == "turn"]
-    assert (turn.attributes or {})["dfo.external_id"] == _frame(second, "done")["trace_id"]
-    assert {span.context.trace_id for span in spans} == {turn.context.trace_id}
-    assert len([span for span in spans if span.name == "resolve_probe"]) == 1
+    paused, resumed = [span for span in spans if span.name == "turn"]
+    trace_id = _frame(second, "done")["trace_id"]
+    assert [(turn.attributes or {})["dfo.external_id"] for turn in (paused, resumed)] == [
+        trace_id,
+        trace_id,
+    ]
+    (resolve_probe,) = [span for span in spans if span.name == "resolve_probe"]
+    assert resolve_probe.context.trace_id == paused.context.trace_id
     executor_probes = [span for span in spans if span.name == "executor_probe"]
     assert len(executor_probes) == 2  # describe_frame, then write_component
-    # `turn` is the only root: the probes of both segments sit below it.
-    assert [span.name for span in spans if span.parent is None] == ["turn"]
+    assert {span.context.trace_id for span in executor_probes} == {resumed.context.trace_id}
+    # Each segment's `turn` is a root, with that segment's probes below it.
+    assert [span.name for span in spans if span.parent is None] == ["turn", "turn"]
     assert [event.name for event in executor_probes[-1].events] == ["executor.probed"]
 
 
@@ -1178,11 +1184,12 @@ async def test_every_stream_flushes_telemetry_before_the_response_ends(
     assert flushes == ["flush", "flush"]  # the rejecting stream
 
 
-async def test_stopping_a_paused_turn_ends_its_span_and_flushes_after_it(
+async def test_stopping_a_paused_turn_leaves_no_span_to_end(
     otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A paused turn's `turn` span stays open, and `/cancel` ends it with no
-    stream left to flush it, so the route flushes once the span has ended."""
+    """The segment that paused ended and exported its span as its stream
+    ended, so the `/cancel` that closes the paused turn has none to end or
+    export."""
     finished_at_flush: list[list[str]] = []
 
     async def flush() -> None:
@@ -1193,7 +1200,7 @@ async def test_stopping_a_paused_turn_ends_its_span_and_flushes_after_it(
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         assert len(finished_at_flush) == 1  # the stream that paused
-        assert "turn" not in finished_at_flush[0]
+        assert "turn" in finished_at_flush[0]
 
         cancel = await client.post(
             "/api/studio/cancel",
@@ -1202,8 +1209,8 @@ async def test_stopping_a_paused_turn_ends_its_span_and_flushes_after_it(
         )
 
     assert cancel.status_code == 204
-    assert len(finished_at_flush) == 2
-    assert "turn" in finished_at_flush[1]
+    assert len(finished_at_flush) == 1
+    assert [span.name for span in otlp_spans.get_finished_spans()].count("turn") == 1
 
 
 async def test_cancelling_an_idle_conversation_flushes_nothing(
@@ -2251,9 +2258,8 @@ async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claim
 ) -> None:
     """A leftover per-turn session cannot be replaced after the claim save
     landed, so `/turn` fails before its stream starts. The lock and the
-    segment it claimed are both released, the instance's live state goes
-    back to the row as stored, its turn span stays open for the next turn
-    to close as abandoned, and the next `/turn` is accepted."""
+    segment it claimed are both released, the claimed segment's span ends
+    `failed` and is exported, and the next `/turn` is accepted."""
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
@@ -2277,14 +2283,14 @@ async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claim
         live = store.current(PRINCIPAL, CONVERSATION)
         assert (live.turn_index, live.turn_recorded, live.segment) == (1, False, None)
         store.claim_segment(PRINCIPAL, CONVERSATION)  # not refused as busy
-        assert otlp_spans.get_finished_spans() == ()
+        assert [span.name for span in otlp_spans.get_finished_spans()] == ["turn"]
+        assert live._telemetry_span is None
         stored = await store.load(PRINCIPAL, CONVERSATION)
         assert stored is not None and stored.segment is None
         app.state.studio._replace_leftover_session = replace
         frames = await _stream(client, "/api/studio/turn", _turn_body("hi again"))
 
     assert _events(frames)[-1] == "done"
-    # The abandoned turn's span, ended by the next turn's begin, then its own.
     assert [span.name for span in otlp_spans.get_finished_spans()] == ["turn", "turn"]
 
 
@@ -2395,12 +2401,12 @@ async def test_a_turn_whose_session_exists_while_adk_moved_deletes_nothing_and_a
 
 
 async def test_a_failure_before_a_resume_streams_keeps_the_answer_for_a_same_answer_retry(
-    monkeypatch: pytest.MonkeyPatch,
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`/interrupt` fails after its claim save, before its stream starts:
     only the lease is dropped, so the same answer retried at once claims
-    and resumes the turn, and the pause survives. The instance forgets the
-    state it changed and never saved."""
+    and resumes the turn, and the pause survives. The failed segment's span
+    ends `failed` and is exported before the request ends."""
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
@@ -2422,10 +2428,19 @@ async def test_a_failure_before_a_resume_streams_keeps_the_answer_for_a_same_ans
             def _boom(*args: Any, **kwargs: Any) -> Any:
                 raise RuntimeError("answer lookup failed")
 
+            ended = _recording_span_ends(patch)
+            flushed: list[list[tuple[str | None, str]]] = []
+
+            async def flush() -> None:
+                flushed.append(list(ended))
+
+            patch.setattr(studio_module, "flush_telemetry", flush)
             patch.setattr("harness.studio._given_answers", _boom)
             with pytest.raises(RuntimeError, match="answer lookup failed"):
                 await _stream(client, "/api/studio/interrupt", body)
 
+        assert ended == [("failed", "ERROR")]
+        assert flushed == [[("failed", "ERROR")]]
         assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
         assert store.current(PRINCIPAL, CONVERSATION).segment is None
         stored = await store.load(PRINCIPAL, CONVERSATION)
@@ -3494,13 +3509,8 @@ async def test_a_raise_right_after_an_answer_s_claim_save_drops_its_lease(
     assert _events(frames)[-1] == "done"
 
 
-async def test_a_turn_over_a_paused_one_ends_the_paused_turn_s_span(
-    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A new `/turn` abandons the turn paused before it: the paused turn's
-    span ends as `abandoned`, at error level as `close_turn` marks it, and
-    the new turn's span ends with the new turn."""
-    app = _app(*_plan(), _text("Hello."), tool_surface=ScriptedSurface())
+def _recording_span_ends(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str | None, str]]:
+    """The status and level of each turn span that ends, in order."""
     ended: list[tuple[str | None, str]] = []
     real_end = studio_state_module.end_turn_span
 
@@ -3510,14 +3520,71 @@ async def test_a_turn_over_a_paused_one_ends_the_paused_turn_s_span(
         real_end(handle, **kwargs)
 
     monkeypatch.setattr(studio_state_module, "end_turn_span", recording_end)
+    return ended
+
+
+async def test_a_release_that_times_out_ends_the_segment_s_span(
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The release's save hangs past its timeout, so nothing is saved; the
+    segment's span ends `failed` all the same, and the lock is released."""
+    studio = _app().state.studio
+    store = studio.store
+    conversation = await store.create("u_a", CONVERSATION)
+    await conversation.lock.acquire()
+    segment_id = store.claim_segment("u_a", CONVERSATION)
+    await store.save("u_a", CONVERSATION)
+    conversation.ensure_turn_span()
+    ended = _recording_span_ends(monkeypatch)
+    real_release = store.release
+
+    async def hanging_checkpoint(*args: Any, **kwargs: Any) -> None:
+        await asyncio.Event().wait()
+
+    async def quick_release(*args: Any, **kwargs: Any) -> Any:
+        return await real_release(*args, timeout=0.05)
+
+    store.checkpoint = hanging_checkpoint  # type: ignore[method-assign]
+    store.release = quick_release  # type: ignore[method-assign]
+
+    async def frames() -> Any:
+        yield MessageDelta(event="message.delta", seq=0, text="one")
+
+    async for _ in studio._locked("u_a", CONVERSATION, conversation, segment_id, frames()):
+        pass
+
+    assert ended == [("failed", "ERROR")]
+    assert not conversation.lock.locked()
+
+
+async def test_a_paused_segment_s_span_ends_paused_and_the_answer_opens_its_own(
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The segment that pauses for approval ends its span as `paused`, and
+    exports it before its stream ends. The answer's segment opens a span of
+    its own on the same trace id and ends it `done`."""
+    app = _app(*_plan())
+    ended = _recording_span_ends(monkeypatch)
+    exported_at_flush: list[list[str]] = []
+
+    async def flush() -> None:
+        exported_at_flush.append(
+            [(span.attributes or {})["dfo.external_id"] for span in otlp_spans.get_finished_spans()]
+        )
+
+    monkeypatch.setattr(studio_module, "flush_telemetry", flush)
 
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
-        await _stream(client, "/api/studio/turn", _turn_body("hi"))
+        plan = _frame(first, "plan.proposed")
+        assert ended == [("paused", "DEFAULT")]
+        second = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
+        )
 
-    assert "plan.proposed" in _events(first)
-    assert [error for error, _ in ended] == ["abandoned", None]
-    assert ended[0] == ("abandoned", "ERROR")
+    trace_id = _frame(second, "done")["trace_id"]
+    assert ended == [("paused", "DEFAULT"), ("done", "DEFAULT")]
+    assert exported_at_flush == [[trace_id], [trace_id, trace_id]]
 
 
 async def test_an_answer_after_a_refused_turn_resumes_on_the_paused_turn_s_span(
@@ -8111,19 +8178,24 @@ async def test_a_pause_frame_is_not_sent_when_its_checkpoint_fails() -> None:
 
 
 @pytest.mark.parametrize(
-    "failure",
+    ("failure", "status"),
     [
-        pytest.param(SegmentLost("taken over"), id="segment-lost"),
-        pytest.param(DatabaseUnavailable("unreachable"), id="database-unavailable"),
+        pytest.param(SegmentLost("taken over"), "segment_lost", id="segment-lost"),
+        pytest.param(
+            DatabaseUnavailable("unreachable"), "database_unavailable", id="database-unavailable"
+        ),
     ],
 )
 async def test_a_stream_that_lost_its_segment_ends_its_span_as_lost(
-    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch, failure: Exception
+    otlp_spans: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    status: str,
 ) -> None:
     """Every save after the claim fails as lost, from the first frame's
-    reservation to the release's, so nothing more of the turn is stored. The instance ends its turn span as
-    `segment_lost` at warning level, exported before the stream ends, and
-    its live state goes back to the row as stored."""
+    reservation to the release's, so nothing more of the turn is stored. The
+    segment's span ends once, named for how the release ended, at warning
+    level, and is exported before the stream ends."""
     app = _app(_text("Hello."))
     store = app.state.studio.store
     ended: list[tuple[str | None, str]] = []
@@ -8153,7 +8225,7 @@ async def test_a_stream_that_lost_its_segment_ends_its_span_as_lost(
 
     error = _frame(frames, "error")["error"]
     assert (error["error"], error["retry"]) == ("transient_unavailable", "retry_after_delay")
-    assert ended == [("segment_lost", "WARNING")]
+    assert ended == [(status, "WARNING")]
     assert exported_at_flush == [1]
 
 
@@ -8221,12 +8293,6 @@ async def test_a_lost_segment_at_a_save_ends_the_stream_as_the_heartbeat_does(
             id="database-unavailable",
         ),
         pytest.param(
-            ConnectionResetError("connection reset"),
-            ["plan.approved", "message.delta"],
-            (logging.WARNING, True),
-            id="transient-failure",
-        ),
-        pytest.param(
             RuntimeError("a bug"),
             ["plan.approved", "message.delta"],
             (logging.ERROR, True),
@@ -8243,8 +8309,7 @@ async def test_a_lost_segment_after_plan_approved_ends_the_stream(
     """The save after `plan.approved` is sent fails. A lost segment ends the stream
     with a stream-fatal error frame, as at every other checkpoint, since another
     instance now owns the conversation; any other failure is logged and the stream
-    goes on, logged as a warning when a retry may outlast it and as an error
-    otherwise."""
+    goes on, logged as an error."""
     studio = _app().state.studio
     conversation = await studio.store.create("u_a", CONVERSATION)
     segment_id = studio.store.claim_segment("u_a", CONVERSATION)
@@ -8275,8 +8340,8 @@ async def test_a_lost_segment_after_plan_approved_ends_the_stream(
         ]
 
     assert sent == relayed
-    # A lost segment and a transient fault are warnings, only the one the
-    # stream goes on past with its traceback; any other fault is an error.
+    # A lost segment is a warning; any other fault, which the stream goes on
+    # past, is an error with its traceback.
     assert [(r.levelno, r.exc_info is not None) for r in caplog.records] == [logged]
 
 

@@ -40,7 +40,7 @@ from typing import Any
 
 import anyio
 from common.telemetry import flush_telemetry
-from compiler.surface import ToolSurface, transient
+from compiler.surface import ToolSurface
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
@@ -85,6 +85,7 @@ from harness.studio_state import (
     ConversationState,
     DatabaseUnavailable,
     SegmentBusy,
+    SegmentEnding,
     SegmentLost,
     _apply_operations,
     _end_stream,
@@ -536,9 +537,8 @@ async def _sse_stream(
     supplied; and client disconnect, which unwinds the same way minus the
     frame nobody is left to read. A disconnect records a running turn as
     cancelled (`close_turn`). A turn that is `awaiting_answer` (paused on an
-    interrupt) is left open, so `/interrupt` still resumes it inside the
-    same turn span and trace, and `/cancel` or the next `begin_turn` still
-    closes it out.
+    interrupt) is left open, so `/interrupt` still resumes it on the
+    same trace, and `/cancel` or the next `begin_turn` still closes it out.
 
     The cancel event fires for two different reasons, told apart by
     `conversation.cancel_reason` (set alongside the event by whoever armed
@@ -574,10 +574,10 @@ async def _sse_stream(
     closed, and the segment's own `finally` discards its unsent step
     records.
 
-    A stream that has a `conversation` runs inside the turn's telemetry span
-    (`ConversationState.in_turn_span`), so a turn resumed by a second request
-    exports as one trace, and the task that produces each frame is created
-    inside that scope. The scope is left on the task that iterates the
+    A stream that has a `conversation` runs inside its segment's telemetry
+    span (`ConversationState.in_turn_span`), on the turn's trace, so a turn
+    resumed by a second request exports on the same trace, and the task
+    that produces each frame is created inside that scope. The scope is left on the task that iterates the
     response. When the response task is cancelled while this generator sits at
     a `yield`, Starlette abandons the generator and the event loop closes it
     later from another context, where leaving the scope detaches nothing
@@ -696,9 +696,7 @@ async def _sse_stream(
                         # cancelled (a completed turn's close_turn already ran
                         # and this is a no-op). A turn paused for an answer
                         # stays open: its `plan.proposed` or elicitation frame
-                        # was sent, `/interrupt` can still resume it, and
-                        # closing it here would end the turn span and put the
-                        # resumed segment on a trace of its own.
+                        # was sent, and `/interrupt` can still resume it.
                         if conversation is not None and not conversation.awaiting_answer:
                             conversation.close_turn(
                                 final_text=conversation.turn_final_text,
@@ -1098,13 +1096,7 @@ class StudioRunner:
                     await self.store.checkpoint(principal, conversation_id, segment_id)
                 except Exception as exc:
                     _log_save_failure(
-                        "checkpoint after plan.approved",
-                        conversation,
-                        segment_id,
-                        exc,
-                        # A fault a retry may outlast, which the stream goes
-                        # on past; anything else is a fault in this code.
-                        level=logging.WARNING if transient(exc) else logging.ERROR,
+                        "checkpoint after plan.approved", conversation, segment_id, exc
                     )
                     if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
                         yield _checkpoint_failed_frame(conversation, exc)
@@ -1151,25 +1143,25 @@ class StudioRunner:
             try:
                 await _unwind(heartbeat)
             finally:
+                ending: SegmentEnding = "failed"
                 try:
-                    await self.store.release(principal, conversation_id, segment_id)
+                    ending = await self.store.release(principal, conversation_id, segment_id)
                 finally:
+                    # The segment ends here on this instance, and its span
+                    # with it; the stream's end exports it (`_sse_stream`).
+                    conversation.end_segment_span(ending)
                     conversation.lock.release()
 
 
 def _log_save_failure(
-    what: str,
-    conversation: ConversationState,
-    segment_id: str,
-    exc: Exception,
-    *,
-    level: int = logging.ERROR,
+    what: str, conversation: ConversationState, segment_id: str, exc: Exception
 ) -> None:
     """Log a save `_checkpointed` made that failed: a lost segment or a
-    database unreachable until the lease's deadline as a warning, which
-    ends the stream as the heartbeat does, and anything else at `level`,
-    with its traceback: an internal fault by default, a warning where the
-    stream goes on past the failure."""
+    database unreachable until the lease's deadline (every transient fault
+    the store's retries did not outlast) as a warning, which ends the
+    stream as the heartbeat does, and anything else, a fault no retry
+    mends such as a lock timeout, a failed login or a bug, as an error with
+    its traceback."""
     if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
         logger.warning(
             "studio %s ended the stream: conversation %s segment %s (trace_id=%s): %s",
@@ -1180,8 +1172,7 @@ def _log_save_failure(
             exc,
         )
     else:
-        logger.log(
-            level,
+        logger.exception(
             "studio %s failed: conversation %s segment %s (trace_id=%s)",
             what,
             conversation.conversation_id,
@@ -1384,22 +1375,32 @@ def _turn_session_state(conversation: ConversationState, body: TurnRequest) -> d
     return state
 
 
-async def _abandon_claim(
+async def _release_claim(
     store: StudioStore,
     principal: str,
     conversation_id: str,
-    segment_id: str | None,
     lock: asyncio.Lock,
+    segment_id: str | None,
 ) -> None:
-    """Let go of a claim whose stream never started: drop `segment_id`'s
-    lease when there is one (`StudioStore.drop_lease`, which runs to the end
-    under cancellation), then release `lock` whatever the drop raised, a
-    cancellation of the request included."""
+    """Let go of a request whose stream never started, on every path,
+    cancellation included. A claim that never committed gives up its
+    working copy (`StudioStore.drop_draft`), whose span ends `not_started`.
+    A claim that committed (`segment_id`) drops its lease
+    (`StudioStore.drop_lease`, which runs to the end under cancellation),
+    and the segment's span, if one opened, ends `failed`. Then `lock` is
+    released and any span that ended is exported."""
+    ended = False
     try:
+        ended = store.drop_draft(principal, conversation_id)
         if segment_id is not None:
             await store.drop_lease(principal, conversation_id, segment_id)
     finally:
+        live = store.current(principal, conversation_id)
+        if segment_id is not None and live is not None:
+            ended = live.end_segment_span("failed") or ended
         lock.release()
+        if ended:
+            await flush_telemetry()
 
 
 async def _unclaimed(
@@ -1409,17 +1410,9 @@ async def _unclaimed(
     lock: asyncio.Lock,
     response: Response,
 ) -> Response:
-    """Answer `response` for a request whose claim save never committed:
-    give up its working copy (`StudioStore.drop_draft`), so the live state
-    stays as loaded, release `lock` whatever that raised, and export the
-    span the copy's turn opened, when it opened one."""
-    ended = False
-    try:
-        ended = store.drop_draft(principal, conversation_id)
-    finally:
-        lock.release()
-        if ended:
-            await flush_telemetry()
+    """Answer `response` for a request whose claim save never committed,
+    once it has let go of it (`_release_claim`)."""
+    await _release_claim(store, principal, conversation_id, lock, None)
     return response
 
 
@@ -1646,23 +1639,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         except BaseException:
             # The stream wrapper normally releases the segment and the lock;
             # a failure before the response starts streaming releases them
-            # here. Before the claim save commits, the working copy is given
-            # up and the live state stays as loaded. After it, the lease is
-            # dropped, and the claim save already covers `begin_turn`'s
-            # effects, so the turn stays open and the next `/turn` closes it
-            # as `begin_turn` closes any open turn.
+            # here (`_release_claim`). Before the claim save commits, the
+            # working copy is given up and the live state stays as loaded.
+            # After it, the lease is dropped, and the claim save already
+            # covers `begin_turn`'s effects, so the turn stays open and the
+            # next `/turn` closes it as `begin_turn` closes any open turn.
             if lock.locked():
-                ended = False
-                try:
-                    ended = studio.store.drop_draft(principal, body.conversation_id)
-                finally:
-                    try:
-                        await _abandon_claim(
-                            studio.store, principal, body.conversation_id, claimed, lock
-                        )
-                    finally:
-                        if ended:
-                            await flush_telemetry()
+                await _release_claim(studio.store, principal, body.conversation_id, lock, claimed)
             raise
 
     router.add_api_route("/turn", turn, methods=["POST"], route_class_override=_BoundedTurnRoute)
@@ -1709,12 +1692,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
                 return Response(status_code=204)
-            closed_here = False
             if conversation.awaiting_answer:
                 conversation.close_turn(
                     final_text=conversation.turn_final_text, error=ErrorCode.CANCELLED.value
                 )
-                closed_here = True
             # The pending interrupts are cleared unconditionally, the same
             # abandonment `begin_turn` already does for a fresh turn on a
             # paused conversation; the parked ADK invocation needs nothing
@@ -1741,9 +1722,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     "persisted",
                     body.conversation_id,
                 )
-            if closed_here:
-                # No stream is left to export the turn span that was just ended.
-                await flush_telemetry()
         finally:
             lock.release()
         return Response(status_code=204)
@@ -1900,12 +1878,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     _streaming_conflict_response("another request already answered this interrupt"),
                 )
         except BaseException:
-            if not lock.locked():
-                raise
-            try:
-                studio.store.drop_draft(principal, body.conversation_id)
-            finally:
-                lock.release()
+            if lock.locked():
+                await _release_claim(studio.store, principal, body.conversation_id, lock, None)
             raise
 
         # Every failure from here to the stream's start drops the lease the
@@ -1918,9 +1892,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
             pending = conversation.pending[body.interrupt_id]
-            # The instance that resumes a paused turn may not be the one that
-            # opened it: its telemetry span is process-local and never persisted,
-            # and a workflow's own steps run as concurrent waves whose recording
+            # The resumed segment opens its own telemetry span on the turn's
+            # trace, whichever instance runs it, and a workflow's own steps
+            # run as concurrent waves whose recording
             # order `_RecordingSurface` needs the plan's own step order to undo
             # (`_PendingInterrupt.step_order`'s docstring). Both are restored
             # before anything below can run the graph or close the turn.
@@ -2049,7 +2023,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 media_type=SSE_MEDIA_TYPE,
             )
         except BaseException:
-            await _abandon_claim(studio.store, principal, body.conversation_id, segment_id, lock)
+            await _release_claim(studio.store, principal, body.conversation_id, lock, segment_id)
             raise
 
     @router.post("/composition")

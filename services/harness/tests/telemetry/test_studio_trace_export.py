@@ -119,11 +119,15 @@ async def _abandon_a_response_at_its_second_frame(
     second `yield`; nothing here closes it, so the event loop does."""
 
     async def segment() -> AsyncGenerator[MessageDelta]:
-        with trace.get_tracer("test.segment").start_as_current_span(MODEL_CALL) as span:
-            span.set_attribute("gen_ai.operation.name", "generate_content")
-        yield MessageDelta(event="message.delta", seq=0, text="one")
-        conversation.close_turn(final_text="one")
-        yield MessageDelta(event="message.delta", seq=1, text="two")
+        try:
+            with trace.get_tracer("test.segment").start_as_current_span(MODEL_CALL) as span:
+                span.set_attribute("gen_ai.operation.name", "generate_content")
+            yield MessageDelta(event="message.delta", seq=0, text="one")
+            conversation.close_turn(final_text="one")
+            yield MessageDelta(event="message.delta", seq=1, text="two")
+        finally:
+            # The segment's end, as `StudioRunner._locked` ends it.
+            conversation.end_segment_span("saved")
 
     response = StreamingResponse(
         _sse_stream(segment(), conversation=conversation), media_type=SSE_MEDIA_TYPE
@@ -259,27 +263,35 @@ async def _approve_a_planned_turn(engine: AsyncEngine) -> list[dict]:
 async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
     fake_langfuse: Any, pg_engine: AsyncEngine
 ) -> None:
-    """Both segments of a turn run ADK's real workflow. Each segment's
-    `invoke_workflow` span is a child of `turn`, and every span on the wire has
-    its parent on the wire too, except `turn`, whose parent is the synthetic one
-    the SDK creates for a seeded trace id. Every exported span is the SDK's own
-    or carries `gen_ai.*` attributes. `turn` carries the question and the
-    answer as its input and output."""
+    """Both segments of a turn run ADK's real workflow, each under a `turn`
+    span of its own on the turn's one trace. Each segment's `invoke_workflow`
+    span is a child of its segment's `turn`, and every span on the wire has
+    its parent on the wire too, except the two `turn` spans, whose parent is
+    the synthetic one the SDK creates for a seeded trace id. Every exported
+    span is the SDK's own or carries `gen_ai.*` attributes. Each `turn`
+    carries the question as its input, and the resumed one the answer as its
+    output."""
     init_telemetry(service_name="harness")
     second = await _approve_a_planned_turn(pg_engine)
 
     scoped = fake_langfuse.scoped_spans()
     spans = [span for _, span in scoped]
-    (turn,) = [span for span in spans if span.name == "turn"]
-    assert turn.trace_id.hex() == Langfuse.create_trace_id(seed=second[-1]["trace_id"])
-    assert {span.trace_id for span in spans} == {turn.trace_id}
-    workflows = [span for span in spans if span.name.startswith("invoke_workflow")]
-    assert len(workflows) == 2
-    assert {span.parent_span_id for span in workflows} == {turn.span_id}
-    assert _spans_with_an_unexported_parent(spans) == [turn]
-    # The turn's question and answer are the trace's overall input and output.
-    assert _attribute(turn, "langfuse.observation.input") == QUESTION
-    assert _attribute(turn, "langfuse.observation.output")
+    paused, resumed = sorted(
+        (span for span in spans if span.name == "turn"), key=lambda span: span.start_time_unix_nano
+    )
+    trace_id = Langfuse.create_trace_id(seed=second[-1]["trace_id"])
+    assert {span.trace_id.hex() for span in spans} == {trace_id}
+    workflows = sorted(
+        (span for span in spans if span.name.startswith("invoke_workflow")),
+        key=lambda span: span.start_time_unix_nano,
+    )
+    assert [span.parent_span_id for span in workflows] == [paused.span_id, resumed.span_id]
+    assert sorted(
+        _spans_with_an_unexported_parent(spans), key=lambda span: span.start_time_unix_nano
+    ) == [paused, resumed]
+    assert _attribute(paused, "langfuse.observation.input") == QUESTION
+    assert _attribute(resumed, "langfuse.observation.input") == QUESTION
+    assert _attribute(resumed, "langfuse.observation.output")
     for scope, span in scoped:
         assert scope == "langfuse-sdk" or any(
             key.startswith("gen_ai") for key in _attribute_keys(span)
@@ -393,9 +405,10 @@ async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_
 ) -> None:
     """The client goes away right after `plan.proposed`, while the stream
     awaits the next frame. The turn stays open and unrecorded, so the
-    `/interrupt` that approves the plan resumes it inside the same `turn` span:
-    one trace, one `turn` span ended once, the execution spans under it, and
-    no cancellation on the turn's record."""
+    `/interrupt` that approves the plan resumes it on the same trace: the
+    paused segment's `turn` span and the resumed one's, each ended, the
+    execution spans under the second, and no cancellation on the turn's
+    record."""
     init_telemetry(service_name="harness")
     app = _planned_app(pg_engine)
     studio: StudioRunner = app.state.studio
@@ -454,10 +467,11 @@ async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_
     assert resumed[-1]["event"] == "done"
 
     spans = fake_langfuse.spans()
-    (turn,) = [span for span in spans if span.name == "turn"]
-    assert turn.end_time_unix_nano > 0
-    assert {span.trace_id for span in spans} == {turn.trace_id}
-    assert turn.trace_id.hex() == Langfuse.create_trace_id(seed=resumed[-1]["trace_id"])
+    turns = [span for span in spans if span.name == "turn"]
+    assert len(turns) == 2
+    assert all(turn.end_time_unix_nano > 0 for turn in turns)
+    trace_id = Langfuse.create_trace_id(seed=resumed[-1]["trace_id"])
+    assert {span.trace_id.hex() for span in spans} == {trace_id}
     assert any(span.name.startswith("invoke_node execute") for span in spans)
     (record,) = conversation.turns
     assert "error" not in record
@@ -475,12 +489,16 @@ async def test_a_client_that_leaves_while_the_turn_runs_ends_the_turn_span_as_ca
     running = asyncio.Event()
 
     async def segment() -> AsyncGenerator[MessageDelta]:
-        with trace.get_tracer("test.segment").start_as_current_span(MODEL_CALL) as span:
-            span.set_attribute("gen_ai.operation.name", "generate_content")
-        yield MessageDelta(event="message.delta", seq=0, text="one")
-        running.set()
-        await asyncio.Event().wait()  # a slow tool call
-        yield MessageDelta(event="message.delta", seq=1, text="two")
+        try:
+            with trace.get_tracer("test.segment").start_as_current_span(MODEL_CALL) as span:
+                span.set_attribute("gen_ai.operation.name", "generate_content")
+            yield MessageDelta(event="message.delta", seq=0, text="one")
+            running.set()
+            await asyncio.Event().wait()  # a slow tool call
+            yield MessageDelta(event="message.delta", seq=1, text="two")
+        finally:
+            # The segment's end, as `StudioRunner._locked` ends it.
+            conversation.end_segment_span("saved")
 
     async def consume() -> None:
         async for _ in _sse_stream(segment(), conversation=conversation, heartbeat_seconds=15):
