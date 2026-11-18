@@ -288,6 +288,11 @@ def _timeout_refusal(conversation: ConversationState, *, tool: str, key: str) ->
     }
 
 
+# How long a client waits before retrying a stream that ended on a fault a
+# retry may outlast: a stream-fatal frame of mode `retry_after_delay`.
+STREAM_RETRY_AFTER_S = 30
+
+
 def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame:
     """The stream-fatal error frame for `exc`, the error a turn ended on
     (`_fatal_frame`): the refusal it states, the MCP call whose pinned
@@ -383,7 +388,9 @@ def _fatal_frame(
             error=error_code,
             retry=retry,
             detail=detail,
-            retry_after_seconds=30 if retry is RetryMode.RETRY_AFTER_DELAY else None,
+            retry_after_seconds=STREAM_RETRY_AFTER_S
+            if retry is RetryMode.RETRY_AFTER_DELAY
+            else None,
         ),
     )
 
@@ -406,7 +413,7 @@ def segment_lost_frame(conversation: ConversationState) -> ErrorFrame:
             error=ErrorCode.TRANSIENT_UNAVAILABLE,
             retry=RetryMode.RETRY_AFTER_DELAY,
             detail=SEGMENT_LOST_DETAIL,
-            retry_after_seconds=30,
+            retry_after_seconds=STREAM_RETRY_AFTER_S,
         ),
     )
 
@@ -441,7 +448,7 @@ def _checkpoint_failed_frame(conversation: ConversationState, exc: Exception) ->
             error=ErrorCode.TRANSIENT_UNAVAILABLE,
             retry=RetryMode.RETRY_AFTER_DELAY,
             detail=detail,
-            retry_after_seconds=30,
+            retry_after_seconds=STREAM_RETRY_AFTER_S,
         ),
     )
 

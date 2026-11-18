@@ -492,6 +492,30 @@ def test_end_turn_span_closes_the_span_when_recording_its_input_and_output_fails
     fake_span_cm.__exit__.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "level"),
+    [
+        pytest.param({"error": "abandoned"}, "ERROR", id="error"),
+        pytest.param({"error": "segment_lost", "level": "WARNING"}, "WARNING", id="warning"),
+    ],
+)
+def test_end_turn_span_marks_an_error_at_its_level(monkeypatch, kwargs, level):
+    """An ended turn's error code is its status, at `ERROR` unless the caller
+    names another level."""
+    telemetry._backend = "langfuse"
+    fake_span_cm = MagicMock()
+    fake_client = MagicMock()
+    fake_client.start_as_current_observation.return_value = fake_span_cm
+    monkeypatch.setattr(langfuse, "get_client", lambda: fake_client)
+    handle = start_turn_span("tr_abc123")
+
+    end_turn_span(handle, request="q", response="a", **kwargs)
+
+    fake_span_cm.__enter__.return_value.update.assert_called_once_with(
+        input="q", output="a", level=level, status_message=kwargs["error"]
+    )
+
+
 async def test_end_turn_span_runs_in_the_context_the_span_was_opened_in(monkeypatch):
     """The scope is exited in the copy of the context it was entered in, from
     whichever task closes the turn, so its context tokens are always reset in

@@ -58,7 +58,6 @@ import dataclasses
 import json
 import logging
 import math
-import ssl
 import time
 import uuid
 from collections.abc import (
@@ -68,16 +67,15 @@ from collections.abc import (
     Collection,
     Coroutine,
     Iterable,
-    Iterator,
 )
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
+from compiler.surface import transient
 from executor.ledger import RunStatus
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.approval import ApprovalRecord
@@ -267,55 +265,6 @@ async def _run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
             )
         raise cancelled
     return task.result()
-
-
-class _ConnectFailedError(Exception):
-    """Acquiring a connection to the database failed (a pool checkout or a
-    connect), raised from what failed, by `StudioStore._transaction`."""
-
-
-# The faults no retry of a connect mends: a socket path or certificate file
-# that is missing, is not a file or may not be read, and a server
-# certificate that does not verify.
-_PERMANENT_CONNECT_FAULTS = (
-    FileNotFoundError,
-    PermissionError,
-    IsADirectoryError,
-    NotADirectoryError,
-    ssl.SSLCertVerificationError,
-)
-
-
-def _chain(exc: BaseException) -> Iterator[BaseException]:
-    """`exc` and every error it was raised from, a driver error's original
-    included."""
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        yield current
-        if isinstance(current, DBAPIError) and isinstance(current.orig, BaseException):
-            yield from _chain(current.orig)
-        current = current.__cause__
-
-
-def _transient(exc: BaseException) -> bool:
-    """Whether `exc` is a fault a retry may outlast, decided by the phase it
-    was raised in. A connect (`_ConnectFailedError`) that failed is
-    retried whatever failed (a refused, reset or timed-out socket, an
-    unreachable host, a name that does not resolve, a TLS failure, the pool
-    timing out, too many open files), unless anything in its chain is a
-    permanent fault (`_PERMANENT_CONNECT_FAULTS`): the network or the
-    server may come back, a missing or unreadable file will not. A
-    statement that failed is retried only when the connection was lost
-    under it: SQLAlchemy invalidated the connection, or a `ConnectionError`
-    is in the chain. A statement or lock timeout, a client-side
-    `TimeoutError` and a misuse of the connection raise at once."""
-    if isinstance(exc, _ConnectFailedError):
-        return not any(isinstance(e, _PERMANENT_CONNECT_FAULTS) for e in _chain(exc))
-    if isinstance(exc, DBAPIError) and exc.connection_invalidated:
-        return True
-    return any(isinstance(e, ConnectionError) for e in _chain(exc))
 
 
 def _changed_since(full: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
@@ -802,6 +751,8 @@ class _RuntimeEntry:
     one. `state` is the `ConversationState` this instance keeps live between
     requests; `load` refreshes its durable fields in place, so `lock`,
     `renew_now` and `_telemetry_span` keep their identity across a reload.
+    `draft` is the working copy a request's claim is built on (`draft`) and
+    the live state as it stood when the copy was taken.
     `baseline` is the last durable snapshot known stored, the reference a
     save diffs against. `composition_lock` serialises same-instance
     `/composition` calls on the shared `state` object, separate from `lock`
@@ -825,6 +776,7 @@ class _RuntimeEntry:
     claim_resumes: bool = False
     state: ConversationState | None = None
     baseline: dict[str, Any] = field(default_factory=dict)
+    draft: tuple[ConversationState, ConversationState] | None = None
 
 
 class StudioStore:
@@ -895,22 +847,36 @@ class StudioStore:
         entry = self._runtime.get((principal, conversation_id))
         return entry.state if entry is not None else None
 
-    def discard_unsaved(self, principal: str, conversation_id: str) -> None:
-        """Drop this instance's live state of the conversation, which holds
-        changes no save stored (a turn begun, a segment claimed in memory, an
-        answer marked), keeping its runtime entry and so its locks. The
-        turn's telemetry span ends first, as abandoned
-        (`ConversationState.abandon_turn_span`), since nothing left holds it.
-        `current` returns None until the next `load`, which reads the row
-        afresh. Called after any lease drop (`drop_lease`), whose
-        bookkeeping reads the entry this clears."""
+    def draft(self, principal: str, conversation_id: str) -> ConversationState:
+        """A working copy of this instance's live state, for the changes a
+        request makes before its claim save (a turn begun, an answer marked,
+        a segment claimed). `save` given the copy swaps what it changed into
+        the live state once the write commits; until then, and on any exit
+        that saves nothing (`drop_draft`), the live state stays as loaded.
+        The copy is one level deep (`_shallow_copy`), with each pending
+        interrupt copied too, since an answer is marked on its entry. The
+        copy holds no telemetry span, so a `begin_turn` on it ends none of
+        the live state's; the swap ends that one instead
+        (`_take_draft`)."""
+        entry = self._runtime[(principal, conversation_id)]
+        assert entry.state is not None
+        work = _shallow_copy(entry.state)
+        work.pending = {key: copy.copy(pending) for key, pending in work.pending.items()}
+        work._telemetry_span = None
+        entry.draft = (work, _shallow_copy(entry.state))
+        return work
+
+    def drop_draft(self, principal: str, conversation_id: str) -> None:
+        """Give up the working copy `draft` handed out, its claim unsaved. A
+        turn span the copy opened (`begin_turn`) ends as `not_started`, at
+        level `WARNING`, since no turn exists for it; the caller flushes it."""
         entry = self._runtime.get((principal, conversation_id))
-        if entry is not None:
-            if entry.state is not None:
-                entry.state.abandon_turn_span()
-            entry.state = None
-            entry.claimed_reserved = None
-            entry.held = None
+        if entry is None or entry.draft is None:
+            return
+        work, _ = entry.draft
+        entry.draft = None
+        entry.claimed_reserved = None
+        work.end_turn_span_unrecorded("not_started")
 
     def lease_deadline(self, principal: str, conversation_id: str) -> float:
         """When, on this instance's clock (`now`), it stops trusting that it
@@ -941,22 +907,9 @@ class StudioStore:
     def _entry(self, principal: str, conversation_id: str) -> _RuntimeEntry:
         return self._runtime.setdefault((principal, conversation_id), _RuntimeEntry())
 
-    @asynccontextmanager
-    async def _transaction(self) -> AsyncIterator[AsyncConnection]:
-        """One read-committed transaction. Every write goes through here.
-        Acquiring its connection, which may check one out of the pool or
-        connect, raises `_ConnectFailedError` from what failed, so a retried
-        write can tell a failed connect from a failed statement
-        (`_transient`)."""
-        try:
-            conn = await self._engine.connect()
-        except Exception as exc:
-            raise _ConnectFailedError(f"no connection to the database: {exc}") from exc
-        try:
-            async with conn.begin():
-                yield conn
-        finally:
-            await conn.close()
+    def _transaction(self) -> AbstractAsyncContextManager[AsyncConnection]:
+        """One read-committed transaction. Every write goes through here."""
+        return self._engine.begin()
 
     async def _write(
         self,
@@ -1090,16 +1043,19 @@ class StudioStore:
             )
         return entry.state
 
-    def claim_segment(self, principal: str, conversation_id: str) -> str:
-        """Claim a fresh segment on the live state already loaded on this
-        instance (`create` or `load` must have run first). Raises
+    def claim_segment(
+        self, principal: str, conversation_id: str, state: ConversationState | None = None
+    ) -> str:
+        """Claim a fresh segment on `state`, a working copy from `draft`, or
+        else on the live state already loaded on this instance (`create` or
+        `load` must have run first). Raises
         `SegmentBusy` when the loaded lease had not lapsed by the database
         clock's reading taken with the load. Otherwise writes a fresh segment
         into `entry.state`, expiring `SEGMENT_TTL_S` after that reading, and
         returns its id.
 
         The claim also takes the segment's first block of frame numbers and
-        starts the live state's `seq` there: `0` up to `SEQ_BLOCK` for a turn
+        starts the state's `seq` there: `0` up to `SEQ_BLOCK` for a turn
         `begin_turn` just opened, else the block after every number reserved
         before, so a stream resuming the turn never repeats a number an
         earlier segment sent.
@@ -1108,23 +1064,29 @@ class StudioStore:
         `/interrupt` save) persists it, and refuses it when the stored lease
         is live by then."""
         entry = self._runtime[(principal, conversation_id)]
-        assert entry.state is not None
-        live = entry.state.segment
+        target = state if state is not None else entry.state
+        assert target is not None
+        live = target.segment
         if live is not None and live.expires_at > entry.read_at:
             raise SegmentBusy(retry_after_seconds=math.ceil(live.expires_at - entry.read_at))
         segment = Segment(
             id=_wire_id("seg"), owner=_OWNER_ID, expires_at=entry.read_at + SEGMENT_TTL_S
         )
-        entry.state.segment = segment
+        target.segment = segment
         entry.lease_stamp = entry.read_stamp
-        entry.claim_resumes = entry.state.turn_index == entry.baseline.get(_KEY_TURN_INDEX)
-        entry.state.seq = entry.seq_reserved if entry.claim_resumes else 0
-        entry.claimed_reserved = entry.state.seq + SEQ_BLOCK
+        entry.claim_resumes = target.turn_index == entry.baseline.get(_KEY_TURN_INDEX)
+        target.seq = entry.seq_reserved if entry.claim_resumes else 0
+        entry.claimed_reserved = target.seq + SEQ_BLOCK
         return segment.id
 
-    async def save(self, principal: str, conversation_id: str) -> None:
+    async def save(
+        self, principal: str, conversation_id: str, state: ConversationState | None = None
+    ) -> None:
         """Write this instance's changed durable fields, compare-and-swapped
-        on the turn state's version. Only the keys whose serialised value
+        on the turn state's version. Given `state`, the working copy `draft`
+        handed out, the fields are the copy's, and once the write commits
+        each field the copy changed is assigned to the live state, which
+        stays as it was when the write fails. Only the keys whose serialised value
         changed since the last load or save on this instance are written; a
         save with nothing changed writes nothing.
 
@@ -1144,9 +1106,11 @@ class StudioStore:
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
+        target = state if state is not None else entry.state
         async with entry.write_lock:
-            delta = _changed_since(_serialize_durable(entry.state), entry.baseline)
+            delta = _changed_since(_serialize_durable(target), entry.baseline)
             if not delta:
+                self._take_draft(entry, target)
                 return
             claimed = _deserialize_segment(delta.get(_KEY_SEGMENT))
             reserved = entry.claimed_reserved if claimed is not None else None
@@ -1161,22 +1125,44 @@ class StudioStore:
                     and stored_lease.id not in {entry.held, claimed.id if claimed else None}
                 ):
                     raise ConversationStale(conversation_id)
-                if (
-                    claimed is not None
-                    and entry.claim_resumes
-                    and row.seq_reserved > entry.state.seq
-                ):
-                    entry.state.seq = row.seq_reserved
+                if claimed is not None and entry.claim_resumes and row.seq_reserved > target.seq:
+                    target.seq = row.seq_reserved
                     reserved = row.seq_reserved + SEQ_BLOCK
-                    delta = _changed_since(_serialize_durable(entry.state), entry.baseline)
+                    delta = _changed_since(_serialize_durable(target), entry.baseline)
                 version = await self._write(conn, entry.pk, delta, seq_reserved=reserved)
             entry.version = version
             entry.baseline.update(delta)
+            self._take_draft(entry, target)
             if claimed is not None:
                 entry.held = claimed.id
             if reserved is not None:
                 entry.seq_reserved = reserved
                 entry.claimed_reserved = None
+
+    @staticmethod
+    def _take_draft(entry: _RuntimeEntry, state: ConversationState) -> None:
+        """Assign each field the working copy `state` changed since `draft`
+        took it to the live state, once its save committed. Nothing when
+        `state` is the live state itself. A turn the copy began
+        (`begin_turn`) brings its own telemetry span; the live state's, a
+        turn the copy closed as abandoned, ends as `close_turn` would have
+        ended it there."""
+        if entry.draft is None or entry.draft[0] is not state:
+            return
+        work, base = entry.draft
+        entry.draft = None
+        live = entry.state
+        assert live is not None
+        if work._telemetry_span is not None:
+            live.end_turn_span_unrecorded("abandoned", level="ERROR")
+            live._telemetry_span = work._telemetry_span
+        for f in dataclasses.fields(ConversationState):
+            if f.name == "_telemetry_span":
+                continue
+            value = getattr(work, f.name)
+            before = getattr(base, f.name)
+            if value != before if isinstance(value, _CONTAINERS) else value is not before:
+                setattr(live, f.name, value)
 
     async def reserve_frames(self, principal: str, conversation_id: str, segment_id: str) -> None:
         """Keep the frame numbers the live stream sends inside its
@@ -1346,7 +1332,8 @@ class StudioStore:
         attempt: Callable[[bool], Awaitable[T]],
     ) -> T:
         """Run `attempt`, a write fenced on the live segment, retrying a
-        transient database fault (`_transient`) with backoff until the
+        transient database fault (`compiler.surface.transient`, the
+        harness's one fault classifier) with backoff until the
         lease's deadline (`lease_deadline`), then raising
         `DatabaseUnavailable` from the last fault: by then another instance
         may claim the conversation, though none has. Each retry sleeps
@@ -1361,7 +1348,7 @@ class StudioStore:
             try:
                 return await attempt(retried)
             except Exception as exc:
-                if not _transient(exc):
+                if not transient(exc):
                     raise
                 if self._clock() + delay >= self._lease_deadline(entry):
                     raise DatabaseUnavailable(
@@ -1644,7 +1631,9 @@ class StudioStore:
                         conversation_id,
                         segment_id,
                     )
+                    self._lose_segment(state, principal, conversation_id)
                 except DatabaseUnavailable as exc:
+                    self._lose_segment(state, principal, conversation_id)
                     logger.error(
                         "studio store release: conversation %s segment %s could not reach the "
                         "database before the lease's deadline; nothing saved, and the lease "
@@ -1664,6 +1653,22 @@ class StudioStore:
                 conversation_id,
                 timeout,
             )
+
+    def _lose_segment(self, state: ConversationState, principal: str, conversation_id: str) -> None:
+        """A release saved nothing because the segment was lost or the
+        database stayed unreachable. When the turn as last stored was
+        running (neither recorded nor paused on an interrupt still to be
+        answered), this instance's turn span ends as `segment_lost`, since
+        whichever instance goes on with the turn opens a span of its own; a
+        pause whose checkpoint landed keeps the span for the answer that
+        resumes it. The stream's end flushes the span."""
+        stored = self._runtime[(principal, conversation_id)].baseline
+        paused = any(
+            pending.resuming_segment is None
+            for pending in _deserialize_pending(stored.get(_KEY_PENDING) or {}).values()
+        )
+        if not stored.get(_KEY_TURN_RECORDED) and not paused:
+            state.end_turn_span_unrecorded("segment_lost")
 
     async def drop_lease(
         self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0

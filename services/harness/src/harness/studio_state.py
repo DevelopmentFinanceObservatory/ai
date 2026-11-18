@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from common.telemetry import end_turn_span, start_turn_span, use_turn_span
+from common.telemetry import EventLevel, end_turn_span, start_turn_span, use_turn_span
 from compiler.sources import alternative_definitions, source_from_spec_block
 from data_mcp.definition_store.identity import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
@@ -1062,16 +1062,20 @@ class ConversationState:
         self.turn_recorded = False
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
-    def abandon_turn_span(self) -> None:
-        """End the turn's telemetry span, when this instance holds one, as
-        `close_turn` ends it for an abandoned turn, without recording the
-        turn: the state holding it is about to be dropped
-        (`StudioStore.discard_unsaved`), and no later close could end it."""
+    def end_turn_span_unrecorded(self, status: str, *, level: EventLevel = "WARNING") -> None:
+        """End the turn's telemetry span, when this instance holds one, with
+        `status` at `level`, without recording the turn: the stream lost its
+        segment (`segment_lost`), its client left (`disconnected`), the
+        request that opened the span claimed nothing (`not_started`), or a
+        turn begun on a working copy closed this one (`abandoned`, as
+        `close_turn` marks it). Whichever instance
+        goes on with the turn opens a span of its own (`ensure_turn_span`)."""
         end_turn_span(
             self._telemetry_span,
             request=self.turn_user_message,
             response=self.turn_final_text,
-            error="abandoned",
+            error=status,
+            level=level,
         )
         self._telemetry_span = None
 
@@ -1083,16 +1087,8 @@ class ConversationState:
         abandons it (`begin_turn`) or carries it on in a span of its own on
         the same `trace_id` (`ensure_turn_span`), so a client that never
         returns leaves no span open on this instance."""
-        if self.turn_recorded or self.awaiting_answer:
-            return
-        end_turn_span(
-            self._telemetry_span,
-            request=self.turn_user_message,
-            response=self.turn_final_text,
-            error="disconnected",
-            level="WARNING",
-        )
-        self._telemetry_span = None
+        if not (self.turn_recorded or self.awaiting_answer):
+            self.end_turn_span_unrecorded("disconnected")
 
     def ensure_turn_span(self) -> None:
         """Open a turn span on this conversation's `trace_id` when it holds

@@ -19,6 +19,7 @@ server a tool belongs to.
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import logging
 import socket
@@ -277,6 +278,13 @@ _POSTGRES_CONNECTION_ENDED = (
 )
 
 
+# The errnos of a network that cannot reach the peer, which a socket raises
+# as a plain `OSError`: no route to the host or its network, or either down.
+_NETWORK_DOWN_ERRNOS = frozenset(
+    {errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ENETDOWN, errno.EHOSTDOWN}
+)
+
+
 def transient_status(status: int | None) -> bool:
     """Whether an HTTP `status` says to try again later: a rate limit (429) or
     a server error (5xx). Any other 4xx repeats for the same request."""
@@ -374,7 +382,9 @@ def _transient_link(exc: BaseException) -> bool:
     failed verification (`ssl.SSLCertVerificationError`), and a transport
     error that is a permanent fault (`permanent_fault`) is not transient
     either. `transient` refuses these and any wrapper of one before this reads
-    the link. Any other `OSError`, such as `FileNotFoundError`, and any other
+    the link. An `OSError` naming an unreachable or downed host or network
+    (`_NETWORK_DOWN_ERRNOS`) is transient. Any other `OSError`, such as
+    `FileNotFoundError`, and any other
     aiohttp error, such as `InvalidURL`, is a fault in this code, and any
     other MCP error an answer the server or this client got wrong, which a
     later attempt meets again. Any other `DBAPIError` is read by the asyncpg error it was
@@ -392,6 +402,8 @@ def _transient_link(exc: BaseException) -> bool:
     if isinstance(exc, MCPError):
         return exc.error.code in TRANSIENT_MCP_CODES
     if type(exc) is RuntimeError and exc.args == (_FASTMCP_SESSION_ENDED,):
+        return True
+    if isinstance(exc, OSError) and exc.errno in _NETWORK_DOWN_ERRNOS:
         return True
     return isinstance(
         exc,

@@ -603,7 +603,7 @@ def end_turn_span(
     request: Any = None,
     response: Any = None,
     error: str | None = None,
-    level: Literal["ERROR", "WARNING"] = "ERROR",
+    level: EventLevel = "ERROR",
 ) -> None:
     """Close a span opened by `start_turn_span`. A no-op for `None`.
 

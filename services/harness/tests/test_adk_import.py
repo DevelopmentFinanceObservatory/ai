@@ -458,12 +458,24 @@ async def test_records_the_turn_loader_skips_are_reported_and_copied_as_stored(
 
 
 async def test_close_open_turns_closes_each_paused_adk_turn_as_abandoned_with_its_blocks(
-    adk: AsyncEngine,
+    adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Each open turn's session row is read once, by the store's load."""
     await import_conversations(adk, apply=True)
     open_turns = [f"{_name(FULL)} turn 4", f"{_name(PLAN_PAUSED)} turn 1"]
+    reads: list[str] = []
+    read_row = adk_import._stored_turn_specs
+
+    async def counted(conn: Any, principal: str, session_id: str) -> Any:
+        reads.append(session_id)
+        return await read_row(conn, principal, session_id)
+
+    monkeypatch.setattr(adk_import, "_stored_turn_specs", counted)
 
     dry = await close_open_turns(adk, apply=False)
+
+    assert sorted(reads) == sorted(set(reads)) and len(reads) == len(open_turns)
+    monkeypatch.setattr(adk_import, "_stored_turn_specs", read_row)
 
     assert (dry.closed, dry.live, dry.not_on_adk, dry.changed) == (open_turns, [], [], [])
     still_open = await _load(adk, FULL)

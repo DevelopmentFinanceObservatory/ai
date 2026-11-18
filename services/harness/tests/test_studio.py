@@ -104,7 +104,12 @@ from harness.studio_store import (
     StudioStore,
     _deserialize_pending,
 )
-from harness.studio_translate import _RecordingExecutor, _stream_fatal, keep_turn_records
+from harness.studio_translate import (
+    STREAM_RETRY_AFTER_S,
+    _RecordingExecutor,
+    _stream_fatal,
+    keep_turn_records,
+)
 from harness.tool_contracts import HarnessCode, ResolverError, harness_refusal
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
@@ -1049,6 +1054,12 @@ def otlp_spans(monkeypatch: pytest.MonkeyPatch) -> InMemorySpanExporter:
     monkeypatch.setattr(otel_trace, "_TRACER_PROVIDER", provider)
     monkeypatch.setattr(telemetry, "_backend", "otel")
     return exporter
+
+
+def _turn_spans(exporter: InMemorySpanExporter) -> int:
+    """How many `turn` spans `exporter` holds finished; the model and agent
+    spans a turn also exports are left out."""
+    return sum(span.name == "turn" for span in exporter.get_finished_spans())
 
 
 async def test_a_turn_paused_for_approval_exports_as_one_trace(
@@ -2153,18 +2164,21 @@ async def test_a_raise_building_the_approval_record_leaves_the_pending_entry_for
                     _interrupt_body(plan["interrupt_id"], "approve"),
                 )
 
-        assert store.current(PRINCIPAL, CONVERSATION) is None  # nothing unsaved kept
-        assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
-        conversation = await store.load(PRINCIPAL, CONVERSATION)
-        assert conversation is not None
+        conversation = store.current(PRINCIPAL, CONVERSATION)
         assert plan["interrupt_id"] in conversation.pending
         assert conversation.approvals == []
+        assert not conversation.lock.locked()
+        stored = await StudioStore(
+            _engine(),
+            adk=NO_ADK,
+            turn_specs=no_turn_specs,
+        ).load(PRINCIPAL, CONVERSATION)
+        assert stored is not None and stored.approvals == []
+        assert stored.pending[plan["interrupt_id"]].answer is None
 
         await _stream(
             client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
         )
-        conversation = await store.load(PRINCIPAL, CONVERSATION)
-        assert conversation is not None
 
     # The retry reaches `ApprovalRecord` unpatched: the record is appended
     # and the pending entry it was keyed on is finally consumed. (This
@@ -2179,8 +2193,9 @@ async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claim
 ) -> None:
     """The turn cannot be opened after the claim save landed, so `/turn`
     fails before its stream starts. The lock and the segment it claimed are
-    both released, the instance's copy of the row no longer names the
-    segment, the turn's span ends, and the next `/turn` is accepted."""
+    both released, the instance's live state goes back to the row as
+    stored, its turn span stays open for the next turn to close as
+    abandoned, and the next `/turn` is accepted."""
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
@@ -2199,17 +2214,21 @@ async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claim
             await _stream(client, "/api/studio/turn", _turn_body("hi"))
 
         assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
-        assert store.current(PRINCIPAL, CONVERSATION) is None
-        assert (
-            store._entry(PRINCIPAL, CONVERSATION).baseline[studio_store_module._KEY_SEGMENT] is None
-        )
-        assert [span.name for span in otlp_spans.get_finished_spans()] == ["turn"]
+        live = store.current(PRINCIPAL, CONVERSATION)
+        assert (live.turn_index, live.turn_recorded, live.segment) == (1, False, None)
+        store.claim_segment(PRINCIPAL, CONVERSATION)  # not refused as busy
+        assert otlp_spans.get_finished_spans() == ()
         stored = await store.load(PRINCIPAL, CONVERSATION)
         assert stored is not None and stored.segment is None
         turns.open_turn = open_turn
         frames = await _stream(client, "/api/studio/turn", _turn_body("hi again"))
 
     assert _events(frames)[-1] == "done"
+    # The abandoned turn's span, ended by the next turn's begin, then its own.
+    assert [span.name for span in otlp_spans.get_finished_spans() if span.name == "turn"] == [
+        "turn",
+        "turn",
+    ]
 
 
 async def test_a_turn_whose_claim_loses_forgets_the_turn_it_began() -> None:
@@ -2226,7 +2245,7 @@ async def test_a_turn_whose_claim_loses_forgets_the_turn_it_began() -> None:
     app = _app(_text("Hello."), store=store)
     save = store.save
 
-    async def claimed_elsewhere(principal: str, conversation_id: str) -> None:
+    async def claimed_elsewhere(principal: str, conversation_id: str, *args: Any) -> None:
         raise ConversationStale(conversation_id)
 
     store.save = claimed_elsewhere  # type: ignore[method-assign]
@@ -2235,7 +2254,8 @@ async def test_a_turn_whose_claim_loses_forgets_the_turn_it_began() -> None:
         response = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
 
     assert (response.status_code, response.json()["error"]) == (409, "transient_unavailable")
-    assert store.current(PRINCIPAL, CONVERSATION) is None
+    live = store.current(PRINCIPAL, CONVERSATION)
+    assert (live.turn_index, live.segment) == (0, None)
     assert store.lock_for(PRINCIPAL, CONVERSATION) is lock
     assert not lock.locked()
     store.save = save  # type: ignore[method-assign]
@@ -2276,7 +2296,7 @@ async def test_a_failure_before_a_resume_streams_keeps_the_answer_for_a_same_ans
                 await _stream(client, "/api/studio/interrupt", body)
 
         assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
-        assert store.current(PRINCIPAL, CONVERSATION) is None
+        assert store.current(PRINCIPAL, CONVERSATION).segment is None
         stored = await store.load(PRINCIPAL, CONVERSATION)
         assert stored is not None and stored.segment is None
         assert stored.pending[elicitation["interrupt_id"]].resuming_segment is not None
@@ -3040,7 +3060,6 @@ async def test_a_different_answer_after_a_crashed_resume_expires_is_refused() ->
     assert mismatched.status_code == 409
     body = mismatched.json()
     assert body["error"] == "edit_conflict"
-    assert store_b.current(PRINCIPAL, CONVERSATION) is None  # its claim, never saved, forgotten
     reloaded = await StudioStore(
         _engine(),
         adk=NO_ADK,
@@ -3049,6 +3068,8 @@ async def test_a_different_answer_after_a_crashed_resume_expires_is_refused() ->
     assert reloaded is not None
     assert plan["interrupt_id"] in reloaded.pending
     assert reloaded.pending[plan["interrupt_id"]].answer == {"decision": "approve", "payload": None}
+    # B's claim, never saved, is gone from its live state.
+    assert store_b.current(PRINCIPAL, CONVERSATION).segment == reloaded.segment
 
 
 @pytest.mark.parametrize(
@@ -3163,14 +3184,14 @@ async def test_two_concurrent_first_answers_to_one_interrupt_give_one_stream_and
     )
     assert conflict.json()["error"] == "transient_unavailable"
     # The losing instance forgets the answer it marked and never saved.
-    assert loser.state.studio.store.current(PRINCIPAL, CONVERSATION) is None
+    lost = loser.state.studio.store.current(PRINCIPAL, CONVERSATION)
+    assert lost.pending[plan["interrupt_id"]].answer is None
 
 
 async def test_an_answer_refused_as_busy_leaves_no_unsaved_approval_behind() -> None:
     """Another instance streams on the conversation, so an approval's claim
     is refused as busy. The approval it recorded and never saved is
-    forgotten with the rest of the instance's live state, and a load reads
-    the row without it."""
+    dropped from the instance's live state."""
     app = _app(*_plan(), tool_surface=ScriptedSurface())
     store = app.state.studio.store
     other = StudioStore(
@@ -3193,17 +3214,132 @@ async def test_an_answer_refused_as_busy_leaves_no_unsaved_approval_behind() -> 
         )
 
     assert busy.status_code == 409
-    assert store.current(PRINCIPAL, CONVERSATION) is None
-    reloaded = await store.load(PRINCIPAL, CONVERSATION)
+    assert store.current(PRINCIPAL, CONVERSATION).approvals == []
+    reloaded = await StudioStore(
+        _engine(),
+        adk=NO_ADK,
+        turn_specs=no_turn_specs,
+    ).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None and reloaded.approvals == []
+    assert reloaded.pending[plan["interrupt_id"]].answer is None
 
 
-async def test_an_answer_whose_turn_holds_no_pause_forgets_what_it_began(
+async def test_a_turn_refused_as_busy_leaves_the_live_state_as_loaded(
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another instance streams on a conversation with a card, so a `/turn`
+    is refused as busy. The live state keeps the canvas, trace id and turn
+    the load read, and the span the refused turn opened ends as
+    `not_started` at warning level and is exported."""
+    app = _app(*_card(), resolver=_search())
+    store = app.state.studio.store
+    other = StudioStore(
+        _engine(),
+        adk=NO_ADK,
+        turn_specs=no_turn_specs,
+    )
+    ended: list[tuple[str | None, str]] = []
+    real_end = studio_state_module.end_turn_span
+
+    def recording_end(handle: Any, **kwargs: Any) -> None:
+        if handle is not None:
+            ended.append((kwargs.get("error"), kwargs.get("level", "ERROR")))
+        real_end(handle, **kwargs)
+
+    flushes: list[int] = []
+
+    async def flush() -> None:
+        flushes.append(_turn_spans(otlp_spans))
+
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        loaded = store.current(PRINCIPAL, CONVERSATION)
+        before = (loaded.trace_id, loaded.turn_index, loaded.composition)
+        await other.load(PRINCIPAL, CONVERSATION)
+        other.claim_segment(PRINCIPAL, CONVERSATION)
+        await other.save(PRINCIPAL, CONVERSATION)
+        monkeypatch.setattr(studio_state_module, "end_turn_span", recording_end)
+        monkeypatch.setattr(studio_module, "flush_telemetry", flush)
+
+        busy = await client.post("/api/studio/turn", json=_turn_body("again"), headers=AUTH)
+
+    assert busy.status_code == 409
+    live = store.current(PRINCIPAL, CONVERSATION)
+    assert live.composition is not None
+    assert (live.trace_id, live.turn_index, live.composition) == before
+    reloaded = await other.load(PRINCIPAL, CONVERSATION)
+    assert reloaded is not None
+    assert (reloaded.trace_id, reloaded.turn_index) == before[:2]
+    assert ended == [("not_started", "WARNING")]
+    assert flushes == [2]  # the first turn's span, then the refused one's
+
+
+async def test_a_turn_over_a_paused_one_ends_the_paused_turn_s_span(
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new `/turn` abandons the turn paused before it: the paused turn's
+    span ends as `abandoned`, at error level as `close_turn` marks it, and
+    the new turn's span ends with the new turn."""
+    app = _app(*_plan(), _text("Hello."), tool_surface=ScriptedSurface())
+    ended: list[tuple[str | None, str]] = []
+    real_end = studio_state_module.end_turn_span
+
+    def recording_end(handle: Any, **kwargs: Any) -> None:
+        if handle is not None:
+            ended.append((kwargs.get("error"), kwargs.get("level", "ERROR")))
+        real_end(handle, **kwargs)
+
+    monkeypatch.setattr(studio_state_module, "end_turn_span", recording_end)
+
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        await _stream(client, "/api/studio/turn", _turn_body("hi"))
+
+    assert "plan.proposed" in _events(first)
+    assert [error for error, _ in ended] == ["abandoned", None]
+    assert ended[0] == ("abandoned", "ERROR")
+
+
+async def test_an_answer_after_a_refused_turn_resumes_on_the_paused_turn_s_span(
+    otlp_spans: InMemorySpanExporter,
+) -> None:
+    """A `/turn` on a paused conversation loses its claim save, so nothing
+    is claimed. The answer that follows resumes the paused turn on its own
+    span: the span the resumed segment ends is the one whose external id is
+    the paused turn's trace id."""
+    app = _app(*_plan(), tool_surface=ScriptedSurface())
+    store = app.state.studio.store
+    real_save = store.save
+    refused: list[str] = []
+
+    async def claimed_elsewhere(principal: str, conversation_id: str, *args: Any) -> None:
+        refused.append(conversation_id)
+        raise ConversationStale(conversation_id)
+
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        store.save = claimed_elsewhere  # type: ignore[method-assign]
+        stale = await client.post("/api/studio/turn", json=_turn_body("other"), headers=AUTH)
+        store.save = real_save  # type: ignore[method-assign]
+        second = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
+        )
+
+    assert (stale.status_code, refused) == (409, [CONVERSATION])
+    trace_id = _frame(second, "done")["trace_id"]
+    turns = [span for span in otlp_spans.get_finished_spans() if span.name == "turn"]
+    assert (turns[-1].attributes or {})["dfo.external_id"] == trace_id
+
+
+async def test_an_answer_whose_turn_holds_no_pause_keeps_its_saved_answer_and_span(
     otlp_spans: InMemorySpanExporter,
 ) -> None:
     """The answer's claim save lands, but no open turn is paused on its
-    interrupt, so `/interrupt` answers 404. The instance forgets the live
-    state it changed after the save and ends the turn span it reopened."""
+    interrupt, so `/interrupt` answers 404. It drops the lease it claimed
+    and releases the lock; the answer the save stored stays recorded, live
+    and stored, and the turn's span stays open, as on every refused or
+    failed answer."""
     app = _app(*_plan(), tool_surface=ScriptedSurface())
     store = app.state.studio.store
 
@@ -3220,9 +3356,16 @@ async def test_an_answer_whose_turn_holds_no_pause_forgets_what_it_began(
         )
 
     assert response.status_code == 404
-    assert store.current(PRINCIPAL, CONVERSATION) is None
     assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
-    assert [span.name for span in otlp_spans.get_finished_spans()].count("turn") == 1
+    live = store.current(PRINCIPAL, CONVERSATION)
+    assert live.segment is None
+    assert live.pending[plan["interrupt_id"]].answer is not None
+    stored = await StudioStore(_engine(), adk=NO_ADK, turn_specs=no_turn_specs).load(
+        PRINCIPAL, CONVERSATION
+    )
+    assert stored is not None and stored.segment is None
+    assert stored.pending[plan["interrupt_id"]].answer == live.pending[plan["interrupt_id"]].answer
+    assert _turn_spans(otlp_spans) == 0
 
 
 async def test_a_resumed_segments_stream_fatal_error_leaves_no_resuming_entry() -> None:
@@ -4640,7 +4783,8 @@ async def test_a_revise_whose_card_write_lost_its_acknowledgement_reports_one_ca
                 yield conn
             if armed and not faults:
                 faults.append(1)
-                raise OperationalError("COMMIT", {}, ConnectionResetError("connection reset"))
+                reset = ConnectionResetError("connection reset")
+                raise OperationalError("COMMIT", {}, reset) from reset
 
         monkeypatch.setattr(store, "_write_composition", arming_write)
         monkeypatch.setattr(store, "_transaction", losing_the_ack)
@@ -6603,6 +6747,16 @@ async def test_a_superseded_pause_is_recorded_as_abandoned() -> None:
     async with _client(app) as client:
         paused = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         assert paused[-1]["event"] == "plan.proposed"
+        # The paused turn's cursor holds a plan record, which the record
+        # that closes the turn keeps.
+        async with _engine().begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE turn_cursors SET state = CAST("
+                    "CAST(state AS jsonb) || CAST(:records AS jsonb) AS json)"
+                ),
+                {"records": json.dumps({ORCHESTRATOR_PLAN_RECORDS_KEY: [{"plan": 1}]})},
+            )
         # A fresh turn supersedes the pause; the abandoned turn must not
         # vanish from history.
         second = await _stream(client, "/api/studio/turn", _turn_body("aid to kenya, quickly"))
@@ -6611,6 +6765,7 @@ async def test_a_superseded_pause_is_recorded_as_abandoned() -> None:
     records = store.current(PRINCIPAL, CONVERSATION).turns
     assert [record["user"] for record in records] == ["q with forks", "aid to kenya, quickly"]
     assert records[0]["error"] == "abandoned"
+    assert records[0]["plans"] == [{"plan": 1}]
     assert "error" not in records[1]
 
 
@@ -7589,6 +7744,53 @@ async def test_a_pause_frame_is_not_sent_when_its_checkpoint_fails() -> None:
     assert is_user_sentence(error["detail"])
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(SegmentLost("taken over"), id="segment-lost"),
+        pytest.param(DatabaseUnavailable("unreachable"), id="database-unavailable"),
+    ],
+)
+async def test_a_stream_that_lost_its_segment_ends_its_span_as_lost(
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    """Every save after the claim fails as lost, from the first frame's
+    reservation to the release's, so nothing more of the turn is stored. The instance ends its turn span as
+    `segment_lost` at warning level, exported before the stream ends, and
+    its live state goes back to the row as stored."""
+    app = _app(_text("Hello."))
+    store = app.state.studio.store
+    ended: list[tuple[str | None, str]] = []
+    real_end = studio_state_module.end_turn_span
+
+    def recording_end(handle: Any, **kwargs: Any) -> None:
+        if handle is not None:
+            ended.append((kwargs.get("error"), kwargs.get("level", "ERROR")))
+        real_end(handle, **kwargs)
+
+    exported_at_flush: list[int] = []
+
+    async def flush() -> None:
+        exported_at_flush.append(_turn_spans(otlp_spans))
+
+    monkeypatch.setattr(studio_state_module, "end_turn_span", recording_end)
+    monkeypatch.setattr(studio_module, "flush_telemetry", flush)
+
+    async def lost(*args: Any, **kwargs: Any) -> None:
+        raise failure
+
+    store.reserve_frames = lost  # type: ignore[method-assign]
+    store.checkpoint = lost  # type: ignore[method-assign]
+
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body("hi"))
+
+    error = _frame(frames, "error")["error"]
+    assert (error["error"], error["retry"]) == ("transient_unavailable", "retry_after_delay")
+    assert ended == [("segment_lost", "WARNING")]
+    assert exported_at_flush == [1]
+
+
 @pytest.mark.parametrize("write", ["reserve_frames", "checkpoint"])
 @pytest.mark.parametrize(
     "failure",
@@ -7624,18 +7826,15 @@ async def test_a_lost_segment_at_a_save_ends_the_stream_as_the_heartbeat_does(
             )
         ]
 
-    assert [frame.model_dump(mode="json", exclude_none=True) for frame in sent] == [
-        {
-            "event": "error",
-            "seq": sent[0].seq,
-            "error": {
-                "error": "transient_unavailable",
-                "retry": "retry_after_delay",
-                "detail": classed_sentence("transient_unavailable", "retry_after_delay"),
-                "retry_after_seconds": 30,
-            },
-        }
-    ]
+    assert [
+        (
+            frame.event,
+            frame.error.error.value,
+            frame.error.retry.value,
+            frame.error.retry_after_seconds,
+        )
+        for frame in sent
+    ] == [("error", "transient_unavailable", "retry_after_delay", STREAM_RETRY_AFTER_S)]
     assert not conversation.turn_recorded
     assert [r.levelno for r in caplog.records] == [logging.WARNING]
 
@@ -7657,7 +7856,7 @@ async def test_a_lost_segment_at_a_save_ends_the_stream_as_the_heartbeat_does(
     ],
 )
 async def test_a_lost_segment_after_plan_approved_ends_the_stream(
-    failure: Exception, relayed: list[str]
+    caplog: pytest.LogCaptureFixture, failure: Exception, relayed: list[str]
 ) -> None:
     """The save after `plan.approved` is sent fails. A lost segment ends the stream
     with a stream-fatal error frame, as at every other checkpoint, since another
@@ -7684,14 +7883,21 @@ async def test_a_lost_segment_after_plan_approved_ends_the_stream(
         )
         yield MessageDelta(event="message.delta", seq=1, text="next")
 
-    sent = [
-        frame.event
-        async for frame in studio._checkpointed(
-            "u_a", CONVERSATION, segment_id, conversation, frames()
-        )
-    ]
+    with caplog.at_level("WARNING", logger="harness.studio"):
+        sent = [
+            frame.event
+            async for frame in studio._checkpointed(
+                "u_a", CONVERSATION, segment_id, conversation, frames()
+            )
+        ]
 
     assert sent == relayed
+    # A warning either way: with the traceback only for the failure the
+    # stream goes on past.
+    tolerated = "message.delta" in relayed
+    assert [(r.levelno, r.exc_info is not None) for r in caplog.records] == [
+        (logging.WARNING, tolerated)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -7726,11 +7932,10 @@ async def test_a_card_fenced_out_by_a_takeover_ends_the_turn_as_transient(
             frames = await _stream(client, "/api/studio/turn", _turn_body())
 
     error = _frame(frames, "error")["error"]
-    assert (error["error"], error["retry"], error["retry_after_seconds"], error["detail"]) == (
+    assert (error["error"], error["retry"], error["retry_after_seconds"]) == (
         "transient_unavailable",
         "retry_after_delay",
-        30,
-        classed_sentence("transient_unavailable", "retry_after_delay"),
+        STREAM_RETRY_AFTER_S,
     )
     assert not store.current(PRINCIPAL, CONVERSATION).turn_recorded
     assert not [r for r in caplog.records if "studio turn failed" in r.getMessage()]

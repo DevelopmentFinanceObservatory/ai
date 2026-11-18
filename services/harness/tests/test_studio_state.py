@@ -27,7 +27,6 @@ import copy
 import errno
 import json
 import logging
-import socket
 import ssl
 import time
 from collections.abc import Awaitable, Callable
@@ -37,6 +36,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import asyncpg
 import pytest
 from compiler.sources import source_from_spec_block
 from fastapi.responses import JSONResponse
@@ -77,7 +77,7 @@ from harness.wire import (
 from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
 from sqlalchemy import text
-from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -2514,6 +2514,19 @@ async def test_a_canvas_write_that_fails_leaves_the_live_state_as_it_was(new_sto
     assert state.turn_components == []
 
 
+def _driver_error(wrapper: DBAPIError, orig: BaseException) -> DBAPIError:
+    """`wrapper` raised from `orig`, as SQLAlchemy raises a driver's error."""
+    wrapper.__cause__ = orig
+    return wrapper
+
+
+def _connection_reset(statement: str) -> DBAPIError:
+    """The error SQLAlchemy raises when the connection resets under
+    `statement`."""
+    reset = ConnectionResetError("connection reset")
+    return _driver_error(OperationalError(statement, {}, reset), reset)
+
+
 def _dropping_connection(store: StudioStore, *, acknowledged: bool) -> list[int]:
     """Make the next transaction `store` opens fail as a dropped connection
     does: before its commit, or after it with the acknowledgement lost.
@@ -2523,7 +2536,7 @@ def _dropping_connection(store: StudioStore, *, acknowledged: bool) -> list[int]
 
     def fault() -> OperationalError:
         faults.append(1)
-        return OperationalError("COMMIT", {}, ConnectionResetError("connection reset"))
+        return _connection_reset("COMMIT")
 
     @asynccontextmanager
     async def dropping() -> Any:
@@ -2628,7 +2641,7 @@ async def test_a_card_write_failing_past_the_lease_deadline_reports_the_database
     await clock.set(deadline)
 
     async def dropped(*args: Any, **kwargs: Any) -> None:
-        raise OperationalError("UPDATE", {}, ConnectionResetError("connection reset"))
+        raise _connection_reset("UPDATE")
 
     store._write_composition = dropped
 
@@ -2642,165 +2655,143 @@ async def test_a_card_write_failing_past_the_lease_deadline_reports_the_database
     assert state.composition is None
 
 
-def _wrapped_in(fault: BaseException, wrapper: BaseException) -> BaseException:
-    wrapper.__cause__ = fault
-    return wrapper
-
-
-class _FailingConnect:
-    """An engine whose next connect raises `fault`; everything else goes to
-    `engine`."""
-
-    def __init__(self, engine: Any, fault: BaseException) -> None:
-        self._engine = engine
-        self.fault: BaseException | None = fault
-
-    async def connect(self) -> Any:
-        if self.fault is not None:
-            fault, self.fault = self.fault, None
-            raise fault
-        return await self._engine.connect()
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._engine, name)
-
-
 @pytest.mark.parametrize(
-    ("phase", "fault", "retried"),
+    ("fault", "retried"),
     [
-        pytest.param("connect", ConnectionRefusedError("refused"), True, id="connect-refused"),
-        pytest.param("connect", ssl.SSLError("handshake failed"), True, id="connect-tls-failure"),
         pytest.param(
-            "connect", socket.gaierror("name does not resolve"), True, id="connect-unresolved"
-        ),
-        pytest.param(
-            "connect",
-            OSError(errno.EHOSTUNREACH, "No route to host"),
+            _driver_error(
+                OperationalError("UPDATE", {}, Exception("terminating connection")),
+                asyncpg.AdminShutdownError("terminating connection due to administrator command"),
+            ),
             True,
-            id="connect-unreachable-host",
+            id="connection-ended",
         ),
         pytest.param(
-            "connect",
-            OSError("Multiple exceptions: [Errno 111] refused, [Errno 99] unavailable"),
+            OperationalError("UPDATE", {}, Exception("closed"), connection_invalidated=True),
             True,
-            id="connect-every-address-refused",
+            id="invalidated",
         ),
-        pytest.param("connect", TimeoutError("timed out"), True, id="connect-timeout"),
+        pytest.param(OSError(errno.EHOSTUNREACH, "No route to host"), True, id="raw-os-error"),
         pytest.param(
-            "connect",
-            OSError(errno.EMFILE, "Too many open files"),
-            True,
-            id="connect-too-many-open-files",
-        ),
-        pytest.param(
-            "connect", SQLAlchemyTimeoutError("QueuePool limit reached"), True, id="pool-timeout"
-        ),
-        pytest.param(
-            "connect",
-            OperationalError("connect", {}, ConnectionRefusedError("refused")),
-            True,
-            id="connect-driver-refused",
+            _driver_error(
+                OperationalError("connect", {}, Exception("password authentication failed")),
+                asyncpg.InvalidAuthorizationSpecificationError("password authentication failed"),
+            ),
+            False,
+            id="auth-error",
         ),
         pytest.param(
-            "connect", FileNotFoundError("no socket at /cloudsql/x"), False, id="missing-socket"
-        ),
-        pytest.param("connect", PermissionError("client key"), False, id="unreadable-key"),
-        pytest.param(
-            "connect", IsADirectoryError("sslrootcert"), False, id="certificate-is-a-directory"
-        ),
-        pytest.param(
-            "connect", NotADirectoryError("sslrootcert"), False, id="certificate-not-a-directory"
-        ),
-        pytest.param(
-            "connect",
             ssl.SSLCertVerificationError("certificate verify failed"),
             False,
             id="unverified-certificate",
         ),
         pytest.param(
-            "connect",
-            _wrapped_in(
-                ssl.SSLCertVerificationError("certificate verify failed"),
-                OSError("connector could not connect"),
+            _driver_error(
+                OperationalError(
+                    "UPDATE", {}, Exception("canceling statement due to lock timeout")
+                ),
+                asyncpg.LockNotAvailableError("canceling statement due to lock timeout"),
             ),
             False,
-            id="unverified-certificate-wrapped",
-        ),
-        pytest.param(
-            "statement",
-            OperationalError("UPDATE", {}, ConnectionResetError("connection reset")),
-            True,
-            id="statement-reset-socket",
-        ),
-        pytest.param(
-            "statement", ConnectionResetError("connection reset"), True, id="statement-reset-raw"
-        ),
-        pytest.param(
-            "statement",
-            OperationalError("UPDATE", {}, Exception("closed"), connection_invalidated=True),
-            True,
-            id="statement-invalidated",
-        ),
-        pytest.param("statement", TimeoutError("timed out"), False, id="statement-timeout"),
-        pytest.param(
-            "statement",
-            OSError(errno.EMFILE, "Too many open files"),
-            False,
-            id="statement-os-error",
-        ),
-        pytest.param(
-            "statement",
-            OperationalError("UPDATE", {}, Exception("canceling statement due to lock timeout")),
-            False,
             id="lock-timeout",
-        ),
-        pytest.param(
-            "statement",
-            InterfaceError("UPDATE", {}, Exception("another operation is in progress")),
-            False,
-            id="connection-misuse",
         ),
     ],
 )
 async def test_a_card_write_retries_a_lost_connection_alone(
-    new_store, monkeypatch, phase: str, fault: Exception, retried: bool
+    new_store, monkeypatch, fault: Exception, retried: bool
 ) -> None:
-    """A failed connect is retried unless what failed is a file or a
-    certificate no retry mends; a failed statement is retried only when the
-    connection was lost under it. Anything else raises at once."""
+    """A write retries a fault the harness's classifier calls transient (a
+    connection ended or invalidated, a network that cannot reach the
+    database), and raises anything else at once."""
     monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
     store = new_store()
     await store.create("principal", CONVERSATION)
     store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
-    if phase == "connect":
-        store._engine = _FailingConnect(store._engine, fault)
-    else:
-        real_write = store._write_composition
-        faults: list[Exception] = []
+    real_write = store._write_composition
+    faults: list[Exception] = []
 
-        async def failing_once(*args: Any, **kwargs: Any) -> None:
-            if not faults:
-                faults.append(fault)
-                raise fault
-            await real_write(*args, **kwargs)
+    async def failing_once(*args: Any, **kwargs: Any) -> None:
+        if not faults:
+            faults.append(fault)
+            raise fault
+        await real_write(*args, **kwargs)
 
-        store._write_composition = failing_once
+    store._write_composition = failing_once
 
     if retried:
         await store.change_canvas(
             "principal", CONVERSATION, lambda work: land_component(work, _CARD)
         )
     else:
-        with pytest.raises(Exception) as raised:
+        with pytest.raises(type(fault)):
             await store.change_canvas(
                 "principal", CONVERSATION, lambda work: land_component(work, _CARD)
             )
-        assert not isinstance(raised.value, DatabaseUnavailable)
-        assert fault in {raised.value, raised.value.__cause__}
 
-    if phase == "connect":
-        assert store._engine.fault is None
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert (reloaded.composition is not None) == retried
+
+
+class _FailingCheckout:
+    """An engine whose next `begin()` fails to check a connection out with
+    `fault`; everything else goes to `engine`."""
+
+    def __init__(self, engine: Any, fault: BaseException) -> None:
+        self._engine = engine
+        self.fault: BaseException | None = fault
+
+    def begin(self) -> Any:
+        if self.fault is None:
+            return self._engine.begin()
+        fault, self.fault = self.fault, None
+
+        @asynccontextmanager
+        async def failing() -> Any:
+            raise fault
+            yield  # pragma: no cover -- marks this a generator
+
+        return failing()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine, name)
+
+
+@pytest.mark.parametrize(
+    ("fault", "retried"),
+    [
+        pytest.param(ConnectionRefusedError("refused"), True, id="refused"),
+        pytest.param(SQLAlchemyTimeoutError("QueuePool limit reached"), True, id="pool-timeout"),
+        pytest.param(
+            ssl.SSLCertVerificationError("certificate verify failed"),
+            False,
+            id="unverified-certificate",
+        ),
+    ],
+)
+async def test_a_write_retries_a_connection_checkout_that_failed_alone(
+    new_store, monkeypatch, fault: Exception, retried: bool
+) -> None:
+    """The connection checkout sits inside the retried attempt: a transient
+    fault there is retried, and a permanent one raises at once."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store = new_store()
+    await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    store._engine = _FailingCheckout(store._engine, fault)
+
+    if retried:
+        await store.change_canvas(
+            "principal", CONVERSATION, lambda work: land_component(work, _CARD)
+        )
+    else:
+        with pytest.raises(type(fault)):
+            await store.change_canvas(
+                "principal", CONVERSATION, lambda work: land_component(work, _CARD)
+            )
+
+    assert store._engine.fault is None
     reloaded = await new_store().load("principal", CONVERSATION)
     assert (reloaded.composition is not None) == retried
 
@@ -2817,7 +2808,7 @@ async def test_a_release_that_cannot_reach_the_database_logs_it_saved_nothing(
     await clock.set(store.lease_deadline("principal", CONVERSATION))
 
     async def dropped(*args: Any, **kwargs: Any) -> None:
-        raise OperationalError("UPDATE", {}, ConnectionResetError("connection reset"))
+        raise _connection_reset("UPDATE")
 
     store._write = dropped
 
@@ -2857,7 +2848,7 @@ async def test_a_release_retried_after_another_instance_claimed_and_released_is_
             b_segment = store_b.claim_segment("principal", CONVERSATION)
             await store_b.save("principal", CONVERSATION)
             await store_b.release("principal", CONVERSATION, b_segment)
-            raise OperationalError("COMMIT", {}, ConnectionResetError("connection reset"))
+            raise _connection_reset("COMMIT")
 
     store_a._transaction = losing_the_ack
     version_before = store_a._runtime[("principal", CONVERSATION)].version
@@ -2943,7 +2934,7 @@ async def test_a_removal_that_cannot_reach_the_database_ends_the_stream_as_lost(
     await clock.set(store.lease_deadline("principal", CONVERSATION))
 
     async def dropped(*args: Any, **kwargs: Any) -> None:
-        raise OperationalError("UPDATE", {}, ConnectionResetError("connection reset"))
+        raise _connection_reset("UPDATE")
 
     store._write_composition = dropped
     state.renew_now = asyncio.Event()
@@ -3165,6 +3156,38 @@ async def test_release_swallows_a_takeover_and_still_never_raises(new_store, clo
     await store_b.save("principal", CONVERSATION)
 
     await store_a.release("principal", CONVERSATION, segment_id)  # must not raise
+
+
+@pytest.mark.parametrize(("paused", "ended"), [(False, ["segment_lost"]), (True, [])])
+async def test_a_release_that_lost_its_segment_ends_a_running_turn_s_span_alone(
+    new_store, clock, monkeypatch, paused: bool, ended: list[str]
+) -> None:
+    """A's release is fenced out by B's takeover. A turn that was running
+    ends A's span as lost; a turn whose pause A had stored keeps it for the
+    answer that resumes it."""
+    calls: list[str | None] = []
+
+    def recording_end(handle: Any, **kwargs: Any) -> None:
+        if handle is not None:
+            calls.append(kwargs.get("error"))
+
+    monkeypatch.setattr(studio_state, "end_turn_span", recording_end)
+    store_a = new_store(clock=clock)
+    store_b = new_store(clock=clock)
+    state = await store_a.create("principal", CONVERSATION)
+    segment_id = store_a.claim_segment("principal", CONVERSATION)
+    if paused:
+        state.pending["int_1"] = _PendingInterrupt(adk_id="adk_1", kind="plan")
+    await store_a.save("principal", CONVERSATION)
+    state._telemetry_span = object()
+
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+    await store_b.load("principal", CONVERSATION)
+    store_b.claim_segment("principal", CONVERSATION)
+    await store_b.save("principal", CONVERSATION)
+    await store_a.release("principal", CONVERSATION, segment_id)
+
+    assert calls == ended
 
 
 async def test_a_release_past_its_timeout_cancels_the_checkpoint_once(new_store) -> None:
