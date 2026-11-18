@@ -22,28 +22,29 @@ from __future__ import annotations
 
 import copy
 import logging
-import sys
 from collections.abc import AsyncGenerator, Callable, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from google.genai import types
 from harness.gemini_agent import (
+    NO_REQUEST_LIMIT,
+    QUESTION_INSTRUCTIONS,
+    UNLIMITED_RETRIES,
     RecordingState,
     as_function_response,
+    declared_tool,
     replayed_history,
     response_parts,
     tool_not_found,
     without_unsigned_thoughts,
 )
-from harness.gemini_wire import NO_PARAMETERS
 from pydantic_ai import Agent, InstrumentationSettings, RunContext, Tool
 from pydantic_ai.capabilities import Instrumentation, ProcessHistory
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolReturnPart, UserPromptPart
 from pydantic_ai.models import Model
 from pydantic_ai.models.google import GoogleModelSettings
-from pydantic_ai.usage import UsageLimits
 
 from planner.call import PlannerCall
 from planner.plan import SessionState
@@ -51,25 +52,6 @@ from planner.settings import AGENT_THINKING_CONFIG
 from planner.tool_spec import ToolSpec, function_declaration, serve_tool
 
 logger = logging.getLogger(__name__)
-
-# The turn budget bounds a run's model calls (`harness.turn_budget`), so Pydantic
-# AI's own default cap of 50 requests is lifted.
-_NO_REQUEST_LIMIT = UsageLimits(request_limit=None)
-
-# Pydantic AI charges a call to a tool the planner lacks against the tool retry
-# budget and ends the run once it is spent. The planner answers every such call
-# (`tool_not_found`) and goes on, so the budget is lifted and the turn budget's
-# call cap ends a run that keeps making them. The planner's own tools take
-# their arguments unvalidated, so none asks for a retry.
-_UNLIMITED_RETRIES = sys.maxsize
-
-# Carried by the request holding the user's message. Pydantic AI merges
-# consecutive requests into one content unless their `instructions` differ,
-# and the brief's request carries the agent's instruction, so this keeps the
-# user's message and the brief two contents.
-# Only the latest request's instructions reach the model, so this text is not
-# sent.
-_QUESTION_INSTRUCTIONS = "The user's message, which opened the turn."
 
 # Makes the `PlannerCall` of one tool call from the state view the call's
 # response writes through and the call's id.
@@ -170,7 +152,7 @@ def planner_agent(
 
     A call to a tool the planner lacks is answered with
     `harness.gemini_agent.tool_not_found`, and the run goes on however many
-    such calls the model makes (`_UNLIMITED_RETRIES`). Each request replays
+    such calls the model makes (`harness.gemini_agent.UNLIMITED_RETRIES`). Each request replays
     the run's earlier responses less their unsigned thought summaries, as the
     session keeps them (`harness.gemini_agent.replayed_history`).
 
@@ -192,7 +174,7 @@ def planner_agent(
         model_settings=GoogleModelSettings(
             google_thinking_config=AGENT_THINKING_CONFIG.model_dump(mode="json", exclude_none=True)
         ),
-        retries={"tools": _UNLIMITED_RETRIES},
+        retries={"tools": UNLIMITED_RETRIES},
         capabilities=[
             ProcessHistory(replayed_history(tools)),
             Instrumentation(
@@ -207,17 +189,9 @@ def planner_agent(
 
 
 def _tool(spec: ToolSpec) -> Tool[PlannerDeps]:
-    declaration = function_declaration(spec)
-    schema = declaration.parameters_json_schema
-    tool = Tool.from_schema(
-        _tool_function(spec),
-        name=spec.name,
-        description=declaration.description,
-        json_schema=dict(schema) if schema is not None else NO_PARAMETERS,
-        takes_ctx=True,
+    return declared_tool(
+        _tool_function(spec), name=spec.name, declaration=function_declaration(spec)
     )
-    tool.strict = False
-    return tool
 
 
 def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
@@ -287,7 +261,7 @@ async def run_planner(
         [
             ModelRequest(
                 parts=[UserPromptPart(_question_prompt(question))],
-                instructions=_QUESTION_INSTRUCTIONS,
+                instructions=QUESTION_INSTRUCTIONS,
             )
         ]
         if question is not None
@@ -298,7 +272,7 @@ async def run_planner(
         model=model,
         message_history=history,
         deps=deps,
-        usage_limits=_NO_REQUEST_LIMIT,
+        usage_limits=NO_REQUEST_LIMIT,
         conversation_id=conversation_id,
     ) as run:
         try:

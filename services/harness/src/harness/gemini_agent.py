@@ -1,7 +1,10 @@
 """What a Pydantic AI agent on Gemini needs of the harness, whichever agent it is.
 
 `GEMINI_PROFILE` is the model profile an agent's `GoogleModel` is built on,
-the one `harness.gemini_wire.in_canonical_form` expects. `replayed_history`
+the one `harness.gemini_wire.in_canonical_form` expects. `declared_tool`
+serves a function under its Gemini declaration; `UNLIMITED_RETRIES`,
+`NO_REQUEST_LIMIT` and `QUESTION_INSTRUCTIONS` are the run settings both
+agents share. `replayed_history`
 is the history processor that puts a run's messages in the form they are
 stored and replayed in. `response_parts` turns a model response back into the
 google-genai parts Gemini sent, and `as_function_response` a tool's answer
@@ -13,11 +16,13 @@ known.
 from __future__ import annotations
 
 import base64
+import sys
 from collections.abc import Awaitable, Callable, MutableMapping, Sequence
 from dataclasses import replace
 from typing import Any, cast
 
 from google.genai import types
+from pydantic_ai import Tool
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
     ModelMessage,
@@ -31,6 +36,9 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 from pydantic_ai.profiles.google import GoogleModelProfile
+from pydantic_ai.usage import UsageLimits
+
+from harness.gemini_wire import NO_PARAMETERS
 
 # The harness's changes to Gemini's profile, which `GoogleModel(profile=...)`
 # merges over the provider's own for the model. Declarations are sent as given
@@ -39,6 +47,43 @@ from pydantic_ai.profiles.google import GoogleModelProfile
 GEMINI_PROFILE = GoogleModelProfile(
     json_schema_transformer=None, supports_inline_system_prompts=True
 )
+
+# Pydantic AI charges a call to a tool the agent lacks against the tool retry
+# budget and ends the run once it is spent. Each agent answers every such call
+# (`tool_not_found`) and goes on, so the budget is lifted and the turn budget's
+# call cap ends a run that keeps making them. Neither agent's tools ask for a
+# retry.
+UNLIMITED_RETRIES = sys.maxsize
+
+# The turn budget bounds a run's model calls (`harness.turn_budget`), so Pydantic
+# AI's own default cap of 50 requests is lifted.
+NO_REQUEST_LIMIT = UsageLimits(request_limit=None)
+
+# Carried by the request holding the user's message. Pydantic AI merges
+# consecutive requests into one content unless their `instructions` differ,
+# so this keeps the user's message a content of its own. Only the latest
+# request's instructions reach the model, so this text is not sent.
+QUESTION_INSTRUCTIONS = "The user's message, which opened the turn."
+
+
+def declared_tool[D](
+    function: Callable[..., Any], *, name: str, declaration: types.FunctionDeclaration
+) -> Tool[D]:
+    """`function`, which takes the run's context first, served as the tool
+    `name` under `declaration`: its description, and its parameters schema
+    as it stands, or `NO_PARAMETERS` for a declaration with none. The tool
+    is not strict, which keeps the request's function calling mode `AUTO`,
+    Gemini's default with tools."""
+    schema = declaration.parameters_json_schema
+    tool: Tool[D] = Tool.from_schema(
+        function,
+        name=name,
+        description=declaration.description,
+        json_schema=dict(schema) if schema is not None else NO_PARAMETERS,
+        takes_ctx=True,
+    )
+    tool.strict = False
+    return tool
 
 
 class RecordingState:
@@ -205,9 +250,13 @@ def as_function_response(value: object) -> dict[str, Any]:
 
 __all__ = [
     "GEMINI_PROFILE",
+    "NO_REQUEST_LIMIT",
+    "QUESTION_INSTRUCTIONS",
+    "UNLIMITED_RETRIES",
     "EmptyResponseError",
     "RecordingState",
     "as_function_response",
+    "declared_tool",
     "holds_no_answer",
     "replayed_history",
     "response_parts",

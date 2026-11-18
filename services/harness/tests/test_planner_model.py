@@ -483,6 +483,13 @@ async def test_a_call_sent_without_an_id_is_stored_under_a_client_id_and_replaye
     assert [
         part.function_response.id for part in replayed[2].parts or [] if part.function_response
     ] == [None, "sent"]
+    # Only the contents that held a client id were copied to strip it; the
+    # user's message goes on as `GoogleModel` built it.
+    assert [type(content) for content in scripted.requests[1].contents] == [
+        dict,
+        types.Content,
+        types.Content,
+    ]
 
 
 _SIGNED = thought_part("weighed the sources", signature=b"sig")

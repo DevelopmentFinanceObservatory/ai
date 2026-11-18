@@ -76,6 +76,10 @@ Every model request (system instruction and contents, as the model received them
 every tool call, a scripted planner's own included, is recorded in order. A
 case's `checks` list names properties from `checks.py`'s `CASE_CHECKS` that read that record:
 
+- `approval_payload_absent_after_approval`: no request made after the plan's first
+  step ran holds the approval pause (the plan card) or the user's answer to it.
+- `refused_step_reaches_the_next_plan`: the orchestrator's first request after a
+  refused plan step names the refusal's code, and the planner is entered again after it.
 - `planner_first_message_carries_search_evidence`: the planner's first request names
   every spec id, warning code and window year the turn's searches returned.
 - `previous_final_message_in_view`: each turn's first orchestrator request shows the

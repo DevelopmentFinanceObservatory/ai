@@ -72,7 +72,6 @@ def node_ctx(
         key=KEY,
         inputs={"message": message},
         state={} if state is None else state,
-        specs={},
         transcript=Transcript(
             list(records) if records is not None else [transcript.user_message(message)]
         ),
@@ -147,7 +146,6 @@ class PlannerHarness:
             key=KEY,
             inputs={"message": self._message},
             state=_as_stored(self._state),
-            specs={},
             transcript=records,
             emit=self.emitted.append,
             stop=StopScope(),

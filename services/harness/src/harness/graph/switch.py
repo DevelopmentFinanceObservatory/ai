@@ -174,8 +174,8 @@ _DRAFTING_PREFIXES = ("planner:", "translator:")
 # (`harness.planner_adapter.store_searched_pin_readings`), with their blocks. Each
 # maps to the value it is put back as when unset, since the readers take the
 # readings and blocks as a list and a mapping. The blocks are the turn's whole
-# spec mapping (`harness.graph.workflow.with_specs`), which the loop writes as
-# given, so a block the revision added is deleted and one it rewrote is put back.
+# spec mapping, which the turn store writes as given (`harness.turn.store`), so
+# a block the revision added is deleted and one it rewrote is put back.
 _RESTORED_KEYS: Mapping[str, Any] = {
     "plan": None,
     ORCHESTRATOR_SEARCHES_KEY: [],

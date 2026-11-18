@@ -430,7 +430,7 @@ def _is_amendment(body: Mapping[str, Any]) -> bool:
     """Whether an ask's response body is the user amending the approval card.
 
     `harness.studio`'s `/interrupt` route answers the approval card
-    (`harness.graph.APPROVE_INTERRUPT`) with `{"result": {"amendment": ...}}`
+    (`harness.graph.state.APPROVE_PAUSE`) with `{"result": {"amendment": ...}}`
     when the user types a change there.
     """
     result = body.get("result")

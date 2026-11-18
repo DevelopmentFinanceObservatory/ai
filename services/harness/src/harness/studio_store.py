@@ -24,7 +24,9 @@ different groups never conflict:
 - `mutate_composition` writes the canvas column alone for each
   `/composition` edit, unfenced, and leaves `version` alone.
 - `renew` and `request_cancel` each update the lease columns in one
-  conditional statement and leave `version` alone.
+  conditional statement and leave `version` alone. A Stop request is an id
+  (`lease_stop_id`) that renewals read and never clear, so a renewal whose
+  acknowledgement is lost cannot drop it; a claim starts with none.
 - `reserve_frames` extends the frame numbers the live segment may send,
   fenced on the segment and its lease being live.
 
@@ -60,7 +62,7 @@ from collections.abc import (
 )
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 from compiler.surface import transient
 from executor.ledger import RunStatus
@@ -247,7 +249,7 @@ def _serialize_segment(segment: Segment) -> dict[str, Any]:
         "id": segment.id,
         "owner": segment.owner,
         "expires_at": segment.expires_at,
-        "cancel": segment.cancel,
+        "stop_id": segment.stop_id,
     }
 
 
@@ -258,7 +260,7 @@ def _deserialize_segment(value: Any) -> Segment | None:
         id=value["id"],
         owner=value["owner"],
         expires_at=value["expires_at"],
-        cancel=bool(value.get("cancel", False)),
+        stop_id=value.get("stop_id"),
     )
 
 
@@ -489,6 +491,15 @@ class ConversationExists(Exception):  # noqa: N818 -- named for the race it repo
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class Renewal:
+    """What a lease renewal found: whether the segment still `held` the
+    lease, and the latest Stop request made of it (`stop_id`), if any."""
+
+    held: bool
+    stop_id: str | None
+
+
 def _jsonb(value: Any) -> str | None:
     """`value` as a jsonb parameter: JSON text, or SQL NULL for `None`."""
     return None if value is None else json.dumps(value)
@@ -496,7 +507,7 @@ def _jsonb(value: Any) -> str | None:
 
 _CONVERSATION_COLUMNS = (
     "id, version, turn_state, composition, lease_segment_id, lease_owner, "
-    "lease_expires_at, lease_cancel, seq_next, seq_reserved"
+    "lease_expires_at, lease_stop_id, seq_next, seq_reserved"
 )
 
 
@@ -507,7 +518,7 @@ def _row_segment(row: Any) -> Segment | None:
         id=row.lease_segment_id,
         owner=row.lease_owner,
         expires_at=row.lease_expires_at,
-        cancel=row.lease_cancel,
+        stop_id=row.lease_stop_id,
     )
 
 
@@ -626,13 +637,13 @@ def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
             _check_column("segment expiry", segment.expires_at, (int, float))
         sets.append(
             "lease_segment_id = :segment_id, lease_owner = :owner, "
-            "lease_expires_at = :expires_at, lease_cancel = :cancel"
+            "lease_expires_at = :expires_at, lease_stop_id = :stop_id"
         )
         params |= {
             "segment_id": segment.id if segment else None,
             "owner": segment.owner if segment else None,
             "expires_at": segment.expires_at if segment else None,
-            "cancel": segment.cancel if segment else False,
+            "stop_id": segment.stop_id if segment else None,
         }
     rows: dict[str, list[dict[str, Any]]] = {}
     for key, value in delta.items():
@@ -1374,21 +1385,20 @@ class StudioStore:
         segment_id: str,
         *,
         timeout: float = 5.0,
-        consume_cancel: bool = False,
-    ) -> Literal["ok", "cancelled", "lost"]:
+    ) -> Renewal:
         """Push `segment_id`'s expiry to `SEGMENT_TTL_S` past the database
         clock's reading in one conditional update of the lease columns, which
         never disturbs whatever the live stream is doing to `entry.state` and
         never writes the rest of the conversation. That is `checkpoint`'s
         job.
 
-        `"lost"` when the stored segment is no longer `segment_id` (another
-        instance took over after this one's TTL lapsed); the caller ends the
-        stream fatally. `"cancelled"` when it is still `segment_id` but its
-        `cancel` flag is set, still renewed, so the flag keeps being observed
-        until the caller reacts to it. With `consume_cancel` the same update
-        clears the flag, so a later `request_cancel` sets it again and the
-        next renewal reports that Stop on its own. `"ok"` otherwise. A
+        `Renewal.held` is `False` when the stored segment is no longer
+        `segment_id` (another instance took over after this one's TTL
+        lapsed); the caller ends the stream fatally. Otherwise
+        `Renewal.stop_id` is the latest Stop request made of the segment
+        (`request_cancel`), or `None`. The renewal leaves it stored, so a
+        renewal whose acknowledgement is lost reports the same request
+        again, and the caller acts once on each id it has not acted on. A
         database error propagates, as does a `TimeoutError` when the renewal
         takes longer than `timeout`; the caller's own heartbeat decides how
         long to keep trying.
@@ -1398,24 +1408,12 @@ class StudioStore:
         cancelled whenever its stream ends.
         """
         return await _run_to_completion(
-            self._renew(
-                principal,
-                conversation_id,
-                segment_id,
-                timeout=timeout,
-                consume_cancel=consume_cancel,
-            )
+            self._renew(principal, conversation_id, segment_id, timeout=timeout)
         )
 
     async def _renew(
-        self,
-        principal: str,
-        conversation_id: str,
-        segment_id: str,
-        *,
-        timeout: float,
-        consume_cancel: bool,
-    ) -> Literal["ok", "cancelled", "lost"]:
+        self, principal: str, conversation_id: str, segment_id: str, *, timeout: float
+    ) -> Renewal:
         """`renew`'s write, run as its own task."""
         stamp = self._clock()
         async with asyncio.timeout(timeout):
@@ -1425,29 +1423,23 @@ class StudioStore:
                     row = (
                         await conn.execute(
                             text(
-                                "WITH held AS ("
-                                " SELECT id, lease_cancel FROM conversations"
+                                "UPDATE conversations"
+                                f" SET lease_expires_at = {self._time_sql} + :ttl"
                                 " WHERE principal = :principal"
                                 " AND conversation_id = :conversation_id"
-                                " AND lease_segment_id = :segment_id FOR UPDATE)"
-                                " UPDATE conversations AS c"
-                                f" SET lease_expires_at = {self._time_sql} + :ttl,"
-                                " lease_cancel = held.lease_cancel AND NOT :consume_cancel"
-                                " FROM held WHERE c.id = held.id"
-                                " RETURNING held.lease_cancel AS was_cancelled, c.lease_owner,"
-                                " c.lease_cancel, c.lease_expires_at"
+                                " AND lease_segment_id = :segment_id"
+                                " RETURNING lease_owner, lease_stop_id, lease_expires_at"
                             ),
                             {
                                 "principal": principal,
                                 "conversation_id": conversation_id,
                                 "segment_id": segment_id,
                                 "ttl": SEGMENT_TTL_S,
-                                "consume_cancel": consume_cancel,
                             },
                         )
                     ).first()
                 if row is None:
-                    return "lost"
+                    return Renewal(held=False, stop_id=None)
                 entry.lease_stamp = max(entry.lease_stamp, stamp)
                 self._note_segment(
                     entry,
@@ -1455,10 +1447,10 @@ class StudioStore:
                         id=segment_id,
                         owner=row.lease_owner,
                         expires_at=row.lease_expires_at,
-                        cancel=row.lease_cancel,
+                        stop_id=row.lease_stop_id,
                     ),
                 )
-                return "cancelled" if row.was_cancelled else "ok"
+                return Renewal(held=True, stop_id=row.lease_stop_id)
 
     def _note_segment(self, entry: _RuntimeEntry, segment: Segment) -> None:
         """Record a lease write in this instance's baseline, and in its live
@@ -1621,7 +1613,7 @@ class StudioStore:
                     await conn.execute(
                         text(
                             "UPDATE conversations SET lease_segment_id = NULL, "
-                            "lease_owner = NULL, lease_expires_at = NULL, lease_cancel = false "
+                            "lease_owner = NULL, lease_expires_at = NULL, lease_stop_id = NULL "
                             "WHERE principal = :principal "
                             "AND conversation_id = :conversation_id "
                             "AND lease_segment_id = :segment_id"
@@ -1646,9 +1638,10 @@ class StudioStore:
             )
 
     async def request_cancel(self, principal: str, conversation_id: str) -> bool:
-        """Set the cancel flag on `conversation_id`'s live segment, whoever
-        owns it, this instance included; the segment's heartbeat reads it at
-        its next renewal. One conditional update of the lease columns.
+        """Record a Stop request, under a fresh id, on `conversation_id`'s
+        live segment, whoever owns it, this instance included; the segment's
+        heartbeat reads it at its next renewal (`renew`). One conditional
+        update of the lease columns.
 
         Returns whether a live segment was found and signalled: `False`
         when there is none, or the one on record has already expired by the
@@ -1656,18 +1649,23 @@ class StudioStore:
         with no active segment.
         """
         entry = self._entry(principal, conversation_id)
+        stop_id = _wire_id("stop")
         async with entry.write_lock:
             async with self._transaction() as conn:
                 row = (
                     await conn.execute(
                         text(
-                            "UPDATE conversations SET lease_cancel = true "
+                            "UPDATE conversations SET lease_stop_id = :stop_id "
                             "WHERE principal = :principal AND conversation_id = :conversation_id "
                             "AND lease_segment_id IS NOT NULL "
                             f"AND lease_expires_at > {self._time_sql} "
                             "RETURNING lease_segment_id, lease_owner, lease_expires_at"
                         ),
-                        {"principal": principal, "conversation_id": conversation_id},
+                        {
+                            "principal": principal,
+                            "conversation_id": conversation_id,
+                            "stop_id": stop_id,
+                        },
                     )
                 ).first()
             if row is None:
@@ -1678,7 +1676,7 @@ class StudioStore:
                     id=row.lease_segment_id,
                     owner=row.lease_owner,
                     expires_at=row.lease_expires_at,
-                    cancel=True,
+                    stop_id=stop_id,
                 ),
             )
             return True

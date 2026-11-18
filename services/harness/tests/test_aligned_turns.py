@@ -74,7 +74,7 @@ from .planner_host import PlannerHarness
 from .planner_tools import call_planner_tool
 from .scripted_genai import ScriptedGenai, call_part, reply, text_part
 from .test_graph import (
-    APPROVE_INTERRUPT,
+    APPROVE_PAUSE,
     _ManifestSurface,
     _output_of,
     _plan_runner,
@@ -515,7 +515,7 @@ async def test_a_paused_plan_stored_before_the_change_approves_on_its_revision(
     offered = _output_of(events, "planner")
     assert offered["revision"] == plan_revision(paused)
 
-    await _resume(runner, APPROVE_INTERRUPT, approve_answer(offered["revision"]))
+    await _resume(runner, APPROVE_PAUSE, approve_answer(offered["revision"]))
 
     assert ("get_data", _MULTILATERAL) in surface.calls
 

@@ -25,20 +25,30 @@ from harness.graph.state import (
     stored_mapping,
     stored_sequence,
 )
-from harness.graph.workflow import EDGES, START, turn_graph, with_specs
+from harness.graph.workflow import EDGES, START, turn_graph
 from harness.turn.events import NodeDone, Paused, TurnFailed
 from harness.turn.loop import END, Outcome
-from harness.turn.node import Next, Node, NodeCtx, StopScope, TurnKey
+from harness.turn.node import Next, Node, NodeCtx
 from harness.turn.store import TurnStatus
-from harness.turn.transcript import Transcript
 from orchestrator.run import ModelResponded, TextDelta, ToolsAnswered
 from pydantic_ai.exceptions import UnexpectedModelBehavior
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .graph_turns import GIVEN, agent_read, given, opening_graph, opening_nodes, visited
 from .scripted_genai import Reply, blocked_reply, empty_reply, reply, text_part
 from .scripted_tools import ask_user_call, plan_call, scripted_orchestrator
 from .turn_driver import TurnDriver, numbered_call_ids, scripted_models
+
+
+async def _stored_state(engine: AsyncEngine, turn: int) -> dict[str, Any]:
+    """The state column of turn `turn` as stored, without the spec blocks
+    the store keeps as rows."""
+    async with engine.connect() as conn:
+        return (
+            await conn.execute(text("SELECT state FROM turn_cursors WHERE id = :id"), {"id": turn})
+        ).scalar_one()
+
 
 _NODES = {"seed", "orchestrate", "ask", "plan_start", "planner", "approve", "switch", "execute"}
 _NODES |= {"plan_done"}
@@ -72,66 +82,6 @@ def test_the_turn_graph_opens_at_seed_and_refuses_a_missing_node() -> None:
         turn_graph(dict.fromkeys(_NODES - {"ask"}, Node(run=_goes)))
 
 
-def _ctx(specs: dict[str, Any], state: dict[str, Any]) -> NodeCtx:
-    return NodeCtx(
-        key=TurnKey("user-1", "conv", 1),
-        inputs={"message": "m"},
-        state=state,
-        specs=specs,
-        transcript=Transcript(),
-        emit=lambda event: None,
-        stop=StopScope(),
-    )
-
-
-async def test_a_node_reads_and_writes_the_specs_in_its_state_only_while_it_runs() -> None:
-    held = {"spec_a": {"spec_id": "spec_a"}}
-    seen: list[Any] = []
-
-    async def writes(ctx: NodeCtx, node_input: Any) -> Next:
-        seen.append(dict(ctx.state[ORCHESTRATOR_SPECS_KEY]))
-        ctx.state[ORCHESTRATOR_SPECS_KEY] = {
-            **ctx.state[ORCHESTRATOR_SPECS_KEY],
-            "spec_b": {"spec_id": "spec_b"},
-        }
-        return Next("next")
-
-    async def answered(ctx: NodeCtx, node_input: Any, answer: dict[str, Any]) -> Next:
-        seen.append(answer)
-        del ctx.state[ORCHESTRATOR_SPECS_KEY]
-        return Next("next")
-
-    node = with_specs(Node(run=writes, resume=answered))
-    specs, state = dict(held), {"plan": None}
-    ctx = _ctx(specs, state)
-
-    await node.run(ctx, None)
-
-    assert seen == [held]
-    assert list(specs) == ["spec_a", "spec_b"]
-    assert ctx.specs is specs
-    assert state == {"plan": None}
-
-    assert node.resume is not None
-    await node.resume(ctx, None, {"answer": 1})
-
-    assert specs == {}
-    assert state == {"plan": None}
-
-
-async def test_a_node_that_raises_still_takes_its_specs_out_of_its_state() -> None:
-    async def raises(ctx: NodeCtx, node_input: Any) -> Next:
-        ctx.state[ORCHESTRATOR_SPECS_KEY] = {"spec_b": {}}
-        raise RuntimeError("broke")
-
-    specs, state = {"spec_a": {}}, {}
-    with pytest.raises(RuntimeError):
-        await with_specs(Node(run=raises)).run(_ctx(specs, state), None)
-
-    assert (specs, state) == ({"spec_b": {}}, {})
-    assert with_specs(Node(run=raises)).resume is None
-
-
 async def test_an_answered_turn_shows_its_status_streams_the_run_and_ends(
     pg_engine: AsyncEngine,
 ) -> None:
@@ -151,7 +101,7 @@ async def test_an_answered_turn_shows_its_status_streams_the_run_and_ends(
     assert 'The user\'s canvas: {"cards": []}' in read
     assert read.endswith("\nKenya's GDP in 2020?")
     assert ORCHESTRATOR_HISTORY_KEY not in run.cursor.state
-    assert ORCHESTRATOR_SPECS_KEY not in run.cursor.state
+    assert ORCHESTRATOR_SPECS_KEY not in await _stored_state(pg_engine, run.cursor.id)
 
 
 async def test_a_plan_hand_off_leaves_on_the_plan_edge_with_the_action_and_keeps_the_run(
@@ -302,7 +252,8 @@ async def test_a_given_node_hands_the_turn_specs_that_the_loop_stores_apart_from
 
     assert next(e.node for e in run.events if isinstance(e, NodeDone)) == GIVEN
     assert await driver.turns.specs(run.cursor) == {"spec_a": {"spec_id": "spec_a"}}
-    assert ORCHESTRATOR_SPECS_KEY not in run.cursor.state
+    assert run.cursor.state[ORCHESTRATOR_SPECS_KEY] == {"spec_a": {"spec_id": "spec_a"}}
+    assert await _stored_state(pg_engine, run.cursor.id) == {"surface": "studio"}
 
 
 def test_a_stored_read_refuses_a_write_into_it() -> None:

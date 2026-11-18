@@ -20,18 +20,25 @@ Every write is one transaction that does two things:
   `CursorStale` when another writer moved it. A write that matches the
   version found the row exactly as its `Cursor` describes it.
 
-Spec blocks are kept apart from `state` because they make up most of a
+The turn's spec blocks, the mapping its state holds under `SPECS_KEY`,
+are stored apart from the rest of the state because they make up most of a
 turn's stored bytes and a checkpoint runs at every node boundary. A write
-takes the turn's whole spec mapping, compares each block's digest with the
-digests its `Cursor` holds, and in the same transaction upserts the blocks
-that are new or changed and deletes the spec ids that are gone, so a
-checkpoint costs what changed rather than what the turn holds. The rows are
+splits the mapping out of the state it is given, compares each block's
+digest with the digests its `Cursor` holds, and in the same transaction
+upserts the blocks that are new or changed, deletes the spec ids that are
+gone and moves the blocks whose position changed, so a checkpoint costs what
+changed rather than what the turn holds. A block the cursor read or wrote
+that is still the same object is not serialised again, since a block is
+never changed in place (`harness.graph.state.stored_mapping`). The rows are
 updated as well as inserted because the mapping is not append-only: a later
 search reading of a held spec id rewrites its block
 (`planner.plan.with_blocks`), and a switch that fails or is stopped puts the
-mapping back as it was before the switch (`harness.graph.switch`).
+mapping back as it was before the switch (`harness.graph.switch`). A read
+merges the blocks back into the state under `SPECS_KEY`, in their stored
+order and with their keys in the order the turn built them, so every
+`Cursor.state` is the state as the turn's nodes see it.
 
-The lease itself, the Stop flag and the frame numbering live on
+The lease itself, the Stop request and the frame numbering live on
 `conversations` and are written by `harness.studio_store.StudioStore`.
 """
 
@@ -40,7 +47,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -48,6 +55,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.studio_state import SegmentLost
+
+# The state key whose mapping, spec blocks by spec id, the store keeps as
+# `turn_specs` rows rather than in the stored state.
+SPECS_KEY = "orchestrator:specs"
 
 
 class TurnStatus(StrEnum):
@@ -76,6 +87,18 @@ class TurnAlreadyOpen(Exception):  # noqa: N818 -- names the state that refuses
 
 class PauseNotOpen(Exception):  # noqa: N818 -- names the state that refuses
     """An answer named a pause the turn does not have open."""
+
+
+def require_open_pause(cursor: Cursor, *, interrupt_id: str, round: int) -> None:
+    """Refuse an answer to `(interrupt_id, round)` unless it is the pause
+    `cursor` has open.
+
+    Raises:
+        PauseNotOpen: the turn has no open pause `(interrupt_id, round)`.
+    """
+    pause = cursor.pause
+    if pause is None or (pause.interrupt_id, pause.round) != (interrupt_id, round):
+        raise PauseNotOpen(f"turn {cursor.turn_index} has no open pause {interrupt_id!r}")
 
 
 @dataclass(frozen=True)
@@ -116,10 +139,12 @@ class OwedAnswer:
 class Cursor:
     """One turn as last read or written. `id` keys the turn's answers and
     records; `conversation` is the `conversations` row's id; `record_count`
-    is the number of transcript entries stored; `spec_digests` is the digest
-    of each stored spec block, by spec id (`TurnStore.specs` reads the
-    blocks). `owed` is set on a running turn whose node still owes an
-    accepted answer to its `resume`, and `None` otherwise."""
+    is the number of transcript entries stored. `state` holds the turn's
+    spec blocks under `SPECS_KEY`; `spec_digests` is the digest of each
+    stored block, by spec id in stored order, and `spec_blocks` the block
+    objects those digests were taken from. `owed` is set on a running turn
+    whose node still owes an accepted answer to its `resume`, and `None`
+    otherwise."""
 
     id: int
     conversation: int
@@ -136,6 +161,9 @@ class Cursor:
     version: int
     record_count: int
     spec_digests: dict[str, str]
+    spec_blocks: Mapping[str, Mapping[str, Any]] = field(
+        default_factory=dict, compare=False, repr=False
+    )
 
 
 def _json(value: Any) -> str | None:
@@ -155,7 +183,25 @@ _COLUMNS = (
 type Specs = Mapping[str, Mapping[str, Any]]
 
 
-def _cursor(row: Any, record_count: int, spec_digests: dict[str, str]) -> Cursor:
+@dataclass(frozen=True)
+class _StoredSpecs:
+    """The spec blocks a write stored or a read found: each block, by spec
+    id in stored order, and its digest."""
+
+    blocks: Specs
+    digests: dict[str, str]
+
+
+_NO_SPECS = _StoredSpecs(blocks={}, digests={})
+
+
+def _split(state: Mapping[str, Any]) -> tuple[dict[str, Any], Specs]:
+    """`state` without `SPECS_KEY`, and the spec blocks it holds there."""
+    rest = {key: value for key, value in state.items() if key != SPECS_KEY}
+    return rest, state.get(SPECS_KEY) or {}
+
+
+def _cursor(row: Any, record_count: int, specs: _StoredSpecs) -> Cursor:
     pause = (
         OpenPause(
             kind=row.pause_kind,
@@ -181,11 +227,12 @@ def _cursor(row: Any, record_count: int, spec_digests: dict[str, str]) -> Cursor
             else None
         ),
         inputs=row.inputs,
-        state=row.state,
+        state={**row.state, SPECS_KEY: dict(specs.blocks)},
         error=row.error,
         version=row.version,
         record_count=record_count,
-        spec_digests=spec_digests,
+        spec_digests=specs.digests,
+        spec_blocks=specs.blocks,
     )
 
 
@@ -226,37 +273,62 @@ async def _append(conn: AsyncConnection, cursor: Cursor, records: Sequence[Agent
 
 
 _UPSERT_SPEC = text(
-    "INSERT INTO turn_specs (turn, spec_id, block, digest) "
-    "VALUES (:turn, :spec_id, CAST(:block AS json), :digest) "
-    "ON CONFLICT (turn, spec_id) DO UPDATE SET block = EXCLUDED.block, digest = EXCLUDED.digest"
+    "INSERT INTO turn_specs (turn, spec_id, seq, block, digest) "
+    "VALUES (:turn, :spec_id, :seq, CAST(:block AS json), :digest) "
+    "ON CONFLICT (turn, spec_id) DO UPDATE "
+    "SET seq = EXCLUDED.seq, block = EXCLUDED.block, digest = EXCLUDED.digest"
 )
+_MOVE_SPEC = text("UPDATE turn_specs SET seq = :seq WHERE turn = :turn AND spec_id = :spec_id")
 
 
-def _spec_digest(block: Mapping[str, Any]) -> tuple[str, str]:
-    """`block`'s canonical JSON and its SHA-256."""
-    body = json.dumps(block, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return body, hashlib.sha256(body.encode()).hexdigest()
+def _spec_digest(body: str) -> str:
+    """The SHA-256 of a spec block's JSON text."""
+    return hashlib.sha256(body.encode()).hexdigest()
 
 
-async def _write_specs(conn: AsyncConnection, cursor: Cursor, specs: Specs) -> dict[str, str]:
-    """Make the turn's stored spec blocks equal `specs`, writing only the
-    blocks whose digest differs from `cursor.spec_digests` and deleting the
-    spec ids `specs` lacks. Returns the digests now stored."""
+async def _write_specs(conn: AsyncConnection, cursor: Cursor, specs: Specs) -> _StoredSpecs:
+    """Make the turn's stored spec blocks equal `specs`, in its order.
+
+    Each row's `seq` is its block's position in `specs`, so stored order is
+    the order the turn's state held the blocks in. A block that is the same
+    object `cursor` read or wrote is taken as unchanged without serialising
+    it; any other is written when its JSON's digest differs from the stored
+    one. A block whose position changed but whose content did not has only
+    its `seq` rewritten, and the spec ids `specs` lacks are deleted.
+    """
+    stored_at = {spec_id: position for position, spec_id in enumerate(cursor.spec_digests)}
     digests: dict[str, str] = {}
     changed: list[dict[str, Any]] = []
-    for spec_id, block in specs.items():
-        body, digest = _spec_digest(block)
-        digests[spec_id] = digest
-        if cursor.spec_digests.get(spec_id) != digest:
-            changed.append({"turn": cursor.id, "spec_id": spec_id, "block": body, "digest": digest})
-    if changed:
-        await conn.execute(_UPSERT_SPEC, changed)
+    moved: list[dict[str, Any]] = []
+    for position, (spec_id, block) in enumerate(specs.items()):
+        if cursor.spec_blocks.get(spec_id) is block:
+            digests[spec_id] = cursor.spec_digests[spec_id]
+        else:
+            body = json.dumps(block, allow_nan=False)
+            digests[spec_id] = digest = _spec_digest(body)
+            if cursor.spec_digests.get(spec_id) != digest:
+                changed.append(
+                    {
+                        "turn": cursor.id,
+                        "spec_id": spec_id,
+                        "seq": position,
+                        "block": body,
+                        "digest": digest,
+                    }
+                )
+                continue
+        if stored_at.get(spec_id) != position:
+            moved.append({"turn": cursor.id, "spec_id": spec_id, "seq": position})
     if gone := [spec_id for spec_id in cursor.spec_digests if spec_id not in digests]:
         await conn.execute(
             text("DELETE FROM turn_specs WHERE turn = :turn AND spec_id = ANY(:gone)"),
             {"turn": cursor.id, "gone": gone},
         )
-    return digests
+    if changed:
+        await conn.execute(_UPSERT_SPEC, changed)
+    if moved:
+        await conn.execute(_MOVE_SPEC, moved)
+    return _StoredSpecs(blocks=dict(specs), digests=digests)
 
 
 async def _read_cursor(conn: AsyncConnection, where: str, params: dict[str, Any]) -> Cursor | None:
@@ -273,18 +345,20 @@ async def _read_cursor(conn: AsyncConnection, where: str, params: dict[str, Any]
     ).first()
     if row is None:
         return None
-    digests = await conn.execute(
-        text("SELECT spec_id, digest FROM turn_specs WHERE turn = :turn"), {"turn": row.id}
-    )
-    return _cursor(row, row.record_count, dict(digests.tuples().all()))
+    return _cursor(row, row.record_count, await _stored_specs(conn, row.id))
 
 
-async def _specs(conn: AsyncConnection, turn: int) -> dict[str, dict[str, Any]]:
-    rows = await conn.execute(
-        text("SELECT spec_id, block FROM turn_specs WHERE turn = :turn ORDER BY seq"),
-        {"turn": turn},
+async def _stored_specs(conn: AsyncConnection, turn: int) -> _StoredSpecs:
+    rows = (
+        await conn.execute(
+            text("SELECT spec_id, block, digest FROM turn_specs WHERE turn = :turn ORDER BY seq"),
+            {"turn": turn},
+        )
+    ).all()
+    return _StoredSpecs(
+        blocks={row.spec_id: row.block for row in rows},
+        digests={row.spec_id: row.digest for row in rows},
     )
-    return dict(rows.tuples().all())
 
 
 async def _records(conn: AsyncConnection, turn: int) -> list[AgentRecord]:
@@ -316,12 +390,17 @@ class TurnStore:
         statuses: tuple[TurnStatus, ...],
         sets: str,
         params: dict[str, Any],
-        specs: Specs | None,
+        state: Mapping[str, Any] | None,
         records: Sequence[AgentRecord],
     ) -> Cursor:
         """Apply `sets` and bump the version where the row still holds the
-        version `cursor` read and one of `statuses`; write `specs` when
-        given (`_write_specs`) and append `records`."""
+        version `cursor` read and one of `statuses`; when `state` is given,
+        store it, its spec blocks as rows (`_write_specs`); and append
+        `records`."""
+        if state is not None:
+            rest, specs = _split(state)
+            sets += ", state = CAST(:state AS json)"
+            params = {**params, "state": _json(rest)}
         row = (
             await conn.execute(
                 text(
@@ -339,11 +418,13 @@ class TurnStore:
         ).first()
         if row is None:
             raise CursorStale(f"turn {cursor.turn_index} moved past version {cursor.version}")
-        digests = (
-            await _write_specs(conn, cursor, specs) if specs is not None else cursor.spec_digests
+        stored = (
+            await _write_specs(conn, cursor, specs)
+            if state is not None
+            else _StoredSpecs(blocks=cursor.spec_blocks, digests=cursor.spec_digests)
         )
         await _append(conn, cursor, records)
-        return _cursor(row, cursor.record_count + len(records), digests)
+        return _cursor(row, cursor.record_count + len(records), stored)
 
     async def open_turn(
         self,
@@ -357,8 +438,8 @@ class TurnStore:
         state: dict[str, Any],
         records: Sequence[AgentRecord] = (),
     ) -> Cursor:
-        """Open turn `turn_index` running at `node` with no node input, and
-        append `records`.
+        """Open turn `turn_index` running at `node` with no node input and
+        with `state`, which holds no spec blocks yet, and append `records`.
 
         Raises:
             SegmentLost: `segment_id` does not hold the conversation's lease.
@@ -396,13 +477,13 @@ class TurnStore:
                         "turn_index": turn_index,
                         "node": node,
                         "inputs": _json(inputs),
-                        "state": _json(state),
+                        "state": _json(_split(state)[0]),
                     },
                 )
             ).one()
-            cursor = _cursor(row, 0, {})
+            cursor = _cursor(row, 0, _NO_SPECS)
             await _append(conn, cursor, records)
-            return _cursor(row, len(records), {})
+            return _cursor(row, len(records), _NO_SPECS)
 
     async def open_cursor(self, principal: str, conversation_id: str) -> Cursor | None:
         """The conversation's open (running or paused) turn, or `None`."""
@@ -426,10 +507,10 @@ class TurnStore:
             raise LookupError(f"no turn {turn_id}")
         return cursor
 
-    async def load(self, cursor: Cursor) -> tuple[dict[str, dict[str, Any]], list[AgentRecord]]:
-        """The turn's spec blocks and transcript (`specs`, `records`), read in
-        one snapshot that also holds the cursor at `cursor.version`, so a
-        segment runs a node only on the turn as its cursor describes it.
+    async def load(self, cursor: Cursor) -> tuple[Cursor, list[AgentRecord]]:
+        """The turn's cursor and transcript, read in one snapshot that holds
+        the cursor at `cursor.version`, so a segment runs a node only on the
+        turn as its cursor describes it.
 
         Raises:
             CursorStale: a write moved the cursor past `cursor.version`.
@@ -437,23 +518,22 @@ class TurnStore:
         async with self._engine.connect() as plain:
             conn = await plain.execution_options(isolation_level="REPEATABLE READ")
             async with conn.begin():
-                version = (
-                    await conn.execute(
-                        text("SELECT version FROM turn_cursors WHERE id = :id"),
-                        {"id": cursor.id},
-                    )
-                ).scalar_one_or_none()
-                if version != cursor.version:
+                current = await _read_cursor(conn, "t.id = :id", {"id": cursor.id})
+                if current is None or current.version != cursor.version:
                     raise CursorStale(
                         f"turn {cursor.turn_index} moved past version {cursor.version}"
                     )
-                return await _specs(conn, cursor.id), await _records(conn, cursor.id)
+                return current, await _records(conn, cursor.id)
 
     async def specs(self, cursor: Cursor) -> dict[str, dict[str, Any]]:
-        """The turn's spec blocks by spec id, in the order the turn first
-        stored each."""
+        """The turn's spec blocks by spec id, in the order the turn's state
+        held them at the last write."""
         async with self._engine.connect() as conn:
-            return await _specs(conn, cursor.id)
+            rows = await conn.execute(
+                text("SELECT spec_id, block FROM turn_specs WHERE turn = :turn ORDER BY seq"),
+                {"turn": cursor.id},
+            )
+            return dict(rows.tuples().all())
 
     async def records(self, cursor: Cursor) -> list[AgentRecord]:
         """The turn's transcript, in the order it was appended."""
@@ -484,11 +564,10 @@ class TurnStore:
         node: str,
         node_input: Any,
         state: dict[str, Any],
-        specs: Specs,
         records: Sequence[AgentRecord] = (),
     ) -> Cursor:
-        """Move the running turn to `node` with `node_input`, writing `state`
-        and the turn's spec blocks `specs`, and appending `records`, with it.
+        """Move the running turn to `node` with `node_input`, writing `state`,
+        its spec blocks included, and appending `records`, with it.
 
         Raises:
             SegmentLost: `segment_id` does not hold the conversation's lease.
@@ -501,9 +580,9 @@ class TurnStore:
                 cursor,
                 statuses=(TurnStatus.RUNNING,),
                 sets="node = :node, node_input = CAST(:node_input AS json), "
-                "state = CAST(:state AS json), owed_interrupt_id = NULL",
-                params={"node": node, "node_input": _json(node_input), "state": _json(state)},
-                specs=specs,
+                "owed_interrupt_id = NULL",
+                params={"node": node, "node_input": _json(node_input)},
+                state=state,
                 records=records,
             )
 
@@ -518,13 +597,12 @@ class TurnStore:
         interrupt_id: str,
         payload: dict[str, Any],
         state: dict[str, Any],
-        specs: Specs,
         records: Sequence[AgentRecord] = (),
     ) -> Cursor:
         """Pause the running turn at `node` on a question of `kind` under the
-        wire id `interrupt_id`, as the turn's next round, writing `state` and
-        the turn's spec blocks `specs`, and appending `records`, with it. The returned cursor's `pause.round` is
-        the round an answer names.
+        wire id `interrupt_id`, as the turn's next round, writing `state`,
+        its spec blocks included, and appending `records`, with it. The
+        returned cursor's `pause.round` is the round an answer names.
 
         Raises:
             SegmentLost: `segment_id` does not hold the conversation's lease.
@@ -539,16 +617,15 @@ class TurnStore:
                 sets="status = 'paused', round = round + 1, node = :node, "
                 "node_input = CAST(:node_input AS json), pause_kind = :kind, "
                 "interrupt_id = :interrupt_id, pause_payload = CAST(:payload AS json), "
-                "state = CAST(:state AS json), owed_interrupt_id = NULL",
+                "owed_interrupt_id = NULL",
                 params={
                     "node": node,
                     "node_input": _json(node_input),
                     "kind": kind,
                     "interrupt_id": interrupt_id,
                     "payload": _json(payload),
-                    "state": _json(state),
                 },
-                specs=specs,
+                state=state,
                 records=records,
             )
 
@@ -572,9 +649,7 @@ class TurnStore:
             SegmentLost: `segment_id` does not hold the conversation's lease.
             CursorStale: the cursor moved.
         """
-        pause = cursor.pause
-        if pause is None or (pause.interrupt_id, pause.round) != (interrupt_id, round):
-            raise PauseNotOpen(f"turn {cursor.turn_index} has no open pause {interrupt_id!r}")
+        require_open_pause(cursor, interrupt_id=interrupt_id, round=round)
         async with self._engine.begin() as conn:
             await self._fence(conn, cursor.conversation, segment_id)
             running = await self._swap(
@@ -584,7 +659,7 @@ class TurnStore:
                 sets="status = 'running', pause_kind = NULL, interrupt_id = NULL, "
                 "pause_payload = NULL, owed_interrupt_id = :interrupt_id",
                 params={"interrupt_id": interrupt_id},
-                specs=None,
+                state=None,
                 records=records,
             )
             await conn.execute(
@@ -609,14 +684,13 @@ class TurnStore:
         status: TurnStatus,
         error: dict[str, Any] | None = None,
         state: dict[str, Any] | None = None,
-        specs: Specs | None = None,
         records: Sequence[AgentRecord] = (),
     ) -> Cursor:
         """Close the open turn with `status`, one of `CLOSED`, appending
         `records`. `FAILED` and `ABANDONED` take an `error` and the others
-        none. `state` and `specs` replace the stored state and spec blocks
-        when given. A paused turn's
-        pause is dropped, so no answer can reach it.
+        none. `state`, its spec blocks included, replaces the stored state
+        when given. A paused turn's pause is dropped, so no answer can reach
+        it.
 
         Raises:
             ValueError: `status` is not a closing status, or `error` is
@@ -628,7 +702,6 @@ class TurnStore:
             raise ValueError(f"{status!r} does not close a turn")
         if (status in _ERRORED) != (error is not None):
             raise ValueError(f"a turn closed {status.value} takes an error only when it failed")
-        state_set = ", state = CAST(:state AS json)" if state is not None else ""
         async with self._engine.begin() as conn:
             await self._fence(conn, cursor.conversation, segment_id)
             return await self._swap(
@@ -636,12 +709,8 @@ class TurnStore:
                 cursor,
                 statuses=(TurnStatus.RUNNING, TurnStatus.PAUSED),
                 sets="status = :status, error = CAST(:error AS json), pause_kind = NULL, "
-                f"interrupt_id = NULL, pause_payload = NULL, owed_interrupt_id = NULL{state_set}",
-                params={
-                    "status": status.value,
-                    "error": _json(error),
-                    **({"state": _json(state)} if state is not None else {}),
-                },
-                specs=specs,
+                "interrupt_id = NULL, pause_payload = NULL, owed_interrupt_id = NULL",
+                params={"status": status.value, "error": _json(error)},
+                state=state,
                 records=records,
             )

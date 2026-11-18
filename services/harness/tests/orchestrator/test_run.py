@@ -14,8 +14,10 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 import pytest
+from compiler.surface import transient
 from google.genai import types
 from harness.gemini_agent import EmptyResponseError
+from harness.gemini_wire import StreamResumedError
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.prefix_cache import PrefixCache
 from harness.sentences import StopCode, refusal_sentence
@@ -35,9 +37,11 @@ from orchestrator.run import (
     ToolsAnswered,
     run_orchestrator,
 )
+from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 
 from ..scripted_genai import (
+    Reply,
     ScriptedGenai,
     call_part,
     empty_reply,
@@ -323,6 +327,8 @@ async def test_a_call_to_a_tool_the_agent_lacks_is_answered_with_the_tools_it_ha
     ]
     assert response.name == "draw"
     assert "The tools you can call are: search, fetch" in json.dumps(response.response)
+    (answered,) = [e for e in events if isinstance(e, ToolsAnswered)]
+    assert [answer.response for answer in answered.answers] == [response.response]
     assert events[-1] == Answered(text="Done.")
 
 
@@ -335,6 +341,23 @@ async def test_a_response_s_tool_answers_carry_the_state_its_calls_wrote() -> No
     assert answered.state
     assert all(state[key] == value for key, value in answered.state.items())
     assert "orchestrator:searches" in answered.state
+    sent = json.dumps(answered.state, sort_keys=True)
+    state["orchestrator:searches"].append({"written": "later"})
+    assert json.dumps(answered.state, sort_keys=True) == sent
+
+
+async def test_a_stream_resumed_over_output_ends_the_run_as_a_dropped_connection() -> None:
+    """Pydantic AI's Gemini parser raises a plain `ModelAPIError` when
+    google-genai resumed a dropped stream over output no continuation token
+    covers; the run raises it as the dropped connection it is."""
+    resumed = ModelAPIError("gemini-test", "the stream resumed over a repeated call")
+    scripted = ScriptedGenai([Reply(chunks=[[text_part("Kenya")]], cut_after=1, cut_with=resumed)])
+
+    with pytest.raises(StreamResumedError) as raised:
+        await _run(scripted)
+
+    assert raised.value.__cause__ is resumed
+    assert transient(raised.value)
 
 
 # --- hand-off and resume -----------------------------------------------------

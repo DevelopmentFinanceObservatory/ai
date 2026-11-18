@@ -4,8 +4,7 @@ The keys and statuses the turn's nodes and the orchestrator's tools
 (`harness.orchestrator_tools`) read and write, the inputs a turn opens with
 (`TurnInput`), the one pending action the agent's hand-off records, the
 tools' budgets, and the helpers more than one node reads: the stored plan
-(`readable_plan`), the turn's spec blocks while a node runs (`with_specs`),
-the answers to the agent's question (`resume_answers`), and the read-only
+(`readable_plan`), the answers to the agent's question (`resume_answers`), and the read-only
 reads of the large containers (`stored_mapping`, `stored_sequence`).
 """
 
@@ -19,41 +18,32 @@ from collections.abc import (
 )
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Annotated, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NamedTuple
 
 from data_mcp.search_tool import MAX_PARTS
 from planner.plan import AskBreakdown, SessionState, scope_unread, stored_plan, with_blocks
 from planner.plan import Plan as PlannerPlan
-from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter
 
 from harness.tool_contracts import (
     reading_facts,
 )
+from harness.turn.store import SPECS_KEY
 from harness.turn_records import Origin, SearchReading, open_prices
 
 if TYPE_CHECKING:
     from harness.turn.node import NodeCtx
 
-# The interrupt id the `approve` node pauses under, read by
-# `harness.studio_translate` to tell the plan card from a question.
-APPROVE_INTERRUPT = "approve"
-
-
-# The `custom_metadata` key a relayed step progress report travels under on
-# `execute`'s events (`_step_progress_event`), read by
-# `harness.studio_translate._Translator.translate`.
-STEP_PROGRESS_KEY = "step_progress"
-
-# The `custom_metadata` key the `planner` node's first event travels under,
-# as it starts a draft: `{"revising": bool}`, true when the draft revises a
-# plan already on record, with `"pick": True` added when it replans for a
-# pick on the plan card. Read by `harness.studio_translate._Translator`.
-PLANNER_STARTED_KEY = "planner_started"
+# The kind of the pause the `approve` node puts the plan card to the user
+# under, read by `harness.studio_translate` to tell the plan card from a
+# question.
+APPROVE_PAUSE: Final = "approve"
 
 # The orchestrator's turn state, written by its tools
 # (`harness.orchestrator_tools`) and read by the turn's nodes.
 ORCHESTRATOR_FRAMES_KEY = "orchestrator:frames"  # frame id -> {"ref", "view", "store_ref"}
-ORCHESTRATOR_SPECS_KEY = "orchestrator:specs"  # spec_id -> its search spec block
+# spec_id -> its search spec block, kept by the turn store as rows of their own.
+ORCHESTRATOR_SPECS_KEY = SPECS_KEY
 # The action the agent's `plan` or `ask_user` call recorded, which the
 # `orchestrate` node takes once the run hands off (`pending_action`).
 ORCHESTRATOR_PENDING_KEY = "orchestrator:pending"
@@ -117,16 +107,10 @@ ORCHESTRATOR_AMENDMENTS_KEY = "orchestrator:amendments"
 # is set only while such a replan is paused. Outside the drafting prefixes
 # the restore resets (`harness.graph.switch._DRAFTING_PREFIXES`).
 PICK_REPLAN_KEY = "switch:pick_replan"
-# The `custom_metadata` key an orchestrator node's own status line travels
-# under ("Reading your question"), read by `studio_translate._Translator`.
-ORCHESTRATOR_STATUS_KEY = "orchestrator_status"
 # The status a plan hand-back carries when the planner made no plan, and
 # when the approved plan ran; `studio_translate._Translator` shows the first as
 # a failed step and the second as nothing.
 ORCHESTRATOR_PLAN_FAILED_STATUS = "Reading why no plan was made"
-# The `custom_metadata` key under which the planner's refusal travels beside
-# that status. It holds `{"code"}`, which selects the failed step's sentence.
-ORCHESTRATOR_STATUS_FAILURE_KEY = "orchestrator_status_failure"
 ORCHESTRATOR_PLAN_RAN_STATUS = "Reading the plan's results"
 
 
@@ -160,9 +144,9 @@ class AskOption(BaseModel):
 
 
 def ask_options(options: list[Any]) -> list[dict[str, Any]]:
-    """Persisted `ask_user` options as `AskOption` dicts. A question paused
-    before options carried a spec_id stored each option as its bare label,
-    which reads here as an option without one."""
+    """The `ask_user` options the model sent as `AskOption` dicts. Gemini
+    does not hold a call's arguments to the declaration, so an option sent
+    as its bare label reads here as an option without a spec_id."""
     return [{"label": option} if isinstance(option, str) else option for option in options]
 
 
@@ -188,18 +172,6 @@ class PendingAsk(BaseModel):
 
     kind: Literal["ask"] = "ask"
     questions: list[AskQuestion]
-
-    @model_validator(mode="before")
-    @classmethod
-    def _one_question(cls, data: Any) -> Any:
-        """A stored single-question action, `{kind, question, options}`, reads
-        as a call with that one question."""
-        if isinstance(data, dict) and "questions" not in data and "question" in data:
-            return {
-                "kind": data.get("kind", "ask"),
-                "questions": [{"question": data["question"], "options": data.get("options")}],
-            }
-        return data
 
 
 class PendingPlan(BaseModel):
@@ -362,23 +334,17 @@ def resume_answers(result: Any) -> dict[str, dict[str, Any]] | None:
     """The clarify interrupt's resume value as one answer per question id, or
     None when the user dismissed the whole pause (`{"skip": True}`).
 
-    The value is `{"answers": {question id: answer}}`, each answer
+    The value `harness.studio`'s `/interrupt` route resumes a clarify with is
+    `{"answers": {question id: answer}}`, each answer
     `{"kind": "option", "spec_id"}`, `{"kind": "text", "text"}` or
-    `{"kind": "skipped"}`. A single-question reply is the answer for `q1`:
-    `{"spec_id"}` for a pick, `{"text"}` for the user's own words, or a bare
-    candidate id.
+    `{"kind": "skipped"}`. Any other value, such as the plan card's answer,
+    answers no question.
     """
     if not isinstance(result, dict):
-        return {"q1": {"kind": "option", "spec_id": str(result)}}
+        return {}
     if result.get("skip"):
         return None
-    if "answers" in result:
-        return dict(result["answers"] or {})
-    if result.get("text"):
-        return {"q1": {"kind": "text", "text": result["text"]}}
-    if result.get("spec_id"):
-        return {"q1": {"kind": "option", "spec_id": result["spec_id"]}}
-    return {"q1": {"kind": "skipped"}}
+    return dict(result.get("answers") or {})
 
 
 _PENDING_ACTION = TypeAdapter(Annotated[PendingAsk | PendingPlan, Field(discriminator="kind")])

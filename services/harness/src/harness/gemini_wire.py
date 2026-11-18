@@ -282,46 +282,41 @@ class GeminiStream:
     async def _send(
         self, *, model: str, contents: Any, config: types.GenerateContentConfig
     ) -> AsyncGenerator[Chunk | Closing]:
-        """The call sent against the request's cached prefix, and resent once,
-        against a fresh cache or none, when the API reports the cache gone
-        before any chunk arrived."""
+        """The call sent against the request's cached prefix, or with no
+        prefix cache as `config` stands, and resent once, against a fresh
+        cache or none, when the API reports the cache gone before any chunk
+        arrived."""
+        cached = await self._cached(model=model, config=config)
+        for resend in (False, True):
+            sending = config if cached is None else against_cache(config, cached[1])
+            arrived = False
+            try:
+                async with aclosing(
+                    self._bounded(model=model, contents=contents, config=sending)
+                ) as items:
+                    async for item in items:
+                        arrived = True
+                        yield item
+                return
+            except errors.ClientError as exc:
+                if resend or cached is None or arrived or exc.code not in CACHE_GONE_CODES:
+                    raise
+                key, name = cached
+                logger.warning(
+                    "prefix cache %s: %s gone (%s), recreating", key[:16], name, exc.code
+                )
+                assert self.prefix_cache is not None
+                self.prefix_cache.forget(key, name)
+                cached = await self._cached(model=model, config=config)
+
+    async def _cached(
+        self, *, model: str, config: types.GenerateContentConfig
+    ) -> tuple[str, str] | None:
+        """The prefix key and cache name `config` is sent against, or `None`
+        with no prefix cache or no cache for it (`PrefixCache.lookup`)."""
         if self.prefix_cache is None:
-            async with aclosing(
-                self._bounded(model=model, contents=contents, config=config)
-            ) as items:
-                async for item in items:
-                    yield item
-            return
-        cached = await self.prefix_cache.lookup(client=self.client, model=model, config=config)
-        if cached is None:
-            async with aclosing(
-                self._bounded(model=model, contents=contents, config=config)
-            ) as items:
-                async for item in items:
-                    yield item
-            return
-
-        key, name = cached
-        arrived = False
-        try:
-            async with aclosing(
-                self._bounded(model=model, contents=contents, config=against_cache(config, name))
-            ) as items:
-                async for item in items:
-                    arrived = True
-                    yield item
-            return
-        except errors.ClientError as exc:
-            if arrived or exc.code not in CACHE_GONE_CODES:
-                raise
-            logger.warning("prefix cache %s: %s gone (%s), recreating", key[:16], name, exc.code)
-
-        self.prefix_cache.forget(key, name)
-        cached = await self.prefix_cache.lookup(client=self.client, model=model, config=config)
-        resent = config if cached is None else against_cache(config, cached[1])
-        async with aclosing(self._bounded(model=model, contents=contents, config=resent)) as items:
-            async for item in items:
-                yield item
+            return None
+        return await self.prefix_cache.lookup(client=self.client, model=model, config=config)
 
     def _bounded(
         self, *, model: str, contents: Any, config: types.GenerateContentConfig
@@ -452,24 +447,50 @@ def _record_usage(span: trace.Span, usage: Usage | None) -> None:
     span.set_attribute(_USAGE_DETAILS, json.dumps(details))
 
 
-def _without_client_call_ids(contents: Any) -> list[types.Content]:
-    """A copy of `contents`, as `GoogleModel` built them, less every function
-    call and function response id that starts with `CLIENT_CALL_ID_PREFIX`.
+def _without_client_call_ids(contents: Any) -> list[Any]:
+    """`contents`, as `GoogleModel` built them, with each content that holds
+    a function call or function response id starting with
+    `CLIENT_CALL_ID_PREFIX` replaced by a copy less those ids. The other
+    contents are passed on as they are, uncopied.
 
     A call the model sent without an id carries one (`_with_client_call_ids`),
     as does a turn put in the model's place
-    (`harness.planner_node.directive_turn`), and a later request of the run
-    replays it. The model sent no id, so it is sent none.
+    (`harness.planner_adapter.directive_turn`), and a later request of the
+    run replays it. The model sent no id, so it is sent none.
     """
-    stripped = [types.Content.model_validate(content).model_copy(deep=True) for content in contents]
-    for content in stripped:
-        for part in content.parts or ():
-            if (call := part.function_call) and (call.id or "").startswith(CLIENT_CALL_ID_PREFIX):
-                call.id = None
-            if (response := part.function_response) and (response.id or "").startswith(
-                CLIENT_CALL_ID_PREFIX
-            ):
-                response.id = None
+    return [
+        _stripped(content) if _holds_client_call_id(content) else content for content in contents
+    ]
+
+
+def _field(value: Any, name: str) -> Any:
+    """`value`'s field `name`, whether `value` is a google-genai model or the
+    dict form `GoogleModel` builds."""
+    return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+
+
+def _client_id(part: Any, field: str) -> bool:
+    ref = _field(part, field)
+    return ref is not None and (_field(ref, "id") or "").startswith(CLIENT_CALL_ID_PREFIX)
+
+
+def _holds_client_call_id(content: Any) -> bool:
+    return any(
+        _client_id(part, "function_call") or _client_id(part, "function_response")
+        for part in _field(content, "parts") or ()
+    )
+
+
+def _stripped(content: Any) -> types.Content:
+    """A copy of `content` less its client call ids."""
+    stripped = types.Content.model_validate(content).model_copy(deep=True)
+    for part in stripped.parts or ():
+        if (call := part.function_call) and (call.id or "").startswith(CLIENT_CALL_ID_PREFIX):
+            call.id = None
+        if (response := part.function_response) and (response.id or "").startswith(
+            CLIENT_CALL_ID_PREFIX
+        ):
+            response.id = None
     return stripped
 
 

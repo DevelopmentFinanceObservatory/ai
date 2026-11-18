@@ -14,7 +14,7 @@ import httpx2
 import pytest
 from compiler.surface import ProgressCallback, ToolCallResult
 from executor.completion import PUBLISH_ATTEMPTS
-from executor.ledger import RunRecord, RunStatus, idempotency_key
+from executor.ledger import Fail, RunChange, RunRecord, RunStatus, idempotency_key
 from fastapi import FastAPI
 from google.genai import types
 from harness.conversation import current_conversation_key
@@ -469,4 +469,52 @@ async def test_a_stop_after_the_client_left_ends_the_run_it_left(pg_engine: Asyn
     assert run.failure is not None and run.failure.code == "cancelled"
     assert '{"runs"' not in agent_read(model.requests[-1])
     assert surface.calls.count("aggregate") == 1
+    assert store.current(PRINCIPAL, CONVERSATION).turns[0]["error"] == "cancelled"
+
+
+class _StopUnrecorded(StudioRunLedger):
+    """A `StudioRunLedger` whose `Fail` records raise while `down` is set, as a
+    store that cannot be written does."""
+
+    down = True
+
+    async def record(self, run_id: str, change: RunChange) -> RunRecord:
+        if self.down and isinstance(change, Fail):
+            raise ConnectionError("the run store is unreachable")
+        return await super().record(run_id, change)
+
+
+async def test_a_stop_that_cannot_end_the_runs_left_answers_retry_and_leaves_the_turn_open(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A Stop with no live segment whose run ledger cannot record the left
+    run stopped answers a retryable 503 and changes nothing, so the run is
+    never carried on as though the user had not stopped it; the Stop
+    retried once the ledger is back ends both."""
+    store = StudioStore(pg_engine)
+    ledger = _StopUnrecorded(store)
+    surface = _HeldAggregate()
+    app, _ = orchestrator_app(
+        plan_call("Kenya's debt service since 2015"),
+        tool_surface=surface,
+        store=store,
+        run_ledger=ledger,
+    )
+    cancel_body = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
+    async with studio_client(app) as client:
+        await _left_mid_run(app, client, surface)
+        refused = await client.post("/api/studio/cancel", json=cancel_body, headers=AUTH)
+        left = await app.state.studio.turns.open_cursor(PRINCIPAL, CONVERSATION)
+        (unended,) = await _runs(pg_engine, ledger)
+        ledger.down = False
+        retried = await client.post("/api/studio/cancel", json=cancel_body, headers=AUTH)
+
+    assert refused.status_code == 503
+    assert refused.json()["retry"] == "retry_after_delay"
+    assert left is not None and left.status is TurnStatus.RUNNING
+    assert unended.status in (RunStatus.ADMITTED, RunStatus.RUNNING)
+    assert retried.status_code == 204
+    (run,) = await _runs(pg_engine, ledger)
+    assert run.failure is not None and run.failure.code == "cancelled"
+    assert await app.state.studio.turns.open_cursor(PRINCIPAL, CONVERSATION) is None
     assert store.current(PRINCIPAL, CONVERSATION).turns[0]["error"] == "cancelled"

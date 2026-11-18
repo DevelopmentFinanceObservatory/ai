@@ -192,6 +192,7 @@ from .scripted_genai import (
 )
 from .scripted_planner import SIGNED, scripted_planner
 from .search_results import search_result_parts
+from .session_events import one_answer
 from .split_plan import SPEC_DEBT, SPEC_DEBT_HISTORY, stored_split_plan
 from .test_turn_records import _switchable_scope
 
@@ -566,7 +567,7 @@ async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, en
         adapter,
         question="kenya debt",
         readings=[],
-        answer={"text": "since 2015"} if resumed else None,
+        answer=one_answer({"text": "since 2015"}) if resumed else None,
         **kwargs,
     )
 
@@ -897,7 +898,7 @@ async def test_a_first_draft_with_only_declines_ends_on_the_declined_asks(paused
             adapter,
             question=draft["question"],
             readings=[],
-            answer={"text": "last five years"},
+            answer=one_answer({"text": "last five years"}),
         )
 
     assert result is not None
@@ -985,7 +986,9 @@ async def test_a_slow_call_beside_an_accepted_ask_answers_before_the_pause_and_r
     assert proposals == [1]
     assert len(answered) == 1 and answered[0] < paused
 
-    await harness.run(adapter, question="kenya debt", readings=[], answer={"text": "since 2015"})
+    await harness.run(
+        adapter, question="kenya debt", readings=[], answer=one_answer({"text": "since 2015"})
+    )
 
     assert proposals == [1]
     assert len(scripted.requests) == 2
@@ -1264,7 +1267,7 @@ async def test_a_picks_replan_run_as_a_task_still_pauses_on_an_ask_and_resumes(
 
     assert paused is None, "the ask should pause the replan, not resolve it"
     assert decision_pick(await harness.state()) == _PICKED
-    resumed = await harness.run(adapter, answer={"text": "2020"}, **entry)
+    resumed = await harness.run(adapter, answer=one_answer({"text": "2020"}), **entry)
     assert resumed is not None and resumed["plan"]["version"] == plan.version
     assert decision_pick(await harness.state()) == _PICKED
     assert answered == [PLANNER_ASK, "propose_plan"]
@@ -1327,7 +1330,7 @@ async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
         question=plan.question,
         readings=[],
         prior_plan=plan.model_dump(mode="json"),
-        answer={"spec_id": SPEC},
+        answer=one_answer({"spec_id": SPEC}),
     )
     assert resumed is not None, "a real answer should let the same turn finish"
     assert resumed["plan"]["version"] == plan.version
@@ -1942,7 +1945,7 @@ async def test_a_refusal_payload_is_held_with_its_code_until_a_later_search_lift
             question="aid to guatemala",
             readings=_turn_readings(),
             refusal=refusal,
-            answer={"text": "since 2015"} if between == "resumed" else None,
+            answer=one_answer({"text": "since 2015"}) if between == "resumed" else None,
         )
     readings = _turn_readings()
     readings[0]["observed_at"] = (before if observed == "before" else after).isoformat()
@@ -3751,7 +3754,9 @@ async def test_the_skills_an_entry_shows_survive_a_planner_ask_and_reach_the_nex
     paused = await harness.run(adapter, amendment="only since 2015", **entry)
     assert paused is None, "the ask should pause the amend"
     resuming = len(scripted.requests)
-    await harness.run(adapter, amendment="only since 2015", answer={"spec_id": SPEC}, **entry)
+    await harness.run(
+        adapter, amendment="only since 2015", answer=one_answer({"spec_id": SPEC}), **entry
+    )
     replanning = len(scripted.requests)
     await harness.run(adapter, amendment="and drop Kenya", **entry)
 
@@ -3834,7 +3839,7 @@ async def test_an_answer_that_resumes_a_run_after_a_translated_proposal_is_read(
         question=draft.question,
         readings=[],
         prior_plan=plan_json,
-        answer={"text": "use debt stock"},
+        answer=one_answer({"text": "use debt stock"}),
     )
     assert output is not None and output["refused"]["final"] is False
     proposals = [
@@ -4037,7 +4042,9 @@ async def test_each_congo_is_settled_by_its_own_answer_and_reaches_search_as_pic
         f"{dataset.id}|donor|Congo|country/COD",
         f"{dataset.id}|recipient|Congo|country/COG",
     ):
-        await harness.run(adapter, question=draft.question, readings=[], answer={"spec_id": pick})
+        await harness.run(
+            adapter, question=draft.question, readings=[], answer=one_answer({"spec_id": pick})
+        )
 
     records = await harness.records()
     proposals = [
@@ -4562,7 +4569,9 @@ async def _resumed_after_an_answer(harness: PlannerHarness, drafts: _Drafts) -> 
     )
     adapter = _scripted_planner(scripted)
     assert await harness.run(adapter, question="kenya debt", readings=[]) is None
-    await harness.run(adapter, question="kenya debt", readings=[], answer={"spec_id": SPEC})
+    await harness.run(
+        adapter, question="kenya debt", readings=[], answer=one_answer({"spec_id": SPEC})
+    )
     await _assert_stored_as_live(harness)
 
 
@@ -4573,7 +4582,9 @@ async def _resumed_proposes_and_asks_again(harness: PlannerHarness, drafts: _Dra
     adapter = _scripted_planner(scripted)
     assert await harness.run(adapter, question="kenya debt", readings=[]) is None
     assert (
-        await harness.run(adapter, question="kenya debt", readings=[], answer={"spec_id": SPEC})
+        await harness.run(
+            adapter, question="kenya debt", readings=[], answer=one_answer({"spec_id": SPEC})
+        )
         is None
     )
     await _assert_stored_as_live(harness)
@@ -4883,7 +4894,7 @@ async def test_the_round_budget_is_not_reset_on_a_resume_of_the_same_turn(
         question="kenya debt",
         readings=[],
         amendment="one more change",
-        answer={"spec_id": SPEC},
+        answer=one_answer({"spec_id": SPEC}),
     )
 
     assert result is not None and "refused" in result
@@ -5261,7 +5272,7 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
         question=draft.question,
         readings=[],
         prior_plan=draft.model_dump(mode="json"),
-        answer={"spec_id": SPEC_B},
+        answer=one_answer({"spec_id": SPEC_B}),
     )
 
     records = await harness.records()

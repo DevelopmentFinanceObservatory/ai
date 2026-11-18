@@ -42,7 +42,7 @@ class AgentSettings(BaseServiceSettings):
 # `include_thoughts=True` puts the model's own thought summary on the
 # response, so a trace shows what a generation reasoned rather than only a
 # token count. `harness.gemini_agent.without_unsigned_thoughts` keeps that
-# summary out of the model's later requests and the session's events.
+# summary out of the model's later requests and the turn's transcript.
 AGENT_THINKING_CONFIG = types.ThinkingConfig(
     thinking_level=types.ThinkingLevel.LOW, include_thoughts=True
 )

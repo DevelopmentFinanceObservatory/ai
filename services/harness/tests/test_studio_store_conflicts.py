@@ -18,7 +18,7 @@ from executor.ledger import PlanApproval, SourcePolicy, Start, idempotency_key, 
 from harness.conversation import current_conversation_key
 from harness.run_ledger import StudioRunLedger
 from harness.studio_state import _next_manifest
-from harness.studio_store import ConversationStale, StudioStore
+from harness.studio_store import ConversationStale, Renewal, StudioStore
 from harness.wire import ComponentType, CompositionActor, CompositionBlock, CompositionManifest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -93,7 +93,7 @@ async def test_heartbeat_checkpoint_canvas_cancel_and_runs_commit_side_by_side(
     await editor.load(PRINCIPAL, CONVERSATION)
     ledger = StudioRunLedger(owner)
 
-    async def heartbeat() -> list[str]:
+    async def heartbeat() -> list[Renewal]:
         return [await owner.renew(PRINCIPAL, CONVERSATION, segment_id) for _ in range(ROUNDS)]
 
     async def stream() -> None:
@@ -118,7 +118,8 @@ async def test_heartbeat_checkpoint_canvas_cancel_and_runs_commit_side_by_side(
         asyncio.gather(heartbeat(), stream(), edits(), stops()), timeout=60
     )
 
-    assert set(renewals) <= {"ok", "cancelled"} and "cancelled" in renewals
+    assert all(renewal.held for renewal in renewals)
+    assert any(renewal.stop_id is not None for renewal in renewals)
     assert all(cancels)
     reloaded = await _store(engines[0]).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
@@ -127,7 +128,7 @@ async def test_heartbeat_checkpoint_canvas_cancel_and_runs_commit_side_by_side(
     ]
     assert reloaded.turn_final_text == f"answer {ROUNDS - 1}"
     assert reloaded.segment is not None and reloaded.segment.id == segment_id
-    assert reloaded.segment.cancel is True
+    assert reloaded.segment.stop_id is not None
     token = current_conversation_key.set((PRINCIPAL, CONVERSATION))
     try:
         assert len(await ledger.unfinished()) == ROUNDS
@@ -190,7 +191,7 @@ async def test_a_claim_racing_a_live_owners_renewal_is_refused(
     await clock.advance(50)  # past the 45 s TTL
     await taker.load(PRINCIPAL, CONVERSATION)
     taker.claim_segment(PRINCIPAL, CONVERSATION)
-    assert await owner.renew(PRINCIPAL, CONVERSATION, segment_id) == "ok"
+    assert (await owner.renew(PRINCIPAL, CONVERSATION, segment_id)).held
 
     with pytest.raises(ConversationStale):
         await taker.save(PRINCIPAL, CONVERSATION)

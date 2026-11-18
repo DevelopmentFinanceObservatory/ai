@@ -1,8 +1,8 @@
 """The turn loop (`harness.turn.loop`) on Postgres, with toy nodes.
 
 Each `StudioStore` stands for one instance: it claims the conversation's
-lease as the routes do, and its heartbeat renewals carry the cancel flag
-another instance's `request_cancel` sets.
+lease as the routes do, and its heartbeat renewals carry the Stop request
+another instance's `request_cancel` records.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from harness.turn.loop import (
 )
 from harness.turn.node import Next, Node, NodeCtx, Pause
 from harness.turn.store import (
+    SPECS_KEY,
     AgentRecord,
     Cursor,
     CursorStale,
@@ -42,6 +43,7 @@ from .store_clock import StoreClock
 PRINCIPAL = "user-1"
 CONVERSATION = "conv-1"
 BEAT = 0.02
+_SPEC_A = {"spec_a": {"spec_id": "spec_a"}}
 
 
 async def _instance(engine: AsyncEngine, clock: StoreClock) -> StudioStore:
@@ -135,7 +137,7 @@ async def test_a_turn_writes_each_boundary_before_it_reports_it(
 
     async def seed(ctx: NodeCtx, node_input: Any) -> Next:
         ctx.state["seeded"] = True
-        ctx.specs["spec_a"] = {"spec_id": "spec_a"}
+        ctx.state[SPECS_KEY] = {"spec_a": {"spec_id": "spec_a"}}
         ctx.transcript.append(AgentRecord(agent="planner", kind="response", body={"n": 1}))
 
         async def read_back() -> None:
@@ -161,16 +163,16 @@ async def test_a_turn_writes_each_boundary_before_it_reports_it(
     )
 
     assert segment.outcome is Outcome.DONE
-    assert stored_at_report == [("answer", {"seeded": True})]
+    assert stored_at_report == [("answer", {"seeded": True, SPECS_KEY: _SPEC_A})]
     assert events == [
         NodeDone(node="seed", label="next", output={"brief": "b"}),
         NodeDone(node="answer", label="done", output="reply"),
     ]
     assert (segment.cursor.status, segment.cursor.state) == (
         TurnStatus.DONE,
-        {"seeded": True, "answered": True},
+        {"seeded": True, "answered": True, SPECS_KEY: _SPEC_A},
     )
-    assert await store.specs(segment.cursor) == {"spec_a": {"spec_id": "spec_a"}}
+    assert await store.specs(segment.cursor) == _SPEC_A
     assert [r.kind for r in await store.records(segment.cursor)] == [entries.USER, "response"]
 
 
@@ -294,7 +296,8 @@ async def test_a_node_the_running_graph_lacks_expires_the_turn(
 ) -> None:
     """A turn opened at a node the running graph has removed, and a turn
     paused at a node that no longer resumes, each close `abandoned` with a
-    `TurnExpired` error, and the conversation's next turn can open."""
+    `TurnExpired` error, and the conversation's next turn can open. The
+    answer to the paused one is not accepted."""
     store, lease = TurnStore(pg_engine), await _instance(pg_engine, clock)
     segment_id = await _claim(lease)
     calls: list[str] = []
@@ -324,6 +327,14 @@ async def test_a_node_the_running_graph_lacks_expires_the_turn(
     assert segment.cursor.error is not None and segment.cursor.error["type"] == "TurnExpired"
     assert calls == (["run"] if paused else [])
     assert await store.open_cursor(PRINCIPAL, CONVERSATION) is None
+    assert failed.error.args[0] == (
+        "the running graph cannot resume 'ask'"
+        if paused
+        else "the running graph cannot run 'retired'"
+    )
+    if answer is not None:
+        assert await store.answer(segment.cursor, interrupt_id=answer.interrupt_id, round=1) is None
+        assert entries.ANSWER not in [r.kind for r in await store.records(segment.cursor)]
 
 
 async def test_a_node_that_raises_closes_the_turn_failed_with_the_last_written_state(
@@ -358,7 +369,7 @@ async def test_a_node_that_raises_closes_the_turn_failed_with_the_last_written_s
         "message": "plan_start broke",
         "transient": False,
     }
-    assert segment.cursor.state == {"seeded": True}
+    assert segment.cursor.state == {"seeded": True, SPECS_KEY: {}}
     assert await store.open_cursor(PRINCIPAL, CONVERSATION) is None
 
 
@@ -484,9 +495,9 @@ async def test_a_reject_closes_the_paused_turn_done_without_resuming_its_node(
     assert calls == ["run"]
 
 
-async def _lease_cancel(engine: AsyncEngine) -> bool:
+async def _stop_request(engine: AsyncEngine) -> str | None:
     async with engine.connect() as conn:
-        return (await conn.execute(text("SELECT lease_cancel FROM conversations"))).scalar_one()
+        return (await conn.execute(text("SELECT lease_stop_id FROM conversations"))).scalar_one()
 
 
 async def test_the_first_stop_ends_only_the_scoped_work_and_the_second_ends_the_turn(
@@ -522,7 +533,9 @@ async def test_the_first_stop_ends_only_the_scoped_work_and_the_second_ends_the_
     assert await lease_b.request_cancel(PRINCIPAL, CONVERSATION)
     await _until(lambda: _at(store, "approve"))
     assert events == [NodeDone(node="switch", label="offer", output={"stopped": True})]
-    assert await _lease_cancel(pg_engine) is False
+    # The renewals that acted on the Stop left it stored; the segment acts
+    # on each request once.
+    assert await _stop_request(pg_engine) is not None
     assert not running.done()
 
     assert await lease_b.request_cancel(PRINCIPAL, CONVERSATION)
@@ -606,10 +619,10 @@ async def test_a_node_cut_off_mid_run_runs_again_from_its_start_in_the_next_segm
 
     assert segment.outcome is Outcome.DONE
     assert calls[len(calls_before) :] == reruns
-    assert segment.cursor.state == {"asked": None}
+    assert segment.cursor.state == {"asked": None, SPECS_KEY: {}}
     # `work`'s last run saw the state and transcript as last written: the
     # user's message, the pause and the answer.
-    assert seen[-1] == ({"asked": None}, 3)
+    assert seen[-1] == ({"asked": None, SPECS_KEY: {}}, 3)
 
 
 async def test_a_lease_taken_by_another_segment_ends_the_segment_lost(
@@ -733,7 +746,7 @@ async def test_a_boundary_write_that_cannot_store_its_values_closes_the_turn_fai
                 ctx.state["share"] = _NAN
                 return Next("done")
             case _:
-                ctx.specs["spec_a"] = {"share": _NAN}
+                ctx.state[SPECS_KEY] = {"spec_a": {"share": _NAN}}
                 return Next("next")
 
     async def after(ctx: NodeCtx, node_input: Any) -> Next:
@@ -758,11 +771,13 @@ async def test_a_boundary_write_that_cannot_store_its_values_closes_the_turn_fai
     assert await store.open_cursor(PRINCIPAL, CONVERSATION) is None
 
 
+@pytest.mark.parametrize("since", ["moved", "closed"])
 async def test_a_cursor_moved_since_it_was_read_runs_no_node(
-    pg_engine: AsyncEngine, clock: StoreClock
+    pg_engine: AsyncEngine, clock: StoreClock, since: str
 ) -> None:
-    """A segment handed a cursor another write has moved since refuses it
-    before the node runs, so no node repeats its work on stale state."""
+    """A segment handed a cursor another write has moved since, or a cursor
+    of a turn that is closed, refuses it before the node runs, so no node
+    repeats its work on stale state."""
     store, lease = TurnStore(pg_engine), await _instance(pg_engine, clock)
     segment_id = await _claim(lease)
     ran: list[Any] = []
@@ -773,9 +788,12 @@ async def test_a_cursor_moved_since_it_was_read_runs_no_node(
 
     graph = Graph(start="work", nodes={"work": Node(run=work)}, edges={("work", "done"): END})
     read = await _open(store, segment_id, graph)
-    await store.advance(
-        read, segment_id=segment_id, node="work", node_input="moved", state={}, specs={}
-    )
+    if since == "moved":
+        await store.advance(read, segment_id=segment_id, node="work", node_input="moved", state={})
+    else:
+        read = await store.turn(
+            (await store.finish(read, segment_id=segment_id, status=TurnStatus.DONE)).id
+        )
 
     with pytest.raises(CursorStale):
         await _segment(store, lease, read, segment_id, graph, [])
@@ -850,6 +868,128 @@ async def test_a_segment_cut_off_after_the_turn_closed_reports_the_stored_close(
 
     assert segment.outcome is Outcome.DONE
     assert segment.cursor.status is TurnStatus.DONE
+
+
+class _HeldAfterPausing(TurnStore):
+    """A store whose first `pause` commits and then holds its caller, the
+    window in which a Stop or a lost lease can cancel the segment after the
+    pause is stored and before the loop reports it."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        super().__init__(engine)
+        self.paused = asyncio.Event()
+
+    async def pause(self, cursor: Cursor, **kwargs: Any) -> Cursor:
+        paused = await super().pause(cursor, **kwargs)
+        if not self.paused.is_set():
+            self.paused.set()
+            await asyncio.sleep(3600)
+        return paused
+
+
+@pytest.mark.parametrize("cut_by", ["stop", "lost-lease"])
+async def test_a_segment_cut_off_after_its_pause_committed_reports_the_pause(
+    pg_engine: AsyncEngine, clock: StoreClock, cut_by: str
+) -> None:
+    """The client gets the question the store holds, whichever cut came
+    after the pause's write, and the turn stays paused for the answer."""
+    store = _HeldAfterPausing(pg_engine)
+    lease_a, lease_b = await _instance(pg_engine, clock), await _instance(pg_engine, clock)
+    segment_id = await _claim(lease_a)
+    graph = Graph(start="ask", nodes={"ask": _asking([])}, edges={("ask", "next"): END})
+    events: list[TurnEvent] = []
+    running = asyncio.create_task(
+        _segment(store, lease_a, await _open(store, segment_id, graph), segment_id, graph, events)
+    )
+    await store.paused.wait()
+    if cut_by == "stop":
+        assert await lease_b.request_cancel(PRINCIPAL, CONVERSATION)
+    else:
+        async with pg_engine.begin() as conn:
+            await conn.execute(text("UPDATE conversations SET lease_segment_id = 'segment-b'"))
+    segment = await asyncio.wait_for(running, 5)
+
+    stored = await _open_cursor(store)
+    [paused] = events
+    assert isinstance(paused, Paused)
+    assert (paused.kind, paused.round, paused.message) == ("ask", 1, "Which donor?")
+    assert stored.pause is not None and stored.pause.interrupt_id == paused.interrupt_id
+    assert segment.outcome is Outcome.PAUSED
+    assert segment.cursor.status is TurnStatus.PAUSED
+
+
+class _ClosesNothing(TurnStore):
+    """A store whose `finish` cannot reach the database."""
+
+    async def finish(self, cursor: Cursor, **kwargs: Any) -> Cursor:
+        raise ConnectionError("the database is unreachable")
+
+
+async def test_a_close_that_cannot_be_written_still_reports_the_nodes_error(
+    pg_engine: AsyncEngine, clock: StoreClock
+) -> None:
+    """The node's exception reaches the client; the turn stays open, as
+    last written, for the conversation's next turn to abandon."""
+    store, lease = _ClosesNothing(pg_engine), await _instance(pg_engine, clock)
+    segment_id = await _claim(lease)
+    refused = RuntimeError("plan_start broke")
+
+    async def plan_start(ctx: NodeCtx, node_input: Any) -> Next:
+        raise refused
+
+    graph = Graph(start="plan_start", nodes={"plan_start": Node(run=plan_start)}, edges={})
+    events: list[TurnEvent] = []
+    segment = await _segment(
+        store, lease, await _open(store, segment_id, graph), segment_id, graph, events
+    )
+
+    assert events == [TurnFailed(node="plan_start", error=refused)]
+    assert segment.outcome is Outcome.FAILED
+    assert (await _open_cursor(store)).status is TurnStatus.RUNNING
+
+
+class _AcknowledgementLost(StudioStore):
+    """A lease store whose first renewal after a Stop request commits and
+    then raises, as a renewal whose acknowledgement is lost does."""
+
+    lose_next = False
+
+    async def renew(self, *args: Any, **kwargs: Any) -> Any:
+        renewal = await super().renew(*args, **kwargs)
+        if self.lose_next and renewal.stop_id is not None:
+            self.lose_next = False
+            raise TimeoutError("the renewal's acknowledgement was lost")
+        return renewal
+
+
+async def test_a_stop_whose_renewal_lost_its_acknowledgement_still_reaches_the_node(
+    pg_engine: AsyncEngine, clock: StoreClock
+) -> None:
+    store = TurnStore(pg_engine)
+    lease_a = _AcknowledgementLost(pg_engine, **clock.store_kwargs)
+    lease_b = await _instance(pg_engine, clock)
+    segment_id = await _claim(lease_a)
+    switching = asyncio.Event()
+
+    async def switch(ctx: NodeCtx, node_input: Any) -> Next:
+        async with ctx.stop.open() as stopped:
+            switching.set()
+            await stopped.wait()
+        return Next("offer")
+
+    graph = Graph(
+        start="switch", nodes={"switch": Node(run=switch)}, edges={("switch", "offer"): END}
+    )
+    running = asyncio.create_task(
+        _segment(store, lease_a, await _open(store, segment_id, graph), segment_id, graph, [])
+    )
+    await switching.wait()
+    lease_a.lose_next = True
+    assert await lease_b.request_cancel(PRINCIPAL, CONVERSATION)
+    segment = await asyncio.wait_for(running, 5)
+
+    assert not lease_a.lose_next
+    assert segment.outcome is Outcome.DONE
 
 
 async def test_a_cursor_owing_an_answer_the_store_lacks_closes_the_turn_failed(

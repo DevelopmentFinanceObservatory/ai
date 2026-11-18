@@ -11,10 +11,10 @@ each of the task's payloads makes. `run_entry` replays them through production c
   recorded envelope through `resolver_digest` and stores the readings, spec blocks and
   warnings as a served turn does (`harness.graph.state.store_search`);
 - its `plan` tool checks the asks and records the hand-off;
-- the graph's `plan_start` and `planner` nodes, each holding the turn's spec blocks
-  in its state as the turn's graph wraps it (`harness.graph.workflow.with_specs`),
+- the graph's `plan_start` and `planner` nodes, the turn's spec blocks in their state,
   take the action the `plan` call recorded as the `orchestrate` node hands it on, and
-  run as the turn loop runs them (`harness.turn.loop`): the planner's ask pauses the
+  run as the turn loop runs them (`harness.turn.loop`), each node's state and input
+  passed on as the turn store hands them back: the planner's ask pauses the
   entry and the user's answer, recorded in the turn's transcript, resumes it. They
   run inside a conversation that holds those spec blocks as `harness.studio` holds a
   turn's (`planner.plan.current_recorded_identity`), and hand the brief to the real
@@ -74,7 +74,6 @@ from harness.gemini_wire import model_retry_options
 from harness.graph.interfaces import PlannerModel
 from harness.graph.planning import plan_start, planner_node
 from harness.graph.state import ORCHESTRATOR_PENDING_KEY, ORCHESTRATOR_SPECS_KEY, pending_action
-from harness.graph.workflow import with_specs
 from harness.orchestrator_tools import (
     AskedOutput,
     Resolver,
@@ -101,6 +100,7 @@ from planner.plan import (
     load_plan,
     unstated_period_reductions,
 )
+from planner.session import function_calls, function_responses
 from planner.source_reads import read_full_history
 from planner.tool_results import ProblemCode
 from planner.tools import load_pending_ask
@@ -1076,7 +1076,6 @@ async def run_entry(
         key=TurnKey(_PRINCIPAL, f"eval-{task.id}", 1),
         inputs={"message": task.question},
         state={},
-        specs=dict(state.pop(ORCHESTRATOR_SPECS_KEY, None) or {}),
         transcript=Transcript([transcript.user_message(task.question)]),
         emit=lambda event: None,
         stop=StopScope(),
@@ -1086,7 +1085,7 @@ async def run_entry(
     # searches returned, as `harness.studio` keeps them, so `propose_plan` and the
     # translation read a pin's identity on record (`planner.plan.recorded_identity`).
     conversation = ConversationState(conversation_id=ctx.key.conversation_id)
-    conversation.turn_specs = dict(ctx.specs)
+    conversation.turn_specs = dict(ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {})
     pending = list(answers)
     error: str | None = None
     timed_out = False
@@ -1097,24 +1096,27 @@ async def run_entry(
 
     async def segment(step: Awaitable[Next | Pause]) -> Next | Pause:
         """One request of the entry: `step` awaited under a fresh budget, then the state
-        stored through JSON, as the turn loop stores it at the node's boundary."""
+        stored as the turn loop stores it at the node's boundary (`_stored`). A step that
+        raises leaves the state as it was."""
         budgets.append(TurnBudget.from_settings(settings))
         probe.next_request()
         token = current_turn_budget.set(budgets[-1])
         identities = current_recorded_identity.set(conversation.recorded_identity)
         try:
-            return await step
+            result = await step
         finally:
             current_recorded_identity.reset(identities)
             current_turn_budget.reset(token)
-            ctx.state = json.loads(json.dumps(ctx.state))
+        ctx.state = _stored(ctx.state)
+        return result
 
     async def drive() -> None:
-        starting = with_specs(plan_start)
-        drafting = with_specs(planner_node(planner=planner))
-        opened = await starting.run(ctx, action.model_dump(mode="json"))
+        drafting = planner_node(planner=planner)
+        opened = await plan_start.run(ctx, action.model_dump(mode="json"))
         assert isinstance(opened, Next)
-        node_input = opened.output
+        # The planner node runs on its input as the loop stored it with the cursor.
+        ctx.state = _stored(ctx.state)
+        node_input = _stored(opened.output)
         result = await segment(drafting.run(ctx, node_input))
         rounds = 0
         while isinstance(result, Pause) and probe.plan is None and pending:
@@ -1160,6 +1162,13 @@ async def run_entry(
         timed_out=timed_out,
         wall_s=wall_s,
     )
+
+
+def _stored(value: Any) -> Any:
+    """`value` as the turn store hands it back: through JSON that holds no NaN or
+    infinity (`harness.turn.store`), raising `ValueError` or `TypeError` where the
+    store's write would."""
+    return json.loads(json.dumps(value, allow_nan=False))
 
 
 def inputs_digest(task: Task, recording: Mapping[str, Any]) -> str:
@@ -1208,30 +1217,25 @@ RECORD_SCHEMA = 4
 
 def tool_calls(records: Sequence[AgentRecord]) -> list[dict[str, Any]]:
     """Every tool call the planner made, in order, with the response its tool gave, read
-    off the planner's records in the turn's transcript (`planner.session`). A call with no
-    response is one the entry ended before it answered."""
+    off the planner's records in the turn's transcript by `planner.session`'s own
+    readers. A call with no response is one the entry ended before it answered."""
     calls: list[dict[str, Any]] = []
     by_id: dict[str, dict[str, Any]] = {}
     for record in records:
-        if record.agent != "planner":
-            continue
-        for part in record.body.get("parts") or ():
-            call = part.get("function_call")
-            if call is not None:
-                entry = {
-                    "id": call.get("id"),
-                    "name": call["name"],
-                    "args": dict(call.get("args") or {}),
-                    "response": None,
-                }
-                calls.append(entry)
-                if entry["id"] is not None:
-                    by_id[entry["id"]] = entry
-            response = part.get("function_response")
-            if response is not None:
-                answered = by_id.get(response.get("id"))
-                if answered is not None and answered["response"] is None:
-                    answered["response"] = response.get("response")
+        for call in function_calls(record):
+            entry = {
+                "id": call.get("id"),
+                "name": call["name"],
+                "args": dict(call.get("args") or {}),
+                "response": None,
+            }
+            calls.append(entry)
+            if entry["id"] is not None:
+                by_id[entry["id"]] = entry
+        for response in function_responses(record):
+            answered = by_id.get(response.get("id"))
+            if answered is not None and answered["response"] is None:
+                answered["response"] = response.get("response")
     return calls
 
 
@@ -1328,16 +1332,18 @@ def record_period_reduction(record: Mapping[str, Any], task: Task) -> PeriodRedu
 
 
 def stop_reason(run: EntryRun) -> str:
-    """How the entry ended: `accepted`, `timeout` (the eval's own limit), `error`, the
+    """How the entry ended: `error`, `accepted`, `timeout` (the eval's own limit), the
     adapter's refusal code, or `asked_user` (an ask the tool took, which the entry paused
-    on, still awaiting the user's answer). A refusal wins over an ask, since the entry
-    it ends pauses on nothing."""
+    on, still awaiting the user's answer). An error wins over a recorded plan: a step
+    that raised, or a state the turn store refused at the node's boundary, fails the
+    served turn, so the plan never reaches the user. A refusal wins over an ask, since
+    the entry it ends pauses on nothing."""
+    if run.error is not None:
+        return "error"
     if run.probe.plan is not None:
         return "accepted"
     if run.timed_out:
         return "timeout"
-    if run.error is not None:
-        return "error"
     if run.probe.refused_code is not None:
         return run.probe.refused_code
     if load_pending_ask(run.state) is not None:

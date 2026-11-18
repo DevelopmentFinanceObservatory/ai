@@ -20,18 +20,13 @@ from data_mcp.tool_errors import ToolErrorCode
 from google.genai import types
 from harness.graph.orchestrate import orchestrate_node
 from harness.graph.state import (
-    ORCHESTRATOR_PENDING_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
-    PendingAsk,
-    ask_questions,
-    pending_action,
 )
 from harness.turn.loop import Outcome
 from harness.turn.node import NodeCtx, StopScope, TurnKey
 from harness.turn.transcript import Transcript
 from harness.turn_records import SearchReading, WindowReading
 from orchestrator.run import ToolsAnswered
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .graph_turns import agent_read, given, opening_graph, opening_nodes, visited
@@ -86,13 +81,8 @@ def _answers(**answers: dict[str, Any]) -> dict[str, Any]:
     return {"answers": answers}
 
 
-@pytest.mark.parametrize(
-    "answer",
-    [_answers(q1={"kind": "option", "spec_id": "o1"}), {"spec_id": "o1"}],
-    ids=["answers", "legacy_pick"],
-)
 async def test_ask_pauses_with_generated_option_ids_and_hands_the_choice_back_in_words(
-    pg_engine: AsyncEngine, answer: dict[str, Any]
+    pg_engine: AsyncEngine,
 ) -> None:
     driver, paused, models = await _turn(
         pg_engine,
@@ -115,7 +105,7 @@ async def test_ask_pauses_with_generated_option_ids_and_hands_the_choice_back_in
             }
         ]
     }
-    resumed_run = await driver.answer(answer, to=pause)
+    resumed_run = await driver.answer(_answers(q1={"kind": "option", "spec_id": "o1"}), to=pause)
 
     resumed = agent_read(models.orchestrator.requests[-1])
     assert "GDP of Congo?" in resumed
@@ -396,14 +386,13 @@ async def test_two_windows_of_one_measure_take_one_prices_question(
 @pytest.mark.parametrize(
     ("answer", "expected"),
     [
-        ({"text": "the big one"}, "The user answered in their own words: the big one"),
         (
             _answers(q1={"kind": "text", "text": "the big one"}),
             "The user answered in their own words: the big one",
         ),
         ({"skip": True}, "The user skipped the question. Do not answer it"),
     ],
-    ids=["legacy_text", "answers_text", "dismissed"],
+    ids=["answers_text", "dismissed"],
 )
 async def test_a_free_text_answer_and_a_skip_are_handed_back_as_such(
     pg_engine: AsyncEngine, answer: dict[str, Any], expected: str
@@ -428,27 +417,27 @@ async def test_a_free_text_answer_and_a_skip_are_handed_back_as_such(
 @pytest.mark.parametrize(
     ("answer", "expected"),
     [
-        ({"spec_id": "o2"}, "The user chose: DR Congo"),
         (_answers(q1={"kind": "option", "spec_id": "o2"}), "The user chose: DR Congo"),
-        ({"text": "the big one"}, "The user answered in their own words: the big one"),
+        (
+            _answers(q1={"kind": "text", "text": "the big one"}),
+            "The user answered in their own words: the big one",
+        ),
         ({"skip": True}, "The user skipped the question. Do not answer it"),
     ],
-    ids=["legacy_pick", "answers_pick", "text", "dismissed"],
+    ids=["pick", "text", "dismissed"],
 )
-async def test_a_question_paused_in_the_one_question_shape_resumes(
+async def test_an_ask_whose_options_the_model_sent_as_bare_labels_resumes(
     pg_engine: AsyncEngine, options: list[Any], answer: dict[str, Any], expected: str
 ) -> None:
-    """A question held in the one-question shape `{kind, question, options}`
-    resumes, whether its options are bare labels or option objects."""
+    """Gemini does not hold a call to its declaration, so an `ask_user`
+    option can arrive as its bare label; the question pauses and resumes as
+    one whose options are objects."""
     driver, paused, models = await _turn(
-        pg_engine, "GDP of Congo?", _ask_user([_CONGO]), text_part("Done.")
+        pg_engine,
+        "GDP of Congo?",
+        _ask_user([{"question": "Which Congo?", "options": options}]),
+        text_part("Done."),
     )
-    held = {"kind": "ask", "question": "Which Congo?", "options": options}
-    async with pg_engine.begin() as conn:
-        await conn.execute(
-            text("UPDATE turn_cursors SET node_input = CAST(:held AS jsonb) WHERE id = :id"),
-            {"held": json.dumps(held), "id": paused.cursor.id},
-        )
 
     resumed = await driver.answer(answer, to=paused.pause)
 
@@ -456,30 +445,6 @@ async def test_a_question_paused_in_the_one_question_shape_resumes(
     assert f"You asked the user: Which Congo?\n{expected}" in agent_read(
         models.orchestrator.requests[-1]
     )
-
-
-def test_a_pending_question_stored_in_the_one_question_shape_reads_as_one_question() -> None:
-    state = {
-        ORCHESTRATOR_PENDING_KEY: {
-            "kind": "ask",
-            "question": "Which Congo?",
-            "options": ["Republic of the Congo", "DR Congo"],
-        }
-    }
-
-    pending = pending_action(state)
-
-    assert isinstance(pending, PendingAsk)
-    assert ask_questions(pending.questions) == [
-        {
-            "id": "q1",
-            "question": "Which Congo?",
-            "candidates": [
-                {"spec_id": "o1", "label": "Republic of the Congo"},
-                {"spec_id": "o2", "label": "DR Congo"},
-            ],
-        }
-    ]
 
 
 @pytest.mark.parametrize("answers", ["plan", "ask_user"])
@@ -493,7 +458,6 @@ async def test_an_answer_no_call_waits_on_is_refused_and_not_read_as_a_seed(answ
         key=TurnKey("user-1", "conv", 1),
         inputs={"message": "Kenya's debt service?"},
         state=state,
-        specs={},
         transcript=Transcript(),
         emit=lambda event: None,
         stop=StopScope(),

@@ -44,6 +44,9 @@ ANSWERS = "answers"
 
 # The kind of the pause on the planner's own ask (`harness.graph.planning`).
 PLANNER_ASK_PAUSE = "planner_ask"
+# The key of a planner-side pause's payload that names the id of the planner
+# ask it put to the user (`harness.graph.planning.planner_ask_pause`).
+ASKED_CALL_ID = "call_id"
 
 # A turn's transcript, as `session_steps` and `SessionCall` read it.
 type Records = Sequence[AgentRecord]
@@ -113,12 +116,12 @@ def _parts(record: AgentRecord, kind: str) -> list[Mapping[str, Any]]:
     return list(record.body.get("parts") or ())
 
 
-def _function_calls(record: AgentRecord) -> list[Mapping[str, Any]]:
+def function_calls(record: AgentRecord) -> list[Mapping[str, Any]]:
     """The function calls of a planner response record, in order."""
     return [part["function_call"] for part in _parts(record, RESPONSE) if "function_call" in part]
 
 
-def _function_responses(record: AgentRecord) -> list[Mapping[str, Any]]:
+def function_responses(record: AgentRecord) -> list[Mapping[str, Any]]:
     """The function responses of a planner answers record, in order."""
     return [
         part["function_response"] for part in _parts(record, ANSWERS) if "function_response" in part
@@ -129,7 +132,7 @@ def _response_holding(records: Records, call_id: str) -> list[Mapping[str, Any]]
     """The function calls of the latest model response in `records` that holds
     a call with `call_id`, in order, or none."""
     for record in reversed(records):
-        calls = _function_calls(record)
+        calls = function_calls(record)
         if any(call.get("id") == call_id for call in calls):
             return calls
     return []
@@ -148,9 +151,7 @@ def _in_flight_calls(records: Records, serving: str | None) -> frozenset[str]:
     """
     if serving is None:
         return frozenset()
-    answered = {
-        response.get("id") for record in records for response in _function_responses(record)
-    }
+    answered = {response.get("id") for record in records for response in function_responses(record)}
     calls = _response_holding(records, serving)
     if not any(call.get("id") == serving and call.get("name") != PLANNER_ASK for call in calls):
         return frozenset()
@@ -173,9 +174,9 @@ def session_steps(records: Records, *, serving: str | None = None) -> Iterator[S
     if the ask had not been made. An accepted one's tool answers
     `ASK_ACCEPTED`, which says nothing the user did and is not read. The
     planner node pauses on it (`PLANNER_ASK_PAUSE`), and that pause yields no
-    step of its own: it puts the planner's latest accepted ask to the user, so
-    the answer to the pause is the answer to that call. Every other tool's
-    response is a `response` step.
+    step of its own: it puts the ask its payload names (`ASKED_CALL_ID`) to
+    the user, so the answer to the pause is the answer to that call. Every
+    other tool's response is a `response` step.
 
     `serving` is the id of the tool call being served. The calls of its own
     model response that no record answers yet (`_in_flight_calls`) yield no
@@ -188,18 +189,16 @@ def session_steps(records: Records, *, serving: str | None = None) -> Iterator[S
     calls: dict[str, dict[str, Any]] = {}
     # The call each planner-side pause's wire id put to the user.
     asks: dict[str, str] = {}
-    last_ask: str | None = None
     for record in records:
         if record.agent == "loop":
             if record.kind == transcript.PAUSE and record.body["kind"] == PLANNER_ASK_PAUSE:
-                if last_ask is not None:
-                    asks[str(record.body["interrupt_id"])] = last_ask
+                asks[str(record.body["interrupt_id"])] = str(record.body["payload"][ASKED_CALL_ID])
                 continue
             step = _loop_step(record, calls, asks)
             if step is not None:
                 yield step
             continue
-        for call in _function_calls(record):
+        for call in function_calls(record):
             call_id = call.get("id")
             if (
                 call_id is None
@@ -208,10 +207,9 @@ def session_steps(records: Records, *, serving: str | None = None) -> Iterator[S
                 or call_id in refused
             ):
                 continue
-            last_ask = call_id
             calls[call_id] = dict(call.get("args") or {})
             yield Step("call", call_id, calls[call_id])
-        for response in _function_responses(record):
+        for response in function_responses(record):
             if response.get("name") != PLANNER_ASK:
                 yield Step("response", body=response.get("response") or {}, name=response["name"])
 
@@ -242,7 +240,7 @@ def _refused_asks(records: Iterable[AgentRecord]) -> frozenset[str]:
     return frozenset(
         response["id"]
         for record in records
-        for response in _function_responses(record)
+        for response in function_responses(record)
         if response.get("id") is not None
         and response.get("name") == PLANNER_ASK
         and (response.get("response") or {}).get("outcome") != Outcome.OK.value

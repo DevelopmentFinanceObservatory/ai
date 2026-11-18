@@ -416,21 +416,21 @@ def _spans_with_an_unexported_parent(spans: list[Span]) -> list[Span]:
     return [span for span in spans if span.parent_span_id not in exported]
 
 
-async def test_adks_spans_export_under_the_turn_and_bare_spans_do_not(
+async def test_an_agent_librarys_spans_export_under_the_turn_and_bare_spans_do_not(
     fake_langfuse: FakeLangfuse,
 ) -> None:
     """An instrumentor's spans carrying `gen_ai.*` attributes export under the
-    Langfuse default filter, `invoke_workflow` as a child of `turn`. A span
+    Langfuse default filter, `invoke_agent` as a child of `turn`. A span
     with no such attribute, from that instrumentor's scope or any other, is dropped."""
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
     handle = start_turn_span("tr_export0010")
     with use_turn_span(handle):
-        adk = trace.get_tracer("gcp.vertex.agent")
-        with adk.start_as_current_span("invoke_workflow wf") as workflow:
-            workflow.set_attribute("gen_ai.operation.name", "invoke_workflow")
-        with adk.start_as_current_span("bare_adk_span"):
+        library = trace.get_tracer("an.agent.library")
+        with library.start_as_current_span("invoke_agent orchestrator") as agent:
+            agent.set_attribute("gen_ai.operation.name", "invoke_agent")
+        with library.start_as_current_span("bare_library_span"):
             pass
         with trace.get_tracer("some.other.library").start_as_current_span("bare"):
             pass
@@ -438,10 +438,10 @@ async def test_adks_spans_export_under_the_turn_and_bare_spans_do_not(
     get_client().flush()
 
     spans = fake_langfuse.spans()
-    assert sorted(span.name for span in spans) == ["invoke_workflow wf", "turn"]
+    assert sorted(span.name for span in spans) == ["invoke_agent orchestrator", "turn"]
     (turn,) = [span for span in spans if span.name == "turn"]
-    (workflow,) = [span for span in spans if span.name == "invoke_workflow wf"]
-    assert workflow.parent_span_id == turn.span_id
+    (agent,) = [span for span in spans if span.name == "invoke_agent orchestrator"]
+    assert agent.parent_span_id == turn.span_id
     # The only parent that was never exported is the SDK's synthetic one for `turn`.
     assert _spans_with_an_unexported_parent(spans) == [turn]
 
@@ -638,10 +638,10 @@ def test_the_langfuse_exporter_matches_the_one_the_sdk_builds_by_default(
 # --- one Langfuse session per conversation ------------------------------------
 
 
-def _adk_child_span(name: str) -> None:
+def _library_child_span(name: str) -> None:
     """A span like a model call's `generate_content`: a separate tracer, with the
     per-turn conversation id an agent framework sets."""
-    with trace.get_tracer("gcp.vertex.agent").start_as_current_span(name) as span:
+    with trace.get_tracer("an.agent.library").start_as_current_span(name) as span:
         span.set_attribute("gen_ai.conversation.id", "conv-1#t1")
 
 
@@ -653,7 +653,7 @@ def test_a_turn_with_a_session_id_exports_it_on_the_turn_and_on_spans_a_library_
 
     handle = start_turn_span("tr_export0013", session_id="conv-1")
     with use_turn_span(handle):
-        _adk_child_span("generate_content gemini-x")
+        _library_child_span("generate_content gemini-x")
     end_turn_span(handle)
     get_client().flush()
 
@@ -693,7 +693,7 @@ def test_a_turn_exports_its_request_and_response_on_the_root_observation_alone(
 
     handle = start_turn_span("tr_export0018", session_id="conv-1")
     with use_turn_span(handle):
-        _adk_child_span("generate_content gemini-x")
+        _library_child_span("generate_content gemini-x")
     end_turn_span(handle, request="life expectancy in Kenya", response="It rose to 66.")
     get_client().flush()
 
@@ -711,16 +711,20 @@ def test_a_turn_exports_its_request_and_response_on_the_root_observation_alone(
 
 
 @pytest.mark.parametrize(
-    ("error", "level", "status_message"),
+    ("error", "level_arg", "level", "status_message"),
     [
-        (None, None, None),
-        ("cancelled", "ERROR", "cancelled"),
-        ("disconnected", "WARNING", "disconnected"),
+        (None, {}, None, None),
+        ("cancelled", {}, "ERROR", "cancelled"),
+        ("disconnected", {"level": "WARNING"}, "WARNING", "disconnected"),
     ],
     ids=["clean", "error", "warning"],
 )
-def test_a_turn_closed_with_an_error_exports_its_root_at_level_error(
-    fake_langfuse: FakeLangfuse, error: str | None, level: str | None, status_message: str | None
+def test_a_turn_closed_with_an_error_exports_its_root_at_the_level_asked_for(
+    fake_langfuse: FakeLangfuse,
+    error: str | None,
+    level_arg: dict[str, str],
+    level: str | None,
+    status_message: str | None,
 ) -> None:
     """A turn ended with an error code marks the root observation at the
     level asked for, `ERROR` by default, naming the code; a clean turn
@@ -736,7 +740,7 @@ def test_a_turn_closed_with_an_error_exports_its_root_at_level_error(
         request="q",
         response="a",
         error=error,
-        **({"level": level} if level == "WARNING" else {}),
+        **level_arg,
     )
     get_client().flush()
 

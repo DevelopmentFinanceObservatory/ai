@@ -26,7 +26,7 @@ from planner.plan import (
 from harness.decision_pick import decision_pick
 from harness.early_mint import EarlyMints
 from harness.graph.events import GraphEvent
-from harness.graph.state import readable_plan
+from harness.graph.state import APPROVE_PAUSE, readable_plan
 from harness.turn.node import Next, Node, NodeCtx, Pause
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ def offer(
                 early_mints.offer(offered)
 
             ctx.after_commit(start_retrievals)
-    return Pause(kind="approve", payload=node_input, message=APPROVE_MESSAGE)
+    return Pause(kind=APPROVE_PAUSE, payload=node_input, message=APPROVE_MESSAGE)
 
 
 def decide(

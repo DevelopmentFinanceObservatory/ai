@@ -24,7 +24,8 @@ from harness.graph.interfaces import Executor
 from harness.graph.orchestrate import ask, orchestrate_node
 from harness.graph.resume import ResumeRuns
 from harness.graph.seed import Fetch, seed_node
-from harness.graph.workflow import EDGES, START, with_specs
+from harness.graph.state import ORCHESTRATOR_SPECS_KEY
+from harness.graph.workflow import EDGES, START
 from harness.turn.events import NodeDone, TurnEvent
 from harness.turn.loop import END, Graph
 from harness.turn.node import Next, Node, NodeCtx
@@ -42,12 +43,14 @@ def given(
     *, specs: Mapping[str, Any] | None = None, state: Mapping[str, Any] | None = None
 ) -> Node:
     """A node that writes `specs` and `state` into the turn, as its earlier
-    searches would have, and goes on to `seed`. It writes `ctx.specs`
-    itself, so it runs without `with_specs`."""
+    searches would have, and goes on to `seed`."""
 
     async def run(ctx: NodeCtx, node_input: Any) -> Next:
         del node_input
-        ctx.specs.update(json.loads(json.dumps(dict(specs or {}))))
+        ctx.state[ORCHESTRATOR_SPECS_KEY] = {
+            **ctx.state[ORCHESTRATOR_SPECS_KEY],
+            **json.loads(json.dumps(dict(specs or {}))),
+        }
         ctx.state.update(json.loads(json.dumps(dict(state or {}))))
         return Next("next")
 
@@ -89,7 +92,7 @@ def opening_graph(nodes: Mapping[str, Node], *, before: Node | None = None) -> G
         for (source, label), target in EDGES.items()
         if source in nodes
     }
-    every = {name: with_specs(node) for name, node in nodes.items()}
+    every = dict(nodes)
     start = START
     if before is not None:
         every[GIVEN] = before

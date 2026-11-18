@@ -228,8 +228,9 @@ def ask_refusal(args: Mapping[str, Any]) -> dict[str, object] | None:
     The model's arguments arrive unchecked. A refusal answers the
     call at once, so the run goes on and Studio asks nothing. An ask this
     accepts ends the planner's run, and the graph's planner node pauses on
-    it with these arguments as its `RequestInput`'s `payload`, from which
-    Studio builds its question (`harness.studio_translate._planner_question`).
+    it with these arguments as its pause's `payload`
+    (`harness.graph.planning.planner_ask_pause`), from which Studio builds its
+    question (`harness.studio_translate._planner_question`).
     `message` is the question as text. Each of `candidates` is a
     mapping, read by its `spec_id` and `label`. `options` are
     `COMBINATION_OPTIONS` or `PRICES_OPTIONS` exactly, as a refusal's action

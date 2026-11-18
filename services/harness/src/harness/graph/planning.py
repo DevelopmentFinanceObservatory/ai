@@ -23,7 +23,7 @@ from planner.plan import (
     save_decision_pick,
 )
 from planner.plan import Plan as PlannerPlan
-from planner.session import PLANNER_ASK_PAUSE
+from planner.session import ASKED_CALL_ID, PLANNER_ASK_PAUSE
 
 from harness.decision_pick import DecisionPick
 from harness.graph import switch as switch_module
@@ -321,13 +321,14 @@ def _pick(payload: dict[str, Any]) -> DecisionPick | None:
 
 def planner_ask_pause(asked: Mapping[str, Any]) -> Pause:
     """The pause on the planner's accepted ask, `asked` as a `PlannerModel`
-    answers it, with the call's arguments as the payload Studio renders the
-    question from (`harness.studio_translate._planner_question`). The
-    planner's tools read the user's answer to it as the answer to that call
+    answers it. Its payload is the call's arguments, which Studio renders the
+    question from (`harness.studio_translate._planner_question`), and the
+    call's id under `ASKED_CALL_ID`, by which the planner's tools read the
+    user's answer to the pause as the answer to that call
     (`planner.session.session_steps`)."""
     return Pause(
         kind=PLANNER_ASK_PAUSE,
-        payload=dict(asked["args"]),
+        payload={**asked["args"], ASKED_CALL_ID: asked["call_id"]},
         message=str(asked["args"]["message"]),
     )
 

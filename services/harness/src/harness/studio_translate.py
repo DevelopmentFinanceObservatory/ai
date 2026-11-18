@@ -85,6 +85,7 @@ from harness.graph.events import AgentStatus, GraphEvent, PlannerStarted, StepPr
 from harness.graph.interfaces import Executor
 from harness.graph.orchestrate import HAND_OFF_EDGES
 from harness.graph.state import (
+    APPROVE_PAUSE,
     ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
@@ -1661,7 +1662,7 @@ class _Translator:
         match event:
             case Paused():
                 frames.extend(self._close_status())
-                if event.kind == "approve":
+                if event.kind == APPROVE_PAUSE:
                     frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
                 frames.extend(self._interrupt_frames(event))
             case PlannerResponse(parts=parts):
@@ -2131,7 +2132,7 @@ class _Translator:
         payload = pause.payload
         wire_id = pause.interrupt_id
         self.paused = True
-        if pause.kind == "approve":
+        if pause.kind == APPROVE_PAUSE:
             frames: list[Any] = []
             note = payload.get("refusal_note")
             if isinstance(note, str) and note:

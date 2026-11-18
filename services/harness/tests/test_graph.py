@@ -69,7 +69,7 @@ from harness.graph.execute import (
 )
 from harness.graph.plan_done import frame_unavailable_reason, plan_done_node
 from harness.graph.state import (
-    APPROVE_INTERRUPT,
+    APPROVE_PAUSE,
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
@@ -191,7 +191,7 @@ class _CallRecordingSurface:
 
 _BRIEF = "kenya debt"
 # The pause kind of each pause a turn here answers, by the interrupt a test names.
-_PAUSE_KINDS = {APPROVE_INTERRUPT: "approve", "planner_ask": "planner_ask"}
+_PAUSE_KINDS = {APPROVE_PAUSE: "approve", "planner_ask": "planner_ask"}
 
 
 class _PlanTurn:
@@ -452,7 +452,7 @@ async def _approved_run(
     events = await _start(runner)
     runner.driver.observe = observe
     return await _resume(
-        runner, APPROVE_INTERRUPT, approve_answer(_output_of(events, "planner")["revision"])
+        runner, APPROVE_PAUSE, approve_answer(_output_of(events, "planner")["revision"])
     )
 
 
@@ -567,16 +567,16 @@ async def test_stale_version_approval_routes_to_amend(
     surface = _CallRecordingSurface(ScriptedSurface())
     runner, _ = _plan_runner(pg_engine, ScriptedPlannerModel(), tool_surface=surface)
     events = await _start(runner)
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     first = _output_of(events, "planner")
     assert first["new_plan"] is True
 
-    events = await _resume(runner, APPROVE_INTERRUPT, wrong(first["revision"]))
+    events = await _resume(runner, APPROVE_PAUSE, wrong(first["revision"]))
 
     # Wrong answer: nothing executed; the planner redrafted to version 2 and
     # a fresh approval interrupt is pending.
     assert surface.calls == []
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     amended = _output_of(events, "planner")
     assert amended["version"] == 2
     assert amended["previous_version"] == 1
@@ -584,7 +584,7 @@ async def test_stale_version_approval_routes_to_amend(
     assert amended["revision"] != first["revision"]
     assert "new_plan" not in amended
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(amended["revision"]))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(amended["revision"]))
     assert [call[0] for call in surface.calls] == ["get_data", "aggregate"]
     assert _output_of(events, "execute")["plan_version"] == 2
 
@@ -598,12 +598,12 @@ async def test_a_plan_approved_unchanged_opens_a_span_and_logs_the_facts(
     runner, _ = _plan_runner(pg_engine, ScriptedPlannerModel(), tool_surface=surface)
     events = await _start(runner)
 
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     plan_payload = _output_of(events, "planner")
     assert plan_payload["version"] == 1
 
     with caplog.at_level("INFO", logger="harness.graph.approve"):
-        events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_payload["revision"]))
+        events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_payload["revision"]))
 
     assert _output_of(events, "execute")["plan_version"] == 1
 
@@ -920,10 +920,10 @@ async def test_a_stopped_plan_hands_back_no_derived_steps_figures(
     )
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     replanned = _output_of(events, "planner")
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(replanned["revision"]))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(replanned["revision"]))
 
     executed = _output_of(events, "execute")
     assert executed["failed_step"]["step_id"] == "change"
@@ -967,7 +967,7 @@ async def test_two_terminal_steps_both_come_back_to_the_agent(
     runner, model = _plan_runner(pg_engine, planner, tool_surface=surface, executor=executor)
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
     assert len(_output_of(events, "execute")["frame_refs"]) == 2
     assert [c["tool"] for c in executor.calls] == ["describe_frame", "describe_frame"]
@@ -1256,7 +1256,7 @@ async def test_plan_amendment_lineage_is_real(pg_engine: AsyncEngine) -> None:
     """The plan carried through amend cycles is a valid `planner.plan.Plan`."""
     runner, _ = _plan_runner(pg_engine, ScriptedPlannerModel())
     await _start(runner)
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(99))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(99))
 
     output = _output_of(events, "planner")
     plan_fields = {k: v for k, v in output.items() if k not in ("summary", "revision")}
@@ -1358,7 +1358,7 @@ async def test_a_refused_redraft_over_an_unreadable_plan_says_the_plan_was_disca
     await _start(runner)
     await _store_state(runner, "plan", json.dumps({"question": "kenya debt", "tool_calls": []}))
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(1))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(1))
 
     refused = _output_of(events, "planner")
     assert refused == {
@@ -1405,14 +1405,14 @@ async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_sta
     planner = _AskingOnAmendPlanner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     runner, _ = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "amendment": "only 2020"})
+    events = await _resume(runner, APPROVE_PAUSE, {"approved": None, "amendment": "only 2020"})
     assert _pending_interrupt(events) == _PLANNER_ASK
     assert planner.calls[1]["amendment"] == "only 2020"
     await _store_state(runner, "plan", json.dumps({"question": "kenya debt", "tool_calls": []}))
 
     events = await _resume(runner, _PLANNER_ASK, {"answer": "2020"})
 
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     assert planner.calls[2]["amendment"] is None
     assert planner.calls[2]["prior_plan"] is None
     redrafted = _output_of(events, "planner")
@@ -1497,14 +1497,14 @@ async def test_an_approval_for_a_superseded_revision_routes_to_amend(
         pg_engine, planner, tool_surface=_fixture_surface(real_schemas), executor=executor
     )
     events = await _start(runner)
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     revision_1 = plan_revision(plan_v1)
     assert _output_of(events, "planner")["revision"] == revision_1
 
     # A wrong answer routes to amend, which redrafts -- an unrelated plan
     # that also happens to be version 1.
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer("not-a-real-revision"))
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer("not-a-real-revision"))
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     amended = _output_of(events, "planner")
     assert amended["version"] == 1
     revision_2 = amended["revision"]
@@ -1512,16 +1512,16 @@ async def test_an_approval_for_a_superseded_revision_routes_to_amend(
 
     # The first card's revision no longer names what's pending: superseded,
     # not approved -- nothing executes and a fresh approval is still pending.
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision_1))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision_1))
     assert executor.calls == []
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     assert _output_of(events, "planner")["revision"] == revision_2
 
     # The correct, current revision approves cleanly: `approve()` succeeds,
     # the gate is passed (no fresh approval interrupt), and the approved
     # workflow's steps ran through `execute_approved_plan` against the
     # tool surface: the executor only describes the final frame.
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision_2))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision_2))
     assert _pending_interrupt(events) is None
     assert [call["tool"] for call in executor.calls] == ["describe_frame"]
     assert _output_of(events, "execute")["plan_version"] == 1
@@ -1553,12 +1553,12 @@ async def test_a_pending_plan_saved_at_the_base_revision_format_is_approved_unam
     surface = _CallRecordingSurface(ScriptedSurface())
     runner, _ = _plan_runner(pg_engine, planner, tool_surface=surface)
     events = await _start(runner)
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     assert _output_of(events, "planner")["revision"] == _BASE_FORMAT_PLAN["revision"]
     # The session holds the plan exactly as it was saved.
     await _store_state(runner, "plan", json.dumps(_BASE_FORMAT_PLAN["plan"]))
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(_BASE_FORMAT_PLAN["revision"]))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(_BASE_FORMAT_PLAN["revision"]))
 
     assert _pending_interrupt(events) is None
     assert len(planner.calls) == 1
@@ -1690,16 +1690,16 @@ async def test_a_refused_amendment_still_offers_the_pending_version_for_approval
         pg_engine, planner, tool_surface=_fixture_surface(real_schemas), executor=executor
     )
     events = await _start(runner)
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     revision_1 = plan_revision(plan_v1)
     assert _output_of(events, "planner")["revision"] == revision_1
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer("not-a-real-revision"))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer("not-a-real-revision"))
 
     # Not a dead end: a fresh approval interrupt for the same, unmodified
     # plan comes back instead, carrying why the amendment did not land.
     assert "plan_done" not in visited(events)
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     refused_output = _output_of(events, "planner")
     assert refused_output["revision"] == revision_1
     assert "budget of 4 plan drafts" in refused_output["refusal_note"]
@@ -1714,7 +1714,7 @@ async def test_a_refused_amendment_still_offers_the_pending_version_for_approval
     # revision approves it -- the round-cap refusal cost the user their
     # amendment, not their already-drafted plan. The plan's own compiled
     # workflow runs it through to completion against the tool surface.
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision_1))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision_1))
     assert _pending_interrupt(events) is None
     approved = PlannerPlan.model_validate_json(_session_state(runner)["plan"])
     assert approved.status is PlanStatus.COMPLETED
@@ -1738,7 +1738,7 @@ async def test_the_execute_node_runs_the_approved_workflow_through_the_surface(
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
 
     assert [call[0] for call in surface.calls] == ["get_data", "aggregate"]
     assert [call["tool"] for call in executor.calls] == ["describe_frame"]
@@ -1814,7 +1814,7 @@ async def test_a_final_retrieval_read_with_extra_columns_is_shown_by_its_manifes
     runner, model = _plan_runner(pg_engine, planner, tool_surface=surface, executor=platform)
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
     (aggregate,) = [args for name, args in surface.calls if name == "aggregate"]
     assert aggregate["frame_ref"] == typed
@@ -1918,7 +1918,7 @@ async def test_a_summed_familys_total_reaches_the_agent_in_the_hand_back(
     runner, model = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
     assert _output_of(events, "execute")["stat_var_totals"] == [sentence]
     _, body = handed_back(model)
@@ -1939,7 +1939,7 @@ async def test_a_none_tool_surface_refuses_loudly_rather_than_executing_nothing(
     revision = plan_revision(plan)
 
     with pytest.raises(RuntimeError, match="no tool surface"):
-        await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
+        await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
 
 
 async def test_a_rediscovery_outcome_replans_naming_the_requirement(
@@ -1966,11 +1966,11 @@ async def test_a_rediscovery_outcome_replans_naming_the_requirement(
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
 
     # Replanned (MAX_REPLANS == 1 covers one round): a fresh approval is
     # pending rather than the turn closing on the first refusal.
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     assert planner.calls[-1]["refusal"] == {
         "kind": "rediscovery_needed",
         "step_id": "get_data",
@@ -2012,10 +2012,10 @@ async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     replanned = _output_of(events, "planner")
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(replanned["revision"]))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(replanned["revision"]))
 
     assert _pending_interrupt(events) is None
     executed = _output_of(events, "execute")
@@ -2061,7 +2061,7 @@ async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_repl
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
 
     # No replan, no second approval: the turn closes on the first refusal.
     assert _pending_interrupt(events) is None
@@ -2119,7 +2119,7 @@ async def test_a_member_cardinality_ceiling_closes_the_turn_without_replanning(
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
 
     # No replan, no second approval: the turn closes on the first refusal.
     assert _pending_interrupt(events) is None
@@ -2174,7 +2174,7 @@ async def test_a_member_cardinality_ceilings_remedy_reaches_the_agent_in_the_han
     runner, model = _plan_runner(pg_engine, planner, tool_surface=surface)
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
     assert _pending_interrupt(events) is None
     assert _output_of(events, "execute")["failed_step"]["remedy"] == remedy
@@ -2203,7 +2203,7 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
     runner, model = _plan_runner(pg_engine, planner, tool_surface=surface)
     events = await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
     assert _pending_interrupt(events) is None
     assert len(planner.calls) == 1
@@ -2255,12 +2255,12 @@ async def test_an_over_ceiling_rows_refusal_still_replans(
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
 
     # A method choice, not a dead end: the planner is asked again (the
     # scripted planner redrafts the same plan, so the version does not bump),
     # and a fresh approval is pending rather than the turn closing.
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert _pending_interrupt(events) == APPROVE_PAUSE
     assert len(planner.calls) == 2
     assert planner.calls[-1]["refusal"]["code"] == "over_ceiling"
 
@@ -2362,11 +2362,11 @@ async def test_a_wave_of_dead_ends_closes_the_turn(
     runner, _ = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
     assert len(planner.calls) == (1 if dead_end else 2)
     if not dead_end:
-        assert _pending_interrupt(events) == APPROVE_INTERRUPT
+        assert _pending_interrupt(events) == APPROVE_PAUSE
         return
     assert _pending_interrupt(events) is None
     failed = _output_of(events, "execute")["failed_step"]
@@ -2405,10 +2405,10 @@ async def test_a_transport_stop_closes_the_turn_only_when_no_retry_can_help(
     runner, _ = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
 
     assert len(planner.calls) == (2 if retryable else 1)
-    assert (_pending_interrupt(events) == APPROVE_INTERRUPT) is retryable
+    assert (_pending_interrupt(events) == APPROVE_PAUSE) is retryable
 
 
 async def test_a_not_approved_outcome_raises_instead_of_replanning(
@@ -2440,7 +2440,7 @@ async def test_a_not_approved_outcome_raises_instead_of_replanning(
     revision = plan_revision(plan)
 
     with pytest.raises(RuntimeError, match="not_approved"):
-        await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
+        await _resume(runner, APPROVE_PAUSE, approve_answer(revision))
 
 
 def test_a_refused_stop_that_read_a_source_names_it_in_the_replan_payload() -> None:
@@ -3181,17 +3181,17 @@ async def test_each_card_offered_starts_its_retrievals_once_with_the_arguments_e
     await asyncio.sleep(0)
     assert sends.sent == [{"spec_id": SPEC_A, "stat_vars": "sum"}]
 
-    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer("not-a-real-revision"))
+    events = await _resume(runner, APPROVE_PAUSE, approve_answer("not-a-real-revision"))
     await asyncio.sleep(0)
     revision_2 = _output_of(events, "planner")["revision"]
     assert len(sends.sent) == 2
 
     # An answer naming the superseded card offers the same card again.
-    await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan_v1)))
+    await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan_v1)))
     await asyncio.sleep(0)
     assert len(sends.sent) == 2
 
-    await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision_2))
+    await _resume(runner, APPROVE_PAUSE, approve_answer(revision_2))
     assert [args for tool, args in surface.calls if tool == "get_data"] == sends.sent[1:]
 
 
@@ -3233,7 +3233,7 @@ async def test_an_early_mint_that_fails_is_logged_and_leaves_the_card_and_plan_a
         offered = await card(EarlyMints(send=sends, max_concurrent=4, settle_s=3.0))
 
     assert offered == await card(None)
-    assert offered[2] == APPROVE_INTERRUPT
+    assert offered[2] == APPROVE_PAUSE
     (line,) = [r.getMessage() for r in caplog.records if r.name == "harness.early_mint"]
     assert f"spec_id={SPEC_A}" in line
     assert f"plan_revision={plan_revision(plan)}" in line
@@ -3379,7 +3379,7 @@ async def test_approving_a_card_withdraws_its_early_calls_and_offering_it_does_n
     await _start(runner)
     assert withdrawn == []
 
-    await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    await _resume(runner, APPROVE_PAUSE, approve_answer(plan_revision(plan)))
     assert withdrawn == ["withdraw"]
 
 

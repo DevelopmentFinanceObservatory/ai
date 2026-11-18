@@ -8,7 +8,7 @@ they happen:
 - `ModelResponded`: a whole model response, once streamed, before its tools
   run (Activity lines for its calls; the thoughts are for traces).
 - `ToolsAnswered`: the answers of one response's calls once every call that
-  ran has answered, and the state those calls wrote.
+  ran has answered, and a copy of the state those calls wrote.
 - `HandedOff`: the run ended on a `plan` or `ask_user` call, which waits on a
   hand-back. It carries the hand-off's record and the history to store with
   the turn until the hand-back arrives.
@@ -23,20 +23,27 @@ closes ends the run on the bound's sentence (`orchestrator.model`), as an
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, MutableMapping
+import copy
+import logging
+from collections.abc import AsyncGenerator, MutableMapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any, Literal
 
+from common.telemetry import current_trace_id
 from google.genai import types
 from harness.gemini_agent import (
+    NO_REQUEST_LIMIT,
+    QUESTION_INSTRUCTIONS,
     EmptyResponseError,
     RecordingState,
     as_function_response,
     holds_no_answer,
     response_parts,
+    tool_not_found,
     without_unsigned_thoughts,
 )
+from harness.gemini_wire import StreamResumedError, resumed_over_output
 from pydantic import BaseModel, SerializerFunctionWrapHandler, field_serializer, field_validator
 from pydantic_ai import (
     Agent,
@@ -48,24 +55,20 @@ from pydantic_ai import (
     PartStartEvent,
     TextPart,
     TextPartDelta,
-    UsageLimits,
 )
 from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart, UserPromptPart
 from pydantic_ai.models import Model
 
 from orchestrator.agent import INSTRUCTION, Orchestrator, OrchestratorDeps
 
-# The turn budget bounds a run's model calls (`harness.turn_budget`), so Pydantic
-# AI's own default cap of 50 requests is lifted.
-_NO_REQUEST_LIMIT = UsageLimits(request_limit=None)
+logger = logging.getLogger(__name__)
 
-# Carried by the request holding the date and digests, and by the one holding
-# the user's message when a seed hand-back follows it. Pydantic AI merges
+# Carried by the request holding the date and digests. Pydantic AI merges
 # consecutive requests into one content unless their `instructions` differ, so
-# each is a content of its own. Only the latest request's instructions reach
-# the model, so neither text is sent.
+# it is a content of its own, as is the user's message when a seed hand-back
+# follows it (`harness.gemini_agent.QUESTION_INSTRUCTIONS`). Only the latest
+# request's instructions reach the model, so neither text is sent.
 _DIGESTS_INSTRUCTIONS = "The turn's date and digests."
-_QUESTION_INSTRUCTIONS = "The user's message, which opened the turn."
 
 # `INSTRUCTION` as each request records it, which Pydantic AI strips of
 # surrounding whitespace, and what a stored request carries in its place
@@ -164,9 +167,10 @@ class ModelResponded:
 @dataclass(frozen=True)
 class ToolsAnswered:
     """The answers of one response's calls, with each call's id, in call
-    order, and the turn state's value of every key those calls wrote. A call
-    that handed off has no answer here; a run resumed after it opens on one
-    whose answer is the hand-back."""
+    order, and a copy of the turn state's value of every key those calls
+    wrote, so a later call's change does not reach an event still queued. A
+    call that handed off has no answer here; a run resumed after it opens on
+    one whose answer is the hand-back."""
 
     answers: tuple[types.FunctionResponse, ...]
     state: dict[str, Any]
@@ -231,6 +235,9 @@ async def run_orchestrator(
     Raises:
         EmptyResponseError: A model response held neither answer text nor a
             function call.
+        StreamResumedError: google-genai resumed a stream over output no
+            continuation token covers (`harness.gemini_wire.resumed_over_output`),
+            a dropped connection a later attempt may not meet.
         NoCallWaitsError: `hand_back` answers no call `history` waits on.
         ValueError: Neither or both of an opening and a resume were given.
     """
@@ -250,44 +257,57 @@ async def run_orchestrator(
     else:
         raise ValueError("give an opening for a turn's first run, or a history and a hand-back")
 
-    async with orchestrator.agent.iter(
-        prompt,
-        model=model,
-        deps=deps,
-        message_history=messages,
-        conversation=conversation,
-        deferred_tool_results=results,
-        usage_limits=_NO_REQUEST_LIMIT,
-        conversation_id=conversation_id,
-    ) as run:
-        async for node in run:
-            if Agent.is_model_request_node(node):
-                deps.view = RecordingState(deps.state)
-                async with node.stream(run.ctx) as stream:
-                    async for event in stream:
-                        if (text := _text(event)) is not None:
-                            yield TextDelta(text)
-                    response = stream.response
-                if holds_no_answer(response):
-                    raise EmptyResponseError(
-                        "the model's response held neither answer text nor a function call"
-                    )
-                yield ModelResponded(parts=response_parts(without_unsigned_thoughts(response)))
-            elif Agent.is_call_tools_node(node):
-                async with node.stream(run.ctx) as stream:
-                    answered = [
-                        _answer(event)
-                        async for event in stream
-                        if isinstance(event, FunctionToolResultEvent)
-                    ]
-                if answered:
-                    yield ToolsAnswered(
-                        answers=tuple(answered),
-                        state={
-                            key: deps.state[key] for key in deps.view.written if key in deps.state
-                        },
-                    )
-        result = run.result
+    try:
+        async with orchestrator.agent.iter(
+            prompt,
+            model=model,
+            deps=deps,
+            message_history=messages,
+            conversation=conversation,
+            deferred_tool_results=results,
+            usage_limits=NO_REQUEST_LIMIT,
+            conversation_id=conversation_id,
+        ) as run:
+            async for node in run:
+                if Agent.is_model_request_node(node):
+                    deps.view = RecordingState(deps.state)
+                    async with node.stream(run.ctx) as stream:
+                        async for event in stream:
+                            if (text := _text(event)) is not None:
+                                yield TextDelta(text)
+                        response = stream.response
+                    if holds_no_answer(response):
+                        raise EmptyResponseError(
+                            "the model's response held neither answer text nor a function call"
+                        )
+                    yield ModelResponded(parts=response_parts(without_unsigned_thoughts(response)))
+                elif Agent.is_call_tools_node(node):
+                    async with node.stream(run.ctx) as stream:
+                        answered = [
+                            _answer(event, orchestrator.tools)
+                            async for event in stream
+                            if isinstance(event, FunctionToolResultEvent)
+                        ]
+                    if answered:
+                        yield ToolsAnswered(
+                            answers=tuple(answered),
+                            state={
+                                key: copy.deepcopy(deps.state[key])
+                                for key in deps.view.written
+                                if key in deps.state
+                            },
+                        )
+            result = run.result
+    except Exception as exc:
+        if not resumed_over_output(exc):
+            raise
+        logger.warning(
+            "orchestrator stream resumed over output turn_id=%s trace_id=%s: %s",
+            turn_id,
+            current_trace_id(),
+            exc,
+        )
+        raise StreamResumedError(str(exc)) from exc
     assert result is not None
     output = result.output
     if isinstance(output, DeferredToolRequests):
@@ -305,7 +325,7 @@ async def run_orchestrator(
 def _opening(opening: Opening) -> tuple[str, list[ModelMessage]]:
     """The prompt and the history before it that open a turn: the date and the
     digests as one request (`_DIGESTS_INSTRUCTIONS`), then the user's message
-    as the prompt, or as a request of its own (`_QUESTION_INSTRUCTIONS`)
+    as the prompt, or as a request of its own (`QUESTION_INSTRUCTIONS`)
     ahead of the seed hand-back as the prompt."""
     lines = [f"Today's date (UTC): {opening.today.isoformat()}"]
     lines += [
@@ -322,7 +342,7 @@ def _opening(opening: Opening) -> tuple[str, list[ModelMessage]]:
     if not opening.seeded:
         return opening.question, messages
     messages.append(
-        ModelRequest(parts=[UserPromptPart(opening.question)], instructions=_QUESTION_INSTRUCTIONS)
+        ModelRequest(parts=[UserPromptPart(opening.question)], instructions=QUESTION_INSTRUCTIONS)
     )
     return opening.seeded, messages
 
@@ -347,14 +367,17 @@ def _text(event: object) -> str | None:
     return None
 
 
-def _answer(event: FunctionToolResultEvent) -> types.FunctionResponse:
-    """A call's answer as the function response the model reads."""
+def _answer(event: FunctionToolResultEvent, tools: Sequence[str]) -> types.FunctionResponse:
+    """A call's answer as the function response the model reads: the tool's
+    own answer, or `tool_not_found`'s for a tool the agent lacks, as the
+    history replays it (`harness.gemini_agent.replayed_history`)."""
     part = event.part
-    body = (
-        as_function_response(part.content)
-        if isinstance(part, ToolReturnPart)
-        else {"error": part.model_response()}
-    )
+    if part.tool_name not in tools:
+        body = tool_not_found(part.tool_name, tools)
+    elif isinstance(part, ToolReturnPart):
+        body = as_function_response(part.content)
+    else:
+        body = {"error": part.model_response()}
     return types.FunctionResponse(id=part.tool_call_id, name=part.tool_name, response=body)
 
 

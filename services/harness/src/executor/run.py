@@ -927,13 +927,13 @@ async def _carry_out(
     was admitted before this call, so driving it carries it on (`_drive`).
 
     A waiter cancelled leaves the run going on for the caller driving it. A
-    driver cancelled fails a computation it was running (`_abandoned`) when
-    its `cancel_ends_run` says the cancellation ends the run, whether or not
-    another caller waits on it, and each waiter then takes the run from the
-    ledger as a driver would: a run failed with no outcome answers
-    `RUN_ABANDONED`, and one the driver left unfinished, cancelled before or
-    after its computation or by a cancellation that does not end the run, is
-    carried on by the waiter."""
+    driver cancelled before its computation finished fails the run
+    (`_abandoned`) when its `cancel_ends_run` says the cancellation ends the
+    run, whether or not another caller waits on it, and each waiter then
+    takes the run from the ledger as a driver would: a run failed with no
+    outcome answers `RUN_ABANDONED`, and one the driver left unfinished, by a
+    cancellation that does not end the run or one after its computation
+    finished, is carried on by the waiter."""
     while (in_flight := _IN_FLIGHT.get(run.run_id)) is not None:
         await asyncio.wait((in_flight,))
         if not in_flight.cancelled():
@@ -941,11 +941,9 @@ async def _carry_out(
     outcome: asyncio.Future[RunOutcome] = asyncio.get_running_loop().create_future()
     _IN_FLIGHT[run.run_id] = outcome
     try:
-        async with store_faults(run.run_id):
-            current = await ledger.get(run.run_id)
-        if current is None:
-            raise RunNotFoundError(run.run_id)
-        result = await _drive(current, submission, ledger=ledger, runtime=runtime, resumed=resumed)
+        result = await _drive(
+            run.run_id, submission, ledger=ledger, runtime=runtime, resumed=resumed
+        )
     except asyncio.CancelledError:
         outcome.cancel()
         raise
@@ -961,93 +959,133 @@ async def _carry_out(
 
 
 async def _drive(
-    run: RunRecord,
+    run_id: str,
     submission: Submission,
     *,
     ledger: RunLedger,
     runtime: _Runtime,
     resumed: bool,
 ) -> RunOutcome:
-    """Take `run` from where the ledger holds it to its outcome.
-
-    An unfinished run admitted before (`resumed`) is first recorded carried
-    on (`Resume`), which fails one resumed too often or too old. A run that
-    already came to an outcome returns it, finishing its publication, and
-    one failed before it came to any answers `RUN_ABANDONED`.
+    """Take run `run_id` from where the ledger holds it to its outcome:
+    compute it (`_compute`), then publish its results.
 
     Raises:
         LedgerUnavailableError: the ledger's store could not record the run's
             progress; the run is left unfinished, never failed for it.
-        RunAbandonedError: a defect stopped the computation; the run is
-            recorded failed (`_abandoned`).
+        RunAbandonedError: a defect stopped the computation, among them a
+            `CancelledError` that reached this task while nobody cancelled
+            it, as a tool client's cancel scope can leak one from a step;
+            the run is recorded failed (`internal_error`).
 
-    A cancellation of the computation records the run failed when
-    `runtime.cancel_ends_run` says it ends the run, and otherwise leaves it
-    unfinished for a later turn to carry on (`harness.graph.resume`).
+    A cancellation of this task before the run's computation finished, at
+    any point from the ledger read to the record of its outcome, records the
+    run failed (`cancelled`) when `runtime.cancel_ends_run` says it ends the
+    run, and otherwise leaves it unfinished for a later turn to carry on
+    (`harness.graph.resume`).
     """
-    if resumed and run.status not in TERMINAL_STATUSES:
-        run = await record_change(ledger, run.run_id, Resume())
+    try:
+        to_publish, outcome = await _compute(
+            run_id, submission, ledger=ledger, runtime=runtime, resumed=resumed
+        )
+    except asyncio.CancelledError as exc:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling() > 0:
+            if runtime.cancel_ends_run():
+                await _abandoned(
+                    run_id,
+                    ExecutorCode.CANCELLED,
+                    "the turn running it was cancelled",
+                    ledger=ledger,
+                )
+            raise
+        await _abandoned(run_id, ExecutorCode.INTERNAL_ERROR, _defect(exc), ledger=ledger)
+        raise RunAbandonedError(run_id) from exc
+    if to_publish is not None:
+        await publish_results(
+            to_publish,
+            ledger=ledger,
+            publisher=runtime.publisher,
+            sleep=runtime.sleep,
+            jitter=runtime.jitter,
+        )
+    return outcome
+
+
+async def _compute(
+    run_id: str,
+    submission: Submission,
+    *,
+    ledger: RunLedger,
+    runtime: _Runtime,
+    resumed: bool,
+) -> tuple[RunRecord | None, RunOutcome]:
+    """Run `run_id`'s computation from where the ledger holds it, returning
+    the run when it still has results to publish, and its outcome.
+
+    An unfinished run is first recorded carried on (`Resume`), which fails
+    one resumed too often or too old, when it was admitted before
+    (`resumed`) or is already `running`: a caller that finds it running
+    took it over from a driver whose cancellation left it unfinished. A run
+    that already came to an outcome returns it, and one failed before it
+    came to any answers `RUN_ABANDONED`.
+
+    Raises:
+        RunNotFoundError: the ledger holds no run `run_id`.
+        LedgerUnavailableError: as `_drive`.
+        RunAbandonedError: a defect raised by the computation, recorded
+            failed (`internal_error`).
+    """
+    async with store_faults(run_id):
+        run = await ledger.get(run_id)
+    if run is None:
+        raise RunNotFoundError(run_id)
+    if run.status not in TERMINAL_STATUSES and (resumed or run.status is RunStatus.RUNNING):
+        run = await record_change(ledger, run_id, Resume())
     if run.outcome is not None:
-        if run.status in (RunStatus.PUBLISHING, RunStatus.PENDING):
-            await publish_results(
-                run,
-                ledger=ledger,
-                publisher=runtime.publisher,
-                sleep=runtime.sleep,
-                jitter=runtime.jitter,
-            )
-        return _recorded_outcome(run.outcome, workflow=submission.workflow)
+        publishing = run.status in (RunStatus.PUBLISHING, RunStatus.PENDING)
+        return (run if publishing else None), _recorded_outcome(
+            run.outcome, workflow=submission.workflow
+        )
     if run.status is RunStatus.FAILED:
         assert run.failure is not None, "a failed run records its failure"
-        return Refused(
+        return None, Refused(
             revision=submission.revision,
-            run_id=run.run_id,
+            run_id=run_id,
             refusal=RefusalKind.RUN_ABANDONED,
             detail=f"the run failed before it came to an outcome: {run.failure.reason}",
         )
     if run.status is RunStatus.ADMITTED:
         try:
-            run = await record_change(ledger, run.run_id, Start())
+            run = await record_change(ledger, run_id, Start())
         except AuthorisationExpiredError as exc:
-            return await _failed(
+            return None, await _failed(
                 Refused(
                     revision=submission.revision,
-                    run_id=run.run_id,
+                    run_id=run_id,
                     refusal=RefusalKind.AUTHORISATION_EXPIRED,
                     detail=str(exc),
                 ),
                 ledger=ledger,
             )
     try:
-        outcome = await _run_workflow(submission, run_id=run.run_id, ledger=ledger, runtime=runtime)
-    except LedgerUnavailableError:
-        raise
-    except asyncio.CancelledError as exc:
-        if runtime.cancel_ends_run():
-            await _abandoned(run.run_id, exc, ledger=ledger)
+        outcome = await _run_workflow(submission, run_id=run_id, ledger=ledger, runtime=runtime)
+    except (LedgerUnavailableError, asyncio.CancelledError):
         raise
     except BaseException as exc:
-        await _abandoned(run.run_id, exc, ledger=ledger)
+        await _abandoned(run_id, ExecutorCode.INTERNAL_ERROR, _defect(exc), ledger=ledger)
         if isinstance(exc, Exception):
-            raise RunAbandonedError(run.run_id) from exc
+            raise RunAbandonedError(run_id) from exc
         raise
     if not isinstance(outcome, Accepted):
-        return await _failed(outcome, ledger=ledger)
+        return None, await _failed(outcome, ledger=ledger)
     results = tuple(
         ResultFrame(spec_id=frame.spec_id, content_version=frame.content_version)
         for frame in outcome.results.values()
     )
     run = await record_change(
-        ledger, run.run_id, Publishing(results, outcome=outcome.model_dump(mode="json"))
+        ledger, run_id, Publishing(results, outcome=outcome.model_dump(mode="json"))
     )
-    await publish_results(
-        run,
-        ledger=ledger,
-        publisher=runtime.publisher,
-        sleep=runtime.sleep,
-        jitter=runtime.jitter,
-    )
-    return outcome
+    return run, outcome
 
 
 def _recorded_outcome(raw: JsonValue, *, workflow: Workflow) -> RunOutcome:
@@ -1069,22 +1107,28 @@ def _recorded_outcome(raw: JsonValue, *, workflow: Workflow) -> RunOutcome:
     )
 
 
-async def _abandoned(run_id: str, exc: BaseException, *, ledger: RunLedger) -> None:
-    """Record run `run_id` failed by `exc`, which ends its computation with no
-    outcome: a cancellation that ends the run (`CancelEndsRun`), or a defect
-    raised. A process that died mid-run, a cancellation that does not end the
-    run, or a ledger that could not record the run's progress
+async def _abandoned(run_id: str, code: str, reason: str, *, ledger: RunLedger) -> None:
+    """Record run `run_id` failed under `code` for `reason` when its
+    computation is unfinished (`admitted` or `running`): a cancellation that
+    ends the run (`CancelEndsRun`), or a defect raised. A run whose
+    computation already finished keeps its outcome for the next turn to
+    publish. A process that died mid-run, a cancellation that does not end
+    the run, or a ledger that could not record the run's progress
     (`LedgerUnavailableError`, which `_drive` never passes here) leaves a run
     unfinished for the next turn to carry on; a failed run is never carried
-    on, and submitting its work again admits a new run. A write that fails
-    here is logged, so `exc` still propagates."""
-    cancelled = isinstance(exc, asyncio.CancelledError)
-    code = ExecutorCode.CANCELLED if cancelled else ExecutorCode.INTERNAL_ERROR
-    reason = "the turn running it was cancelled" if cancelled else f"{type(exc).__name__}: {exc}"
+    on, and submitting its work again admits a new run. A read or write that
+    fails here is logged, so the caller's exception still propagates."""
     try:
-        await ledger.record(run_id, Fail(code, reason))
+        run = await ledger.get(run_id)
+        if run is not None and run.status in (RunStatus.ADMITTED, RunStatus.RUNNING):
+            await ledger.record(run_id, Fail(code, reason))
     except Exception:
         logger.exception("executor: could not record run %s as %s", run_id, code)
+
+
+def _defect(exc: BaseException) -> str:
+    """The failure reason a run records for defect `exc`."""
+    return f"{type(exc).__name__}: {exc}"
 
 
 async def _failed(
@@ -1652,10 +1696,11 @@ class _Run:
         # completion when one of them raises something `_attempt` did not
         # catch. Such an exception is a defect, since `_attempt` returns
         # `_Stopped` and never raises it, and ending the wave at once would
-        # abandon that wave's other in-flight steps unawaited. A
-        # `BaseException` outside `Exception`, such as `CancelledError`,
-        # is not captured by `return_exceptions` and propagates
-        # regardless.
+        # abandon that wave's other in-flight steps unawaited. A step
+        # that ends with `CancelledError` is captured the same way and
+        # raised below: when this task was cancelled the cancellation
+        # also reaches the `gather` itself, and when it was not, the step
+        # leaked one, which `_drive` records as a defect.
         outcomes = await asyncio.gather(
             *(self._attempt(step, schemas[step.tool.name]) for step in wave),
             return_exceptions=True,

@@ -1369,6 +1369,96 @@ def _need_log(evidence: Evidence, check: str) -> list[str]:
     )
 
 
+def _label(request: dict[str, Any], log: list[dict[str, Any]]) -> str:
+    ordinal = sum(
+        1
+        for entry in log[: log.index(request)]
+        if entry["kind"] == "request" and entry["agent"] == request["agent"]
+    )
+    return f"{request['agent']} request {ordinal + 1}"
+
+
+def _first_step(log: list[dict[str, Any]], *, refused: bool = False) -> int | None:
+    """The log index of the first plan-step call, or of the first refused one."""
+    return next(
+        (
+            index
+            for index, entry in enumerate(log)
+            if entry["kind"] == "call"
+            and entry["layer"] == "step"
+            and (not refused or entry["outcome"] == "refused")
+        ),
+        None,
+    )
+
+
+def approval_payload_absent_after_approval(evidence: Evidence) -> list[str]:
+    """No model request made after the plan's first step ran carries the
+    approval pause's payload or the user's answer to it. The turn writes
+    both to its transcript (`harness.turn.transcript`), where the planner's
+    session reads the pause as a call and the answer as an answer step;
+    the browser reads both from the stream, and no model is meant to. The
+    pause's payload, the plan card, and the answer, `{"approved":
+    <revision>}`, both hold the plan's whole revision, which the plan's
+    hand-back names by a 12-character prefix alone."""
+    if missing := _need_log(evidence, "approval_payload_absent_after_approval"):
+        return missing
+    log = evidence.log or []
+    started = _first_step(log)
+    approved = [
+        frame
+        for turn in evidence.turn_frames
+        for frame in turn
+        if frame["event"] == "plan.approved"
+    ]
+    if started is None or not approved:
+        return ["approval_payload_absent_after_approval: no plan step ran, so nothing was approved"]
+    revisions = {frame["revision"] for frame in approved}
+    return [
+        f"{_label(entry, log)} after approval carries the approval pause or its answer"
+        for entry in log[started:]
+        if entry["kind"] == "request"
+        and any(
+            revision in _contents_text(entry) or revision in entry["system"]
+            for revision in revisions
+        )
+    ]
+
+
+def refused_step_reaches_the_next_plan(evidence: Evidence) -> list[str]:
+    """A refused plan step reaches the orchestrator, and the planner is
+    entered again after it: the orchestrator's first request after the
+    refusal names the refusal's code in the plan's hand-back, and a planner
+    request follows that one. The turn graph hands the refused run back to
+    the orchestrator, whose second `plan` call opens the planner once more
+    in the same turn."""
+    if missing := _need_log(evidence, "refused_step_reaches_the_next_plan"):
+        return missing
+    log = evidence.log or []
+    refused = _first_step(log, refused=True)
+    if refused is None:
+        return ["refused_step_reaches_the_next_plan: no plan step was refused"]
+    code = log[refused]["code"]
+    handed_back = next(
+        (
+            index
+            for index in range(refused + 1, len(log))
+            if log[index]["kind"] == "request" and log[index]["agent"] == "orchestrator"
+        ),
+        None,
+    )
+    if handed_back is None:
+        return ["no orchestrator request followed the refused step"]
+    violations = []
+    if code not in _contents_text(log[handed_back]):
+        violations.append(
+            f"{_label(log[handed_back], log)} after the refused step does not name its code {code}"
+        )
+    if not _requests(Evidence(turn_frames=[], log=log[handed_back:]), agent="planner"):
+        violations.append("the planner was not entered again after the refused step")
+    return violations
+
+
 _SPEC_ID = re.compile(r"spec_[0-9a-f]{32}")
 
 
@@ -1645,6 +1735,8 @@ def every_ask_accounted_for(evidence: Evidence) -> list[str]:
 
 
 CASE_CHECKS: dict[str, Callable[[Evidence], list[str]]] = {
+    "approval_payload_absent_after_approval": approval_payload_absent_after_approval,
+    "refused_step_reaches_the_next_plan": refused_step_reaches_the_next_plan,
     "planner_first_message_carries_search_evidence": planner_first_message_carries_search_evidence,
     "previous_final_message_in_view": previous_final_message_in_view,
     "earlier_plan_in_view": earlier_plan_in_view,

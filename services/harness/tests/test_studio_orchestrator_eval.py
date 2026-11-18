@@ -203,12 +203,71 @@ RAN = {"ask": "A", "answered_by": [{"step": "s1", "status": "data"}]}
 SPEC = "spec_" + "1" * 32
 READING = {"spec_id": SPEC, "window": {"start": 1990, "end": 2020}, "warnings": [{"code": "w_one"}]}
 CLOSING = 'The series rose. Would you like "Uganda" too?'
+REVISION = "f" * 64
+APPROVED = [[{"event": "plan.approved", "revision": REVISION}]]
+REFUSED = {**_step(SPEC), "outcome": "refused", "code": "facet_not_available"}
 TURN_ONE = [{"kind": "turn", "index": 1}, _request("orchestrator", "first")]
 
 
 @pytest.mark.parametrize(
     ("name", "turn_frames", "log", "violated"),
     [
+        (
+            "approval_payload_absent_after_approval",
+            APPROVED,
+            [_step(), _request("orchestrator", f"Plan {REVISION[:12]} (approved)")],
+            False,
+        ),
+        (
+            "approval_payload_absent_after_approval",
+            APPROVED,
+            [_step(), _request("planner", json.dumps({"approved": REVISION}))],
+            True,
+        ),
+        (
+            "approval_payload_absent_after_approval",
+            APPROVED,
+            [_step(), _request("orchestrator", "ok", system=REVISION)],
+            True,
+        ),
+        # The plan the planner proposes, before the approval, is not held against it.
+        (
+            "approval_payload_absent_after_approval",
+            APPROVED,
+            [_request("planner", REVISION), _step()],
+            False,
+        ),
+        # No step ran, or nothing was approved: a case that proves nothing fails.
+        ("approval_payload_absent_after_approval", APPROVED, [_request("planner", "ok")], True),
+        ("approval_payload_absent_after_approval", [], [_step(), _request("planner", "ok")], True),
+        (
+            "refused_step_reaches_the_next_plan",
+            [],
+            [
+                REFUSED,
+                _request("orchestrator", "failed_step facet_not_available"),
+                _request("planner"),
+            ],
+            False,
+        ),
+        (
+            "refused_step_reaches_the_next_plan",
+            [],
+            [REFUSED, _request("orchestrator", "the plan ran"), _request("planner")],
+            True,
+        ),
+        (
+            "refused_step_reaches_the_next_plan",
+            [],
+            [_request("planner"), REFUSED, _request("orchestrator", "facet_not_available")],
+            True,
+        ),
+        (
+            "refused_step_reaches_the_next_plan",
+            [],
+            [_step(), _request("orchestrator", "facet_not_available"), _request("planner")],
+            True,
+        ),
         (
             "planner_first_message_carries_search_evidence",
             [],

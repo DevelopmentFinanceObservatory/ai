@@ -69,7 +69,8 @@
           ],
           "options": [],
           "recommended_spec_id": null,
-          "rationale": null
+          "rationale": null,
+          "call_id": "a1"
         },
         "message": "Which source did you mean?"
       }
@@ -81,7 +82,12 @@
         "interrupt_id": "<interrupt 1>",
         "round": 1,
         "answer": {
-          "spec_id": "spec_9f0330e5ca67f5ef7576003ee30d2104"
+          "answers": {
+            "q1": {
+              "kind": "option",
+              "spec_id": "spec_9f0330e5ca67f5ef7576003ee30d2104"
+            }
+          }
         }
       }
     },
@@ -934,7 +940,12 @@
       },
       "body": {
         "result": {
-          "spec_id": "spec_9f0330e5ca67f5ef7576003ee30d2104"
+          "answers": {
+            "q1": {
+              "kind": "option",
+              "spec_id": "spec_9f0330e5ca67f5ef7576003ee30d2104"
+            }
+          }
         }
       },
       "name": null
@@ -3545,291 +3556,291 @@
   },
   "specs": {
     "spec_50fb71f953b7ee352c878d87a27d256a": {
+      "spec_id": "spec_50fb71f953b7ee352c878d87a27d256a",
+      "sentence": "US health aid to Africa",
       "definition": {
+        "schema_version": 1,
+        "spec_id": "spec_50fb71f953b7ee352c878d87a27d256a",
         "identity": {
+          "identity_version": "spec1",
+          "shape": {
+            "kind": "statvar_schema",
+            "population_type": "ODA",
+            "measured_property": "grantEquivalent"
+          },
+          "slots": [
+            {
+              "property": "crsPurpose",
+              "binding": {
+                "state": "set",
+                "refs": [
+                  "CRSPurposeCode120",
+                  "CRSPurposeCode130"
+                ]
+              }
+            }
+          ],
           "entities": {
+            "origin": [
+              "country/USA"
+            ],
             "destination": [
               "country/GHA",
               "country/KEN",
               "DACAfricaUnallocated"
-            ],
-            "origin": [
-              "country/USA"
             ]
           },
-          "identity_version": "spec1",
           "requested_window": {
             "kind": "all"
-          },
-          "shape": {
-            "kind": "statvar_schema",
-            "measured_property": "grantEquivalent",
-            "population_type": "ODA"
-          },
-          "slots": [
-            {
-              "binding": {
-                "refs": [
-                  "CRSPurposeCode120",
-                  "CRSPurposeCode130"
-                ],
-                "state": "set"
-              },
-              "property": "crsPurpose"
-            }
-          ]
-        },
-        "schema_version": 1,
-        "spec_id": "spec_50fb71f953b7ee352c878d87a27d256a"
+          }
+        }
       },
       "resolved": {
         "scope_choices": {
+          "id": "spec_bbf39afbb8fc4bade6e048bc16b15dcc",
           "base": {
+            "schema_version": 1,
+            "spec_id": "spec_bbf39afbb8fc4bade6e048bc16b15dcc",
             "identity": {
+              "identity_version": "spec1",
+              "shape": {
+                "kind": "statvar_schema",
+                "population_type": "ODA",
+                "measured_property": "amount"
+              },
+              "slots": [
+                {
+                  "property": "crsPurpose",
+                  "binding": {
+                    "state": "set",
+                    "refs": [
+                      "CRSPurposeCode120",
+                      "CRSPurposeCode130"
+                    ]
+                  }
+                },
+                {
+                  "property": "nettingBasis",
+                  "binding": {
+                    "state": "value",
+                    "ref": "Gross"
+                  }
+                }
+              ],
               "entities": {
+                "origin": [
+                  "country/USA"
+                ],
                 "destination": [
                   "country/GHA",
                   "country/KEN",
                   "DACAfricaUnallocated"
-                ],
-                "origin": [
-                  "country/USA"
                 ]
               },
-              "identity_version": "spec1",
               "requested_window": {
                 "kind": "all"
-              },
-              "shape": {
-                "kind": "statvar_schema",
-                "measured_property": "amount",
-                "population_type": "ODA"
-              },
-              "slots": [
+              }
+            }
+          },
+          "rule_version": "test",
+          "entries": [
+            {
+              "axis": "region",
+              "option_id": "region:members_only",
+              "provenance": "carried",
+              "origin": {
+                "kind": "choice",
+                "choice_id": "earlier:region"
+              }
+            },
+            {
+              "axis": "sector",
+              "option_id": "sector:120+130",
+              "provenance": "explicit",
+              "concept": "health",
+              "origin": {
+                "kind": "choice",
+                "choice_id": "spec_bbf39afbb8fc4bade6e048bc16b15dcc:sector"
+              }
+            }
+          ],
+          "dropped_entries": [],
+          "choices": [
+            {
+              "id": "spec_bbf39afbb8fc4bade6e048bc16b15dcc:sector",
+              "axis": "sector",
+              "rule": "test_sector_grouping",
+              "provenance": "explicit",
+              "active": "sector:120+130",
+              "options": [
                 {
+                  "option_id": "sector:120+130",
+                  "label": "health (CRS 120) and population and reproductive health (CRS 130)",
                   "binding": {
+                    "kind": "slot",
+                    "slot": "crsPurpose",
+                    "state": "set",
                     "refs": [
                       "CRSPurposeCode120",
                       "CRSPurposeCode130"
-                    ],
-                    "state": "set"
+                    ]
                   },
-                  "property": "crsPurpose"
+                  "availability": {
+                    "status": "available",
+                    "detail": {}
+                  }
                 },
                 {
+                  "option_id": "sector:120",
+                  "label": "health (CRS 120)",
                   "binding": {
-                    "ref": "Gross",
-                    "state": "value"
+                    "kind": "slot",
+                    "slot": "crsPurpose",
+                    "state": "value",
+                    "refs": [
+                      "CRSPurposeCode120"
+                    ]
                   },
-                  "property": "nettingBasis"
+                  "availability": {
+                    "status": "available",
+                    "detail": {}
+                  }
                 }
               ]
             },
-            "schema_version": 1,
-            "spec_id": "spec_bbf39afbb8fc4bade6e048bc16b15dcc"
-          },
-          "choices": [
             {
-              "active": "sector:120+130",
-              "axis": "sector",
-              "id": "spec_bbf39afbb8fc4bade6e048bc16b15dcc:sector",
-              "options": [
-                {
-                  "availability": {
-                    "detail": {},
-                    "status": "available"
-                  },
-                  "binding": {
-                    "kind": "slot",
-                    "refs": [
-                      "CRSPurposeCode120",
-                      "CRSPurposeCode130"
-                    ],
-                    "slot": "crsPurpose",
-                    "state": "set"
-                  },
-                  "label": "health (CRS 120) and population and reproductive health (CRS 130)",
-                  "option_id": "sector:120+130"
-                },
-                {
-                  "availability": {
-                    "detail": {},
-                    "status": "available"
-                  },
-                  "binding": {
-                    "kind": "slot",
-                    "refs": [
-                      "CRSPurposeCode120"
-                    ],
-                    "slot": "crsPurpose",
-                    "state": "value"
-                  },
-                  "label": "health (CRS 120)",
-                  "option_id": "sector:120"
-                }
-              ],
-              "provenance": "explicit",
-              "rule": "test_sector_grouping"
-            },
-            {
-              "active": "region:members_only",
-              "axis": "region",
               "id": "spec_bbf39afbb8fc4bade6e048bc16b15dcc:region",
+              "axis": "region",
+              "rule": "test_summed_region",
+              "provenance": "carried",
+              "active": "region:members_only",
               "options": [
                 {
-                  "availability": {
-                    "detail": {},
-                    "status": "available"
-                  },
+                  "option_id": "region:members_and_residuals",
+                  "label": "Africa incl. regional buckets",
                   "binding": {
+                    "kind": "entities",
+                    "role": "destination",
                     "add": [
                       "DACAfricaUnallocated"
-                    ],
-                    "kind": "entities",
-                    "role": "destination"
+                    ]
                   },
-                  "label": "Africa incl. regional buckets",
-                  "option_id": "region:members_and_residuals"
+                  "availability": {
+                    "status": "available",
+                    "detail": {}
+                  }
                 },
                 {
-                  "availability": {
-                    "detail": {},
-                    "status": "available"
-                  },
-                  "binding": {
-                    "add": [],
-                    "kind": "entities",
-                    "role": "destination"
-                  },
+                  "option_id": "region:members_only",
                   "label": "Africa's countries only",
-                  "option_id": "region:members_only"
+                  "binding": {
+                    "kind": "entities",
+                    "role": "destination",
+                    "add": []
+                  },
+                  "availability": {
+                    "status": "available",
+                    "detail": {}
+                  }
                 }
-              ],
-              "provenance": "carried",
-              "rule": "test_summed_region"
+              ]
             },
             {
-              "active": "measure_basis:grant_equivalent",
-              "axis": "measure_basis",
               "id": "spec_bbf39afbb8fc4bade6e048bc16b15dcc:measure_basis",
+              "axis": "measure_basis",
+              "rule": "test_basis_convention",
+              "provenance": "default",
+              "active": "measure_basis:grant_equivalent",
               "options": [
                 {
-                  "availability": {
-                    "code": "conflicts_with",
-                    "detail": {
-                      "entry": "sector:120+130"
-                    },
-                    "status": "unavailable"
-                  },
+                  "option_id": "measure_basis:gross",
+                  "label": "gross disbursements, current USD",
                   "binding": {
                     "kind": "shape",
                     "measured_property": "amount",
                     "netting_basis": "Gross"
                   },
-                  "label": "gross disbursements, current USD",
-                  "option_id": "measure_basis:gross"
-                },
-                {
                   "availability": {
+                    "status": "unavailable",
                     "code": "conflicts_with",
                     "detail": {
-                      "cause": "net_lacks_purpose_120",
-                      "entry": "sector:120"
-                    },
-                    "status": "unavailable"
-                  },
+                      "entry": "sector:120+130"
+                    }
+                  }
+                },
+                {
+                  "option_id": "measure_basis:net",
+                  "label": "net disbursements",
                   "binding": {
                     "kind": "shape",
                     "measured_property": "amount",
                     "netting_basis": "Net"
                   },
-                  "label": "net disbursements",
-                  "option_id": "measure_basis:net"
+                  "availability": {
+                    "status": "unavailable",
+                    "code": "conflicts_with",
+                    "detail": {
+                      "entry": "sector:120",
+                      "cause": "net_lacks_purpose_120"
+                    }
+                  }
                 },
                 {
-                  "availability": {
-                    "detail": {},
-                    "status": "available"
-                  },
+                  "option_id": "measure_basis:grant_equivalent",
+                  "label": "grant equivalents",
                   "binding": {
                     "kind": "shape",
                     "measured_property": "grantEquivalent",
                     "netting_basis": null
                   },
-                  "label": "grant equivalents",
-                  "option_id": "measure_basis:grant_equivalent"
+                  "availability": {
+                    "status": "available",
+                    "detail": {}
+                  }
                 }
-              ],
-              "provenance": "default",
-              "rule": "test_basis_convention"
+              ]
             }
           ],
           "compiled": {
-            "components": [],
+            "spec_id": "spec_50fb71f953b7ee352c878d87a27d256a",
             "identity": {
+              "identity_version": "spec1",
+              "shape": {
+                "kind": "statvar_schema",
+                "population_type": "ODA",
+                "measured_property": "grantEquivalent"
+              },
+              "slots": [
+                {
+                  "property": "crsPurpose",
+                  "binding": {
+                    "state": "set",
+                    "refs": [
+                      "CRSPurposeCode120",
+                      "CRSPurposeCode130"
+                    ]
+                  }
+                }
+              ],
               "entities": {
+                "origin": [
+                  "country/USA"
+                ],
                 "destination": [
                   "country/GHA",
                   "country/KEN",
                   "DACAfricaUnallocated"
-                ],
-                "origin": [
-                  "country/USA"
                 ]
               },
-              "identity_version": "spec1",
               "requested_window": {
                 "kind": "all"
-              },
-              "shape": {
-                "kind": "statvar_schema",
-                "measured_property": "grantEquivalent",
-                "population_type": "ODA"
-              },
-              "slots": [
-                {
-                  "binding": {
-                    "refs": [
-                      "CRSPurposeCode120",
-                      "CRSPurposeCode130"
-                    ],
-                    "state": "set"
-                  },
-                  "property": "crsPurpose"
-                }
-              ]
+              }
             },
-            "spec_id": "spec_50fb71f953b7ee352c878d87a27d256a"
+            "components": []
           },
-          "dropped_entries": [],
-          "entries": [
-            {
-              "axis": "region",
-              "option_id": "region:members_only",
-              "origin": {
-                "choice_id": "earlier:region",
-                "kind": "choice"
-              },
-              "provenance": "carried"
-            },
-            {
-              "axis": "sector",
-              "concept": "health",
-              "option_id": "sector:120+130",
-              "origin": {
-                "choice_id": "spec_bbf39afbb8fc4bade6e048bc16b15dcc:sector",
-                "kind": "choice"
-              },
-              "provenance": "explicit"
-            }
-          ],
-          "id": "spec_bbf39afbb8fc4bade6e048bc16b15dcc",
-          "ledger": [],
-          "rule_version": "test"
+          "ledger": []
         }
-      },
-      "sentence": "US health aid to Africa",
-      "spec_id": "spec_50fb71f953b7ee352c878d87a27d256a"
+      }
     }
   }
 }

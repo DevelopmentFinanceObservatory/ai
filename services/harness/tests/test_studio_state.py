@@ -60,7 +60,7 @@ from harness.studio_state import (
     make_recall_part,
     remove_cards,
 )
-from harness.studio_store import SEQ_BLOCK, ConversationStale, StudioStore
+from harness.studio_store import SEQ_BLOCK, ConversationStale, Renewal, StudioStore
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
 from harness.wire import (
     AddOp,
@@ -1910,7 +1910,9 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
         resuming_segment="seg_1",
         answer={"decision": "approve", "option_id": "spec_a"},
     )
-    state.segment = Segment(id="seg_1", owner="owner_a", expires_at=1_700_000_045.0, cancel=True)
+    state.segment = Segment(
+        id="seg_1", owner="owner_a", expires_at=1_700_000_045.0, stop_id="stop_1"
+    )
     state.components["cmp_1"] = {"type": "line_chart", "title": "Aid to Kenya", "revision": 1}
     # A record stored before turns held plans and readings, and one that holds them.
     state.turns.append({"user": "q1", "assistant": "a1"})
@@ -1964,7 +1966,7 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
     assert pending.answer == {"decision": "approve", "option_id": "spec_a"}
     assert loaded.awaiting_answer is False  # its only entry is resuming
     assert loaded.segment == Segment(
-        id="seg_1", owner="owner_a", expires_at=1_700_000_045.0, cancel=True
+        id="seg_1", owner="owner_a", expires_at=1_700_000_045.0, stop_id="stop_1"
     )
     assert loaded.components == {
         "cmp_1": {"type": "line_chart", "title": "Aid to Kenya", "revision": 1}
@@ -2165,7 +2167,7 @@ async def test_a_resuming_claim_starts_past_numbers_a_lapsed_stream_reserved_aft
     store_b = new_store(clock=clock)
     state_b = await store_b.load("principal", CONVERSATION)
     store_b.claim_segment("principal", CONVERSATION)
-    assert await store_a.renew("principal", CONVERSATION, first) == "ok"
+    assert await store_a.renew("principal", CONVERSATION, first) == Renewal(held=True, stop_id=None)
     state_a.seq = SEQ_BLOCK - 10  # inside the headroom of [0, 256)
     await store_a.reserve_frames("principal", CONVERSATION, first)
     await clock.advance(studio_state.SEGMENT_TTL_S + 1)
@@ -2247,7 +2249,7 @@ async def test_renew_reports_lost_after_a_takeover(new_store, clock) -> None:
     store_b.claim_segment("principal", CONVERSATION)
     await store_b.save("principal", CONVERSATION)
 
-    assert await store_a.renew("principal", CONVERSATION, segment_id) == "lost"
+    assert not (await store_a.renew("principal", CONVERSATION, segment_id)).held
 
 
 async def test_renew_reports_ok_and_pushes_the_ttl_forward(new_store, clock) -> None:
@@ -2257,18 +2259,21 @@ async def test_renew_reports_ok_and_pushes_the_ttl_forward(new_store, clock) -> 
     await store.save("principal", CONVERSATION)
 
     await clock.advance(30)
-    assert await store.renew("principal", CONVERSATION, segment_id) == "ok"
+    assert await store.renew("principal", CONVERSATION, segment_id) == Renewal(
+        held=True, stop_id=None
+    )
 
     reloaded = await new_store().load("principal", CONVERSATION)
     assert reloaded.segment is not None
-    assert reloaded.segment.cancel is False
+    assert reloaded.segment.stop_id is None
     assert reloaded.segment.expires_at == clock.at + studio_state.SEGMENT_TTL_S
 
 
 async def test_renew_reports_cancelled_and_still_pushes_the_ttl_forward(new_store, clock) -> None:
-    """`request_cancel`, from another instance, sets the segment's `cancel`
-    flag; the owner's next `renew` reports it -- and still renews, so the
-    flag keeps being observed until the owner reacts to it."""
+    """`request_cancel`, from another instance, records a Stop request on
+    the segment; the owner's renewals report it -- and still renew, and
+    leave it stored, so a renewal whose acknowledgement is lost cannot drop
+    it. A later request has a new id."""
     store_a = new_store(clock=clock)
     store_b = new_store(clock=clock)
     await store_a.create("principal", CONVERSATION)
@@ -2278,11 +2283,19 @@ async def test_renew_reports_cancelled_and_still_pushes_the_ttl_forward(new_stor
     assert await store_b.request_cancel("principal", CONVERSATION) is True
 
     await clock.advance(30)
-    assert await store_a.renew("principal", CONVERSATION, segment_id) == "cancelled"
+    first = await store_a.renew("principal", CONVERSATION, segment_id)
+    again = await store_a.renew("principal", CONVERSATION, segment_id)
+    assert first.held and first.stop_id is not None
+    assert again == first
 
     reloaded = await new_store().load("principal", CONVERSATION)
     assert reloaded.segment is not None
-    assert reloaded.segment.cancel is True
+    assert reloaded.segment.stop_id == first.stop_id
+    assert await store_b.request_cancel("principal", CONVERSATION) is True
+    assert (await store_a.renew("principal", CONVERSATION, segment_id)).stop_id not in (
+        None,
+        first.stop_id,
+    )
     assert reloaded.segment.expires_at == clock.at + studio_state.SEGMENT_TTL_S
 
 

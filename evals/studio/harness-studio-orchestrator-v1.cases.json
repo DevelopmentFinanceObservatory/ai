@@ -94,6 +94,70 @@
         }
       ]
     },
+    "refused-step-then-second-plan": {
+      "search": [
+        {
+          "parts": [
+            {
+              "variable": "life expectancy",
+              "status": "definite",
+              "spec_id": "spec_11111111111111111111111111111111",
+              "sentence": "life expectancy at birth in Kenya",
+              "coverage": [
+                1990,
+                2020
+              ],
+              "warnings": [
+                {
+                  "code": "time_text_not_parsed",
+                  "message": "The time text in the question was not understood."
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "plan_spec_id": "spec_11111111111111111111111111111111",
+      "get_data_refusals": {
+        "spec_11111111111111111111111111111111": {
+          "code": "facet_not_available",
+          "retry_mode": "do_not_retry"
+        }
+      },
+      "orchestrator": [
+        {
+          "call": "search",
+          "args": {
+            "parts": [
+              {
+                "variable": "life expectancy"
+              }
+            ]
+          }
+        },
+        {
+          "call": "plan",
+          "args": {
+            "brief": "Growth of life expectancy in Kenya since 2000",
+            "asks": [
+              "Growth of life expectancy in Kenya since 2000"
+            ]
+          }
+        },
+        {
+          "call": "plan",
+          "args": {
+            "brief": "Life expectancy in Kenya, any recent years",
+            "asks": [
+              "Life expectancy in Kenya, any recent years"
+            ]
+          }
+        },
+        {
+          "text": "The plan could not be run."
+        }
+      ]
+    },
     "answer-only": {
       "search": [
         {
@@ -842,6 +906,45 @@
             "message_contains": [
               "grew"
             ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-approval-payload-stays-out-of-model-requests",
+      "modes": [
+        "scripted"
+      ],
+      "scenario": "approved-plan",
+      "checks": [
+        "approval_payload_absent_after_approval"
+      ],
+      "turns": [
+        {
+          "message": "How fast did life expectancy grow in Kenya since 2000?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-refused-step-reaches-the-second-plan",
+      "modes": [
+        "scripted"
+      ],
+      "scenario": "refused-step-then-second-plan",
+      "checks": [
+        "refused_step_reaches_the_next_plan",
+        "approval_payload_absent_after_approval"
+      ],
+      "turns": [
+        {
+          "message": "How fast did life expectancy grow in Kenya since 2000?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
           }
         }
       ]

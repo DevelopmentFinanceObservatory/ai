@@ -429,13 +429,14 @@ class Segment:
     segment (`renew`, `checkpoint`) is fenced against it, never against
     `owner`. `owner` is the claiming instance's id, carried for logs only.
     `expires_at` is a wall-clock epoch second past which the claim is dead
-    and takeable. `cancel` is set by `StudioStore.request_cancel`, from any
-    instance, and observed by the owner's own heartbeat."""
+    and takeable. `stop_id` names the latest Stop request
+    `StudioStore.request_cancel` made of the segment, from any instance,
+    which the owner's own heartbeat reads; a claim starts with none."""
 
     id: str
     owner: str
     expires_at: float
-    cancel: bool = False
+    stop_id: str | None = None
 
 
 @dataclass

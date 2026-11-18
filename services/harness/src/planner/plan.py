@@ -220,13 +220,6 @@ SPEC_SEARCHED_STATE_KEY = "planner:spec_searched_at"
 # builds a pinned requirement's source from an entry with no `search` call.
 PIN_SOURCES_STATE_KEY = "planner:pin_sources"
 
-# The session-state slot the host writes a seeded turn's seeds to, as JSON:
-# one entry per Search result a Studio handoff carries (`TurnRequest.seed_spec`),
-# as `harness.seeds.seeds_slot` compacts it, a `harness.wire.Seed` or the
-# refusal its step fails with. `harness.graph`'s `seed` node reads each entry
-# and clears the slot. Unset on a turn with no seeds.
-SEEDS_STATE_KEY = "seeds"
-
 # The session-state slot holding a `WindowedPin` for every pin of a dataset
 # whose identity a search in the conversation recorded
 # (`recorded_identity`), that the plan `propose_plan` (`planner.tools.propose`) last

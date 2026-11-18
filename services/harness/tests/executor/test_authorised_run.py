@@ -24,6 +24,7 @@ from executor.completion import (
 )
 from executor.ledger import (
     MAX_PENDING_AGE,
+    Admission,
     Attempt,
     Complete,
     Fail,
@@ -38,6 +39,7 @@ from executor.ledger import (
     RunStatus,
     Seal,
     SourcePolicy,
+    Start,
     idempotency_key,
     submission_content,
     submission_digest,
@@ -45,6 +47,7 @@ from executor.ledger import (
 from executor.outcomes import Accepted, RefusalKind, Refused
 from executor.run import (
     PLAN_APPROVAL_TTL,
+    RunAbandonedError,
     Submission,
     current_step_id,
     default_fetch_series_stats,
@@ -61,6 +64,7 @@ from harness.studio_store import ConversationStale
 from planner.operations import RetrieveOperation, Translation
 from planner.plan import AnswerMode, DatasetRequirement, Decision, Plan, PlanStatus
 from planner.workflow import SelectedSource, ToolId
+from pydantic import JsonValue
 
 from .conftest import (
     CONTENT_VERSION,
@@ -1325,6 +1329,170 @@ async def test_a_cancellation_that_does_not_end_the_run_leaves_it_for_its_waiter
     assert isinstance(outcome, Accepted), outcome
     run = await ledger.get(outcome.run_id or "")
     assert run is not None and run.failure is None
+    assert _tools(surface) == ["get_data", "get_data", "aggregate"]
+
+
+class _HeldStart(InMemoryRunLedger):
+    """Holds every `Start` record, once written, until `release` is set, and
+    names the run it started."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.starting = asyncio.Event()
+        self.release = asyncio.Event()
+        self.started = ""
+
+    async def record(self, run_id: str, change: RunChange) -> RunRecord:
+        recorded = await super().record(run_id, change)
+        if isinstance(change, Start):
+            self.started = run_id
+            self.starting.set()
+            await self.release.wait()
+        return recorded
+
+
+async def test_a_stop_while_the_run_is_recorded_started_records_it_cancelled(
+    approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
+) -> None:
+    """A cancellation that ends the run fails it wherever it lands before the
+    computation finished, here the `Start` record, so no later turn carries
+    on the work the user stopped."""
+    plan = approved_plan()
+    submission = _submission(plan)
+    ledger = _HeldStart()
+    surface = _surface(real_schemas, manifest())
+    driver = asyncio.create_task(
+        execute_authorised(
+            submission,
+            authorisation=_approval(
+                plan, submission.source_policy(), expires_at=datetime.now(UTC) + HOUR
+            ),
+            idempotency_key=idempotency_key(caller="u", conversation_id="c", task="t"),
+            ledger=ledger,
+            surface=surface,
+            publisher=None,
+        )
+    )
+    await asyncio.wait_for(ledger.starting.wait(), timeout=5)
+    driver.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await driver
+
+    run = await ledger.get(ledger.started)
+    assert run is not None and run.status is RunStatus.FAILED
+    assert run.failure is not None and run.failure.code == "cancelled"
+    assert _tools(surface) == []
+
+
+class _LeaksCancel(ScriptedSurface):
+    """Ends every `get_data` call with a `CancelledError` nobody asked for, as
+    a tool client's cancel scope can."""
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Mapping[str, object],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        if tool.name == "get_data":
+            self.calls.append((tool.name, dict(arguments)))
+            raise asyncio.CancelledError
+        return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+
+
+async def test_a_cancellation_a_step_leaks_records_the_run_failed_by_a_defect(
+    approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
+) -> None:
+    plan = approved_plan()
+    submission = _submission(plan)
+    ledger = InMemoryRunLedger()
+    surface = _LeaksCancel(schemas=real_schemas, responses={"aggregate": [ok(RESULT_FRAME)]})
+
+    with pytest.raises(RunAbandonedError) as raised:
+        await execute_authorised(
+            submission,
+            authorisation=_approval(
+                plan, submission.source_policy(), expires_at=datetime.now(UTC) + HOUR
+            ),
+            idempotency_key=idempotency_key(caller="u", conversation_id="c", task="t"),
+            ledger=ledger,
+            surface=surface,
+            publisher=None,
+            cancel_ends_run=lambda: False,
+        )
+
+    assert isinstance(raised.value.__cause__, asyncio.CancelledError)
+    run = await ledger.get(raised.value.run_id)
+    assert run is not None and run.status is RunStatus.FAILED
+    assert run.failure is not None and run.failure.code == "internal_error"
+
+
+class _HeldFirstAdmission(InMemoryRunLedger):
+    """Hands back its first admission only once `release` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+        self._admitted = 0
+
+    async def admit(self, candidate: RunRecord, *, submission: JsonValue) -> Admission:
+        admission = await super().admit(candidate, submission=submission)
+        self._admitted += 1
+        if self._admitted == 1:
+            await self.release.wait()
+        return admission
+
+
+async def test_a_caller_taking_over_a_running_run_records_it_carried_on(
+    approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
+) -> None:
+    """The first submission admits the run but the second drives it. When the
+    second leaves with the run unfinished, the first takes over a `running`
+    run and records it carried on, counted against the resume limit, though
+    its own admission was new."""
+    plan = approved_plan()
+    submission = _submission(plan)
+    authorisation = _approval(plan, submission.source_policy(), expires_at=datetime.now(UTC) + HOUR)
+    ledger = _HeldFirstAdmission()
+    surface = ScriptedSurface(
+        schemas=real_schemas,
+        responses={"get_data": [ok(manifest()), ok(manifest())], "aggregate": [ok(RESULT_FRAME)]},
+        delays={"get_data": 3600},
+    )
+
+    def submit() -> asyncio.Task[Any]:
+        return asyncio.create_task(
+            execute_authorised(
+                submission,
+                authorisation=authorisation,
+                idempotency_key=idempotency_key(caller="u", conversation_id="c", task="t"),
+                ledger=ledger,
+                surface=surface,
+                publisher=None,
+                cancel_ends_run=lambda: False,
+            )
+        )
+
+    admitted_first = submit()
+    for _ in range(20):
+        await asyncio.sleep(0)
+    driver = submit()
+    while not surface.calls:
+        await asyncio.sleep(0)
+    ledger.release.set()
+    for _ in range(20):
+        await asyncio.sleep(0)
+    surface.delays.clear()
+    driver.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await driver
+
+    outcome = await asyncio.wait_for(admitted_first, timeout=5)
+
+    assert isinstance(outcome, Accepted), outcome
+    run = await ledger.get(outcome.run_id or "")
+    assert run is not None and run.resumes == 2
     assert _tools(surface) == ["get_data", "get_data", "aggregate"]
 
 

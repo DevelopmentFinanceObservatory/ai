@@ -3276,14 +3276,15 @@ async def test_an_answer_after_a_refused_turn_resumes_on_the_paused_turn_s_span(
     assert (turns[-1].attributes or {})["dfo.external_id"] == trace_id
 
 
-async def test_an_answer_whose_turn_holds_no_pause_keeps_its_saved_answer_and_span(
+async def test_an_answer_whose_turn_holds_no_pause_is_refused_before_anything_is_saved(
     otlp_spans: InMemorySpanExporter,
 ) -> None:
-    """The answer's claim save lands, but no open turn is paused on its
-    interrupt, so `/interrupt` answers 404. It drops the lease it claimed
-    and releases the lock; the answer the save stored stays recorded, live
-    and stored, and the turn's span stays open, as on every refused or
-    failed answer."""
+    """No open turn is paused on the answer's interrupt, so `/interrupt`
+    answers 404 before its claim save: no approval of the plan is recorded
+    and the pending entry is not marked resuming, live or stored, so an
+    answer with another decision is refused the same way, never as a
+    conflict with the first. The lock is released and the turn's span stays
+    open, as on every refused answer."""
     app = _app(*_plan(), tool_surface=ScriptedSurface())
     store = app.state.studio.store
 
@@ -3293,20 +3294,23 @@ async def test_an_answer_whose_turn_holds_no_pause_keeps_its_saved_answer_and_sp
         async with _engine().begin() as conn:
             await conn.execute(text("DELETE FROM turn_cursors"))
 
-        response = await client.post(
-            "/api/studio/interrupt",
-            json=_interrupt_body(plan["interrupt_id"], "approve"),
-            headers=AUTH,
-        )
+        responses = [
+            await client.post(
+                "/api/studio/interrupt",
+                json=_interrupt_body(plan["interrupt_id"], *decision),
+                headers=AUTH,
+            )
+            for decision in (("approve",), ("amend", "use commitments"))
+        ]
 
-    assert response.status_code == 404
+    assert [(r.status_code, r.json()["error"]) for r in responses] == [(404, "not_found")] * 2
     assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
-    live = store.current(PRINCIPAL, CONVERSATION)
-    assert live.segment is None
-    assert live.pending[plan["interrupt_id"]].answer is not None
     stored = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
-    assert stored is not None and stored.segment is None
-    assert stored.pending[plan["interrupt_id"]].answer == live.pending[plan["interrupt_id"]].answer
+    for state in (store.current(PRINCIPAL, CONVERSATION), stored):
+        assert state is not None and state.segment is None
+        assert state.approvals == []
+        pending = state.pending[plan["interrupt_id"]]
+        assert (pending.answer, pending.resuming_segment) == (None, None)
     assert _turn_spans(otlp_spans) == 0
 
 
@@ -5679,21 +5683,23 @@ async def test_a_switch_approves_nothing_and_the_plan_is_offered_again() -> None
 
 
 class _StopsTaken:
-    """Counts the Stops `store`'s heartbeat renewals read, so a test sends
-    its next Stop only once the one before it was taken."""
+    """Counts the Stop requests `store`'s heartbeat renewals read, each once,
+    so a test sends its next Stop only once the one before it was taken."""
 
     def __init__(self, store: StudioStore) -> None:
         self.taken = 0
         self._changed = asyncio.Condition()
+        self._seen: set[str] = set()
         renew = store.renew
 
         async def counting(*args: Any, **kwargs: Any) -> Any:
-            result = await renew(*args, **kwargs)
-            if result == "cancelled":
+            renewal = await renew(*args, **kwargs)
+            if renewal.stop_id is not None and renewal.stop_id not in self._seen:
+                self._seen.add(renewal.stop_id)
                 async with self._changed:
                     self.taken += 1
                     self._changed.notify_all()
-            return result
+            return renewal
 
         store.renew = counting  # type: ignore[method-assign]
 

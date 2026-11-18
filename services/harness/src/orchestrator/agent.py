@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-import sys
 from collections.abc import Awaitable, Callable, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from types import FunctionType
@@ -32,8 +31,13 @@ from typing import TYPE_CHECKING, Any
 
 from common.telemetry import current_trace_id
 from google.genai import types
-from harness.gemini_agent import RecordingState, as_function_response, replayed_history
-from harness.gemini_wire import NO_PARAMETERS
+from harness.gemini_agent import (
+    UNLIMITED_RETRIES,
+    RecordingState,
+    as_function_response,
+    declared_tool,
+    replayed_history,
+)
 from harness.orchestrator_tools import raised_answer
 from harness.settings import DEFAULT_ORCHESTRATOR_THINKING_LEVEL
 from pydantic_ai import (
@@ -55,12 +59,6 @@ if TYPE_CHECKING:
     from harness.settings import ThinkingLevelName
 
 logger = logging.getLogger(__name__)
-
-# Pydantic AI charges a call to a tool the agent lacks against the tool retry
-# budget and ends the run once it is spent. The agent answers every such call
-# (`tool_not_found`), and the turn budget's call cap ends a run that keeps
-# making them.
-_UNLIMITED_RETRIES = sys.maxsize
 
 INSTRUCTION = """\
 You are the analyst behind DFO Studio, the Development Finance Observatory's
@@ -385,7 +383,7 @@ def orchestrator_agent(
                 thinking_level=types.ThinkingLevel(thinking_level), include_thoughts=True
             ).model_dump(mode="json", exclude_none=True)
         ),
-        retries={"tools": _UNLIMITED_RETRIES},
+        retries={"tools": UNLIMITED_RETRIES},
         capabilities=[
             ProcessHistory(replayed_history(names)),
             Instrumentation(
@@ -400,17 +398,9 @@ def orchestrator_agent(
 
 
 def _tool(function: FunctionType) -> Tool[OrchestratorDeps]:
-    declaration = tool_declaration(function)
-    schema = declaration.parameters_json_schema
-    tool = Tool.from_schema(
-        _tool_function(function),
-        name=function.__name__,
-        description=declaration.description,
-        json_schema=dict(schema) if schema is not None else NO_PARAMETERS,
-        takes_ctx=True,
+    return declared_tool(
+        _tool_function(function), name=function.__name__, declaration=tool_declaration(function)
     )
-    tool.strict = False
-    return tool
 
 
 def _tool_function(function: FunctionType) -> Callable[..., Awaitable[dict[str, Any]]]:

@@ -47,6 +47,7 @@ from harness.decision_pick import DecisionPick
 from harness.graph import switch as switch_module
 from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
+    ORCHESTRATOR_SPECS_KEY,
     PICK_REPLAN_KEY,
 )
 from harness.graph.switch import SCOPE_CHOICE_NOT_APPLIED, SWITCH_CANCELLED, SwitchFailedError
@@ -124,6 +125,7 @@ from .scope_scenarios import (
 from .scripted_genai import ScriptedGenai, call_part, reply
 from .scripted_planner import SIGNED
 from .scripted_tools import plan_call, scripted_orchestrator
+from .session_events import one_answer
 from .test_planner_node import _ask_call, _proposals, _steps
 from .turn_driver import SegmentRun, TurnDriver, numbered_call_ids, scripted_models
 
@@ -1418,9 +1420,9 @@ async def test_the_first_stop_ends_only_the_switch_and_a_stop_while_paused_ends_
     pg_engine: AsyncEngine, real_schemas: list[ToolSchema]
 ) -> None:
     """A Stop posted while the switch's revision runs reaches it through the
-    conversation's cancel flag: it ends the revision only, the turn pauses on
+    conversation's Stop request: it ends the revision only, the turn pauses on
     the plan card again with `switch_cancelled` and the state as it stood,
-    and the flag is spent. A second Stop finds the turn paused and no live
+    and the segment acts on that request once. A second Stop finds the turn paused and no live
     segment, and closes it `cancelled`."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
@@ -1966,7 +1968,7 @@ async def test_a_switch_after_an_entry_revises_the_plan(
     with numbered_call_ids():
         asked = await driver.turn(_BRIEF)
         assert asked.pause.kind == _PLANNER_ASK, "the planner's ask pauses the turn"
-        carded = await driver.answer({"spec_id": pin}, to=asked.pause)
+        carded = await driver.answer(one_answer({"spec_id": pin}), to=asked.pause)
         assert _pauses_on_the_card(carded)
         reading = SearchReading.from_part(
             {"variable": "health aid", "status": "definite", "spec_id": pin, "scope": scope}
@@ -1994,7 +1996,10 @@ async def test_a_switch_after_an_entry_revises_the_plan(
             {
                 "records": [{"agent": r.agent, "kind": r.kind, "body": r.body} for r in records],
                 "steps": _steps(records),
-                "state": state,
+                # The spec blocks are recorded on their own, as the store keeps them.
+                "state": {
+                    key: value for key, value in state.items() if key != ORCHESTRATOR_SPECS_KEY
+                },
                 "specs": await driver.turns.specs(switched.cursor),
             }
         ),

@@ -24,14 +24,16 @@ from google.genai import types
 from harness.planner_adapter import PlannerAdapter
 from harness.scripted_plan import scripted_plan
 from harness.settings import Settings
+from harness.turn import transcript
 from harness.turn.store import AgentRecord
 from harness.turn_events import PLANNER_ASK
-from planner.call import PlannerCall
+from planner.call import PlannerCall, Step
 from planner.plan import PLAN_STATE_KEY
+from planner.session import ASKED_CALL_ID, PLANNER_ASK_PAUSE, session_steps
 from planner.skills import SKILLS_READ_STATE_KEY
 from planner.specs import PROPOSE_PLAN, planner_tool_specs, skill_tool_spec
 from planner.tool_spec import Parameter, ToolSpec
-from planner.tools import EndRun
+from planner.tools import ASK_ACCEPTED, EndRun
 
 from .planner_expectations import expect, expectation_name
 from .planner_host import PlannerHarness, planner_calls
@@ -43,6 +45,14 @@ from .scripted_genai import (
     text_part,
     thought_part,
     usage_metadata,
+)
+from .session_events import (
+    model_response,
+    one_answer,
+    tool_answers,
+    tool_call,
+    turn_pause,
+    user_answer,
 )
 from .test_planner_node import _steps
 
@@ -313,3 +323,23 @@ def _call_ids(stored: _Stored) -> list[str]:
 def _renamed(record: AgentRecord, old: str, new: str) -> AgentRecord:
     body = json.loads(json.dumps(record.body).replace(old, new))
     return AgentRecord(agent=record.agent, kind=record.kind, body=body)
+
+
+def test_the_answer_to_a_planner_pause_answers_the_ask_the_pause_names() -> None:
+    """Two accepted asks precede the pause, which put the first to the user,
+    as the pause on a re-offered stored ask does: the answer is the first
+    call's, whichever ask came last."""
+    first = {"message": "Which source did you mean?"}
+    picked = one_answer({"spec_id": "oda"})
+    later = {"message": "Which year did you mean?"}
+    records = [
+        transcript.user_message(_QUESTION),
+        model_response(tool_call("a1", PLANNER_ASK, first), tool_call("a2", PLANNER_ASK, later)),
+        tool_answers(("a1", PLANNER_ASK, ASK_ACCEPTED), ("a2", PLANNER_ASK, ASK_ACCEPTED)),
+        turn_pause(PLANNER_ASK_PAUSE, "int_1", {**first, ASKED_CALL_ID: "a1"}),
+        user_answer("int_1", picked),
+    ]
+
+    *_, answered = session_steps(records)
+
+    assert answered == Step("answer", "a1", first, {"result": picked})

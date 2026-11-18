@@ -117,7 +117,7 @@ Models: `TurnRequest`, `InterruptResponse`, `CompositionMutation`,
   choose, and the planner plans on without a pick of theirs.
 - **`turn.cancel`** → `POST /api/studio/cancel` (delta 14) aborts the
   conversation's in-flight segment (the Stop button), whichever instance
-  owns it: the request sets the segment's durable cancel flag on the
+  owns it: the request records a durable Stop request on the
   conversation's row, and the owning instance's own heartbeat observes it and ends
   the stream within one heartbeat interval (5 s). Idempotent; returns
   204\. The aborted stream, if still open, ends with a stream-fatal `error`

@@ -50,6 +50,20 @@ def user_answer(interrupt_id: str, answer: Any) -> AgentRecord:
     return transcript.answer(interrupt_id=interrupt_id, round=1, value=cast(Any, answer))
 
 
+def one_answer(said: Any) -> Any:
+    """The value `harness.studio`'s `/interrupt` route resumes a one-question
+    ask with, for what the user `said`: a candidate picked (`{"spec_id"}`) or
+    their own words (a string, or `{"text"}`). Any other value, such as a
+    dismissal (`{"skip": True}`), is passed on as it is."""
+    if isinstance(said, str):
+        said = {"text": said}
+    if isinstance(said, dict) and "spec_id" in said:
+        return {"answers": {"q1": {"kind": "option", "spec_id": said["spec_id"]}}}
+    if isinstance(said, dict) and "text" in said:
+        return {"answers": {"q1": {"kind": "text", "text": said["text"]}}}
+    return said
+
+
 def turn_pause(kind: str, interrupt_id: str, payload: Mapping[str, Any]) -> AgentRecord:
     """A pause of `kind` the turn put to the user under `interrupt_id`."""
     return transcript.pause(

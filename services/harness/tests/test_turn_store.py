@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 from harness.db.migrate import MIGRATIONS_DIR, apply_pending
 from harness.studio_state import SegmentLost
+from harness.turn import store as store_module
 from harness.turn.store import (
+    SPECS_KEY,
     AgentRecord,
     Cursor,
     CursorStale,
@@ -74,7 +77,6 @@ async def _paused(store: TurnStore, cursor: Cursor, *, interrupt_id: str = "int_
         interrupt_id=interrupt_id,
         payload={"question": "which donor?"},
         state=cursor.state,
-        specs={},
     )
 
 
@@ -103,8 +105,7 @@ async def test_a_turn_runs_pauses_resumes_and_closes_with_its_transcript_in_orde
         segment_id=SEGMENT,
         node="planner",
         node_input={"brief": "b"},
-        state={"plan": {"steps": 1}},
-        specs={"spec_a": {"spec_id": "spec_a"}},
+        state={"plan": {"steps": 1}, SPECS_KEY: {"spec_a": {"spec_id": "spec_a"}}},
         records=[AgentRecord(agent="planner", kind="response", body={"parts": [1]})],
     )
     paused = await store.pause(
@@ -116,7 +117,6 @@ async def test_a_turn_runs_pauses_resumes_and_closes_with_its_transcript_in_orde
         interrupt_id="int_1",
         payload={"question": "which donor?"},
         state=advanced.state,
-        specs={"spec_a": {"spec_id": "spec_a"}},
         records=[AgentRecord(agent="loop", kind="pause", body={"question": "which donor?"})],
     )
     resumed = await store.record_answer(
@@ -138,7 +138,7 @@ async def test_a_turn_runs_pauses_resumes_and_closes_with_its_transcript_in_orde
     )
     assert (resumed.status, resumed.node, resumed.pause) == (TurnStatus.RUNNING, "planner", None)
     assert (closed.status, closed.error, closed.version) == (TurnStatus.DONE, None, 4)
-    assert closed.state == {"plan": {"steps": 1}}
+    assert closed.state == {"plan": {"steps": 1}, SPECS_KEY: {"spec_a": {"spec_id": "spec_a"}}}
     assert await store.specs(closed) == {"spec_a": {"spec_id": "spec_a"}}
     assert [(r.agent, r.kind) for r in await store.records(closed)] == [
         ("loop", "user"),
@@ -160,8 +160,7 @@ async def test_a_write_from_a_stale_cursor_is_refused_and_leaves_the_row_as_writ
         segment_id=SEGMENT,
         node="planner",
         node_input=None,
-        state={"winner": True},
-        specs={"spec_a": {"by": "winner"}},
+        state={"winner": True, SPECS_KEY: {"spec_a": {"by": "winner"}}},
     )
 
     with pytest.raises(CursorStale):
@@ -170,8 +169,7 @@ async def test_a_write_from_a_stale_cursor_is_refused_and_leaves_the_row_as_writ
             segment_id=SEGMENT,
             node="orchestrate",
             node_input=None,
-            state={"winner": False},
-            specs={"spec_a": {"by": "loser"}, "spec_b": {}},
+            state={"winner": False, SPECS_KEY: {"spec_a": {"by": "loser"}, "spec_b": {}}},
             records=[AgentRecord(agent="planner", kind="response", body={})],
         )
 
@@ -179,7 +177,7 @@ async def test_a_write_from_a_stale_cursor_is_refused_and_leaves_the_row_as_writ
     assert stored is not None
     assert (stored.node, stored.state, stored.version, stored.record_count) == (
         "planner",
-        {"winner": True},
+        {"winner": True, SPECS_KEY: {"spec_a": {"by": "winner"}}},
         1,
         1,
     )
@@ -195,9 +193,7 @@ async def test_writes_are_refused_once_another_segment_holds_the_lease(
     await _move_lease(pg_engine, "segment-b")
 
     with pytest.raises(SegmentLost):
-        await store.advance(
-            opened, segment_id=SEGMENT, node="planner", node_input=None, state={}, specs={}
-        )
+        await store.advance(opened, segment_id=SEGMENT, node="planner", node_input=None, state={})
     with pytest.raises(SegmentLost):
         await store.finish(opened, segment_id=SEGMENT, status=TurnStatus.CANCELLED)
 
@@ -262,7 +258,7 @@ async def test_an_accepted_answer_is_owed_until_the_next_write_moves_the_cursor(
 
     if next_write == "advance":
         moved = await store.advance(
-            resumed, segment_id=SEGMENT, node="planner", node_input=None, state={}, specs={}
+            resumed, segment_id=SEGMENT, node="planner", node_input=None, state={}
         )
     elif next_write == "pause":
         moved = await _paused(store, resumed, interrupt_id="int_2")
@@ -346,7 +342,7 @@ async def test_a_turn_closes_with_an_error_exactly_when_it_failed_or_was_abandon
 
 
 async def _spec_rows(engine: AsyncEngine) -> dict[str, tuple[int, int]]:
-    """Each stored spec block's (insertion seq, writing transaction id)."""
+    """Each stored spec block's (position, writing transaction id)."""
     async with engine.connect() as conn:
         rows = await conn.execute(
             text("SELECT spec_id, seq, xmin::text::bigint AS written_by FROM turn_specs")
@@ -364,8 +360,7 @@ async def test_a_checkpoint_writes_only_the_spec_blocks_that_changed(
         segment_id=SEGMENT,
         node="orchestrate",
         node_input=None,
-        state={},
-        specs={"spec_a": {"v": 1}, "spec_b": {"v": 1}, "spec_c": {"v": 1}},
+        state={SPECS_KEY: {"spec_a": {"v": 1}, "spec_b": {"v": 1}, "spec_c": {"v": 1}}},
     )
     before = await _spec_rows(pg_engine)
 
@@ -376,8 +371,7 @@ async def test_a_checkpoint_writes_only_the_spec_blocks_that_changed(
         segment_id=SEGMENT,
         node="planner",
         node_input=None,
-        state={},
-        specs={"spec_a": {"v": 1}, "spec_b": {"v": 2}, "spec_d": {"v": 1}},
+        state={SPECS_KEY: {"spec_a": {"v": 1}, "spec_b": {"v": 2}, "spec_d": {"v": 1}}},
     )
     after = await _spec_rows(pg_engine)
 
@@ -393,6 +387,87 @@ async def test_a_checkpoint_writes_only_the_spec_blocks_that_changed(
     # A segment that takes the turn over reads the digests the writer held,
     # so its first checkpoint diffs against what is stored.
     assert await store.open_cursor(PRINCIPAL, CONVERSATION) == second
+
+
+async def test_a_spec_block_reads_back_with_its_keys_in_the_order_the_turn_built_them(
+    pg_engine: AsyncEngine,
+) -> None:
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    block = {"spec_id": "spec_a", "title": "ODA", "dims": {"recipient": "KEN", "donor": "DAC"}}
+
+    written = await store.advance(
+        await _open(store),
+        segment_id=SEGMENT,
+        node="planner",
+        node_input=None,
+        state={SPECS_KEY: {"spec_a": block}},
+    )
+    taken_over = await store.open_cursor(PRINCIPAL, CONVERSATION)
+    assert taken_over is not None
+    loaded, _ = await store.load(taken_over)
+
+    for read in (loaded.state[SPECS_KEY]["spec_a"], (await store.specs(written))["spec_a"]):
+        assert list(read) == ["spec_id", "title", "dims"]
+        assert list(read["dims"]) == ["recipient", "donor"]
+
+
+async def test_spec_blocks_read_back_in_the_order_the_turn_last_held_them(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A switch drops spec_a and then, failing, puts the mapping back as it
+    was: spec_a first again. The next segment reads that order, as it does
+    after blocks move without changing and after an earlier one is dropped."""
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    a, b, c = {"v": "a"}, {"v": "b"}, {"v": "c"}
+
+    async def held(cursor: Cursor, specs: dict[str, Any]) -> tuple[Cursor, list[str]]:
+        written = await store.advance(
+            cursor, segment_id=SEGMENT, node="planner", node_input=None, state={SPECS_KEY: specs}
+        )
+        stored = await store.open_cursor(PRINCIPAL, CONVERSATION)
+        assert stored is not None
+        return written, list(stored.state[SPECS_KEY])
+
+    cursor, _ = await held(await _open(store), {"spec_a": a, "spec_b": b})
+    cursor, _ = await held(cursor, {"spec_b": b})
+    cursor, restored = await held(cursor, {"spec_a": a, "spec_b": b})
+    cursor, moved = await held(cursor, {"spec_b": {"v": "b"}, "spec_a": {"v": "a"}})
+    cursor, appended = await held(cursor, {"spec_a": a, "spec_c": c})
+
+    assert restored == ["spec_a", "spec_b"]
+    assert moved == ["spec_b", "spec_a"]
+    assert appended == ["spec_a", "spec_c"]
+
+
+async def test_a_checkpoint_does_not_serialise_a_block_it_wrote_or_read_again(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    first = await store.advance(
+        await _open(store),
+        segment_id=SEGMENT,
+        node="planner",
+        node_input=None,
+        state={SPECS_KEY: {"spec_a": {"v": 1}, "spec_b": {"v": 1}}},
+    )
+    digested: list[str] = []
+    real = store_module._spec_digest
+    monkeypatch.setattr(
+        store_module, "_spec_digest", lambda body: digested.append(body) or real(body)
+    )
+
+    await store.advance(
+        first,
+        segment_id=SEGMENT,
+        node="approve",
+        node_input=None,
+        state={SPECS_KEY: {**first.state[SPECS_KEY], "spec_b": {"v": 2}}},
+    )
+
+    assert digested == ['{"v": 2}']
 
 
 async def test_a_pause_round_takes_one_answer(pg_engine: AsyncEngine) -> None:
@@ -429,7 +504,6 @@ async def test_a_value_json_cannot_hold_is_refused_before_the_write(
             segment_id=SEGMENT,
             node="planner",
             node_input=None,
-            state={"share": nan} if where == "state" else {},
-            specs={"spec_a": {"share": nan}} if where == "spec block" else {},
+            state={"share": nan} if where == "state" else {SPECS_KEY: {"spec_a": {"share": nan}}},
         )
     assert await store.open_cursor(PRINCIPAL, CONVERSATION) == opened

@@ -4,7 +4,13 @@
 -- A turn's writes are compare-and-swapped on `turn_cursors.version` and
 -- fenced on the conversation's lease (`conversations.lease_segment_id`) in
 -- the same transaction (`harness.turn.store.TurnStore`). The lease, the Stop
--- flag and the frame numbering stay on `conversations`.
+-- request and the frame numbering stay on `conversations`.
+
+-- A Stop request on the conversation's live segment, by id
+-- (`StudioStore.request_cancel`). Renewals read it and never clear it, and
+-- the segment acts once on each id, so a renewal whose acknowledgement is
+-- lost cannot drop a Stop. A claim or a dropped lease clears it.
+ALTER TABLE conversations ADD COLUMN lease_stop_id text;
 
 -- Every value column is `json`, which keeps the text as written: a node's
 -- input, the state and the transcript hold values a model reads verbatim,
@@ -59,13 +65,15 @@ CREATE UNIQUE INDEX turn_cursors_one_open ON turn_cursors (conversation)
 
 -- The orchestrator's spec blocks for the turn, one row per spec id. A
 -- checkpoint writes only the blocks that changed since the last one and
--- deletes those the turn dropped; `digest` is the SHA-256 of the block's
--- canonical JSON, which that comparison reads. `seq` keeps first-insertion
--- order, the order the turn's state held the blocks in.
+-- deletes those the turn dropped; `block` is the JSON text as the turn
+-- built it and `digest` its SHA-256, which that comparison reads. `seq` is
+-- the block's position in the turn's state as last written: a checkpoint
+-- that finds the order changed rewrites the positions of the blocks that
+-- moved.
 CREATE TABLE turn_specs (
     turn bigint NOT NULL REFERENCES turn_cursors (id) ON DELETE CASCADE,
     spec_id text NOT NULL,
-    seq bigint GENERATED ALWAYS AS IDENTITY,
+    seq integer NOT NULL CHECK (seq >= 0),
     block json NOT NULL,
     digest text NOT NULL,
     PRIMARY KEY (turn, spec_id)

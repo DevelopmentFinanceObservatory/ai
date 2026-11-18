@@ -696,7 +696,7 @@ async def test_a_hand_back_in_history_is_the_one_result_of_its_plan_call(pg_engi
     )
     await open_session(runner)
     single_pause(await run_turn(runner, "Kenya's debt service?"))
-    await answer_turn(runner, {"spec_id": "o1"})
+    await answer_turn(runner, {"answers": {"q1": {"kind": "option", "spec_id": "o1"}}})
 
     request = model.requests[-1]
     assert not _results_of(request.content_list[-1], "plan")
@@ -1115,7 +1115,7 @@ async def test_a_hand_back_is_still_in_view_after_a_later_pause(pg_engine: Async
     await open_session(runner)
 
     single_pause(await run_turn(runner, "Kenya's debt service?"))
-    await answer_turn(runner, {"spec_id": "o1"})
+    await answer_turn(runner, {"answers": {"q1": {"kind": "option", "spec_id": "o1"}}})
 
     resumed = request_text(model.requests[-1])
     assert "Kenya's debt service?" in resumed

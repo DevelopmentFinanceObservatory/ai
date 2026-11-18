@@ -46,6 +46,7 @@ from executor.ledger import InMemoryRunLedger
 from executor.run import no_label_refs
 from fastapi import FastAPI
 from google.genai import types
+from harness.conversation import current_conversation_id
 from harness.graph.events import GraphEvent
 from harness.graph.workflow import studio_graph
 from harness.orchestrator_tools import build_orchestrator_tools
@@ -472,7 +473,7 @@ def _planner_adapter(
 def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) -> FastAPI:
     """The studio for one case, its conversations and turns stored on `engine`."""
     settings = Settings()
-    orchestrator_client = scripted_client(
+    orchestrator_genai = scripted_client(
         OrchestratorScript(
             script=[_part_from_step(step) for step in scenario["orchestrator"]], log=log
         )
@@ -506,7 +507,9 @@ def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) 
         )
         planner = handing_back_planner_failures(adapter)
 
-    run_ledger = InMemoryRunLedger()
+    # Each conversation's runs are its own, as the served `StudioRunLedger`
+    # keeps them.
+    run_ledger = InMemoryRunLedger(scope=current_conversation_id.get)
 
     def create_graph(recorder: Any, surface_recorder: Any) -> Graph[GraphEvent]:
         tools = build_orchestrator_tools(
@@ -517,7 +520,7 @@ def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) 
             orchestrator=orchestrator_agent(tools, include_content=content_on_spans()),
             # One model per orchestrator run, on the turn's budget, as served.
             model=lambda: orchestrator_model(
-                _ORCHESTRATOR_MODEL, client=orchestrator_client, budget=current_turn_budget.get()
+                _ORCHESTRATOR_MODEL, client=orchestrator_genai, budget=current_turn_budget.get()
             ),
             tools=tools,
             executor=recorder,

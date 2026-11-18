@@ -270,6 +270,7 @@ from ..planner_tools import (
 from ..session_events import (
     merged,
     model_response,
+    one_answer,
     response_event,
     tool_answers,
     tool_call,
@@ -353,8 +354,8 @@ def _ask_event(candidates: list[dict[str, str]], *, call_id: str = "call-1") -> 
 
 def _answer_event(spec_id: str, *, call_id: str = "call-1") -> AgentRecord:
     """The user's answer to `_ask_event`'s call: the pause on it shares the
-    call's id, and the answer is `{"spec_id": ...}`, what the user chose."""
-    return user_answer(call_id, {"spec_id": spec_id})
+    call's id, and the answer picks `spec_id`."""
+    return user_answer(call_id, one_answer({"spec_id": spec_id}))
 
 
 def _referred_event(kind: ReferralKind, requirement_id: str | None) -> AgentRecord:
@@ -377,10 +378,11 @@ def _referred_event(kind: ReferralKind, requirement_id: str | None) -> AgentReco
 
 
 def _ask_response(call_id: str, body: dict[str, Any]) -> AgentRecord:
-    """The answer to the `ask_user_question` call `call_id`: the user's, the
-    `result` of `body`, when `body` holds one, or else the tool's own."""
+    """The answer to the `ask_user_question` call `call_id`: the user's, what
+    the `result` of `body` says (`one_answer`), when `body` holds one, or
+    else the tool's own."""
     if "result" in body:
-        return user_answer(call_id, body["result"])
+        return user_answer(call_id, one_answer(body["result"]))
     return tool_answers((call_id, PLANNER_ASK, body))
 
 
@@ -447,8 +449,8 @@ def _clarify_answer_event(*answers: dict[str, str]) -> AgentRecord:
 
 
 def _legacy_clarify_answer_event(spec_id: str) -> AgentRecord:
-    """The answer body of a single-question pause: `{"spec_id": ...}`."""
-    return user_answer(_ASK_PAUSE_ID, {"spec_id": spec_id})
+    """The answer to a single-question pause, picking `spec_id`."""
+    return user_answer(_ASK_PAUSE_ID, one_answer({"spec_id": spec_id}))
 
 
 async def _no_executor(*, tool: str, args: dict[str, object]) -> dict[str, object]:

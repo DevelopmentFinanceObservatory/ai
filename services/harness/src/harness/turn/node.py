@@ -12,9 +12,9 @@ A node's events have a type of the graph's own, `E`, which the loop passes
 to the caller's `emit` beside its own `TurnEvent`s; the loop reads none of
 them.
 
-A node never writes the store. It reads and changes `ctx.state`,
-`ctx.specs` and `ctx.transcript`, and the loop writes all three with the
-cursor at the node's boundary. Changes since the last boundary die with the
+A node never writes the store. It reads and changes `ctx.state` and
+`ctx.transcript`, and the loop writes both with the cursor at the node's
+boundary. Changes since the last boundary die with the
 process, and the node then runs again from its start.
 """
 
@@ -112,9 +112,9 @@ class NodeCtx[E]:
     """What a node reads and writes.
 
     `inputs` are the turn's inputs, fixed when it opened. `state` is the
-    turn-scoped state the nodes share and `specs` the turn's spec blocks by
-    spec id; `transcript` holds the agents' records. The loop writes all
-    three with the cursor at the node's boundary. `emit` streams an event to
+    turn-scoped state the nodes share, the turn's spec blocks included
+    (`harness.turn.store.SPECS_KEY`); `transcript` holds the agents'
+    records. The loop writes both with the cursor at the node's boundary. `emit` streams an event to
     the client at once: one of the graph's own (`E`), or a `TurnEvent`.
     `stop` is the turn's `StopScope`. `after_commit` registers work that must
     follow the boundary's write, such as acknowledging what a hand-back
@@ -124,7 +124,6 @@ class NodeCtx[E]:
     key: TurnKey
     inputs: dict[str, Any]
     state: dict[str, Any]
-    specs: dict[str, dict[str, Any]]
     transcript: Transcript
     emit: Callable[[E | TurnEvent], None]
     stop: StopScope

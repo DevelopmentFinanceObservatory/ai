@@ -81,6 +81,7 @@ from .scripted_genai import (
 from .scripted_planner import MODEL as _MODEL
 from .scripted_planner import SIGNED as _SIGNED
 from .scripted_planner import Tools, scripted_planner
+from .session_events import one_answer
 from .test_planner_adapter import _sector_switched, _translated_plan
 from .test_planner_model import _HangingGenai
 from .test_turn_records import _switchable_scope
@@ -912,7 +913,7 @@ async def _stopped(plan: Plan) -> _Entry:
     )
 
 
-async def test_a_stop_while_a_planner_tool_hangs_stores_the_answered_call_and_not_the_hanging_one(
+async def test_a_stop_while_a_planner_tool_hangs_stores_neither_call_nor_any_record_of_the_run(
     plan: Plan,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
@@ -1012,7 +1013,10 @@ async def test_a_revision_after_an_entry_reads_the_steps_of_its_stored_ask_and_a
                 reply(_ask_call("a1", candidates=candidates), usage=_USAGE),
                 reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED)),
             ],
-            runs=[_planned(pinned), {**_planned(pinned), "answer": {"result": {"spec_id": _SPEC}}}],
+            runs=[
+                _planned(pinned),
+                {**_planned(pinned), "answer": {"result": one_answer({"spec_id": _SPEC})}},
+            ],
             setup=_proposals(),
             translate=translate,
         ),
