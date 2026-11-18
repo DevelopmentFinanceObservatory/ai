@@ -258,6 +258,10 @@ _HAS_OPEN_TURN = text(
     "SELECT 1 FROM turn_cursors WHERE conversation = :conversation "
     "AND status IN ('running', 'paused')"
 )
+_OPEN_TURN_VERSION = text(
+    "SELECT id, version FROM turn_cursors WHERE conversation = :conversation "
+    "AND status IN ('running', 'paused')"
+)
 _APPEND = text(
     "INSERT INTO agent_records (turn, seq, agent, kind, body) "
     "VALUES (:turn, :seq, :agent, :kind, CAST(:body AS json))"
@@ -784,3 +788,11 @@ async def cursor_at(conn: AsyncConnection, conversation: int, turn_index: int) -
         "t.conversation = :conversation AND t.turn_index = :turn_index",
         {"conversation": conversation, "turn_index": turn_index},
     )
+
+
+async def open_turn_version(conn: AsyncConnection, conversation: int) -> tuple[int, int] | None:
+    """The id and version of the open (running or paused) turn of the
+    `conversations` row `conversation`, read on `conn` in the caller's
+    transaction, or `None` when no turn is open."""
+    row = (await conn.execute(_OPEN_TURN_VERSION, {"conversation": conversation})).first()
+    return None if row is None else (row.id, row.version)

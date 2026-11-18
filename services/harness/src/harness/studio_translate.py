@@ -448,7 +448,9 @@ class _Records:
     segment's stream owner alone drains (`take`). `count` is how many records
     a conversation has had appended, which an event carries
     (`_EventRecords`), so that the owner takes exactly the records made
-    before it."""
+    before it. The counts never start afresh: an event still queued holds
+    a count from before any drain, so a count reused after a drain emptied
+    the queue would hand that event a record made after it."""
 
     def __init__(self) -> None:
         self.items: list[_ExecutorRecord] = []
@@ -476,12 +478,7 @@ class _Records:
             for record in self.items
             if record.conversation != conversation or id(record) in kept
         ]
-        if kept:
-            self._taken[conversation] = taken + count
-        else:
-            # Nothing of the conversation waits: its counts start afresh.
-            self._appended.pop(conversation, None)
-            self._taken.pop(conversation, None)
+        self._taken[conversation] = taken + count
         return took
 
 

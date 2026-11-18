@@ -2368,7 +2368,9 @@ async def test_an_edit_card_stopped_and_left_before_its_next_renewal_is_recorded
 async def _close_claim_refused_before_its_save(monkeypatch: pytest.MonkeyPatch) -> None:
     app = _app(_text("Hello."))
 
-    async def claimed_elsewhere(principal: str, conversation_id: str, *args: Any) -> None:
+    async def claimed_elsewhere(
+        principal: str, conversation_id: str, *args: Any, **kwargs: Any
+    ) -> None:
         raise ConversationStale(conversation_id)
 
     app.state.studio.store.save = claimed_elsewhere  # type: ignore[method-assign]
@@ -3546,7 +3548,9 @@ async def test_a_turn_whose_claim_loses_forgets_the_turn_it_began() -> None:
     app = _app(_text("Hello."), store=store)
     save = store.save
 
-    async def claimed_elsewhere(principal: str, conversation_id: str, *args: Any) -> None:
+    async def claimed_elsewhere(
+        principal: str, conversation_id: str, *args: Any, **kwargs: Any
+    ) -> None:
         raise ConversationStale(conversation_id)
 
     store.save = claimed_elsewhere  # type: ignore[method-assign]
@@ -4270,6 +4274,84 @@ async def test_a_cancel_on_a_lapsed_lease_fences_out_the_stream_still_running_un
     assert reloaded.turn_final_text == ""
 
 
+def _reading(checkpoint: int) -> dict[str, Any]:
+    """A search reading the turn's checkpoint `checkpoint` holds."""
+    return SearchReading(text=f"aid, checkpoint {checkpoint}", status="definite").model_dump(
+        mode="json"
+    )
+
+
+@pytest.mark.parametrize("writes", ["once", "every_read"])
+async def test_a_turn_abandons_the_previous_turn_as_its_owner_last_wrote_it(
+    monkeypatch: pytest.MonkeyPatch, writes: str
+) -> None:
+    """A's turn is left running under a lease that lapsed, and A writes a
+    checkpoint after B's `/turn` read the turn and before B's claim
+    commits. Once: B's turn streams, and the turn it abandons closes with
+    the records A's last checkpoint wrote. After every read: B claims
+    nothing and answers a retryable 409, the turn left running as A wrote
+    it."""
+    clock = await StoreClock.start(_engine())
+    store_a = StudioStore(_engine(), **clock.store_kwargs)
+    turns = turn_store_module.TurnStore(_engine())
+    state_a = await store_a.create(PRINCIPAL, CONVERSATION)
+    segment_a = store_a.claim_segment(PRINCIPAL, CONVERSATION)
+    state_a.begin_turn()
+    state_a.turn_user_message = "aid to Kenya"
+    await store_a.save(PRINCIPAL, CONVERSATION)
+    left = await turns.open_turn(
+        PRINCIPAL,
+        CONVERSATION,
+        segment_id=segment_a,
+        turn_index=1,
+        node="plan",
+        inputs={},
+        state={ORCHESTRATOR_SEARCHES_KEY: [_reading(1)]},
+    )
+    await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)  # A's lease has lapsed
+
+    store_b = StudioStore(_engine(), **clock.store_kwargs)
+    app_b = _app(_text("Hello."), store=store_b)
+    read = app_b.state.studio.turns.open_cursor
+    written = [left]
+
+    async def read_then_checkpoint(principal: str, conversation_id: str) -> Any:
+        cursor = await read(principal, conversation_id)
+        if cursor is not None and (writes == "every_read" or len(written) == 1):
+            reading = _reading(len(written) + 1)
+            written.append(
+                await turns.advance(
+                    written[-1],
+                    segment_id=segment_a,
+                    node="plan",
+                    node_input=None,
+                    state={ORCHESTRATOR_SEARCHES_KEY: [reading]},
+                )
+            )
+        return cursor
+
+    monkeypatch.setattr(app_b.state.studio.turns, "open_cursor", read_then_checkpoint)
+    async with _client(app_b) as client:
+        if writes == "once":
+            frames = await _stream(client, "/api/studio/turn", _turn_body("hi"))
+        else:
+            response = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
+
+    stored = await turns.turn(left.id)
+    conversation = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert conversation is not None
+    if writes == "once":
+        assert _events(frames)[-1] == "done"
+        assert stored.status is TurnStatus.ABANDONED
+        record = conversation.turns[0]
+        assert (record["error"], record["readings"]) == ("abandoned", [_reading(2)])
+    else:
+        assert response.status_code == 409
+        assert response.json()["error"] == "transient_unavailable"
+        assert (stored.status, stored.version) == (TurnStatus.RUNNING, written[-1].version)
+        assert (conversation.turn_index, conversation.segment.id) == (1, segment_a)
+
+
 class _CallingSurface(ScriptedSurface):
     """`ScriptedSurface`, recording the name of every tool it is called with."""
 
@@ -4642,7 +4724,9 @@ async def test_an_answer_after_a_refused_turn_resumes_on_the_paused_turn_s_span(
     real_save = store.save
     refused: list[str] = []
 
-    async def claimed_elsewhere(principal: str, conversation_id: str, *args: Any) -> None:
+    async def claimed_elsewhere(
+        principal: str, conversation_id: str, *args: Any, **kwargs: Any
+    ) -> None:
         refused.append(conversation_id)
         raise ConversationStale(conversation_id)
 

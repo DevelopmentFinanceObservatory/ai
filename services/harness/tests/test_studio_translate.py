@@ -58,10 +58,12 @@ from harness.studio_state import (
 )
 from harness.studio_store import StudioStore
 from harness.studio_translate import (
+    _EventRecords,
     _ExecutorRecord,
     _planner_question,
     _RecordingExecutor,
     _RecordingSurface,
+    _Records,
     _stream_fatal,
     _timeout_refusal,
     _Translator,
@@ -1675,6 +1677,47 @@ async def test_a_stream_behind_the_run_shows_each_call_where_it_happened() -> No
         ("Starting the plan", StepStatus.COMPLETE),
         ("Fetching data", StepStatus.COMPLETE),
         ("Reading the plan's results", StepStatus.RUNNING),
+    ]
+
+
+def test_a_drain_that_empties_the_queue_keeps_the_counts_the_queued_events_hold() -> None:
+    """Every event's mark counts from the first record appended, so a
+    drain that takes every record leaves the counts where they were: the
+    record appended next is the second, and an event marked before it
+    takes nothing."""
+    records = _Records()
+    records.append(_surface_record("debt", {"outcome": "ok"}))
+    assert [record.step_id for record in records.take("c1", 1)] == ["debt"]
+
+    records.append(_surface_record("pop", {"outcome": "ok"}))
+
+    assert records.count("c1") == 2
+    assert records.take("c1", 1) == []
+    assert [record.step_id for record in records.take("c1", 2)] == ["pop"]
+
+
+async def test_a_call_recorded_after_a_drain_shows_after_the_events_marked_before_it() -> None:
+    """The stream's owner drains the first event's call before the segment
+    records its next one, and the second event, marked before that call,
+    still shows its own frames first."""
+    translator, surface_recorder = _progress_translator()
+    marks = _EventRecords(translator._recorder, surface_recorder)
+    surface_recorder._records.append(_surface_record("debt", {"outcome": "ok", "summary": "done"}))
+    approved = marks.recorded(NodeDone("approve", "approved", {"v": 1}))
+    executed = marks.recorded(NodeDone("execute", "ok", {"frame_refs": []}))
+
+    frames = await translator.translate_recorded(*approved)
+    surface_recorder._records.append(_surface_record("pop", {"outcome": "ok", "summary": "done"}))
+    answered = marks.recorded(NodeDone("answer", "done", {}))
+    for event in (executed, answered):
+        frames.extend(await translator.translate_recorded(*event))
+
+    assert [(f.label, f.status) for f in frames] == [
+        ("Fetching data", StepStatus.COMPLETE),
+        ("Starting the plan", StepStatus.RUNNING),
+        ("Starting the plan", StepStatus.COMPLETE),
+        ("Reading the plan's results", StepStatus.RUNNING),
+        ("Fetching data", StepStatus.COMPLETE),
     ]
 
 

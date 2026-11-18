@@ -35,6 +35,7 @@ demand by the recall function (`make_recall_part`).
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
@@ -138,7 +139,7 @@ from harness.turn.loop import (
     run_segment,
     stop_turn,
 )
-from harness.turn.store import Cursor, CursorStale, TurnStatus, TurnStore
+from harness.turn.store import Cursor, CursorStale, TurnStatus, TurnStore, open_turn_version
 from harness.turn_budget import start_turn_budget
 from harness.turn_records import CHIP_STALE_NOTE, stored_choice
 from harness.wire import (
@@ -1307,6 +1308,39 @@ def _set_turn_context(
     start_turn_budget(settings)
 
 
+# How many times `/turn` builds its claim on the turn left open before it
+# answers a retryable 409, when that turn's lapsed segment keeps writing it
+# between the read and the claim save (`_left_open_unmoved`).
+_CLAIM_ATTEMPTS = 3
+
+
+class _LeftOpenMoved(Exception):  # noqa: N818 -- names the state that refuses
+    """The turn `/turn` read open before its claim was written, or closed,
+    before the claim save locked the conversation."""
+
+
+def _left_open_unmoved(
+    left_open: Cursor | None,
+) -> Callable[[AsyncConnection, int], Awaitable[None]]:
+    """The check `/turn`'s claim save runs with the conversation locked
+    (`StudioStore.save`'s `alongside`): the open turn is still `left_open`,
+    at its version, or there is still none. A lapsed segment's write holds
+    the conversation row shared until it commits, so the check reads the
+    turn after any such write.
+
+    Raises:
+        _LeftOpenMoved: the open turn moved, closed or opened since
+            `left_open` was read, which rolls the claim back.
+    """
+    read = None if left_open is None else (left_open.id, left_open.version)
+
+    async def check(conn: AsyncConnection, pk: int) -> None:
+        if await open_turn_version(conn, pk) != read:
+            raise _LeftOpenMoved
+
+    return check
+
+
 def _same_open_pause(before: Cursor | None, after: Cursor | None) -> bool:
     """Whether `after`, the turn read after a claim, is where `before`, the
     turn read before it, stood: both closed, or both open with the same
@@ -1554,82 +1588,115 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # made on a working copy, which the save swaps into the live
             # state once it commits. A request that claims nothing leaves
             # the live state as loaded.
-            work = studio.store.draft(principal, body.conversation_id)
-            left_open = await studio.turns.open_cursor(principal, body.conversation_id)
-            if left_open is not None and not work.turn_recorded:
-                keep_turn_records(work, left_open.state)
-            abandoned = work.begin_turn()
-            begun = work
-            work.auto_add = body.auto_add
-            if pick is None:
-                work.turn_user_message = body.message
-                work.turn_user_words = body.message
-            else:
-                # The history record names the option the chip counts. Search
-                # would read its label as scope the user stated, so the words
-                # later searches send leave it out, as a plan card's switch does.
-                work.turn_user_message = f"count {chip_label}"
-                work.turn_user_words = ""
-                # The record's `spec_id` is the reading the `seed` node compiles,
-                # set once the chip applies, so the chip's own origin stays out.
-                work.turn_applied_choice = pick.model_dump(include={"choice_id", "option_id"})
-            # The segment lease: claimed on the working copy before the claim
-            # save below persists it, so the save's own compare-and-swap
-            # covers both in one write. `SegmentBusy` means a live segment,
-            # on this instance or another, already owns the conversation's
-            # stream. Its own `retry_after_seconds` is the ceiling of that
-            # segment's remaining TTL.
-            try:
-                segment_id = studio.store.claim_segment(principal, body.conversation_id, work)
-            except SegmentBusy as exc:
-                return await _unclaimed(
-                    studio.store,
-                    principal,
-                    body.conversation_id,
-                    lock,
-                    _streaming_conflict_response(
-                        "another request is streaming on this conversation",
-                        retry_after_seconds=exc.retry_after_seconds,
-                    ),
-                    turn=work,
-                )
-            # The claim: advancing turn_index (and the segment above) is
-            # saved before the turn opens and before the SSE response
-            # starts. This save is a compare-and-swap against what this
-            # instance last loaded, so a `ConversationStale` here means
-            # another instance's `/turn` claimed a turn on this conversation
-            # since. Claiming first leaves no crash window: a crash between
-            # the claim and the turn's opening leaves the store at the new
-            # turn_index with no turn open, and the next `/turn` claims the
-            # one after it. The segment it also claimed expires by its own
-            # TTL. The save refuses while a Stop is live for the open turn
-            # (`StopPending`), so the turn index stops at the open turn.
-            # A Stop that landed since the check above ends that turn
-            # here, and the request is answered a retryable 409.
-            try:
-                await studio.store.save(principal, body.conversation_id, work)
-            except StopPending:
-                return await _answer_after_stop(
-                    studio,
-                    principal,
-                    body.conversation_id,
-                    lock,
-                    _streaming_conflict_response(
-                        "the conversation's previous turn was stopped", retry_after_seconds=1
-                    ),
-                    turn=work,
-                )
-            except ConversationStale:
-                return await _unclaimed(
-                    studio.store,
-                    principal,
-                    body.conversation_id,
-                    lock,
-                    _streaming_conflict_response(
-                        "another request is streaming on this conversation"
-                    ),
-                    turn=work,
-                )
+            #
+            # The segment whose lease lapsed can still write the turn until
+            # the claim commits, so the claim save checks, with the
+            # conversation locked, that the turn stands as read here
+            # (`_left_open_unmoved`). Once the claim commits, that segment's
+            # writes are fenced out. A turn that moved is read again and the
+            # claim built on it afresh, so the turn closes on its last write.
+            for attempt in itertools.count(1):
+                work = studio.store.draft(principal, body.conversation_id)
+                left_open = await studio.turns.open_cursor(principal, body.conversation_id)
+                if left_open is not None and not work.turn_recorded:
+                    keep_turn_records(work, left_open.state)
+                abandoned = work.begin_turn()
+                begun = work
+                work.auto_add = body.auto_add
+                if pick is None:
+                    work.turn_user_message = body.message
+                    work.turn_user_words = body.message
+                else:
+                    # The history record names the option the chip counts.
+                    # Search would read its label as scope the user stated, so
+                    # the words later searches send leave it out, as a plan
+                    # card's switch does.
+                    work.turn_user_message = f"count {chip_label}"
+                    work.turn_user_words = ""
+                    # The record's `spec_id` is the reading the `seed` node
+                    # compiles, set once the chip applies, so the chip's own
+                    # origin stays out.
+                    work.turn_applied_choice = pick.model_dump(include={"choice_id", "option_id"})
+                # The segment lease: claimed on the working copy before the
+                # claim save below persists it, so the save's own
+                # compare-and-swap covers both in one write. `SegmentBusy`
+                # means a live segment, on this instance or another, already
+                # owns the conversation's stream. Its own
+                # `retry_after_seconds` is the ceiling of that segment's
+                # remaining TTL.
+                try:
+                    segment_id = studio.store.claim_segment(principal, body.conversation_id, work)
+                except SegmentBusy as exc:
+                    return await _unclaimed(
+                        studio.store,
+                        principal,
+                        body.conversation_id,
+                        lock,
+                        _streaming_conflict_response(
+                            "another request is streaming on this conversation",
+                            retry_after_seconds=exc.retry_after_seconds,
+                        ),
+                        turn=work,
+                    )
+                # The claim: advancing turn_index (and the segment above) is
+                # saved before the turn opens and before the SSE response
+                # starts. This save is a compare-and-swap against what this
+                # instance last loaded, so a `ConversationStale` here means
+                # another instance's `/turn` claimed a turn on this
+                # conversation since. Claiming first leaves no crash window: a
+                # crash between the claim and the turn's opening leaves the
+                # store at the new turn_index with no turn open, and the next
+                # `/turn` claims the one after it. The segment it also claimed
+                # expires by its own TTL. The save refuses while a Stop is
+                # live for the open turn (`StopPending`), so the turn index
+                # stops at the open turn. A Stop that landed since the check
+                # above ends that turn here, and the request is answered a
+                # retryable 409.
+                try:
+                    await studio.store.save(
+                        principal,
+                        body.conversation_id,
+                        work,
+                        alongside=_left_open_unmoved(left_open),
+                    )
+                except _LeftOpenMoved:
+                    if attempt < _CLAIM_ATTEMPTS:
+                        studio.store.drop_draft(principal, body.conversation_id)
+                        continue
+                    return await _unclaimed(
+                        studio.store,
+                        principal,
+                        body.conversation_id,
+                        lock,
+                        _streaming_conflict_response(
+                            "the conversation's previous turn is still being written",
+                            retry_after_seconds=1,
+                        ),
+                        turn=work,
+                    )
+                except StopPending:
+                    return await _answer_after_stop(
+                        studio,
+                        principal,
+                        body.conversation_id,
+                        lock,
+                        _streaming_conflict_response(
+                            "the conversation's previous turn was stopped", retry_after_seconds=1
+                        ),
+                        turn=work,
+                    )
+                except ConversationStale:
+                    return await _unclaimed(
+                        studio.store,
+                        principal,
+                        body.conversation_id,
+                        lock,
+                        _streaming_conflict_response(
+                            "another request is streaming on this conversation"
+                        ),
+                        turn=work,
+                    )
+                break
             claimed = segment_id
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None

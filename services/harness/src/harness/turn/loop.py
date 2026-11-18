@@ -423,6 +423,16 @@ async def _enter[E](
     return target, owed
 
 
+def _cut(error: Exception | None = None) -> None:
+    """Raise the cancellation the running task was sent and has not taken
+    back (`asyncio.Task.cancelling`), so the segment settles on its cut
+    (`run_segment`) when the node or its work after the commit caught the
+    cancellation and returned, or raised `error` in its place."""
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise asyncio.CancelledError from error
+
+
 async def drive[E](
     store: TurnStore,
     segment: Segment,
@@ -458,6 +468,13 @@ async def drive[E](
     that pauses). When the node that took it ends the turn or leaves on
     another edge, or the node after it returns anything but a pause, the
     turn closes `cancelled` in place of that node's write.
+
+    A cut (a Stop that ends the turn, a lost lease, a client that left)
+    reaches the node as a cancellation of the task running `drive`. The
+    cancellation is raised again once the node returns or raises, and once
+    its work after the commit has run, so a node that catches it neither
+    writes its result nor leads to another node, and the segment settles
+    on the cut as when the cancellation escapes (`run_segment`).
 
     Raises:
         ValueError: the cursor is paused and no `answer` was given.
@@ -514,8 +531,10 @@ async def drive[E](
                 result = await target.run(ctx, node_input)
             following = _following(graph, node, result)
         except Exception as exc:
+            _cut(exc)
             logger.exception("turn %s: node %s failed", key, node)
             return await close(TurnStatus.FAILED, node, exc)
+        _cut()
         owed = None
         if (
             stop.taken is not None
@@ -559,6 +578,7 @@ async def drive[E](
             logger.exception("turn %s: the write after node %s failed", key, node)
             return await close(TurnStatus.FAILED, node, exc)
         await _after_commit(ctx, node)
+        _cut()
 
         if segment.pausing is not None:
             segment.outcome = Outcome.PAUSED

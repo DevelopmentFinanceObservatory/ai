@@ -8,6 +8,7 @@ another instance's `request_cancel` records.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -1236,6 +1237,98 @@ async def test_a_stop_whose_renewal_lost_its_acknowledgement_still_reaches_the_n
     # The scope took the Stop, and the turn ended with no pause to record
     # it, so the turn closes on it.
     assert segment.outcome is Outcome.CANCELLED
+
+
+class _RenewalsFail(StudioStore):
+    """A `StudioStore` whose renewals fail and whose lease deadline has
+    passed, so the heartbeat ends the segment `lost` while the stored lease
+    is still the segment's own."""
+
+    async def renew(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("the database cannot be reached")
+
+    def lease_deadline(self, principal: str, conversation_id: str) -> float:
+        return float("-inf")
+
+
+@pytest.mark.parametrize(
+    ("cut", "absorbs_by"),
+    [
+        ("stop", "returning"),
+        ("stop", "raising"),
+        ("stop", "after_commit"),
+        ("lost", "returning"),
+    ],
+)
+async def test_a_cut_settles_the_turn_when_its_node_absorbs_the_cancellation(
+    pg_engine: AsyncEngine, clock: StoreClock, cut: str, absorbs_by: str
+) -> None:
+    """The heartbeat cancels the node, which catches the cancellation and
+    returns a result, raises an error of its own, or lets its work after
+    the commit catch it. The segment settles as when the cancellation
+    escapes, and no later node runs. A Stop closes the turn `cancelled` at
+    the node it cut and ends the Stop. A lost lease, renewals failing while
+    the stored lease is still the segment's, leaves the turn running as
+    last written, with nothing the node returned committed."""
+    store = TurnStore(pg_engine)
+    lease_a = (
+        await _instance(pg_engine, clock)
+        if cut == "stop"
+        else _RenewalsFail(pg_engine, **clock.store_kwargs)
+    )
+    lease_b = await _instance(pg_engine, clock)
+    segment_id = await _claim(lease_a)
+    working = asyncio.Event()
+    ran: list[str] = []
+
+    async def absorb() -> None:
+        working.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.sleep(3600)
+
+    async def work(ctx: NodeCtx, node_input: Any) -> Next:
+        ctx.state["work"] = "returned"
+        if absorbs_by == "after_commit":
+            ctx.after_commit(absorb)
+            return Next("next")
+        await absorb()
+        if absorbs_by == "raising":
+            raise RuntimeError("the node's own error after the cancellation")
+        return Next("next")
+
+    async def later(ctx: NodeCtx, node_input: Any) -> Next:
+        ran.append("later")
+        return Next("done")
+
+    graph = Graph(
+        start="work",
+        nodes={"work": Node(run=work), "later": Node(run=later)},
+        edges={("work", "next"): "later", ("later", "done"): END},
+    )
+    events: list[TurnEvent] = []
+    opened = await _open(store, segment_id, graph)
+    running = asyncio.create_task(_segment(store, lease_a, opened, segment_id, graph, events))
+    await working.wait()
+    if cut == "stop":
+        assert await lease_b.request_cancel(PRINCIPAL, CONVERSATION)
+    segment = await asyncio.wait_for(running, 5)
+
+    assert ran == []
+    assert not [event for event in events if isinstance(event, TurnFailed)]
+    stored = await store.turn(opened.id)
+    if cut == "lost":
+        assert segment.outcome is Outcome.LOST
+        assert (stored.status, stored.node, stored.version) == (
+            TurnStatus.RUNNING,
+            "work",
+            opened.version,
+        )
+        assert "work" not in stored.state
+        return
+    assert segment.outcome is Outcome.CANCELLED
+    assert (stored.status, stored.error) == (TurnStatus.CANCELLED, None)
+    assert stored.node == ("later" if absorbs_by == "after_commit" else "work")
+    assert not await lease_b.stop_live(PRINCIPAL, CONVERSATION)
 
 
 async def test_a_cursor_owing_an_answer_the_store_lacks_closes_the_turn_failed(
