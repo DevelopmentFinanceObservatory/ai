@@ -243,7 +243,12 @@ async def _retry_startup_step(
 class _MigrationRefusedError(RuntimeError):
     """A migration raised a SQLSTATE beginning `DFA`, its own refusal to run
     against this database (`0004_rename_adk_tables.sql`). The database does not
-    change by waiting."""
+    change by waiting. The message leads with the SQLSTATE, which
+    deploy/README.md lists with each refusal's manual step."""
+
+    def __init__(self, sqlstate: str, message: str) -> None:
+        super().__init__(f"{sqlstate}: {message}")
+        self.sqlstate = sqlstate
 
 
 async def _apply_migrations_with_retries(
@@ -266,8 +271,9 @@ async def _apply_migrations_with_retries(
         try:
             await apply_pending(engine)
         except asyncpg.PostgresError as exc:
-            if (getattr(exc, "sqlstate", None) or "").startswith("DFA"):
-                raise _MigrationRefusedError(str(exc)) from exc
+            sqlstate = getattr(exc, "sqlstate", None) or ""
+            if sqlstate.startswith("DFA"):
+                raise _MigrationRefusedError(sqlstate, str(exc)) from exc
             raise
 
     await _retry_startup_step(

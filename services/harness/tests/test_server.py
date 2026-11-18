@@ -968,6 +968,7 @@ async def test_a_migration_refusal_is_fatal_at_once(monkeypatch: pytest.MonkeyPa
         )
 
     assert attempts == [1]
+    assert refusal.value.sqlstate == "DFA04"
     assert refusal.value.__cause__ is not None
 
 
