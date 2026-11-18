@@ -81,6 +81,11 @@ ManifestFactory = Callable[..., dict[str, Any]]
 PlanFactory = Callable[..., Plan]
 
 
+def _component(assembled: tuple[dict[str, Any], Any] | None) -> dict[str, Any] | None:
+    """The component `McpExecutor._assemble_component` built, or `None`."""
+    return assembled[0] if assembled is not None else None
+
+
 def _today_utc() -> str:
     """Today's date in UTC, the zone `_wire_provenance`'s fallback
     `last_refreshed` is computed in."""
@@ -130,9 +135,11 @@ async def test_a_component_from_a_planned_run_carries_its_retrievals_real_proven
     # what `create_app` wires `McpExecutor` and `_RecordingSurface` to share
     # (`provenance=provenance` on both).
     executor = McpExecutor(settings=Settings(), provenance=store)
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1},
-        envelope=resolved_revision("stat_card", frame_ref=frame_ref.model_dump()),
+    component = _component(
+        await executor._assemble_component(
+            reply={"component_id": "cmp_1", "revision": 1},
+            envelope=resolved_revision("stat_card", frame_ref=frame_ref.model_dump()),
+        )
     )
 
     assert component is not None
@@ -331,13 +338,17 @@ async def test_two_independent_retrievals_each_attribute_to_their_own_frame(
     executor = McpExecutor(settings=Settings(), provenance=store)
     debt_ref = outcome.results["totals"].model_dump()
     population_ref = outcome.results["population_totals_op"].model_dump()
-    debt_component = await executor._assemble_component(
-        reply={"component_id": "cmp_debt", "revision": 1},
-        envelope=resolved_revision("stat_card", frame_ref=debt_ref),
+    debt_component = _component(
+        await executor._assemble_component(
+            reply={"component_id": "cmp_debt", "revision": 1},
+            envelope=resolved_revision("stat_card", frame_ref=debt_ref),
+        )
     )
-    population_component = await executor._assemble_component(
-        reply={"component_id": "cmp_population", "revision": 1},
-        envelope=resolved_revision("stat_card", frame_ref=population_ref),
+    population_component = _component(
+        await executor._assemble_component(
+            reply={"component_id": "cmp_population", "revision": 1},
+            envelope=resolved_revision("stat_card", frame_ref=population_ref),
+        )
     )
 
     assert debt_component is not None
@@ -409,9 +420,11 @@ async def test_a_frame_with_no_linked_manifest_is_withheld_not_fabricated() -> N
     frame_ref = {"spec_id": "ops_" + "f" * 32, "content_version": "ocv_" + "f" * 32}
     executor = McpExecutor(settings=Settings(), provenance=ProvenanceStore())
 
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1},
-        envelope=resolved_revision("stat_card", frame_ref=frame_ref),
+    component = _component(
+        await executor._assemble_component(
+            reply={"component_id": "cmp_1", "revision": 1},
+            envelope=resolved_revision("stat_card", frame_ref=frame_ref),
+        )
     )
 
     assert component is None
@@ -669,9 +682,11 @@ async def _assemble(
     store: ProvenanceStore, frame_ref: dict[str, str], *, facts: dict[str, Any] | None = None
 ) -> dict[str, Any] | None:
     executor = McpExecutor(settings=Settings(), provenance=store)
-    return await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts or {}},
-        envelope=resolved_revision("stat_card", frame_ref=frame_ref),
+    return _component(
+        await executor._assemble_component(
+            reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts or {}},
+            envelope=resolved_revision("stat_card", frame_ref=frame_ref),
+        )
     )
 
 

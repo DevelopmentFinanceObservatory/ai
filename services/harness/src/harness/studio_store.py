@@ -1496,7 +1496,8 @@ class StudioStore:
         conversation_id: str,
         attempt: Callable[[], Awaitable[T]],
     ) -> T:
-        """Run `attempt`, a write fenced on the live segment, retrying a
+        """Run `attempt`, a write fenced on the live segment or a read a
+        stream makes before one (`card_lineage`), retrying a
         transient database fault (`compiler.surface.transient`, the
         harness's one fault classifier) with backoff until the lease's
         deadline (`lease_deadline`), then raising `DatabaseUnavailable` from
@@ -2034,25 +2035,27 @@ class StudioStore:
     ) -> CardLineage | None:
         """The stored lineage of card `component_id`, or, with no
         `component_id`, of a card drawn from `frame` or whose create asked for
-        it (`harness.provenance.CardLineageReader`). One indexed read, with no
-        lock and no runtime entry, so any instance can read it before a write.
-        `None` when no such card's lineage is stored."""
+        it (`harness.provenance.CardLineageReader`). One indexed read with no
+        lock, so any instance can read it before a write. A transient database
+        fault is retried until the lease's deadline (`_retrying`), as the
+        stream's card writes are, then raises `DatabaseUnavailable`. `None`
+        when no such card's lineage is stored."""
         spec_id, content_version = frame if frame is not None else (None, None)
         if component_id is None and (spec_id is None or content_version is None):
             return None
-        async with self._engine.connect() as conn:
-            row = (
-                await conn.execute(
-                    _SELECT_CARD_LINEAGE,
-                    {
-                        "principal": principal,
-                        "conversation_id": conversation_id,
-                        "component_id": component_id,
-                        "spec_id": spec_id,
-                        "content_version": content_version,
-                    },
-                )
-            ).first()
+        params = {
+            "principal": principal,
+            "conversation_id": conversation_id,
+            "component_id": component_id,
+            "spec_id": spec_id,
+            "content_version": content_version,
+        }
+
+        async def read() -> Any:
+            async with self._transaction() as conn:
+                return (await conn.execute(_SELECT_CARD_LINEAGE, params)).first()
+
+        row = await self._retrying(self._entry(principal, conversation_id), conversation_id, read)
         if row is None:
             return None
         requested = (row.requested_spec_id, row.requested_content_version)

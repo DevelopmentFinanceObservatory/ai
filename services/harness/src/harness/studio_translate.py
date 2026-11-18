@@ -540,10 +540,16 @@ class _RecordingExecutor:
         Never touches the conversation itself; a component with no matching
         record (this capability called directly, not through `__call__`
         first) leaves nothing to stamp and is silently a no-op."""
+        if (record := self._record_for(component)) is not None:
+            record.land = True
+
+    def _record_for(self, component: dict[str, Any]) -> _ExecutorRecord | None:
+        """The latest record whose result carries this exact `component`
+        object, matched by identity, or `None`."""
         for record in reversed(self._records.items):
             if record.result.get("component") is component:
-                record.land = True
-                break
+                return record
+        return None
 
     async def __call__(
         self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
@@ -632,18 +638,14 @@ class _RecordingExecutor:
         """The write token of the recorded write that returned `component`
         (matched by identity, as `land_component` matches), read without
         taking the record."""
-        for record in reversed(self._records.items):
-            if record.result.get("component") is component:
-                return record.write_token
-        return None
+        record = self._record_for(component)
+        return record.write_token if record is not None else None
 
     def card_lineage(self, component: dict[str, Any]) -> CardLineage | None:
         """The frame lineage of the recorded write that returned `component`
         (matched by identity, as `write_token` matches)."""
-        for record in reversed(self._records.items):
-            if record.result.get("component") is component:
-                return record.card_lineage
-        return None
+        record = self._record_for(component)
+        return record.card_lineage if record is not None else None
 
     def count(self, conversation: str) -> int:
         """How many records this conversation has had appended (`_Records`)."""

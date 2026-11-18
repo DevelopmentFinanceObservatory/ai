@@ -56,7 +56,8 @@ from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import CARD_LINEAGE_KEY, CardLineage, ProvenanceStore
 from harness.rolling_cards import AdmittedWrite, RollingCards
 from harness.settings import Settings
-from harness.tool_contracts import ResolverError, graph_envelope
+from harness.studio_state import DatabaseUnavailable
+from harness.tool_contracts import HarnessCode, ResolverError, graph_envelope
 from harness.wire import FactSummary, component_fault
 from mcp import MCPError
 from mcp.types import INVALID_PARAMS, REQUEST_TIMEOUT, ErrorData
@@ -65,6 +66,11 @@ from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY, Refusa
 
 from .resolved_revision import resolved_revision
 from .test_turn_records import _manifest, _served_identity
+
+
+def _component(assembled: tuple[dict[str, Any], Any] | None) -> dict[str, Any] | None:
+    """The component `McpExecutor._assemble_component` built, or `None`."""
+    return assembled[0] if assembled is not None else None
 
 
 class _StopAtConnectError(Exception):
@@ -977,8 +983,11 @@ class _CardLineages:
     `StudioStore.card_lineage` reads them: by card, or by the frame a card
     was drawn from or its create asked for."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, fails: int = 0) -> None:
         self.committed: list[CardLineage] = []
+        self.reads: list[dict[str, Any]] = []
+        # How many reads fail first, as a store whose retries ran out does.
+        self.fails = fails
 
     async def __call__(
         self,
@@ -989,6 +998,10 @@ class _CardLineages:
         frame: tuple[str | None, str | None] | None = None,
     ) -> CardLineage | None:
         del principal, conversation_id
+        self.reads.append({"component_id": component_id, "frame": frame})
+        if self.fails:
+            self.fails -= 1
+            raise DatabaseUnavailable("the conversation store stayed unreachable")
         return next(
             (
                 card
@@ -998,6 +1011,131 @@ class _CardLineages:
             ),
             None,
         )
+
+
+_FRAME_F = {"spec_id": "ops_" + "6" * 32, "content_version": "ocv_" + "6" * 32}
+
+
+def _drawn_on_f() -> ProvenanceStore:
+    """A store holding frame F, resting on two retrievals whose step declared one StatVar."""
+    conversation = current_conversation_id.get()
+    store = ProvenanceStore()
+    sources = []
+    for n in (7, 8):
+        ref = {"spec_id": "spec_" + str(n) * 32, "content_version": "cv_" + str(n) * 32}
+        citation = {"text": f"src:{n}", "sources": [{"ref": f"src:{n}", "label": f"src:{n}"}]}
+        store.put(conversation=conversation, manifest={"citation": citation}, **ref)
+        sources.append((ref["spec_id"], ref["content_version"]))
+    assert store.alias(conversation=conversation, **_FRAME_F, sources=sources, stat_var_count=1)
+    return store
+
+
+def _written_on_f(component_id: str, *, revision: int = 1) -> SimpleNamespace:
+    return _tool_result(
+        {"component_id": component_id, "revision": revision, "fact_summary": {}},
+        meta={
+            RESOLVED_PAYLOAD_META_KEY: resolved_revision(
+                "line_chart", component_id=component_id, revision=revision, frame_ref=_FRAME_F
+            )
+        },
+    )
+
+
+async def test_a_revise_of_a_card_with_no_lineage_row_borrows_its_frames_and_gains_a_row(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """Card X was drawn on frame F before lineages were stored, and card Y
+    later drawn on F stored F's. A fresh executor revises X: it reads X's own
+    lineage, finds none, reads the frame X's stored intent names (one
+    `describe_component`), and draws X with Y's sources and count. X's revise
+    carries the lineage for its write to commit; a revise of Y on the
+    instance that drew it reads nothing and carries none."""
+    client = scripted_presentation_client(
+        [
+            _written_on_f("cmp_y"),
+            _tool_result(
+                {
+                    "component_id": "cmp_x",
+                    "revision": 1,
+                    "stored_intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F},
+                }
+            ),
+            _written_on_f("cmp_x", revision=2),
+            _written_on_f("cmp_y", revision=2),
+        ]
+    )
+    current_conversation_key.set(("principal", current_conversation_id.get()))
+    lineages = _CardLineages()
+    drawing = McpExecutor(settings=Settings(), provenance=_drawn_on_f(), card_lineages=lineages)
+    drawn_y = await drawing(
+        tool="write_component",
+        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F}},
+    )
+    lineages.committed.append(drawn_y.pop(CARD_LINEAGE_KEY))
+    fresh = McpExecutor(settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages)
+
+    revised_x = await fresh(
+        tool="write_component", args={"component_id": "cmp_x", "intent": {"title": "New"}}
+    )
+    reads = len(lineages.reads)
+    revised_y = await drawing(
+        tool="write_component", args={"component_id": "cmp_y", "intent": {"title": "New"}}
+    )
+
+    assert client.calls == [
+        "write_component",
+        "describe_component",
+        "write_component",
+        "write_component",
+    ]
+    assert lineages.reads == [
+        {"component_id": "cmp_x", "frame": None},
+        {"component_id": None, "frame": (_FRAME_F["spec_id"], _FRAME_F["content_version"])},
+    ]
+    assert revised_x["outcome"] == "ok", revised_x
+    drawn, revised = drawn_y["component"], revised_x["component"]
+    assert [source["id"] for source in drawn["provenance"]["sources"]] == ["src:7", "src:8"]
+    assert revised["provenance"]["sources"] == drawn["provenance"]["sources"]
+    assert revised["fact_summary"]["attribution"] == drawn["fact_summary"]["attribution"]
+    assert revised_x[CARD_LINEAGE_KEY].component_id == "cmp_x"
+    assert revised_x[CARD_LINEAGE_KEY].lineage == lineages.committed[0].lineage
+    assert len(lineages.reads) == reads
+    assert revised_y["outcome"] == "ok", revised_y
+    assert CARD_LINEAGE_KEY not in revised_y
+
+
+async def test_a_lineage_that_cannot_be_read_refuses_the_write_before_it_is_sent(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """The store's retries ran out: the write is refused with a code that says
+    it may be tried again, and nothing reaches the platform. The next write,
+    once the store answers, draws."""
+    client = scripted_presentation_client([_written_on_f("cmp_1"), _written_on_f("cmp_2")])
+    current_conversation_key.set(("principal", current_conversation_id.get()))
+    lineages = _CardLineages()
+    drawing = McpExecutor(settings=Settings(), provenance=_drawn_on_f(), card_lineages=lineages)
+    drawn = await drawing(
+        tool="write_component",
+        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F}},
+    )
+    lineages.committed.append(drawn.pop(CARD_LINEAGE_KEY))
+    fresh = McpExecutor(settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages)
+    lineages.fails = 1
+    args = {"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F}}
+
+    refused = await fresh(tool="write_component", args=args)
+    sent = len(client.calls)
+    drawn_again = await fresh(tool="write_component", args=args)
+
+    assert refused["outcome"] == "refusal"
+    assert refused["refusal"]["code"] == HarnessCode.TRANSIENT_UNAVAILABLE
+    assert refused["refusal"]["retry_mode"] == "retry_after_delay"
+    assert sent == 1
+    assert drawn_again["outcome"] == "ok", drawn_again
+    assert (
+        drawn_again["component"]["provenance"]["sources"]
+        == (drawn["component"]["provenance"]["sources"])
+    )
 
 
 @pytest.mark.parametrize(
@@ -1613,8 +1751,10 @@ async def test_a_cut_series_list_leaves_the_attribution_counting_every_stat_var(
     store, envelope, facts = _assembled_summary(drawn=20, resolved=3000, series_cut=40)
     executor = McpExecutor(settings=Settings(), provenance=store)
 
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+    component = _component(
+        await executor._assemble_component(
+            reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+        )
     )
 
     assert component is not None
@@ -1629,9 +1769,9 @@ async def test_a_cut_series_list_states_how_many_of_the_series_it_shows() -> Non
     executor = McpExecutor(settings=Settings(), provenance=store)
     reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
 
-    cut = await executor._assemble_component(reply=reply, envelope=envelope)
+    cut = _component(await executor._assemble_component(reply=reply, envelope=envelope))
     facts["series_cut"] = 0
-    whole = await executor._assemble_component(reply=reply, envelope=envelope)
+    whole = _component(await executor._assemble_component(reply=reply, envelope=envelope))
 
     assert cut is not None and whole is not None
     assert cut["fact_summary"]["series_truncated"] == {"showing": 20, "total": 60}
@@ -1656,13 +1796,15 @@ async def test_a_card_over_a_derived_frame_counts_that_frames_stat_vars() -> Non
     executor = McpExecutor(settings=Settings(), provenance=store)
     reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
 
-    over_derived = await executor._assemble_component(
-        reply=reply,
-        envelope=resolved_revision(
-            "line_chart", component_id="cmp_1", revision=1, frame_ref=derived
-        ),
+    over_derived = _component(
+        await executor._assemble_component(
+            reply=reply,
+            envelope=resolved_revision(
+                "line_chart", component_id="cmp_1", revision=1, frame_ref=derived
+            ),
+        )
     )
-    over_root = await executor._assemble_component(reply=reply, envelope=root_envelope)
+    over_root = _component(await executor._assemble_component(reply=reply, envelope=root_envelope))
 
     assert over_derived is not None
     assert over_root is not None
@@ -1694,13 +1836,15 @@ async def test_a_card_over_a_summed_family_counts_the_stat_vars_the_sum_added() 
     executor = McpExecutor(settings=Settings(), provenance=store)
     reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
 
-    over_derived = await executor._assemble_component(
-        reply=reply,
-        envelope=resolved_revision(
-            "line_chart", component_id="cmp_1", revision=1, frame_ref=derived
-        ),
+    over_derived = _component(
+        await executor._assemble_component(
+            reply=reply,
+            envelope=resolved_revision(
+                "line_chart", component_id="cmp_1", revision=1, frame_ref=derived
+            ),
+        )
     )
-    over_root = await executor._assemble_component(reply=reply, envelope=root_envelope)
+    over_root = _component(await executor._assemble_component(reply=reply, envelope=root_envelope))
 
     assert over_derived is not None
     assert over_root is not None
@@ -1713,10 +1857,10 @@ async def test_the_platform_defaults_reach_the_wire_fact_summary() -> None:
     executor = McpExecutor(settings=Settings(), provenance=store)
     reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
 
-    without = await executor._assemble_component(reply=reply, envelope=envelope)
+    without = _component(await executor._assemble_component(reply=reply, envelope=envelope))
     facts["defaults"] = [{"pointer": "/intent/select", "detail": "Drew every recipient."}]
     facts["a_member_the_platform_adds_later"] = {"x": 1}
-    with_defaults = await executor._assemble_component(reply=reply, envelope=envelope)
+    with_defaults = _component(await executor._assemble_component(reply=reply, envelope=envelope))
 
     assert without is not None
     assert "defaults" not in without["fact_summary"]
@@ -1747,8 +1891,10 @@ async def test_the_platform_unit_reaches_the_wire_fact_summary_as_it_is(unit: ob
     executor = McpExecutor(settings=Settings(), provenance=store)
     facts["unit"] = unit
 
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+    component = _component(
+        await executor._assemble_component(
+            reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+        )
     )
 
     assert component is not None
@@ -1791,8 +1937,10 @@ async def test_a_stored_card_the_frame_cannot_be_built_from_is_refused_naming_th
     ERROR without the stored values."""
     store, envelope, facts = _assembled_summary(drawn=1, resolved=1, series_cut=0)
     executor = McpExecutor(settings=Settings(), provenance=store)
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+    component = _component(
+        await executor._assemble_component(
+            reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+        )
     )
     assert component is not None
     component = {**component, **fault}
@@ -1841,8 +1989,10 @@ async def test_each_series_states_the_periods_of_its_first_and_last_values() -> 
     ]
     executor = McpExecutor(settings=Settings(), provenance=store)
 
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+    component = _component(
+        await executor._assemble_component(
+            reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+        )
     )
 
     assert component is not None

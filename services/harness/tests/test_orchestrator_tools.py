@@ -65,7 +65,7 @@ from harness.graph.state import (
     register_frames,
     store_search,
 )
-from harness.mcp_client import _presentation_refusal_outcome
+from harness.mcp_client import _lineage_unread_refusal, _presentation_refusal_outcome
 from harness.orchestrator_tools import (
     HANDED_OFF,
     Chart,
@@ -2474,6 +2474,38 @@ async def test_make_charts_reports_a_write_that_raised_and_draws_nothing_after_i
     assert _writes(executor) == fails_on
     assert len(executor.landed) == fails_on - 1
     assert ctx.state["orchestrator:calls"] == {"fetch": 1, counted: 1}
+
+
+class LineageUnreadExecutor(FakeExecutor):
+    """Refuses the first write as `McpExecutor` does when the lineage of the
+    card's frame could not be read, and sends nothing for it."""
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        if tool == "write_component" and not self.refused:
+            self.refused = True
+            return {"outcome": "refusal", "refusal": _lineage_unread_refusal()}
+        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
+
+    refused = False
+
+
+async def test_a_chart_whose_lineage_could_not_be_read_is_refused_alone():
+    """Nothing reached the platform, so the chart may be drawn again, and the
+    charts after it in the call still draw."""
+    executor = LineageUnreadExecutor()
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+
+    drawn = await tools["make_charts"](_distinct_charts(frame_id_for(REF), 3), ctx)
+
+    assert ["error" if "error" in chart else "holds" for chart in drawn["charts"]] == [
+        "error",
+        "holds",
+        "holds",
+    ]
+    assert _stated(drawn["charts"][0]) == (HarnessCode.TRANSIENT_UNAVAILABLE, "retry_after_delay")
+    assert _writes(executor) == 2
+    assert len(executor.landed) == 2
 
 
 class YieldingExecutor(FakeExecutor):
