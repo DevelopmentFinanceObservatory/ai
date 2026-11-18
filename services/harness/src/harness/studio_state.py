@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from common.telemetry import end_turn_span, start_turn_span, use_turn_span
+from common.telemetry import EventLevel, end_turn_span, start_turn_span, use_turn_span
 from compiler.sources import alternative_definitions, source_from_spec_block
 from data_mcp.definition_store.identity import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
@@ -1073,19 +1073,19 @@ class ConversationState:
         self.turn_recorded = False
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
-    def lose_turn_span(self) -> None:
+    def end_turn_span_unrecorded(self, status: str, *, level: EventLevel = "WARNING") -> None:
         """End the turn's telemetry span, when this instance holds one, with
-        status `segment_lost` at level `WARNING`, without recording the
-        turn: the stream ended because its segment was lost or the database
-        stayed unreachable, nothing of the turn was saved, and whichever
-        instance goes on with it opens a span of its own
-        (`ensure_turn_span`)."""
+        `status` at `level`, without recording the turn: the stream lost its
+        segment (`segment_lost`), the request that opened the span claimed
+        nothing (`not_started`), or a turn begun on a working copy closed
+        this one (`abandoned`, as `close_turn` marks it). Whichever instance
+        goes on with the turn opens a span of its own (`ensure_turn_span`)."""
         end_turn_span(
             self._telemetry_span,
             request=self.turn_user_message,
             response=self.turn_final_text,
-            error="segment_lost",
-            level="WARNING",
+            error=status,
+            level=level,
         )
         self._telemetry_span = None
 

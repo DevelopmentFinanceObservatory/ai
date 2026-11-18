@@ -1098,7 +1098,11 @@ class StudioRunner:
                     await self.store.checkpoint(principal, conversation_id, segment_id)
                 except Exception as exc:
                     _log_save_failure(
-                        "checkpoint after plan.approved", conversation, segment_id, exc
+                        "checkpoint after plan.approved",
+                        conversation,
+                        segment_id,
+                        exc,
+                        level=logging.WARNING,
                     )
                     if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
                         yield _checkpoint_failed_frame(conversation, exc)
@@ -1152,12 +1156,18 @@ class StudioRunner:
 
 
 def _log_save_failure(
-    what: str, conversation: ConversationState, segment_id: str, exc: Exception
+    what: str,
+    conversation: ConversationState,
+    segment_id: str,
+    exc: Exception,
+    *,
+    level: int = logging.ERROR,
 ) -> None:
     """Log a save `_checkpointed` made that failed: a lost segment or a
     database unreachable until the lease's deadline as a warning, which
-    ends the stream as the heartbeat does, and anything else as an internal
-    fault, with its traceback."""
+    ends the stream as the heartbeat does, and anything else at `level`,
+    with its traceback: an internal fault by default, a warning where the
+    stream goes on past the failure."""
     if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
         logger.warning(
             "studio %s ended the stream: conversation %s segment %s (trace_id=%s): %s",
@@ -1168,12 +1178,14 @@ def _log_save_failure(
             exc,
         )
     else:
-        logger.exception(
+        logger.log(
+            level,
             "studio %s failed: conversation %s segment %s (trace_id=%s)",
             what,
             conversation.conversation_id,
             segment_id,
             conversation.trace_id,
+            exc_info=exc,
         )
 
 
@@ -1388,6 +1400,23 @@ async def _abandon_claim(
         lock.release()
 
 
+async def _unclaimed(
+    store: StudioStore,
+    principal: str,
+    conversation_id: str,
+    lock: asyncio.Lock,
+    response: Response,
+) -> Response:
+    """Answer `response` for a request whose claim save never committed:
+    give up its working copy (`StudioStore.drop_draft`), so the live state
+    stays as loaded, release `lock`, and export the span the copy's turn
+    opened, if any."""
+    store.drop_draft(principal, conversation_id)
+    lock.release()
+    await flush_telemetry()
+    return response
+
+
 def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRouter:
     router = APIRouter(prefix="/api/studio", route_class=_StudioRoute)
 
@@ -1447,22 +1476,100 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     lock.release()
                     return label
                 chip_label = label
-            conversation.begin_turn()
-            conversation.auto_add = body.auto_add
+            # Every change up to the claim save is made on a working copy,
+            # which the save swaps into the live state once it commits; a
+            # request that claims nothing leaves the live state as loaded.
+            work = studio.store.draft(principal, body.conversation_id)
+            work.begin_turn()
+            work.auto_add = body.auto_add
             if pick is None:
-                conversation.turn_user_message = body.message
-                conversation.turn_user_words = body.message
+                work.turn_user_message = body.message
+                work.turn_user_words = body.message
             else:
                 # The history record names the option the chip counts. Search
                 # would read its label as scope the user stated, so the words
                 # later searches send leave it out, as a plan card's switch does.
-                conversation.turn_user_message = f"count {chip_label}"
-                conversation.turn_user_words = ""
+                work.turn_user_message = f"count {chip_label}"
+                work.turn_user_words = ""
                 # The record's `spec_id` is the reading the `seed` node compiles,
                 # set once the chip applies, so the chip's own origin stays out.
-                conversation.turn_applied_choice = pick.model_dump(
-                    include={"choice_id", "option_id"}
+                work.turn_applied_choice = pick.model_dump(include={"choice_id", "option_id"})
+            # The segment lease: claimed on the working copy before the claim
+            # save below persists it, so the save's own compare-and-swap
+            # covers both in one write. `SegmentBusy` means a live segment,
+            # on this instance or another, already owns the conversation's
+            # stream; its own `retry_after_seconds` is the ceiling of that
+            # segment's remaining TTL.
+            try:
+                segment_id = studio.store.claim_segment(principal, body.conversation_id, work)
+            except SegmentBusy as exc:
+                return await _unclaimed(
+                    studio.store,
+                    principal,
+                    body.conversation_id,
+                    lock,
+                    _streaming_conflict_response(
+                        "another request is streaming on this conversation",
+                        retry_after_seconds=exc.retry_after_seconds,
+                    ),
                 )
+            edit = (
+                body.component_ref is not None
+                and body.component_ref.intent is ComponentRefIntent.EDIT
+            )
+            # The turn's ADK session is created before the claim save, so a
+            # turn the previous release opened under the same id is met while
+            # nothing is claimed (`_open_session`). The Edit Card route runs
+            # no ADK session.
+            session_state: dict[str, Any] = {}
+            fresh = True
+            if not edit:
+                session_state = _turn_session_state(work, body)
+                try:
+                    fresh = await studio._open_session(
+                        user_id=principal,
+                        conversation_id=body.conversation_id,
+                        session_id=work.session_id,
+                        state=session_state,
+                    )
+                except ConversationStale:
+                    # An instance still running on ADK sessions opened this
+                    # turn since the load. Nothing is claimed, so the retry's
+                    # load re-imports what it wrote and meets its lease.
+                    return await _unclaimed(
+                        studio.store,
+                        principal,
+                        body.conversation_id,
+                        lock,
+                        _streaming_conflict_response(
+                            "another request is streaming on this conversation"
+                        ),
+                    )
+            # The claim: advancing turn_index (and the segment above) is
+            # saved before the SSE response starts. This save is a
+            # compare-and-swap against what this instance last loaded, so a
+            # `ConversationStale` here means another instance's `/turn`
+            # claimed a turn on this conversation since. The session this
+            # request created is then a leftover, which the next claim of
+            # the same turn replaces; a crash between the create and the
+            # claim leaves the same leftover. A crash after the claim leaves
+            # the store at the new turn_index, and the segment it claimed
+            # expires by its own TTL.
+            try:
+                await studio.store.save(principal, body.conversation_id, work)
+            except ConversationStale:
+                return await _unclaimed(
+                    studio.store,
+                    principal,
+                    body.conversation_id,
+                    lock,
+                    _streaming_conflict_response(
+                        "another request is streaming on this conversation"
+                    ),
+                )
+            claimed = segment_id
+            conversation = studio.store.current(principal, body.conversation_id)
+            assert conversation is not None
             # Set in the request task's context (each request gets a fresh
             # one, so nothing leaks across requests); the streamed generator
             # and every task spawned under it inherit the value, which is
@@ -1478,70 +1585,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # This request's model-call bounds, read by every model call the
             # streamed run makes (`harness.turn_budget`).
             start_turn_budget(settings)
-            # The segment lease: claimed on the live state before the claim
-            # save below persists it, so the save's own compare-and-swap
-            # covers both in one write. `SegmentBusy` means a live segment,
-            # on this instance or another, already owns the conversation's
-            # stream; its own `retry_after_seconds` is the ceiling of that
-            # segment's remaining TTL.
-            try:
-                segment_id = studio.store.claim_segment(principal, body.conversation_id)
-            except SegmentBusy as exc:
-                studio.store.discard_unsaved(principal, body.conversation_id)
-                lock.release()
-                return _streaming_conflict_response(
-                    "another request is streaming on this conversation",
-                    retry_after_seconds=exc.retry_after_seconds,
-                )
-            edit = (
-                body.component_ref is not None
-                and body.component_ref.intent is ComponentRefIntent.EDIT
-            )
-            # The turn's ADK session is created before the claim save, so a
-            # turn the previous release opened under the same id is met while
-            # nothing is claimed (`_open_session`). The Edit Card route runs
-            # no ADK session.
-            session_state: dict[str, Any] = {}
-            fresh = True
-            if not edit:
-                session_state = _turn_session_state(conversation, body)
-                try:
-                    fresh = await studio._open_session(
-                        user_id=principal,
-                        conversation_id=body.conversation_id,
-                        session_id=conversation.session_id,
-                        state=session_state,
-                    )
-                except ConversationStale:
-                    # An instance still running on ADK sessions opened this
-                    # turn since the load. Nothing is claimed, so the retry's
-                    # load re-imports what it wrote and meets its lease. The
-                    # turn begun above was never saved, so this instance drops
-                    # it from its live state.
-                    studio.store.discard_unsaved(principal, body.conversation_id)
-                    lock.release()
-                    return _streaming_conflict_response(
-                        "another request is streaming on this conversation"
-                    )
-            # The claim: advancing turn_index (and the segment above) is
-            # saved before the SSE response starts. This save is a
-            # compare-and-swap against what this instance last loaded, so a
-            # `ConversationStale` here means another instance's `/turn`
-            # claimed a turn on this conversation since. The session this
-            # request created is then a leftover, which the next claim of
-            # the same turn replaces; a crash between the create and the
-            # claim leaves the same leftover. A crash after the claim leaves
-            # the store at the new turn_index, and the segment it claimed
-            # expires by its own TTL.
-            try:
-                await studio.store.save(principal, body.conversation_id)
-            except ConversationStale:
-                studio.store.discard_unsaved(principal, body.conversation_id)
-                lock.release()
-                return _streaming_conflict_response(
-                    "another request is streaming on this conversation"
-                )
-            claimed = segment_id
             if not fresh:
                 # Replaced only once the claim has won, so a session another
                 # instance of this release created for the same turn is
@@ -1596,19 +1639,16 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
         except BaseException:
             # The stream wrapper normally releases the segment and the lock;
-            # a failure before the response starts streaming drops the lease,
-            # drops the live state's changes no save stored, and releases the
-            # lock here. The claim save already covers
-            # `begin_turn`'s effects, so the turn stays open and the next
-            # `/turn` closes it as `begin_turn` closes any open turn. A path
-            # above that let go of the lock itself cleared `claimed` first.
+            # a failure before the response starts streaming releases them
+            # here. Before the claim save commits, the working copy is given
+            # up and the live state stays as loaded. After it, the lease is
+            # dropped, and the claim save already covers `begin_turn`'s
+            # effects, so the turn stays open and the next `/turn` closes it
+            # as `begin_turn` closes any open turn.
             if lock.locked():
-                try:
-                    await _abandon_claim(
-                        studio.store, principal, body.conversation_id, claimed, lock
-                    )
-                finally:
-                    studio.store.discard_unsaved(principal, body.conversation_id)
+                studio.store.drop_draft(principal, body.conversation_id)
+                await _abandon_claim(studio.store, principal, body.conversation_id, claimed, lock)
+                await flush_telemetry()
             raise
 
     router.add_api_route("/turn", turn, methods=["POST"], route_class_override=_BoundedTurnRoute)
@@ -1713,6 +1753,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 lock.release()
                 return refusal
             assert pending is not None  # narrowed by _interrupt_refusal
+            # Every change up to the claim save is made on a working copy,
+            # which the save swaps into the live state once it commits; a
+            # request that claims nothing leaves the live state as loaded.
+            work = studio.store.draft(principal, body.conversation_id)
+            pending = work.pending[body.interrupt_id]
             # A stream that runs a plan-card switch arms the switch's Stop:
             # one that answers the switch, and one that answers a question
             # the planner asked while replanning for a pick on the card.
@@ -1752,7 +1797,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # constructing the record ever raises, the entry is
                 # untouched and the interrupt can still be answered fresh.
                 assert pending.plan_revision is not None  # every plan interrupt carries one
-                conversation.approvals.append(
+                work.approvals.append(
                     ApprovalRecord(
                         revision=pending.plan_revision,
                         approver=principal,
@@ -1772,13 +1817,17 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # whatever it is answering with: a live resume already under
             # way may yet land cleanly on the answer it started with.
             try:
-                segment_id = studio.store.claim_segment(principal, body.conversation_id)
+                segment_id = studio.store.claim_segment(principal, body.conversation_id, work)
             except SegmentBusy as exc:
-                studio.store.discard_unsaved(principal, body.conversation_id)
-                lock.release()
-                return _streaming_conflict_response(
-                    "another request is streaming on this conversation",
-                    retry_after_seconds=exc.retry_after_seconds,
+                return await _unclaimed(
+                    studio.store,
+                    principal,
+                    body.conversation_id,
+                    lock,
+                    _streaming_conflict_response(
+                        "another request is streaming on this conversation",
+                        retry_after_seconds=exc.retry_after_seconds,
+                    ),
                 )
             if resuming and pending.answer != requested_answer:
                 # The claim above only succeeds once the earlier resume's
@@ -1789,19 +1838,23 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # resumed it. Refused for good: a live segment above would
                 # already have caught a retry of the SAME answer, so a
                 # mismatch reaching here can never become a match later.
-                studio.store.discard_unsaved(principal, body.conversation_id)
-                lock.release()
-                return _tool_error_response(
-                    ToolError(
-                        error=ErrorCode.EDIT_CONFLICT,
-                        retry=RetryMode.REFRESH_THEN_RETRY,
-                        detail=(
-                            f"interrupt {body.interrupt_id!r} already resumed with a "
-                            "different decision"
+                return await _unclaimed(
+                    studio.store,
+                    principal,
+                    body.conversation_id,
+                    lock,
+                    _tool_error_response(
+                        ToolError(
+                            error=ErrorCode.EDIT_CONFLICT,
+                            retry=RetryMode.REFRESH_THEN_RETRY,
+                            detail=(
+                                f"interrupt {body.interrupt_id!r} already resumed with a "
+                                "different decision"
+                            ),
+                            fix="reload the conversation and follow its recorded outcome",
                         ),
-                        fix="reload the conversation and follow its recorded outcome",
+                        status_code=409,
                     ),
-                    status_code=409,
                 )
             # The entry is kept, marked resuming under this fresh segment.
             # A crash between this save and the resumed stream's own
@@ -1815,25 +1868,30 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             if body.decision is InterruptDecision.SWITCH and pending.card is not None:
                 # What each choice held before the turn's first switch of
                 # it, which `plan.approved` names as `changed_from`.
-                conversation.turn_choice_baseline = {
+                work.turn_choice_baseline = {
                     **held_labels(pending.card),
-                    **conversation.turn_choice_baseline,
+                    **work.turn_choice_baseline,
                 }
             # Saved before the resume stream starts: a double answer to the
             # same interrupt across two instances loses cleanly here, with a
             # 409, rather than each resuming its own segment of the turn.
             try:
-                await studio.store.save(principal, body.conversation_id)
+                await studio.store.save(principal, body.conversation_id, work)
             except ConversationStale:
-                studio.store.discard_unsaved(principal, body.conversation_id)
-                lock.release()
-                return _streaming_conflict_response(
-                    "another request already answered this interrupt"
+                return await _unclaimed(
+                    studio.store,
+                    principal,
+                    body.conversation_id,
+                    lock,
+                    _streaming_conflict_response("another request already answered this interrupt"),
                 )
+            conversation = studio.store.current(principal, body.conversation_id)
+            assert conversation is not None
+            pending = conversation.pending[body.interrupt_id]
         except BaseException:
             if not lock.locked():
                 raise
-            studio.store.discard_unsaved(principal, body.conversation_id)
+            studio.store.drop_draft(principal, body.conversation_id)
             lock.release()
             raise
 
@@ -1841,8 +1899,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         # save above claimed, and releases the lock. Only the lease: the
         # pending entry stays resuming under the dropped segment with the
         # answer recorded, so a retry of the same answer claims at once and
-        # resumes. The turn lines added below were never saved, so this
-        # instance drops them from its live state.
+        # resumes. The turn lines added below stay unsaved, and the retry's
+        # load reads the row afresh.
         try:
             # The instance that resumes a paused turn may not be the one that
             # opened it: its telemetry span is process-local and never persisted,
@@ -1975,12 +2033,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 media_type=SSE_MEDIA_TYPE,
             )
         except BaseException:
-            try:
-                await _abandon_claim(
-                    studio.store, principal, body.conversation_id, segment_id, lock
-                )
-            finally:
-                studio.store.discard_unsaved(principal, body.conversation_id)
+            await _abandon_claim(studio.store, principal, body.conversation_id, segment_id, lock)
             raise
 
     @router.post("/composition")

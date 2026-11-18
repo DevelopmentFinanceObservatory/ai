@@ -633,7 +633,7 @@ async def _stored_turn_specs(
     return dict(row[0] or {}), row[1]
 
 
-def open_turn_specs(engine: AsyncEngine) -> TurnSpecs:
+def open_turn_specs(engine: AsyncEngine, *, found: set[str] | None = None) -> TurnSpecs:
     """`StudioStore`'s `turn_specs` reader over `engine`: the spec blocks the
     turn session `session_id` (app `dfo_analyst_graph`) holds, read by SQL
     as stored. Empty when the session holds none or does not exist.
@@ -641,11 +641,17 @@ def open_turn_specs(engine: AsyncEngine) -> TurnSpecs:
     `convert_specs`. The server serves Studio through it, and `--verify`
     reads open turns through it and the job's bridge (`_NoAdk`), whose
     conversion is the serving bridge's (`_converted_specs`), so the gate
-    checks the blocks the serving release loads."""
+    checks the blocks the serving release loads, and `close-open-turns`
+    reads them through it too, with `found` gathering the ids of the
+    sessions that exist."""
 
     async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
         stored = await _turn_session_row(engine, principal, session_id)
-        return stored[0] if stored is not None else {}
+        if stored is None:
+            return {}
+        if found is not None:
+            found.add(session_id)
+        return stored[0]
 
     return turn_specs
 
@@ -1647,19 +1653,11 @@ async def _close_one(
 ) -> None:
     """Close one conversation's open ADK turn, if it has one, and note what
     became of it in `report`. The open turn's spec blocks are the ones the
-    store's `load` read and converted, through the server's reader of the
-    turn session's row (`_turn_session_row`)."""
+    store's `load` read and converted, through the server's reader
+    (`open_turn_specs`)."""
     sessions: set[str] = set()
-
-    async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
-        stored = await _turn_session_row(engine, principal, session_id)
-        if stored is None:
-            return {}
-        sessions.add(session_id)
-        return stored[0]
-
     bridge = _NoAdk()
-    store = StudioStore(engine, turn_specs=turn_specs, adk=bridge)
+    store = StudioStore(engine, turn_specs=open_turn_specs(engine, found=sessions), adk=bridge)
     state = await store.load(principal, conversation_id)
     if state is None or not state.turn_index or state.turn_recorded:
         return

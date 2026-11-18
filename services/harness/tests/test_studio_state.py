@@ -77,6 +77,7 @@ from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, OperationalError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from . import drawn_cards
@@ -2713,17 +2714,79 @@ async def test_a_card_write_retries_a_lost_connection_alone(
     assert (reloaded.composition is not None) == retried
 
 
+class _FailingCheckout:
+    """An engine whose next `begin()` fails to check a connection out with
+    `fault`; everything else goes to `engine`."""
+
+    def __init__(self, engine: Any, fault: BaseException) -> None:
+        self._engine = engine
+        self.fault: BaseException | None = fault
+
+    def begin(self) -> Any:
+        if self.fault is None:
+            return self._engine.begin()
+        fault, self.fault = self.fault, None
+
+        @asynccontextmanager
+        async def failing() -> Any:
+            raise fault
+            yield  # pragma: no cover -- marks this a generator
+
+        return failing()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine, name)
+
+
+@pytest.mark.parametrize(
+    ("fault", "retried"),
+    [
+        pytest.param(ConnectionRefusedError("refused"), True, id="refused"),
+        pytest.param(SQLAlchemyTimeoutError("QueuePool limit reached"), True, id="pool-timeout"),
+        pytest.param(
+            ssl.SSLCertVerificationError("certificate verify failed"),
+            False,
+            id="unverified-certificate",
+        ),
+    ],
+)
+async def test_a_write_retries_a_connection_checkout_that_failed_alone(
+    new_store, monkeypatch, fault: Exception, retried: bool
+) -> None:
+    """The connection checkout sits inside the retried attempt: a transient
+    fault there is retried, and a permanent one raises at once."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store = new_store()
+    await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    store._engine = _FailingCheckout(store._engine, fault)
+
+    if retried:
+        await store.change_canvas(
+            "principal", CONVERSATION, lambda work: land_component(work, _CARD)
+        )
+    else:
+        with pytest.raises(type(fault)):
+            await store.change_canvas(
+                "principal", CONVERSATION, lambda work: land_component(work, _CARD)
+            )
+
+    assert store._engine.fault is None
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert (reloaded.composition is not None) == retried
+
+
 async def test_a_release_that_cannot_reach_the_database_logs_it_saved_nothing(
     new_store, clock, caplog
 ) -> None:
     """The release names the database, not a takeover, as why nothing was
     saved."""
     store = new_store(clock=clock)
-    state = await store.create("principal", CONVERSATION)
+    await store.create("principal", CONVERSATION)
     segment_id = store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
     await clock.set(store.lease_deadline("principal", CONVERSATION))
-    state.turn_final_text = "never saved"
 
     async def dropped(*args: Any, **kwargs: Any) -> None:
         raise _connection_reset("UPDATE")
@@ -2736,7 +2799,6 @@ async def test_a_release_that_cannot_reach_the_database_logs_it_saved_nothing(
     (record,) = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert record.levelno == logging.ERROR
     assert "could not reach the database" in record.getMessage()
-    assert store.current("principal", CONVERSATION).turn_final_text == ""
 
 
 async def test_a_release_retried_after_another_instance_claimed_and_released_is_fenced_out(
@@ -3063,14 +3125,11 @@ async def test_release_never_raises_on_a_db_error(new_store) -> None:
 
 
 async def test_release_swallows_a_takeover_and_still_never_raises(new_store, clock) -> None:
-    """A's release is fenced out by B's takeover: it raises nothing, and A's
-    live state drops what A never saved."""
     store_a = new_store(clock=clock)
     store_b = new_store(clock=clock)
-    state = await store_a.create("principal", CONVERSATION)
+    await store_a.create("principal", CONVERSATION)
     segment_id = store_a.claim_segment("principal", CONVERSATION)
     await store_a.save("principal", CONVERSATION)
-    state.turn_final_text = "never saved"
 
     await clock.advance(studio_state.SEGMENT_TTL_S + 1)  # A's segment has expired
     await store_b.load("principal", CONVERSATION)
@@ -3079,7 +3138,37 @@ async def test_release_swallows_a_takeover_and_still_never_raises(new_store, clo
 
     await store_a.release("principal", CONVERSATION, segment_id)  # must not raise
 
-    assert store_a.current("principal", CONVERSATION).turn_final_text == ""
+
+@pytest.mark.parametrize(("paused", "ended"), [(False, ["segment_lost"]), (True, [])])
+async def test_a_release_that_lost_its_segment_ends_a_running_turn_s_span_alone(
+    new_store, clock, monkeypatch, paused: bool, ended: list[str]
+) -> None:
+    """A's release is fenced out by B's takeover. A turn that was running
+    ends A's span as lost; a turn whose pause A had stored keeps it for the
+    answer that resumes it."""
+    calls: list[str | None] = []
+
+    def recording_end(handle: Any, **kwargs: Any) -> None:
+        if handle is not None:
+            calls.append(kwargs.get("error"))
+
+    monkeypatch.setattr(studio_state, "end_turn_span", recording_end)
+    store_a = new_store(clock=clock)
+    store_b = new_store(clock=clock)
+    state = await store_a.create("principal", CONVERSATION)
+    segment_id = store_a.claim_segment("principal", CONVERSATION)
+    if paused:
+        state.pending["int_1"] = _PendingInterrupt(adk_id="adk_1", kind="plan")
+    await store_a.save("principal", CONVERSATION)
+    state._telemetry_span = object()
+
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+    await store_b.load("principal", CONVERSATION)
+    store_b.claim_segment("principal", CONVERSATION)
+    await store_b.save("principal", CONVERSATION)
+    await store_a.release("principal", CONVERSATION, segment_id)
+
+    assert calls == ended
 
 
 async def test_a_release_past_its_timeout_cancels_the_checkpoint_once(new_store) -> None:
