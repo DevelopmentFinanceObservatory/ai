@@ -1300,16 +1300,17 @@ def span_level(status: str) -> EventLevel:
     | Claim refused before its     | none        | `not_started`          | WARNING |             |
     | save committed               |             |                        |         |             |
     | (`StudioStore.drop_draft`)   |             |                        |         |             |
-    | Request failed after its     | none        | `failed`               | ERROR   |             |
-    | claim, before streaming      |             |                        |         |             |
-    | Request cancelled after its  | none        | `cancelled`            | WARNING |             |
-    | claim, before streaming      |             |                        |         |             |
+    | Request or response failed   | none        | `failed`               | ERROR   |             |
+    | after its claim, before the  |             |                        |         |             |
+    | body starts, the turn left   |             |                        |         |             |
+    | open                         |             |                        |         |             |
+    | Request's task cancelled     | none        | `cancelled`            | WARNING |             |
+    | after its claim, before the  |             |                        |         |             |
+    | body starts, the turn left   |             |                        |         |             |
+    | open                         |             |                        |         |             |
     | Client gone before the body  | none        | `disconnected`         | WARNING |             |
     | starts (`_ClaimedStream`),   |             |                        |         |             |
     | the turn left open           |             |                        |         |             |
-    | Response fails before the    | none        | `failed`               | ERROR   |             |
-    | body starts, the turn left   |             |                        |         |             |
-    | open                         |             |                        |         |             |
     | Span still open when a new   | none        | `orphaned`             | WARNING |             |
     | segment's span moves in      |             |                        |         |             |
     | Paused turn closed by        | none        | `cancelled`            | WARNING |             |

@@ -41,7 +41,7 @@ from contextlib import (
     nullcontext,
     suppress,
 )
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Literal, override
 
@@ -1528,6 +1528,7 @@ class StudioRunner:
         which lets go of the claim's hold, relayed by `_sse_stream`, both
         sharing one `_StreamEnding`, then, with `settle`, the wait for the
         early calls of the card it offered (`_settling`)."""
+        assert claim.segment_id is not None
         ending = _StreamEnding()
         stream = _sse_stream(
             self._locked(
@@ -1843,9 +1844,19 @@ async def _acquire_or_conflict(
     conversation, since a lock exists (and can be contended) before this
     store has ever loaded or created the conversation it names.
     """
+    hold = await _try_hold(store, principal, conversation_id)
+    if hold is None:
+        return _streaming_conflict_response("another request is streaming on this conversation")
+    return hold
+
+
+async def _try_hold(store: StudioStore, principal: str, conversation_id: str) -> _LockHold | None:
+    """The conversation's lock, taken at once, or `None` when a request
+    holds it. A free lock is taken with no suspension point between the
+    check and the acquire."""
     lock = store.lock_for(principal, conversation_id)
     if lock.locked():
-        return _streaming_conflict_response("another request is streaming on this conversation")
+        return None
     await lock.acquire()
     return _LockHold(lock)
 
@@ -1886,78 +1897,73 @@ def _turn_session_state(conversation: ConversationState, body: TurnRequest) -> d
     return state
 
 
-async def _release_claim(
-    store: StudioStore,
-    principal: str,
-    conversation_id: str,
-    hold: _LockHold,
-    segment_id: str | None,
-    *,
-    cause: BaseException | None = None,
-    gone: bool = False,
-) -> None:
+def _ending_status(cause: BaseException | None) -> str:
+    """The status a released claim's segment span ends with, by `cause`,
+    the exception that ended the request, `None` when its response
+    returned (span_level's table). The client's own disconnect is
+    `disconnected`: `ClientDisconnect` or `OSError` from a send, or a
+    return, since under ASGI spec 2.3 Starlette's response returns once the
+    client's disconnect cancelled its send task (`_ClaimedStream`). The
+    request task's own cancellation is `cancelled`. Anything else is
+    `failed`, a `CancelledError` an inner task let out among them."""
+    if cause is None or isinstance(cause, ClientDisconnect | OSError):
+        return "disconnected"
+    task = asyncio.current_task()
+    if isinstance(cause, asyncio.CancelledError) and task is not None and task.cancelling() > 0:
+        return "cancelled"
+    return "failed"
+
+
+async def _release_claim(claim: _Claim, *, cause: BaseException | None = None) -> None:
     """Let go of a request whose stream never started, on every path,
     cancellation included. A claim that never committed gives up its
     working copy (`StudioStore.drop_draft`), whose span ends `not_started`.
-    A claim that committed (`segment_id`) drops its lease
+    A claim that committed (`claim.segment_id`) drops its lease
     (`StudioStore.drop_lease`, which runs to the end under cancellation),
-    and the segment's span, if one opened, ends `cancelled` when `cause`,
-    the exception that ended the request, is this task's own cancellation
-    (the client gone), and `failed` otherwise, a `CancelledError` an inner
-    task let out among them. With `gone`, a client that left before the
-    response's body started (`_ClaimedStream`), it ends `disconnected`.
-    Then `hold` lets go of the lock, and any span
-    that ended is exported, whatever the span end raised. It does nothing once
-    `hold` has let go: the working copy and the lease are then another
+    and the segment's span, if one opened, ends as `_ending_status` reads
+    `cause`. Then the claim's hold lets go of the lock, and any span that
+    ended is exported, whatever the span end raised. It does nothing once
+    the hold has let go: the working copy and the lease are then another
     request's."""
-    if not hold.held:
+    store, principal, conversation_id = claim.store, claim.principal, claim.conversation_id
+    if not claim.hold.held:
         return
-    task = asyncio.current_task()
-    cancelled = (
-        isinstance(cause, asyncio.CancelledError) and task is not None and task.cancelling() > 0
-    )
-    status = "disconnected" if gone else "cancelled" if cancelled else "failed"
     ended = False
     try:
         ended = store.drop_draft(principal, conversation_id)
-        if segment_id is not None:
-            await store.drop_lease(principal, conversation_id, segment_id)
+        if claim.segment_id is not None:
+            await store.drop_lease(principal, conversation_id, claim.segment_id)
     finally:
         try:
             try:
                 live = store.current(principal, conversation_id)
-                if segment_id is not None and live is not None:
-                    ended = live.end_segment_span(status) or ended
+                if claim.segment_id is not None and live is not None:
+                    ended = live.end_segment_span(_ending_status(cause)) or ended
             finally:
-                hold.release()
+                claim.hold.release()
         finally:
             if ended:
                 await flush_telemetry()
 
 
-async def _unclaimed(
-    store: StudioStore,
-    principal: str,
-    conversation_id: str,
-    hold: _LockHold,
-    response: Response,
-) -> Response:
+async def _unclaimed(claim: _Claim, response: Response) -> Response:
     """Answer `response` for a request whose claim save never committed,
     once it has let go of it (`_release_claim`)."""
-    await _release_claim(store, principal, conversation_id, hold, None)
+    await _release_claim(claim)
     return response
 
 
 @dataclass(frozen=True)
 class _Claim:
-    """A request's claimed segment: what `_ClaimedStream` lets go of when
-    the segment's stream never does."""
+    """A request's claim on its conversation: its lock hold, and the
+    segment once the claim save committed it (`segment_id`). What
+    `_release_claim` lets go of when the segment's stream never does."""
 
     store: StudioStore
     principal: str
     conversation_id: str
     hold: _LockHold
-    segment_id: str
+    segment_id: str | None = None
 
 
 class _ClaimedStream(StreamingResponse):
@@ -1973,7 +1979,9 @@ class _ClaimedStream(StreamingResponse):
     The lease is dropped, a pending entry stays resuming under it, no turn
     line the route added is saved, and the turn stays open for the next
     `/turn` or the close job to record `abandoned`. The segment's span ends
-    `disconnected` when the client left, and `failed` otherwise."""
+    as `_ending_status` reads how the response ended: `disconnected` when
+    the client left, `cancelled` when the request's task was cancelled, and
+    `failed` otherwise."""
 
     body_iterator: AsyncGenerator[str]
 
@@ -1993,29 +2001,7 @@ class _ClaimedStream(StreamingResponse):
             try:
                 await self.body_iterator.aclose()
             finally:
-                claim = self._claim
-                await _release_claim(
-                    claim.store,
-                    claim.principal,
-                    claim.conversation_id,
-                    claim.hold,
-                    claim.segment_id,
-                    cause=cause,
-                    gone=_client_left(cause),
-                )
-
-
-def _client_left(cause: BaseException | None) -> bool:
-    """Whether a response that ended with `cause` (`None` when it returned)
-    ended because the client left. Under ASGI spec 2.3 a response returns
-    once the client's disconnect cancels its send, and under spec 2.4 a
-    send to a gone client raises `ClientDisconnect` or `OSError`. A
-    cancellation is the client's when this task's own cancellation raised
-    it, as `_release_claim` reads it."""
-    if cause is None or isinstance(cause, ClientDisconnect | OSError):
-        return True
-    task = asyncio.current_task()
-    return isinstance(cause, asyncio.CancelledError) and task is not None and task.cancelling() > 0
+                await _release_claim(self._claim, cause=cause)
 
 
 def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRouter:
@@ -2028,9 +2014,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         hold = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
         if isinstance(hold, JSONResponse):
             return hold
-        # The segment this request claimed once its claim save landed, which
-        # every failure before the stream starts releases.
-        claimed: str | None = None
+        # The request's claim, which every failure before the stream starts
+        # releases, with its segment once the claim save landed.
+        claim = _Claim(studio.store, principal, body.conversation_id, hold)
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
@@ -2105,10 +2091,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 segment_id = studio.store.claim_segment(principal, body.conversation_id, work)
             except SegmentBusy as exc:
                 return await _unclaimed(
-                    studio.store,
-                    principal,
-                    body.conversation_id,
-                    hold,
+                    claim,
                     _streaming_conflict_response(
                         "another request is streaming on this conversation",
                         retry_after_seconds=exc.retry_after_seconds,
@@ -2138,10 +2121,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     # turn since the load. Nothing is claimed, so the retry's
                     # load re-imports what it wrote and meets its lease.
                     return await _unclaimed(
-                        studio.store,
-                        principal,
-                        body.conversation_id,
-                        hold,
+                        claim,
                         _streaming_conflict_response(
                             "another request is streaming on this conversation"
                         ),
@@ -2160,16 +2140,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 await studio.store.save(principal, body.conversation_id, work)
             except ConversationStale:
                 return await _unclaimed(
-                    studio.store,
-                    principal,
-                    body.conversation_id,
-                    hold,
+                    claim,
                     _streaming_conflict_response(
                         "another request is streaming on this conversation"
                     ),
                 )
-            claimed = segment_id
-            claim = _Claim(studio.store, principal, body.conversation_id, hold, segment_id)
+            claim = replace(claim, segment_id=segment_id)
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
             if abandoned is not None:
@@ -2233,9 +2209,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # After it, the lease is dropped, and the claim save already
             # covers `begin_turn`'s effects, so the turn stays open and the
             # next `/turn` closes it as `begin_turn` closes any open turn.
-            await _release_claim(
-                studio.store, principal, body.conversation_id, hold, claimed, cause=exc
-            )
+            await _release_claim(claim, cause=exc)
             raise
 
     router.add_api_route("/turn", turn, methods=["POST"], route_class_override=_BoundedTurnRoute)
@@ -2274,8 +2248,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             return Response(status_code=204)
         if await studio.store.request_cancel(principal, body.conversation_id):
             return Response(status_code=204)
-        hold = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
-        if isinstance(hold, JSONResponse):
+        hold = await _try_hold(studio.store, principal, body.conversation_id)
+        if hold is None:
             # A request holds the lock: a claim on its way, or a stream.
             return Response(status_code=204)
         closed: ClosedTurn | None = None
@@ -2333,6 +2307,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         hold = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
         if isinstance(hold, JSONResponse):
             return hold
+        claim = _Claim(studio.store, principal, body.conversation_id, hold)
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
@@ -2411,10 +2386,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 segment_id = studio.store.claim_segment(principal, body.conversation_id, work)
             except SegmentBusy as exc:
                 return await _unclaimed(
-                    studio.store,
-                    principal,
-                    body.conversation_id,
-                    hold,
+                    claim,
                     _streaming_conflict_response(
                         "another request is streaming on this conversation",
                         retry_after_seconds=exc.retry_after_seconds,
@@ -2430,10 +2402,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # already have caught a retry of the SAME answer, so a
                 # mismatch reaching here can never become a match later.
                 return await _unclaimed(
-                    studio.store,
-                    principal,
-                    body.conversation_id,
-                    hold,
+                    claim,
                     _tool_error_response(
                         ToolError(
                             error=ErrorCode.EDIT_CONFLICT,
@@ -2474,14 +2443,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 await studio.store.save(principal, body.conversation_id, work)
             except ConversationStale:
                 return await _unclaimed(
-                    studio.store,
-                    principal,
-                    body.conversation_id,
-                    hold,
+                    claim,
                     _streaming_conflict_response("another request already answered this interrupt"),
                 )
         except BaseException:
-            await _release_claim(studio.store, principal, body.conversation_id, hold, None)
+            await _release_claim(claim)
             raise
 
         # Every failure from here to the stream's start drops the lease the
@@ -2490,7 +2456,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         # resuming under the dropped segment with the answer recorded, so a
         # retry of the same answer claims at once and resumes. The turn lines
         # added below stay unsaved, and the retry's load reads the row afresh.
-        claim = _Claim(studio.store, principal, body.conversation_id, hold, segment_id)
+        claim = replace(claim, segment_id=segment_id)
         try:
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
@@ -2603,9 +2569,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 claim, conversation, frames, switch=switching, settle=True
             )
         except BaseException as exc:
-            await _release_claim(
-                studio.store, principal, body.conversation_id, hold, segment_id, cause=exc
-            )
+            await _release_claim(claim, cause=exc)
             raise
 
     @router.post("/composition")

@@ -1726,13 +1726,27 @@ async def _close_one(
 
 async def _turn_cursor_exists(conn: AsyncConnection, pk: int, turn_index: int) -> bool:
     """Whether `turn_cursors` holds a row for turn `turn_index` of the
-    conversation whose row id is `pk`: never while the table does not
-    exist."""
-    if (await conn.execute(text("SELECT to_regclass('turn_cursors')"))).scalar() is None:
+    conversation whose row id is `pk`, or for the turn index the row holds
+    as read here: never while the table does not exist. The table may not
+    exist, and a statement that names a missing table fails, so one
+    statement probes the table and reads the row's turn index, and a second
+    reads `turn_cursors` only when the table exists."""
+    probe = (
+        await conn.execute(
+            text(
+                "SELECT to_regclass('turn_cursors') IS NOT NULL AS present, "
+                "(turn_state ->> 'turn_index')::int AS stored "
+                "FROM conversations WHERE id = :pk"
+            ),
+            {"pk": pk},
+        )
+    ).one()
+    if not probe.present:
         return False
+    indices = [turn_index] if probe.stored in {None, turn_index} else [turn_index, probe.stored]
     found = await conn.execute(
-        text("SELECT 1 FROM turn_cursors WHERE conversation = :pk AND turn_index = :turn_index"),
-        {"pk": pk, "turn_index": turn_index},
+        text("SELECT 1 FROM turn_cursors WHERE conversation = :pk AND turn_index = ANY(:indices)"),
+        {"pk": pk, "indices": indices},
     )
     return found.first() is not None
 
