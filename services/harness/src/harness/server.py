@@ -502,11 +502,17 @@ def create_app(
     # `McpExecutor`'s own direct-fetch writer land in the same store
     # component assembly reads from -- see `harness.provenance`.
     provenance = ProvenanceStore()
+    # The store exists before the executor, which reads the lineage stored
+    # with each card through it, and before the graph, because the recall
+    # function is bound to it (conversation resolved per request via
+    # contextvar).
+    store = StudioStore(engine, lineage_engine=database.lineage_engine)
     # The executor replays a rolling frame through the refresh's clients when
     # a card draws other series than the frame's latest period was taken over.
     executor = McpExecutor(
         settings=resolved_settings,
         provenance=provenance,
+        card_lineages=store,
         card_replay=live_refresh.replay,
         dataset_versions=live_refresh.dataset_versions,
     )
@@ -529,9 +535,6 @@ def create_app(
         )
     else:
         logger.info("early mints: off (EARLY_MINT=false)")
-    # The store exists before the graph because the recall function is
-    # bound to it (conversation resolved per request via contextvar).
-    store = StudioStore(engine)
     # Built once and threaded into both the `execute` node below and
     # `build_planner`'s planner (which reads skills through it and
     # passes it on to the translator), so the two compile against one set
@@ -623,6 +626,7 @@ def create_app(
         tool_surface=tool_surface,
         provenance=provenance,
         early_mints=early_mints,
+        run_ledger=run_ledger,
     )
     app.state.studio = studio
     app.include_router(create_studio_router(studio, settings=resolved_settings))

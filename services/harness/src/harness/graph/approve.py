@@ -10,11 +10,13 @@ plan `approve` approved.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, cast
 
 from common.telemetry import record_span
 from planner.plan import (
+    Plan,
     PlanStatus,
     SessionState,
     alignments,
@@ -23,10 +25,11 @@ from planner.plan import (
     windowed_origins,
 )
 
+from harness.conversation import current_conversation_id
 from harness.decision_pick import decision_pick
 from harness.early_mint import EarlyMints
 from harness.graph.events import GraphEvent
-from harness.graph.state import APPROVE_PAUSE, readable_plan
+from harness.graph.state import APPROVE_PAUSE, APPROVED_RUN_KEY, readable_plan
 from harness.turn.node import Next, Node, NodeCtx, Pause
 
 logger = logging.getLogger(__name__)
@@ -64,15 +67,20 @@ def offer(
     that dies before the commit and runs again offers once, and one that dies
     between the commit and the offer offers nothing, and the run then asks
     for its frames itself. The answer reaches `decide`, which makes no offer.
+    A Stop that closes the turn once the pause committed cancels the
+    retrievals the offer started (`EarlyMints.cancel`), so nothing fetches
+    for the closed turn.
     """
     if early_mints is not None:
         offered = stored_plan(ctx.state.get("plan"), state_key="plan")
         if offered is not None and offered.status is PlanStatus.PENDING_APPROVAL:
+            conversation = current_conversation_id.get()
 
             async def start_retrievals() -> None:
                 early_mints.offer(offered)
 
             ctx.after_commit(start_retrievals)
+            ctx.on_cut_close(lambda: early_mints.cancel(offered, conversation=conversation))
     return Pause(kind=APPROVE_PAUSE, payload=node_input, message=APPROVE_MESSAGE)
 
 
@@ -96,6 +104,11 @@ def decide(
     carries the plan stamped with that time (`Plan.approved_at`), from which
     the approval's lifetime runs. An answer with no such time approves
     nothing and routes `amend`, as one naming another revision does.
+
+    The answer names under `run_id` the run the studio admitted with the
+    approval, when it admitted one, and the approval keeps it for `execute`
+    under `APPROVED_RUN_KEY`. An approving answer to a plan that no longer
+    awaits approval raises `ValueError` (`Plan.approve`) and fails the turn.
 
     An answer carrying `switch` (`{"choice_id", "option_id"}`, a scope choice
     the user moved on the card) routes `switch` to the `switch` node
@@ -142,11 +155,13 @@ def decide(
         # switched to the option it already has, it offers back unchanged
         # with `switch_failed`.
         return Next("switch", {"switch": switch})
-    approved_at = _answered_at(answer)
-    if answer.get("approved") != plan_revision(plan) or approved_at is None:
+    approved_at = _approval_time(plan, answer)
+    if approved_at is None:
         return Next("amend", {"plan": plan.model_dump(mode="json"), "answer": answer})
     approved = plan.approve(at=approved_at)
     ctx.state["plan"] = approved.model_dump_json()
+    run_id = answer.get("run_id")
+    ctx.state[APPROVED_RUN_KEY] = run_id if isinstance(run_id, str) else None
 
     async def record_approval() -> None:
         amended = approved.version > 1
@@ -159,7 +174,19 @@ def decide(
     return Next("approved", approved.model_dump(mode="json"))
 
 
-def _answered_at(answer: dict[str, Any]) -> datetime | None:
+def _approval_time(plan: Plan, answer: Mapping[str, Any]) -> datetime | None:
+    """When `answer`, one that switches nothing, approves `plan` by
+    `decide`'s rule: it names `plan`'s revision and says under `at`, as an
+    ISO 8601 time with its offset, when the user gave it. `None` for an
+    answer that approves nothing. Whether `plan` can still be approved is
+    `Plan.approve`'s to say."""
+    approved_at = _answered_at(answer)
+    if answer.get("approved") != plan_revision(plan) or approved_at is None:
+        return None
+    return approved_at
+
+
+def _answered_at(answer: Mapping[str, Any]) -> datetime | None:
     """When an approve answer says the user gave it, or `None` when it states
     no timezone-aware ISO 8601 time under `at`."""
     raw = answer.get("at")

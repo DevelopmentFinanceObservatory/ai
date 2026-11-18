@@ -3383,6 +3383,41 @@ async def test_approving_a_card_withdraws_its_early_calls_and_offering_it_does_n
     assert withdrawn == ["withdraw"]
 
 
+async def test_cancelling_a_cards_early_mints_stops_its_calls_sent_or_not_and_spares_a_newer_card(
+    real_schemas: list[ToolSchema], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A Stop that closed the turn which offered the card cancels its calls,
+    the one sent and the one still waiting for a slot, each logged
+    `cancelled`. A cancel naming a card a newer offer replaced does
+    nothing."""
+    hold = asyncio.Event()
+    sends = _EarlySends(hold=hold)
+    early = EarlyMints(send=sends, max_concurrent=1, settle_s=3.0)
+    plan = _with_retrievals(_planner_plan(schemas=real_schemas), 2)
+    conversation = current_conversation_id.get()
+    early.offer(plan)
+    await asyncio.sleep(0)
+    assert len(sends.sent) == 1
+
+    with caplog.at_level("INFO", logger="harness.early_mint"):
+        early.cancel(plan, conversation=conversation)
+        await asyncio.gather(*early._tasks, return_exceptions=True)
+
+    assert (len(sends.sent), sends.cancelled) == (1, 1)
+    lines = [r.getMessage() for r in caplog.records if r.name == "harness.early_mint"]
+    assert [line for line in lines if "outcome=cancelled" in line] == lines
+    assert len(lines) == 2
+
+    newer = _planner_plan(question="kenya debt, revised", schemas=real_schemas)
+    early.offer(newer)
+    await asyncio.sleep(0)
+    early.cancel(plan, conversation=conversation)
+    assert sends.cancelled == 1
+    hold.set()
+    await asyncio.gather(*early._tasks)
+    assert len(sends.sent) == 2
+
+
 async def test_closing_early_mints_cancels_the_calls_still_running(
     real_schemas: list[ToolSchema],
 ) -> None:

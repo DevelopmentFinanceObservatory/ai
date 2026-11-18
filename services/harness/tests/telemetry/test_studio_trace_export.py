@@ -26,7 +26,7 @@ from harness.studio import StudioRunner
 from harness.studio_relay import Channel
 from harness.studio_state import ConversationState
 from harness.studio_store import SegmentClose, Snapshot
-from harness.studio_stream import Emit, own_segment
+from harness.studio_stream import Emit, LockHold, own_segment
 from harness.turn.loop import Outcome
 from harness.wire import ErrorFrame, MessageDelta
 from langfuse import Langfuse
@@ -391,6 +391,7 @@ async def test_a_client_that_leaves_while_the_turn_runs_ends_the_turn_span_as_le
     work = _SlowWork(conversation)
     channel: Channel = asyncio.Queue()
     gone = asyncio.Event()
+    await conversation.lock.acquire()
     owner = asyncio.create_task(
         own_segment(
             work,
@@ -401,6 +402,7 @@ async def test_a_client_that_leaves_while_the_turn_runs_ends_the_turn_span_as_le
             segment_id="seg_1",
             channel=channel,
             gone=gone,
+            hold=LockHold(conversation.lock),
         )
     )
     await asyncio.wait_for(work.running.wait(), timeout=15)

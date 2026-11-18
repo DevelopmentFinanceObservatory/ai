@@ -59,6 +59,7 @@ from harness.studio_store import SegmentClose, Snapshot, closed_turn_error
 from harness.studio_stream import (
     Emit,
     Finish,
+    LockHold,
     Status,
     WorkEnd,
     ending,
@@ -787,6 +788,7 @@ async def _run_case(case: Case, spans: Spans) -> tuple[list[str], Run]:
             adk_id="i0", kind="plan", resuming_segment=SEGMENT
         )
     await conversation.lock.acquire()
+    hold = LockHold(conversation.lock)
     world = World(stored=_durable(conversation))
     run = Run(case, conversation, world)
     mark_approved_sent = conversation.mark_approved_sent
@@ -807,6 +809,7 @@ async def _run_case(case: Case, spans: Spans) -> tuple[list[str], Run]:
             segment_id=SEGMENT,
             channel=channel,
             gone=run.gone,
+            hold=hold,
         )
     )
     response = StudioStream(channel=channel, owner=owner, gone=run.gone, keepalive_s=60)
@@ -1065,6 +1068,7 @@ async def _owned(
     """Run the owner over `work` to its end; the frames it put on the
     channel, as the wire carries them."""
     channel: Channel = asyncio.Queue()
+    await conversation.lock.acquire()
     await own_segment(
         work,
         store=store,
@@ -1074,6 +1078,7 @@ async def _owned(
         segment_id=SEGMENT,
         channel=channel,
         gone=asyncio.Event(),
+        hold=LockHold(conversation.lock),
     )
     frames: list[dict[str, Any]] = []
     while (frame := channel.get_nowait()) is not None:
@@ -1090,6 +1095,34 @@ def _running(conversation: ConversationState, step_id: str, **fields: Any) -> Ac
         status=StepStatus.RUNNING,
         **{"tool": "get_data", **fields},
     )
+
+
+async def test_an_owner_whose_hold_let_go_leaves_the_next_request_s_lock_alone(
+    spans: Spans,
+) -> None:
+    """The owner lets go of the lock through the hold the route handed it.
+    A hold that already let go releases nothing, so the lock another
+    request took since stays held."""
+    conversation = ConversationState(conversation_id=CONVERSATION, trace_id="tr")
+    conversation.begin_turn()
+    await conversation.lock.acquire()
+    hold = LockHold(conversation.lock)
+    hold.release()
+    await conversation.lock.acquire()
+
+    await own_segment(
+        _ScriptedWork([], Outcome.FAILED),
+        store=_LandingStore(),
+        conversation=conversation,
+        principal=PRINCIPAL,
+        conversation_id=CONVERSATION,
+        segment_id=SEGMENT,
+        channel=asyncio.Queue(),
+        gone=asyncio.Event(),
+        hold=hold,
+    )
+
+    assert conversation.lock.locked()
 
 
 @pytest.mark.parametrize("outcome", [Outcome.CANCELLED, Outcome.FAILED, Outcome.LOST], ids=str)

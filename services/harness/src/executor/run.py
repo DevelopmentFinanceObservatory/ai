@@ -285,6 +285,7 @@ from executor.classify import (
 from executor.completion import ResultPublisher, publish_results
 from executor.ledger import (
     TERMINAL_STATUSES,
+    UNFINISHED_STATUSES,
     Attempt,
     AuthorisationExpiredError,
     Fail,
@@ -773,7 +774,9 @@ async def execute_authorised(
     carries that run on: one whose computation finished returns the outcome it
     recorded and only resumes publication, and one that was still computing
     runs its workflow again, the tools answering what the store already
-    holds. A key whose run failed admits a new run of the work. Every tool call
+    holds. A run the key names that is still `admitted`, as the studio
+    admits one with the plan's approval, starts here and counts no resume
+    (`RunRecord.resumes`). A key whose run failed admits a new run of the work. Every tool call
     is recorded as an attempt before it goes out, and the retrieved inputs are
     sealed, and checked against the authorisation's sources, before the first
     derived step. An accepted run then publishes each derived terminal frame
@@ -822,12 +825,10 @@ async def execute_authorised(
             refusal=RefusalKind.AUTHORISATION_MISMATCH,
             detail=f"the authorisation names work {authorised}, not {submission.revision}",
         )
-    candidate = new_run(
-        idempotency_key=idempotency_key,
-        submission_digest=submission_digest(
-            submission=submission, source_policy=authorisation.source_policy
-        ),
+    candidate = run_candidate(
+        submission,
         authorisation=authorisation,
+        idempotency_key=idempotency_key,
         now=datetime.now(UTC),
     )
     try:
@@ -837,8 +838,29 @@ async def execute_authorised(
         return Refused(
             revision=submission.revision, refusal=RefusalKind.AUTHORISATION_EXPIRED, detail=str(exc)
         )
+    # A run its key names that is still `admitted` was never computed, so
+    # computing it here starts it and counts no resume.
+    resumed = admission.resumed and admission.run.status is not RunStatus.ADMITTED
     return await _carry_out(
-        admission.run, submission, ledger=ledger, runtime=runtime, resumed=admission.resumed
+        admission.run, submission, ledger=ledger, runtime=runtime, resumed=resumed
+    )
+
+
+def run_candidate(
+    submission: Submission, *, authorisation: PlanApproval, idempotency_key: str, now: datetime
+) -> RunRecord:
+    """The `admitted` run `execute_authorised` asks its ledger to admit for
+    `submission` under `authorisation` and `idempotency_key`, minted at
+    `now`: its digest covers the submission and the approval's source
+    policy (`submission_digest`), so any caller admitting the same work
+    under the same key binds the same run."""
+    return new_run(
+        idempotency_key=idempotency_key,
+        submission_digest=submission_digest(
+            submission=submission, source_policy=authorisation.source_policy
+        ),
+        authorisation=authorisation,
+        now=now,
     )
 
 
@@ -890,7 +912,10 @@ async def resume_run(
 ) -> RunOutcome:
     """Carry an unfinished `run` of `ledger` on from `submission`, the one
     stored with it (`load_submission`), as `execute_authorised` carries on a
-    run its key already names. Raises as `execute_authorised` does."""
+    run its key already names. A later turn's carry-on: it counts a resume
+    for any unfinished run, an `admitted` one included, so a run whose start
+    keeps failing meets `MAX_PUBLICATION_RESUMES`. Raises as
+    `execute_authorised` does."""
     runtime = _Runtime(
         surface=surface,
         capabilities=capabilities,
@@ -923,8 +948,11 @@ async def _carry_out(
     """Take `run` to its outcome, or, when this process is already carrying
     it out, wait for that outcome without driving the run a second time. The
     driver starts from the ledger's current record, since `run` may be a
-    snapshot taken before an earlier driver finished. `resumed` says `run`
-    was admitted before this call, so driving it carries it on (`_drive`).
+    snapshot taken before an earlier driver finished. `resumed` says driving
+    `run` carries on a started run and counts a resume (`_compute`): a later
+    turn's `resume_run`, which counts an `admitted` run as started, or a
+    submission whose key names a run past `admitted`. A run still
+    `admitted` that its own submission finds is started, not resumed.
 
     A waiter cancelled leaves the run going on for the caller driving it. A
     driver cancelled before its computation finished fails the run
@@ -1120,7 +1148,7 @@ async def _abandoned(run_id: str, code: str, reason: str, *, ledger: RunLedger) 
     fails here is logged, so the caller's exception still propagates."""
     try:
         run = await ledger.get(run_id)
-        if run is not None and run.status in (RunStatus.ADMITTED, RunStatus.RUNNING):
+        if run is not None and run.status in UNFINISHED_STATUSES:
             await ledger.record(run_id, Fail(code, reason))
     except Exception:
         logger.exception("executor: could not record run %s as %s", run_id, code)
@@ -1144,6 +1172,122 @@ async def _failed(
         ledger, outcome.run_id, Fail(code, reason, outcome=outcome.model_dump(mode="json"))
     )
     return outcome
+
+
+@dataclass(frozen=True, kw_only=True)
+class ApprovedWork:
+    """What an approved plan runs as: the plan `running`, its `submission`,
+    the `authorisation` its approval grants and the run's `idempotency_key`."""
+
+    running: Plan
+    submission: Submission
+    authorisation: PlanApproval
+    idempotency_key: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class UnrunnablePlan:
+    """An approved plan `approved_work` finds nothing to run for: the `plan`
+    as its rules leave it and the `refused` outcome it answers with."""
+
+    plan: Plan
+    refused: Refused
+
+
+def approved_work(
+    plan: Plan, *, approver: str, conversation_id: str
+) -> ApprovedWork | UnrunnablePlan:
+    """The work approved `plan` runs as under `execute_approved_plan`'s rules,
+    or the `UnrunnablePlan` it cannot run as: `NOT_APPROVED` for a plan that
+    is not `APPROVED`, carries no workflow, or whose approval cannot be
+    stated (a workflow that retrieves no source), `STALE_REVISION` for one whose
+    content no longer hashes to its approved revision, and
+    `AUTHORISATION_EXPIRED`, the plan failed, for one with no approval time.
+    Its authorisation is a `PlanApproval` of the approved revision by
+    `approver` over every source the workflow retrieves, in force for
+    `PLAN_APPROVAL_TTL` from `approved_at`; its key names the approved
+    revision for `approver` in `conversation_id`. Pure: it reads and writes
+    no ledger, so the studio's interrupt route admits the same run in the
+    save that records the approval, and `execute_approved_plan` then
+    carries that run on. It raises nothing."""
+    if plan.status is not PlanStatus.APPROVED:
+        return UnrunnablePlan(
+            plan=plan,
+            refused=Refused(
+                revision=plan_revision(plan),
+                refusal=RefusalKind.NOT_APPROVED,
+                detail=f"this plan is {plan.status.value}, not approved; nothing runs",
+            ),
+        )
+    if plan.workflow is None:
+        return UnrunnablePlan(
+            plan=plan,
+            refused=Refused(
+                revision=plan_revision(plan),
+                refusal=RefusalKind.NOT_APPROVED,
+                detail="this plan carries no workflow; nothing runs",
+            ),
+        )
+    try:
+        running = plan.start_execution()
+    except ValueError as exc:
+        # Approved as different content: nothing runs.
+        return UnrunnablePlan(
+            plan=plan,
+            refused=Refused(
+                revision=plan_revision(plan), refusal=RefusalKind.STALE_REVISION, detail=str(exc)
+            ),
+        )
+    assert running.workflow is not None  # checked on `plan` above
+    # `start_execution` refuses a plan whose content does not hash to it.
+    assert running.approved_revision is not None
+    if running.approved_at is None:
+        return UnrunnablePlan(
+            plan=running.fail(),
+            refused=Refused(
+                revision=plan_revision(running),
+                refusal=RefusalKind.AUTHORISATION_EXPIRED,
+                detail="this plan carries no approval time, so it needs approving again",
+            ),
+        )
+    # The plan validated its own workflow and requirements.
+    submission = Submission.model_construct(
+        revision=plan_revision(running),
+        workflow=running.workflow,
+        requirements=tuple(
+            r for r in running.evidence_requirements if isinstance(r, DatasetRequirement)
+        ),
+    )
+    try:
+        authorisation = PlanApproval(
+            source_policy=submission.source_policy(),
+            expires_at=running.approved_at + PLAN_APPROVAL_TTL,
+            plan_version=running.version,
+            approved_revision=running.approved_revision,
+            approver=approver,
+            at=running.approved_at,
+        )
+    except ValidationError as exc:
+        # A workflow that retrieves no source has no source policy to
+        # authorise, and an approval that cannot be stated runs nothing.
+        return UnrunnablePlan(
+            plan=plan,
+            refused=Refused(
+                revision=plan_revision(plan),
+                refusal=RefusalKind.NOT_APPROVED,
+                detail=f"this plan's approval cannot be authorised: {exc}",
+            ),
+        )
+    return ApprovedWork(
+        running=running,
+        submission=submission,
+        authorisation=authorisation,
+        idempotency_key=idempotency_key(
+            caller=approver,
+            conversation_id=conversation_id,
+            task=f"plan:{running.approved_revision}",
+        ),
+    )
 
 
 async def execute_approved_plan(
@@ -1177,7 +1321,9 @@ async def execute_approved_plan(
     run, as is one whose approval has expired when a new run is admitted. The run's
     idempotency key names the approved revision (which covers the plan's
     version) for `approver` in `conversation_id`, so executing one revision
-    again, in any turn of the conversation, carries on its run. `ledger` keeps the run, a
+    again, in any turn of the conversation, carries on its run, the one the
+    studio admitted with the approval among them. The submission,
+    authorisation and key are `approved_work`'s. `ledger` keeps the run, a
     fresh `InMemoryRunLedger` by default.
 
     The plan's status follows its run's: `COMPLETED` once the run completed,
@@ -1212,52 +1358,15 @@ async def execute_approved_plan(
         LedgerUnavailableError: the ledger's store could not record or read
             the run (`execute_authorised`).
     """
-    if plan.status is not PlanStatus.APPROVED:
-        return plan, Refused(
-            revision=plan_revision(plan),
-            refusal=RefusalKind.NOT_APPROVED,
-            detail=f"this plan is {plan.status.value}, not approved; nothing runs",
-        )
-    try:
-        running = plan.start_execution()
-    except ValueError as exc:
-        # Approved as different content: nothing runs.
-        return plan, Refused(
-            revision=plan_revision(plan), refusal=RefusalKind.STALE_REVISION, detail=str(exc)
-        )
-    assert running.workflow is not None, "an EXECUTING plan always carries a workflow"
-    assert running.approved_revision is not None, "an EXECUTING plan was approved"
-    if running.approved_at is None:
-        return running.fail(), Refused(
-            revision=plan_revision(running),
-            refusal=RefusalKind.AUTHORISATION_EXPIRED,
-            detail="this plan carries no approval time, so it needs approving again",
-        )
-    # The plan validated its own workflow and requirements.
-    submission = Submission.model_construct(
-        revision=plan_revision(running),
-        workflow=running.workflow,
-        requirements=tuple(
-            r for r in running.evidence_requirements if isinstance(r, DatasetRequirement)
-        ),
-    )
+    work = approved_work(plan, approver=approver, conversation_id=conversation_id)
+    if isinstance(work, UnrunnablePlan):
+        return work.plan, work.refused
+    running = work.running
     ledger = ledger if ledger is not None else InMemoryRunLedger()
-    approval = PlanApproval(
-        source_policy=submission.source_policy(),
-        expires_at=running.approved_at + PLAN_APPROVAL_TTL,
-        plan_version=running.version,
-        approved_revision=running.approved_revision,
-        approver=approver,
-        at=running.approved_at,
-    )
     outcome = await execute_authorised(
-        submission,
-        authorisation=approval,
-        idempotency_key=idempotency_key(
-            caller=approver,
-            conversation_id=conversation_id,
-            task=f"plan:{running.approved_revision}",
-        ),
+        work.submission,
+        authorisation=work.authorisation,
+        idempotency_key=work.idempotency_key,
         ledger=ledger,
         surface=surface,
         publisher=publisher,

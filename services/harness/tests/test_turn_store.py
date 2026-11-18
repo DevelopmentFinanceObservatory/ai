@@ -89,9 +89,13 @@ async def test_the_turn_tables_apply_on_top_of_the_conversation_tables(
         shutil.copy(MIGRATIONS_DIR / name, tmp_path / name)
     await apply_pending(pg_empty_engine, directory=tmp_path)
 
-    shutil.copy(MIGRATIONS_DIR / "0003_turns.sql", tmp_path / "0003_turns.sql")
+    for name in ("0003_turns.sql", "0004_card_lineage.sql"):
+        shutil.copy(MIGRATIONS_DIR / name, tmp_path / name)
 
-    assert await apply_pending(pg_empty_engine, directory=tmp_path) == ["0003_turns.sql"]
+    assert await apply_pending(pg_empty_engine, directory=tmp_path) == [
+        "0003_turns.sql",
+        "0004_card_lineage.sql",
+    ]
     await _conversation(pg_empty_engine)
     cursor = await _open(TurnStore(pg_empty_engine))
     assert cursor.status is TurnStatus.RUNNING

@@ -92,6 +92,8 @@ from harness.graph.switch import APPLY_CHOICE_STEP_TOOL
 from harness.mcp_client import _manifest_summary
 from harness.orchestrator_tools import HANDED_OFF
 from harness.provenance import (
+    CARD_LINEAGE_KEY,
+    CardLineage,
     ProvenanceStore,
     manifest_with_stat_vars,
     retrieval_frame_ref,
@@ -440,6 +442,9 @@ class _ExecutorRecord:
     # reads it (`_RecordingExecutor._take_write_token`), for the stream's
     # owner to keep in the conversation with the card.
     write_token: str | None = None
+    # The lineage of the frame a drawn card rests on, taken off its result
+    # with the write token, which the card's write commits with the card.
+    card_lineage: CardLineage | None = None
 
 
 class _Records:
@@ -448,7 +453,12 @@ class _Records:
     segment's stream owner alone drains (`take`). `count` is how many records
     a conversation has had appended, which an event carries
     (`_EventRecords`), so that the owner takes exactly the records made
-    before it."""
+    before it. The counts never start afresh while the segment's stream
+    owner runs: an event still queued holds a count from before any drain,
+    so a count reused after a drain emptied the queue would hand that
+    event a record made after it. Once the owner ends, no event of the
+    segment is left to drain, and `forget` drops the conversation's records
+    and counts."""
 
     def __init__(self) -> None:
         self.items: list[_ExecutorRecord] = []
@@ -463,6 +473,12 @@ class _Records:
     def count(self, conversation: str) -> int:
         return self._appended.get(conversation, 0)
 
+    def forget(self, conversation: str) -> None:
+        """Drop this conversation's records and counts."""
+        self.items = [record for record in self.items if record.conversation != conversation]
+        self._appended.pop(conversation, None)
+        self._taken.pop(conversation, None)
+
     def take(self, conversation: str, upto: int | None = None) -> list[_ExecutorRecord]:
         """This conversation's records, preserving order: every one, or the
         ones appended before its `upto`th."""
@@ -476,12 +492,7 @@ class _Records:
             for record in self.items
             if record.conversation != conversation or id(record) in kept
         ]
-        if kept:
-            self._taken[conversation] = taken + count
-        else:
-            # Nothing of the conversation waits: its counts start afresh.
-            self._appended.pop(conversation, None)
-            self._taken.pop(conversation, None)
+        self._taken[conversation] = taken + count
         return took
 
 
@@ -535,10 +546,16 @@ class _RecordingExecutor:
         Never touches the conversation itself; a component with no matching
         record (this capability called directly, not through `__call__`
         first) leaves nothing to stamp and is silently a no-op."""
+        if (record := self._record_for(component)) is not None:
+            record.land = True
+
+    def _record_for(self, component: dict[str, Any]) -> _ExecutorRecord | None:
+        """The latest record whose result carries this exact `component`
+        object, matched by identity, or `None`."""
         for record in reversed(self._records.items):
             if record.result.get("component") is component:
-                record.land = True
-                break
+                return record
+        return None
 
     async def __call__(
         self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
@@ -557,7 +574,8 @@ class _RecordingExecutor:
             )
             raise
         token = self._take_write_token(tool=tool, args=args, result=result)
-        self._record(tool, args, result, started=started, write_token=token)
+        lineage = result.pop(CARD_LINEAGE_KEY, None)
+        self._record(tool, args, result, started=started, write_token=token, card_lineage=lineage)
         return result
 
     def record_step(
@@ -581,6 +599,7 @@ class _RecordingExecutor:
         started: float,
         step_id: str | None = None,
         write_token: str | None = None,
+        card_lineage: CardLineage | None = None,
     ) -> None:
         """Record one call; its step is `step_id`, or the current step when that is `None`."""
         self._records.append(
@@ -592,6 +611,7 @@ class _RecordingExecutor:
                 conversation=current_conversation_id.get(),
                 step_id=step_id if step_id is not None else current_step_id.get(),
                 write_token=write_token,
+                card_lineage=card_lineage,
             )
         )
 
@@ -624,10 +644,14 @@ class _RecordingExecutor:
         """The write token of the recorded write that returned `component`
         (matched by identity, as `land_component` matches), read without
         taking the record."""
-        for record in reversed(self._records.items):
-            if record.result.get("component") is component:
-                return record.write_token
-        return None
+        record = self._record_for(component)
+        return record.write_token if record is not None else None
+
+    def card_lineage(self, component: dict[str, Any]) -> CardLineage | None:
+        """The frame lineage of the recorded write that returned `component`
+        (matched by identity, as `write_token` matches)."""
+        record = self._record_for(component)
+        return record.card_lineage if record is not None else None
 
     def count(self, conversation: str) -> int:
         """How many records this conversation has had appended (`_Records`)."""
@@ -637,6 +661,11 @@ class _RecordingExecutor:
         """Take (only) this conversation's records, preserving order: every
         one, or those appended before its `upto`th (`_Records.take`)."""
         return self._records.take(conversation, upto)
+
+    def release(self, conversation: str) -> None:
+        """Drop this conversation's records and counts once its segment's
+        stream owner has ended (`_Records.forget`)."""
+        self._records.forget(conversation)
 
     async def aclose(self) -> None:
         """Release the wrapped executor's resources, if it holds any.
@@ -993,6 +1022,15 @@ class _RecordingSurface:
                 key: started for key, started in self._in_flight.items() if key[0] != conversation
             }
         return self._records.take(conversation, upto)
+
+    def release(self, conversation: str) -> None:
+        """Drop this conversation's records, counts and calls still in
+        flight once its segment's stream owner has ended
+        (`_Records.forget`)."""
+        self._in_flight = {
+            key: started for key, started in self._in_flight.items() if key[0] != conversation
+        }
+        self._records.forget(conversation)
 
     def count(self, conversation: str) -> int:
         """How many records this conversation has had appended (`_Records`)."""
@@ -2022,6 +2060,7 @@ class _Translator:
                         intent=record.args.get("intent"),
                         created=created,
                         write_token=record.write_token,
+                        card_lineage=record.card_lineage,
                     )
                 )
         return frames
@@ -2034,6 +2073,7 @@ class _Translator:
         created: ComponentCreated,
         intent: dict[str, Any] | None = None,
         write_token: str | None = None,
+        card_lineage: CardLineage | None = None,
     ) -> list[Any]:
         """Frames for `component`, which passed the `component.created` wire
         contract (`created` is the frame `_record_frames` built from it).
@@ -2049,27 +2089,37 @@ class _Translator:
         resolves to `"held"` inside `harness.studio_state.land_component`
         itself, also only `component.created`, and writes the card's entry
         with no block. The card's `write_token` is kept with it, in its
-        write, or in the conversation for the closing write when nothing
-        lands."""
+        write, and its `card_lineage` commits in that write. A card that does
+        not land keeps its token in the conversation for the closing write,
+        and stores no lineage."""
         created.seq = self._conversation.next_seq()
         if not land:
             if write_token:
                 self._conversation.write_tokens[created.component_id] = write_token
             return [created]
-        if await self._land(component, intent=intent, write_token=write_token) != "created":
+        landed = await self._land(
+            component, intent=intent, write_token=write_token, card_lineage=card_lineage
+        )
+        if landed != "created":
             return [created]
         # Read with no await since the landing, so this is the manifest it wrote.
         return [created, *self._composition_update()]
 
     async def _land(
-        self, component: dict[str, Any], *, intent: dict[str, Any] | None, write_token: str | None
+        self,
+        component: dict[str, Any],
+        *,
+        intent: dict[str, Any] | None,
+        write_token: str | None,
+        card_lineage: CardLineage | None = None,
     ) -> Literal["created", "held"]:
         """`harness.studio_state.land_component` on the current
         conversation, inside the store's card write
         (`StudioStore.change_canvas`), which hands it the canvas as stored
         and commits the block it appends with the card's digest entry, turn
-        line and write token. A held card appends no block, and its entry,
-        line and token commit the same way."""
+        line, write token and frame lineage (`card_lineage`). A held card
+        appends no block, and its entry, line and token commit the same way,
+        with no lineage."""
         key = current_conversation_key.get()
         assert key is not None, "a card lands only inside a conversation's stream"
 
@@ -2081,7 +2131,9 @@ class _Translator:
                 }
             return state_land_component(work, component, intent=intent)
 
-        return await self._recorder.store.change_canvas(*key, land)
+        return await self._recorder.store.change_canvas(
+            *key, land, lineage=card_lineage, landed=lambda landed: landed == "created"
+        )
 
     def _composition_update(self) -> list[CompositionUpdated]:
         """The `composition.updated` frame for the conversation's stored

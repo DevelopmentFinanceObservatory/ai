@@ -382,6 +382,12 @@ class _PendingInterrupt:
     # `plan.approved` frame (`harness.studio_stream`), so a retry resuming
     # the same answer sends it only when the dead attempt did not.
     approved_sent: bool = False
+    # The run the save that recorded this plan interrupt's approval admitted
+    # and left for `execute` to compute, `admitted` or `running`
+    # (`harness.studio._approval_admission`); None when it admitted none or
+    # the key named a finished run. A retry resuming the same answer names
+    # it to `approve` as the first did.
+    admitted_run: str | None = None
 
 
 # A conversation's active stream may run on any instance; this is the

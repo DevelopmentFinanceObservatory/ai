@@ -8,6 +8,7 @@ another instance's `request_cancel` records.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -1236,6 +1237,417 @@ async def test_a_stop_whose_renewal_lost_its_acknowledgement_still_reaches_the_n
     # The scope took the Stop, and the turn ended with no pause to record
     # it, so the turn closes on it.
     assert segment.outcome is Outcome.CANCELLED
+
+
+class _RenewalsFail(StudioStore):
+    """A `StudioStore` whose renewals fail, once `failing` is set, with the
+    lease deadline passed, so the heartbeat ends the segment `lost` while
+    the stored lease is still the segment's own."""
+
+    failing = False
+
+    async def renew(self, *args: Any, **kwargs: Any) -> Any:
+        if not self.failing:
+            return await super().renew(*args, **kwargs)
+        raise RuntimeError("the database cannot be reached")
+
+    def lease_deadline(self, principal: str, conversation_id: str) -> float:
+        return float("-inf") if self.failing else super().lease_deadline(principal, conversation_id)
+
+
+async def _cut_lease(pg_engine: AsyncEngine, clock: StoreClock, cut: str) -> StudioStore:
+    """The lease of the instance a test cuts by `cut`: a Stop posted from
+    another instance, or a lost lease (`_RenewalsFail`)."""
+    if cut == "stop":
+        return await _instance(pg_engine, clock)
+    return _RenewalsFail(pg_engine, **clock.store_kwargs)
+
+
+async def _make_cut(lease: StudioStore, other: StudioStore, cut: str) -> None:
+    """Cut the segment running under `lease` (`_cut_lease`)."""
+    if isinstance(lease, _RenewalsFail):
+        lease.failing = True
+        return
+    assert cut == "stop"
+    assert await other.request_cancel(PRINCIPAL, CONVERSATION)
+
+
+@pytest.mark.parametrize(
+    ("cut", "absorbs_by"),
+    [
+        ("stop", "returning"),
+        ("stop", "raising"),
+        ("stop", "after_commit"),
+        ("lost", "returning"),
+        ("lost", "after_final_commit"),
+    ],
+)
+async def test_a_cut_settles_the_turn_when_its_node_absorbs_the_cancellation(
+    pg_engine: AsyncEngine, clock: StoreClock, cut: str, absorbs_by: str
+) -> None:
+    """The heartbeat cancels the node, which catches the cancellation and
+    returns a result, raises an error of its own, or lets its work after
+    the commit catch it. The segment settles as when the cancellation
+    escapes, and no later node runs. A Stop closes the turn `cancelled` at
+    the node it cut and ends the Stop. A lost lease, renewals failing while
+    the stored lease is still the segment's, leaves the turn running as
+    last written, with nothing the node returned committed. A cut after
+    the turn's end committed leaves it `done`, its `NodeDone` reported."""
+    store = TurnStore(pg_engine)
+    lease_a = await _cut_lease(pg_engine, clock, cut)
+    lease_b = await _instance(pg_engine, clock)
+    segment_id = await _claim(lease_a)
+    ran: list[str] = []
+
+    async def absorb() -> None:
+        await _make_cut(lease_a, lease_b, cut)
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.sleep(3600)
+
+    async def work(ctx: NodeCtx, node_input: Any) -> Next:
+        ctx.state["work"] = "returned"
+        if absorbs_by in {"after_commit", "after_final_commit"}:
+            ctx.after_commit(absorb)
+            return Next("done" if absorbs_by == "after_final_commit" else "next")
+        await absorb()
+        if absorbs_by == "raising":
+            raise RuntimeError("the node's own error after the cancellation")
+        return Next("next")
+
+    async def later(ctx: NodeCtx, node_input: Any) -> Next:
+        ran.append("later")
+        return Next("done")
+
+    graph = Graph(
+        start="work",
+        nodes={"work": Node(run=work), "later": Node(run=later)},
+        edges={("work", "next"): "later", ("work", "done"): END, ("later", "done"): END},
+    )
+    events: list[TurnEvent] = []
+    opened = await _open(store, segment_id, graph)
+    segment = await asyncio.wait_for(_segment(store, lease_a, opened, segment_id, graph, events), 5)
+
+    assert ran == []
+    assert not [event for event in events if isinstance(event, TurnFailed)]
+    stored = await store.turn(opened.id)
+    if absorbs_by == "after_final_commit":
+        assert (segment.outcome, stored.status) == (Outcome.DONE, TurnStatus.DONE)
+        assert events == [NodeDone(node="work", label="done", output=None)]
+        return
+    if cut == "lost":
+        assert segment.outcome is Outcome.LOST
+        assert (stored.status, stored.node, stored.version) == (
+            TurnStatus.RUNNING,
+            "work",
+            opened.version,
+        )
+        assert "work" not in stored.state
+        return
+    assert segment.outcome is Outcome.CANCELLED
+    assert (stored.status, stored.error) == (TurnStatus.CANCELLED, None)
+    assert stored.node == ("later" if absorbs_by == "after_commit" else "work")
+    assert not await lease_b.stop_live(PRINCIPAL, CONVERSATION)
+
+
+class _CutAfterCommit(TurnStore):
+    """A `TurnStore` whose first `advance`, or first close `done`, commits
+    and then cuts the segment through `cut` before it returns, so the cut
+    lands while the write's acknowledgement is awaited."""
+
+    def __init__(self, engine: AsyncEngine, *, cut: Callable[[], Awaitable[None]]) -> None:
+        super().__init__(engine)
+        self._cut = cut
+        self._cuts = 1
+
+    async def _cut_once(self) -> None:
+        if self._cuts:
+            self._cuts -= 1
+            await self._cut()
+            await asyncio.sleep(3600)
+
+    async def advance(self, *args: Any, **kwargs: Any) -> Cursor:
+        written = await super().advance(*args, **kwargs)
+        await self._cut_once()
+        return written
+
+    async def finish(self, *args: Any, **kwargs: Any) -> Cursor:
+        written = await super().finish(*args, **kwargs)
+        if kwargs.get("status") is TurnStatus.DONE:
+            await self._cut_once()
+        return written
+
+
+@pytest.mark.parametrize("ends", [True, False], ids=["final-node", "middle-node"])
+@pytest.mark.parametrize("cut_at", ["acknowledgement", "after_commit", "after_after_commit"])
+async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
+    pg_engine: AsyncEngine, clock: StoreClock, cut_at: str, ends: bool
+) -> None:
+    """A lost lease cuts the segment once `work`'s move or end committed:
+    while the write's acknowledgement is awaited, during `work`'s work
+    after the commit, or once that work caught the cancellation and
+    returned. `work`'s `NodeDone` is reported once, before the segment
+    settles on the turn as stored: `done` for the final node, the move to
+    `later` for a middle one, with `later` never run."""
+    lease_a = _RenewalsFail(pg_engine, **clock.store_kwargs)
+    lease_b = await _instance(pg_engine, clock)
+
+    async def cut() -> None:
+        await _make_cut(lease_a, lease_b, "lost")
+
+    store: TurnStore = (
+        _CutAfterCommit(pg_engine, cut=cut) if cut_at == "acknowledgement" else TurnStore(pg_engine)
+    )
+    segment_id = await _claim(lease_a)
+    ran: list[str] = []
+    label = "done" if ends else "next"
+
+    async def escaping() -> None:
+        await cut()
+        await asyncio.sleep(3600)
+
+    async def absorbing() -> None:
+        await cut()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.sleep(3600)
+
+    async def work(ctx: NodeCtx, node_input: Any) -> Next:
+        if cut_at == "after_commit":
+            ctx.after_commit(escaping)
+        elif cut_at == "after_after_commit":
+            ctx.after_commit(absorbing)
+        return Next(label)
+
+    async def later(ctx: NodeCtx, node_input: Any) -> Next:
+        ran.append("later")
+        return Next("done")
+
+    graph = Graph(
+        start="work",
+        nodes={"work": Node(run=work), "later": Node(run=later)},
+        edges={("work", "next"): "later", ("work", "done"): END, ("later", "done"): END},
+    )
+    events: list[TurnEvent] = []
+    opened = await _open(store, segment_id, graph)
+    segment = await asyncio.wait_for(_segment(store, lease_a, opened, segment_id, graph, events), 5)
+
+    assert events == [NodeDone(node="work", label=label, output=None)]
+    assert ran == []
+    stored = await TurnStore(pg_engine).turn(opened.id)
+    if ends:
+        assert (segment.outcome, stored.status) == (Outcome.DONE, TurnStatus.DONE)
+    else:
+        assert segment.outcome is Outcome.LOST
+        assert (stored.status, stored.node) == (TurnStatus.RUNNING, "later")
+
+
+class _TakenOverAtTheWrite(TurnStore):
+    """A `TurnStore` whose first `advance` writes nothing of its own: segment
+    B takes the conversation's lease and makes the same move from the same
+    version, and the write then waits until the segment is cut."""
+
+    async def advance(self, cursor: Cursor, **kwargs: Any) -> Cursor:
+        async with self._engine.begin() as conn:
+            await conn.execute(text("UPDATE conversations SET lease_segment_id = 'segment-b'"))
+        await TurnStore(self._engine).advance(cursor, **{**kwargs, "segment_id": "segment-b"})
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable")
+
+
+async def test_a_cut_reports_no_node_done_for_a_move_another_segment_wrote(
+    pg_engine: AsyncEngine, clock: StoreClock
+) -> None:
+    """Another segment takes the lease while `work`'s move is being written
+    and writes that same move from the same version. The stored cursor is
+    one version on, at `later`, but its writer is the other segment, so the
+    cut segment ends `lost` and reports no `NodeDone`."""
+    store = _TakenOverAtTheWrite(pg_engine)
+    lease = await _instance(pg_engine, clock)
+    segment_id = await _claim(lease)
+
+    async def work(ctx: NodeCtx, node_input: Any) -> Next:
+        return Next("next")
+
+    graph = Graph(
+        start="work",
+        nodes={"work": Node(run=work), "later": _stays("later", ran=[])},
+        edges={("work", "next"): "later"},
+    )
+    events: list[TurnEvent] = []
+    opened = await _open(store, segment_id, graph)
+    segment = await asyncio.wait_for(_segment(store, lease, opened, segment_id, graph, events), 5)
+
+    stored = await store.turn(opened.id)
+    assert (stored.version, stored.node, stored.written_by) == (
+        opened.version + 1,
+        "later",
+        "segment-b",
+    )
+    assert segment.outcome is Outcome.LOST
+    assert events == []
+
+
+class _CloseFailsUnderACut(TurnStore):
+    """A `TurnStore` whose first close cuts the segment through `cut`,
+    catches the cancellation, and raises an error of its own, writing
+    nothing."""
+
+    def __init__(self, engine: AsyncEngine, *, cut: Callable[[], Awaitable[None]]) -> None:
+        super().__init__(engine)
+        self._cut = cut
+        self._failed = False
+
+    async def finish(self, *args: Any, **kwargs: Any) -> Cursor:
+        if not self._failed:
+            self._failed = True
+            await self._cut()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(3600)
+            raise RuntimeError("the close failed after the cancellation")
+        return await super().finish(*args, **kwargs)
+
+
+@pytest.mark.parametrize("closing", ["on_error", "on_taken_stop"])
+async def test_a_close_that_fails_under_a_cut_settles_on_the_cut(
+    pg_engine: AsyncEngine, clock: StoreClock, closing: str
+) -> None:
+    """The turn closes on a node's error, or on the Stop its scope took, and
+    the close fails while a lost lease cuts the segment. The segment settles
+    on the cut, `lost` with the turn left as last written, and reports no
+    `TurnFailed`."""
+    lease_a = _RenewalsFail(pg_engine, **clock.store_kwargs)
+    lease_b = await _instance(pg_engine, clock)
+    store = _CloseFailsUnderACut(pg_engine, cut=lambda: _make_cut(lease_a, lease_b, "lost"))
+    segment_id = await _claim(lease_a)
+
+    async def work(ctx: NodeCtx, node_input: Any) -> Next:
+        if closing == "on_error":
+            raise RuntimeError("the node failed")
+        # The scope took a Stop and the node leaves on an edge no pause
+        # records it on, so the turn closes on it.
+        ctx.stop.taken = "stop_taken"
+        return Next("done")
+
+    graph = Graph(start="work", nodes={"work": Node(run=work)}, edges={("work", "done"): END})
+    events: list[TurnEvent] = []
+    opened = await _open(store, segment_id, graph)
+    segment = await asyncio.wait_for(_segment(store, lease_a, opened, segment_id, graph, events), 5)
+
+    assert segment.outcome is Outcome.LOST
+    assert not [event for event in events if isinstance(event, TurnFailed)]
+    stored = await store.turn(opened.id)
+    assert (stored.status, stored.version) == (TurnStatus.RUNNING, opened.version)
+
+
+async def test_a_stop_that_closes_a_turn_whose_pause_committed_undoes_the_pausing_nodes_work(
+    pg_engine: AsyncEngine, clock: StoreClock
+) -> None:
+    """The node pauses, starting work after its pause commits, and a Stop
+    cuts the segment during that work. The turn closes `cancelled`, and
+    what the node registered to undo its work runs once."""
+    store = TurnStore(pg_engine)
+    lease_a, lease_b = await _instance(pg_engine, clock), await _instance(pg_engine, clock)
+    segment_id = await _claim(lease_a)
+    undone: list[str] = []
+
+    async def start_work() -> None:
+        await _make_cut(lease_a, lease_b, "stop")
+        await asyncio.sleep(3600)
+
+    async def ask(ctx: NodeCtx, node_input: Any) -> Pause:
+        ctx.after_commit(start_work)
+        ctx.on_cut_close(lambda: undone.append("work"))
+        return Pause(kind="ask", payload={}, message="Which donor?")
+
+    async def answered(ctx: NodeCtx, node_input: Any, answer: dict[str, Any]) -> Next:
+        return Next("next")
+
+    graph = Graph(
+        start="ask", nodes={"ask": Node(run=ask, resume=answered)}, edges={("ask", "next"): END}
+    )
+    opened = await _open(store, segment_id, graph)
+    segment = await asyncio.wait_for(_segment(store, lease_a, opened, segment_id, graph, []), 5)
+
+    assert segment.outcome is Outcome.CANCELLED
+    assert (await store.turn(opened.id)).status is TurnStatus.CANCELLED
+    assert undone == ["work"]
+
+
+class _WriteAbsorbsCut(TurnStore):
+    """A `TurnStore` whose `advance` or `record_answer` (`absorbing`) cuts
+    the segment through `cut`, catches the cancellation, and raises an
+    error of its own, writing nothing."""
+
+    def __init__(self, engine: AsyncEngine, *, absorbing: str, cut: Callable[[], Awaitable[None]]):
+        super().__init__(engine)
+        self._absorbing = absorbing
+        self._cut = cut
+
+    async def _absorb(self) -> None:
+        await self._cut()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.sleep(3600)
+        raise RuntimeError("the write failed after the cancellation")
+
+    async def advance(self, *args: Any, **kwargs: Any) -> Cursor:
+        if self._absorbing == "write":
+            await self._absorb()
+        return await super().advance(*args, **kwargs)
+
+    async def record_answer(self, *args: Any, **kwargs: Any) -> Cursor:
+        if self._absorbing == "answer":
+            await self._absorb()
+        return await super().record_answer(*args, **kwargs)
+
+
+@pytest.mark.parametrize("cut", ["stop", "lost"])
+@pytest.mark.parametrize("absorbing", ["write", "answer"])
+async def test_a_cut_a_boundary_write_absorbs_settles_the_turn_without_failing_it(
+    pg_engine: AsyncEngine, clock: StoreClock, cut: str, absorbing: str
+) -> None:
+    """The heartbeat cuts the segment inside the move's write after `work`,
+    or inside the acceptance of the answer to `ask`'s pause, and the write
+    catches the cancellation and raises an error of its own. The turn is
+    not closed `failed`: a Stop closes it `cancelled`, and a lost lease
+    leaves it as last written."""
+    lease_a = await _cut_lease(pg_engine, clock, cut)
+    lease_b = await _instance(pg_engine, clock)
+    store = _WriteAbsorbsCut(
+        pg_engine, absorbing=absorbing, cut=lambda: _make_cut(lease_a, lease_b, cut)
+    )
+    calls: list[str] = []
+
+    async def work(ctx: NodeCtx, node_input: Any) -> Next:
+        return Next("next")
+
+    graph = Graph(
+        start="ask" if absorbing == "answer" else "work",
+        nodes={"ask": _asking(calls), "work": Node(run=work)},
+        edges={("ask", "next"): END, ("work", "next"): "ask"},
+    )
+    segment_id = await _claim(lease_a)
+    events: list[TurnEvent] = []
+    answer: Answer | None = None
+    opened = await _open(store, segment_id, graph)
+    if absorbing == "answer":
+        await _segment(store, lease_a, opened, segment_id, graph, events)
+        [paused] = events
+        assert isinstance(paused, Paused)
+        answer = Answer(interrupt_id=paused.interrupt_id, round=1, value={"donor": "DAC"})
+        opened = await _open_cursor(store)
+        events.clear()
+    segment = await asyncio.wait_for(
+        _segment(store, lease_a, opened, segment_id, graph, events, answer=answer), 5
+    )
+
+    assert not [event for event in events if isinstance(event, TurnFailed)]
+    assert calls == (["run"] if absorbing == "answer" else [])
+    stored = await store.turn(opened.id)
+    if cut == "stop":
+        assert segment.outcome is Outcome.CANCELLED
+        assert (stored.status, stored.error) == (TurnStatus.CANCELLED, None)
+        return
+    assert segment.outcome is (Outcome.PAUSED if absorbing == "answer" else Outcome.LOST)
+    assert (stored.status, stored.version) == (opened.status, opened.version)
 
 
 async def test_a_cursor_owing_an_answer_the_store_lacks_closes_the_turn_failed(

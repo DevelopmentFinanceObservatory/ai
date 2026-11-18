@@ -25,8 +25,9 @@ different groups never conflict:
   compare-and-swapped on `version` and only while no lease is live.
 - `change_canvas` is a checkpoint with a card change applied: each card
   the turn lands, holds, swaps, revises or removes commits with its canvas
-  block and every other changed durable field in one transaction, fenced
-  on the segment.
+  block, every other changed durable field and a drawn card's frame lineage
+  (`conversation_card_lineage`, read back by `card_lineage`) in one
+  transaction, fenced on the segment.
 - `mutate_composition` writes the canvas column alone for each
   `/composition` edit, unfenced, and leaves `version` alone.
 - `renew` and `request_cancel` each update the lease columns in one
@@ -84,7 +85,7 @@ from typing import Any
 from compiler.surface import transient
 from executor.ledger import RunStatus
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
+from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.approval import ApprovalRecord
@@ -95,6 +96,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
 )
+from harness.provenance import CardLineage, CardLineageDecodeError, lineage_from_json
 from harness.run_ledger import end_unfinished
 from harness.studio_state import (
     SEGMENT_TTL_S,
@@ -344,6 +346,8 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             ),
             "card_new_plan": bool(p.card and p.card.new_plan),
             "approved_sent": p.approved_sent,
+            # Written only when set: an entry with no admitted run has no key.
+            **({"admitted_run": p.admitted_run} if p.admitted_run is not None else {}),
         }
         for interrupt_id, p in pending.items()
     }
@@ -377,6 +381,7 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
             else None
         ),
         approved_sent=bool(entry.get("approved_sent")),
+        admitted_run=entry.get("admitted_run"),
     )
     if "questions" in entry:
         pending.questions = tuple(
@@ -861,6 +866,80 @@ async def _run_delta_write(conn: AsyncConnection, pk: int, write: _DeltaWrite) -
     return version
 
 
+_INSERT_CARD_LINEAGE = text(
+    "INSERT INTO conversation_card_lineage (conversation, component_id, spec_id, "
+    "content_version, requested_spec_id, requested_content_version, members, stat_var_count) "
+    "VALUES (:pk, :component_id, :spec_id, :content_version, :requested_spec_id, "
+    ":requested_content_version, CAST(:members AS json), :stat_var_count) "
+    "ON CONFLICT (conversation, component_id) DO NOTHING"
+)
+
+# A card's stored lineage in conversation `:pk`: the row of card
+# `:component_id`, else one drawn from the frame `:spec_id`/`:content_version`,
+# else one whose write named that frame, the latest written first among equals,
+# leaving out the cards in `:skipped`, whose rows did not decode.
+# Cards on one frame share one lineage, so any of them serves.
+_SELECT_CARD_LINEAGE = text(
+    "SELECT component_id, spec_id, content_version, requested_spec_id, "
+    "requested_content_version, members, stat_var_count "
+    "FROM conversation_card_lineage WHERE conversation = :pk AND ("
+    "component_id = :component_id "
+    "OR (spec_id = :spec_id AND content_version = :content_version) "
+    "OR (requested_spec_id = :spec_id AND requested_content_version = :content_version)) "
+    "AND component_id <> ALL(:skipped) "
+    "ORDER BY COALESCE(component_id = :component_id, false) DESC, "
+    "COALESCE(spec_id = :spec_id AND content_version = :content_version, false) DESC, "
+    "created_at DESC, component_id "
+    "LIMIT 1"
+).bindparams(bindparam("skipped", type_=ARRAY(Text)))
+
+
+def _card_lineage_row(lineage: CardLineage) -> dict[str, Any] | None:
+    """`lineage` as the parameters of its row, its members as JSON text, or
+    `None`, logged at error, when JSON cannot hold them (a NaN or an
+    infinity among a manifest's values, which `json` would write as a bare
+    token Postgres refuses). The card then lands without its row."""
+    try:
+        members = json.dumps(lineage.members_json(), allow_nan=False)
+    except (TypeError, ValueError):
+        logger.exception(
+            "studio store: the lineage of component_id=%r cannot be stored as JSON; "
+            "the card lands without it",
+            lineage.component_id,
+        )
+        return None
+    requested = lineage.requested or (None, None)
+    return {
+        "component_id": lineage.component_id,
+        "spec_id": lineage.frame[0],
+        "content_version": lineage.frame[1],
+        "requested_spec_id": requested[0],
+        "requested_content_version": requested[1],
+        "members": members,
+        "stat_var_count": lineage.stat_var_count,
+    }
+
+
+async def _insert_card_lineage(conn: AsyncConnection, pk: int, row: Mapping[str, Any]) -> None:
+    """Store a card's lineage `row` (`_card_lineage_row`) on conversation `pk`,
+    in a savepoint, so a failed insert leaves the card's write to commit. A
+    card's lineage is written once: its frame never changes, and a write
+    retried after a commit whose acknowledgement was lost finds the row there.
+    A transient fault raises, for the whole write to be retried; any other
+    is logged at error and the card lands without its row."""
+    try:
+        async with conn.begin_nested():
+            await conn.execute(_INSERT_CARD_LINEAGE, {**row, "pk": pk})
+    except Exception as exc:
+        if transient(exc):
+            raise
+        logger.exception(
+            "studio store: the lineage of component_id=%r was not stored; the card lands "
+            "without it",
+            row["component_id"],
+        )
+
+
 def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any]) -> None:
     """Keep the plan records, search readings, spec blocks and applied chip
     `state`, a turn's state, holds, for `ConversationState.close_turn` to
@@ -946,10 +1025,15 @@ class StudioStore:
         self,
         engine: AsyncEngine,
         *,
+        lineage_engine: AsyncEngine | None = None,
         clock: Callable[[], float] = time.time,
         time_sql: str = DATABASE_NOW,
     ) -> None:
         self._engine = engine
+        # Card lineage reads run over their own pool
+        # (`harness.db.engine.DatabaseHandle.lineage_engine`); a test store
+        # passes none and reads over `engine`.
+        self._lineage_engine = lineage_engine or engine
         self._runtime: dict[tuple[str, str], _RuntimeEntry] = {}
         self._clock = clock
         self._time_sql = time_sql
@@ -1250,6 +1334,70 @@ class StudioStore:
         entry.claimed_reserved = target.seq + SEQ_BLOCK
         return segment.id
 
+    async def claim_turn_lease(self, principal: str, conversation_id: str) -> str:
+        """Claim the conversation's lease for a new turn and write the lease
+        alone, under the row lock, and return the segment's id. The turn
+        state and its version are left as stored, so a lapsed segment that
+        wrote them since this instance's `load` does not refuse the claim.
+        Once the claim commits, that segment's writes are fenced out: its
+        cursor writes on the lease id (`harness.turn.store`), its saves on
+        the live lease this claim holds. The claim reserves the new turn's
+        frame numbers, `0` to `SEQ_BLOCK` (`claim_segment`), and the caller
+        loads the conversation afresh before it begins the turn.
+
+        Raises:
+            SegmentBusy: the loaded lease had not lapsed by the database
+                clock's reading taken with the load.
+            ConversationStale: a lease another segment holds is live on the
+                row as locked.
+            StopPending: a Stop is live for the conversation's open turn
+                (`StopState.live`).
+        """
+        entry = self._runtime[(principal, conversation_id)]
+        assert entry.pk is not None and entry.state is not None
+        live = entry.state.segment
+        if live is not None and live.expires_at > entry.read_at:
+            raise SegmentBusy(retry_after_seconds=math.ceil(live.expires_at - entry.read_at))
+        segment_id = _wire_id("seg")
+        stamp = self._clock()
+        async with entry.write_lock:
+            async with self._transaction() as conn:
+                row = (await conn.execute(self._lock_conversation, {"pk": entry.pk})).first()
+                if row is None:
+                    raise ConversationStale(conversation_id)
+                stored_lease = _row_segment(row)
+                if stored_lease is not None and stored_lease.expires_at > row.db_now:
+                    raise ConversationStale(conversation_id)
+                if (await _stop_state(conn, row, lease_live=False)).live:
+                    raise StopPending(conversation_id)
+                claimed = (
+                    await conn.execute(
+                        text(
+                            "UPDATE conversations SET lease_segment_id = :segment_id, "
+                            "lease_owner = :owner, "
+                            f"lease_expires_at = {self._time_sql} + :ttl, "
+                            "seq_reserved = :reserved "
+                            "WHERE id = :pk RETURNING lease_expires_at"
+                        ),
+                        {
+                            "pk": entry.pk,
+                            "segment_id": segment_id,
+                            "owner": _OWNER_ID,
+                            "ttl": SEGMENT_TTL_S,
+                            "reserved": SEQ_BLOCK,
+                        },
+                    )
+                ).one()
+            segment = Segment(id=segment_id, owner=_OWNER_ID, expires_at=claimed.lease_expires_at)
+            entry.state.segment = segment
+            self._note_segment(entry, segment)
+            entry.lease_stamp = stamp
+            entry.held = segment_id
+            entry.seq_reserved, entry.claimed_reserved = SEQ_BLOCK, None
+            entry.claimed.set()
+            entry.claimed = asyncio.Event()
+        return segment_id
+
     async def save(
         self,
         principal: str,
@@ -1257,6 +1405,7 @@ class StudioStore:
         state: ConversationState | None = None,
         *,
         stopping: bool = False,
+        alongside: Callable[[AsyncConnection, int], Awaitable[None]] | None = None,
     ) -> None:
         """Write this instance's changed durable fields, compare-and-swapped
         on the turn state's version. Given `state`, the working copy `draft`
@@ -1282,13 +1431,24 @@ class StudioStore:
         for the conversation's turn as the locked row and its cursor stand
         (`StopState.live`), unless `stopping`: the claim then acts on the
         Stop, closing the turn `cancelled`.
+
+        `alongside`, when given, runs on the save's connection and in its
+        transaction, with the conversation's row id, once the row is locked
+        and the checks above passed and before the fields are written: what
+        it writes commits with the save or not at all, and anything it raises
+        rolls the save back and propagates. It may change the durable fields
+        of the state being saved, the segment excepted, and the save writes
+        what it changed. It runs even when no field
+        changed. The interrupt route admits an approved plan's run through it
+        (`harness.run_ledger.StudioRunLedger.admit_with_approval`) and names the run on
+        the pending interrupt.
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
         target = state if state is not None else entry.state
         async with entry.write_lock:
             delta = _changed_since(_serialize_durable(target), entry.baseline)
-            if not delta:
+            if not delta and alongside is None:
                 self._take_draft(entry, target)
                 return
             claimed = _deserialize_segment(delta.get(_KEY_SEGMENT))
@@ -1308,7 +1468,14 @@ class StudioStore:
                     lease_live = stored_lease is not None and stored_lease.expires_at > row.db_now
                     if (await _stop_state(conn, row, lease_live=lease_live)).live:
                         raise StopPending(conversation_id)
-                version = await self._write(conn, entry.pk, delta, seq_reserved=reserved)
+                if alongside is not None:
+                    await alongside(conn, entry.pk)
+                    delta = _changed_since(_serialize_durable(target), entry.baseline)
+                version = (
+                    await self._write(conn, entry.pk, delta, seq_reserved=reserved)
+                    if delta
+                    else row.version
+                )
             entry.version = version
             entry.baseline.update(delta)
             self._take_draft(entry, target)
@@ -1407,6 +1574,9 @@ class StudioStore:
         principal: str,
         conversation_id: str,
         change: Callable[[ConversationState], T],
+        *,
+        lineage: CardLineage | None = None,
+        landed: Callable[[T], bool] = bool,
     ) -> T:
         """The write of a card change the turn makes: each card it lands,
         holds, swaps, revises or removes. A checkpoint of the whole
@@ -1416,7 +1586,13 @@ class StudioStore:
         so a stored card always has its digest entry, write token and turn
         line beside it. No other field is written, so a write the turn's
         drive makes (`harness.studio_state.make_remove_cards`) commits
-        nothing the stream's owner has changed.
+        nothing the stream's owner has changed. `lineage`, the drawn card's
+        frame lineage, is serialised before the row lock is taken and commits
+        in the same transaction, once per card, when `landed` says from what
+        `change` returned that it wrote the card's block: a held card, or a
+        revise whose block is gone, stores none. A lineage that cannot be
+        stored leaves the card to land without it (`_card_lineage_row`,
+        `_insert_card_lineage`).
 
         Raises `SegmentLost` and writes nothing when the stored lease is not
         that segment, so a stream another instance took over lands no card.
@@ -1435,10 +1611,13 @@ class StudioStore:
         segment_id = state.segment.id if state.segment is not None else None
         if segment_id is None:
             raise SegmentLost(f"conversation {conversation_id!r} holds no segment")
+        row = _card_lineage_row(lineage) if lineage is not None else None
         return await self._retrying(
             entry,
             conversation_id,
-            lambda: self._fenced_save(entry, conversation_id, segment_id, change),
+            lambda: self._fenced_save(
+                entry, conversation_id, segment_id, change, lineage_row=row, landed=landed
+            ),
         )
 
     async def _retrying[T](
@@ -1486,12 +1665,16 @@ class StudioStore:
         change: Callable[[ConversationState], T],
         *,
         snapshot: Callable[[], Snapshot] | None = None,
+        lineage_row: Mapping[str, Any] | None = None,
+        landed: Callable[[T], bool] = bool,
     ) -> T:
         """`checkpoint` and `change_canvas`'s one write. Under the row lock
         and fenced on `segment_id`, run `change` on a one-level copy of the live
         state holding the canvas as stored, then write the copy's canvas when
         `change` replaced it, and the durable keys below whose value differs
-        from `entry.baseline`, in one transaction. Once it commits, record the
+        from `entry.baseline`, and `lineage_row` when given and `landed` holds
+        for what `change` returned, in one transaction.
+        Once it commits, record the
         written keys in the baseline and the version, and assign the canvas
         read back and each field `change` changed to the live state.
 
@@ -1535,6 +1718,8 @@ class StudioStore:
                         else None,
                     )
                 version = await self._write(conn, entry.pk, changed) if changed else row.version
+                if lineage_row is not None and landed(result):
+                    await _insert_card_lineage(conn, entry.pk, lineage_row)
             entry.version = version
             entry.baseline.update(changed)
             _assign_changed(state, work, base)
@@ -1970,6 +2155,69 @@ class StudioStore:
                     f"conversation {conversation_id!r} segment {segment_id!r} is not the lease"
                 )
             yield conn, pk
+
+    async def card_lineage(
+        self,
+        principal: str,
+        conversation_id: str,
+        *,
+        component_id: str | None = None,
+        frame: tuple[str | None, str | None] | None = None,
+    ) -> CardLineage | None:
+        """The stored lineage of card `component_id`, else of a card drawn from
+        `frame`, else of a card whose write named `frame`
+        (`harness.provenance.CardLineages`), read on the conversation this
+        instance loaded over the lineage engine, in one attempt with no lock
+        and no retry: the caller bounds the read and goes on without it. One
+        row is read; only when it does not decode, logged with its key, is the
+        next read, leaving it out. `None` when none is stored or none decodes.
+
+        Raises:
+            LookupError: This instance has not loaded the conversation.
+        """
+        spec_id, content_version = frame if frame is not None else (None, None)
+        if component_id is None and (spec_id is None or content_version is None):
+            return None
+        entry = self._runtime.get((principal, conversation_id))
+        if entry is None or entry.pk is None:
+            raise LookupError(f"conversation {conversation_id!r} is not loaded here")
+        skipped: list[str] = []
+        async with self._lineage_engine.begin() as conn:
+            while True:
+                row = (
+                    await conn.execute(
+                        _SELECT_CARD_LINEAGE,
+                        {
+                            "pk": entry.pk,
+                            "component_id": component_id,
+                            "spec_id": spec_id,
+                            "content_version": content_version,
+                            "skipped": skipped,
+                        },
+                    )
+                ).first()
+                if row is None:
+                    return None
+                try:
+                    lineage = lineage_from_json(row.members)
+                except CardLineageDecodeError:
+                    logger.exception(
+                        "studio store: skipping the lineage row of conversation %s "
+                        "component_id=%r, which does not decode",
+                        conversation_id,
+                        row.component_id,
+                    )
+                    skipped.append(row.component_id)
+                    continue
+                break
+        requested = (row.requested_spec_id, row.requested_content_version)
+        return CardLineage(
+            component_id=row.component_id,
+            frame=(row.spec_id, row.content_version),
+            lineage=lineage,
+            stat_var_count=row.stat_var_count,
+            requested=requested if requested != (None, None) else None,
+        )
 
     async def run_statuses(
         self, principal: str, conversation_id: str, *, conversation: ConversationState

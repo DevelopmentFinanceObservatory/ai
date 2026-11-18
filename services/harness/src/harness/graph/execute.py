@@ -46,6 +46,7 @@ from planner.plan import Plan as PlannerPlan
 from planner.plan import SessionState, aligned_pins, plan_revision, windowed_origins
 
 from harness import plan_display
+from harness.conversation import ledger_conversation_id
 from harness.graph.answer import (
     answer_frames,
     answer_notes,
@@ -57,6 +58,7 @@ from harness.graph.answer import (
 from harness.graph.events import GraphEvent, StepProgress
 from harness.graph.plan_done import StepSummary, authored_report
 from harness.graph.state import (
+    APPROVED_RUN_KEY,
     ORCHESTRATOR_ALIGNED_SERVED_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -64,7 +66,7 @@ from harness.graph.state import (
     stored_sequence,
 )
 from harness.scope_choices import served_facts
-from harness.turn.node import Next, Node, NodeCtx, TurnKey
+from harness.turn.node import Next, Node, NodeCtx
 from harness.turn_records import SearchReading
 
 logger = logging.getLogger(__name__)
@@ -293,16 +295,6 @@ def _step_progress(
     )
 
 
-def ledger_conversation(key: TurnKey) -> str:
-    """The conversation id a turn's runs are admitted under
-    (`executor.ledger.idempotency_key`): the principal and the conversation,
-    as the studio names the conversation to its tools
-    (`harness.conversation.current_conversation_id`). Every turn of the
-    conversation names the same one, so a later turn executing the same
-    revision carries the run on."""
-    return f"{key.principal}/{key.conversation_id}"
-
-
 def _mark_masked_step_failed(
     tool_surface: ToolSurface | None,
     outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused,
@@ -453,7 +445,7 @@ def execute_node(
 
         `execute_approved_plan` owns the run: its admission to `run_ledger`
         under the user's approval of the revision (the turn's user approved it
-        at `approve`), keyed on the conversation (`ledger_conversation`) so a
+        at `approve`), keyed on the conversation (`ledger_conversation_id`) so a
         later turn executing the same revision, or this node run again after
         a crash, carries the run on; per-step retry, the
         per-capability transport policy, the checks that turn a step's own
@@ -481,9 +473,10 @@ def execute_node(
         routes "ok" with no frames, standing `unfinished`
         (`executor.completion.unrecorded_hand_back`): it is left for the
         conversation's next turn to carry on, no replan is spent, and the
-        plan is left `EXECUTING`. A run the store could not admit stands
-        `not_started` (`run_not_started`): nothing was run, nothing carries
-        on, and the plan is left as approved.
+        plan is left `EXECUTING`. A run the store could not admit, and that
+        the approval admitted none of, stands `not_started`
+        (`run_not_started`): nothing was run, nothing carries on, and the
+        plan is left as approved.
         `MethodChoiceNeeded` and `RediscoveryNeeded` route "replan" while the budget allows and "ok"
         with `failed_step` once it is spent, the same as any other
         `Refused`. The "replan" refusal names the model's own steps and
@@ -523,6 +516,22 @@ def execute_node(
         the conversation's next turn carries it on (`harness.graph.resume`),
         as does this node run again from the cursor.
 
+        The run is usually admitted already: the studio's interrupt route admits
+        it in the save that records the approval, with the same candidate and
+        key, and stores its plan, which this node's store of it leaves as it is;
+        its admission then finds the run and computes it, counting no resume. A
+        store that cannot record that admission leaves the run the approval
+        admitted (`APPROVED_RUN_KEY`) held, standing `unfinished` under its id,
+        for the next turn to carry on; with none admitted it stands
+        `not_started`. A run whose `Start` the store keeps refusing stays
+        `admitted` and is carried on by each later turn
+        (`harness.graph.resume`), each counting a resume, until it fails
+        `computation_abandoned` at `MAX_PUBLICATION_RESUMES`. A turn that closes
+        `abandoned` or `failed` between the approval and this node leaves that
+        run unfinished for the next turn to carry on, as a crash after this
+        node's admission does; only a Stop, which closes the turn `cancelled`,
+        ends it.
+
         A plan stored in a shape this release does not read
         (`readable_plan`) runs nothing and spends no replan: it routes
         `"replan"` with `{"unreadable_plan": True}`, and `planner` drafts the
@@ -545,6 +554,7 @@ def execute_node(
             # The places only label the step lines, so the plan runs without them.
             logger.exception("execute: no plan card places for plan version %s", plan.version)
             places = {}
+        approved_run = ctx.state.get(APPROVED_RUN_KEY)
         await store_run_plan(run_ledger, revision=plan_revision(plan), plan=plan)
 
         def on_progress(step_id: str, report: ProgressReport) -> None:
@@ -561,7 +571,7 @@ def execute_node(
                 ledger=run_ledger,
                 publisher=publisher,
                 approver=ctx.key.principal,
-                conversation_id=ledger_conversation(ctx.key),
+                conversation_id=ledger_conversation_id(ctx.key.principal, ctx.key.conversation_id),
                 max_concurrent_steps=max_concurrent_steps,
                 fetch_series_stats=fetch_series_stats,
                 label_refs=label_refs,
@@ -569,10 +579,13 @@ def execute_node(
                 cancel_ends_run=lambda: ctx.stop.turn_stopped,
             )
         except LedgerUnavailableError as exc:
-            if exc.run_id is not None:
-                # The run started and is unfinished: the plan is executing.
+            # A run the approval admitted is held whatever this admission
+            # met, for the next turn to carry on.
+            held = exc.run_id or (approved_run if isinstance(approved_run, str) else None)
+            if held is not None:
+                # The run is admitted and unfinished: the plan is executing.
                 ctx.state["plan"] = plan.start_execution().model_dump_json()
-            return Next("ok", _without_figures(plan.version, run=unrecorded_hand_back(exc.run_id)))
+            return Next("ok", _without_figures(plan.version, run=unrecorded_hand_back(held)))
         ctx.state["plan"] = finished.model_dump_json()
         record_served_scopes(ctx.state, tool_surface, outcome)
         workflow = plan.workflow

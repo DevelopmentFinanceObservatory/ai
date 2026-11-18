@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import itertools
 import json
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -78,7 +79,7 @@ from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.plan_display import decision_option_id
 from harness.planner_adapter import PlannerAdapter
-from harness.provenance import ProvenanceStore
+from harness.provenance import CARD_FRAME_KEY, ProvenanceStore
 from harness.scripted import SCRIPTED_SPEC, ScriptedPlannerModel, ScriptedSurface
 from harness.sentences import FAILURE_CLASS, StopCode, refusal_sentence
 from harness.settings import Settings
@@ -102,7 +103,7 @@ from harness.studio_store import (
     StudioStore,
     _deserialize_pending,
 )
-from harness.studio_stream import Finish, WorkEnd, ending
+from harness.studio_stream import Finish, LockHold, WorkEnd, ending
 from harness.studio_translate import (
     STREAM_RETRY_AFTER_S,
     _RecordingExecutor,
@@ -165,6 +166,7 @@ from .scripted_tools import (
 )
 from .store_clock import StoreClock
 from .studio_routes import AUTH, ScriptLlm, orchestrator_app, stream, studio_client, turn_body
+from .test_turn_records import _top_donors
 from .turn_driver import CONVERSATION
 
 SPEC_A = "spec_" + "a" * 32
@@ -2368,10 +2370,12 @@ async def test_an_edit_card_stopped_and_left_before_its_next_renewal_is_recorded
 async def _close_claim_refused_before_its_save(monkeypatch: pytest.MonkeyPatch) -> None:
     app = _app(_text("Hello."))
 
-    async def claimed_elsewhere(principal: str, conversation_id: str, *args: Any) -> None:
+    async def claimed_elsewhere(
+        principal: str, conversation_id: str, *args: Any, **kwargs: Any
+    ) -> None:
         raise ConversationStale(conversation_id)
 
-    app.state.studio.store.save = claimed_elsewhere  # type: ignore[method-assign]
+    app.state.studio.store.claim_turn_lease = claimed_elsewhere  # type: ignore[method-assign]
     async with _client(app) as client:
         refused = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
     assert refused.status_code == 409
@@ -3544,12 +3548,14 @@ async def test_a_turn_whose_claim_loses_forgets_the_turn_it_began() -> None:
     )
     lock = store.lock_for(PRINCIPAL, CONVERSATION)
     app = _app(_text("Hello."), store=store)
-    save = store.save
+    claim = store.claim_turn_lease
 
-    async def claimed_elsewhere(principal: str, conversation_id: str, *args: Any) -> None:
+    async def claimed_elsewhere(
+        principal: str, conversation_id: str, *args: Any, **kwargs: Any
+    ) -> None:
         raise ConversationStale(conversation_id)
 
-    store.save = claimed_elsewhere  # type: ignore[method-assign]
+    store.claim_turn_lease = claimed_elsewhere  # type: ignore[method-assign]
 
     async with _client(app) as client:
         response = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
@@ -3559,7 +3565,7 @@ async def test_a_turn_whose_claim_loses_forgets_the_turn_it_began() -> None:
     assert (live.turn_index, live.segment) == (0, None)
     assert store.lock_for(PRINCIPAL, CONVERSATION) is lock
     assert not lock.locked()
-    store.save = save  # type: ignore[method-assign]
+    store.claim_turn_lease = claim  # type: ignore[method-assign]
     stored = await store.load(PRINCIPAL, CONVERSATION)
     assert stored is not None and (stored.turn_index, stored.segment) == (0, None)
 
@@ -4270,6 +4276,116 @@ async def test_a_cancel_on_a_lapsed_lease_fences_out_the_stream_still_running_un
     assert reloaded.turn_final_text == ""
 
 
+def _reading(checkpoint: int) -> dict[str, Any]:
+    """A search reading the turn's checkpoint `checkpoint` holds."""
+    return SearchReading(text=f"aid, checkpoint {checkpoint}", status="definite").model_dump(
+        mode="json"
+    )
+
+
+@pytest.mark.parametrize("lapsed", ["finishes_the_turn", "writes_continuously"])
+async def test_a_turn_claimed_over_a_lapsed_segment_records_its_last_write(
+    monkeypatch: pytest.MonkeyPatch, lapsed: str
+) -> None:
+    """A's turn is left running under a lease that lapsed, and A goes on
+    writing while B's `/turn` runs. Either A finishes the turn `done` after
+    B's load, its record unwritten, or A writes the turn's cursor and the
+    conversation's record over and over until B's claim fences it out. B
+    streams, and the turn A left is recorded from A's last write: the
+    finished turn with the readings, plans and specs its cursor holds, the
+    turn left running abandoned on A's last cursor and record."""
+    _, record = _top_donors()
+    plan = record.model_dump(mode="json")
+    used = record.sources[0].spec_id
+
+    def turn_state(checkpoint: int) -> dict[str, Any]:
+        return {
+            ORCHESTRATOR_SEARCHES_KEY: [_reading(checkpoint)],
+            ORCHESTRATOR_PLAN_RECORDS_KEY: [plan],
+            ORCHESTRATOR_SPECS_KEY: {used: {"spec_id": used}},
+        }
+
+    clock = await StoreClock.start(_engine())
+    store_a = StudioStore(_engine(), **clock.store_kwargs)
+    turns = turn_store_module.TurnStore(_engine())
+    state_a = await store_a.create(PRINCIPAL, CONVERSATION)
+    segment_a = store_a.claim_segment(PRINCIPAL, CONVERSATION)
+    state_a.begin_turn()
+    state_a.turn_user_message = "aid to Kenya"
+    await store_a.save(PRINCIPAL, CONVERSATION)
+    left = await turns.open_turn(
+        PRINCIPAL,
+        CONVERSATION,
+        segment_id=segment_a,
+        turn_index=1,
+        node="plan",
+        inputs={},
+        state=turn_state(1),
+    )
+    await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)  # A's lease has lapsed
+
+    store_b = StudioStore(_engine(), **clock.store_kwargs)
+    app_b = _app(_text("Hello."), store=store_b)
+    # A's last committed cursor checkpoint and record text.
+    last = {"checkpoint": 1, "text": ""}
+    writing: asyncio.Task[None] | None = None
+
+    async def write_until_fenced() -> None:
+        cursor = left
+        for checkpoint in itertools.count(2):
+            try:
+                cursor = await turns.advance(
+                    cursor,
+                    segment_id=segment_a,
+                    node="plan",
+                    node_input=None,
+                    state=turn_state(checkpoint),
+                )
+                last["checkpoint"] = checkpoint
+                state_a.turn_final_text = f"written by A at {checkpoint}"
+                await store_a.save(PRINCIPAL, CONVERSATION)
+                last["text"] = state_a.turn_final_text
+            except (SegmentLost, ConversationStale, CursorStale):
+                return
+
+    load = store_b.load
+
+    async def load_then_write(principal: str, conversation_id: str) -> Any:
+        nonlocal writing
+        loaded = await load(principal, conversation_id)
+        if writing is None:
+            if lapsed == "finishes_the_turn":
+                await turns.finish(
+                    left, segment_id=segment_a, status=TurnStatus.DONE, state=turn_state(1)
+                )
+                writing = asyncio.get_running_loop().create_task(asyncio.sleep(0))
+            else:
+                writing = asyncio.get_running_loop().create_task(write_until_fenced())
+                while last["checkpoint"] < 3:
+                    await asyncio.sleep(0)
+        return loaded
+
+    monkeypatch.setattr(store_b, "load", load_then_write)
+    async with _client(app_b) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body("hi"))
+    assert writing is not None
+    await asyncio.wait_for(writing, 5)
+
+    assert _events(frames)[-1] == "done"
+    stored = await turns.turn(left.id)
+    conversation = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert conversation is not None
+    first = conversation.turns[0]
+    assert first["readings"][0] == _reading(last["checkpoint"])
+    assert [p["revision"] for p in first["plans"]] == [plan["revision"]]
+    assert first["specs"] == {used: {"spec_id": used}}
+    if lapsed == "finishes_the_turn":
+        assert (stored.status, first["error"]) == (TurnStatus.DONE, "state_not_saved")
+    else:
+        assert (stored.status, first["error"]) == (TurnStatus.ABANDONED, "abandoned")
+        assert first["assistant"] == last["text"]
+
+
 class _CallingSurface(ScriptedSurface):
     """`ScriptedSurface`, recording the name of every tool it is called with."""
 
@@ -4639,19 +4755,21 @@ async def test_an_answer_after_a_refused_turn_resumes_on_the_paused_turn_s_span(
     the paused turn's trace id."""
     app = _app(*_plan(), tool_surface=ScriptedSurface())
     store = app.state.studio.store
-    real_save = store.save
+    real_claim = store.claim_turn_lease
     refused: list[str] = []
 
-    async def claimed_elsewhere(principal: str, conversation_id: str, *args: Any) -> None:
+    async def claimed_elsewhere(
+        principal: str, conversation_id: str, *args: Any, **kwargs: Any
+    ) -> None:
         refused.append(conversation_id)
         raise ConversationStale(conversation_id)
 
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
-        store.save = claimed_elsewhere  # type: ignore[method-assign]
+        store.claim_turn_lease = claimed_elsewhere  # type: ignore[method-assign]
         stale = await client.post("/api/studio/turn", json=_turn_body("other"), headers=AUTH)
-        store.save = real_save  # type: ignore[method-assign]
+        store.claim_turn_lease = real_claim  # type: ignore[method-assign]
         second = await _stream(
             client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
         )
@@ -5171,6 +5289,7 @@ async def test_component_ref_edit_patch_streams_component_revised() -> None:
         "intent": {"title": "Aid to Kenya, 2018-2024"},
         "component_id": "cmp_01test0001",
         "write_token": WRITE_TOKEN,
+        CARD_FRAME_KEY: STORED_INTENT["frame_ref"],
     }
 
 
@@ -5437,7 +5556,15 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
         records.extend(drained)
         return drained
 
+    release = _RecordingExecutor.release
+
+    def _keep_and_release(self: _RecordingExecutor, conversation: str) -> None:
+        # The records the stream did not translate, which its owner's end drops.
+        records.extend(self.drain(conversation))
+        release(self, conversation)
+
     monkeypatch.setattr(_RecordingExecutor, "drain", _drain_and_keep)
+    monkeypatch.setattr(_RecordingExecutor, "release", _keep_and_release)
     provenance = ProvenanceStore()
     provenance.put(conversation=f"{PRINCIPAL}/{CONVERSATION}", manifest={}, **REF_A)
     edit_model = ScriptedEditModel(
@@ -5470,6 +5597,7 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
     assert revise[0] == "write_component"
     assert revise[1]["component_id"] == component_id
     assert revise[1]["write_token"] == token
+    assert CARD_FRAME_KEY not in revise[1]
 
     conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
     assert conversation.write_tokens == {component_id: token}
@@ -5484,9 +5612,13 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
     ]
     assert "cmw_" not in json.dumps(client_visible, default=str)
     assert "cmw_" not in repr(conversation)
-    assert any(
-        record.tool == "write_component" and "component_id" in record.args for record in records
-    )
+    # The edit names the card's frame, read from its stored intent, so the
+    # executor reads the card's lineage without describing the card again.
+    assert [
+        record.args.get(CARD_FRAME_KEY)
+        for record in records
+        if record.tool == "write_component" and "component_id" in record.args
+    ] == [REF_A]
     assert "cmw_" not in json.dumps(
         [(record.args, record.result) for record in records], default=str
     )
@@ -5501,6 +5633,94 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded.write_tokens == {component_id: token}
     assert "cmw_" not in json.dumps(reloaded.components)
+
+
+@pytest.mark.parametrize(
+    ("edit", "event"),
+    [
+        pytest.param(
+            {"text": "Renamed.", "patch": {"title": "Aid to Kenya, 2018-2024"}, "recreate": None},
+            "component.revised",
+            id="revise",
+        ),
+        pytest.param(
+            {
+                "text": "Rebuilt.",
+                "patch": None,
+                "recreate": {"type": "stat_card", "title": "Aid", "select": {}},
+            },
+            "component.created",
+            id="recreate",
+        ),
+    ],
+)
+async def test_an_edit_on_another_instance_states_the_sources_and_count_of_the_first_draw(
+    monkeypatch: pytest.MonkeyPatch, edit: dict[str, Any], event: str
+) -> None:
+    """A card is drawn on one instance from a frame resting on two
+    retrievals whose step declared one StatVar, and edited on a second
+    instance whose provenance store is empty. The edit reads the lineage the
+    card's write stored with it, so the edited card states the same sources
+    and indicator count as the first draw."""
+    platform = _TokenIssuingPlatform()
+    monkeypatch.setattr(
+        McpTimeoutPolicy, "client", lambda self, url, *, auth, caller, tool=None: platform
+    )
+    conversation = f"{PRINCIPAL}/{CONVERSATION}"
+    drawn = ProvenanceStore()
+    retrievals = [
+        ({"spec_id": "spec_" + str(n) * 32, "content_version": "cv_" + str(n) * 32}, source)
+        for n, source in ((2, "src:a"), (3, "src:b"))
+    ]
+    for ref, source in retrievals:
+        manifest = {
+            "citation": {"text": source, "sources": [{"ref": source, "label": source}]},
+            "trace": {"resolved_stat_vars": [{"ref": f"dcid:{source}"}]},
+        }
+        drawn.put(conversation=conversation, manifest=manifest, **ref)
+    # The plan's chart names the plan's terminal frame, and the platform
+    # draws it from REF_A.
+    for frame in (REF_A, {"spec_id": "ops_" + "9" * 32, "content_version": "ocv_" + "9" * 32}):
+        assert drawn.alias(
+            conversation=conversation,
+            **frame,
+            sources=[(ref["spec_id"], ref["content_version"]) for ref, _ in retrievals],
+            stat_var_count=1,
+        )
+    first_store = StudioStore(_engine())
+    first = _app(
+        *_plan("q with forks", *_charts_the_plan()),
+        executor=McpExecutor(settings=Settings(), provenance=drawn, card_lineages=first_store),
+        store=first_store,
+        tool_surface=ScriptedSurface(),
+    )
+    async with _client(first) as client:
+        created = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(created, "plan.proposed")
+        resumed = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+    second_store = StudioStore(_engine())
+    second = _app(
+        executor=McpExecutor(
+            settings=Settings(),
+            provenance=ProvenanceStore(),
+            card_lineages=second_store,
+        ),
+        store=second_store,
+        edit_model=ScriptedEditModel(edit),
+    )
+    async with _client(second) as client:
+        edited = await _stream(client, "/api/studio/turn", _edit_body("change it"))
+
+    drawn_card = _frame(resumed, "component.created")
+    edited_card = _frame(edited, event)
+    assert [source["id"] for source in drawn_card["provenance"]["sources"]] == ["src:a", "src:b"]
+    assert drawn_card["fact_summary"]["attribution"]["indicator_count"] == 1
+    # The attribution names the sources and counts them and the indicators.
+    assert edited_card["fact_summary"]["attribution"] == drawn_card["fact_summary"]["attribution"]
+    if event == "component.created":
+        assert edited_card["provenance"]["sources"] == drawn_card["provenance"]["sources"]
 
 
 async def test_component_ref_edit_recreate_replaces_the_block_in_place() -> None:
@@ -6014,6 +6234,7 @@ async def test_a_revise_that_needs_another_frame_is_written_as_a_new_card_in_its
         "intent": patch,
         "component_id": "cmp_01test0001",
         "write_token": WRITE_TOKEN,
+        CARD_FRAME_KEY: STORED_INTENT["frame_ref"],
     }
     assert create == {
         "tool": "write_component",
@@ -7442,7 +7663,7 @@ async def _stop_after_the_turn_ended(row: _Row):
 async def _stop_before_the_claim_save(row: _Row):
     app = await row.build(*_card(), resolver=_HangingResolver(), heartbeat_seconds=0.1)
     store = app.state.studio.store
-    real = store.save
+    real = store.claim_turn_lease
     entered, go = asyncio.Event(), asyncio.Event()
 
     async def held(*args: Any, **kwargs: Any) -> Any:
@@ -7451,7 +7672,7 @@ async def _stop_before_the_claim_save(row: _Row):
             await go.wait()
         return await real(*args, **kwargs)
 
-    store.save = held
+    store.claim_turn_lease = held  # type: ignore[method-assign]
     async with _client(app) as client:
         stream = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
         await asyncio.wait_for(entered.wait(), timeout=5)
@@ -7713,22 +7934,22 @@ async def test_a_stop_that_lands_at_the_claim_save_closes_the_turn_and_the_retry
     stopped card's answer is refused, and the retried `/turn` streams."""
     app = _app(*_plan(), _text("Hello."))
     store = app.state.studio.store
-    real_save = store.save
+    real_claim = store.claim_turn_lease
     landed: list[bool] = []
 
     async def stop_lands_first(*args: Any, **kwargs: Any) -> Any:
-        if not landed and len(args) > 2:
-            # The claim save of the second `/turn`, which passes its working copy.
+        if not landed:
+            # The claim of the second `/turn`.
             landed.append(True)
             async with _engine().begin() as conn:
                 await conn.execute(text("UPDATE conversations SET lease_cancel = true"))
-        return await real_save(*args, **kwargs)
+        return await real_claim(*args, **kwargs)
 
     async with _client(app) as client:
         plan = _frame(
             await _stream(client, "/api/studio/turn", _turn_body("q with forks")), "plan.proposed"
         )
-        store.save = stop_lands_first
+        store.claim_turn_lease = stop_lands_first  # type: ignore[method-assign]
         refused = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
         assert landed
         stopped = await _turn_statuses()
@@ -8562,8 +8783,8 @@ async def test_the_lock_is_held_from_the_route_not_from_the_first_frame() -> Non
     store = StudioStore(_engine())
 
     first = await _acquire_or_conflict(store, "u_a", CONVERSATION)
-    assert isinstance(first, asyncio.Lock)
-    assert first.locked()
+    assert isinstance(first, LockHold)
+    assert first.lock.locked()
 
     second = await _acquire_or_conflict(store, "u_a", CONVERSATION)
     assert isinstance(second, JSONResponse)
@@ -8571,12 +8792,12 @@ async def test_the_lock_is_held_from_the_route_not_from_the_first_frame() -> Non
     assert json.loads(second.body)["error"] == "transient_unavailable"
 
     other = await _acquire_or_conflict(store, "u_a", "conv_01test0009")
-    assert isinstance(other, asyncio.Lock)
-    assert other is not first
+    assert isinstance(other, LockHold)
+    assert other.lock is not first.lock
 
     first.release()
     third = await _acquire_or_conflict(store, "u_a", CONVERSATION)
-    assert third is first
+    assert isinstance(third, LockHold) and third.lock is first.lock
 
 
 # --- conversation history: turn records and digest ----------------------------
@@ -9749,6 +9970,133 @@ async def test_a_request_cancelled_while_it_drops_its_claim_still_releases_the_l
     assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
     stored = await store.load(PRINCIPAL, CONVERSATION)
     assert stored is not None and stored.segment is None
+
+
+async def test_a_claim_whose_span_end_raises_still_releases_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/turn` claims, then its turn cannot be opened. Recording the span of
+    the claim it lets go of raises; the lock is released all the same."""
+    app = _app(_text("Hello."))
+    studio = app.state.studio
+
+    async def unavailable(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the turn cannot be opened")
+
+    def broken_record(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("telemetry is down")
+
+    monkeypatch.setattr(studio.turns, "open_turn", unavailable)
+    monkeypatch.setattr(studio_module, "record_unstreamed_span", broken_record)
+
+    with pytest.raises(RuntimeError, match="telemetry is down"):
+        await _turn_endpoint(studio)(
+            TurnRequest.model_validate(_turn_body("hi")), authorization=AUTH["Authorization"]
+        )
+
+    assert not studio.store.lock_for(PRINCIPAL, CONVERSATION).locked()
+
+
+async def test_a_request_cancelled_after_it_let_go_leaves_the_next_request_s_claim_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `/turn` refused as busy lets go of the lock, then waits on the
+    export of the span it recorded. Request B takes the lock and a working
+    copy, and A is cancelled during that export: B keeps both."""
+    app = _app(_text("Hello."))
+    studio = app.state.studio
+    store = studio.store
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("hi"))
+    other = StudioStore(_engine())
+    await other.load(PRINCIPAL, CONVERSATION)
+    await other.claim_turn_lease(PRINCIPAL, CONVERSATION)
+    flushing = asyncio.Event()
+
+    async def held_flush() -> None:
+        # Only A's first export waits; a second release by A returns.
+        if not flushing.is_set():
+            flushing.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(studio_module, "flush_telemetry", held_flush)
+    request_a = asyncio.ensure_future(
+        _turn_endpoint(studio)(
+            TurnRequest.model_validate(_turn_body("again")), authorization=AUTH["Authorization"]
+        )
+    )
+    await asyncio.wait_for(flushing.wait(), timeout=5)
+    lock = store.lock_for(PRINCIPAL, CONVERSATION)
+    assert not lock.locked()
+    await lock.acquire()
+    work_b = store.draft(PRINCIPAL, CONVERSATION)
+
+    request_a.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request_a
+
+    assert lock.locked()
+    draft = store._runtime[(PRINCIPAL, CONVERSATION)].draft
+    assert draft is not None and draft[0] is work_b
+
+
+async def test_a_turn_whose_body_never_starts_leaves_no_lock_or_lease() -> None:
+    """Under ASGI spec 2.3 Starlette reads the client's disconnect beside
+    the body, so a client already gone ends the response before the body's
+    first frame is pulled. The segment's owner runs as a task of its own
+    and still ends the segment: the lock is released, the lease cleared and
+    the turn left open, and the next `/turn`, on another instance, claims
+    and records it `abandoned`."""
+    app = _app(search_call("aid to Kenya"), resolver=_HangingResolver())
+    store = app.state.studio.store
+    body = json.dumps(_turn_body("hi")).encode()
+    received = 0
+
+    async def receive() -> dict[str, Any]:
+        nonlocal received
+        received += 1
+        if received == 1:
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        # A server's send yields to the loop, where the disconnect's
+        # cancellation lands before the body is pulled.
+        await asyncio.sleep(0)
+        sent.append(message)
+
+    path = "/api/studio/turn"
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"authorization", AUTH["Authorization"].encode()),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": ("127.0.0.1", 1),
+        "server": ("test", 80),
+    }
+    await asyncio.wait_for(app(scope, receive, send), timeout=10)
+
+    assert not any(message.get("body") for message in sent)
+    assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
+    stored = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert stored is not None and stored.segment is None and not stored.turn_recorded
+    async with _client(_app(_text("Again."))) as client:
+        again = await _stream(client, "/api/studio/turn", _turn_body("again"))
+    assert _frame(again, "done")
+    closed = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert closed is not None and closed.turns[0]["error"] == "abandoned"
 
 
 async def test_a_pause_frame_is_not_sent_when_its_closing_write_fails() -> None:

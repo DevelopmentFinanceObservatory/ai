@@ -125,7 +125,9 @@ class NodeCtx[E]:
     graph's own (`E`) or a `TurnEvent`.
     `stop` is the turn's `StopScope`. `after_commit` registers work that must
     follow the boundary's write, such as acknowledging what a hand-back
-    delivered.
+    delivered. `on_cut_close` registers what undoes that work when a cut
+    closes the turn after the node's pause committed, such as cancelling
+    the retrievals a plan card's offer started.
     """
 
     key: TurnKey
@@ -135,10 +137,16 @@ class NodeCtx[E]:
     emit: Callable[[E | TurnEvent], None]
     stop: StopScope
     committed: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
+    cut_closes: list[Callable[[], None]] = field(default_factory=list)
 
     def after_commit(self, work: Callable[[], Awaitable[None]]) -> None:
         """Run `work` once the write at this node's boundary commits."""
         self.committed.append(work)
+
+    def on_cut_close(self, undo: Callable[[], None]) -> None:
+        """Run `undo` when a cut (a Stop) closes the turn after this node's
+        pause committed (`harness.turn.loop.run_segment`)."""
+        self.cut_closes.append(undo)
 
 
 type Run[E] = Callable[[NodeCtx[E], Any], Awaitable[Next | Pause]]

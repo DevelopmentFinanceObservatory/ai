@@ -37,7 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextlib import (
     suppress,
 )
@@ -46,11 +46,20 @@ from typing import Any, Literal
 
 from common.telemetry import flush_telemetry
 from compiler.surface import ToolSurface
+from executor.ledger import UNFINISHED_STATUSES, submission_content
+from executor.run import UnrunnablePlan, approved_work, run_candidate
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
-from planner.plan import current_earlier_block, current_recorded_identity
+from planner.plan import (
+    PlanStatus,
+    current_earlier_block,
+    current_recorded_identity,
+    plan_revision,
+    stored_plan,
+)
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
@@ -58,6 +67,7 @@ from harness.conversation import (
     current_conversation_id,
     current_conversation_key,
     current_user_message,
+    ledger_conversation_id,
 )
 from harness.decision_pick import is_decision_choice
 from harness.early_mint import EarlyMints
@@ -69,6 +79,7 @@ from harness.graph.state import (
     TurnInput,
 )
 from harness.provenance import ProvenanceStore
+from harness.run_ledger import ApprovedRun, StudioRunLedger
 from harness.seeds import seeds_slot
 from harness.settings import Settings
 from harness.studio_edit import (
@@ -90,6 +101,7 @@ from harness.studio_state import (
     _PendingInterrupt,
     _PendingQuestion,
     _tool_error_response,
+    _wire_id,
     record_closed_turn_span,
     record_unstreamed_span,
     renew_lease_now,
@@ -99,9 +111,10 @@ from harness.studio_store import (
     ConversationStale,
     StopPending,
     StudioStore,
+    closed_turn_error,
     retry_delays,
 )
-from harness.studio_stream import Emit, LiveOwners, open_stream
+from harness.studio_stream import Emit, LiveOwners, LockHold, open_stream
 from harness.studio_translate import (
     RecordMarks,
     SegmentEvent,
@@ -511,7 +524,11 @@ class StudioRunner:
     (the owner's `settle`). A stream renews the conversation's lease every
     `heartbeat_seconds`. `owners` holds the owners of the streams running on
     this instance (`harness.studio_stream`), which the app's lifespan
-    shutdown waits for before it closes the database.
+    shutdown waits for before it closes the database. `run_ledger` is the
+    graph's ledger, through which `/interrupt` admits an approved plan's run
+    in the save that records the approval
+    (`harness.run_ledger.StudioRunLedger.admit_with_approval`); with none, `execute`
+    admits every run.
     """
 
     def __init__(
@@ -526,8 +543,10 @@ class StudioRunner:
         provenance: ProvenanceStore | None = None,
         early_mints: EarlyMints | None = None,
         heartbeat_seconds: float = HEARTBEAT_INTERVAL_S,
+        run_ledger: StudioRunLedger | None = None,
     ) -> None:
         self.edit_model = edit_model
+        self.run_ledger = run_ledger
         self.early_mints = early_mints
         self.store = store
         self.turns = turns
@@ -878,12 +897,14 @@ def _close_work(
     conversation: ConversationState, renew_now: asyncio.Event, runner: StudioRunner
 ) -> None:
     """Let go of a work's `renew_now`, when the conversation still holds it,
-    and empty the recorders of the calls its stream did not translate."""
+    and empty the recorders of the calls its stream did not translate,
+    their counts included, since no event of the segment is left to drain
+    (`harness.studio_translate._Records.forget`)."""
     if conversation.renew_now is renew_now:
         conversation.renew_now = None
-    runner.recorder.drain(current_conversation_id.get())
+    runner.recorder.release(current_conversation_id.get())
     if runner.surface_recorder is not None:
-        runner.surface_recorder.drain(current_conversation_id.get())
+        runner.surface_recorder.release(current_conversation_id.get())
 
 
 def _streaming_conflict_response(detail: str, *, retry_after_seconds: int = 5) -> JSONResponse:
@@ -998,24 +1019,25 @@ def _unknown_conversation_response(conversation_id: str) -> JSONResponse:
 
 async def _acquire_or_conflict(
     store: StudioStore, principal: str, conversation_id: str
-) -> asyncio.Lock | JSONResponse:
+) -> LockHold | JSONResponse:
     """Take the conversation's lock BEFORE loading or touching any turn
     state.
 
     The check-and-acquire pair has no suspension point between them on
     the uncontended fast path, so two concurrent requests cannot both
     pass. A lazily-acquired lock let them race past the 409 guard and
-    clobber each other's turn state and cancel event. The stream's owner
-    (`harness.studio_stream`) releases; early-exit route paths
-    must release explicitly. Returns the lock itself, not a conversation --
-    a lock exists (and can be contended) before this store has ever loaded
-    or created the conversation it names.
+    clobber each other's turn state and cancel event. The request lets go
+    of the hold on every early-exit path (`_release_claim`), or hands it to
+    the stream's owner (`harness.studio_stream.open_stream`), which lets go
+    once the segment ends. Returns the request's hold on the lock, not a
+    conversation, since a lock exists (and can be contended) before this
+    store has ever loaded or created the conversation it names.
     """
     lock = store.lock_for(principal, conversation_id)
     if lock.locked():
         return _streaming_conflict_response("another request is streaming on this conversation")
     await lock.acquire()
-    return lock
+    return LockHold(lock)
 
 
 class _ClaimLost(Exception):  # noqa: N818 -- names the outcome, not an error kind
@@ -1070,17 +1092,17 @@ async def _answer_after_stop(
     studio: StudioRunner,
     principal: str,
     conversation_id: str,
-    lock: asyncio.Lock,
+    hold: LockHold,
     then: Response,
     *,
     turn: ConversationState | None = None,
 ) -> Response:
-    """Close the turn a live Stop names (`_close_stopped_turn`), release
-    `lock` (`_unclaimed`, given `turn`), and answer that close's refusal,
+    """Close the turn a live Stop names (`_close_stopped_turn`), let go of
+    `hold` (`_unclaimed`, given `turn`), and answer that close's refusal,
     else `then`."""
     refused = await _close_stopped_turn(studio, principal, conversation_id)
     return await _unclaimed(
-        studio.store, principal, conversation_id, lock, refused or then, turn=turn
+        studio.store, principal, conversation_id, hold, refused or then, turn=turn
     )
 
 
@@ -1088,7 +1110,7 @@ async def _release_claim(
     store: StudioStore,
     principal: str,
     conversation_id: str,
-    lock: asyncio.Lock,
+    hold: LockHold,
     segment_id: str | None,
     *,
     cause: BaseException | None = None,
@@ -1105,8 +1127,13 @@ async def _release_claim(
     the exception that ended the request, gives `cancelled` when it is this
     task's own cancellation (the client gone) and `failed` otherwise, a
     `CancelledError` an inner task let out among them, and a refusal, with
-    no `cause`, gives `not_started`. Then `lock` is released and that span
-    is exported."""
+    no `cause`, gives `not_started`. Then `hold` lets go of the lock,
+    whatever recording the span raised, and that span is exported. It does
+    nothing once `hold` has let go: the working copy and the lease are then
+    another request's, so a request cancelled while it exports the span
+    leaves the next request's claim alone."""
+    if not hold.held:
+        return
     task = asyncio.current_task()
     status: UnstreamedStatus
     if cause is None:
@@ -1120,14 +1147,16 @@ async def _release_claim(
         if segment_id is not None:
             await store.drop_lease(principal, conversation_id, segment_id)
     finally:
-        if turn is not None:
-            record_unstreamed_span(
-                conversation_id,
-                trace_id=turn.trace_id,
-                user_message=turn.turn_user_message,
-                status=status,
-            )
-        lock.release()
+        try:
+            if turn is not None:
+                record_unstreamed_span(
+                    conversation_id,
+                    trace_id=turn.trace_id,
+                    user_message=turn.turn_user_message,
+                    status=status,
+                )
+        finally:
+            hold.release()
         if turn is not None:
             await flush_telemetry()
 
@@ -1282,7 +1311,7 @@ def _set_turn_context(
     same conversation_id must not share a canvas. The user's words are what
     a search sends. The budget bounds every model call the segment makes
     (`harness.turn_budget`)."""
-    current_conversation_id.set(f"{principal}/{conversation_id}")
+    current_conversation_id.set(ledger_conversation_id(principal, conversation_id))
     current_conversation_key.set((principal, conversation_id))
     current_user_message.set(conversation.turn_user_words)
     current_earlier_block.set(conversation.earlier_block)
@@ -1299,11 +1328,82 @@ def _same_open_pause(before: Cursor | None, after: Cursor | None) -> bool:
     return after.status is before.status and after.pause == before.pause
 
 
+def _approval_admission(
+    studio: StudioRunner,
+    state: Mapping[str, Any],
+    pending: _PendingInterrupt,
+    *,
+    at: datetime,
+    principal: str,
+    conversation_id: str,
+) -> Callable[[AsyncConnection, int], Awaitable[None]] | None:
+    """The write that admits the run of the plan the turn's `state` holds,
+    approved at `at` through plan interrupt `pending`, for `StudioStore.save`
+    to make in the transaction that records the approval (`alongside`).
+
+    The plan is the one `approve.decide` reads from the same cursor, approved
+    when it awaits approval as the revision `pending` is keyed on, as
+    `decide` approves it; its run is the candidate `execute_approved_plan`
+    builds (`approved_work`, `run_candidate`), which `studio.run_ledger`
+    stores with its plan and admits by `execute`'s rule
+    (`StudioRunLedger.admit_with_approval`). So `execute` finds the run its
+    key names and carries it on, and a turn that ends before `execute`
+    leaves the run for the next turn's `seed`. When the admission leaves
+    that run unfinished, the write names it on `pending` (`admitted_run`),
+    which the same save stores, so the answer to `approve` names it on this
+    attempt and on every retry resuming it.
+
+    None when there is nothing to admit: no Studio ledger, no plan the state
+    holds that this release reads, a plan keyed on another revision
+    (`decide` amends), a plan that no longer awaits approval (`decide`
+    raises in the turn), or one `approved_work` finds nothing to run for
+    (`execute` raises in the turn). It raises nothing."""
+    ledger = studio.run_ledger
+    if ledger is None:
+        return None
+    raw = state.get("plan")
+    plan = stored_plan(raw if isinstance(raw, str) else None, state_key="plan")
+    if (
+        plan is None
+        or plan.status is not PlanStatus.PENDING_APPROVAL
+        or plan_revision(plan) != pending.plan_revision
+    ):
+        return None
+    approved = plan.approve(at=at)
+    work = approved_work(
+        approved,
+        approver=principal,
+        conversation_id=ledger_conversation_id(principal, conversation_id),
+    )
+    if isinstance(work, UnrunnablePlan):
+        return None
+
+    def build(now: datetime) -> ApprovedRun:
+        return ApprovedRun(
+            candidate=run_candidate(
+                work.submission,
+                authorisation=work.authorisation,
+                idempotency_key=work.idempotency_key,
+                now=now,
+            ),
+            submission=submission_content(work.submission),
+            revision=plan_revision(approved),
+            plan=approved.model_dump_json(),
+        )
+
+    async def admit(conn: AsyncConnection, pk: int) -> None:
+        admitted = await ledger.admit_with_approval(conn, pk, build)
+        if admitted is not None and admitted.run.status in UNFINISHED_STATUSES:
+            pending.admitted_run = admitted.run.run_id
+
+    return admit
+
+
 async def _unclaimed(
     store: StudioStore,
     principal: str,
     conversation_id: str,
-    lock: asyncio.Lock,
+    hold: LockHold,
     response: Response,
     *,
     turn: ConversationState | None = None,
@@ -1311,7 +1411,7 @@ async def _unclaimed(
     """Answer `response` for a request whose claim save never committed,
     once it has let go of it (`_release_claim`, given `turn`), so the live
     state stays as loaded."""
-    await _release_claim(store, principal, conversation_id, lock, None, turn=turn)
+    await _release_claim(store, principal, conversation_id, hold, None, turn=turn)
     return response
 
 
@@ -1391,9 +1491,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         body: TurnRequest, authorization: str | None = Header(default=None)
     ) -> Response:
         principal = principal_for(authorization, settings=settings)
-        lock = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
-        if isinstance(lock, JSONResponse):
-            return lock
+        hold = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
+        if isinstance(hold, JSONResponse):
+            return hold
         # The segment this request claimed once its claim save landed, which
         # every failure before the stream starts releases, and the working
         # copy its claim began the turn on, whose trace records how it let
@@ -1406,7 +1506,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 if body.component_ref is not None or body.apply_choice is not None:
                     # The client refers to state (a card to edit or to follow
                     # up on, or a chip under an answer) this store never had.
-                    lock.release()
+                    hold.release()
                     return _unknown_conversation_response(body.conversation_id)
                 try:
                     conversation = await studio.store.create(principal, body.conversation_id)
@@ -1426,7 +1526,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 refused = await _close_stopped_turn(studio, principal, body.conversation_id)
                 if refused is not None:
                     return await _unclaimed(
-                        studio.store, principal, body.conversation_id, lock, refused
+                        studio.store, principal, body.conversation_id, hold, refused
                     )
                 conversation = await studio.store.load(principal, body.conversation_id)
                 assert conversation is not None
@@ -1437,7 +1537,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             ):
                 # A follow-up about a card this conversation never stored
                 # would run as a plain turn with no card in view.
-                lock.release()
+                hold.release()
                 return _tool_error_response(
                     ToolError(
                         error=ErrorCode.NOT_FOUND,
@@ -1454,95 +1554,108 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             if (pick := body.apply_choice) is not None:
                 label = _chip_label(conversation, pick)
                 if isinstance(label, JSONResponse):
-                    lock.release()
+                    hold.release()
                     return label
                 chip_label = label
-            # A turn still open on the conversation, paused on a question or
-            # left running by a segment whose lease lapsed, is abandoned once
-            # this request holds the lease. Its records are taken first, so
-            # `begin_turn` keeps them in the record it closes the turn with.
-            # A turn the tables record as open with no cursor closes on what
-            # the conversation holds. Every change up to the claim save is
-            # made on a working copy, which the save swaps into the live
-            # state once it commits. A request that claims nothing leaves
-            # the live state as loaded.
-            work = studio.store.draft(principal, body.conversation_id)
-            left_open = await studio.turns.open_cursor(principal, body.conversation_id)
-            if left_open is not None and not work.turn_recorded:
-                keep_turn_records(work, left_open.state)
-            abandoned = work.begin_turn()
-            begun = work
-            work.auto_add = body.auto_add
-            if pick is None:
-                work.turn_user_message = body.message
-                work.turn_user_words = body.message
-            else:
-                # The history record names the option the chip counts. Search
-                # would read its label as scope the user stated, so the words
-                # later searches send leave it out, as a plan card's switch does.
-                work.turn_user_message = f"count {chip_label}"
-                work.turn_user_words = ""
-                # The record's `spec_id` is the reading the `seed` node compiles,
-                # set once the chip applies, so the chip's own origin stays out.
-                work.turn_applied_choice = pick.model_dump(include={"choice_id", "option_id"})
-            # The segment lease: claimed on the working copy before the claim
-            # save below persists it, so the save's own compare-and-swap
-            # covers both in one write. `SegmentBusy` means a live segment,
-            # on this instance or another, already owns the conversation's
-            # stream. Its own `retry_after_seconds` is the ceiling of that
-            # segment's remaining TTL.
+            user_message = body.message if pick is None else f"count {chip_label}"
+            # The claim: the lease, written alone (`StudioStore.claim_turn_lease`),
+            # before the turn opens and before the SSE response starts. A
+            # segment whose lease lapsed can still write the turn left open
+            # (its cursor, its record) until the claim commits. From then on
+            # its writes are fenced out, so the turn is read below, under
+            # this request's lease, as that segment last wrote it.
+            # `SegmentBusy` and `ConversationStale` mean a live segment, on
+            # this instance or another, already owns the conversation's
+            # stream. `StopPending` means a Stop is live for the open turn,
+            # which ends that turn here, and the request is answered a
+            # retryable 409. Claiming first leaves no crash window: a crash
+            # after the claim leaves the turn index where it was, and the
+            # segment expires by its own TTL. The turn's trace is minted
+            # here, so a claim that fails ends a span on the trace the turn
+            # would have had (`_release_claim`).
+            begun = ConversationState(
+                conversation_id=body.conversation_id,
+                trace_id=_wire_id("tr"),
+                turn_user_message=user_message,
+            )
             try:
-                segment_id = studio.store.claim_segment(principal, body.conversation_id, work)
+                segment_id = await studio.store.claim_turn_lease(principal, body.conversation_id)
             except SegmentBusy as exc:
                 return await _unclaimed(
                     studio.store,
                     principal,
                     body.conversation_id,
-                    lock,
+                    hold,
                     _streaming_conflict_response(
                         "another request is streaming on this conversation",
                         retry_after_seconds=exc.retry_after_seconds,
                     ),
-                    turn=work,
+                    turn=begun,
                 )
-            # The claim: advancing turn_index (and the segment above) is
-            # saved before the turn opens and before the SSE response
-            # starts. This save is a compare-and-swap against what this
-            # instance last loaded, so a `ConversationStale` here means
-            # another instance's `/turn` claimed a turn on this conversation
-            # since. Claiming first leaves no crash window: a crash between
-            # the claim and the turn's opening leaves the store at the new
-            # turn_index with no turn open, and the next `/turn` claims the
-            # one after it. The segment it also claimed expires by its own
-            # TTL. The save refuses while a Stop is live for the open turn
-            # (`StopPending`), so the turn index stops at the open turn.
-            # A Stop that landed since the check above ends that turn
-            # here, and the request is answered a retryable 409.
-            try:
-                await studio.store.save(principal, body.conversation_id, work)
             except StopPending:
+                # A `ConversationStale` of its own kind, so it is caught first.
                 return await _answer_after_stop(
                     studio,
                     principal,
                     body.conversation_id,
-                    lock,
+                    hold,
                     _streaming_conflict_response(
                         "the conversation's previous turn was stopped", retry_after_seconds=1
                     ),
-                    turn=work,
+                    turn=begun,
                 )
             except ConversationStale:
                 return await _unclaimed(
                     studio.store,
                     principal,
                     body.conversation_id,
-                    lock,
+                    hold,
                     _streaming_conflict_response(
                         "another request is streaming on this conversation"
                     ),
-                    turn=work,
+                    turn=begun,
                 )
             claimed = segment_id
+            # Under the lease, the turn begins on the conversation and the
+            # turn left open as stored. A turn still open, paused on a
+            # question or left running by the lapsed segment, is closed
+            # `abandoned`, keeping its records. A turn whose cursor closed
+            # with its record left open (a closing write that never landed)
+            # is recorded as its cursor holds it, as `StudioStore.load`
+            # records one with no lease live. A turn the tables record as
+            # open with no cursor closes on what the conversation holds.
+            # Every change is made on a working copy, which the save swaps
+            # into the live state once it commits.
+            await studio.store.load(principal, body.conversation_id)
+            work = studio.store.draft(principal, body.conversation_id)
+            left_open = await studio.turns.open_cursor(principal, body.conversation_id)
+            if left_open is not None:
+                if not work.turn_recorded:
+                    keep_turn_records(work, left_open.state)
+                await abandon(studio.turns, left_open, segment_id=segment_id)
+            elif work.turn_index and not work.turn_recorded:
+                closed = await studio.turns.turn_at(
+                    principal, body.conversation_id, work.turn_index
+                )
+                if closed is not None:
+                    keep_turn_records(work, closed.state)
+                    work.close_turn(final_text="", error=closed_turn_error(closed))
+            abandoned = work.begin_turn()
+            work.trace_id = begun.trace_id
+            begun = work
+            work.auto_add = body.auto_add
+            work.turn_user_message = user_message
+            if pick is None:
+                work.turn_user_words = body.message
+            else:
+                # The history record names the option the chip counts. Search
+                # would read its label as scope the user stated, so the words
+                # later searches send leave it out, as a plan card's switch does.
+                work.turn_user_words = ""
+                # The record's `spec_id` is the reading the `seed` node compiles,
+                # set once the chip applies, so the chip's own origin stays out.
+                work.turn_applied_choice = pick.model_dump(include={"choice_id", "option_id"})
+            await studio.store.save(principal, body.conversation_id, work)
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
             if abandoned is not None:
@@ -1551,8 +1664,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # span.
                 record_closed_turn_span(body.conversation_id, abandoned)
             _set_turn_context(principal, body.conversation_id, conversation, settings)
-            if left_open is not None:
-                await abandon(studio.turns, left_open, segment_id=segment_id)
             if (
                 body.component_ref is not None
                 and body.component_ref.intent is ComponentRefIntent.EDIT
@@ -1577,6 +1688,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     principal=principal,
                     conversation_id=body.conversation_id,
                     segment_id=segment_id,
+                    hold=hold,
                 )
             focus = (
                 body.component_ref.component_id
@@ -1622,7 +1734,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 state=state,
                 records=[entries.user_message(text)],
             )
-            # The segment's owner takes the lease and the lock from here on.
+            # The segment's owner takes the lease and the lock hold from here on.
             return open_stream(
                 _SegmentWork(
                     studio,
@@ -1637,26 +1749,27 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 principal=principal,
                 conversation_id=body.conversation_id,
                 segment_id=segment_id,
+                hold=hold,
                 settle=studio.early_mints.settle if studio.early_mints is not None else None,
             )
         except BaseException as exc:
-            # The stream's owner releases the segment and the lock. A
-            # failure before the response starts streaming releases them
-            # here (`_release_claim`). Before the claim save commits, the
-            # working copy is given up and the live state stays as loaded.
-            # After it, the lease is dropped. The claim save already covers
-            # `begin_turn`'s effects, and a turn opened here stays open, so
-            # the next `/turn` closes both as it closes any open turn.
-            if lock.locked():
-                await _release_claim(
-                    studio.store,
-                    principal,
-                    body.conversation_id,
-                    lock,
-                    claimed,
-                    cause=exc,
-                    turn=begun,
-                )
+            # The stream's owner releases the segment and lets go of the
+            # lock hold. A failure before the owner starts releases them
+            # here (`_release_claim`), which does nothing once a refusal
+            # above let go of the hold. Before the claim commits, nothing is
+            # saved. After it, the lease is dropped and an unsaved working
+            # copy is given up. A turn the claim's holder abandoned, saved
+            # or opened stays as written, and the next `/turn` closes what
+            # is open as it closes any open turn.
+            await _release_claim(
+                studio.store,
+                principal,
+                body.conversation_id,
+                hold,
+                claimed,
+                cause=exc,
+                turn=begun,
+            )
             raise
 
     router.add_api_route("/turn", turn, methods=["POST"], route_class_override=_BoundedTurnRoute)
@@ -1811,9 +1924,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         body: InterruptResponse, authorization: str | None = Header(default=None)
     ) -> Response:
         principal = principal_for(authorization, settings=settings)
-        lock = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
-        if isinstance(lock, JSONResponse):
-            return lock
+        hold = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
+        if isinstance(hold, JSONResponse):
+            return hold
         # The working copy of a claim about to be saved, whose trace records
         # how a request let go of its claim before its stream started
         # (`_release_claim`).
@@ -1821,7 +1934,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
-                lock.release()
+                hold.release()
                 return _unknown_conversation_response(body.conversation_id)
             if await studio.store.stop_live(principal, body.conversation_id):
                 # A Stop live for the turn ends it first, which leaves no
@@ -1830,13 +1943,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     studio,
                     principal,
                     body.conversation_id,
-                    lock,
+                    hold,
                     _no_pending_interrupt_response(body.interrupt_id),
                 )
             pending = conversation.pending.get(body.interrupt_id)
             refusal = _interrupt_refusal(conversation.pending, body)
             if refusal is not None:
-                lock.release()
+                hold.release()
                 return refusal
             assert pending is not None  # narrowed by _interrupt_refusal
             # Every change up to the claim save is made on a working copy,
@@ -1885,7 +1998,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     studio.store,
                     principal,
                     body.conversation_id,
-                    lock,
+                    hold,
                     _no_pending_interrupt_response(body.interrupt_id),
                 )
             # The segment lease: claimed before the save below persists it.
@@ -1902,7 +2015,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     studio.store,
                     principal,
                     body.conversation_id,
-                    lock,
+                    hold,
                     _streaming_conflict_response(
                         "another request is streaming on this conversation",
                         retry_after_seconds=exc.retry_after_seconds,
@@ -1921,7 +2034,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     studio.store,
                     principal,
                     body.conversation_id,
-                    lock,
+                    hold,
                     _tool_error_response(
                         ToolError(
                             error=ErrorCode.EDIT_CONFLICT,
@@ -1951,7 +2064,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     studio,
                     principal,
                     body.conversation_id,
-                    lock,
+                    hold,
                     _no_pending_interrupt_response(body.interrupt_id),
                     turn=claiming,
                 )
@@ -1960,15 +2073,14 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     studio.store,
                     principal,
                     body.conversation_id,
-                    lock,
+                    hold,
                     _streaming_conflict_response("another request already answered this interrupt"),
                     turn=claiming,
                 )
         except BaseException:
-            if lock.locked():
-                await _release_claim(
-                    studio.store, principal, body.conversation_id, lock, None, turn=claiming
-                )
+            await _release_claim(
+                studio.store, principal, body.conversation_id, hold, None, turn=claiming
+            )
             raise
 
         # Every failure from here to the stream's start drops the lease the
@@ -1987,7 +2099,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             claimed = await studio.turns.open_cursor(principal, body.conversation_id)
             if not _same_open_pause(cursor, claimed):
                 await _release_claim(
-                    studio.store, principal, body.conversation_id, lock, segment_id, turn=claiming
+                    studio.store, principal, body.conversation_id, hold, segment_id, turn=claiming
                 )
                 return _tool_error_response(
                     ToolError(
@@ -2001,6 +2113,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             cursor = claimed
             work = studio.store.draft(principal, body.conversation_id)
             pending = work.pending[body.interrupt_id]
+            admission: Callable[[AsyncConnection, int], Awaitable[None]] | None = None
             # A switch revises the plan and approves nothing, so it leaves
             # no approval record.
             if (
@@ -2018,18 +2131,32 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # constructing the record ever raises, the entry is
                 # untouched and the interrupt can still be answered fresh.
                 assert pending.plan_revision is not None  # every plan interrupt carries one
-                work.approvals.append(
-                    ApprovalRecord(
-                        revision=pending.plan_revision,
-                        approver=principal,
-                        decision=_APPROVAL_DECISION[body.decision],
-                        at=datetime.now(UTC),
-                        conversation_id=body.conversation_id,
-                        interrupt_id=body.interrupt_id,
-                        plan_version=pending.plan_version,
-                        auth_enforced=settings.studio_api_token is not None,
-                    )
+                record = ApprovalRecord(
+                    revision=pending.plan_revision,
+                    approver=principal,
+                    decision=_APPROVAL_DECISION[body.decision],
+                    at=datetime.now(UTC),
+                    conversation_id=body.conversation_id,
+                    interrupt_id=body.interrupt_id,
+                    plan_version=pending.plan_version,
+                    auth_enforced=settings.studio_api_token is not None,
                 )
+                work.approvals.append(record)
+                if body.decision is InterruptDecision.APPROVE:
+                    # The approval and its run commit together: the save
+                    # below admits the run `execute` would, so a client
+                    # that leaves at any point after it has the plan carried
+                    # on by the next turn's `seed`.
+                    # A first answer answers the open pause on the claimed cursor.
+                    assert cursor is not None
+                    admission = _approval_admission(
+                        studio,
+                        cursor.state,
+                        pending,
+                        at=record.at,
+                        principal=principal,
+                        conversation_id=body.conversation_id,
+                    )
             # The entry is kept, marked resuming under this fresh segment.
             # A crash between this save and the resumed stream's closing
             # write still leaves a durable, retryable record. The stream's
@@ -2046,13 +2173,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     **work.turn_choice_baseline,
                 }
             try:
-                await studio.store.save(principal, body.conversation_id, work)
+                await studio.store.save(principal, body.conversation_id, work, alongside=admission)
             except ConversationStale:
                 # The lease this request holds refuses every other save, so
                 # only a takeover after it lapsed moves the conversation
                 # here, and nothing of the answer was stored.
                 await _release_claim(
-                    studio.store, principal, body.conversation_id, lock, segment_id, turn=claiming
+                    studio.store, principal, body.conversation_id, hold, segment_id, turn=claiming
                 )
                 return _tool_error_response(
                     ToolError(
@@ -2072,7 +2199,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # before anything below can run the graph or close the turn.
             if studio.surface_recorder is not None:
                 studio.surface_recorder.set_step_order(
-                    f"{principal}/{body.conversation_id}", pending.step_order, pending.step_labels
+                    ledger_conversation_id(principal, body.conversation_id),
+                    pending.step_order,
+                    pending.step_labels,
                 )
 
             if body.decision is InterruptDecision.REJECT:
@@ -2092,7 +2221,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                             value={"rejected": True},
                         ),
                     )
-                # The segment's owner takes the lease and the lock from here on.
+                # The segment's owner takes the lease and the lock hold from here on.
                 return open_stream(
                     _RejectWork(conversation),
                     owners=studio.owners,
@@ -2101,6 +2230,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     principal=principal,
                     conversation_id=body.conversation_id,
                     segment_id=segment_id,
+                    hold=hold,
                 )
 
             assert cursor is not None  # a paused or running turn, checked before the claim
@@ -2127,6 +2257,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # retry resuming the same answer later approves as of the same
                 # moment. The graph's `approve` node approves nothing without it.
                 answer = {"approved": pending.plan_revision}
+                if pending.admitted_run is not None:
+                    # The run the approval's save admitted, for `execute`.
+                    answer["run_id"] = pending.admitted_run
                 recorded = next(
                     (
                         r
@@ -2165,7 +2298,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 if body.decision is InterruptDecision.APPROVE and not pending.approved_sent
                 else None
             )
-            # The segment's owner takes the lease and the lock from here on.
+            # The segment's owner takes the lease and the lock hold from here on.
             return open_stream(
                 _SegmentWork(
                     studio,
@@ -2186,19 +2319,19 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 principal=principal,
                 conversation_id=body.conversation_id,
                 segment_id=segment_id,
+                hold=hold,
                 settle=studio.early_mints.settle if studio.early_mints is not None else None,
             )
         except BaseException as exc:
-            if lock.locked():
-                await _release_claim(
-                    studio.store,
-                    principal,
-                    body.conversation_id,
-                    lock,
-                    segment_id,
-                    cause=exc,
-                    turn=claiming,
-                )
+            await _release_claim(
+                studio.store,
+                principal,
+                body.conversation_id,
+                hold,
+                segment_id,
+                cause=exc,
+                turn=claiming,
+            )
             raise
 
     @router.post("/composition")

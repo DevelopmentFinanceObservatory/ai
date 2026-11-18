@@ -30,11 +30,14 @@ from executor.ledger import (
     RunStatus,
     idempotency_key,
 )
-from harness.conversation import current_conversation_key
+from harness.conversation import (
+    current_conversation_id,
+    current_conversation_key,
+    ledger_conversation_id,
+)
 from harness.graph import plan_done as plan_done_module
-from harness.graph.approve import APPROVE_MESSAGE
+from harness.graph.approve import APPROVE_MESSAGE, offer
 from harness.graph.events import StepProgress
-from harness.graph.execute import ledger_conversation
 from harness.graph.plan_done import (
     HandBack,
     StepSummary,
@@ -54,8 +57,9 @@ from harness.sentences import DECLINE_REASONS
 from harness.studio_state import ConversationState, SegmentLost
 from harness.turn.events import NodeDone, Paused
 from harness.turn.loop import Outcome, run_segment
-from harness.turn.node import TurnKey
+from harness.turn.node import NodeCtx, StopScope, TurnKey
 from harness.turn.store import TurnStatus
+from harness.turn.transcript import Transcript
 from harness.turn_records import PlanAsk, PlanRecord
 from planner.plan import AskAnswer, Decline, Plan, PlanStatus, UnsupportedOperation, load_asks
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -154,12 +158,16 @@ class _EarlyMints:
     def __init__(self) -> None:
         self.offered: list[str] = []
         self.withdrawn = 0
+        self.cancelled: list[tuple[str, str]] = []
 
     def offer(self, plan: Plan) -> None:
         self.offered.append(plan.model_dump_json())
 
     def withdraw(self) -> None:
         self.withdrawn += 1
+
+    def cancel(self, plan: Plan, *, conversation: str) -> None:
+        self.cancelled.append((plan.model_dump_json(), conversation))
 
 
 def _driver(
@@ -326,6 +334,34 @@ async def test_a_card_is_offered_for_early_retrieval_once_its_pause_commits(
     assert mints.withdrawn == 1
 
 
+async def test_a_card_offered_for_early_retrieval_is_cancelled_when_a_cut_closes_its_turn(
+    pg_engine: AsyncEngine,
+) -> None:
+    """The card's pause registers the cancel of its early calls, for the
+    conversation that offered it, to run when a Stop closes the turn after
+    the pause commits (`NodeCtx.on_cut_close`)."""
+    paused = await _driver(pg_engine, _planned("Charted.")).turn(_QUESTION)
+    mints = _EarlyMints()
+    ctx = NodeCtx(
+        key=TurnKey(PRINCIPAL, CONVERSATION, 1),
+        inputs={},
+        state={"plan": paused.cursor.state["plan"]},
+        transcript=Transcript([]),
+        emit=lambda event: None,
+        stop=StopScope(),
+    )
+    token = current_conversation_id.set("conversation-a")
+    try:
+        offer(ctx, paused.pause.payload, early_mints=mints)
+    finally:
+        current_conversation_id.reset(token)
+
+    assert mints.cancelled == []
+    (undo,) = ctx.cut_closes
+    undo()
+    assert mints.cancelled == [(paused.cursor.state["plan"], "conversation-a")]
+
+
 async def test_a_death_before_the_card_pause_commits_offers_the_card_once_on_the_rerun(
     pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -377,10 +413,10 @@ async def test_the_approved_plans_run_is_kept_in_the_conversations_ledger_under_
     assert run is not None and run.status is RunStatus.COMPLETED
     assert run.idempotency_key == idempotency_key(
         caller=PRINCIPAL,
-        conversation_id=ledger_conversation(TurnKey(PRINCIPAL, CONVERSATION, 1)),
+        conversation_id=ledger_conversation_id(PRINCIPAL, CONVERSATION),
         task=f"plan:{card.payload['revision']}",
     )
-    assert ledger_conversation(TurnKey(PRINCIPAL, CONVERSATION, 1)) == f"{PRINCIPAL}/{CONVERSATION}"
+    assert ledger_conversation_id(PRINCIPAL, CONVERSATION) == f"{PRINCIPAL}/{CONVERSATION}"
 
 
 class _ProcessDiedError(BaseException):

@@ -121,3 +121,59 @@ async def test_connector_backend_builds_the_connector_only_once_across_pooled_co
     assert len(fake_connector.connect_calls) == 2
 
     await database.aclose()
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        pytest.param(
+            Settings(database_url="postgresql+asyncpg://u@localhost/db"), id="database-url"
+        ),
+        pytest.param(
+            Settings(
+                session_store_instance_connection_name="my-project:my-region:my-instance",
+                session_store_database="sessions",
+                session_store_runtime_db_user="ai-run",
+                session_store_pool_size=4,
+                session_store_max_overflow=2,
+            ),
+            id="connector",
+        ),
+    ],
+)
+async def test_card_lineage_reads_get_a_pool_of_one_connection_of_their_own(
+    settings: Settings, fake_connector
+) -> None:
+    """The lineage engine shares no pool with the session store's engine, and
+    holds one connection with no overflow."""
+    database = build_database(settings=settings)
+    assert database is not None
+
+    assert database.lineage_engine is not database.engine
+    assert database.lineage_engine.pool is not database.engine.pool
+    # `size` and `_max_overflow` are on the `AsyncAdaptedQueuePool` the
+    # engine builds, not on the `Pool` it is typed as.
+    assert database.lineage_engine.pool.size() == 1  # type: ignore[attr-defined]
+    assert database.lineage_engine.pool._max_overflow == 0  # type: ignore[attr-defined]
+    assert database.lineage_engine.pool.timeout() == 1.5  # type: ignore[attr-defined]
+
+    await database.aclose()
+
+
+async def test_the_connector_backed_lineage_engine_bounds_each_statement(fake_connector) -> None:
+    """Its connections are dialled with asyncpg's `command_timeout`, so a
+    stalled lineage read cannot hold the pool's one connection."""
+    settings = Settings(
+        session_store_instance_connection_name="my-project:my-region:my-instance",
+        session_store_database="sessions",
+        session_store_runtime_db_user="ai-run",
+    )
+    database = build_database(settings=settings)
+    assert database is not None
+
+    with pytest.raises(RuntimeError, match="never dials a real Cloud SQL instance"):
+        async with database.lineage_engine.connect():
+            pass
+
+    assert fake_connector.connect_calls[-1]["command_timeout"] == 3.0
+    await database.aclose()

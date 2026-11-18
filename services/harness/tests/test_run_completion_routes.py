@@ -7,19 +7,33 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any
 
+import executor.run as run_module
+import harness.run_ledger as run_ledger_module
+import harness.studio as studio_module
 import harness.turn.store as turn_store_module
 import httpx2
 import pytest
 from compiler.surface import ProgressCallback, ToolCallResult
 from executor.completion import PUBLISH_ATTEMPTS
-from executor.ledger import RunRecord, RunStatus, idempotency_key
+from executor.ledger import (
+    Admission,
+    IdempotencyConflictError,
+    RunRecord,
+    RunStatus,
+    SourcePolicy,
+    idempotency_key,
+)
 from fastapi import FastAPI
 from google.genai import types
 from harness.conversation import current_conversation_key
 from harness.graph import answer as answer_module
+from harness.graph import approve as approve_module
+from harness.graph import execute as execute_module
 from harness.graph.state import frame_id_for
 from harness.run_ledger import StudioRunLedger
 from harness.scripted import ScriptedSurface
@@ -517,3 +531,432 @@ async def test_a_stop_that_cannot_end_the_runs_left_answers_retry_and_leaves_the
     assert run.failure is not None and run.failure.code == "cancelled"
     assert await app.state.studio.turns.open_cursor(PRINCIPAL, CONVERSATION) is None
     assert store.current(PRINCIPAL, CONVERSATION).turns[0]["error"] == "cancelled"
+
+
+# --- the approval admits its run ------------------------------------------------
+
+
+class _HangsOnce:
+    """Stands in for async callable `real`: its first call sets `entered`
+    and waits until cancelled, and every later call is `real`'s."""
+
+    def __init__(self, real: Any) -> None:
+        self.real = real
+        self.entered = asyncio.Event()
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if not self.entered.is_set():
+            self.entered.set()
+            await asyncio.Event().wait()
+        return await self.real(*args, **kwargs)
+
+
+def _hang_at(app: FastAPI, monkeypatch: pytest.MonkeyPatch, where: str) -> _HangsOnce:
+    """Hang the approval's resume once, at `where`: `record_answer`, the
+    turn store's write accepting the answer, the first write after the
+    route's save; or `execute`, the node's run of the plan, after the
+    boundary write moved the cursor there."""
+    if where == "record_answer":
+        turns = app.state.studio.turns
+        hang = _HangsOnce(turns.record_answer)
+        monkeypatch.setattr(turns, "record_answer", hang)
+    else:
+        hang = _HangsOnce(execute_module.execute_approved_plan)
+        monkeypatch.setattr(execute_module, "execute_approved_plan", hang)
+    return hang
+
+
+async def _approvals(engine: AsyncEngine) -> list[str]:
+    """The interrupt ids the stored conversation has approvals on record for."""
+    stored = await StudioStore(engine).load(PRINCIPAL, CONVERSATION)
+    assert stored is not None
+    return [record.interrupt_id for record in stored.approvals]
+
+
+async def _plans_stored(engine: AsyncEngine) -> int:
+    """How many plans the test's conversation keeps under `run_plans`."""
+    async with engine.connect() as conn:
+        return (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM run_plans p JOIN conversations c "
+                    "ON c.id = p.conversation WHERE c.principal = :principal "
+                    "AND c.conversation_id = :conversation_id"
+                ),
+                {"principal": PRINCIPAL, "conversation_id": CONVERSATION},
+            )
+        ).scalar_one()
+
+
+async def _admitted_run(engine: AsyncEngine, interrupt_id: str) -> str | None:
+    """The run the stored pending interrupt `interrupt_id` names as admitted."""
+    stored = await StudioStore(engine).load(PRINCIPAL, CONVERSATION)
+    assert stored is not None
+    return stored.pending[interrupt_id].admitted_run
+
+
+def _studio_app(store: StudioStore, *script: Any) -> tuple[FastAPI, Any, StudioRunLedger]:
+    """The studio over `store` and its own `StudioRunLedger`, the agent
+    answering `script` after the plan call."""
+    ledger = StudioRunLedger(store)
+    app, model = orchestrator_app(
+        plan_call("Kenya's debt service since 2015"),
+        *script,
+        tool_surface=ScriptedSurface(),
+        store=store,
+        run_ledger=ledger,
+    )
+    return app, model, ledger
+
+
+@pytest.mark.parametrize(
+    ("next_request", "resumes"),
+    [("turn", 1), ("interrupt", 0)],
+)
+@pytest.mark.parametrize("where", ["record_answer", "execute"])
+async def test_an_approval_a_client_left_before_execute_admitted_is_carried_on_by_the_next_request(
+    pg_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+    next_request: str,
+    resumes: int,
+) -> None:
+    """The client leaves after the route saved the approval and before
+    `execute` admits a run: before the turn store accepts the answer, or
+    once the cursor stands at `execute`. The save admitted the run with the
+    approval and stored its plan, so the stored approval, the run row and
+    the plan read together. The next request carries that one run on to its
+    chart with no new plan: a `/turn` through its `seed`, which counts one
+    resume, or a retried `/interrupt` of the same approval through
+    `execute`, which admits nothing new and starts the run, counting none."""
+    store = StudioStore(pg_engine)
+    app, model, ledger = _studio_app(store, *_charts_the_plan())
+    hang = _hang_at(app, monkeypatch, where)
+    async with studio_client(app) as client:
+        first = await stream(client, "/api/studio/turn", turn_body("Kenya's debt service?"))
+        interrupt_id = _frame(first, "plan.proposed")["interrupt_id"]
+        await _leaves_when(
+            app, "/api/studio/interrupt", _approve_body(interrupt_id), leave=hang.entered
+        )
+        assert await _approvals(pg_engine) == [interrupt_id]
+        (admitted,) = await _runs(pg_engine, ledger)
+        assert admitted.status is RunStatus.ADMITTED
+        assert await _admitted_run(pg_engine, interrupt_id) == admitted.run_id
+        assert await _plans_stored(pg_engine) == 1
+
+        if next_request == "turn":
+            frames = await stream(client, "/api/studio/turn", turn_body("Is it ready?"))
+            assert '{"runs"' in agent_read(model.requests[-2])
+        else:
+            frames = await stream(client, "/api/studio/interrupt", _approve_body(interrupt_id))
+
+    events = [frame["event"] for frame in frames]
+    assert "plan.proposed" not in events
+    assert "component.created" in events
+    assert await _approvals(pg_engine) == [interrupt_id]
+    (run,) = await _runs(pg_engine, ledger)
+    assert (run.run_id, run.status, run.resumes) == (
+        admitted.run_id,
+        RunStatus.COMPLETED,
+        resumes,
+    )
+
+
+@pytest.mark.parametrize(
+    ("where", "cause"),
+    [
+        pytest.param("admit_on", "the database went away", id="fault"),
+        pytest.param("admit_on", "already names run", id="conflict"),
+        pytest.param("build", "the submission cannot be read", id="build"),
+    ],
+)
+async def test_an_admission_refused_at_the_approval_leaves_the_approval_for_execute_to_run(
+    pg_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    where: str,
+    cause: str,
+) -> None:
+    """A store fault or a ledger refusal while the approval's save admits
+    the run, or a raise building what it writes, rolls back that admission
+    alone and is logged with its cause: the save commits the approval with
+    no run, no stored plan and no admitted run named, and `execute` then
+    admits the run and completes it."""
+    store = StudioStore(pg_engine)
+    app, _, ledger = _studio_app(store, *_charts_the_plan())
+    admit_on = run_ledger_module.admit_on
+
+    async def admits_then_refuses(conn: Any, pk: int, candidate: RunRecord, **kwargs: Any) -> Any:
+        await admit_on(conn, pk, candidate, **kwargs)
+        if cause == "already names run":
+            raise IdempotencyConflictError(candidate, "sha_other")
+        raise ConnectionError(cause)
+
+    def unreadable(submission: Any) -> Any:
+        raise ValueError(cause)
+
+    hang = _hang_at(app, monkeypatch, "record_answer")
+    async with studio_client(app) as client:
+        first = await stream(client, "/api/studio/turn", turn_body("Kenya's debt service?"))
+        interrupt_id = _frame(first, "plan.proposed")["interrupt_id"]
+        with monkeypatch.context() as patched:
+            if where == "admit_on":
+                patched.setattr(run_ledger_module, "admit_on", admits_then_refuses)
+            else:
+                patched.setattr(studio_module, "submission_content", unreadable)
+            await _leaves_when(
+                app, "/api/studio/interrupt", _approve_body(interrupt_id), leave=hang.entered
+            )
+        assert await _approvals(pg_engine) == [interrupt_id]
+        assert await _runs(pg_engine, ledger) == []
+        assert await _plans_stored(pg_engine) == 0
+        assert await _admitted_run(pg_engine, interrupt_id) is None
+
+        frames = await stream(client, "/api/studio/interrupt", _approve_body(interrupt_id))
+
+    assert "component.created" in [frame["event"] for frame in frames]
+    (run,) = await _runs(pg_engine, ledger)
+    assert (run.status, run.resumes) == (RunStatus.COMPLETED, 0)
+    (logged,) = [r for r in caplog.records if "admits no run" in r.getMessage()]
+    assert logged.exc_info is not None
+    assert cause in (logged.exc_text or logging.Formatter().formatException(logged.exc_info))
+
+
+@pytest.mark.parametrize(
+    ("status", "named"),
+    [(RunStatus.ADMITTED, True), (RunStatus.COMPLETED, False), (RunStatus.FAILED, False)],
+)
+async def test_the_approval_names_the_run_it_admitted_only_while_that_run_is_unfinished(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, status: RunStatus, named: bool
+) -> None:
+    """The pending interrupt names the run its approval's admission
+    answered only when `execute` still has that run to compute. A run the
+    key already names that completed or failed is named nowhere, so no
+    hand-back calls it unfinished."""
+    store = StudioStore(pg_engine)
+    app, _, _ = _studio_app(store)
+    admit_on = run_ledger_module.admit_on
+
+    async def dies(*args: Any, **kwargs: Any) -> SegmentClose:
+        """The stream's closing write, which would store the pending entry
+        again: only the approval's save stores it here."""
+        return SegmentClose.FAILED
+
+    async def answers_a_run(*args: Any, **kwargs: Any) -> Admission:
+        admission = await admit_on(*args, **kwargs)
+        return Admission(run=admission.run.model_copy(update={"status": status}), resumed=True)
+
+    monkeypatch.setattr(run_ledger_module, "admit_on", answers_a_run)
+    hang = _hang_at(app, monkeypatch, "record_answer")
+    async with studio_client(app) as client:
+        first = await stream(client, "/api/studio/turn", turn_body("Kenya's debt service?"))
+        interrupt_id = _frame(first, "plan.proposed")["interrupt_id"]
+        store.close_segment = dies  # type: ignore[method-assign]
+        await _leaves_when(
+            app, "/api/studio/interrupt", _approve_body(interrupt_id), leave=hang.entered
+        )
+
+    assert (await _admitted_run(pg_engine, interrupt_id) is not None) is named
+
+
+async def test_a_ledger_outside_the_conversation_store_admits_nothing_with_the_approval(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the default in-process ledger the approval's save writes no run
+    row and no plan to the conversation store; `execute` admits the run in
+    the ledger it keeps."""
+    app, _ = orchestrator_app(
+        plan_call("Kenya's debt service since 2015"),
+        *_charts_the_plan(),
+        tool_surface=ScriptedSurface(),
+        engine=pg_engine,
+    )
+    hang = _hang_at(app, monkeypatch, "record_answer")
+    async with studio_client(app) as client:
+        first = await stream(client, "/api/studio/turn", turn_body("Kenya's debt service?"))
+        interrupt_id = _frame(first, "plan.proposed")["interrupt_id"]
+        await _leaves_when(
+            app, "/api/studio/interrupt", _approve_body(interrupt_id), leave=hang.entered
+        )
+        assert await _approvals(pg_engine) == [interrupt_id]
+        assert await _admitted_run(pg_engine, interrupt_id) is None
+        frames = await stream(client, "/api/studio/interrupt", _approve_body(interrupt_id))
+
+    assert "component.created" in [frame["event"] for frame in frames]
+    async with pg_engine.connect() as conn:
+        rows = (await conn.execute(text("SELECT count(*) FROM runs"))).scalar_one()
+    assert rows == 0
+    assert await _plans_stored(pg_engine) == 0
+
+
+async def test_a_stop_after_an_approval_ends_the_run_it_admitted_and_the_next_turn_plans(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Stop after the approval, while `execute` has not yet started its
+    run, closes the turn `cancelled` and records the run the approval
+    admitted failed `cancelled`, so the next turn carries nothing on and
+    plans again."""
+    store = StudioStore(pg_engine)
+    app, _, ledger = _studio_app(store, plan_call("Kenya's debt service since 2016"))
+    hang = _hang_at(app, monkeypatch, "execute")
+    async with studio_client(app) as client:
+        first = await stream(client, "/api/studio/turn", turn_body("Kenya's debt service?"))
+        plan = _frame(first, "plan.proposed")
+        running = asyncio.ensure_future(
+            stream(client, "/api/studio/interrupt", _approve_body(plan["interrupt_id"]))
+        )
+        await asyncio.wait_for(hang.entered.wait(), timeout=10)
+        cancel = await client.post(
+            "/api/studio/cancel",
+            json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
+            headers=AUTH,
+        )
+        assert cancel.status_code == 204
+        await asyncio.wait_for(running, timeout=10)
+        frames = await stream(client, "/api/studio/turn", turn_body("And since 2016?"))
+
+    (run,) = await _runs(pg_engine, ledger)
+    assert run.status is RunStatus.FAILED
+    assert run.failure is not None and run.failure.code == "cancelled"
+    assert "plan.proposed" in [frame["event"] for frame in frames]
+
+
+@pytest.mark.parametrize("admitted_with_the_approval", [True, False])
+async def test_a_ledger_fault_at_execute_s_admission_hands_back_what_the_ledger_holds(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, admitted_with_the_approval: bool
+) -> None:
+    """The store faults when `execute` admits the run. When the approval
+    admitted it, the agent is told that run is unfinished, under its id, and
+    the next turn carries it on to its chart. When the approval admitted
+    none, the agent is told the run did not start, and no run is kept."""
+    store = StudioStore(pg_engine)
+    app, model, ledger = _studio_app(
+        store, types.Part.from_text(text="It is held."), *_charts_the_plan()
+    )
+    admit = ledger.admit
+    calls = 0
+
+    async def faults_once(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectionError("the run store is unreachable")
+        return await admit(*args, **kwargs)
+
+    async def faults(*args: Any, **kwargs: Any) -> Any:
+        raise ConnectionError("the run store is unreachable")
+
+    monkeypatch.setattr(ledger, "admit", faults_once)
+    if not admitted_with_the_approval:
+        monkeypatch.setattr(run_ledger_module, "admit_on", faults)
+    async with studio_client(app) as client:
+        first = await stream(client, "/api/studio/turn", turn_body("Kenya's debt service?"))
+        await stream(
+            client,
+            "/api/studio/interrupt",
+            _approve_body(_frame(first, "plan.proposed")["interrupt_id"]),
+        )
+        after_plan = agent_read(model.requests[-1])
+        held = await _runs(pg_engine, ledger)
+        if admitted_with_the_approval:
+            frames = await stream(client, "/api/studio/turn", turn_body("Is it ready?"))
+
+    body = json.loads(next(line for line in after_plan.split("\n") if line.startswith('{"frames"')))
+    if not admitted_with_the_approval:
+        assert body["run"]["status"] == "not_started"
+        assert held == []
+        return
+    (admitted,) = held
+    assert (body["run"]["status"], body["run"]["run_id"]) == ("unfinished", admitted.run_id)
+    assert admitted.status is RunStatus.ADMITTED
+    assert "component.created" in [frame["event"] for frame in frames]
+    (run,) = await _runs(pg_engine, ledger)
+    assert (run.run_id, run.status) == (admitted.run_id, RunStatus.COMPLETED)
+
+
+@pytest.mark.parametrize("status", ["approved", "executing"])
+async def test_an_approval_of_a_plan_no_longer_awaiting_it_admits_nothing_and_fails_the_turn(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """The cursor's plan no longer awaits approval, approved or already
+    executing. The route commits the answer and admits no run, and
+    `decide`, reading the same plan, raises and fails the turn."""
+    store = StudioStore(pg_engine)
+    app, _, ledger = _studio_app(store)
+    read = studio_module.stored_plan
+
+    def answered(raw: str | None, *, state_key: str) -> Any:
+        plan = read(raw, state_key=state_key)
+        assert plan is not None
+        approved = plan.approve(at=datetime.now(UTC))
+        return approved if status == "approved" else approved.start_execution()
+
+    def readable(ctx: Any, raw: str | None) -> Any:
+        return answered(raw, state_key="plan")
+
+    monkeypatch.setattr(studio_module, "stored_plan", answered)
+    monkeypatch.setattr(approve_module, "readable_plan", readable)
+    async with studio_client(app) as client:
+        first = await stream(client, "/api/studio/turn", turn_body("Kenya's debt service?"))
+        interrupt_id = _frame(first, "plan.proposed")["interrupt_id"]
+        frames = await stream(client, "/api/studio/interrupt", _approve_body(interrupt_id))
+
+    assert frames[-1]["event"] == "error"
+    assert await _approvals(pg_engine) == [interrupt_id]
+    assert await _runs(pg_engine, ledger) == []
+
+
+async def test_an_answer_the_approval_rule_refuses_admits_nothing_at_the_route(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route reads a plan whose revision is not the one the card was
+    keyed on, so the approval rule approves nothing there: the route admits
+    no run, and `execute` admits the run of the plan `decide` approves."""
+    store = StudioStore(pg_engine)
+    app, _, ledger = _studio_app(store, *_charts_the_plan())
+    read = studio_module.stored_plan
+
+    def revised(raw: str | None, *, state_key: str) -> Any:
+        plan = read(raw, state_key=state_key)
+        assert plan is not None
+        return plan.model_copy(update={"version": plan.version + 1})
+
+    monkeypatch.setattr(studio_module, "stored_plan", revised)
+    hang = _hang_at(app, monkeypatch, "record_answer")
+    async with studio_client(app) as client:
+        first = await stream(client, "/api/studio/turn", turn_body("Kenya's debt service?"))
+        interrupt_id = _frame(first, "plan.proposed")["interrupt_id"]
+        await _leaves_when(
+            app, "/api/studio/interrupt", _approve_body(interrupt_id), leave=hang.entered
+        )
+        assert await _runs(pg_engine, ledger) == []
+        assert await _admitted_run(pg_engine, interrupt_id) is None
+        frames = await stream(client, "/api/studio/interrupt", _approve_body(interrupt_id))
+
+    assert "component.created" in [frame["event"] for frame in frames]
+    (run,) = await _runs(pg_engine, ledger)
+    assert run.status is RunStatus.COMPLETED
+
+
+async def test_an_approval_whose_sources_cannot_be_authorised_admits_nothing_and_fails_the_turn(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workflow that retrieves no source has no source policy an approval
+    could authorise: `SourcePolicy` refuses an empty `sources`. The plan's
+    `Submission.source_policy` answers that empty policy here, as such a
+    workflow's would. The route answers the approval with a 200 stream and
+    admits no run, and `execute` raises on the plan it cannot run, so the
+    turn ends in an error."""
+    store = StudioStore(pg_engine)
+    app, _, ledger = _studio_app(store)
+    monkeypatch.setattr(
+        run_module.Submission, "source_policy", lambda self: SourcePolicy(sources=())
+    )
+    async with studio_client(app) as client:
+        first = await stream(client, "/api/studio/turn", turn_body("Kenya's debt service?"))
+        interrupt_id = _frame(first, "plan.proposed")["interrupt_id"]
+        frames = await stream(client, "/api/studio/interrupt", _approve_body(interrupt_id))
+
+    assert frames[-1]["event"] == "error"
+    assert await _approvals(pg_engine) == [interrupt_id]
+    assert await _runs(pg_engine, ledger) == []

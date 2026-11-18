@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import errno
 import json
 import logging
@@ -42,7 +43,9 @@ from fastapi.responses import JSONResponse
 from harness import studio_state, studio_store
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.conversation import current_conversation_key
+from harness.db import engine as engine_module
 from harness.graph.state import ORCHESTRATOR_PLAN_RECORDS_KEY, ORCHESTRATOR_SEARCHES_KEY
+from harness.provenance import CardLineage, ProvenanceInput
 from harness.studio_edit import _refresh_block
 from harness.studio_state import (
     CANVAS_DIGEST_MAX_BYTES,
@@ -81,10 +84,10 @@ from harness.wire import (
 )
 from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
-from sqlalchemy import text
+from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from . import drawn_cards
 from .resolved_revision import resolved_revision
@@ -2856,6 +2859,190 @@ async def test_a_card_the_turn_lands_is_written_onto_the_canvas_as_stored(new_st
     assert reloaded.turn_components == state_a.turn_components
 
 
+def _card_lineage(component_id: str, *, count: int | None) -> CardLineage:
+    """A card drawn on frame `ops_f` resting on two retrievals, asked for as `ops_asked`."""
+    return CardLineage(
+        component_id=component_id,
+        frame=("ops_f", "ocv_f"),
+        lineage=(
+            ProvenanceInput("spec_a", "cv_a", {"citation": {"sources": [{"ref": "src:a"}]}}),
+            ProvenanceInput("spec_b", "cv_b", {"trace": {"resolved_stat_vars": [{"ref": "x"}]}}),
+        ),
+        stat_var_count=count,
+        requested=("ops_asked", "ocv_asked"),
+    )
+
+
+async def _claimed(store: StudioStore) -> None:
+    await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+
+
+def _landing(component_id: str) -> Callable[[ConversationState], Any]:
+    return lambda work: land_component(work, {**_CARD, "component_id": component_id})
+
+
+async def test_a_cards_lineage_commits_with_it_once_and_any_instance_reads_it(new_store) -> None:
+    """The lineage of a card's frame commits in the card's own write. Another
+    instance reads it by the card, by the frame it was drawn from and by the
+    frame its write named. A later write of the same card, a revise or a
+    retried commit, leaves the first lineage stored."""
+    store_a = new_store()
+    await _claimed(store_a)
+    first = _card_lineage("cmp_two", count=1)
+
+    await store_a.change_canvas("principal", CONVERSATION, _landing("cmp_two"), lineage=first)
+    await store_a.change_canvas(
+        "principal",
+        CONVERSATION,
+        _landing("cmp_two"),
+        lineage=_card_lineage("cmp_two", count=7),
+    )
+
+    store_b = new_store()
+    await store_b.load("principal", CONVERSATION)
+    read = store_b.card_lineage
+    assert await read("principal", CONVERSATION, component_id="cmp_two") == first
+    assert await read("principal", CONVERSATION, frame=("ops_f", "ocv_f")) == first
+    assert await read("principal", CONVERSATION, frame=("ops_asked", "ocv_asked")) == first
+    assert await read("principal", CONVERSATION, component_id="cmp_other") is None
+    assert await read("principal", CONVERSATION, frame=("ops_g", "ocv_g")) is None
+    with pytest.raises(LookupError):
+        await read("someone_else", CONVERSATION, component_id="cmp_two")
+
+
+@pytest.mark.parametrize("wrote_block", [True, False], ids=["block-written", "block-gone"])
+async def test_a_card_write_stores_its_lineage_only_when_it_wrote_the_cards_block(
+    new_store, wrote_block: bool
+) -> None:
+    """A revise whose card's block is gone from the canvas writes no block,
+    so its lineage is not stored; one that wrote the block stores it."""
+    store = new_store()
+    await _claimed(store)
+    lineage = _card_lineage("cmp_two", count=1)
+
+    returned = await store.change_canvas(
+        "principal", CONVERSATION, lambda work: wrote_block, lineage=lineage
+    )
+
+    assert returned is wrote_block
+    stored = await store.card_lineage("principal", CONVERSATION, component_id="cmp_two")
+    assert stored == (lineage if wrote_block else None)
+
+
+async def test_a_card_lineage_read_prefers_the_cards_own_row_then_its_frame_then_the_latest(
+    new_store,
+) -> None:
+    """One read: the card's own row over a row on the frame, a row drawn from
+    the frame over one whose write named it, and the latest of equals."""
+    store = new_store()
+    await _claimed(store)
+    frame, other, named = ("ops_f", "ocv_f"), ("ops_o", "ocv_o"), ("ops_n", "ocv_n")
+    rows = [
+        dataclasses.replace(_card_lineage("cmp_own", count=1), frame=other, requested=named),
+        dataclasses.replace(_card_lineage("cmp_drawn", count=2), requested=None),
+        dataclasses.replace(_card_lineage("cmp_later", count=3), requested=None),
+        # Written last, and only named the frame.
+        dataclasses.replace(_card_lineage("cmp_named", count=4), frame=other, requested=frame),
+    ]
+    for lineage in rows:
+        await store.change_canvas(
+            "principal", CONVERSATION, _landing(lineage.component_id), lineage=lineage
+        )
+
+    async def found(**by: Any) -> str | None:
+        card = await store.card_lineage("principal", CONVERSATION, **by)
+        return card.component_id if card is not None else None
+
+    assert await found(component_id="cmp_own", frame=frame) == "cmp_own"
+    assert await found(frame=frame) == "cmp_later"
+    assert await found(component_id="cmp_none", frame=frame) == "cmp_later"
+    assert await found(frame=named) == "cmp_own"
+
+
+@pytest.mark.parametrize("fault", ["nan-in-a-manifest", "insert-refused"])
+async def test_a_card_lands_without_a_lineage_that_cannot_be_stored(
+    new_store, monkeypatch, caplog, fault: str
+) -> None:
+    """A manifest holding a NaN cannot be stored as JSON, and an insert the
+    database refuses for good fails its savepoint alone. Either way the card
+    lands with its block, entry and turn line, without a lineage row, and
+    the failure is logged at error."""
+    store = new_store()
+    await _claimed(store)
+    lineage = _card_lineage("cmp_two", count=1)
+    if fault == "nan-in-a-manifest":
+        lineage = dataclasses.replace(
+            lineage,
+            lineage=(ProvenanceInput("spec_a", "cv_a", {"coverage": {"share": float("nan")}}),),
+        )
+    else:
+        monkeypatch.setattr(
+            studio_store, "_INSERT_CARD_LINEAGE", text("INSERT INTO no_such_table VALUES (:pk)")
+        )
+
+    inserts: list[object] = []
+    insert = studio_store._insert_card_lineage
+
+    async def counted(*args: Any) -> None:
+        inserts.append(args)
+        await insert(*args)
+
+    monkeypatch.setattr(studio_store, "_insert_card_lineage", counted)
+
+    with caplog.at_level(logging.ERROR, logger="harness.studio_store"):
+        landed = await store.change_canvas(
+            "principal", CONVERSATION, _landing("cmp_two"), lineage=lineage
+        )
+
+    assert landed == "created"
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert [block.component_id for block in reloaded.composition.blocks] == ["cmp_two"]
+    assert "cmp_two" in reloaded.components
+    assert await store.card_lineage("principal", CONVERSATION, component_id="cmp_two") is None
+    assert any(record.levelno == logging.ERROR for record in caplog.records)
+    # A NaN never reaches Postgres: the lineage is refused before the insert.
+    assert len(inserts) == (0 if fault == "nan-in-a-manifest" else 1)
+
+
+async def test_a_card_lineage_row_that_does_not_decode_leaves_the_next_match_to_serve(
+    new_store, pg_engine
+) -> None:
+    """The card's own row comes first and does not decode, so the row of
+    another card drawn from its frame serves; with that one broken too, none
+    serves."""
+    store = new_store()
+    await _claimed(store)
+    for component_id in ("cmp_one", "cmp_two"):
+        await store.change_canvas(
+            "principal",
+            CONVERSATION,
+            _landing(component_id),
+            lineage=_card_lineage(component_id, count=1),
+        )
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE conversation_card_lineage SET members = '{}' WHERE component_id = 'cmp_two'"
+            )
+        )
+
+    read = await store.card_lineage(
+        "principal", CONVERSATION, component_id="cmp_two", frame=("ops_f", "ocv_f")
+    )
+    assert read == _card_lineage("cmp_one", count=1)
+
+    async with pg_engine.begin() as conn:
+        await conn.execute(text("UPDATE conversation_card_lineage SET members = '[]'"))
+    assert (
+        await store.card_lineage(
+            "principal", CONVERSATION, component_id="cmp_two", frame=("ops_f", "ocv_f")
+        )
+        is None
+    )
+
+
 async def test_a_card_write_commits_only_the_fields_its_change_made(new_store) -> None:
     """The turn's drive removes a card (`remove_cards`) while the stream's
     owner holds a pending interrupt it has not saved. The removal commits
@@ -3162,6 +3349,101 @@ async def test_a_write_retries_a_connection_checkout_that_failed_alone(
     assert store._engine.fault is None
     reloaded = await new_store().load("principal", CONVERSATION)
     assert (reloaded.composition is not None) == retried
+
+
+async def test_a_card_lineage_read_makes_one_attempt_and_leaves_the_lease_alone(
+    new_store, monkeypatch
+) -> None:
+    """The read a write makes before it is sent is best effort: a transient
+    fault raises at once, with no retry and no early lease renewal, and the
+    caller goes on without the lineage."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    state.renew_now = asyncio.Event()
+    await store.change_canvas(
+        "principal",
+        CONVERSATION,
+        lambda work: land_component(work, _CARD),
+        lineage=_card_lineage("cmp_two", count=1),
+    )
+    store._lineage_engine = _FailingCheckout(
+        store._lineage_engine, ConnectionRefusedError("refused")
+    )
+
+    with pytest.raises(ConnectionRefusedError):
+        await store.card_lineage("principal", CONVERSATION, component_id="cmp_two")
+    assert not state.renew_now.is_set()
+
+
+async def test_a_lineage_read_on_a_stalled_statement_gives_the_one_connection_back(
+    pg_database_url: str, monkeypatch
+) -> None:
+    """Read A stalls in its statement on the lineage engine's one connection
+    and nobody waits for it. The statement bound ends A, so read B, waiting
+    for the connection, gets it and reads the card's lineage."""
+    monkeypatch.setattr(engine_module, "_LINEAGE_COMMAND_TIMEOUT_S", 0.3)
+    stalling = studio_store._SELECT_CARD_LINEAGE.text.replace(
+        "SELECT component_id",
+        "WITH stall AS (SELECT pg_sleep(CASE WHEN CAST(:spec_id AS text) = 'stall' "
+        "THEN 30 ELSE 0 END)) SELECT component_id",
+        1,
+    ).replace("FROM conversation_card_lineage", "FROM conversation_card_lineage, stall", 1)
+    monkeypatch.setattr(
+        studio_store,
+        "_SELECT_CARD_LINEAGE",
+        text(stalling).bindparams(bindparam("skipped", type_=ARRAY(Text))),
+    )
+    engine = create_async_engine(pg_database_url)
+    lineage_engine = engine_module.build_lineage_engine(pg_database_url)
+    try:
+        store = StudioStore(engine, lineage_engine=lineage_engine)
+        await _claimed(store)
+        lineage = _card_lineage("cmp_two", count=1)
+        await store.change_canvas("principal", CONVERSATION, _landing("cmp_two"), lineage=lineage)
+
+        stalled = asyncio.create_task(
+            store.card_lineage(
+                "principal", CONVERSATION, component_id="cmp_two", frame=("stall", "stall")
+            )
+        )
+        await asyncio.sleep(0.05)
+        read = await asyncio.wait_for(
+            store.card_lineage("principal", CONVERSATION, component_id="cmp_two"), timeout=5
+        )
+
+        assert read == lineage
+        with pytest.raises(TimeoutError):
+            await stalled
+    finally:
+        await lineage_engine.dispose()
+        await engine.dispose()
+
+
+class _NoCheckout:
+    """An engine that refuses every connection, standing for a session-store
+    pool no lineage read may take one from."""
+
+    def begin(self) -> Any:
+        raise AssertionError("a lineage read took a session-store connection")
+
+    connect = begin
+
+
+async def test_a_card_lineage_read_takes_no_connection_from_the_session_store_pool(
+    pg_engine,
+) -> None:
+    """Lineage reads run over the lineage engine alone, so the lease renewals
+    and card writes keep every connection of the session-store pool."""
+    store = StudioStore(pg_engine, lineage_engine=pg_engine)
+    await _claimed(store)
+    lineage = _card_lineage("cmp_two", count=1)
+    await store.change_canvas("principal", CONVERSATION, _landing("cmp_two"), lineage=lineage)
+    store._engine = _NoCheckout()
+
+    assert await store.card_lineage("principal", CONVERSATION, component_id="cmp_two") == lineage
 
 
 async def test_a_removal_whose_commit_lost_its_acknowledgement_reports_the_cards_it_removed(

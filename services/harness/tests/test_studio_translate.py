@@ -14,6 +14,7 @@ import json
 import logging
 import ssl
 from collections.abc import Callable, Mapping, Sequence
+from types import SimpleNamespace
 from typing import Any, cast
 
 import aiohttp
@@ -43,12 +44,14 @@ from harness.graph.state import ORCHESTRATOR_PRIOR_LEDGER_KEY
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import decision_choice_id, decision_option_id
 from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
+from harness.provenance import CardLineage, ProvenanceInput
 from harness.scope_choices import PartScope, carried_entries
 from harness.scripted import ScriptedSurface
 from harness.scripted_plan import scripted_plan
 from harness.seeds import SEED_STEP_TOOL
 from harness.sentences import DECLINE_REASONS, DROPPED_REASON, failure_sentence
 from harness.settings import Settings
+from harness.studio import _close_work
 from harness.studio_state import (
     ConversationState,
     _next_manifest,
@@ -58,10 +61,12 @@ from harness.studio_state import (
 )
 from harness.studio_store import StudioStore
 from harness.studio_translate import (
+    _EventRecords,
     _ExecutorRecord,
     _planner_question,
     _RecordingExecutor,
     _RecordingSurface,
+    _Records,
     _stream_fatal,
     _timeout_refusal,
     _Translator,
@@ -1678,6 +1683,73 @@ async def test_a_stream_behind_the_run_shows_each_call_where_it_happened() -> No
     ]
 
 
+def test_a_drain_that_empties_the_queue_keeps_the_counts_the_queued_events_hold() -> None:
+    """Every event's mark counts from the first record appended, so a
+    drain that takes every record leaves the counts where they were: the
+    record appended next is the second, and an event marked before it
+    takes nothing."""
+    records = _Records()
+    records.append(_surface_record("debt", {"outcome": "ok"}))
+    assert [record.step_id for record in records.take("c1", 1)] == ["debt"]
+
+    records.append(_surface_record("pop", {"outcome": "ok"}))
+
+    assert records.count("c1") == 2
+    assert records.take("c1", 1) == []
+    assert [record.step_id for record in records.take("c1", 2)] == ["pop"]
+
+
+def test_the_end_of_a_segment_s_stream_owner_drops_the_conversation_s_counts() -> None:
+    """Once the owner ends, no event of its segment is left to drain, so
+    the recorders drop the conversation's records and counts, and keep
+    another conversation's."""
+    translator, surface_recorder = _progress_translator()
+    recorder = translator._recorder
+    for conversation in ("c1", "c2"):
+        current_conversation_id.set(conversation)
+        recorder.record_step(tool="get_data", args={}, result={"outcome": "ok"}, step_id="s")
+        surface_recorder._records.append(
+            _ExecutorRecord(
+                tool="get_data", args={}, result={}, duration_ms=1, conversation=conversation
+            )
+        )
+    current_conversation_id.set("c1")
+    recorder.drain("c1", 1)
+    runner = cast(Any, SimpleNamespace(recorder=recorder, surface_recorder=surface_recorder))
+
+    _close_work(ConversationState(conversation_id="c1"), asyncio.Event(), runner)
+
+    for records in (recorder._records, surface_recorder._records):
+        assert (records.count("c1"), records.count("c2")) == (0, 1)
+        assert "c1" not in {*records._appended, *records._taken}
+        assert [record.conversation for record in records.items] == ["c2"]
+
+
+async def test_a_call_recorded_after_a_drain_shows_after_the_events_marked_before_it() -> None:
+    """The stream's owner drains the first event's call before the segment
+    records its next one, and the second event, marked before that call,
+    still shows its own frames first."""
+    translator, surface_recorder = _progress_translator()
+    marks = _EventRecords(translator._recorder, surface_recorder)
+    surface_recorder._records.append(_surface_record("debt", {"outcome": "ok", "summary": "done"}))
+    approved = marks.recorded(NodeDone("approve", "approved", {"v": 1}))
+    executed = marks.recorded(NodeDone("execute", "ok", {"frame_refs": []}))
+
+    frames = await translator.translate_recorded(*approved)
+    surface_recorder._records.append(_surface_record("pop", {"outcome": "ok", "summary": "done"}))
+    answered = marks.recorded(NodeDone("answer", "done", {}))
+    for event in (executed, answered):
+        frames.extend(await translator.translate_recorded(*event))
+
+    assert [(f.label, f.status) for f in frames] == [
+        ("Fetching data", StepStatus.COMPLETE),
+        ("Starting the plan", StepStatus.RUNNING),
+        ("Starting the plan", StepStatus.COMPLETE),
+        ("Reading the plan's results", StepStatus.RUNNING),
+        ("Fetching data", StepStatus.COMPLETE),
+    ]
+
+
 async def test_the_stream_sends_each_event_as_the_segment_emits_it() -> None:
     """An event's frames go out while the segment still runs, and the
     stream ends once the segment is done and every event it emitted is
@@ -1923,6 +1995,7 @@ async def _component_frames_of(
     *,
     land: bool,
     write_token: str | None = None,
+    card_lineage: CardLineage | None = None,
 ) -> list[Any]:
     """`translator._component_frames` for a component that passed the wire contract."""
     return await translator._component_frames(
@@ -1930,6 +2003,7 @@ async def _component_frames_of(
         land=land,
         created=component_created(component, step_id="s1"),
         write_token=write_token,
+        card_lineage=card_lineage,
     )
 
 
@@ -2060,6 +2134,33 @@ async def test_component_frames_land_true_holds_when_auto_add_is_off(
     assert stored.composition is None
     assert stored.components["cmp_two"] == conversation.components["cmp_two"]
     assert stored.write_tokens == {"cmp_two": "token-two"}
+
+
+@pytest.mark.parametrize("auto_add", [True, False], ids=["landed", "held"])
+async def test_component_frames_store_a_cards_lineage_only_when_it_lands_on_the_canvas(
+    pg_engine: AsyncEngine, auto_add: bool
+) -> None:
+    """A card that lands commits its frame lineage with its block; a held
+    card, which writes no block, stores none."""
+    current_conversation_id.set("c1")
+    store, conversation = await _stored_conversation(pg_engine)
+    translator = _Translator(
+        conversation=conversation, recorder=_RecordingExecutor(_dummy_executor, store=store)
+    )
+    conversation.auto_add = auto_add
+    lineage = CardLineage(
+        component_id="cmp_two",
+        frame=("ops_f", "ocv_f"),
+        lineage=(ProvenanceInput("spec_a", "cv_a", {"citation": {"text": "a"}}),),
+        stat_var_count=1,
+    )
+
+    await _component_frames_of(
+        translator, _written_component("cmp_two"), land=True, card_lineage=lineage
+    )
+
+    stored = await store.card_lineage("principal", "c1", component_id="cmp_two")
+    assert stored == (lineage if auto_add else None)
 
 
 async def test_component_frames_land_false_emits_only_component_created() -> None:
