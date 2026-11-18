@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, cast
 
+import asyncpg
 import httpx2
 import pytest
 from analysis_mcp.fixtures import seed_fixture_store
@@ -942,3 +943,49 @@ def test_cors_origins_setting_parses_a_comma_separated_env_value() -> None:
     settings = Settings(studio_cors_origins="http://localhost:8091, http://localhost:3000")  # type: ignore[arg-type]
     assert settings.studio_cors_origins == ["http://localhost:8091", "http://localhost:3000"]
     assert Settings(studio_cors_origins="").studio_cors_origins == []  # type: ignore[arg-type]
+
+
+def _postgres_error(sqlstate: str | None) -> asyncpg.PostgresError:
+    error = asyncpg.PostgresError("failed")
+    error.sqlstate = sqlstate
+    return error
+
+
+async def test_a_migration_refusal_is_fatal_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A SQLSTATE beginning `DFA`, a migration's own refusal, is not retried."""
+    attempts: list[int] = []
+
+    async def refusing_apply_pending(engine: object) -> list[str]:
+        attempts.append(len(attempts) + 1)
+        raise _postgres_error("DFA04")
+
+    monkeypatch.setattr(server_module, "apply_pending", refusing_apply_pending)
+    now, sleep = _fake_clock_and_sleep()
+
+    with pytest.raises(server_module._MigrationRefusedError) as refusal:
+        await server_module._apply_migrations_with_retries(
+            cast(AsyncEngine, object()), budget_s=60.0, sleep=sleep, now=now
+        )
+
+    assert attempts == [1]
+    assert refusal.value.__cause__ is not None
+
+
+async def test_any_other_migration_database_error_retries_until_the_budget_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[int] = []
+
+    async def failing_apply_pending(engine: object) -> list[str]:
+        attempts.append(len(attempts) + 1)
+        raise _postgres_error("55P03")
+
+    monkeypatch.setattr(server_module, "apply_pending", failing_apply_pending)
+    now, sleep = _fake_clock_and_sleep()
+
+    with pytest.raises(asyncpg.PostgresError):
+        await server_module._apply_migrations_with_retries(
+            cast(AsyncEngine, object()), budget_s=10.0, sleep=sleep, now=now
+        )
+
+    assert len(attempts) >= 2

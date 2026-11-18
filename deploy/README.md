@@ -276,6 +276,58 @@ The first number is the frames whose cards can be refreshed after the bucket's o
 
 This image reads saved Studio conversations from the harness's own tables (`harness/db/migrations`) only. A deployment whose serving revision stores conversations in ADK's session tables (app `dfo_analyst_graph.ledger` in the `sessions` table) copies them across before this image takes traffic, with the `python -m harness.adk_import` job on the image of the revision that added the tables. That image's `deploy/README.md` gives the cutover steps. Its `import --apply` and `import --verify` must exit 0 with no conversation in conflict, and its `close-open-turns --apply` closes every turn left open on a pause, once before the traffic move and again after the 900-second drain. A turn the tables record as open with no turn of this image behind it is closed as `abandoned` on the conversation's next turn, with what the conversation holds.
 
+## Renaming the ADK tables
+
+Migration `0004_rename_adk_tables.sql` renames ADK's `sessions`, `events`, `app_states`, `user_states` and `adk_internal_metadata` tables and the import job's `adk_ledger_imports` to `adk_archive_<name>`, in the schema each is in, and renames each table's indexes and owned sequences the same way. It drops nothing and changes no row. A renamed table keeps its rows, keys and foreign keys, and `adk_archive_events` still references `adk_archive_sessions`. The runtime user needs ownership of the tables and `CREATE` on their schema. A table is ADK's when it has the columns of ADK's tables, and tables resolve through `search_path`. `adk_ledger_imports` holds one row per imported conversation. Startup applies the migration, so deploying the image that carries it runs it.
+
+No revision that reads ADK's tables may take traffic once the migration commits. An instance of the ADK-serving image that starts afterwards recreates empty ADK tables and serves an empty conversation list. Its new rows then sit in neither the harness tables nor the archive, and its fresh tables block the rename-back below. Deploy the image that carries the migration only after the image that serves Studio from ADK, or from the first conversation tables, has stopped taking traffic.
+
+Each check below stops startup at once with its own SQLSTATE and renames nothing:
+
+- `DFA01`: a table of an ADK name lacks ADK's columns while another carries them. Rename the foreign table by hand. With no ADK table at all, tables of those names are left alone without a message.
+- `DFA02`: ADK's `sessions` holds rows of app `dfo_analyst_graph.ledger` and `adk_ledger_imports` holds no row, so the import never ran. Run the import job of the image that holds it. To discard ADK's conversations instead, drop ADK's five tables with the statement below.
+- `DFA03`: a table to rename is not owned by the user the migration runs as, or that user lacks `CREATE` on its schema. Run it as the owner or grant `CREATE`.
+- `DFA04`: a relation or type named `adk_archive_<name>` exists in the schema, for a table, index or sequence to rename. Rename or drop it.
+
+The statements below act on `current_schema()`, so connect with the harness's `search_path`, as the tables' owner, and run them with `psql`. Each runs in one transaction and stops at the first error.
+
+To discard ADK's five tables, for `DFA02` or after a rollback:
+
+```sql
+\set ON_ERROR_STOP on
+BEGIN;
+SELECT format('DROP TABLE IF EXISTS %I.%I CASCADE', schemaname, tablename)
+FROM pg_tables WHERE schemaname = current_schema()
+  AND tablename IN ('events', 'sessions', 'app_states', 'user_states', 'adk_internal_metadata') \gexec
+COMMIT;
+```
+
+When ADK's copy is no longer needed, drop the renamed tables:
+
+```sql
+\set ON_ERROR_STOP on
+BEGIN;
+SELECT format('DROP TABLE IF EXISTS %I.%I CASCADE', schemaname, tablename)
+FROM pg_tables WHERE schemaname = current_schema() AND tablename LIKE 'adk\_archive\_%' \gexec
+COMMIT;
+```
+
+To roll back to an image that reads ADK's tables, rename every renamed table, index and sequence back before that image starts, so it finds its tables and creates none:
+
+```sql
+\set ON_ERROR_STOP on
+BEGIN;
+SELECT format('ALTER %s %I.%I RENAME TO %I',
+    CASE c.relkind WHEN 'i' THEN 'INDEX' WHEN 'S' THEN 'SEQUENCE' ELSE 'TABLE' END,
+    n.nspname, c.relname, substr(c.relname, length('adk_archive_') + 1))
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = current_schema() AND c.relname LIKE 'adk\_archive\_%' AND c.relkind IN ('r', 'i', 'S')
+ORDER BY CASE c.relkind WHEN 'r' THEN 0 ELSE 1 END \gexec
+COMMIT;
+```
+
+The migration is recorded as applied, so a later start of the image that carries it does not run it again. To roll forward after a rollback, first run the import job of the image that holds it, so the conversations the ADK-reading image wrote meanwhile reach the harness tables. Then drop ADK's five tables with the first statement above, or rename them away, before this image starts.
+
 ## Langfuse export
 
 `python -m harness.langfuse_export` loads the Langfuse observations of one environment into the BigQuery table `observations`, day-partitioned on `start_time`. It runs as the Cloud Run job named by `JOB_LANGFUSE_EXPORT` on this image, and `build-deploy.yml` points that job at each new image in an Environment that sets the var. It reads these settings from the environment or `.env` and exits 2 naming any that is unset:

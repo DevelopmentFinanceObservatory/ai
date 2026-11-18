@@ -5,9 +5,9 @@ The SQL files in `harness/db/migrations` run in filename order.
 its bytes. A run refuses when an applied file changed, or when one is
 missing and its name sorts at or below the newest file this image holds. A
 fix is a new file. An applied file newer than every file here was written by
-a later release, whose migrations add to this schema, so the run logs it and
-carries on, and a revision of this release can still start beside the later
-one or after a rollback.
+a later release. That release may have renamed or dropped what this one reads,
+so the run logs the file and carries on, and an image started against a newer
+schema runs only where the deploy notes say it may.
 
 The bookkeeping table is created in a transaction of its own. The pending
 files then apply in one transaction, every one of them or none. Each

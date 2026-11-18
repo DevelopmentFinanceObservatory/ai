@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
+import asyncpg
 import httpx2
 import uvicorn
 from analysis_mcp.server import mcp as analysis_mcp
@@ -239,10 +240,18 @@ async def _retry_startup_step(
             backoff_s = min(backoff_s * 2, _STARTUP_MAX_BACKOFF_S)
 
 
+class _MigrationRefusedError(RuntimeError):
+    """A migration raised a SQLSTATE beginning `DFA`, its own refusal to run
+    against this database (`0004_rename_adk_tables.sql`). The database does not
+    change by waiting."""
+
+
 async def _apply_migrations_with_retries(
     engine: AsyncEngine,
     *,
     budget_s: float,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    now: Callable[[], float] = time.monotonic,
 ) -> None:
     """Retry `apply_pending` under `_retry_startup_step`'s budget. An
     attempt has no bound of its own. `apply_pending` bounds each statement
@@ -250,12 +259,24 @@ async def _apply_migrations_with_retries(
     migration of several statements runs as long as its statements take.
     A failed attempt leaves no lock behind, because `apply_pending` holds
     a transaction-level lock. A `MigrationChecksumError` is a fault in the
-    files, so it propagates at once."""
+    files, and a migration's own refusal (a SQLSTATE beginning `DFA`) a fact
+    about the database, so each propagates at once."""
+
+    async def attempt() -> None:
+        try:
+            await apply_pending(engine)
+        except asyncpg.PostgresError as exc:
+            if (getattr(exc, "sqlstate", None) or "").startswith("DFA"):
+                raise _MigrationRefusedError(str(exc)) from exc
+            raise
+
     await _retry_startup_step(
         "apply_pending",
-        lambda: apply_pending(engine),
+        attempt,
         budget_s=budget_s,
-        fatal=(MigrationChecksumError,),
+        sleep=sleep,
+        now=now,
+        fatal=(MigrationChecksumError, _MigrationRefusedError),
     )
 
 
