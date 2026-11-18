@@ -5503,6 +5503,93 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
     assert "cmw_" not in json.dumps(reloaded.components)
 
 
+@pytest.mark.parametrize(
+    ("edit", "event"),
+    [
+        pytest.param(
+            {"text": "Renamed.", "patch": {"title": "Aid to Kenya, 2018-2024"}, "recreate": None},
+            "component.revised",
+            id="revise",
+        ),
+        pytest.param(
+            {
+                "text": "Rebuilt.",
+                "patch": None,
+                "recreate": {"type": "stat_card", "title": "Aid", "select": {}},
+            },
+            "component.created",
+            id="recreate",
+        ),
+    ],
+)
+async def test_an_edit_on_another_instance_states_the_sources_and_count_of_the_first_draw(
+    monkeypatch: pytest.MonkeyPatch, edit: dict[str, Any], event: str
+) -> None:
+    """A card is drawn on one instance from a frame resting on two
+    retrievals whose step declared one StatVar, and edited on a second
+    instance whose provenance store is empty. The edit reads the lineage the
+    card's write stored with it, so the edited card states the same sources
+    and indicator count as the first draw."""
+    platform = _TokenIssuingPlatform()
+    monkeypatch.setattr(
+        McpTimeoutPolicy, "client", lambda self, url, *, auth, caller, tool=None: platform
+    )
+    conversation = f"{PRINCIPAL}/{CONVERSATION}"
+    drawn = ProvenanceStore()
+    retrievals = [
+        ({"spec_id": "spec_" + str(n) * 32, "content_version": "cv_" + str(n) * 32}, source)
+        for n, source in ((2, "src:a"), (3, "src:b"))
+    ]
+    for ref, source in retrievals:
+        manifest = {
+            "citation": {"text": source, "sources": [{"ref": source, "label": source}]},
+            "trace": {"resolved_stat_vars": [{"ref": f"dcid:{source}"}]},
+        }
+        drawn.put(conversation=conversation, manifest=manifest, **ref)
+    assert drawn.alias(
+        conversation=conversation,
+        **REF_A,
+        sources=[(ref["spec_id"], ref["content_version"]) for ref, _ in retrievals],
+        stat_var_count=1,
+    )
+    first_store = StudioStore(_engine())
+    first = _app(
+        *_plan("q with forks", *_charts_the_plan()),
+        executor=McpExecutor(
+            settings=Settings(), provenance=drawn, card_lineages=first_store.card_lineage
+        ),
+        store=first_store,
+        tool_surface=ScriptedSurface(),
+    )
+    async with _client(first) as client:
+        created = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(created, "plan.proposed")
+        resumed = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+    second_store = StudioStore(_engine())
+    second = _app(
+        executor=McpExecutor(
+            settings=Settings(),
+            provenance=ProvenanceStore(),
+            card_lineages=second_store.card_lineage,
+        ),
+        store=second_store,
+        edit_model=ScriptedEditModel(edit),
+    )
+    async with _client(second) as client:
+        edited = await _stream(client, "/api/studio/turn", _edit_body("change it"))
+
+    drawn_card = _frame(resumed, "component.created")
+    edited_card = _frame(edited, event)
+    assert [source["id"] for source in drawn_card["provenance"]["sources"]] == ["src:a", "src:b"]
+    assert drawn_card["fact_summary"]["attribution"]["indicator_count"] == 1
+    # The attribution names the sources and counts them and the indicators.
+    assert edited_card["fact_summary"]["attribution"] == drawn_card["fact_summary"]["attribution"]
+    if event == "component.created":
+        assert edited_card["provenance"]["sources"] == drawn_card["provenance"]["sources"]
+
+
 async def test_component_ref_edit_recreate_replaces_the_block_in_place() -> None:
     recreated = {
         **COMPONENT,

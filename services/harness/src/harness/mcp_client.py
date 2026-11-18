@@ -81,6 +81,7 @@ failure, comes back from the first attempt.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import random
@@ -148,10 +149,16 @@ from presentation_mcp.platform_contract import (
     RetryMode,
 )
 
-from harness.conversation import current_conversation_caller, current_conversation_id
+from harness.conversation import (
+    current_conversation_caller,
+    current_conversation_id,
+    current_conversation_key,
+)
 from harness.derived_frames import derived_recipe
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import (
+    CARD_LINEAGE_KEY,
+    CardLineageReader,
     Lineage,
     ProvenanceStore,
     data_artifact,
@@ -583,6 +590,13 @@ class McpExecutor:
     approved-plan path's own writer -- `_assemble_component` below reads
     from it regardless of which path retrieved the frame.
 
+    A `write_component` on a frame the store does not hold first puts back
+    the lineage stored with the conversation's cards (`card_lineages`,
+    `_restore_card_lineage`), so an edit on another instance or after a
+    restart reads the card's frame as the instance that drew it did. A drawn
+    card's outcome carries its frame's `harness.provenance.CardLineage` under
+    `CARD_LINEAGE_KEY`, for the card's write to commit with it.
+
     Every `write_component` passes `harness.rolling_cards.RollingCards.admit`
     before it is sent (`_admitted_write`), whoever asked for it. A card whose
     period follows the latest data is written on the frame of the series it
@@ -603,6 +617,7 @@ class McpExecutor:
         *,
         settings: Settings,
         provenance: ProvenanceStore | None = None,
+        card_lineages: CardLineageReader | None = None,
         card_replay: CardReplay | None = None,
         publish_frame: PublishFrame | None = None,
         dataset_versions: DatasetVersions | None = None,
@@ -630,6 +645,8 @@ class McpExecutor:
         # path to share it with (a test, `McpResolver`'s doubles) gets a
         # private one.
         self._provenance = provenance if provenance is not None else ProvenanceStore()
+        # The lineages stored with the conversation's cards, read on a miss.
+        self._card_lineages = card_lineages
         # The rules for a card whose period follows the latest data, with the
         # frames and replays they have found, shared by every conversation.
         self._rolling_cards = RollingCards(replay=card_replay, clock=clock)
@@ -764,11 +781,13 @@ class McpExecutor:
         the refusal no retry follows, comes back as it is.
         """
         if tool == "write_component":
+            await self._restore_card_lineage(args)
             try:
                 admitted = await self._admitted_write(args)
             except CardWithheld as withheld:
                 return {"outcome": "refusal", "refusal": withheld.refusal}
             outcome = await self._retried(tool, admitted.args, on_progress=on_progress)
+            _note_requested_frame(outcome, args)
             if admitted.stored_card is not None and outcome.get("outcome") == "ok":
                 return _held_to_its_resolved_periods(admitted.stored_card, outcome)
             return outcome
@@ -859,6 +878,38 @@ class McpExecutor:
         finally:
             await self._get_data_clients.release(client)
         return background_outcome(result.structured_content)
+
+    async def _restore_card_lineage(self, args: Mapping[str, Any]) -> None:
+        """Put back the lineage a `write_component` reads when the store does
+        not hold it: the stored lineage of the card a revise names
+        (`component_id`), or of a card drawn from the frame a create's intent
+        names. Read before the write is sent, so the rolling-card rules
+        (`_admitted_write`) and the card's assembly (`_assemble_component`)
+        read it from the store. A frame no stored card was drawn from stays
+        missing, and its card is withheld `provenance_unavailable`. A
+        database fault raises before anything is sent."""
+        key = current_conversation_key.get()
+        if self._card_lineages is None or key is None:
+            return
+        conversation = current_conversation_id.get()
+        component_id = args.get("component_id")
+        if isinstance(component_id, str) and component_id:
+            card = await self._card_lineages(*key, component_id=component_id)
+            if card is not None:
+                self._provenance.restore(conversation=conversation, card=card)
+            return
+        intent = args.get("intent")
+        frame_ref = intent.get("frame_ref") if isinstance(intent, Mapping) else None
+        if not isinstance(frame_ref, Mapping):
+            return
+        frame = (frame_ref.get("spec_id"), frame_ref.get("content_version"))
+        if self._provenance.get(
+            conversation=conversation, spec_id=frame[0], content_version=frame[1]
+        ):
+            return
+        card = await self._card_lineages(*key, frame=frame)
+        if card is not None:
+            self._provenance.restore(conversation=conversation, card=card)
 
     async def _admitted_write(self, args: dict[str, Any]) -> AdmittedWrite:
         """The arguments to send for a `write_component` call, under the rules
@@ -1062,6 +1113,7 @@ class McpExecutor:
         if (withheld := _withheld_card(component, args)) is not None:
             return withheld
         assert component is not None
+        frame_ref = ((envelope.get("provenance") or {}).get("inputs") or [{}])[0]
         title = (args.get("intent") or {}).get("title") or _envelope_title(envelope)
         summary = f"{component['type']}: {title}" if title else None
         outcome = {"outcome": "ok", "frame_refs": [], "component": component, "summary": summary}
@@ -1069,6 +1121,13 @@ class McpExecutor:
             # `_RecordingExecutor.__call__` pops this into the conversation's
             # `write_tokens` before the outcome reaches any other reader.
             outcome[WRITE_TOKEN_KEY] = write_token
+        # Taken off by `_RecordingExecutor.__call__` too, for the card's write.
+        outcome[CARD_LINEAGE_KEY] = self._provenance.card_lineage(
+            conversation=current_conversation_id.get(),
+            component_id=str(component["component_id"]),
+            spec_id=frame_ref.get("spec_id"),
+            content_version=frame_ref.get("content_version"),
+        )
         return outcome
 
     async def _assemble_component(
@@ -1160,6 +1219,20 @@ class McpExecutor:
                 platform_facts=platform_facts,
             ),
         }
+
+
+def _note_requested_frame(outcome: dict[str, Any], args: Mapping[str, Any]) -> None:
+    """Mark a create's `CardLineage` with the frame its intent named, when the
+    card was written on another one (a rolling card's replayed frame), so a
+    later create asking for that frame finds the card's lineage too."""
+    card = outcome.get(CARD_LINEAGE_KEY)
+    intent = args.get("intent")
+    frame_ref = intent.get("frame_ref") if isinstance(intent, Mapping) else None
+    if card is None or args.get("component_id") or not isinstance(frame_ref, Mapping):
+        return
+    requested = (frame_ref.get("spec_id"), frame_ref.get("content_version"))
+    if requested != card.frame:
+        outcome[CARD_LINEAGE_KEY] = dataclasses.replace(card, requested=requested)
 
 
 def _withheld_card(component: dict[str, Any] | None, args: dict[str, Any]) -> dict[str, Any] | None:

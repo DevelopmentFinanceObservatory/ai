@@ -43,6 +43,7 @@ from harness import studio_state, studio_store
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.conversation import current_conversation_key
 from harness.graph.state import ORCHESTRATOR_PLAN_RECORDS_KEY, ORCHESTRATOR_SEARCHES_KEY
+from harness.provenance import CardLineage, ProvenanceInput
 from harness.studio_edit import _refresh_block
 from harness.studio_state import (
     CANVAS_DIGEST_MAX_BYTES,
@@ -2854,6 +2855,51 @@ async def test_a_card_the_turn_lands_is_written_onto_the_canvas_as_stored(new_st
     assert reloaded.components == state_a.components
     assert reloaded.write_tokens == {"cmp_two": "token-two"}
     assert reloaded.turn_components == state_a.turn_components
+
+
+def _card_lineage(component_id: str, *, count: int | None) -> CardLineage:
+    """A card drawn on frame `ops_f` resting on two retrievals, asked for as `ops_asked`."""
+    return CardLineage(
+        component_id=component_id,
+        frame=("ops_f", "ocv_f"),
+        lineage=(
+            ProvenanceInput("spec_a", "cv_a", {"citation": {"sources": [{"ref": "src:a"}]}}),
+            ProvenanceInput("spec_b", "cv_b", {"trace": {"resolved_stat_vars": [{"ref": "x"}]}}),
+        ),
+        stat_var_count=count,
+        requested=("ops_asked", "ocv_asked"),
+    )
+
+
+async def test_a_cards_lineage_commits_with_it_once_and_any_instance_reads_it(new_store) -> None:
+    """The lineage of a card's frame commits in the card's own write. Another
+    instance reads it by the card, by the frame it was drawn from and by the
+    frame its create asked for. A later write of the same card, a revise or a
+    retried commit, leaves the first lineage stored."""
+    store_a = new_store()
+    await store_a.create("principal", CONVERSATION)
+    store_a.claim_segment("principal", CONVERSATION)
+    await store_a.save("principal", CONVERSATION)
+    first = _card_lineage("cmp_two", count=1)
+
+    await store_a.change_canvas(
+        "principal", CONVERSATION, lambda work: land_component(work, _CARD), lineage=first
+    )
+    await store_a.change_canvas(
+        "principal",
+        CONVERSATION,
+        lambda work: land_component(work, _CARD),
+        lineage=_card_lineage("cmp_two", count=7),
+    )
+
+    store_b = new_store()
+    read = store_b.card_lineage
+    assert await read("principal", CONVERSATION, component_id="cmp_two") == first
+    assert await read("principal", CONVERSATION, frame=("ops_f", "ocv_f")) == first
+    assert await read("principal", CONVERSATION, frame=("ops_asked", "ocv_asked")) == first
+    assert await read("principal", CONVERSATION, component_id="cmp_other") is None
+    assert await read("principal", CONVERSATION, frame=("ops_g", "ocv_g")) is None
+    assert await read("someone_else", CONVERSATION, component_id="cmp_two") is None
 
 
 async def test_a_card_write_commits_only_the_fields_its_change_made(new_store) -> None:

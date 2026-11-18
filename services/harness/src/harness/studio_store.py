@@ -25,8 +25,9 @@ different groups never conflict:
   compare-and-swapped on `version` and only while no lease is live.
 - `change_canvas` is a checkpoint with a card change applied: each card
   the turn lands, holds, swaps, revises or removes commits with its canvas
-  block and every other changed durable field in one transaction, fenced
-  on the segment.
+  block, every other changed durable field and a drawn card's frame lineage
+  (`conversation_card_lineage`, read back by `card_lineage`) in one
+  transaction, fenced on the segment.
 - `mutate_composition` writes the canvas column alone for each
   `/composition` edit, unfenced, and leaves `version` alone.
 - `renew` and `request_cancel` each update the lease columns in one
@@ -95,6 +96,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
 )
+from harness.provenance import CardLineage, lineage_from_json
 from harness.run_ledger import end_unfinished
 from harness.studio_state import (
     SEGMENT_TTL_S,
@@ -861,6 +863,49 @@ async def _run_delta_write(conn: AsyncConnection, pk: int, write: _DeltaWrite) -
     return version
 
 
+_INSERT_CARD_LINEAGE = text(
+    "INSERT INTO conversation_card_lineage (conversation, component_id, spec_id, "
+    "content_version, requested_spec_id, requested_content_version, members, stat_var_count) "
+    "VALUES (:pk, :component_id, :spec_id, :content_version, :requested_spec_id, "
+    ":requested_content_version, CAST(:members AS json), :stat_var_count) "
+    "ON CONFLICT (conversation, component_id) DO NOTHING"
+)
+
+# A card's stored lineage: the card's own row when `:component_id` is set,
+# else a card drawn from the frame `:spec_id`/`:content_version` or whose
+# create asked for it. Cards on one frame share one lineage, so any one serves.
+_SELECT_CARD_LINEAGE = text(
+    "SELECT l.component_id, l.spec_id, l.content_version, l.requested_spec_id, "
+    "l.requested_content_version, l.members, l.stat_var_count "
+    "FROM conversation_card_lineage l JOIN conversations c ON c.id = l.conversation "
+    "WHERE c.principal = :principal AND c.conversation_id = :conversation_id AND ("
+    "l.component_id = :component_id OR (CAST(:component_id AS text) IS NULL AND ("
+    "(l.spec_id = :spec_id AND l.content_version = :content_version) OR "
+    "(l.requested_spec_id = :spec_id AND l.requested_content_version = :content_version)))) "
+    "LIMIT 1"
+)
+
+
+async def _insert_card_lineage(conn: AsyncConnection, pk: int, lineage: CardLineage) -> None:
+    """Store `lineage` for its card on row `pk`. A card's lineage is written
+    once: its frame never changes, and a write retried after a commit whose
+    acknowledgement was lost finds the row there."""
+    requested = lineage.requested or (None, None)
+    await conn.execute(
+        _INSERT_CARD_LINEAGE,
+        {
+            "pk": pk,
+            "component_id": lineage.component_id,
+            "spec_id": lineage.frame[0],
+            "content_version": lineage.frame[1],
+            "requested_spec_id": requested[0],
+            "requested_content_version": requested[1],
+            "members": json.dumps(lineage.members_json()),
+            "stat_var_count": lineage.stat_var_count,
+        },
+    )
+
+
 def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any]) -> None:
     """Keep the plan records, search readings, spec blocks and applied chip
     `state`, a turn's state, holds, for `ConversationState.close_turn` to
@@ -1407,6 +1452,8 @@ class StudioStore:
         principal: str,
         conversation_id: str,
         change: Callable[[ConversationState], T],
+        *,
+        lineage: CardLineage | None = None,
     ) -> T:
         """The write of a card change the turn makes: each card it lands,
         holds, swaps, revises or removes. A checkpoint of the whole
@@ -1416,7 +1463,9 @@ class StudioStore:
         so a stored card always has its digest entry, write token and turn
         line beside it. No other field is written, so a write the turn's
         drive makes (`harness.studio_state.make_remove_cards`) commits
-        nothing the stream's owner has changed.
+        nothing the stream's owner has changed. `lineage`, the drawn card's
+        frame lineage, commits in the same transaction, once per card
+        (`_insert_card_lineage`).
 
         Raises `SegmentLost` and writes nothing when the stored lease is not
         that segment, so a stream another instance took over lands no card.
@@ -1438,7 +1487,7 @@ class StudioStore:
         return await self._retrying(
             entry,
             conversation_id,
-            lambda: self._fenced_save(entry, conversation_id, segment_id, change),
+            lambda: self._fenced_save(entry, conversation_id, segment_id, change, lineage=lineage),
         )
 
     async def _retrying[T](
@@ -1486,12 +1535,14 @@ class StudioStore:
         change: Callable[[ConversationState], T],
         *,
         snapshot: Callable[[], Snapshot] | None = None,
+        lineage: CardLineage | None = None,
     ) -> T:
         """`checkpoint` and `change_canvas`'s one write. Under the row lock
         and fenced on `segment_id`, run `change` on a one-level copy of the live
         state holding the canvas as stored, then write the copy's canvas when
         `change` replaced it, and the durable keys below whose value differs
-        from `entry.baseline`, in one transaction. Once it commits, record the
+        from `entry.baseline`, and `lineage` when given, in one transaction.
+        Once it commits, record the
         written keys in the baseline and the version, and assign the canvas
         read back and each field `change` changed to the live state.
 
@@ -1535,6 +1586,8 @@ class StudioStore:
                         else None,
                     )
                 version = await self._write(conn, entry.pk, changed) if changed else row.version
+                if lineage is not None:
+                    await _insert_card_lineage(conn, entry.pk, lineage)
             entry.version = version
             entry.baseline.update(changed)
             _assign_changed(state, work, base)
@@ -1970,6 +2023,46 @@ class StudioStore:
                     f"conversation {conversation_id!r} segment {segment_id!r} is not the lease"
                 )
             yield conn, pk
+
+    async def card_lineage(
+        self,
+        principal: str,
+        conversation_id: str,
+        *,
+        component_id: str | None = None,
+        frame: tuple[str | None, str | None] | None = None,
+    ) -> CardLineage | None:
+        """The stored lineage of card `component_id`, or, with no
+        `component_id`, of a card drawn from `frame` or whose create asked for
+        it (`harness.provenance.CardLineageReader`). One indexed read, with no
+        lock and no runtime entry, so any instance can read it before a write.
+        `None` when no such card's lineage is stored."""
+        spec_id, content_version = frame if frame is not None else (None, None)
+        if component_id is None and (spec_id is None or content_version is None):
+            return None
+        async with self._engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    _SELECT_CARD_LINEAGE,
+                    {
+                        "principal": principal,
+                        "conversation_id": conversation_id,
+                        "component_id": component_id,
+                        "spec_id": spec_id,
+                        "content_version": content_version,
+                    },
+                )
+            ).first()
+        if row is None:
+            return None
+        requested = (row.requested_spec_id, row.requested_content_version)
+        return CardLineage(
+            component_id=row.component_id,
+            frame=(row.spec_id, row.content_version),
+            lineage=lineage_from_json(row.members),
+            stat_var_count=row.stat_var_count,
+            requested=requested if requested != (None, None) else None,
+        )
 
     async def run_statuses(
         self, principal: str, conversation_id: str, *, conversation: ConversationState

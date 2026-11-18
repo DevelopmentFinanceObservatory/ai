@@ -40,7 +40,7 @@ from data_mcp.stat_var_list import STAT_VARS_OMITTED_KEY
 from executor.classify import MAX_ATTEMPTS_PER_STEP
 from fastmcp import Client, Context, FastMCP
 from fastmcp.tools import ToolResult
-from harness.conversation import current_conversation_id
+from harness.conversation import current_conversation_id, current_conversation_key
 from harness.mcp_client import (
     McpExecutor,
     McpResolver,
@@ -53,7 +53,8 @@ from harness.mcp_client import (
     _withheld_card,
 )
 from harness.mcp_deadlines import McpTimeoutPolicy
-from harness.provenance import ProvenanceStore
+from harness.provenance import CARD_LINEAGE_KEY, CardLineage, ProvenanceStore
+from harness.rolling_cards import AdmittedWrite, RollingCards
 from harness.settings import Settings
 from harness.tool_contracts import ResolverError, graph_envelope
 from harness.wire import FactSummary, component_fault
@@ -969,6 +970,124 @@ async def test_the_executor_withholds_a_card_with_no_linked_lineage_as_a_harness
     assert refusal["code"] == "provenance_unavailable"
     assert refusal["origin"] == "harness"
     assert refusal["retry_mode"] == "do_not_retry"
+
+
+class _CardLineages:
+    """The lineages a conversation's card writes commit, read back as
+    `StudioStore.card_lineage` reads them: by card, or by the frame a card
+    was drawn from or its create asked for."""
+
+    def __init__(self) -> None:
+        self.committed: list[CardLineage] = []
+
+    async def __call__(
+        self,
+        principal: str,
+        conversation_id: str,
+        *,
+        component_id: str | None = None,
+        frame: tuple[str | None, str | None] | None = None,
+    ) -> CardLineage | None:
+        del principal, conversation_id
+        return next(
+            (
+                card
+                for card in self.committed
+                if card.component_id == component_id
+                or (component_id is None and frame in (card.frame, card.requested))
+            ),
+            None,
+        )
+
+
+@pytest.mark.parametrize(
+    "asked",
+    [
+        pytest.param("replayed", id="recreate-on-the-stored-intents-frame"),
+        pytest.param("named", id="redraw-on-the-frame-the-first-create-named"),
+    ],
+)
+async def test_a_rolling_recreate_on_a_fresh_executor_states_the_first_draws_sources_and_count(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
+    asked: str,
+) -> None:
+    """A rolling card asked for on frame N is drawn on N's replay R from a
+    frame resting on two retrievals whose step declared one StatVar. A second
+    executor, its provenance store empty, writes a card asking for R (an Edit
+    Card recreate from the stored intent), which the rolling rules replay onto
+    R2, or for N (a redraw from the canvas), replayed onto R again. It reads the first card's stored
+    lineage before the write, so the new card states the same sources and
+    indicator count."""
+    named = {"spec_id": "ops_" + "1" * 32, "content_version": "ocv_" + "1" * 32}
+    replayed = {"spec_id": "ops_" + "2" * 32, "content_version": "ocv_" + "2" * 32}
+    replayed_again = {"spec_id": "ops_" + "3" * 32, "content_version": "ocv_" + "3" * 32}
+    moves = {
+        (named["spec_id"], named["content_version"]): replayed,
+        (replayed["spec_id"], replayed["content_version"]): replayed_again,
+    }
+
+    async def admit(self: RollingCards, args: dict[str, Any], **_: Any) -> AdmittedWrite:
+        intent = args["intent"]
+        frame = intent["frame_ref"]
+        target = moves[(frame["spec_id"], frame["content_version"])]
+        return AdmittedWrite(
+            args={**args, "intent": {**intent, "frame_ref": target}}, replayed_from=dict(frame)
+        )
+
+    monkeypatch.setattr(RollingCards, "admit", admit)
+    redraw_frame = replayed if asked == "replayed" else named
+    written_on = moves[(redraw_frame["spec_id"], redraw_frame["content_version"])]
+    scripted_presentation_client(
+        [
+            _tool_result(
+                {"component_id": component_id, "revision": 1, "fact_summary": {}},
+                meta={
+                    RESOLVED_PAYLOAD_META_KEY: resolved_revision(
+                        "line_chart", component_id=component_id, revision=1, frame_ref=frame_ref
+                    )
+                },
+            )
+            for component_id, frame_ref in (("cmp_1", replayed), ("cmp_2", written_on))
+        ]
+    )
+    conversation = current_conversation_id.get()
+    current_conversation_key.set(("principal", conversation))
+    drawn = ProvenanceStore()
+    sources = []
+    for n in (4, 5):
+        ref = {"spec_id": "spec_" + str(n) * 32, "content_version": "cv_" + str(n) * 32}
+        citation = {"text": f"src:{n}", "sources": [{"ref": f"src:{n}", "label": f"src:{n}"}]}
+        drawn.put(conversation=conversation, manifest={"citation": citation}, **ref)
+        sources.append((ref["spec_id"], ref["content_version"]))
+    assert drawn.alias(conversation=conversation, **named, sources=sources, stat_var_count=1)
+    lineages = _CardLineages()
+    first = McpExecutor(settings=Settings(), provenance=drawn, card_lineages=lineages)
+    drawn_card = await first(
+        tool="write_component",
+        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": named}},
+    )
+    lineages.committed.append(drawn_card.pop(CARD_LINEAGE_KEY))
+
+    second = McpExecutor(settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages)
+    redrawn = await second(
+        tool="write_component",
+        args={
+            "intent": {
+                "type": "line_chart",
+                "title": "t",
+                "frame_ref": redraw_frame,
+            }
+        },
+    )
+
+    assert redrawn["outcome"] == "ok", redrawn
+    first_card, new_card = drawn_card["component"], redrawn["component"]
+    assert [source["id"] for source in first_card["provenance"]["sources"]] == ["src:4", "src:5"]
+    assert new_card["provenance"]["sources"] == first_card["provenance"]["sources"]
+    assert first_card["fact_summary"]["attribution"]["indicator_count"] == 1
+    assert new_card["fact_summary"]["attribution"] == first_card["fact_summary"]["attribution"]
+    assert new_card["provenance"]["inputs"][0] == written_on
 
 
 async def test_the_executor_relays_a_platform_write_refusal_as_a_service_refusal(

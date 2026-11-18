@@ -40,8 +40,13 @@ holds more than a handful of frames awaiting a `write_component`, so the
 per-bucket cap is headroom.
 
 The store is in-process, so a frame's provenance lives on the instance that
-recorded it. `StudioStore` keeps conversations in Postgres, where any
-instance reads them; this store has no shared backend.
+recorded it. A card's lineage also lives with the card: each card write
+commits the `CardLineage` of the frame it was drawn from
+(`harness.studio_store.StudioStore.change_canvas`), and a write on a frame
+this store does not hold puts the stored one back first
+(`ProvenanceStore.restore`, called by `harness.mcp_client.McpExecutor`), so
+an edit on another instance or after a restart finds the card's frame here.
+A frame no card was drawn from has no stored lineage.
 """
 
 from __future__ import annotations
@@ -51,7 +56,7 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import Any
+from typing import Any, Protocol
 
 from data_mcp.stat_var_list import with_stat_var_list
 from fastmcp.exceptions import ResourceError
@@ -127,6 +132,67 @@ class _Entry:
 
     lineage: Lineage
     stat_var_count: int | None = None
+
+
+# The `write_component` outcome key `harness.mcp_client.McpExecutor` hands a
+# drawn card's `CardLineage` under, taken off the outcome before anything else
+# reads it (`harness.studio_translate._RecordingExecutor`).
+CARD_LINEAGE_KEY = "card_lineage"
+
+
+@dataclass(frozen=True, slots=True)
+class CardLineage:
+    """The lineage of the frame card `component_id` was drawn from, as the
+    card's write commits it with the card.
+
+    `frame` is the frame the platform's resolved revision names
+    (`provenance.inputs[0]`), and `requested` the frame the create's intent
+    named when a rolling card was written on another one
+    (`harness.rolling_cards`). `lineage` holds every member whole, manifest
+    included, and `stat_var_count` the count `ProvenanceStore.alias` stored,
+    `None` when it stored none.
+    """
+
+    component_id: str
+    frame: _FrameKey
+    lineage: Lineage
+    stat_var_count: int | None = None
+    requested: _FrameKey | None = None
+
+    def members_json(self) -> list[dict[str, Any]]:
+        """`lineage` as the JSON list the card's lineage row stores."""
+        return [
+            {
+                "spec_id": member.spec_id,
+                "content_version": member.content_version,
+                "manifest": member.manifest,
+            }
+            for member in self.lineage
+        ]
+
+
+def lineage_from_json(members: Sequence[Mapping[str, Any]]) -> Lineage:
+    """The `Lineage` `CardLineage.members_json` wrote."""
+    return tuple(
+        ProvenanceInput(member["spec_id"], member["content_version"], dict(member["manifest"]))
+        for member in members
+    )
+
+
+class CardLineageReader(Protocol):
+    """Reads the stored `CardLineage` of a conversation's card
+    (`harness.studio_store.StudioStore.card_lineage`): the card
+    `component_id`, or any card drawn from `frame` or whose create asked for
+    it. `None` when no such card's lineage is stored."""
+
+    async def __call__(
+        self,
+        principal: str,
+        conversation_id: str,
+        *,
+        component_id: str | None = None,
+        frame: _FrameKey | None = None,
+    ) -> CardLineage | None: ...
 
 
 class ProvenanceStore:
@@ -244,6 +310,35 @@ class ProvenanceStore:
             entry=_Entry(tuple(members.values()), stat_var_count),
         )
         return True
+
+    def card_lineage(
+        self,
+        *,
+        conversation: str,
+        component_id: str,
+        spec_id: str | None,
+        content_version: str | None,
+    ) -> CardLineage | None:
+        """The `CardLineage` card `component_id` commits when it is drawn from
+        the frame `(spec_id, content_version)`, or `None` when the store holds
+        no lineage for that frame."""
+        entry = self._entry(conversation, (spec_id, content_version))
+        if entry is None:
+            return None
+        return CardLineage(
+            component_id=component_id,
+            frame=(spec_id, content_version),
+            lineage=entry.lineage,
+            stat_var_count=entry.stat_var_count,
+        )
+
+    def restore(self, *, conversation: str, card: CardLineage) -> None:
+        """Put a stored card's lineage back under its frame, and under the
+        frame its create asked for, wherever the store holds none."""
+        entry = _Entry(card.lineage, card.stat_var_count)
+        for key in dict.fromkeys(key for key in (card.frame, card.requested) if key is not None):
+            if self._entry(conversation, key) is None:
+                self._store(conversation=conversation, key=key, entry=entry)
 
     def _store(self, *, conversation: str, key: _FrameKey, entry: _Entry) -> None:
         bucket = self._by_conversation.get(conversation)
@@ -578,9 +673,13 @@ def _year(value: object) -> int | None:
 
 
 __all__ = [
+    "CARD_LINEAGE_KEY",
+    "CardLineage",
+    "CardLineageReader",
     "Lineage",
     "ProvenanceInput",
     "ProvenanceStore",
+    "lineage_from_json",
     "merged_manifest",
     "summed_stat_var_count",
 ]

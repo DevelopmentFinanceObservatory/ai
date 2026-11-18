@@ -42,6 +42,7 @@ from common.mcp_telemetry import WRITE_TOKEN_KEY
 from pydantic import BaseModel
 
 from harness.conversation import current_conversation_key
+from harness.provenance import CardLineage
 from harness.studio_state import (
     ConversationState,
     _block_title,
@@ -115,9 +116,11 @@ class EditFailed:
 @dataclass(frozen=True)
 class CanvasChange:
     """A card write. `change` runs on the canvas as stored and returns
-    whether it changed the canvas (`StudioStore.change_canvas`)."""
+    whether it changed the canvas (`StudioStore.change_canvas`), and
+    `lineage`, the written card's frame lineage, commits with it."""
 
     change: Callable[[ConversationState], bool]
+    lineage: CardLineage | None = None
 
 
 # An edit emits a frame to number or one of the events above.
@@ -165,10 +168,10 @@ async def edit_event_frames(
             return [*closed_on_reply(c, text, suggestions=True)]
         case EditFailed(error=error):
             return [_stream_fatal(c, error)]
-        case CanvasChange(change=change):
+        case CanvasChange(change=change, lineage=lineage):
             key = current_conversation_key.get()
             assert key is not None, "an edit runs only inside a conversation's stream"
-            if not await store.change_canvas(*key, change):
+            if not await store.change_canvas(*key, change, lineage=lineage):
                 return []
             return [
                 CompositionUpdated(
@@ -328,7 +331,7 @@ async def _edit_flow(
                 )
                 return refreshed
 
-            frames.append(CanvasChange(revise))
+            frames.append(CanvasChange(revise, lineage=recorder.card_lineage(component)))
             frames.extend(_close(text or "Done -- the card was updated."))
         for frame in frames:
             yield frame
@@ -390,7 +393,7 @@ async def _edit_flow(
         )
         return _replace_block(work, old_component_id=component_id, component=component)
 
-    yield CanvasChange(recreate)
+    yield CanvasChange(recreate, lineage=recorder.card_lineage(component))
     for frame in _close(closing):
         yield frame
 
