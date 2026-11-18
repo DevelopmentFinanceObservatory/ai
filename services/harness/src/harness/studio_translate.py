@@ -105,6 +105,7 @@ from harness.seeds import SEED_STEP_TOOL, SEEDS_STEP_ID
 from harness.sentences import DROPPED_REASON, MAX_SENTENCE_CHARS, failure_sentence
 from harness.studio_state import (
     ConversationState,
+    DatabaseUnavailable,
     SegmentLost,
     _PendingChoice,
     _PendingInterrupt,
@@ -387,25 +388,52 @@ def _fatal_frame(
     )
 
 
+# What a user reads when a stream's segment is lost (`segment_lost_frame`).
+SEGMENT_LOST_DETAIL = failure_sentence(ErrorCode.TRANSIENT_UNAVAILABLE, RetryMode.RETRY_AFTER_DELAY)
+
+
+def segment_lost_frame(conversation: ConversationState) -> ErrorFrame:
+    """The frame that ends a stream whose segment is lost: another instance
+    took it over, or this one could not reach the database before the
+    lease's deadline (`DatabaseUnavailable`). Either way the turn is left as
+    stored, so the client retries after a delay. One frame for every place
+    that loss surfaces: the heartbeat (`_sse_stream`), a checkpoint, a
+    frame-number reservation and a canvas write."""
+    return ErrorFrame(
+        event="error",
+        seq=conversation.next_seq(),
+        error=ToolError(
+            error=ErrorCode.TRANSIENT_UNAVAILABLE,
+            retry=RetryMode.RETRY_AFTER_DELAY,
+            detail=SEGMENT_LOST_DETAIL,
+            retry_after_seconds=30,
+        ),
+    )
+
+
 def _checkpoint_failed_frame(conversation: ConversationState, exc: Exception) -> ErrorFrame:
     """The stream-fatal frame a stream yields when its state cannot be
     saved: `StudioRunner._checkpointed` when a checkpoint before a pause or
     terminal frame, or a frame-number reservation, fails, in place of the
     frame it would have carried, and the turn and edit streams when a
-    card's canvas write is fenced out (`StudioStore.change_canvas`). A
+    card's canvas write fails (`StudioStore.change_canvas`). A
     `SegmentLost` means another instance's claim has already outlived this
-    one's TTL and now owns the conversation, so the turn is left open for it
-    rather than closed here; anything else (a DB error) closes the turn, since
-    nothing else will finish it. The turn's record names `state_not_saved`,
-    and the frame, whose grammar has no such member, the transient code."""
+    one's TTL and now owns the conversation, and `DatabaseUnavailable` that
+    the database stayed unreachable until the lease's deadline, so no close
+    could be saved: either way the turn is left as stored and the stream
+    ends as when the heartbeat's renewals fail (`segment_lost_frame`).
+    Anything else (a database error) closes the turn, since nothing else
+    will finish it. The turn's record names `state_not_saved`, and the
+    frame, whose grammar has no such member, the transient code."""
+    if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
+        return segment_lost_frame(conversation)
     refusal = harness_refusal(
         code=HarnessCode.STATE_NOT_SAVED, message=f"the turn's state could not be saved: {exc}"
     )
     detail = failure_detail(refusal)
-    if not isinstance(exc, SegmentLost):
-        conversation.close_turn(
-            final_text=conversation.turn_final_text or detail, error=refusal["code"]
-        )
+    conversation.close_turn(
+        final_text=conversation.turn_final_text or detail, error=refusal["code"]
+    )
     return ErrorFrame(
         event="error",
         seq=conversation.next_seq(),

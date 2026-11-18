@@ -56,7 +56,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from .graph_turns import agent_read
 from .studio_routes import AUTH, orchestrator_app, stream, studio_client, turn_body
-from .turn_driver import NO_ADK
 
 RECORDED = json.loads(
     (Path(__file__).parent / "fixtures" / "adk_import" / "ledger_sessions.json").read_text()
@@ -118,7 +117,9 @@ def _view(state: ConversationState) -> dict[str, Any]:
 
 
 def _store(engine: AsyncEngine) -> StudioStore:
-    return StudioStore(engine, adk=NO_ADK, turn_specs=open_turn_specs(engine))
+    """A store over the tables as the job builds one: the reader the server
+    serves, and a bridge that converts what it reads."""
+    return adk_import._store(engine)
 
 
 async def _load(engine: AsyncEngine, conversation_id: str) -> ConversationState | None:
@@ -738,6 +739,83 @@ async def _put_open_turn_block(engine: AsyncEngine, block: dict[str, Any]) -> No
                 "id": f"{FULL}#t4",
             },
         )
+
+
+async def test_a_served_block_that_does_not_convert_is_logged_once_with_its_turn_and_reason(
+    adk: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The block the serving release keeps as stored is named once by the
+    store's bridge, with its turn session, spec id and why, however many
+    loads read it."""
+    spec_id = next(iter(EXPECTED[FULL]["view"]["turn_specs"]))
+    block = {**_mapping_block(), "spec_id": spec_id, "_bound_refs": "g7"}
+    await _put_open_turn_block(adk, block)
+    await import_conversations(adk, apply=True)
+    store = _reimporting_store(adk)
+
+    with caplog.at_level("WARNING", logger="harness.adk_import"):
+        for _ in range(2):
+            assert await store.load(PRINCIPAL, FULL) is not None
+
+    (logged,) = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert f"{FULL}#t4: the _bound_refs of spec block {spec_id} does not convert" in logged
+    assert logged.endswith("TypeError: _bound_refs is of type str")
+
+
+async def test_a_load_converts_an_open_turn_s_blocks_once(
+    adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reader returns the blocks as stored and the bridge converts them,
+    so each block is converted once per load."""
+    spec_id = next(iter(EXPECTED[FULL]["view"]["turn_specs"]))
+    await _put_open_turn_block(adk, {**_mapping_block(), "spec_id": spec_id})
+    await import_conversations(adk, apply=True)
+    store = _reimporting_store(adk)
+    converted: list[str] = []
+    convert = adk_import._convert_block
+
+    def counting(block: Any) -> Any:
+        converted.append(block.get("spec_id"))
+        return convert(block)
+
+    monkeypatch.setattr(adk_import, "_convert_block", counting)
+
+    state = await store.load(PRINCIPAL, FULL)
+
+    assert state is not None
+    assert converted.count(spec_id) == 1
+    source_from_spec_block(state.turn_specs[spec_id])
+
+
+def test_a_bridge_remembers_the_blocks_it_logged_within_its_bound(
+    adk: AsyncEngine, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each bridge keeps its own memo of the blocks it logged, holding the
+    latest `_LOGGED_BLOCKS_KEPT`, so a block pushed out by newer ones is
+    logged again."""
+    monkeypatch.setattr(adk_import, "_LOGGED_BLOCKS_KEPT", 1)
+    first, second = reimport_on_access(adk), reimport_on_access(adk)
+
+    def block(spec_id: str) -> dict[str, Any]:
+        return {spec_id: {**_mapping_block(), "spec_id": spec_id, "_bound_refs": "g7"}}
+
+    with caplog.at_level("WARNING", logger="harness.adk_import"):
+        for bridge, spec_id in [
+            (first, "spec_a"),
+            (first, "spec_a"),
+            (second, "spec_a"),
+            (first, "spec_b"),
+            (first, "spec_a"),
+        ]:
+            bridge.convert_specs(f"{FULL}#t4", block(spec_id))
+
+    logged = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert [m.split("_bound_refs of spec block ")[1].split(" ")[0] for m in logged] == [
+        "spec_a",
+        "spec_a",
+        "spec_b",
+        "spec_a",
+    ]
 
 
 async def test_close_open_turns_keeps_a_mapping_form_turn_block_as_rows(

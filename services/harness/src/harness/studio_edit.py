@@ -35,6 +35,7 @@ from common.mcp_telemetry import WRITE_TOKEN_KEY
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.studio_state import (
     ConversationState,
+    DatabaseUnavailable,
     SegmentLost,
     _block_title,
     _digest_entry,
@@ -115,13 +116,12 @@ async def edit_frames(
             message=message,
         ):
             yield frame
-    except SegmentLost as exc:
-        # The card's write found another instance had taken the conversation
-        # over (`StudioStore.change_canvas`): that instance finishes it.
+    except (SegmentLost, DatabaseUnavailable) as exc:
+        # The card's write fenced out by another instance's takeover, which
+        # finishes the turn, or one that could not reach the database before
+        # the lease's deadline (`StudioStore.change_canvas`).
         logger.warning(
-            "studio segment lost while writing the edited card (trace_id=%s): %s",
-            conversation.trace_id,
-            exc,
+            "studio edited card write failed (trace_id=%s): %s", conversation.trace_id, exc
         )
         yield _checkpoint_failed_frame(conversation, exc)
     except Exception as exc:
@@ -259,7 +259,14 @@ async def _edit_flow(
             frames: list[Any] = [revised]
             title = _block_title(component) if caught_up else patch.get("title")
 
+            # Whether an earlier attempt of the card's write changed the
+            # canvas: a retry after a commit whose acknowledgement was lost
+            # finds the block already refreshed, and still owes the client
+            # the `composition.updated` that commit made.
+            refreshed = False
+
             def revise(work: ConversationState) -> bool:
+                nonlocal refreshed
                 _record_revision(
                     work,
                     component_id=component_id,
@@ -267,9 +274,13 @@ async def _edit_flow(
                     revision=revised.revision,
                     title=title,
                 )
-                return _refresh_block(
-                    work, component_id=component_id, revision=revised.revision, title=title
+                refreshed = (
+                    _refresh_block(
+                        work, component_id=component_id, revision=revised.revision, title=title
+                    )
+                    or refreshed
                 )
+                return refreshed
 
             key = current_conversation_key.get()
             assert key is not None, "an edit runs only inside a conversation's stream"
@@ -504,15 +515,20 @@ def _refresh_block(
     title: str | None,
 ) -> bool:
     """Bring the edited component's block up to `revision`, and `title` when
-    given; True iff a block changed (a not-composed card mints no empty
-    manifest revision)."""
+    given; True iff a block changed. A card that is not composed, or whose
+    block already shows `revision` and `title`, mints no empty manifest
+    revision: the store retries a write whose commit landed but whose
+    acknowledgement was lost, and that retry reads the block the commit
+    wrote."""
     previous = conversation.composition
     if previous is None:
         return False
     blocks = [block.model_copy(deep=True) for block in previous.blocks]
     changed = False
     for block in blocks:
-        if block.component_id == component_id:
+        if block.component_id == component_id and (
+            block.revision != revision or (title and block.title != title)
+        ):
             block.revision = revision
             if title:
                 block.title = title

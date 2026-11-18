@@ -57,6 +57,10 @@ class _NoAdk:
     async def take_copy(self, principal: str, conversation_id: str) -> None:
         del principal, conversation_id
 
+    def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
+        del session_id
+        return specs
+
 
 async def _no_turn_specs(principal: str, session_id: str) -> dict[str, Any]:
     del principal, session_id

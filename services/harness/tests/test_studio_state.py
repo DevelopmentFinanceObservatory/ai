@@ -24,8 +24,11 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import errno
 import json
 import logging
+import socket
+import ssl
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -43,10 +46,12 @@ from harness import studio_state, studio_store
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.conversation import current_conversation_key
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY
+from harness.studio_edit import _refresh_block
 from harness.studio_state import (
     CANVAS_DIGEST_MAX_BYTES,
     CONVERSATION_DIGEST_MAX_BYTES,
     ConversationState,
+    DatabaseUnavailable,
     Segment,
     SegmentBusy,
     SegmentLost,
@@ -72,7 +77,8 @@ from harness.wire import (
 from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
 from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from . import drawn_cards
@@ -2605,12 +2611,14 @@ async def test_a_frame_reservation_that_meets_a_dropped_connection_is_retried(
     assert reserved == 2 * SEQ_BLOCK - 10
 
 
-async def test_a_card_write_failing_past_the_lease_deadline_reports_the_segment_lost(
+async def test_a_card_write_failing_past_the_lease_deadline_reports_the_database_unavailable(
     new_store, clock
 ) -> None:
     """A write that keeps failing stops retrying at the lease's deadline, ten
     seconds before the lease dated from the claim's load would lapse: past
-    it, another instance may claim the conversation."""
+    it, another instance may claim the conversation. No instance has, so
+    the write reports the database unavailable, raised from the last fault,
+    in place of a takeover."""
     store = new_store(clock=clock)
     state = await store.create("principal", CONVERSATION)
     store.claim_segment("principal", CONVERSATION)
@@ -2624,13 +2632,330 @@ async def test_a_card_write_failing_past_the_lease_deadline_reports_the_segment_
 
     store._write_composition = dropped
 
-    with pytest.raises(SegmentLost):
+    with pytest.raises(DatabaseUnavailable) as raised:
         await store.change_canvas(
             "principal", CONVERSATION, lambda work: land_component(work, _CARD)
         )
 
+    assert isinstance(raised.value.__cause__, OperationalError)
     assert state.components == {}
     assert state.composition is None
+
+
+def _wrapped_in(fault: BaseException, wrapper: BaseException) -> BaseException:
+    wrapper.__cause__ = fault
+    return wrapper
+
+
+class _FailingConnect:
+    """An engine whose next connect raises `fault`; everything else goes to
+    `engine`."""
+
+    def __init__(self, engine: Any, fault: BaseException) -> None:
+        self._engine = engine
+        self.fault: BaseException | None = fault
+
+    async def connect(self) -> Any:
+        if self.fault is not None:
+            fault, self.fault = self.fault, None
+            raise fault
+        return await self._engine.connect()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine, name)
+
+
+@pytest.mark.parametrize(
+    ("phase", "fault", "retried"),
+    [
+        pytest.param("connect", ConnectionRefusedError("refused"), True, id="connect-refused"),
+        pytest.param("connect", ssl.SSLError("handshake failed"), True, id="connect-tls-failure"),
+        pytest.param(
+            "connect", socket.gaierror("name does not resolve"), True, id="connect-unresolved"
+        ),
+        pytest.param(
+            "connect",
+            OSError(errno.EHOSTUNREACH, "No route to host"),
+            True,
+            id="connect-unreachable-host",
+        ),
+        pytest.param(
+            "connect",
+            OSError("Multiple exceptions: [Errno 111] refused, [Errno 99] unavailable"),
+            True,
+            id="connect-every-address-refused",
+        ),
+        pytest.param("connect", TimeoutError("timed out"), True, id="connect-timeout"),
+        pytest.param(
+            "connect",
+            OSError(errno.EMFILE, "Too many open files"),
+            True,
+            id="connect-too-many-open-files",
+        ),
+        pytest.param(
+            "connect", SQLAlchemyTimeoutError("QueuePool limit reached"), True, id="pool-timeout"
+        ),
+        pytest.param(
+            "connect",
+            OperationalError("connect", {}, ConnectionRefusedError("refused")),
+            True,
+            id="connect-driver-refused",
+        ),
+        pytest.param(
+            "connect", FileNotFoundError("no socket at /cloudsql/x"), False, id="missing-socket"
+        ),
+        pytest.param("connect", PermissionError("client key"), False, id="unreadable-key"),
+        pytest.param(
+            "connect", IsADirectoryError("sslrootcert"), False, id="certificate-is-a-directory"
+        ),
+        pytest.param(
+            "connect", NotADirectoryError("sslrootcert"), False, id="certificate-not-a-directory"
+        ),
+        pytest.param(
+            "connect",
+            ssl.SSLCertVerificationError("certificate verify failed"),
+            False,
+            id="unverified-certificate",
+        ),
+        pytest.param(
+            "connect",
+            _wrapped_in(
+                ssl.SSLCertVerificationError("certificate verify failed"),
+                OSError("connector could not connect"),
+            ),
+            False,
+            id="unverified-certificate-wrapped",
+        ),
+        pytest.param(
+            "statement",
+            OperationalError("UPDATE", {}, ConnectionResetError("connection reset")),
+            True,
+            id="statement-reset-socket",
+        ),
+        pytest.param(
+            "statement", ConnectionResetError("connection reset"), True, id="statement-reset-raw"
+        ),
+        pytest.param(
+            "statement",
+            OperationalError("UPDATE", {}, Exception("closed"), connection_invalidated=True),
+            True,
+            id="statement-invalidated",
+        ),
+        pytest.param("statement", TimeoutError("timed out"), False, id="statement-timeout"),
+        pytest.param(
+            "statement",
+            OSError(errno.EMFILE, "Too many open files"),
+            False,
+            id="statement-os-error",
+        ),
+        pytest.param(
+            "statement",
+            OperationalError("UPDATE", {}, Exception("canceling statement due to lock timeout")),
+            False,
+            id="lock-timeout",
+        ),
+        pytest.param(
+            "statement",
+            InterfaceError("UPDATE", {}, Exception("another operation is in progress")),
+            False,
+            id="connection-misuse",
+        ),
+    ],
+)
+async def test_a_card_write_retries_a_lost_connection_alone(
+    new_store, monkeypatch, phase: str, fault: Exception, retried: bool
+) -> None:
+    """A failed connect is retried unless what failed is a file or a
+    certificate no retry mends; a failed statement is retried only when the
+    connection was lost under it. Anything else raises at once."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store = new_store()
+    await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    if phase == "connect":
+        store._engine = _FailingConnect(store._engine, fault)
+    else:
+        real_write = store._write_composition
+        faults: list[Exception] = []
+
+        async def failing_once(*args: Any, **kwargs: Any) -> None:
+            if not faults:
+                faults.append(fault)
+                raise fault
+            await real_write(*args, **kwargs)
+
+        store._write_composition = failing_once
+
+    if retried:
+        await store.change_canvas(
+            "principal", CONVERSATION, lambda work: land_component(work, _CARD)
+        )
+    else:
+        with pytest.raises(Exception) as raised:
+            await store.change_canvas(
+                "principal", CONVERSATION, lambda work: land_component(work, _CARD)
+            )
+        assert not isinstance(raised.value, DatabaseUnavailable)
+        assert fault in {raised.value, raised.value.__cause__}
+
+    if phase == "connect":
+        assert store._engine.fault is None
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert (reloaded.composition is not None) == retried
+
+
+async def test_a_release_that_cannot_reach_the_database_logs_it_saved_nothing(
+    new_store, clock, caplog
+) -> None:
+    """The release names the database, not a takeover, as why nothing was
+    saved."""
+    store = new_store(clock=clock)
+    await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await clock.set(store.lease_deadline("principal", CONVERSATION))
+
+    async def dropped(*args: Any, **kwargs: Any) -> None:
+        raise OperationalError("UPDATE", {}, ConnectionResetError("connection reset"))
+
+    store._write = dropped
+
+    with caplog.at_level(logging.WARNING, logger=studio_store.__name__):
+        await store.release("principal", CONVERSATION, segment_id)
+
+    (record,) = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert record.levelno == logging.ERROR
+    assert "could not reach the database" in record.getMessage()
+
+
+async def test_a_release_retried_after_another_instance_claimed_and_released_is_fenced_out(
+    new_store, monkeypatch, caplog
+) -> None:
+    """A's release commits and its acknowledgement is lost. Before the retry,
+    B claims and releases. The row holds no lease, but at B's version, so the
+    retry knows its own commit is not the last one and records nothing."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store_a = new_store()
+    state_a = await store_a.create("principal", CONVERSATION)
+    state_a.begin_turn()
+    segment_id = store_a.claim_segment("principal", CONVERSATION)
+    await store_a.save("principal", CONVERSATION)
+    state_a.turn_final_text = "A's last words"
+    store_b = new_store()
+    real_transaction = store_a._transaction
+    faults: list[int] = []
+
+    @asynccontextmanager
+    async def losing_the_ack() -> Any:
+        async with real_transaction() as conn:
+            yield conn
+        if not faults:
+            faults.append(1)
+            state_b = await store_b.load("principal", CONVERSATION)
+            state_b.turn_final_text = "B's words"
+            b_segment = store_b.claim_segment("principal", CONVERSATION)
+            await store_b.save("principal", CONVERSATION)
+            await store_b.release("principal", CONVERSATION, b_segment)
+            raise OperationalError("COMMIT", {}, ConnectionResetError("connection reset"))
+
+    store_a._transaction = losing_the_ack
+    version_before = store_a._runtime[("principal", CONVERSATION)].version
+
+    with caplog.at_level(logging.WARNING, logger=studio_store.__name__):
+        await store_a.release("principal", CONVERSATION, segment_id)
+
+    assert faults == [1]
+    assert any("taken over" in r.getMessage() for r in caplog.records)
+    assert store_a._runtime[("principal", CONVERSATION)].version == version_before
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert reloaded.turn_final_text == "B's words"
+
+
+async def test_a_removal_whose_commit_lost_its_acknowledgement_reports_the_cards_it_removed(
+    new_store, monkeypatch
+) -> None:
+    """The retry reads a canvas the card is already off. It still reports the
+    card removed, and the stream still owes its `composition.updated`."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await store.change_canvas("principal", CONVERSATION, lambda work: land_component(work, _CARD))
+    faults = _dropping_connection(store, acknowledged=True)
+    remove = studio_state.make_remove_cards(store)
+    token = current_conversation_key.set(("principal", CONVERSATION))
+    try:
+        result = await remove(component_ids=["cmp_two"], all_cards=False)
+    finally:
+        current_conversation_key.reset(token)
+
+    assert faults == [1]
+    assert result == (["cmp_two"], [])
+    assert state.take_unreported_removal() is True
+    assert state.composition is not None and state.composition.blocks == []
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert reloaded.composition == state.composition
+
+
+async def test_a_block_refresh_whose_commit_lost_its_acknowledgement_mints_one_revision(
+    new_store, monkeypatch
+) -> None:
+    """The retry finds the block already at the revision and title, and
+    leaves the canvas as the lost commit wrote it."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await store.change_canvas("principal", CONVERSATION, lambda work: land_component(work, _CARD))
+    assert state.composition is not None
+    landed = state.composition.revision
+    faults = _dropping_connection(store, acknowledged=True)
+
+    await store.change_canvas(
+        "principal",
+        CONVERSATION,
+        lambda work: _refresh_block(work, component_id="cmp_two", revision=2, title="Renamed"),
+    )
+
+    assert faults == [1]
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert reloaded.composition.revision == landed + 1
+    assert (reloaded.composition.blocks[0].revision, reloaded.composition.blocks[0].title) == (
+        2,
+        "Renamed",
+    )
+
+
+async def test_a_removal_that_cannot_reach_the_database_ends_the_stream_as_lost(
+    new_store, clock
+) -> None:
+    """No close could be saved while the database is down. The removal wakes
+    the stream's heartbeat (`renew_lease_now`), whose renewal past the
+    lease's deadline ends the stream as lost, with the turn as stored."""
+    store = new_store(clock=clock)
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await store.change_canvas("principal", CONVERSATION, lambda work: land_component(work, _CARD))
+    await clock.set(store.lease_deadline("principal", CONVERSATION))
+
+    async def dropped(*args: Any, **kwargs: Any) -> None:
+        raise OperationalError("UPDATE", {}, ConnectionResetError("connection reset"))
+
+    store._write_composition = dropped
+    state.renew_now = asyncio.Event()
+    remove = studio_state.make_remove_cards(store)
+    token = current_conversation_key.set(("principal", CONVERSATION))
+    try:
+        with pytest.raises(DatabaseUnavailable):
+            await remove(component_ids=["cmp_two"], all_cards=False)
+    finally:
+        current_conversation_key.reset(token)
+
+    assert state.renew_now.is_set()
 
 
 async def test_a_removal_fenced_out_by_a_takeover_ends_the_stream(new_store, clock) -> None:
@@ -2658,6 +2983,33 @@ async def test_a_removal_fenced_out_by_a_takeover_ends_the_stream(new_store, clo
         current_conversation_key.reset(token)
 
     assert state_a.renew_now.is_set()
+
+
+async def test_a_composition_edit_reads_the_digest_entries_its_adds_name_alone(new_store) -> None:
+    """A pin, move or remove reads no digest entry under the row lock, and an
+    add reads the entries of the cards it names."""
+    store = new_store()
+    await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    for component_id in ("cmp_two", "cmp_three"):
+        card = {**_CARD, "component_id": component_id}
+        await store.change_canvas(
+            "principal", CONVERSATION, lambda work, card=card: land_component(work, card)
+        )
+    read: list[dict[str, Any]] = []
+
+    def mutate(manifest: CompositionManifest | None, components: Any) -> CompositionManifest:
+        read.append(dict(components))
+        assert manifest is not None
+        return manifest
+
+    await store.mutate_composition("principal", CONVERSATION, mutate)
+    await store.mutate_composition(
+        "principal", CONVERSATION, mutate, component_ids={"cmp_three", "cmp_gone"}
+    )
+
+    assert [sorted(components) for components in read] == [[], ["cmp_three"]]
 
 
 async def test_mutate_composition_no_op_returns_the_same_manifest_without_appending(

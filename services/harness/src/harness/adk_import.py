@@ -67,12 +67,13 @@ Verbs:
   with `StudioStore.load` from the tables, the canvas included, and the
   run-ledger items with the run rows, its lease's cancel flag left out.
   Both sides take the open turn's spec blocks from its turn session
-  through the reader the server serves (`open_turn_specs`). A conversation
+  through the reader the server serves (`open_turn_specs`), converted as
+  `StudioStore.load` converts them. A conversation
   whose ADK state moved since the job imported it while its rows did not
   (the previous release still serving), and one whose rows moved since,
   written by the release that reads the tables (one written while verify
-  compares it included), are each listed and not compared; one where both moved is a conflict, listed, not compared, and
-  fails the verify.
+  compares it included), are each listed and not compared; one where both
+  moved is a conflict, listed, not compared, and fails the verify.
 - `close-open-turns`: closes, in the tables, every open turn that holds no
   live lease and ran on ADK (its turn session `{conversation_id}#t{n}`
   under app `dfo_analyst_graph` exists), as `ConversationState.begin_turn`
@@ -96,7 +97,9 @@ conversation with `harness.studio_store.ConversationHeld`. A conversation
 whose ledger session the copy refuses is served as the tables hold it, and
 started afresh by its next turn when they do not hold it. `open_turn_specs`
 is the `turn_specs` reader the server gives `StudioStore`: it reads an open
-turn's spec blocks converted as `import` converts them.
+turn's spec blocks as stored, and `StudioStore.load` converts them, as
+`import` does, through the bridge's `convert_specs`, which logs a block that
+does not convert.
 
 Without `--apply` nothing is written to the conversation tables. Only
 `import` migrates, so `--verify` and `close-open-turns` also run from an
@@ -124,6 +127,7 @@ import json
 import logging
 import math
 import sys
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -577,16 +581,44 @@ class _TurnSpecs:
 async def _turn_session_specs(
     engine: AsyncEngine, principal: str, session_id: str
 ) -> _TurnSpecs | None:
-    """The spec blocks a turn's own ADK session holds, empty when it holds
-    none. None when the session does not exist."""
-    async with engine.connect() as conn:
-        return await _read_turn_session(conn, principal, session_id)
+    """The spec blocks a turn's own ADK session holds, converted, empty when
+    it holds none. None when the session does not exist."""
+    return _converted_turn(session_id, await _turn_session_row(engine, principal, session_id))
 
 
 async def _read_turn_session(
     conn: AsyncConnection, principal: str, session_id: str
 ) -> _TurnSpecs | None:
     """`_turn_session_specs` on `conn`."""
+    return _converted_turn(session_id, await _stored_turn_specs(conn, principal, session_id))
+
+
+def _converted_turn(
+    session_id: str, stored: tuple[dict[str, Any], int] | None
+) -> _TurnSpecs | None:
+    """The turn session `session_id`'s spec blocks as stored
+    (`_stored_turn_specs`), converted (`_converted_specs`)."""
+    if stored is None:
+        return None
+    specs, size = stored
+    blocks = Blocks()
+    return _TurnSpecs(specs=_converted_specs(session_id, specs, blocks), blocks=blocks, size=size)
+
+
+async def _turn_session_row(
+    engine: AsyncEngine, principal: str, session_id: str
+) -> tuple[dict[str, Any], int] | None:
+    """`_stored_turn_specs` on a connection of its own: the one read of a
+    turn session's row outside the import's transaction."""
+    async with engine.connect() as conn:
+        return await _stored_turn_specs(conn, principal, session_id)
+
+
+async def _stored_turn_specs(
+    conn: AsyncConnection, principal: str, session_id: str
+) -> tuple[dict[str, Any], int] | None:
+    """The spec blocks a turn's own ADK session holds, as stored, and their
+    size in bytes of JSON text. None when the session does not exist."""
     row = (
         await conn.execute(
             text(
@@ -604,30 +636,36 @@ async def _read_turn_session(
     ).first()
     if row is None:
         return None
-    blocks = Blocks()
-    specs = _convert_blocks(dict(row[0] or {}), session_id, blocks)
-    return _TurnSpecs(specs=dict(specs), blocks=blocks, size=row[1])
+    return dict(row[0] or {}), row[1]
 
 
 def open_turn_specs(engine: AsyncEngine) -> TurnSpecs:
     """`StudioStore`'s `turn_specs` reader over `engine`: the spec blocks the
     turn session `session_id` (app `dfo_analyst_graph`) holds, read by SQL
-    and converted as the import converts them (`_convert_blocks`). Empty
-    when the session holds none or does not exist. The server serves Studio
-    through it, and `--verify` and `close-open-turns` read open turns
-    through it, so the gate checks the blocks the serving release loads."""
+    as stored. Empty when the session holds none or does not exist.
+    `StudioStore.load` converts what it reads, once, through its bridge's
+    `convert_specs`. The server serves Studio through it, and `--verify`
+    reads open turns through it and the job's bridge (`_NoAdk`), whose
+    conversion is the serving bridge's (`_converted_specs`), so the gate
+    checks the blocks the serving release loads."""
 
     async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
-        turn = await _turn_session_specs(engine, principal, session_id)
-        return turn.specs if turn is not None else {}
+        stored = await _turn_session_row(engine, principal, session_id)
+        return stored[0] if stored is not None else {}
 
     return turn_specs
 
 
-def _converted_specs(session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
+def _converted_specs(session_id: str, specs: dict[str, Any], blocks: Blocks) -> dict[str, Any]:
     """`specs`, the spec blocks turn session `session_id` holds, converted
-    (`_convert_blocks`); a block that does not convert is kept as it is."""
-    return dict(_convert_blocks(specs, session_id, Blocks()))
+    (`_convert_blocks`), and `specs` itself when no block needed converting.
+    A block that does not convert is kept as it is and named in `blocks`."""
+    converted = _convert_blocks(specs, session_id, blocks)
+    return specs if converted is specs else dict(converted)
+
+
+# How many unconvertible spec blocks a bridge remembers having logged.
+_LOGGED_BLOCKS_KEPT = 1024
 
 
 async def _find_row(conn: AsyncConnection, names: dict[str, str], *, lock: bool) -> int | None:
@@ -1162,8 +1200,9 @@ def reimport_on_access(engine: AsyncEngine) -> AdkBridge:
     (`_ADK_MOVED`), so a `/turn` can tell a per-turn session the previous
     release just created from a leftover one. `AdkBridge.convert_specs`
     converts the spec blocks a turn session holds as the import does
-    (`_converted_specs`), for a stream that resumes a turn the previous
-    release opened.
+    (`_converted_specs`), for a load of an open turn and a stream that
+    resumes a turn the previous release opened, and logs each block that
+    does not convert once (`_AdkOnAccess._log_unconvertible`).
 
     Before each load it reads the conversation's ledger session against
     what was last copied of it (`_ADK_MOVED`). When ADK holds no ledger
@@ -1197,6 +1236,9 @@ class _AdkOnAccess:
         # Each refused conversation, with the ledger session's `update_time` the
         # refusal read.
         self._refused: dict[tuple[str, str], datetime] = {}
+        # The unconvertible spec blocks this bridge has logged, newest last,
+        # by the reason logged, which names the turn session and spec id.
+        self._logged: OrderedDict[str, None] = OrderedDict()
 
     async def _lookup(self, principal: str, conversation_id: str) -> Row[Any] | None:
         async with self._engine.connect() as conn:
@@ -1218,7 +1260,25 @@ class _AdkOnAccess:
         )
 
     def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
-        return _converted_specs(session_id, specs)
+        blocks = Blocks()
+        converted = _converted_specs(session_id, specs, blocks)
+        for reason in blocks.unconvertible:
+            self._log_unconvertible(reason)
+        return converted
+
+    def _log_unconvertible(self, reason: str) -> None:
+        """Log a spec block served as stored, since it does not convert, once
+        while it stays among the `_LOGGED_BLOCKS_KEPT` this bridge last
+        logged. `reason` names the turn session (conversation and turn)
+        holding it, its spec id and why. A turn that closes with it loses
+        its entity refs, since the reader refuses the mapping form."""
+        if reason in self._logged:
+            self._logged.move_to_end(reason)
+            return
+        self._logged[reason] = None
+        if len(self._logged) > _LOGGED_BLOCKS_KEPT:
+            self._logged.popitem(last=False)
+        logger.warning("adk import: a spec block is served as stored: %s", reason)
 
     async def reimport(self, principal: str, conversation_id: str) -> None:
         row = await self._lookup(principal, conversation_id)
@@ -1275,7 +1335,7 @@ class _NoAdk:
         return False
 
     def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
-        return _converted_specs(session_id, specs)
+        return _converted_specs(session_id, specs, Blocks())
 
 
 def _store(engine: AsyncEngine) -> StudioStore:
@@ -1347,9 +1407,12 @@ async def _stored_runs(engine: AsyncEngine, principal: str, conversation_id: str
 
 async def _read_turn_specs(engine: AsyncEngine, principal: str, state: ConversationState) -> None:
     """Set the open turn's spec blocks on `state` from its turn session,
-    through the reader `StudioStore.load` uses (`open_turn_specs`)."""
+    through the reader and the bridge the tables side's `StudioStore.load`
+    uses (`open_turn_specs`, `_NoAdk.convert_specs`)."""
     if state.turn_index and not state.turn_recorded:
-        state.turn_specs = await open_turn_specs(engine)(principal, state.session_id)
+        session_id = state.session_id
+        stored = await open_turn_specs(engine)(principal, session_id)
+        state.turn_specs = _NoAdk().convert_specs(session_id, stored)
 
 
 async def _adk_view(engine: AsyncEngine, session: _Session) -> dict[str, Any]:

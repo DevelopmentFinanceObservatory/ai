@@ -14,7 +14,7 @@ time: `StudioStore.claim_segment` takes it, `renew` pushes its TTL forward,
 `checkpoint` writes the rest of the conversation's state to storage
 mid-stream (and at end of segment, through `release`), and
 `request_cancel` signals it from any instance. See `Segment`,
-`SegmentBusy` and `SegmentLost`.
+`SegmentBusy`, `SegmentLost` and `DatabaseUnavailable`.
 """
 
 from __future__ import annotations
@@ -413,6 +413,13 @@ class SegmentLost(Exception):  # noqa: N818 -- named for the wire condition, not
     """Raised by `StudioStore.checkpoint` when the stored live segment is
     no longer the one this call is checkpointing on behalf of. Another
     instance took over after this one's TTL lapsed."""
+
+
+class DatabaseUnavailable(Exception):  # noqa: N818 -- named for the condition the stream reports
+    """Raised by `StudioStore`'s retried writes (`checkpoint`,
+    `change_canvas`, `reserve_frames`) when the database stayed unreachable
+    until the lease's deadline. The stream ends as a lost segment does,
+    leaving the turn as stored, since no close could be saved either."""
 
 
 @dataclass(frozen=True)
@@ -1048,6 +1055,19 @@ class ConversationState:
         self.turn_recorded = False
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
+    def abandon_turn_span(self) -> None:
+        """End the turn's telemetry span, when this instance holds one, as
+        `close_turn` ends it for an abandoned turn, without recording the
+        turn: the state holding it is about to be dropped
+        (`StudioStore.discard_unsaved`), and no later close could end it."""
+        end_turn_span(
+            self._telemetry_span,
+            request=self.turn_user_message,
+            response=self.turn_final_text,
+            error="abandoned",
+        )
+        self._telemetry_span = None
+
     def ensure_turn_span(self) -> None:
         """Open a turn span on this conversation's `trace_id` when it holds
         none. `begin_turn` opens the span for the instance that starts a
@@ -1142,21 +1162,37 @@ def make_remove_cards(store: StudioStore) -> Any:
     is written as it happens, on the canvas as stored
     (`StudioStore.change_canvas`).
 
-    A `SegmentLost` there has the stream renew its lease at once
-    (`renew_lease_now`) before it propagates: raised inside the tool, it
-    reaches the model as a failed call, and the renewal that finds the lease
-    gone ends the turn's segment."""
+    The store retries a write whose commit landed but whose acknowledgement
+    was lost, and that retry reads a canvas the cards are already off. A
+    card an earlier attempt took off that the canvas no longer shows is
+    reported removed, and the removal unreported, so the model and the
+    stream learn what the commit did.
+
+    A `SegmentLost` or `DatabaseUnavailable` there has the stream renew its
+    lease at once (`renew_lease_now`) before it propagates: raised inside
+    the tool, it reaches the model as a failed call, and the renewal that
+    finds the lease gone, or that cannot reach the database before the
+    lease's deadline either, ends the turn's segment as lost."""
 
     async def remove(*, component_ids: list[str], all_cards: bool) -> tuple[list[str], list[str]]:
         key = current_conversation_key.get()
         conversation = store.current(*key) if key is not None else None
         if key is None or conversation is None:
             return [], list(component_ids)
+        earlier: list[str] = []
+
+        def change(work: ConversationState) -> tuple[list[str], list[str]]:
+            shown = _block_ids(work.composition)
+            removed, missing = remove_cards(work, component_ids, all_cards=all_cards)
+            landed = [cid for cid in earlier if cid not in shown]
+            if landed:
+                work._removal_unreported = True
+            earlier[:] = landed + [cid for cid in removed if cid not in landed]
+            return list(earlier), missing
+
         try:
-            return await store.change_canvas(
-                *key, lambda work: remove_cards(work, component_ids, all_cards=all_cards)
-            )
-        except SegmentLost:
+            return await store.change_canvas(*key, change)
+        except (SegmentLost, DatabaseUnavailable):
             renew_lease_now(conversation)
             raise
 
@@ -1633,6 +1669,10 @@ def _next_manifest(
     )
 
 
+def _block_ids(composition: CompositionManifest | None) -> list[str]:
+    return [block.component_id for block in composition.blocks] if composition else []
+
+
 def _block_index(composition: CompositionManifest | None, component_id: str) -> int | None:
     """The position of `component_id`'s block in `composition`, or `None`
     when there is no composition or no block there names it. The
@@ -1718,7 +1758,7 @@ def remove_cards(
     (`ConversationState.take_unreported_removal`). `make_remove_cards` runs
     it inside the store's canvas write, on the canvas as stored."""
     previous = conversation.composition
-    present = [block.component_id for block in previous.blocks] if previous else []
+    present = _block_ids(previous)
     named = set(component_ids)
     removed = [cid for cid in present if all_cards or cid in named]
     missing = [

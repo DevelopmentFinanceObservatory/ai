@@ -11,10 +11,10 @@ once.
 Every write is one transaction fenced on the conversation's live segment
 (`StudioStore.fenced`): a writer whose segment another instance took over
 gets `SegmentLost` and records nothing, publication included, and ends the
-conversation's stream, and a takeover waits for an in-flight write to commit. Two admissions of one key settle on
-the `run_keys` primary key: the second waits for the first to commit and
-then decides against its run. A record change locks its run row. Nothing
-retries.
+conversation's stream, and a takeover waits for an in-flight write to
+commit. Two admissions of one key settle on the `run_keys` primary key: the
+second waits for the first to commit and then decides against its run. A
+record change locks its run row. Nothing retries.
 
 A stored run is read with `executor.ledger.stored_run`, so one another
 release wrote loads. A stored run this release still cannot read is recorded
