@@ -1,13 +1,14 @@
-"""`_Translator` over real ADK events, in the order a streamed run yields them."""
+"""`_Translator` over the turn's events, in the order an agent's run emits them."""
 
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 import logging
+import sys
 from collections.abc import Mapping
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,20 +17,15 @@ from common.period_note import period_note
 from compiler.surface import ProgressCallback, ToolCallResult, ToolSchema
 from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from executor.run import current_step_id
-from google.adk.events import Event
-from google.adk.events.event import NodeInfo
 from google.genai import types
 from harness.chart_binding import TopMembers
 from harness.conversation import current_conversation_id
+from harness.graph.events import AgentStatus, PlannerStarted, StepProgress
 from harness.graph.state import (
-    APPROVE_INTERRUPT,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
-    ORCHESTRATOR_STATUS_FAILURE_KEY,
-    ORCHESTRATOR_STATUS_KEY,
-    STEP_PROGRESS_KEY,
 )
-from harness.orchestrator_tools import HANDED_OFF, OrchestratorTool, build_orchestrator_tools
+from harness.orchestrator_tools import HANDED_OFF, build_orchestrator_tools
 from harness.provenance import ProvenanceStore
 from harness.reply_figures import DrawnSeries, card_holds
 from harness.scripted_plan import scripted_plan
@@ -42,6 +38,7 @@ from harness.sentences import (
 from harness.studio_state import (
     ConversationState,
     _next_manifest,
+    _wire_id,
     land_component,
     remove_cards,
 )
@@ -56,15 +53,30 @@ from harness.studio_translate import (
     _tool_call_label,
     _Translator,
 )
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn.events import NodeDone, Paused
 from harness.wire import ActivityStep, CompositionActor, CompositionManifest, StepStatus
+from orchestrator.call import OrchestratorCall
+from orchestrator.run import ModelResponded, TextDelta, ToolsAnswered
 from planner.plan import plan_revision
 from planner.workflow import ToolId
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .failure_text import classed_sentence, is_user_sentence
-from .orchestrator_fakes import NO_ADK, no_turn_specs, unconnected_store
-from .test_studio_orchestrator_eval import checks
+from .turn_driver import NO_ADK, no_turn_specs, unconnected_store
+
+
+def _studio_eval_checks() -> Any:
+    """The Studio eval's checks (`evals/studio/checks.py`), loaded as the eval loads them."""
+    path = Path(__file__).resolve().parents[3] / "evals" / "studio" / "checks.py"
+    spec = importlib.util.spec_from_file_location("checks", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("checks", module)
+    spec.loader.exec_module(module)
+    return module
+
+
+checks = _studio_eval_checks()
 
 
 async def _no_executor(*, tool: str, args: dict[str, object]) -> dict[str, object]:
@@ -79,13 +91,37 @@ def _translator() -> _Translator:
 
 
 def _event(
-    *parts: types.Part, partial: bool | None = None, author: str = "dfo_orchestrator"
-) -> Event:
-    return Event(author=author, partial=partial, content=types.Content(parts=list(parts)))
+    *parts: types.Part, partial: bool = False
+) -> TextDelta | ModelResponded | ToolsAnswered | None:
+    """The event the agent's run emits for `parts`: a streamed chunk's answer
+    text (`partial`), none for a chunk of thought alone, which the run does
+    not stream, the answers of a response's calls, or a whole response."""
+    if partial:
+        text = "".join(part.text or "" for part in parts if part.text and not part.thought)
+        return TextDelta(text) if text else None
+    answers = tuple(part.function_response for part in parts if part.function_response)
+    if answers:
+        return ToolsAnswered(answers=answers, state={})
+    return ModelResponded(parts=parts)
 
 
-async def _frames(translator: _Translator, *events: Event) -> list:
-    return [frame for event in events for frame in await translator.translate(event)]
+def _status(text: str, failure: dict[str, Any] | None = None) -> AgentStatus:
+    """The status line an `orchestrate` entry opens with."""
+    return AgentStatus(text=text, failure=failure)
+
+
+def _handed_off(kind: str) -> NodeDone:
+    """`orchestrate` finishing on the hand-off of `kind` its run ended on."""
+    return NodeDone(node="orchestrate", label=kind, output={"kind": kind})
+
+
+async def _frames(translator: _Translator, *events: Any) -> list:
+    return [
+        frame
+        for event in events
+        if event is not None
+        for frame in await translator.translate(event)
+    ]
 
 
 def _steps(frames: list) -> list[tuple[str, StepStatus]]:
@@ -227,17 +263,14 @@ async def test_text_before_a_tool_call_is_interim_and_the_last_text_is_the_answe
 async def test_text_after_a_hand_off_is_not_shown_until_the_next_run_starts():
     translator = _translator()
     call = types.FunctionCall(id="call_1", name="ask_user", args={"question": "Which Congo?"})
-    taken = types.FunctionResponse(
-        id="call_1", name="ask_user", response={"status": "Recorded.", HANDED_OFF: "ask"}
-    )
 
+    # The run ends on the hand-off; the next run, after the answer, opens
+    # under its own status line.
     frames = await _frames(
         translator,
         _event(types.Part(function_call=call)),
-        _event(types.Part(function_response=taken)),
-        _event(types.Part(text="I have asked the user."), partial=True),
-        _event(types.Part(text="I have asked the user.")),
-        Event(author="t", custom_metadata={ORCHESTRATOR_STATUS_KEY: "Reading your answer"}),
+        _handed_off("ask"),
+        _status("Reading your answer"),
         _event(types.Part(text="The Republic of the Congo's GDP was $15.7 billion."), partial=True),
     )
 
@@ -310,7 +343,7 @@ async def test_step_ids_stay_unique_across_the_segments_of_one_turn():
     second = _Translator(conversation=conversation, recorder=recorder)
     ask = types.FunctionCall(id="call_1", name="ask_user", args={"question": "Which?"})
     explain = types.FunctionCall(id="call_2", name="explain_dfo", args={})
-    status = Event(author="t", custom_metadata={ORCHESTRATOR_STATUS_KEY: "Reading your answer"})
+    status = _status("Reading your answer")
 
     before = await _frames(first, _event(types.Part(function_call=ask)), status)
     after = await _frames(second, _event(types.Part(function_call=explain)), status)
@@ -421,13 +454,10 @@ _FILLED_VALUES = ("propose", "4f2a9c0d", "aid_by_donor", "forecast", "U.S.", "7"
 
 async def _plan_failed_step(failure: object) -> ActivityStep:
     """The failed step a plan hand-back with no plan shows for `failure`."""
-    failed_status = {ORCHESTRATOR_STATUS_KEY: ORCHESTRATOR_PLAN_FAILED_STATUS}
-    if failure is not None:
-        failed_status[ORCHESTRATOR_STATUS_FAILURE_KEY] = failure
     frames = await _frames(
         _translator(),
-        Event(author="t", custom_metadata={ORCHESTRATOR_STATUS_KEY: "Reading your question"}),
-        Event(author="t", custom_metadata=failed_status),
+        _status("Reading your question"),
+        _status(ORCHESTRATOR_PLAN_FAILED_STATUS, failure),
     )
     assert _steps(frames) == [
         ("Reading your question", StepStatus.RUNNING),
@@ -488,15 +518,8 @@ async def test_a_plan_that_ran_is_read_from_the_execute_nodes_result_through_the
     """The line opens at the execute node's result, so it covers `plan_done`,
     and the hand-back's status keeps it running until the agent's next move."""
     translator = _translator()
-    executed = Event(
-        author="dfo_analyst_graph",
-        node_info=NodeInfo(path="dfo_analyst_graph/execute@1"),
-        output={"frame_refs": []},
-        route="ok",
-    )
-    hand_back = Event(
-        author="t", custom_metadata={ORCHESTRATOR_STATUS_KEY: ORCHESTRATOR_PLAN_RAN_STATUS}
-    )
+    executed = NodeDone(node="execute", label="ok", output={"frame_refs": []})
+    hand_back = _status(ORCHESTRATOR_PLAN_RAN_STATUS)
     call = types.FunctionCall(id="call_1", name="make_charts", args={"charts": [{}]})
 
     frames = await _frames(translator, executed, hand_back, _event(types.Part(function_call=call)))
@@ -533,12 +556,7 @@ async def test_thinking_leaves_the_reading_line_running_until_the_answer_text():
 
 
 async def test_a_plan_sent_back_for_a_replan_opens_no_reading_line():
-    executed = Event(
-        author="dfo_analyst_graph",
-        node_info=NodeInfo(path="dfo_analyst_graph/execute@1"),
-        output={"refusal": {"code": "x"}},
-        route="replan",
-    )
+    executed = NodeDone(node="execute", label="replan", output={"refusal": {"code": "x"}})
 
     assert _steps(await _frames(_translator(), executed)) == []
 
@@ -548,16 +566,8 @@ async def test_a_successful_hand_off_to_the_planner_shows_only_the_planner_statu
     planner's own status lines follow it."""
     translator = _translator()
     call = types.FunctionCall(id="call_1", name="plan", args={"brief": "b", "asks": ["a"]})
-    taken = types.FunctionResponse(
-        id="call_1", name="plan", response={"status": "Recorded.", HANDED_OFF: "plan"}
-    )
 
-    frames = await _frames(
-        translator,
-        _event(types.Part(function_call=call)),
-        _event(types.Part(function_response=taken)),
-        _event(types.Part(text="**Waiting**", thought=True), partial=True),
-    )
+    frames = await _frames(translator, _event(types.Part(function_call=call)), _handed_off("plan"))
 
     assert _steps(frames) == [("Working on a plan", StepStatus.RUNNING)]
 
@@ -595,20 +605,12 @@ async def test_the_planning_line_names_what_the_plan_is_drafted_for(asks, detail
     translator = _translator()
     args = {"brief": "b", **({"asks": asks} if asks is not None else {})}
     call = types.FunctionCall(id="call_1", name="plan", args=args)
-    taken = types.FunctionResponse(
-        id="call_1", name="plan", response={"status": "Recorded.", HANDED_OFF: "plan"}
-    )
-    planner_started = Event(
-        author="dfo_analyst_graph",
-        node_info=NodeInfo(path="dfo_analyst_graph/planner@1"),
-        custom_metadata={"planner_started": {"revising": False}},
-    )
 
     frames = await _frames(
         translator,
         _event(types.Part(function_call=call)),
-        _event(types.Part(function_response=taken)),
-        planner_started,
+        _handed_off("plan"),
+        PlannerStarted(revising=False),
     )
 
     assert _reading_lines(frames) == [("Working on a plan", StepStatus.RUNNING, detail)]
@@ -653,36 +655,25 @@ _SLIP = {
 _SEARCH = {"parts": [{"variable": "ODA to Kenya"}]}
 
 
-def _call(call_id: str, name: str, args: dict[str, Any]) -> Event:
+def _call(call_id: str, name: str, args: dict[str, Any]) -> Any:
     return _event(types.Part(function_call=types.FunctionCall(id=call_id, name=name, args=args)))
 
 
-def _response(call_id: str, name: str, answer: dict[str, Any]) -> Event:
+def _response(call_id: str, name: str, answer: dict[str, Any]) -> Any:
     return _event(
         types.Part(function_response=types.FunctionResponse(id=call_id, name=name, response=answer))
     )
 
 
-def _plan_card() -> Event:
-    """The approval interrupt a planner that made a plan pauses on."""
+def _plan_card() -> Paused:
+    """The approval pause a planner that made a plan leads to."""
     plan = scripted_plan("kenya life expectancy", spec_id=None)
     payload = {**plan.model_dump(mode="json"), "revision": plan_revision(plan)}
-    call = types.FunctionCall(
-        id=APPROVE_INTERRUPT, name=REQUEST_INPUT_FUNCTION_CALL_NAME, args={"payload": payload}
-    )
-    return Event(
-        author="dfo_analyst_graph", content=types.Content(parts=[types.Part(function_call=call)])
-    )
+    return Paused(kind="approve", interrupt_id=_wire_id("int"), round=1, payload=payload)
 
 
-def _no_plan() -> Event:
-    return Event(
-        author="t",
-        custom_metadata={
-            ORCHESTRATOR_STATUS_KEY: ORCHESTRATOR_PLAN_FAILED_STATUS,
-            ORCHESTRATOR_STATUS_FAILURE_KEY: {"code": "internal_error"},
-        },
-    )
+def _no_plan() -> AgentStatus:
+    return _status(ORCHESTRATOR_PLAN_FAILED_STATUS, {"code": "internal_error"})
 
 
 def _settled_failures(frames: list) -> list[ActivityStep]:
@@ -695,7 +686,6 @@ def _settled_failures(frames: list) -> list[ActivityStep]:
     return list(latest.values())
 
 
-_PLANNED = {"status": "Recorded.", HANDED_OFF: "plan"}
 # A hand-off whose ask lists donors one by one and totals across them, and
 # the orchestrator's refusal of it.
 _ASKED_TWICE = {"brief": "b", "asks": [{"by": ["donor"], "over": ["donor"], "across": "2022"}]}
@@ -713,7 +703,7 @@ _ASK_SLIP = {
             _call("c1", "plan", _ASKED_TWICE),
             _response("c1", "plan", _ASK_SLIP),
             _call("c2", "plan", {"brief": "b", "asks": [{"by": ["donor"], "across": "2022"}]}),
-            _response("c2", "plan", _PLANNED),
+            _handed_off("plan"),
         ],
         # A skill read under a wrong name.
         lambda: [
@@ -759,13 +749,13 @@ async def test_a_quiet_call_the_model_corrects_shows_no_failed_step(events):
             _call("c1", "plan", {"brief": "b", "asks": ["a"]}),
             _response("c1", "plan", _FAULT),
             _call("c2", "plan", {"brief": "b again", "asks": ["a"]}),
-            _response("c2", "plan", _PLANNED),
+            _handed_off("plan"),
         ],
         # A planner that made no plan, then a plan made on a second hand-off.
         lambda: [
             _no_plan(),
             _call("c2", "plan", {"brief": "b"}),
-            _response("c2", "plan", _PLANNED),
+            _handed_off("plan"),
             _plan_card(),
         ],
     ],
@@ -800,8 +790,7 @@ async def test_a_search_with_nothing_to_search_settles_when_a_corrected_search_s
         for tool in build_orchestrator_tools(resolver=resolver, executor=None)
         if tool.__name__ == "search"
     ]
-    ctx = SimpleNamespace(state={})
-    missing = await OrchestratorTool(search).run_async(args={"parts": []}, tool_context=ctx)
+    missing = await search(call=OrchestratorCall(state={}, turn_id="turn-1"), parts=[])
     assert missing["invalid"] == [{"loc": "parts", "type": "missing"}]
     translator = _translator()
 
@@ -837,7 +826,7 @@ async def test_a_search_with_nothing_to_search_settles_when_a_corrected_search_s
         # A hand-off the planner took, which then made no plan.
         lambda: [
             _call("c1", "plan", {"brief": "b"}),
-            _response("c1", "plan", _PLANNED),
+            _handed_off("plan"),
             _no_plan(),
         ],
         # A failure no later step tried again: the turn ends on it.
@@ -887,7 +876,7 @@ _TITLE_REFUSED = {
 }
 
 
-def _calls(*calls: tuple[str, str, dict[str, Any]]) -> Event:
+def _calls(*calls: tuple[str, str, dict[str, Any]]) -> Any:
     """One model call that makes several tool calls at once."""
     return _event(
         *(
@@ -897,7 +886,7 @@ def _calls(*calls: tuple[str, str, dict[str, Any]]) -> Event:
     )
 
 
-def _responses(*responses: tuple[str, str, dict[str, Any]]) -> Event:
+def _responses(*responses: tuple[str, str, dict[str, Any]]) -> Any:
     return _event(
         *(
             types.Part(
@@ -1609,8 +1598,7 @@ async def test_the_charts_reading_line_names_only_charts_a_call_drew(answers, de
     translator = _translator()
     await _frames(
         translator,
-        _call("c1", "make_charts", _NAMED_CHARTS),
-        _call("c2", "make_charts", _OTHER_CHARTS),
+        _calls(("c1", "make_charts", _NAMED_CHARTS), ("c2", "make_charts", _OTHER_CHARTS)),
     )
 
     read = await translator.translate(_responses(*answers))
@@ -1866,25 +1854,12 @@ async def test_a_hand_off_to_the_planner_is_one_line_until_the_planner_drafts():
     call = types.FunctionCall(
         id="call_1", name="plan", args={"brief": "growth", "asks": ["growth"]}
     )
-    taken = types.FunctionResponse(
-        id="call_1", name="plan", response={"status": "Recorded.", HANDED_OFF: "plan"}
-    )
-    planner_started = Event(
-        author="dfo_analyst_graph",
-        node_info=NodeInfo(path="dfo_analyst_graph/planner@1"),
-        custom_metadata={"planner_started": {"revising": False}},
-    )
 
     frames = await _frames(
         translator,
         _event(types.Part(function_call=call)),
-        _event(types.Part(function_response=taken)),
-        _event(
-            types.Part(text="**Wrapping up**\n\nThe planner has it.", thought=True), partial=True
-        ),
-        _event(types.Part(text="Handed off."), partial=True),
-        _event(types.Part(text="Handed off.")),
-        planner_started,
+        _handed_off("plan"),
+        PlannerStarted(revising=False),
     )
 
     lines = [f for f in frames if f.event == "activity.step" and f.tool is None]
@@ -1895,25 +1870,47 @@ async def test_a_hand_off_to_the_planner_is_one_line_until_the_planner_drafts():
 async def test_a_hand_off_to_a_question_opens_no_line():
     translator = _translator()
     call = types.FunctionCall(id="call_1", name="ask_user", args={"question": "Which Congo?"})
-    taken = types.FunctionResponse(
-        id="call_1", name="ask_user", response={"status": "Recorded.", HANDED_OFF: "ask"}
-    )
 
-    frames = await _frames(
-        translator,
-        _event(types.Part(function_call=call)),
-        _event(types.Part(function_response=taken)),
-    )
+    frames = await _frames(translator, _event(types.Part(function_call=call)), _handed_off("ask"))
 
     assert [f for f in frames if f.event == "activity.step" and f.tool is None] == []
 
 
+@pytest.mark.parametrize("same_translator", [True, False], ids=["same-segment", "resumed-segment"])
+async def test_the_hand_back_a_resumed_run_opens_on_shows_only_its_status_line(same_translator):
+    """A run that resumes after a hand-off first answers the call it handed
+    off on with the hand-back. The status line the run opens under stands for
+    it, so its answer adds no line: the agent reads under that status until
+    its next move."""
+    translator = _translator()
+    call = types.FunctionCall(id="call_1", name="plan", args={"brief": "b", "asks": ["a"]})
+    await _frames(translator, _event(types.Part(function_call=call)), _handed_off("plan"))
+    if not same_translator:
+        translator = _Translator(
+            conversation=translator._conversation, recorder=translator._recorder
+        )
+    hand_back = types.FunctionResponse(
+        id="call_1", name="plan", response={"result": "The plan ran.", "frames": []}
+    )
+
+    opened = await _frames(translator, _status(ORCHESTRATOR_PLAN_RAN_STATUS))
+    answered = await _frames(translator, ToolsAnswered(answers=(hand_back,), state={}))
+    answering = await _frames(translator, _event(types.Part(text="Here it is."), partial=True))
+
+    assert _steps(opened)[-1] == ("Reading the plan's results", StepStatus.RUNNING)
+    assert answered == []
+    assert _steps(answering) == [("Reading the plan's results", StepStatus.COMPLETE)]
+
+
 async def test_plan_path_step_progress_becomes_a_running_fetch_line():
-    progress = Event(
-        author="t",
-        custom_metadata={
-            STEP_PROGRESS_KEY: {"step_id": "req_1", "tool": "get_data", "message": "minting"}
-        },
+    progress = StepProgress(
+        step_id="req_1",
+        tool="get_data",
+        message="minting",
+        position=None,
+        count=None,
+        description=None,
+        gives_answer=None,
     )
 
     frames = await _frames(_translator(), progress)
@@ -1969,8 +1966,9 @@ def _reading_lines(frames: list) -> list[tuple[str, StepStatus, str | None]]:
     ]
 
 
-def _batch(*pairs: tuple[str, dict[str, Any], dict[str, Any]]) -> tuple[Event, Event]:
-    """One model turn's parallel calls, and their responses in one event."""
+def _batch(*pairs: tuple[str, dict[str, Any], dict[str, Any]]) -> tuple[Any, Any]:
+    """One model turn's parallel calls, and their answers in one event. A
+    call whose answer records a hand-off has none: the run ends on it."""
     calls = [
         types.FunctionCall(id=f"call_{index}", name=name, args=args)
         for index, (name, args, _) in enumerate(pairs)
@@ -1978,10 +1976,13 @@ def _batch(*pairs: tuple[str, dict[str, Any], dict[str, Any]]) -> tuple[Event, E
     responses = [
         types.FunctionResponse(id=f"call_{index}", name=name, response=answer)
         for index, (name, _, answer) in enumerate(pairs)
+        if not answer.get(HANDED_OFF)
     ]
     return (
         _event(*(types.Part(function_call=call) for call in calls)),
-        _event(*(types.Part(function_response=response) for response in responses)),
+        _event(*(types.Part(function_response=response) for response in responses))
+        if responses
+        else None,
     )
 
 
@@ -2307,7 +2308,7 @@ async def test_a_manifest_older_than_one_the_stream_sent_is_logged_and_not_sent(
     sent = conversation.composition
     assert older is not None and sent is not None
 
-    async def revisions(*events: Event) -> list[int]:
+    async def revisions(*events: Any) -> list[int]:
         frames = await _frames(translator, *events)
         return [f.manifest.revision for f in frames if f.event == "composition.updated"]
 

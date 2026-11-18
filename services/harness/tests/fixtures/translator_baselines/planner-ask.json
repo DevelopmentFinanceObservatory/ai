@@ -1,0 +1,633 @@
+[
+ {
+  "approving": null,
+  "conversation": {
+   "_composition_ops": [],
+   "_removal_unreported": false,
+   "auto_add": true,
+   "components": {},
+   "composition": null,
+   "conversation_id": "conv_01test0000",
+   "latest_plan_version": null,
+   "plan_version_ids": {},
+   "seq": 0,
+   "timed_out_calls": [],
+   "trace_id": "tr_ff5b31f618fb4378",
+   "turn_applied_choice": null,
+   "turn_choice_baseline": {},
+   "turn_components": [],
+   "turn_final_text": "",
+   "turn_index": 1,
+   "turn_plans": [],
+   "turn_readings": [],
+   "turn_recorded": false,
+   "turn_specs": {},
+   "turn_user_message": "q with forks",
+   "turn_user_words": "q with forks",
+   "turns": []
+  },
+  "conversation_id": "u_4c5dc9b7708905f7/conv_01test0000",
+  "conversation_key": [
+   "u_4c5dc9b7708905f7",
+   "conv_01test0000"
+  ],
+  "finish": {
+   "frames": [],
+   "records": [],
+   "world": {
+    "composition": null,
+    "removal": false,
+    "turn_applied_choice": null,
+    "turn_plans": [],
+    "turn_readings": [],
+    "turn_specs": {}
+   }
+  },
+  "items": [
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "failure": null,
+      "text": "Reading your question",
+      "type": "AgentStatus"
+     }
+    ],
+    "frames": [
+     {
+      "event": "activity.step",
+      "label": "Reading your question",
+      "seq": 0,
+      "status": "running",
+      "step_id": "s0"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "parts": [
+       {
+        "function_call": {
+         "args": {
+          "asks": [
+           "q with forks"
+          ],
+          "brief": "q with forks"
+         },
+         "id": "adk-1",
+         "name": "plan"
+        }
+       }
+      ],
+      "type": "ModelResponded"
+     }
+    ],
+    "frames": [
+     {
+      "duration_ms": 10,
+      "event": "activity.step",
+      "label": "Reading your question",
+      "seq": 1,
+      "status": "complete",
+      "step_id": "s0"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [
+     {
+      "event": "activity.step",
+      "label": "Working on a plan",
+      "seq": 2,
+      "status": "running",
+      "step_id": "s2"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "label": "plan",
+      "node": "orchestrate",
+      "output": {
+       "ask_breakdowns": [],
+       "asks": [
+        "q with forks"
+       ],
+       "asks_across_years": [],
+       "brief": "q with forks",
+       "kind": "plan"
+      },
+      "type": "NodeDone"
+     }
+    ],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "label": "next",
+      "node": "plan_start",
+      "output": {},
+      "type": "NodeDone"
+     }
+    ],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "pick": false,
+      "revising": false,
+      "type": "PlannerStarted"
+     }
+    ],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "parts": [
+       {
+        "function_call": {
+         "args": {
+          "candidates": [
+           {
+            "label": "reading A",
+            "spec_id": "spec_a"
+           },
+           {
+            "label": "reading B",
+            "spec_id": "spec_b"
+           }
+          ],
+          "message": "Which source did you mean?"
+         },
+         "id": "call-1",
+         "name": "ask_user_question"
+        }
+       }
+      ],
+      "type": "PlannerResponse"
+     }
+    ],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "answers": [
+       {
+        "id": "call-1",
+        "name": "ask_user_question",
+        "response": {
+         "message": "The question is with the user. Their answer arrives with your next brief.",
+         "outcome": "ok",
+         "status": "asked"
+        }
+       }
+      ],
+      "state": {},
+      "type": "PlannerAnswers"
+     }
+    ],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "interrupt_id": "int_e4eec56214c84666",
+      "kind": "planner_ask",
+      "message": "Which source did you mean?",
+      "payload": {
+       "candidates": [
+        {
+         "label": "reading A",
+         "spec_id": "spec_a"
+        },
+        {
+         "label": "reading B",
+         "spec_id": "spec_b"
+        }
+       ],
+       "message": "Which source did you mean?",
+       "options": [],
+       "rationale": null,
+       "recommended_spec_id": null
+      },
+      "round": 1,
+      "type": "Paused"
+     }
+    ],
+    "frames": [
+     {
+      "duration_ms": 8,
+      "event": "activity.step",
+      "label": "Working on a plan",
+      "seq": 3,
+      "status": "complete",
+      "step_id": "s2"
+     },
+     {
+      "event": "elicitation.request",
+      "interrupt_id": "int_e4eec56214c84666",
+      "questions": [
+       {
+        "allow_free_text": true,
+        "id": "q1",
+        "input": "single_select",
+        "options": [
+         {
+          "id": "spec_a",
+          "label": "reading A",
+          "recommended": false
+         },
+         {
+          "id": "spec_b",
+          "label": "reading B",
+          "recommended": false
+         }
+        ],
+        "question": "Which source did you mean?",
+        "skippable": false
+       }
+      ],
+      "seq": 4,
+      "skippable": true
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   }
+  ],
+  "manifests": [],
+  "step_labels": null
+ },
+ {
+  "approving": null,
+  "conversation": {
+   "_composition_ops": [],
+   "_removal_unreported": false,
+   "auto_add": true,
+   "components": {},
+   "composition": null,
+   "conversation_id": "conv_01test0000",
+   "latest_plan_version": null,
+   "plan_version_ids": {},
+   "seq": 5,
+   "timed_out_calls": [],
+   "trace_id": "tr_ff5b31f618fb4378",
+   "turn_applied_choice": null,
+   "turn_choice_baseline": {},
+   "turn_components": [],
+   "turn_final_text": "",
+   "turn_index": 1,
+   "turn_plans": [],
+   "turn_readings": [],
+   "turn_recorded": false,
+   "turn_specs": {},
+   "turn_user_message": "q with forks\n(then: reading B (spec_b))",
+   "turn_user_words": "q with forks\n(then: reading B (spec_b))",
+   "turns": []
+  },
+  "conversation_id": "u_4c5dc9b7708905f7/conv_01test0000",
+  "conversation_key": [
+   "u_4c5dc9b7708905f7",
+   "conv_01test0000"
+  ],
+  "finish": {
+   "frames": [
+    {
+     "event": "message.complete",
+     "seq": 11,
+     "text": "No plan came of it."
+    },
+    {
+     "event": "suggestions",
+     "items": [],
+     "seq": 12
+    },
+    {
+     "event": "done",
+     "seq": 13,
+     "trace_id": "tr_ff5b31f618fb4378"
+    }
+   ],
+   "records": [],
+   "world": {
+    "composition": null,
+    "removal": false,
+    "turn_applied_choice": null,
+    "turn_plans": [],
+    "turn_readings": [],
+    "turn_specs": {}
+   }
+  },
+  "items": [
+   {
+    "events": [
+     {
+      "pick": false,
+      "revising": false,
+      "type": "PlannerStarted"
+     }
+    ],
+    "frames": [
+     {
+      "event": "activity.step",
+      "label": "Working on a plan",
+      "seq": 5,
+      "status": "running",
+      "step_id": "s5"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "label": "refused",
+      "node": "planner",
+      "output": {
+       "code": "plan_not_ready",
+       "final": false,
+       "text": "No plan was made: the planner stopped before the plan was ready."
+      },
+      "type": "NodeDone"
+     }
+    ],
+    "frames": [
+     {
+      "duration_ms": 5,
+      "event": "activity.step",
+      "label": "Working on a plan",
+      "seq": 6,
+      "status": "complete",
+      "step_id": "s5"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "label": "next",
+      "node": "plan_done",
+      "output": {
+       "answers": "plan",
+       "body": {},
+       "failure": {
+        "code": "plan_not_ready"
+       },
+       "status": "Reading why no plan was made",
+       "text": "The planner could not make a plan: No plan was made: the planner stopped before the plan was ready.\nAnswer with search and fetch where you can, and say plainly what could not be calculated. A brief that avoids the problem may be planned once more."
+      },
+      "type": "NodeDone"
+     }
+    ],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "failure": {
+       "code": "plan_not_ready"
+      },
+      "text": "Reading why no plan was made",
+      "type": "AgentStatus"
+     },
+     {
+      "answers": [
+       {
+        "id": "adk-1",
+        "name": "plan",
+        "response": {
+         "result": "The planner could not make a plan: No plan was made: the planner stopped before the plan was ready.\nAnswer with search and fetch where you can, and say plainly what could not be calculated. A brief that avoids the problem may be planned once more."
+        }
+       }
+      ],
+      "state": {},
+      "type": "ToolsAnswered"
+     }
+    ],
+    "frames": [
+     {
+      "detail": "A plan for what was asked could not be completed.",
+      "event": "activity.step",
+      "label": "No plan could be made",
+      "seq": 7,
+      "status": "failed",
+      "step_id": "s7"
+     },
+     {
+      "event": "activity.step",
+      "label": "Reading why no plan was made",
+      "seq": 8,
+      "status": "running",
+      "step_id": "s8"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "text": "No plan came of it.",
+      "type": "TextDelta"
+     }
+    ],
+    "frames": [
+     {
+      "duration_ms": 2,
+      "event": "activity.step",
+      "label": "Reading why no plan was made",
+      "seq": 9,
+      "status": "complete",
+      "step_id": "s8"
+     },
+     {
+      "event": "message.delta",
+      "seq": 10,
+      "text": "No plan came of it."
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "parts": [
+       {
+        "text": "No plan came of it."
+       }
+      ],
+      "type": "ModelResponded"
+     }
+    ],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   }
+  ],
+  "manifests": [],
+  "step_labels": null
+ }
+]

@@ -44,7 +44,7 @@ from data_mcp.definition_writes import MAX_IDENTITY_BYTES, windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from data_mcp.tool_errors import ToolRefusal, to_tool_result
-from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_SEARCHES_KEY, store_search
+from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY, store_search
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import card_questions, plan_words, shown_decisions
 from harness.planner_adapter import (
@@ -52,10 +52,11 @@ from harness.planner_adapter import (
 )
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.sentences import PlanWords, refusal_reason, refusal_sentence
-from harness.studio_state import ConversationState, _turn_identities
+from harness.studio_state import ConversationState, _turn_identities, _wire_id
 from harness.studio_translate import _RecordingExecutor, _Translator
 from harness.tool_contracts import reading_facts
 from harness.turn import transcript
+from harness.turn.events import Paused
 from harness.turn.store import AgentRecord
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import RecordedIdentity, SearchReading, _periods
@@ -277,6 +278,7 @@ from ..session_events import (
 )
 from ..split_plan import split_draft
 from ..test_turn_records import _switchable_scope
+from ..turn_driver import unconnected_store
 from ..unreachable_surface import unreachable_surface
 
 # The `decision`, `requirement`, `derived_requirement` and `requirements`
@@ -454,12 +456,7 @@ async def _no_executor(*, tool: str, args: dict[str, object]) -> dict[str, objec
 
 
 def _studio_translator() -> _Translator:
-    """Studio's translator of one conversation, which runs no plan step.
-
-    `..orchestrator_fakes` is imported here, by the one test reading the
-    translator, so that this module loads apart from Studio's wiring."""
-    from ..orchestrator_fakes import unconnected_store  # noqa: PLC0415 -- see the docstring
-
+    """Studio's translator of one conversation, which runs no plan step."""
     return _Translator(
         conversation=ConversationState(conversation_id="c1"),
         recorder=_RecordingExecutor(_no_executor, store=unconnected_store()),
@@ -13715,7 +13712,8 @@ def test_the_card_after_an_amendment_shows_no_decision_the_plan_contradicts(
                 assert fix_disagreements(requirement, cited_decision) == []
         card = [(d.slot, d.chosen, d.resolved_by) for d in shown_decisions(plan)]
         payload = {**plan.model_dump(mode="json"), "summary": "", "revision": plan_revision(plan)}
-        (frame,) = _studio_translator()._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
+        offered = Paused(kind="approve", interrupt_id=_wire_id("int"), round=1, payload=payload)
+        (frame,) = _studio_translator()._interrupt_frames(offered)
         wire = {"user": ResolvedBy.USER, "default": ResolvedBy.PLANNER_DEFAULT}
         assert [(d.id, d.chosen, wire[d.resolved_by]) for d in frame.decisions] == card
         return card

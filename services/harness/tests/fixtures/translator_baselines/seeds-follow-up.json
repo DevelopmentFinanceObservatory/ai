@@ -1,0 +1,432 @@
+[
+ {
+  "approving": null,
+  "conversation": {
+   "_composition_ops": [],
+   "_removal_unreported": false,
+   "auto_add": true,
+   "components": {},
+   "composition": null,
+   "conversation_id": "conv_01test0000",
+   "latest_plan_version": null,
+   "plan_version_ids": {},
+   "seq": 0,
+   "timed_out_calls": [],
+   "trace_id": "tr_2d4d01c3b1eb45ac",
+   "turn_applied_choice": null,
+   "turn_choice_baseline": {},
+   "turn_components": [],
+   "turn_final_text": "",
+   "turn_index": 1,
+   "turn_plans": [],
+   "turn_readings": [],
+   "turn_recorded": false,
+   "turn_specs": {},
+   "turn_user_message": "hi",
+   "turn_user_words": "hi",
+   "turns": []
+  },
+  "conversation_id": "u_4c5dc9b7708905f7/conv_01test0000",
+  "conversation_key": [
+   "u_4c5dc9b7708905f7",
+   "conv_01test0000"
+  ],
+  "finish": {
+   "frames": [
+    {
+     "event": "message.complete",
+     "seq": 3,
+     "text": "Hello. Ask me about aid."
+    },
+    {
+     "event": "suggestions",
+     "items": [],
+     "seq": 4
+    },
+    {
+     "event": "done",
+     "seq": 5,
+     "trace_id": "tr_2d4d01c3b1eb45ac"
+    }
+   ],
+   "records": [],
+   "world": {
+    "composition": null,
+    "removal": false,
+    "turn_applied_choice": null,
+    "turn_plans": [],
+    "turn_readings": [],
+    "turn_specs": {}
+   }
+  },
+  "items": [
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "failure": null,
+      "text": "Reading your question",
+      "type": "AgentStatus"
+     }
+    ],
+    "frames": [
+     {
+      "event": "activity.step",
+      "label": "Reading your question",
+      "seq": 0,
+      "status": "running",
+      "step_id": "s0"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "text": "Hello. Ask me about aid.",
+      "type": "TextDelta"
+     }
+    ],
+    "frames": [
+     {
+      "duration_ms": 11,
+      "event": "activity.step",
+      "label": "Reading your question",
+      "seq": 1,
+      "status": "complete",
+      "step_id": "s0"
+     },
+     {
+      "event": "message.delta",
+      "seq": 2,
+      "text": "Hello. Ask me about aid."
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "parts": [
+       {
+        "text": "Hello. Ask me about aid."
+       }
+      ],
+      "type": "ModelResponded"
+     }
+    ],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   }
+  ],
+  "manifests": [],
+  "step_labels": null
+ },
+ {
+  "approving": null,
+  "conversation": {
+   "_composition_ops": [],
+   "_removal_unreported": false,
+   "auto_add": true,
+   "components": {},
+   "composition": null,
+   "conversation_id": "conv_01test0000",
+   "latest_plan_version": null,
+   "plan_version_ids": {},
+   "seq": 0,
+   "timed_out_calls": [],
+   "trace_id": "tr_754af0a81e144a6e",
+   "turn_applied_choice": null,
+   "turn_choice_baseline": {},
+   "turn_components": [],
+   "turn_final_text": "",
+   "turn_index": 2,
+   "turn_plans": [],
+   "turn_readings": [],
+   "turn_recorded": false,
+   "turn_specs": {},
+   "turn_user_message": "top 5 donors for education aid",
+   "turn_user_words": "top 5 donors for education aid",
+   "turns": [
+    {
+     "assistant": "Hello. Ask me about aid.",
+     "user": "hi"
+    }
+   ]
+  },
+  "conversation_id": "u_4c5dc9b7708905f7/conv_01test0000",
+  "conversation_key": [
+   "u_4c5dc9b7708905f7",
+   "conv_01test0000"
+  ],
+  "finish": {
+   "frames": [
+    {
+     "event": "message.complete",
+     "seq": 4,
+     "text": "Here are the top donors."
+    },
+    {
+     "event": "suggestions",
+     "items": [],
+     "seq": 5
+    },
+    {
+     "event": "done",
+     "seq": 6,
+     "trace_id": "tr_754af0a81e144a6e"
+    }
+   ],
+   "records": [],
+   "world": {
+    "composition": null,
+    "removal": false,
+    "turn_applied_choice": null,
+    "turn_plans": [],
+    "turn_readings": [
+     {
+      "alternatives": [],
+      "asked_roles": [],
+      "candidates": [],
+      "counted_as": null,
+      "coverage_kind": null,
+      "departures": [],
+      "fetch": null,
+      "flagged_match": null,
+      "observed_at": "2026-11-18T00:55:40.157999Z",
+      "open_axes": [],
+      "origin": "seed",
+      "recent_years": [],
+      "refusal_code": null,
+      "requested_window_kind": "all",
+      "roles": [],
+      "sentence": "Education aid from every donor",
+      "skills": [],
+      "spec_id": "spec_59d94198a8a4ef218f62de6f77caaa3e",
+      "status": "definite",
+      "text": null,
+      "unbound_qualifiers": [],
+      "warnings": [],
+      "wide": false,
+      "window": null
+     }
+    ],
+    "turn_specs": {
+     "spec_59d94198a8a4ef218f62de6f77caaa3e": {
+      "definition": {
+       "identity": {
+        "identity_version": "spec1",
+        "requested_window": {
+         "kind": "all"
+        },
+        "seed": "education aid"
+       },
+       "schema_version": 1,
+       "spec_id": "spec_59d94198a8a4ef218f62de6f77caaa3e"
+      },
+      "resolved": {
+       "rendered_sentence": "Education aid from every donor"
+      },
+      "spec_id": "spec_59d94198a8a4ef218f62de6f77caaa3e"
+     }
+    }
+   }
+  },
+  "items": [
+   {
+    "events": [
+     {
+      "label": "next",
+      "node": "seed",
+      "output": {
+       "answers": null,
+       "body": {},
+       "failure": null,
+       "status": "Reading the datasets you brought from Search",
+       "text": "The user brought these datasets from Search: fetch or plan each with its spec_id. A part's operations are what the user's question asked of it; ask for them with plan.\n{\"parts\": [{\"status\": \"definite\", \"spec_id\": \"spec_59d94198a8a4ef218f62de6f77caaa3e\", \"resolved\": \"Education aid from every donor\", \"warnings\": [], \"candidates\": [], \"wide\": false, \"operations\": [{\"verb\": \"rank\", \"phrase\": \"top 5 donors\", \"over\": \"origin\"}]}]}"
+      },
+      "type": "NodeDone"
+     }
+    ],
+    "frames": [
+     {
+      "detail": "received 1 of 1 dataset(s) from Search",
+      "duration_ms": 0,
+      "event": "activity.step",
+      "label": "Receive the datasets from Search",
+      "seq": 0,
+      "status": "complete",
+      "step_id": "s0",
+      "tool": "receive_seeds"
+     }
+    ],
+    "records": [
+     {
+      "args": {
+       "seeds": 1
+      },
+      "conversation": "u_4c5dc9b7708905f7/conv_01test0000",
+      "duration_ms": 0,
+      "land": false,
+      "result": {
+       "frame_refs": [],
+       "outcome": "ok",
+       "summary": "received 1 of 1 dataset(s) from Search"
+      },
+      "step_id": "seeds",
+      "tool": "receive_seeds"
+     }
+    ],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "failure": null,
+      "text": "Reading the datasets you brought from Search",
+      "type": "AgentStatus"
+     }
+    ],
+    "frames": [
+     {
+      "event": "activity.step",
+      "label": "Reading the datasets you brought from Search",
+      "seq": 1,
+      "status": "running",
+      "step_id": "s1"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "text": "Here are the top donors.",
+      "type": "TextDelta"
+     }
+    ],
+    "frames": [
+     {
+      "duration_ms": 2,
+      "event": "activity.step",
+      "label": "Reading the datasets you brought from Search",
+      "seq": 2,
+      "status": "complete",
+      "step_id": "s1"
+     },
+     {
+      "event": "message.delta",
+      "seq": 3,
+      "text": "Here are the top donors."
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "parts": [
+       {
+        "text": "Here are the top donors."
+       }
+      ],
+      "type": "ModelResponded"
+     }
+    ],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   }
+  ],
+  "manifests": [],
+  "step_labels": null
+ }
+]

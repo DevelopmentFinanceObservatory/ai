@@ -121,9 +121,9 @@ async def _draft(
     Every end of the entry but a planner-side ask clears the pick, so no
     later entry or revision of the plan holds it. An ask keeps the replan's
     state for its resume and records the snapshot under `PICK_REPLAN_KEY`,
-    which the resume restores from. The entry's `PlannerStarted` says it is
-    a pick's, so Studio arms the switch's Stop on the stream answering an
-    ask the replan raises.
+    which the resume restores from, and whose replan runs under
+    `_unless_stopped` again. The entry's `PlannerStarted` says it is a
+    pick's.
 
     The planner runs in this node's task, so a Stop that cancels the node
     cancels the run, and the turn's budget

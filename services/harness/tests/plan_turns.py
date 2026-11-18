@@ -2,11 +2,11 @@
 
 `plan_nodes` builds every node a plan call passes through: `seed`,
 `orchestrate` and `ask` (`tests.graph_turns.opening_nodes`), then
-`plan_start`, `planner`, `approve`, `execute` and `plan_done`, each the real
-node, the planner drafting with a `ScriptedPlannerModel` by default, and
-`seed` carrying runs on through the real run resumer. Build the graph with
-`tests.graph_turns.opening_graph`, which ends the turn on an edge to
-`switch`, and run it with `tests.turn_driver.TurnDriver`.
+`plan_start`, `planner`, `approve`, `switch`, `execute` and `plan_done`,
+each the real node, the planner drafting and revising with a
+`ScriptedPlannerModel` by default, and `seed` carrying runs on through the
+real run resumer. Build the graph with `tests.graph_turns.opening_graph`
+and run it with `tests.turn_driver.TurnDriver`.
 
 `approve_answer` is the answer approving a card, and `approve_turn` runs a
 question to its card and approves it on the same instance.
@@ -25,14 +25,16 @@ from harness.early_mint import EarlyMints
 from harness.graph import planning
 from harness.graph.approve import approve_node
 from harness.graph.execute import execute_node
-from harness.graph.interfaces import Executor
+from harness.graph.interfaces import Executor, PlannerModel
 from harness.graph.plan_done import plan_done_node
 from harness.graph.resume import run_resumer
+from harness.graph.switch import switch_node
 from harness.scripted import ScriptedPlannerModel, scripted_publish_result
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.turn.node import Node
 from orchestrator.agent import Orchestrator
 
+from .data_mcp_definitions import DataMcpDefinitions
 from .graph_turns import opening_nodes
 from .turn_driver import ScriptedModels, SegmentRun, TurnDriver
 
@@ -50,19 +52,22 @@ def plan_nodes(
     run_ledger: RunLedger,
     tool_surface: ToolSurface | None,
     executor: Executor,
-    planner: ScriptedPlannerModel | None = None,
+    planner: PlannerModel | None = None,
     publisher: ResultPublisher | None = scripted_publish_result,
     early_mints: EarlyMints | None = None,
     definition_surface: ToolSurface | None = None,
 ) -> dict[str, Node]:
-    """Every node a plan call passes through but `switch`: `orchestrate`
-    running `orchestrator` on its scripted model, `planner` drafting with
-    `planner`, and the real `approve` (offering to `early_mints`), `execute`
-    (running against `tool_surface`, publishing through `publisher`) and
-    `plan_done` (describing through `executor`), every run kept in
-    `run_ledger`, whose unfinished runs `seed` carries on. `seed` resolves
-    seeds through `definition_surface` (`tests.graph_turns.opening_nodes`'
-    default when `None`)."""
+    """Every node a plan call passes through: `orchestrate` running
+    `orchestrator` on its scripted model, `planner` drafting with `planner`,
+    and the real `approve` (offering to `early_mints`), `switch` (revising
+    with `planner`), `execute` (running against `tool_surface`, publishing
+    through `publisher`) and `plan_done` (describing through `executor`),
+    every run kept in `run_ledger`, whose unfinished runs `seed` carries on.
+    `seed` resolves seeds and `switch` posts switches through
+    `definition_surface`, a data-mcp over a Search that serves nothing when
+    `None`."""
+    planner = planner or ScriptedPlannerModel()
+    definition_surface = definition_surface or DataMcpDefinitions()
     resume = run_resumer(
         run_ledger=run_ledger,
         publisher=publisher,
@@ -81,8 +86,9 @@ def plan_nodes(
             resume=resume,
         ),
         "plan_start": planning.plan_start,
-        "planner": planning.planner_node(planner=planner or ScriptedPlannerModel()),
+        "planner": planning.planner_node(planner=planner),
         "approve": approve_node(early_mints=early_mints),
+        "switch": switch_node(planner=planner, definition_surface=definition_surface),
         "execute": execute_node(
             tool_surface=tool_surface,
             run_ledger=run_ledger,

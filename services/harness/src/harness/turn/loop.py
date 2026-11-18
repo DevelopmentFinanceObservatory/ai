@@ -12,8 +12,8 @@ input as the cursor stored it.
 
 A node that raises, a boundary write that fails for any reason but a lost
 lease, a moved cursor or an answer to no open pause, and an owed answer the
-store lacks each close the turn `failed`, with `{node, type, message}` as
-its error. A cursor naming a node the running `Graph` lacks, or paused at a
+store lacks each close the turn `failed`, with `failure`'s record of the
+exception as its error. A cursor naming a node the running `Graph` lacks, or paused at a
 node that can no longer resume, closes the turn `abandoned` with a
 `TurnExpired` error: no turn is carried across a graph change.
 
@@ -32,6 +32,11 @@ closes the turn `cancelled`. A lost lease cancels the node and leaves the
 cursor to the instance that holds the lease now. Either way the segment
 then reads the turn back, and reports a close or a pause that committed
 before the cut as the store holds it.
+
+A turn no segment runs is closed without running its node: `stop_turn`
+closes it `cancelled` on a Stop that found no live segment (the turn
+paused, or left running by a segment whose lease lapsed), and `reject`
+closes a paused turn `done` on the user's reject of its open pause.
 """
 
 from __future__ import annotations
@@ -43,6 +48,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+
+from compiler.surface import transient
 
 from harness.studio_state import HEARTBEAT_INTERVAL_S, SEGMENT_TTL_S, SegmentLost, _wire_id
 from harness.studio_store import StudioStore
@@ -122,8 +129,34 @@ class Segment:
     outcome: Outcome | None = None
 
 
-def _error(node: str, error: BaseException) -> dict[str, Any]:
-    return {"node": node, "type": type(error).__name__, "message": str(error)}
+# The attributes an exception sets to name the MCP call whose pinned timeout
+# it hit (`harness.mcp_client`).
+_TIMEOUT_ATTRIBUTES = ("timeout_tool", "timeout_key")
+
+
+def failure(node: str, error: Exception) -> dict[str, Any]:
+    """The error a turn closed on `error` at `node` records: `node`, the
+    exception's `type` and `message`, whether a later attempt may not meet
+    it (`transient`, `compiler.surface.transient`), the `refusal` it states
+    when it states one, and `timeout_tool` and `timeout_key` when it hit an
+    MCP call's pinned timeout. These are what the Studio error frame reads
+    off the exception (`harness.studio_translate._stream_fatal`), so a
+    reader of the closed turn with no exception at hand words the same
+    frame."""
+    recorded: dict[str, Any] = {
+        "node": node,
+        "type": type(error).__name__,
+        "message": str(error),
+        "transient": transient(error),
+    }
+    refusal = getattr(error, "refusal", None)
+    if isinstance(refusal, Mapping) and refusal:
+        recorded["refusal"] = dict(refusal)
+    for name in _TIMEOUT_ATTRIBUTES:
+        value = getattr(error, name, None)
+        if isinstance(value, str):
+            recorded[name] = value
+    return recorded
 
 
 async def _close_on_error(
@@ -133,11 +166,11 @@ async def _close_on_error(
     segment_id: str,
     status: TurnStatus,
     node: str,
-    error: BaseException,
+    error: Exception,
     emit: Callable[[TurnEvent], None],
 ) -> Segment:
     segment.cursor = await store.finish(
-        segment.cursor, segment_id=segment_id, status=status, error=_error(node, error)
+        segment.cursor, segment_id=segment_id, status=status, error=failure(node, error)
     )
     segment.outcome = Outcome(status.value)
     emit(TurnFailed(node=node, error=error))
@@ -231,7 +264,7 @@ class _Closes(Exception):  # noqa: N818 -- carries the close, not an error kind
     """`_enter` found the turn cannot go on: close it with `status` and
     `error`."""
 
-    def __init__(self, status: TurnStatus, error: BaseException) -> None:
+    def __init__(self, status: TurnStatus, error: Exception) -> None:
         super().__init__(str(error))
         self.status = status
         self.error = error
@@ -340,7 +373,7 @@ async def drive[E](
     transcript = Transcript(stored)
     node, node_input = cursor.node, cursor.node_input
 
-    async def close(status: TurnStatus, node: str, error: BaseException) -> Segment:
+    async def close(status: TurnStatus, node: str, error: Exception) -> Segment:
         return await _close_on_error(
             store, segment, segment_id=segment_id, status=status, node=node, error=error, emit=emit
         )
@@ -413,6 +446,44 @@ async def drive[E](
         assert following is not None
         # The next node takes its input as stored, as a rerun reads it back.
         node, node_input, target = following, cursor.node_input, graph.nodes[following]
+
+
+async def stop_turn(store: TurnStore, cursor: Cursor, *, segment_id: str) -> Cursor:
+    """Close the open turn at `cursor` `cancelled` without running its node,
+    writing under `segment_id`, the conversation lease the caller claimed:
+    the Stop of a turn no segment runs, paused on a question or left running
+    by a segment whose lease lapsed. A paused turn's pause is dropped, so an
+    answer to it is refused (`PauseNotOpen`).
+
+    Raises:
+        SegmentLost: `segment_id` no longer holds the conversation's lease.
+        CursorStale: another writer moved the cursor, or closed the turn.
+    """
+    return await store.finish(cursor, segment_id=segment_id, status=TurnStatus.CANCELLED)
+
+
+async def reject(store: TurnStore, cursor: Cursor, *, segment_id: str, answer: Answer) -> Cursor:
+    """Close the paused turn at `cursor` `done` on the user's reject of its
+    open pause, writing under `segment_id`, the conversation lease the
+    caller claimed. The paused node does not run; `answer` joins the
+    turn's transcript in the same write.
+
+    Raises:
+        PauseNotOpen: `answer` names a pause the turn does not have open.
+        SegmentLost: `segment_id` no longer holds the conversation's lease.
+        CursorStale: another writer moved the cursor, or closed the turn.
+    """
+    pause = cursor.pause
+    if pause is None or (pause.interrupt_id, pause.round) != (answer.interrupt_id, answer.round):
+        raise PauseNotOpen(f"turn {cursor.turn_index} has no open pause {answer.interrupt_id!r}")
+    return await store.finish(
+        cursor,
+        segment_id=segment_id,
+        status=TurnStatus.DONE,
+        records=[
+            entries.answer(interrupt_id=answer.interrupt_id, round=answer.round, value=answer.value)
+        ],
+    )
 
 
 async def _settle(store: TurnStore, segment: Segment, *, cut_by: Outcome, segment_id: str) -> None:

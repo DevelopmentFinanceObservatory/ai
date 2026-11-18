@@ -10,7 +10,10 @@ from harness.turn.loop import (
     Segment,
     TurnExpired,
     drive,
+    failure,
+    reject,
     run_segment,
+    stop_turn,
 )
 from harness.turn.node import Next, Node, NodeCtx, Pause, StopScope, TurnKey
 from harness.turn.transcript import Transcript
@@ -35,5 +38,8 @@ __all__ = [
     "TurnFailed",
     "TurnKey",
     "drive",
+    "failure",
+    "reject",
     "run_segment",
+    "stop_turn",
 ]

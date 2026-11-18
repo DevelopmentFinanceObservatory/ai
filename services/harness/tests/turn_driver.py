@@ -25,7 +25,7 @@ from __future__ import annotations
 import contextlib
 import itertools
 import json
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from unittest import mock
@@ -40,7 +40,7 @@ from harness.turn_budget import TurnBudget
 from orchestrator.model import orchestrator_model
 from planner.model import planner_model
 from pydantic_ai.models.google import GoogleModel
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from .scripted_genai import Request, ScriptedGenai, Step
 
@@ -131,6 +131,21 @@ async def no_turn_specs(principal: str, session_id: str) -> dict[str, Any]:
     return {}
 
 
+def unconnected_store() -> StudioStore:
+    """A `StudioStore` with no database behind its engine, for a test that
+    reads only the in-process state a store holds (`StudioStore.current`), as
+    the recorder does. Any read or write the test makes through it fails at
+    once: port 1 on the loopback refuses the connection, and a 1 s connect
+    timeout bounds the attempt where it does not."""
+    return StudioStore(
+        create_async_engine(
+            "postgresql+asyncpg://unconnected@127.0.0.1:1/none", connect_args={"timeout": 1}
+        ),
+        adk=NO_ADK,
+        turn_specs=no_turn_specs,
+    )
+
+
 @dataclass(frozen=True)
 class SegmentRun:
     """One segment of a turn: how it ended, the cursor as it left it, and
@@ -159,6 +174,8 @@ class TurnDriver:
     `studio` is the instance's `StudioStore`, which holds the conversation's
     lease and its Stop flag, and `turns` its `TurnStore`. `store_kwargs`
     reach the `StudioStore`, such as a `tests.store_clock.StoreClock`'s.
+    `observe`, when set, hears each event as the segment emits it, as
+    Studio's translator does (`harness.studio_translate._Translator.emit`).
     """
 
     def __init__(
@@ -175,6 +192,7 @@ class TurnDriver:
         self.principal = principal
         self.conversation_id = conversation_id
         self.heartbeat_seconds = heartbeat_seconds
+        self.observe: Callable[[TurnEvent], None] | None = None
         self.turns = TurnStore(engine)
         self.studio = StudioStore(
             engine, turn_specs=no_turn_specs, adk=NO_ADK, **(store_kwargs or {})
@@ -243,6 +261,12 @@ class TurnDriver:
 
     async def _run(self, cursor: Cursor, segment_id: str, *, answer: Answer | None) -> SegmentRun:
         events: list[TurnEvent] = []
+
+        def emit(event: TurnEvent) -> None:
+            events.append(event)
+            if self.observe is not None:
+                self.observe(event)
+
         try:
             segment = await run_segment(
                 self.turns,
@@ -252,7 +276,7 @@ class TurnDriver:
                 conversation_id=self.conversation_id,
                 segment_id=segment_id,
                 graph=self.graph,
-                emit=events.append,
+                emit=emit,
                 answer=answer,
                 heartbeat_seconds=self.heartbeat_seconds,
             )

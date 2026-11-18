@@ -90,7 +90,7 @@ def turn_id(key: TurnKey) -> str:
 
 
 # The edge each hand-off takes, by the tool whose call handed off.
-_HAND_OFF_EDGES = {"plan": "plan", "ask_user": "ask"}
+HAND_OFF_EDGES = {"plan": "plan", "ask_user": "ask"}
 
 
 def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) -> Node[GraphEvent]:
@@ -172,7 +172,7 @@ def _handed_off(ctx: NodeCtx[GraphEvent], handed: HandedOff) -> Next:
     of the action its call recorded, which leaves the state."""
     pending = pending_action(ctx.state)
     ctx.state.pop(ORCHESTRATOR_PENDING_KEY, None)
-    if pending is None or pending.kind != _HAND_OFF_EDGES.get(handed.tool):
+    if pending is None or pending.kind != HAND_OFF_EDGES.get(handed.tool):
         raise RuntimeError(f"the {handed.tool} call handed off with no action of its own recorded")
     ctx.state[ORCHESTRATOR_HISTORY_KEY] = handed.history.model_dump(mode="json")
     return Next(pending.kind, pending.model_dump(mode="json"))

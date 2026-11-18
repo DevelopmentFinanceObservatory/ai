@@ -15,9 +15,25 @@ import pytest
 from harness.studio_store import StudioStore
 from harness.turn import transcript as entries
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
-from harness.turn.loop import END, Answer, Graph, Outcome, TurnExpired, run_segment
+from harness.turn.loop import (
+    END,
+    Answer,
+    Graph,
+    Outcome,
+    TurnExpired,
+    reject,
+    run_segment,
+    stop_turn,
+)
 from harness.turn.node import Next, Node, NodeCtx, Pause
-from harness.turn.store import AgentRecord, Cursor, CursorStale, TurnStatus, TurnStore
+from harness.turn.store import (
+    AgentRecord,
+    Cursor,
+    CursorStale,
+    PauseNotOpen,
+    TurnStatus,
+    TurnStore,
+)
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -359,9 +375,132 @@ async def test_a_node_that_raises_closes_the_turn_failed_with_the_last_written_s
         "node": "plan_start",
         "type": "RuntimeError",
         "message": "plan_start broke",
+        "transient": False,
     }
     assert segment.cursor.state == {"seeded": True}
     assert await store.open_cursor(PRINCIPAL, CONVERSATION) is None
+
+
+class _Refused(Exception):  # noqa: N818 -- a stand-in for a refusal-bearing tool error
+    """An error stating a refusal and the MCP call whose pinned timeout it
+    hit, raised from a dropped connection."""
+
+    def __init__(self) -> None:
+        super().__init__("get_data timed out")
+        self.refusal = {"code": "capability_unavailable", "retry_mode": "do_not_retry"}
+        self.timeout_tool = "get_data"
+        self.timeout_key = "get_data:spec_a"
+
+
+async def test_a_failed_turn_records_what_its_error_frame_reads(
+    pg_engine: AsyncEngine, clock: StoreClock
+) -> None:
+    """The turn's failure carries the exception the node raised, and the
+    cursor records what the Studio error frame reads off it: the refusal
+    it states, the timed-out call, and whether a later attempt may not meet
+    it, read through its cause."""
+    store, lease = TurnStore(pg_engine), await _instance(pg_engine, clock)
+    segment_id = await _claim(lease)
+    raised = _Refused()
+
+    async def work(ctx: NodeCtx, node_input: Any) -> Next:
+        raise raised from ConnectionResetError("peer closed")
+
+    graph = Graph(start="work", nodes={"work": Node(run=work)}, edges={})
+    events: list[TurnEvent] = []
+    segment = await _segment(
+        store, lease, await _open(store, segment_id, graph), segment_id, graph, events
+    )
+
+    [failed] = events
+    assert isinstance(failed, TurnFailed) and failed.error is raised
+    assert segment.cursor.error == {
+        "node": "work",
+        "type": "_Refused",
+        "message": "get_data timed out",
+        "transient": True,
+        "refusal": {"code": "capability_unavailable", "retry_mode": "do_not_retry"},
+        "timeout_tool": "get_data",
+        "timeout_key": "get_data:spec_a",
+    }
+
+
+async def _paused(store: TurnStore, lease: StudioStore, calls: list[str]) -> tuple[Graph, Paused]:
+    """A turn paused at `ask` by `lease`'s instance, whose lease it then drops."""
+    graph = Graph(start="ask", nodes={"ask": _asking(calls)}, edges={("ask", "next"): END})
+    segment_id = await _claim(lease)
+    events: list[TurnEvent] = []
+    await _segment(store, lease, await _open(store, segment_id, graph), segment_id, graph, events)
+    await lease.drop_lease(PRINCIPAL, CONVERSATION, segment_id)
+    [paused] = events
+    assert isinstance(paused, Paused)
+    return graph, paused
+
+
+async def test_a_stop_while_the_turn_is_paused_closes_it_cancelled(
+    pg_engine: AsyncEngine, clock: StoreClock
+) -> None:
+    """A Stop finds no live segment for a paused turn; the instance that
+    takes the lease closes the turn `cancelled`, and the answer to its
+    pause is then refused."""
+    store = TurnStore(pg_engine)
+    lease_a, lease_b = await _instance(pg_engine, clock), await _instance(pg_engine, clock)
+    calls: list[str] = []
+    _, paused = await _paused(store, lease_a, calls)
+
+    assert not await lease_b.request_cancel(PRINCIPAL, CONVERSATION)
+    segment_id = await _claim(lease_b)
+    stopped = await stop_turn(store, await _open_cursor(store), segment_id=segment_id)
+
+    assert (stopped.status, stopped.pause, stopped.error) == (TurnStatus.CANCELLED, None, None)
+    assert await store.open_cursor(PRINCIPAL, CONVERSATION) is None
+    with pytest.raises(PauseNotOpen):
+        await store.record_answer(
+            stopped,
+            segment_id=segment_id,
+            interrupt_id=paused.interrupt_id,
+            round=paused.round,
+            answer={"donor": "DAC"},
+        )
+    assert calls == ["run"]
+
+
+async def test_a_reject_closes_the_paused_turn_done_without_resuming_its_node(
+    pg_engine: AsyncEngine, clock: StoreClock
+) -> None:
+    """A reject of the open pause closes the turn `done` with the answer in
+    its transcript and runs nothing; one naming another round is refused and
+    leaves the turn paused."""
+    store, lease = TurnStore(pg_engine), await _instance(pg_engine, clock)
+    calls: list[str] = []
+    _, paused = await _paused(store, lease, calls)
+    segment_id = await _claim(lease)
+    cursor = await _open_cursor(store)
+
+    with pytest.raises(PauseNotOpen):
+        await reject(
+            store,
+            cursor,
+            segment_id=segment_id,
+            answer=Answer(interrupt_id=paused.interrupt_id, round=2, value={"rejected": True}),
+        )
+    assert (await _open_cursor(store)).status is TurnStatus.PAUSED
+
+    rejected = await reject(
+        store,
+        cursor,
+        segment_id=segment_id,
+        answer=Answer(
+            interrupt_id=paused.interrupt_id, round=paused.round, value={"rejected": True}
+        ),
+    )
+
+    assert (rejected.status, rejected.pause) == (TurnStatus.DONE, None)
+    assert await store.open_cursor(PRINCIPAL, CONVERSATION) is None
+    records = await store.records(rejected)
+    assert [r.kind for r in records] == [entries.USER, entries.PAUSE, entries.ANSWER]
+    assert records[-1].body["answer"] == {"rejected": True}
+    assert calls == ["run"]
 
 
 async def _lease_cancel(engine: AsyncEngine) -> bool:

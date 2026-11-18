@@ -1,0 +1,2282 @@
+[
+ {
+  "approving": null,
+  "conversation": {
+   "_composition_ops": [],
+   "_removal_unreported": false,
+   "auto_add": true,
+   "components": {},
+   "composition": null,
+   "conversation_id": "conv_01test0000",
+   "latest_plan_version": null,
+   "plan_version_ids": {},
+   "seq": 0,
+   "timed_out_calls": [],
+   "trace_id": "tr_738148b1b6354929",
+   "turn_applied_choice": null,
+   "turn_choice_baseline": {},
+   "turn_components": [],
+   "turn_final_text": "",
+   "turn_index": 1,
+   "turn_plans": [],
+   "turn_readings": [],
+   "turn_recorded": false,
+   "turn_specs": {},
+   "turn_user_message": "q with forks",
+   "turn_user_words": "q with forks",
+   "turns": []
+  },
+  "conversation_id": "u_4c5dc9b7708905f7/conv_01test0000",
+  "conversation_key": [
+   "u_4c5dc9b7708905f7",
+   "conv_01test0000"
+  ],
+  "finish": {
+   "frames": [],
+   "records": [],
+   "world": {
+    "composition": null,
+    "removal": false,
+    "turn_applied_choice": null,
+    "turn_plans": [],
+    "turn_readings": [],
+    "turn_specs": {}
+   }
+  },
+  "items": [
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "failure": null,
+      "text": "Reading your question",
+      "type": "AgentStatus"
+     }
+    ],
+    "frames": [
+     {
+      "event": "activity.step",
+      "label": "Reading your question",
+      "seq": 0,
+      "status": "running",
+      "step_id": "s0"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "parts": [
+       {
+        "function_call": {
+         "args": {
+          "asks": [
+           "q with forks"
+          ],
+          "brief": "q with forks"
+         },
+         "id": "adk-1",
+         "name": "plan"
+        }
+       }
+      ],
+      "type": "ModelResponded"
+     }
+    ],
+    "frames": [
+     {
+      "duration_ms": 8,
+      "event": "activity.step",
+      "label": "Reading your question",
+      "seq": 1,
+      "status": "complete",
+      "step_id": "s0"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [
+     {
+      "event": "activity.step",
+      "label": "Working on a plan",
+      "seq": 2,
+      "status": "running",
+      "step_id": "s2"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "label": "plan",
+      "node": "orchestrate",
+      "output": {
+       "ask_breakdowns": [],
+       "asks": [
+        "q with forks"
+       ],
+       "asks_across_years": [],
+       "brief": "q with forks",
+       "kind": "plan"
+      },
+      "type": "NodeDone"
+     }
+    ],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "label": "next",
+      "node": "plan_start",
+      "output": {},
+      "type": "NodeDone"
+     }
+    ],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "pick": false,
+      "revising": false,
+      "type": "PlannerStarted"
+     }
+    ],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "parts": [
+       {
+        "function_call": {
+         "args": {},
+         "id": "adk-2",
+         "name": "propose_plan"
+        }
+       }
+      ],
+      "type": "PlannerResponse"
+     }
+    ],
+    "frames": [
+     {
+      "duration_ms": 18,
+      "event": "activity.step",
+      "label": "Working on a plan",
+      "seq": 3,
+      "status": "complete",
+      "step_id": "s2"
+     },
+     {
+      "event": "activity.step",
+      "label": "Checking the plan against the data",
+      "seq": 4,
+      "status": "running",
+      "step_id": "s4"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "answers": [
+       {
+        "id": "adk-2",
+        "name": "propose_plan",
+        "response": {
+         "outcome": "ok",
+         "previous_version": null,
+         "question": "q with forks",
+         "status": "pending_approval",
+         "summary": {
+          "revision": "f29c633dc3cabe4c6e9ee5ef210e4c77e5e9f6d08cc11a3bffc4b36f19174a1a",
+          "version": 1,
+          "warnings": []
+         },
+         "translation": {
+          "outcome": "ok"
+         },
+         "version": 1
+        }
+       }
+      ],
+      "state": {},
+      "type": "PlannerAnswers"
+     }
+    ],
+    "frames": [
+     {
+      "duration_ms": 2,
+      "event": "activity.step",
+      "label": "Checking the plan against the data",
+      "seq": 5,
+      "status": "complete",
+      "step_id": "s4"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "label": "ok",
+      "node": "planner",
+      "output": {
+       "answer_mode": "series",
+       "answered": [],
+       "approved_at": null,
+       "approved_revision": null,
+       "ask_breakdowns": [],
+       "asks": [],
+       "asks_across_years": [],
+       "decisions": [
+        {
+         "chosen": "life expectancy at birth",
+         "description": "Which measure answers the scripted question.",
+         "fixes": null,
+         "options": [
+          "life expectancy at birth",
+          "healthy life expectancy"
+         ],
+         "rationale": "Life expectancy at birth is the measure scripted mode always answers with.",
+         "resolved_by": "planner_default",
+         "slot": "measure"
+        }
+       ],
+       "declined": [],
+       "evidence_requirements": [
+        {
+         "across": [],
+         "breakdown": null,
+         "coverage": {
+          "on_missing": "report_gaps"
+         },
+         "decision_ids": [
+          "measure"
+         ],
+         "entities": [
+          {
+           "name": "Kenya",
+           "role": null
+          }
+         ],
+         "frequency": "annual",
+         "id": "life_expectancy",
+         "kind": "dataset",
+         "measure": "life expectancy at birth",
+         "period": {
+          "end": 2023,
+          "start": 1960
+         },
+         "period_end_open": false,
+         "source": null,
+         "source_code": null,
+         "source_exclude": false,
+         "source_ref": null,
+         "source_spec_id": null,
+         "stat_vars": null,
+         "unit": null
+        },
+        {
+         "decision_ids": [
+          "measure"
+         ],
+         "group_by": [
+          "period"
+         ],
+         "id": "life_expectancy_by_period",
+         "input_id": "life_expectancy",
+         "kind": "aggregate",
+         "reduction": "mean"
+        }
+       ],
+       "first_years": [],
+       "new_plan": true,
+       "period_licences": [],
+       "previous_version": null,
+       "question": "q with forks",
+       "revision": "f29c633dc3cabe4c6e9ee5ef210e4c77e5e9f6d08cc11a3bffc4b36f19174a1a",
+       "rolling_copies": [],
+       "status": "pending_approval",
+       "summary": {
+        "revision": "f29c633dc3cabe4c6e9ee5ef210e4c77e5e9f6d08cc11a3bffc4b36f19174a1a",
+        "version": 1,
+        "warnings": []
+       },
+       "translation": {
+        "operations": [
+         {
+          "id": "retrieve",
+          "kind": "retrieve",
+          "requirement_id": "life_expectancy",
+          "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+         },
+         {
+          "group_by": [
+           "period"
+          ],
+          "id": "totals",
+          "input": "retrieve",
+          "kind": "aggregate",
+          "reduction": "mean",
+          "requirement_id": "life_expectancy_by_period"
+         }
+        ],
+        "terminal": [
+         "totals"
+        ]
+       },
+       "version": 1,
+       "workflow": {
+        "evidence_bindings": [
+         {
+          "requirement_id": "life_expectancy",
+          "spec_id": "spec_ffffffffffffffffffffffffffffffff",
+          "step_id": "retrieve"
+         }
+        ],
+        "sources": [
+         {
+          "confidence": "high",
+          "coverage_kind": null,
+          "coverage_window": {
+           "end": 2023,
+           "start": 1960
+          },
+          "definition": null,
+          "entities": [
+           {
+            "label": "Kenya",
+            "ref": "country/KEN",
+            "role": "country"
+           }
+          ],
+          "groups": [],
+          "has_data": true,
+          "identity": {
+           "stat_var": "LifeExpectancy_Person"
+          },
+          "measure_label": null,
+          "open_axes": [],
+          "open_entity_axes": null,
+          "provenance_account": null,
+          "provenance_label": null,
+          "provenance_ref": null,
+          "resolved_sources": [],
+          "searched_as": null,
+          "sentence": "life expectancy at birth in Kenya, 1960 to 2023",
+          "served_count": 1,
+          "shape_member_count": null,
+          "shape_member_digest": null,
+          "slot_codes": null,
+          "spec_id": "spec_ffffffffffffffffffffffffffffffff",
+          "stat_var_member_count": null,
+          "stat_var_member_count_exact": null,
+          "stat_var_reading": null,
+          "stat_var_reading_set_by": null,
+          "unit_label": null,
+          "unit_per_series": null,
+          "unit_ref": null
+         }
+        ],
+        "steps": [
+         {
+          "args": {
+           "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+          },
+          "bindings": {},
+          "expected_role_keys": [
+           "country"
+          ],
+          "id": "retrieve",
+          "implementation_version": null,
+          "input_schema_hash": "e3983a32ec5a3a1a35c761b4c68b3486f0c4a88382be00a9df82886266eee191",
+          "operation_id": "retrieve",
+          "output_schema_hash": null,
+          "tool": {
+           "name": "get_data",
+           "server": "data-mcp"
+          }
+         },
+         {
+          "args": {
+           "aggregation": "mean",
+           "group_by": [
+            "time_period"
+           ]
+          },
+          "bindings": {
+           "frame_ref": {
+            "from_step": "retrieve",
+            "output": "frame_ref"
+           }
+          },
+          "expected_role_keys": [],
+          "id": "totals",
+          "implementation_version": null,
+          "input_schema_hash": "a39e878dc1be854e22e319e8e91663c9ca1d82036a04657465ee18dd3c733412",
+          "operation_id": "totals",
+          "output_schema_hash": null,
+          "tool": {
+           "name": "aggregate",
+           "server": "analysis-mcp"
+          }
+         }
+        ],
+        "terminal_steps": [
+         "totals"
+        ],
+        "warnings": []
+       }
+      },
+      "type": "NodeDone"
+     }
+    ],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "interrupt_id": "int_3e770746a2044d78",
+      "kind": "approve",
+      "message": "Approve this plan to run it? Its data may already be loading.",
+      "payload": {
+       "answer_mode": "series",
+       "answered": [],
+       "approved_at": null,
+       "approved_revision": null,
+       "ask_breakdowns": [],
+       "asks": [],
+       "asks_across_years": [],
+       "decisions": [
+        {
+         "chosen": "life expectancy at birth",
+         "description": "Which measure answers the scripted question.",
+         "fixes": null,
+         "options": [
+          "life expectancy at birth",
+          "healthy life expectancy"
+         ],
+         "rationale": "Life expectancy at birth is the measure scripted mode always answers with.",
+         "resolved_by": "planner_default",
+         "slot": "measure"
+        }
+       ],
+       "declined": [],
+       "evidence_requirements": [
+        {
+         "across": [],
+         "breakdown": null,
+         "coverage": {
+          "on_missing": "report_gaps"
+         },
+         "decision_ids": [
+          "measure"
+         ],
+         "entities": [
+          {
+           "name": "Kenya",
+           "role": null
+          }
+         ],
+         "frequency": "annual",
+         "id": "life_expectancy",
+         "kind": "dataset",
+         "measure": "life expectancy at birth",
+         "period": {
+          "end": 2023,
+          "start": 1960
+         },
+         "period_end_open": false,
+         "source": null,
+         "source_code": null,
+         "source_exclude": false,
+         "source_ref": null,
+         "source_spec_id": null,
+         "stat_vars": null,
+         "unit": null
+        },
+        {
+         "decision_ids": [
+          "measure"
+         ],
+         "group_by": [
+          "period"
+         ],
+         "id": "life_expectancy_by_period",
+         "input_id": "life_expectancy",
+         "kind": "aggregate",
+         "reduction": "mean"
+        }
+       ],
+       "first_years": [],
+       "new_plan": true,
+       "period_licences": [],
+       "previous_version": null,
+       "question": "q with forks",
+       "revision": "f29c633dc3cabe4c6e9ee5ef210e4c77e5e9f6d08cc11a3bffc4b36f19174a1a",
+       "rolling_copies": [],
+       "status": "pending_approval",
+       "summary": {
+        "revision": "f29c633dc3cabe4c6e9ee5ef210e4c77e5e9f6d08cc11a3bffc4b36f19174a1a",
+        "version": 1,
+        "warnings": []
+       },
+       "translation": {
+        "operations": [
+         {
+          "id": "retrieve",
+          "kind": "retrieve",
+          "requirement_id": "life_expectancy",
+          "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+         },
+         {
+          "group_by": [
+           "period"
+          ],
+          "id": "totals",
+          "input": "retrieve",
+          "kind": "aggregate",
+          "reduction": "mean",
+          "requirement_id": "life_expectancy_by_period"
+         }
+        ],
+        "terminal": [
+         "totals"
+        ]
+       },
+       "version": 1,
+       "workflow": {
+        "evidence_bindings": [
+         {
+          "requirement_id": "life_expectancy",
+          "spec_id": "spec_ffffffffffffffffffffffffffffffff",
+          "step_id": "retrieve"
+         }
+        ],
+        "sources": [
+         {
+          "confidence": "high",
+          "coverage_kind": null,
+          "coverage_window": {
+           "end": 2023,
+           "start": 1960
+          },
+          "definition": null,
+          "entities": [
+           {
+            "label": "Kenya",
+            "ref": "country/KEN",
+            "role": "country"
+           }
+          ],
+          "groups": [],
+          "has_data": true,
+          "identity": {
+           "stat_var": "LifeExpectancy_Person"
+          },
+          "measure_label": null,
+          "open_axes": [],
+          "open_entity_axes": null,
+          "provenance_account": null,
+          "provenance_label": null,
+          "provenance_ref": null,
+          "resolved_sources": [],
+          "searched_as": null,
+          "sentence": "life expectancy at birth in Kenya, 1960 to 2023",
+          "served_count": 1,
+          "shape_member_count": null,
+          "shape_member_digest": null,
+          "slot_codes": null,
+          "spec_id": "spec_ffffffffffffffffffffffffffffffff",
+          "stat_var_member_count": null,
+          "stat_var_member_count_exact": null,
+          "stat_var_reading": null,
+          "stat_var_reading_set_by": null,
+          "unit_label": null,
+          "unit_per_series": null,
+          "unit_ref": null
+         }
+        ],
+        "steps": [
+         {
+          "args": {
+           "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+          },
+          "bindings": {},
+          "expected_role_keys": [
+           "country"
+          ],
+          "id": "retrieve",
+          "implementation_version": null,
+          "input_schema_hash": "e3983a32ec5a3a1a35c761b4c68b3486f0c4a88382be00a9df82886266eee191",
+          "operation_id": "retrieve",
+          "output_schema_hash": null,
+          "tool": {
+           "name": "get_data",
+           "server": "data-mcp"
+          }
+         },
+         {
+          "args": {
+           "aggregation": "mean",
+           "group_by": [
+            "time_period"
+           ]
+          },
+          "bindings": {
+           "frame_ref": {
+            "from_step": "retrieve",
+            "output": "frame_ref"
+           }
+          },
+          "expected_role_keys": [],
+          "id": "totals",
+          "implementation_version": null,
+          "input_schema_hash": "a39e878dc1be854e22e319e8e91663c9ca1d82036a04657465ee18dd3c733412",
+          "operation_id": "totals",
+          "output_schema_hash": null,
+          "tool": {
+           "name": "aggregate",
+           "server": "analysis-mcp"
+          }
+         }
+        ],
+        "terminal_steps": [
+         "totals"
+        ],
+        "warnings": []
+       }
+      },
+      "round": 1,
+      "type": "Paused"
+     }
+    ],
+    "frames": [
+     {
+      "actions": [
+       "approve",
+       "amend",
+       "reject"
+      ],
+      "caveats": [],
+      "decisions": [
+       {
+        "alternatives": [
+         "life expectancy at birth",
+         "healthy life expectancy"
+        ],
+        "chosen": "life expectancy at birth",
+        "id": "measure",
+        "question": "Which measure answers the scripted question.",
+        "reason": "Life expectancy at birth is the measure scripted mode always answers with.",
+        "resolved_by": "default"
+       }
+      ],
+      "event": "plan.proposed",
+      "interrupt_id": "int_3e770746a2044d78",
+      "operations": [
+       {
+        "id": "retrieve",
+        "kind": "retrieve",
+        "requirement_id": "life_expectancy",
+        "sentence": "life expectancy at birth in Kenya, 1960 to 2023."
+       },
+       {
+        "id": "totals",
+        "kind": "aggregate",
+        "requirement_id": "life_expectancy_by_period",
+        "sentence": "The average of life expectancy at birth, grouped by year."
+       }
+      ],
+      "plan_version_id": "plan_a49a0c72bc154e95",
+      "requirements": [
+       {
+        "decision_ids": [
+         "measure"
+        ],
+        "id": "life_expectancy",
+        "kind": "dataset",
+        "sentence": "life expectancy at birth in Kenya, 1960 to 2023."
+       },
+       {
+        "decision_ids": [
+         "measure"
+        ],
+        "id": "life_expectancy_by_period",
+        "kind": "aggregate",
+        "sentence": "The average of life expectancy at birth, grouped by year."
+       }
+      ],
+      "revision": "f29c633dc3cabe4c6e9ee5ef210e4c77e5e9f6d08cc11a3bffc4b36f19174a1a",
+      "seq": 6,
+      "steps": [
+       {
+        "args": {
+         "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+        },
+        "description": "life expectancy at birth in Kenya, 1960 to 2023.",
+        "gives_answer": false,
+        "id": "retrieve",
+        "label": "Fetch life expectancy at birth for Kenya"
+       },
+       {
+        "args": {
+         "aggregation": "mean",
+         "group_by": [
+          "time_period"
+         ]
+        },
+        "description": "The average of life expectancy at birth, grouped by year. Result: one figure per year, 1960-2023.",
+        "gives_answer": true,
+        "id": "totals",
+        "label": "Average life expectancy at birth by year"
+       }
+      ],
+      "summary": "Life expectancy at birth, for Kenya, from 1960 to 2023.",
+      "title": "Research plan",
+      "version": 1
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   }
+  ],
+  "manifests": [
+   {
+    "frame_ref": {
+     "content_version": "cv_99999999999999999999999999999999",
+     "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+    },
+    "manifest": null
+   },
+   {
+    "frame_ref": {
+     "content_version": "cv_99999999999999999999999999999999",
+     "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+    },
+    "manifest": null
+   },
+   {
+    "frame_ref": {
+     "content_version": "cv_99999999999999999999999999999999",
+     "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+    },
+    "manifest": null
+   }
+  ],
+  "step_labels": {}
+ },
+ {
+  "approving": {
+   "actions": [
+    "approve",
+    "amend",
+    "reject"
+   ],
+   "caveats": [],
+   "decisions": [
+    {
+     "alternatives": [
+      "life expectancy at birth",
+      "healthy life expectancy"
+     ],
+     "chosen": "life expectancy at birth",
+     "id": "measure",
+     "question": "Which measure answers the scripted question.",
+     "reason": "Life expectancy at birth is the measure scripted mode always answers with.",
+     "resolved_by": "default"
+    }
+   ],
+   "event": "plan.proposed",
+   "interrupt_id": "int_3e770746a2044d78",
+   "operations": [
+    {
+     "id": "retrieve",
+     "kind": "retrieve",
+     "requirement_id": "life_expectancy",
+     "sentence": "life expectancy at birth in Kenya, 1960 to 2023."
+    },
+    {
+     "id": "totals",
+     "kind": "aggregate",
+     "requirement_id": "life_expectancy_by_period",
+     "sentence": "The average of life expectancy at birth, grouped by year."
+    }
+   ],
+   "plan_version_id": "plan_a49a0c72bc154e95",
+   "requirements": [
+    {
+     "decision_ids": [
+      "measure"
+     ],
+     "id": "life_expectancy",
+     "kind": "dataset",
+     "sentence": "life expectancy at birth in Kenya, 1960 to 2023."
+    },
+    {
+     "decision_ids": [
+      "measure"
+     ],
+     "id": "life_expectancy_by_period",
+     "kind": "aggregate",
+     "sentence": "The average of life expectancy at birth, grouped by year."
+    }
+   ],
+   "revision": "f29c633dc3cabe4c6e9ee5ef210e4c77e5e9f6d08cc11a3bffc4b36f19174a1a",
+   "seq": 6,
+   "steps": [
+    {
+     "args": {
+      "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+     },
+     "description": "life expectancy at birth in Kenya, 1960 to 2023.",
+     "gives_answer": false,
+     "id": "retrieve",
+     "label": "Fetch life expectancy at birth for Kenya"
+    },
+    {
+     "args": {
+      "aggregation": "mean",
+      "group_by": [
+       "time_period"
+      ]
+     },
+     "description": "The average of life expectancy at birth, grouped by year. Result: one figure per year, 1960-2023.",
+     "gives_answer": true,
+     "id": "totals",
+     "label": "Average life expectancy at birth by year"
+    }
+   ],
+   "summary": "Life expectancy at birth, for Kenya, from 1960 to 2023.",
+   "title": "Research plan",
+   "version": 1
+  },
+  "conversation": {
+   "_composition_ops": [],
+   "_removal_unreported": false,
+   "auto_add": true,
+   "components": {},
+   "composition": null,
+   "conversation_id": "conv_01test0000",
+   "latest_plan_version": 1,
+   "plan_version_ids": {
+    "1": "plan_a49a0c72bc154e95"
+   },
+   "seq": 7,
+   "timed_out_calls": [],
+   "trace_id": "tr_738148b1b6354929",
+   "turn_applied_choice": null,
+   "turn_choice_baseline": {},
+   "turn_components": [],
+   "turn_final_text": "",
+   "turn_index": 1,
+   "turn_plans": [],
+   "turn_readings": [],
+   "turn_recorded": false,
+   "turn_specs": {},
+   "turn_user_message": "q with forks",
+   "turn_user_words": "q with forks",
+   "turns": []
+  },
+  "conversation_id": "u_4c5dc9b7708905f7/conv_01test0000",
+  "conversation_key": [
+   "u_4c5dc9b7708905f7",
+   "conv_01test0000"
+  ],
+  "finish": {
+   "frames": [
+    {
+     "event": "message.complete",
+     "seq": 24,
+     "text": "Charted."
+    },
+    {
+     "event": "suggestions",
+     "items": [],
+     "seq": 25
+    },
+    {
+     "composition": {
+      "actor": "model",
+      "blocks": [
+       {
+        "component_id": "cmp_01test0001",
+        "pinned": false,
+        "revision": 1,
+        "title": "Aid to Kenya",
+        "type": "stat_card"
+       }
+      ],
+      "composition_id": "cps_7aef060ade39488c",
+      "counts": {
+       "all": 1,
+       "charts": 0,
+       "notes": 0,
+       "stats": 1,
+       "tables": 0
+      },
+      "revision": 1
+     },
+     "event": "done",
+     "seq": 26,
+     "trace_id": "tr_738148b1b6354929"
+    }
+   ],
+   "records": [],
+   "world": {
+    "composition": {
+     "actor": "model",
+     "blocks": [
+      {
+       "component_id": "cmp_01test0001",
+       "pinned": false,
+       "revision": 1,
+       "title": "Aid to Kenya",
+       "type": "stat_card"
+      }
+     ],
+     "composition_id": "cps_7aef060ade39488c",
+     "counts": {
+      "all": 1,
+      "charts": 0,
+      "notes": 0,
+      "stats": 1,
+      "tables": 0
+     },
+     "revision": 1
+    },
+    "removal": false,
+    "turn_applied_choice": null,
+    "turn_plans": [
+     {
+      "approved_revision": "f29c633dc3cabe4c6e9ee5ef210e4c77e5e9f6d08cc11a3bffc4b36f19174a1a",
+      "asks": [],
+      "decisions": [
+       {
+        "chosen": "life expectancy at birth",
+        "rationale": "Life expectancy at birth is the measure scripted mode always answers with.",
+        "resolved_by": "planner_default",
+        "slot": "measure"
+       }
+      ],
+      "declined": [],
+      "outputs": [
+       "totals"
+      ],
+      "periods": [
+       {
+        "assumed": false,
+        "decision": null,
+        "end": 2023,
+        "requirement_ids": [
+         "life_expectancy"
+        ],
+        "start": 1960
+       }
+      ],
+      "question": "q with forks",
+      "revision": "f29c633dc3cabe4c6e9ee5ef210e4c77e5e9f6d08cc11a3bffc4b36f19174a1a",
+      "run_id": "run_3b440048b8084109815d2adad7f2671e",
+      "sources": [
+       {
+        "coverage": {
+         "end": 2023,
+         "start": 1960
+        },
+        "coverage_kind": null,
+        "coverage_source": "coverage",
+        "identity": {
+         "stat_var": "LifeExpectancy_Person"
+        },
+        "measure": "life expectancy at birth",
+        "members": null,
+        "name": null,
+        "origin": "translator",
+        "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+       }
+      ],
+      "status": "completed",
+      "steps": [
+       {
+        "failed": false,
+        "id": "retrieve",
+        "label": "Fetch life expectancy at birth for Kenya",
+        "reading": null,
+        "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+       },
+       {
+        "failed": false,
+        "id": "totals",
+        "label": "Average life expectancy at birth by year",
+        "reading": null,
+        "spec_id": null
+       }
+      ],
+      "warnings": []
+     }
+    ],
+    "turn_readings": [],
+    "turn_specs": {}
+   }
+  },
+  "items": [
+   {
+    "events": [
+     {
+      "label": "approved",
+      "node": "approve",
+      "output": {
+       "answer_mode": "series",
+       "answered": [],
+       "approved_at": "2026-11-18T00:55:39.320341Z",
+       "approved_revision": "f29c633dc3cabe4c6e9ee5ef210e4c77e5e9f6d08cc11a3bffc4b36f19174a1a",
+       "ask_breakdowns": [],
+       "asks": [],
+       "asks_across_years": [],
+       "decisions": [
+        {
+         "chosen": "life expectancy at birth",
+         "description": "Which measure answers the scripted question.",
+         "fixes": null,
+         "options": [
+          "life expectancy at birth",
+          "healthy life expectancy"
+         ],
+         "rationale": "Life expectancy at birth is the measure scripted mode always answers with.",
+         "resolved_by": "planner_default",
+         "slot": "measure"
+        }
+       ],
+       "declined": [],
+       "evidence_requirements": [
+        {
+         "across": [],
+         "breakdown": null,
+         "coverage": {
+          "on_missing": "report_gaps"
+         },
+         "decision_ids": [
+          "measure"
+         ],
+         "entities": [
+          {
+           "name": "Kenya",
+           "role": null
+          }
+         ],
+         "frequency": "annual",
+         "id": "life_expectancy",
+         "kind": "dataset",
+         "measure": "life expectancy at birth",
+         "period": {
+          "end": 2023,
+          "start": 1960
+         },
+         "period_end_open": false,
+         "source": null,
+         "source_code": null,
+         "source_exclude": false,
+         "source_ref": null,
+         "source_spec_id": null,
+         "stat_vars": null,
+         "unit": null
+        },
+        {
+         "decision_ids": [
+          "measure"
+         ],
+         "group_by": [
+          "period"
+         ],
+         "id": "life_expectancy_by_period",
+         "input_id": "life_expectancy",
+         "kind": "aggregate",
+         "reduction": "mean"
+        }
+       ],
+       "first_years": [],
+       "period_licences": [],
+       "previous_version": null,
+       "question": "q with forks",
+       "rolling_copies": [],
+       "status": "approved",
+       "translation": {
+        "operations": [
+         {
+          "id": "retrieve",
+          "kind": "retrieve",
+          "requirement_id": "life_expectancy",
+          "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+         },
+         {
+          "group_by": [
+           "period"
+          ],
+          "id": "totals",
+          "input": "retrieve",
+          "kind": "aggregate",
+          "reduction": "mean",
+          "requirement_id": "life_expectancy_by_period"
+         }
+        ],
+        "terminal": [
+         "totals"
+        ]
+       },
+       "version": 1,
+       "workflow": {
+        "evidence_bindings": [
+         {
+          "requirement_id": "life_expectancy",
+          "spec_id": "spec_ffffffffffffffffffffffffffffffff",
+          "step_id": "retrieve"
+         }
+        ],
+        "sources": [
+         {
+          "confidence": "high",
+          "coverage_kind": null,
+          "coverage_window": {
+           "end": 2023,
+           "start": 1960
+          },
+          "definition": null,
+          "entities": [
+           {
+            "label": "Kenya",
+            "ref": "country/KEN",
+            "role": "country"
+           }
+          ],
+          "groups": [],
+          "has_data": true,
+          "identity": {
+           "stat_var": "LifeExpectancy_Person"
+          },
+          "measure_label": null,
+          "open_axes": [],
+          "open_entity_axes": null,
+          "provenance_account": null,
+          "provenance_label": null,
+          "provenance_ref": null,
+          "resolved_sources": [],
+          "searched_as": null,
+          "sentence": "life expectancy at birth in Kenya, 1960 to 2023",
+          "served_count": 1,
+          "shape_member_count": null,
+          "shape_member_digest": null,
+          "slot_codes": null,
+          "spec_id": "spec_ffffffffffffffffffffffffffffffff",
+          "stat_var_member_count": null,
+          "stat_var_member_count_exact": null,
+          "stat_var_reading": null,
+          "stat_var_reading_set_by": null,
+          "unit_label": null,
+          "unit_per_series": null,
+          "unit_ref": null
+         }
+        ],
+        "steps": [
+         {
+          "args": {
+           "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+          },
+          "bindings": {},
+          "expected_role_keys": [
+           "country"
+          ],
+          "id": "retrieve",
+          "implementation_version": null,
+          "input_schema_hash": "e3983a32ec5a3a1a35c761b4c68b3486f0c4a88382be00a9df82886266eee191",
+          "operation_id": "retrieve",
+          "output_schema_hash": null,
+          "tool": {
+           "name": "get_data",
+           "server": "data-mcp"
+          }
+         },
+         {
+          "args": {
+           "aggregation": "mean",
+           "group_by": [
+            "time_period"
+           ]
+          },
+          "bindings": {
+           "frame_ref": {
+            "from_step": "retrieve",
+            "output": "frame_ref"
+           }
+          },
+          "expected_role_keys": [],
+          "id": "totals",
+          "implementation_version": null,
+          "input_schema_hash": "a39e878dc1be854e22e319e8e91663c9ca1d82036a04657465ee18dd3c733412",
+          "operation_id": "totals",
+          "output_schema_hash": null,
+          "tool": {
+           "name": "aggregate",
+           "server": "analysis-mcp"
+          }
+         }
+        ],
+        "terminal_steps": [
+         "totals"
+        ],
+        "warnings": []
+       }
+      },
+      "type": "NodeDone"
+     }
+    ],
+    "frames": [
+     {
+      "caveats": [],
+      "choices": [],
+      "event": "plan.approved",
+      "plan_version_id": "plan_a49a0c72bc154e95",
+      "revision": "f29c633dc3cabe4c6e9ee5ef210e4c77e5e9f6d08cc11a3bffc4b36f19174a1a",
+      "seq": 7,
+      "steps": [
+       {
+        "gives_answer": false,
+        "label": "Fetch life expectancy at birth for Kenya"
+       },
+       {
+        "gives_answer": true,
+        "label": "Average life expectancy at birth by year"
+       }
+      ],
+      "summary": "Life expectancy at birth, for Kenya, from 1960 to 2023.",
+      "title": "Research plan",
+      "version": 1
+     },
+     {
+      "event": "activity.step",
+      "label": "Starting the plan",
+      "seq": 8,
+      "status": "running",
+      "step_id": "s8"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "count": 2,
+      "description": "life expectancy at birth in Kenya, 1960 to 2023.",
+      "gives_answer": false,
+      "message": "Result received; checking it",
+      "position": 1,
+      "step_id": "retrieve",
+      "tool": "get_data",
+      "type": "StepProgress"
+     }
+    ],
+    "frames": [
+     {
+      "duration_ms": 49,
+      "event": "activity.step",
+      "label": "Starting the plan",
+      "seq": 9,
+      "status": "complete",
+      "step_id": "s8"
+     },
+     {
+      "detail": "step 1 of 2 \u00b7 life expectancy at birth in Kenya, 1960 to 2023",
+      "event": "activity.step",
+      "label": "Fetch life expectancy at birth for Kenya",
+      "seq": 10,
+      "status": "running",
+      "step_id": "s10",
+      "tool": "get_data"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "count": 2,
+      "description": "The average of life expectancy at birth, grouped by year. Result: one figure per year, 1960-2023.",
+      "gives_answer": true,
+      "message": "Result received; checking it",
+      "position": 2,
+      "step_id": "totals",
+      "tool": "aggregate",
+      "type": "StepProgress"
+     }
+    ],
+    "frames": [
+     {
+      "detail": "step 2 of 2 \u00b7 The average of life expectancy at birth, grouped by year. Result: one figure per year, 1960-2023",
+      "event": "activity.step",
+      "label": "Average life expectancy at birth by year",
+      "seq": 11,
+      "status": "running",
+      "step_id": "s11",
+      "tool": "aggregate"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "label": "ok",
+      "node": "execute",
+      "output": {
+       "frame_ref_steps": [
+        {
+         "is_final_step": true,
+         "step_id": "totals",
+         "store_ref": {
+          "content_version": "ocv_99999999999999999999999999999999",
+          "spec_id": "ops_99999999999999999999999999999999"
+         },
+         "tool": "aggregate"
+        }
+       ],
+       "frame_refs": [
+        {
+         "content_version": "ocv_99999999999999999999999999999999",
+         "spec_id": "ops_99999999999999999999999999999999"
+        }
+       ],
+       "plan_version": 1,
+       "run": {
+        "run_id": "run_3b440048b8084109815d2adad7f2671e",
+        "status": "completed"
+       },
+       "stat_var_totals": [],
+       "step_summaries": [
+        {
+         "digest": "scripted get_data result",
+         "ranked_before_limit": null,
+         "rows": null,
+         "tool": "get_data"
+        },
+        {
+         "digest": "scripted aggregate result",
+         "ranked_before_limit": null,
+         "rows": 64,
+         "tool": "aggregate"
+        }
+       ]
+      },
+      "type": "NodeDone"
+     }
+    ],
+    "frames": [
+     {
+      "detail": "64 observations \u00b7 World Development Indicators",
+      "duration_ms": 0,
+      "event": "activity.step",
+      "label": "Fetch life expectancy at birth for Kenya",
+      "seq": 12,
+      "status": "complete",
+      "step_id": "s10",
+      "tool": "get_data"
+     },
+     {
+      "detail": "The result holds 64 rows.",
+      "duration_ms": 0,
+      "event": "activity.step",
+      "label": "Average life expectancy at birth by year",
+      "seq": 13,
+      "status": "complete",
+      "step_id": "s11",
+      "tool": "aggregate"
+     },
+     {
+      "detail": "Average life expectancy at birth by year",
+      "event": "activity.step",
+      "label": "Reading the plan's results",
+      "seq": 14,
+      "status": "running",
+      "step_id": "s14"
+     }
+    ],
+    "records": [
+     {
+      "args": {
+       "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+      },
+      "conversation": "u_4c5dc9b7708905f7/conv_01test0000",
+      "duration_ms": 0,
+      "land": false,
+      "result": {
+       "frame_refs": [],
+       "outcome": "ok",
+       "summary": "64 observations \u00b7 World Development Indicators"
+      },
+      "step_id": "retrieve",
+      "tool": "get_data"
+     },
+     {
+      "args": {
+       "aggregation": "mean",
+       "frame_ref": {
+        "content_version": "cv_99999999999999999999999999999999",
+        "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+       },
+       "group_by": [
+        "time_period"
+       ]
+      },
+      "conversation": "u_4c5dc9b7708905f7/conv_01test0000",
+      "duration_ms": 0,
+      "land": false,
+      "result": {
+       "frame_refs": [],
+       "outcome": "ok",
+       "rows": 64,
+       "summary": null
+      },
+      "step_id": "totals",
+      "tool": "aggregate"
+     }
+    ],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "label": "next",
+      "node": "plan_done",
+      "output": {
+       "answers": "plan",
+       "body": {
+        "frames": [
+         {
+          "frame": "f124622",
+          "view": {
+           "dimensions": [
+            {
+             "name": "stat_var",
+             "plural": false,
+             "values": [
+              "dcid:Aid"
+             ]
+            }
+           ]
+          }
+         }
+        ],
+        "plan_record": "Plan f29c633dc3ca (approved), status completed: \"q with forks\"\nperiod 1960-2023, as the requirements state it, no period decision\ndecisions:\n- measure = life expectancy at birth [planner_default]: Life expectancy at birth is the measure scripted mode always answers with.\nsources:\n- spec_ffffffffffffffffffffffffffffffff for life expectancy at birth; coverage 1960-2023; from translator\noutputs: totals\nsteps:\n- retrieve: Fetch life expectancy at birth for Kenya (spec_ffffffffffffffffffffffffffffffff)\n- totals: Average life expectancy at birth by year",
+        "run": {
+         "run_id": "run_3b440048b8084109815d2adad7f2671e",
+         "status": "completed"
+        },
+        "step_summaries": [
+         "scripted get_data result",
+         "scripted aggregate result"
+        ],
+        "totals": []
+       },
+       "failure": null,
+       "status": "Reading the plan's results",
+       "text": "The approved plan ran. Chart its frames and answer."
+      },
+      "type": "NodeDone"
+     }
+    ],
+    "frames": [],
+    "records": [
+     {
+      "args": {
+       "frame_ref": {
+        "content_version": "ocv_99999999999999999999999999999999",
+        "spec_id": "ops_99999999999999999999999999999999"
+       }
+      },
+      "conversation": "u_4c5dc9b7708905f7/conv_01test0000",
+      "duration_ms": 0,
+      "land": false,
+      "result": {
+       "frame_refs": [],
+       "outcome": "ok",
+       "view": {
+        "dimensions": [
+         {
+          "name": "stat_var",
+          "plural": false,
+          "values": [
+           "dcid:Aid"
+          ]
+         }
+        ]
+       }
+      },
+      "step_id": null,
+      "tool": "describe_frame"
+     }
+    ],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "failure": null,
+      "text": "Reading the plan's results",
+      "type": "AgentStatus"
+     },
+     {
+      "answers": [
+       {
+        "id": "adk-1",
+        "name": "plan",
+        "response": {
+         "frames": [
+          {
+           "frame": "f124622",
+           "view": {
+            "dimensions": [
+             {
+              "name": "stat_var",
+              "plural": false,
+              "values": [
+               "dcid:Aid"
+              ]
+             }
+            ]
+           }
+          }
+         ],
+         "plan_record": "Plan f29c633dc3ca (approved), status completed: \"q with forks\"\nperiod 1960-2023, as the requirements state it, no period decision\ndecisions:\n- measure = life expectancy at birth [planner_default]: Life expectancy at birth is the measure scripted mode always answers with.\nsources:\n- spec_ffffffffffffffffffffffffffffffff for life expectancy at birth; coverage 1960-2023; from translator\noutputs: totals\nsteps:\n- retrieve: Fetch life expectancy at birth for Kenya (spec_ffffffffffffffffffffffffffffffff)\n- totals: Average life expectancy at birth by year",
+         "result": "The approved plan ran. Chart its frames and answer.",
+         "run": {
+          "run_id": "run_3b440048b8084109815d2adad7f2671e",
+          "status": "completed"
+         },
+         "step_summaries": [
+          "scripted get_data result",
+          "scripted aggregate result"
+         ],
+         "totals": []
+        }
+       }
+      ],
+      "state": {},
+      "type": "ToolsAnswered"
+     }
+    ],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "parts": [
+       {
+        "function_call": {
+         "args": {
+          "charts": [
+           {
+            "frame": "f124622",
+            "select_json": "{\"stat_var\": \"dcid:LifeExpectancy_Person\"}",
+            "title": "Aid to Kenya",
+            "type": "stat_card"
+           }
+          ]
+         },
+         "id": "adk-3",
+         "name": "make_charts"
+        }
+       }
+      ],
+      "type": "ModelResponded"
+     }
+    ],
+    "frames": [
+     {
+      "duration_ms": 6,
+      "event": "activity.step",
+      "label": "Reading the plan's results",
+      "seq": 15,
+      "status": "complete",
+      "step_id": "s14"
+     },
+     {
+      "detail": "Aid to Kenya",
+      "event": "activity.step",
+      "label": "Making 1 chart",
+      "seq": 16,
+      "status": "running",
+      "step_id": "s16",
+      "tool": "make_charts"
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "answers": [
+       {
+        "id": "adk-3",
+        "name": "make_charts",
+        "response": {
+         "charts": [
+          {
+           "holds": {
+            "first_period": "2024",
+            "last_period": "2024",
+            "series": [
+             "Malaria grant disbursements to Ethiopia"
+            ],
+            "series_count": 1,
+            "unit": {
+             "base_year": 2023,
+             "currency": "USD",
+             "magnitude": "millions",
+             "prices": "constant"
+            }
+           },
+           "reply_figures": [
+            {
+             "period": "2024",
+             "series": "Malaria grant disbursements to Ethiopia",
+             "unit": {
+              "base_year": 2023,
+              "currency": "USD",
+              "magnitude": "millions",
+              "prices": "constant"
+             },
+             "value": 441.9
+            }
+           ],
+           "title": "Aid to Kenya"
+          }
+         ]
+        }
+       }
+      ],
+      "state": {},
+      "type": "ToolsAnswered"
+     }
+    ],
+    "frames": [
+     {
+      "duration_ms": 0,
+      "event": "activity.step",
+      "label": "Adding a chart",
+      "produced": {
+       "component_id": "cmp_01test0001",
+       "revision": 1
+      },
+      "seq": 17,
+      "status": "complete",
+      "step_id": "s17",
+      "tool": "write_component"
+     },
+     {
+      "catalog_version": "2026.8.0",
+      "component_id": "cmp_01test0001",
+      "created_from": {
+       "step_id": "s17"
+      },
+      "event": "component.created",
+      "fact_summary": {
+       "attribution": {
+        "indicator_count": 1,
+        "label": "Test source \u00b7 1 indicator",
+        "source_count": 1
+       },
+       "component_id": "cmp_01test0001",
+       "defaults": [],
+       "revision": 1,
+       "series": [
+        {
+         "id": "ken",
+         "label": "Kenya",
+         "point_count": 9
+        }
+       ]
+      },
+      "min_catalog_version": "2026.8.0",
+      "payload": {
+       "catalog_version": "2026.8.0",
+       "component": {
+        "change": {
+         "basis": [
+          "2023",
+          "2024"
+         ],
+         "derivation": "percent_change",
+         "value": 1.89
+        },
+        "label": "Malaria grant disbursements to Ethiopia",
+        "period": "2024",
+        "title": {
+         "authorship": "model",
+         "text": "Aid to Kenya"
+        },
+        "type": "stat_card",
+        "unit": {
+         "base_year": 2023,
+         "currency": "USD",
+         "magnitude": "millions",
+         "prices": "constant"
+        },
+        "value": 441.9
+       },
+       "component_id": "cmp_01test0001",
+       "provenance": {
+        "citation": "OECD DAC via ONE DFO, retrieved 12 June 2026",
+        "execution_ref": null,
+        "freshness": {
+         "data_through": "2024",
+         "last_refreshed": "2026-06-12",
+         "next_expected": "2026-10",
+         "partial_period": false
+        },
+        "generated_at": "2026-07-14T10:02:00Z",
+        "inputs": [
+         {
+          "content_version": "cv_11111111111111111111111111111111",
+          "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+         }
+        ],
+        "refreshed_from": null,
+        "sources": [
+         {
+          "id": "src_oecd_dac",
+          "licence": "CC BY 4.0",
+          "name": "OECD DAC",
+          "retrieved": "2026-06-12",
+          "url": "https://stats.oecd.org/"
+         }
+        ],
+        "warnings": []
+       },
+       "revision": 1,
+       "schema_version": 1
+      },
+      "provenance": {
+       "citation": "Test source (2026).",
+       "freshness": {
+        "data_through": "2024",
+        "last_refreshed": "2026-06-30",
+        "partial_period": false
+       },
+       "generated_at": "2026-08-28T00:00:00Z",
+       "inputs": [
+        {
+         "content_version": "cv_11111111111111111111111111111111",
+         "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+       ],
+       "sources": [
+        {
+         "id": "src_test",
+         "licence": "CC BY 4.0",
+         "name": "Test source"
+        }
+       ],
+       "warnings": []
+      },
+      "revision": 1,
+      "seq": 18,
+      "type": "stat_card"
+     },
+     {
+      "event": "composition.updated",
+      "manifest": {
+       "actor": "model",
+       "blocks": [
+        {
+         "component_id": "cmp_01test0001",
+         "pinned": false,
+         "revision": 1,
+         "title": "Aid to Kenya",
+         "type": "stat_card"
+        }
+       ],
+       "composition_id": "cps_7aef060ade39488c",
+       "counts": {
+        "all": 1,
+        "charts": 0,
+        "notes": 0,
+        "stats": 1,
+        "tables": 0
+       },
+       "revision": 1
+      },
+      "seq": 19
+     },
+     {
+      "event": "activity.step",
+      "label": "Making 1 chart",
+      "seq": 20,
+      "status": "complete",
+      "step_id": "s16",
+      "tool": "make_charts"
+     },
+     {
+      "detail": "Aid to Kenya",
+      "event": "activity.step",
+      "label": "Going over the charts",
+      "seq": 21,
+      "status": "running",
+      "step_id": "s21"
+     }
+    ],
+    "records": [
+     {
+      "args": {
+       "intent": {
+        "frame_ref": {
+         "content_version": "ocv_99999999999999999999999999999999",
+         "spec_id": "ops_99999999999999999999999999999999"
+        },
+        "select": {
+         "stat_var": "dcid:LifeExpectancy_Person"
+        },
+        "title": "Aid to Kenya",
+        "type": "stat_card"
+       }
+      },
+      "conversation": "u_4c5dc9b7708905f7/conv_01test0000",
+      "duration_ms": 0,
+      "land": true,
+      "result": {
+       "component": {
+        "catalog_version": "2026.8.0",
+        "component_id": "cmp_01test0001",
+        "fact_summary": {
+         "attribution": {
+          "indicator_count": 1,
+          "label": "Test source \u00b7 1 indicator",
+          "source_count": 1
+         },
+         "component_id": "cmp_01test0001",
+         "revision": 1,
+         "series": [
+          {
+           "id": "ken",
+           "label": "Kenya",
+           "point_count": 9
+          }
+         ]
+        },
+        "min_catalog_version": "2026.8.0",
+        "payload": {
+         "catalog_version": "2026.8.0",
+         "component": {
+          "change": {
+           "basis": [
+            "2023",
+            "2024"
+           ],
+           "derivation": "percent_change",
+           "value": 1.89
+          },
+          "label": "Malaria grant disbursements to Ethiopia",
+          "period": "2024",
+          "title": {
+           "authorship": "model",
+           "text": "Aid to Kenya"
+          },
+          "type": "stat_card",
+          "unit": {
+           "base_year": 2023,
+           "currency": "USD",
+           "magnitude": "millions",
+           "prices": "constant"
+          },
+          "value": 441.9
+         },
+         "component_id": "cmp_01test0001",
+         "provenance": {
+          "citation": "OECD DAC via ONE DFO, retrieved 12 June 2026",
+          "execution_ref": null,
+          "freshness": {
+           "data_through": "2024",
+           "last_refreshed": "2026-06-12",
+           "next_expected": "2026-10",
+           "partial_period": false
+          },
+          "generated_at": "2026-07-14T10:02:00Z",
+          "inputs": [
+           {
+            "content_version": "cv_11111111111111111111111111111111",
+            "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+           }
+          ],
+          "refreshed_from": null,
+          "sources": [
+           {
+            "id": "src_oecd_dac",
+            "licence": "CC BY 4.0",
+            "name": "OECD DAC",
+            "retrieved": "2026-06-12",
+            "url": "https://stats.oecd.org/"
+           }
+          ],
+          "warnings": []
+         },
+         "revision": 1,
+         "schema_version": 1
+        },
+        "provenance": {
+         "citation": "Test source (2026).",
+         "freshness": {
+          "data_through": "2024",
+          "last_refreshed": "2026-06-30",
+          "partial_period": false
+         },
+         "generated_at": "2026-08-28T00:00:00Z",
+         "inputs": [
+          {
+           "content_version": "cv_11111111111111111111111111111111",
+           "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+         ],
+         "sources": [
+          {
+           "id": "src_test",
+           "licence": "CC BY 4.0",
+           "name": "Test source"
+          }
+         ],
+         "warnings": []
+        },
+        "revision": 1,
+        "type": "stat_card"
+       },
+       "frame_refs": [],
+       "outcome": "ok"
+      },
+      "step_id": null,
+      "tool": "write_component"
+     }
+    ],
+    "world": {
+     "composition": null,
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "text": "Charted.",
+      "type": "TextDelta"
+     }
+    ],
+    "frames": [
+     {
+      "duration_ms": 2,
+      "event": "activity.step",
+      "label": "Going over the charts",
+      "seq": 22,
+      "status": "complete",
+      "step_id": "s21"
+     },
+     {
+      "event": "message.delta",
+      "seq": 23,
+      "text": "Charted."
+     }
+    ],
+    "records": [],
+    "world": {
+     "composition": {
+      "actor": "model",
+      "blocks": [
+       {
+        "component_id": "cmp_01test0001",
+        "pinned": false,
+        "revision": 1,
+        "title": "Aid to Kenya",
+        "type": "stat_card"
+       }
+      ],
+      "composition_id": "cps_7aef060ade39488c",
+      "counts": {
+       "all": 1,
+       "charts": 0,
+       "notes": 0,
+       "stats": 1,
+       "tables": 0
+      },
+      "revision": 1
+     },
+     "removal": false
+    }
+   },
+   {
+    "events": [
+     {
+      "parts": [
+       {
+        "text": "Charted."
+       }
+      ],
+      "type": "ModelResponded"
+     }
+    ],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": {
+      "actor": "model",
+      "blocks": [
+       {
+        "component_id": "cmp_01test0001",
+        "pinned": false,
+        "revision": 1,
+        "title": "Aid to Kenya",
+        "type": "stat_card"
+       }
+      ],
+      "composition_id": "cps_7aef060ade39488c",
+      "counts": {
+       "all": 1,
+       "charts": 0,
+       "notes": 0,
+       "stats": 1,
+       "tables": 0
+      },
+      "revision": 1
+     },
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": {
+      "actor": "model",
+      "blocks": [
+       {
+        "component_id": "cmp_01test0001",
+        "pinned": false,
+        "revision": 1,
+        "title": "Aid to Kenya",
+        "type": "stat_card"
+       }
+      ],
+      "composition_id": "cps_7aef060ade39488c",
+      "counts": {
+       "all": 1,
+       "charts": 0,
+       "notes": 0,
+       "stats": 1,
+       "tables": 0
+      },
+      "revision": 1
+     },
+     "removal": false
+    }
+   },
+   {
+    "events": [],
+    "frames": [],
+    "records": [],
+    "world": {
+     "composition": {
+      "actor": "model",
+      "blocks": [
+       {
+        "component_id": "cmp_01test0001",
+        "pinned": false,
+        "revision": 1,
+        "title": "Aid to Kenya",
+        "type": "stat_card"
+       }
+      ],
+      "composition_id": "cps_7aef060ade39488c",
+      "counts": {
+       "all": 1,
+       "charts": 0,
+       "notes": 0,
+       "stats": 1,
+       "tables": 0
+      },
+      "revision": 1
+     },
+     "removal": false
+    }
+   }
+  ],
+  "manifests": [
+   {
+    "frame_ref": {
+     "content_version": "cv_99999999999999999999999999999999",
+     "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+    },
+    "manifest": null
+   },
+   {
+    "frame_ref": {
+     "content_version": "cv_99999999999999999999999999999999",
+     "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+    },
+    "manifest": null
+   },
+   {
+    "frame_ref": {
+     "content_version": "cv_99999999999999999999999999999999",
+     "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+    },
+    "manifest": null
+   }
+  ],
+  "step_labels": {
+   "retrieve": "Fetch life expectancy at birth for Kenya",
+   "totals": "Average life expectancy at birth by year"
+  }
+ }
+]

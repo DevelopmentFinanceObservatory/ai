@@ -39,10 +39,16 @@ class Paused:
 class TurnFailed:
     """The turn ended on `error` at `node`, and its cursor records it: a node
     raised (closed `failed`), or the cursor named a node the running graph
-    cannot run (closed `abandoned`, `error` a `harness.turn.loop.TurnExpired`)."""
+    cannot run (closed `abandoned`, `error` a `harness.turn.loop.TurnExpired`).
+
+    `error` is the exception itself, so the Studio error frame reads what it
+    states (`harness.studio_translate._stream_fatal`): its `refusal`, the MCP
+    call whose pinned timeout it hit, and its cause chain. The cursor's
+    `error` records the same facts for a reader with no exception at hand
+    (`harness.turn.loop.failure`)."""
 
     node: str
-    error: BaseException
+    error: Exception
 
 
 type TurnEvent = NodeDone | Paused | TurnFailed
