@@ -62,7 +62,7 @@ from planner.workflow import ToolId
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .failure_text import classed_sentence, is_user_sentence
-from .turn_driver import NO_ADK, no_turn_specs, unconnected_store
+from .turn_driver import unconnected_store
 
 
 def _studio_eval_checks() -> Any:
@@ -2246,7 +2246,7 @@ async def test_a_removal_reported_after_a_newer_canvas_edit_carries_that_edit(
     and the drain that reports it, here a pin. The client renders every
     update, so the removal's update carries the stored manifest: never a
     revision below the one the pin committed, and the pin with it."""
-    store = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs)
+    store = StudioStore(pg_engine)
     await store.create("principal", "c1")
     conversation = store.current("principal", "c1")
     assert conversation is not None

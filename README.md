@@ -10,7 +10,7 @@ A [uv workspace](https://docs.astral.sh/uv/concepts/projects/workspaces/) monore
 
 ```text
 packages/common/            Shared logging, telemetry, settings base, and materialisation store
-services/harness/           Agent loop on Google ADK and FastAPI, streamed over SSE
+services/harness/           Agent loop on Pydantic AI and FastAPI, streamed over SSE
 services/data-mcp/          Data discovery, minting, materialisation, and graph entity description
 services/analysis-mcp/      Deterministic computation across seven analytical verbs
 services/presentation-mcp/  Canvas component authoring and frame view tools

@@ -76,11 +76,6 @@ Every model request (system instruction and contents, as the model received them
 every tool call, a scripted planner's own included, is recorded in order. A
 case's `checks` list names properties from `checks.py`'s `CASE_CHECKS` that read that record:
 
-- `approval_payload_absent_after_approval`: no request made after the plan's first
-  step ran holds the approval pause (the plan and the user's answer).
-- `no_relay_marker`, `planner_sees_no_relay_marker`: no request, or no planner
-  request, holds a fence around another agent's quoted turn (`checks.RELAY_MARKER`),
-  which would present a graph node's output to a model as another agent's speech.
 - `planner_first_message_carries_search_evidence`: the planner's first request names
   every spec id, warning code and window year the turn's searches returned.
 - `previous_final_message_in_view`: each turn's first orchestrator request shows the

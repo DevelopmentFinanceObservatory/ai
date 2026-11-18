@@ -106,35 +106,6 @@ def request_text(request: Request) -> str:
     return "\n".join(lines)
 
 
-class _NoAdk:
-    """The `harness.studio_store.AdkBridge` of a store whose conversations
-    ADK never held."""
-
-    async def reimport(self, principal: str, conversation_id: str) -> None:
-        del principal, conversation_id
-
-    async def moved(self, principal: str, conversation_id: str) -> bool:
-        del principal, conversation_id
-        return False
-
-    async def take_copy(self, principal: str, conversation_id: str) -> None:
-        del principal, conversation_id
-
-    def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
-        del session_id
-        return specs
-
-
-NO_ADK = _NoAdk()
-
-
-async def no_turn_specs(principal: str, session_id: str) -> dict[str, Any]:
-    """A `StudioStore` `turn_specs` reader for turns that hold no spec
-    blocks in an ADK session."""
-    del principal, session_id
-    return {}
-
-
 def unconnected_store() -> StudioStore:
     """A `StudioStore` with no database behind its engine, for a test that
     reads only the in-process state a store holds (`StudioStore.current`), as
@@ -145,8 +116,6 @@ def unconnected_store() -> StudioStore:
         create_async_engine(
             "postgresql+asyncpg://unconnected@127.0.0.1:1/none", connect_args={"timeout": 1}
         ),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
 
 
@@ -198,9 +167,7 @@ class TurnDriver:
         self.heartbeat_seconds = heartbeat_seconds
         self.observe: Callable[[TurnEvent], None] | None = None
         self.turns = TurnStore(engine)
-        self.studio = StudioStore(
-            engine, turn_specs=no_turn_specs, adk=NO_ADK, **(store_kwargs or {})
-        )
+        self.studio = StudioStore(engine, **(store_kwargs or {}))
 
     async def turn(
         self,

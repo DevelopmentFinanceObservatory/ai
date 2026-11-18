@@ -671,11 +671,6 @@ schema validation gets a 422 with `{"detail": [...]}` (FastAPI's format).
   claim (a crash, or a slow write) and another instance has since taken
   the conversation over. The turn continues there; the taking-over
   instance's own stream, if you have one open, is what finishes it.
-- 409 `constraint_violation` with `constraint_id: "conversation_diverged"`
-  and `retry: "do_not_retry"` means the conversation changed in two places
-  during a server upgrade and cannot continue until an operator repairs
-  it. Every route answers it, `/cancel` included unless a stream is live.
-  Do not retry. Show `detail`.
 
 ## 8. Card edits, follow-ups, and canvas questions
 

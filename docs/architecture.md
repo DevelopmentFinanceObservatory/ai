@@ -6,28 +6,29 @@ dfo-ai is the AI layer of the Development Finance Observatory
 (DFO). It's a uv workspace monorepo whose packages deploy together as
 **one** Cloud Run service at launch.
 
-**`services/harness`** runs the agent. It's built on Google ADK and
+**`services/harness`** runs the agent. It's built on Pydantic AI and
 FastAPI, and powers the site's chat-and-canvas workspace (DFO Studio) over
 an SSE event stream: the frozen wire contract in
 `docs/studio-contract-v1.md`. A data turn runs one agent that calls its
-own tools (`services/harness/src/orchestrator/README.md`) inside an ADK
-workflow that owns routing, approval and execution; card edits, canvas
+own tools (`services/harness/src/orchestrator/README.md`) inside the turn
+graph (`harness.graph`), whose nodes run on the harness's own turn loop
+(`harness.turn`) and own routing, approval and execution; card edits, canvas
 mutations, and cancellation are direct studio routes (see
 `services/harness/README.md`). It mounts data-mcp, analysis-mcp, and
 presentation-mcp as FastMCP ASGI sub-apps inside its own process,
 reachable over streamable HTTP at in-container loopback paths
 (`/mcp/data`, `/mcp/analysis`, `/mcp/presentation`).
 
-The agent runs in ADK's chat mode, so each of its runs in a turn reads its
-own earlier calls and their results. Its `plan` and `ask_user` tools record
-a hand-off and end its run; when the workflow comes back, the `orchestrate`
-node (`harness.graph.orchestrate`) answers the open call with a function
-response under the call's id, and ADK pairs a call with its last response.
-The agent reads a plan's frames, step summaries, asks and plan record, or
-the user's answers, as that call's result. The `seed` node's hand-back, the
-runs and datasets a turn opens with, answers no call: it waits in session
-state and `orchestrator.agent.prepend_digests` shows it after the user's
-message on every request.
+The agent keeps its message history across its runs in a turn
+(`orchestrator.run.StoredHistory`), so each run reads its own earlier calls
+and their results. Its `plan` and `ask_user` tools record a hand-off and end
+its run; when the graph comes back, the `orchestrate` node
+(`harness.graph.orchestrate`) answers the open call with a function response
+under the call's id. The agent reads a plan's frames, step summaries, asks
+and plan record, or the user's answers, as that call's result. The `seed`
+node's hand-back, the runs and datasets a turn opens with, answers no call:
+`orchestrator.run.run_orchestrator` sends it after the user's message on the
+turn's first request.
 
 **`services/harness/src/planner`** is the Planner Agent: the agent that
 drafts a methodological plan for a question, recording each decision it makes,
@@ -196,9 +197,8 @@ source out of a `describe` answer. `executor.run` keeps each server's digest
 text as its step's `StepRecord.digest`, which the workflow's `plan_done`
 node hands to the agent as `step_summaries`. The planner's model reaches
 these Python functions through the planner's tool specs (`planner.specs`),
-which `harness.planner_adapter.PlannerAdapter` serves. ADK's
-`McpTool` plays no part, so no `CallToolResult` dump is built for them and an
-`after_tool_callback` editing one would have nothing to edit. Where a tool
+which `harness.planner_adapter.PlannerAdapter` serves, so no
+`CallToolResult` dump is built for them. Where a tool
 does answer with a digest, a refusal's machine-readable detail rides the
 same call. data-mcp and analysis-mcp put the actionable recovery grammar in
 `structuredContent`, and the harness's own mounted consumers read it there.
@@ -210,7 +210,7 @@ proxy-level metrics do not dilute the agent traces.
 A deployed service with the Langfuse variables set sends Langfuse Cloud (EU
 region) the text of each Studio question and the assistant's replies; the
 orchestrator and planner prompts, which include the canvas and conversation
-digests, and each model response, on ADK's `generate_content` spans; tool
+digests, and each model response, on Pydantic AI's `chat` spans; tool
 arguments and results at digest level, on its `execute_tool` spans; and
 refusal codes with the refusal fields recorded on the trace events below.
 `common.telemetry.init_telemetry` sets
@@ -220,9 +220,6 @@ content on those spans; `NO_CONTENT` keeps them off. A streamed response
 appears as one output message per chunk, and a thought summary appears as
 unlabelled text. Everything above is sent unmasked. `LANGFUSE_SAMPLE_RATE`
 and a Langfuse `mask` function limit it.
-`ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN=otel_semconv_1_36` returns ADK to its v1
-span layout, under which Langfuse prices each model call twice and shows each
-`invoke_workflow` span without its parent.
 
 One studio turn is one trace. `ConversationState.begin_turn` opens a `turn`
 span whose trace id is derived from the turn's wire `trace_id`, and
@@ -233,7 +230,7 @@ leaves the turn open for the next request to carry on and ends this instance's
 turn on opens a `turn` span on the same trace. The `/turn` stream and the `/interrupt` stream that resumes
 the turn are separate requests, and each runs inside that span
 (`ConversationState.in_turn_span`), so the
-resumed segment's ADK, MCP and `record_event` spans nest under the same `turn`
+resumed segment's agent, MCP and `record_event` spans nest under the same `turn`
 span. `close_turn` gives the `turn` span the user's message as its input and
 the closing text as its output, which Langfuse shows as the trace's input and
 output. A turn closed with an error code (`cancelled`, `abandoned`, and the

@@ -10,7 +10,7 @@ that result and marks the call's span failed when the answer is an error.
 None of them reads a framework.
 
 The declaration and the conversion are the ones ADK's `FunctionTool` makes
-from an equivalent Python signature (google-adk 2.13, with
+from an equivalent Python signature (ADK 2.13, with
 `JSON_SCHEMA_FOR_FUNC_DECL` on and `FUNCTION_TOOL_ARG_VALIDATION` off, ADK's
 defaults), so the model reads the same bytes and a body receives the same
 values whichever serves it.

@@ -34,7 +34,7 @@ from .scripted_tools import chart, make_charts_call, plan_call
 from .store_clock import StoreClock
 from .studio_routes import AUTH, orchestrator_app, stream, studio_client, turn_body
 from .test_run_completion import _FlakyPublisher
-from .turn_driver import CONVERSATION, NO_ADK, no_turn_specs
+from .turn_driver import CONVERSATION
 
 # The principal `tests.studio_routes.AUTH`'s token names.
 PRINCIPAL = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
@@ -54,7 +54,7 @@ async def test_a_studio_run_left_pending_is_carried_on_from_the_conversation_led
     from the plan stored with the ledger."""
     total = "The figures are the sum of 3 indicators."
     monkeypatch.setattr(answer_module, "_stat_var_totals", lambda *a, **k: [total])
-    store = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs)
+    store = StudioStore(pg_engine)
     ledger = StudioRunLedger(store)
     publisher = _FlakyPublisher()
     app, model = orchestrator_app(
@@ -288,7 +288,7 @@ async def test_a_run_a_client_left_is_carried_on_to_its_charts_by_the_next_reque
     and the agent charts its frame: a `/turn` abandons the open turn and
     its `seed` hands the run back; a retried `/interrupt` runs `execute`
     again from the cursor."""
-    store = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs)
+    store = StudioStore(pg_engine)
     ledger = StudioRunLedger(store)
     surface = _HeldAggregate()
     app, model = orchestrator_app(
@@ -330,8 +330,8 @@ async def test_a_run_left_by_an_instance_that_died_is_carried_on_by_another_once
     lease lives, and once it lapses B abandons A's turn, carries A's run on
     from the stored ledger and charts its frame."""
     clock = await StoreClock.start(pg_engine)
-    store_a = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs, **clock.store_kwargs)
-    store_b = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs, **clock.store_kwargs)
+    store_a = StudioStore(pg_engine, **clock.store_kwargs)
+    store_b = StudioStore(pg_engine, **clock.store_kwargs)
     surface_a = _HeldAggregate()
     app_a, _ = orchestrator_app(
         plan_call("Kenya's debt service since 2015"),
@@ -379,7 +379,7 @@ async def test_a_stop_during_a_run_records_it_cancelled_and_nothing_carries_it_o
     """A Stop while the approved plan's run computes ends the turn
     `cancelled` and records the run failed `cancelled`, so the next turn
     hands no run back and no step runs again."""
-    store = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs)
+    store = StudioStore(pg_engine)
     ledger = StudioRunLedger(store)
     surface = _HeldAggregate()
     app, model = orchestrator_app(
@@ -419,7 +419,7 @@ async def test_a_client_that_leaves_mid_model_call_leaves_the_turn_for_the_next_
     """The client leaves while the agent's model call streams. The turn's
     cursor stays running where the engine left it and the lease is let go,
     so the next `/turn` streams at once, closing the left turn `abandoned`."""
-    store = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs)
+    store = StudioStore(pg_engine)
     calling = asyncio.Event()
 
     async def hangs(request: Any) -> types.Part:
@@ -445,7 +445,7 @@ async def test_a_stop_after_the_client_left_ends_the_run_it_left(pg_engine: Asyn
     """The client leaves mid-run, then a Stop arrives with no segment live.
     The Stop closes the turn `cancelled` and records its run failed
     `cancelled`, so the next turn hands no run back."""
-    store = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs)
+    store = StudioStore(pg_engine)
     ledger = StudioRunLedger(store)
     surface = _HeldAggregate()
     app, model = orchestrator_app(

@@ -37,9 +37,9 @@ Pre-commit runs ruff, `ty`, codespell, actionlint, and mdformat. Ruff and `ty` s
 - `just check` passes, and CI is green.
 - New behaviour has tests, and a bug fix has a test that fails without it.
 - Docs change with the code, including the README of the component you touched and `.env.example` for a new setting.
-- Settings are `pydantic-settings` classes that subclass `common.settings.BaseServiceSettings`. Read configuration through them, not `os.getenv`, except for variables a third-party library reads itself, such as `GOOGLE_API_KEY` for google-adk.
+- Settings are `pydantic-settings` classes that subclass `common.settings.BaseServiceSettings`. Read configuration through them, not `os.getenv`, except for variables a third-party library reads itself, such as `GOOGLE_API_KEY` for google-genai.
 - A change to the digest or planner-context text can move a committed baseline. [docs/development.md](docs/development.md) says which command regenerates it.
 
 Tests run from an empty working directory, so the suite reads no local `.env`. `test_scripts/` is ignored by git; use it for one-off local probes. Only `services/*/tests` and `packages/*/tests` run under `just check` and in CI.
 
-[docs/development.md](docs/development.md) holds maintainer notes: secrets, adding a config key, baselines, the google-adk upgrade, and deploys.
+[docs/development.md](docs/development.md) holds maintainer notes: secrets, adding a config key, baselines, and deploys.

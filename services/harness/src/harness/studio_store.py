@@ -38,16 +38,6 @@ transient database fault until the lease's deadline
 (`StudioStore.lease_deadline`), then raise `DatabaseUnavailable`; the rest
 do not retry. The run ledger
 (`harness.run_ledger`) writes inside `fenced`.
-
-The open turn's spec blocks are the one thing read from elsewhere: the
-turn's own ADK session holds them, and `load` reads them back through the
-`turn_specs` reader the store is given
-(`harness.adk_import.open_turn_specs`) and converts blocks stored before
-`planner.workflow.BoundEntity` through `AdkBridge.convert_specs`. Before
-it reads a conversation's rows, `load` runs the `AdkBridge.reimport` of the
-`adk` it is given, which copies in what the previous release wrote to the
-conversation's ADK ledger session since the tables last took it
-(`harness.adk_import.reimport_on_access`).
 """
 
 from __future__ import annotations
@@ -70,7 +60,7 @@ from collections.abc import (
 )
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
 from compiler.surface import transient
 from executor.ledger import RunStatus
@@ -150,40 +140,10 @@ _COMPONENT_ITEM_PREFIX = "component:"
 _WRITE_TOKEN_ITEM_PREFIX = "write_token:"
 _APPROVAL_ITEM_PREFIX = "approval:"
 
-# Reads the spec blocks an open turn's own session holds, called with
-# (principal, session_id); empty when it holds none.
-type TurnSpecs = Callable[[str, str], Awaitable[dict[str, Any]]]
-
-
-class AdkBridge(Protocol):
-    """How `StudioStore` reads conversations the previous release still
-    writes to ADK (`harness.adk_import.reimport_on_access`)."""
-
-    async def reimport(self, principal: str, conversation_id: str) -> None:
-        """Bring one conversation's rows up to date with its ADK ledger
-        session before `StudioStore.load` reads them. Raises
-        `ConversationHeld` for a conversation that cannot be served, and lets
-        any other failure of the copy propagate, so the request fails before
-        it writes."""
-        ...
-
-    async def moved(self, principal: str, conversation_id: str) -> bool:
-        """Whether ADK's ledger session for a conversation moved since it was
-        last copied or refused, or the conversation is diverged: the previous
-        release wrote to it after this instance's `load` read the rows."""
-        ...
-
-    def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
-        """`specs`, the spec blocks turn session `session_id` holds, with each
-        block a release before `planner.workflow.BoundEntity` stored read as
-        `compiler.sources.source_from_spec_block` takes it, and `specs`
-        itself when converting changes nothing."""
-        ...
-
-
 # Identity, the process-local runtime objects, and the turn's spec blocks
-# (`turn_specs`, read back from the turn's own ADK session by
-# `StudioStore.load`), which `_serialize_durable`/`_apply_delta` skip.
+# (`turn_specs`, which the open turn's `turn_specs` rows hold,
+# `harness.turn.store.TurnStore.specs`), which
+# `_serialize_durable`/`_apply_delta` skip.
 _PROCESS_LOCAL_FIELDS = frozenset(
     {
         "conversation_id",
@@ -344,7 +304,6 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             ),
             "card_new_plan": bool(p.card and p.card.new_plan),
             "approved_sent": p.approved_sent,
-            "pick_replan": p.pick_replan,
         }
         for interrupt_id, p in pending.items()
     }
@@ -378,7 +337,6 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
             else None
         ),
         approved_sent=bool(entry.get("approved_sent")),
-        pick_replan=bool(entry.get("pick_replan")),
     )
     if "questions" in entry:
         pending.questions = tuple(
@@ -524,16 +482,6 @@ class ConversationStale(Exception):  # noqa: N818 -- named for the wire 409
 
 class ConversationExists(Exception):  # noqa: N818 -- named for the race it reports
     """`StudioStore.create` lost the race to create the conversation."""
-
-
-class ConversationHeld(Exception):  # noqa: N818 -- names the state the routes refuse
-    """`StudioStore.load` cannot serve the conversation, and no retry will
-    until an operator acts, raised by `AdkBridge.reimport`: the
-    conversation's ADK ledger session and its rows both changed since the
-    last copy (the wire's `conversation_diverged`)."""
-
-    def __init__(self, conversation_id: str) -> None:
-        super().__init__(f"conversation {conversation_id!r} is diverged")
 
 
 # ---------------------------------------------------------------------------
@@ -783,14 +731,9 @@ class StudioStore:
     """Conversation state, keyed (principal, conversation_id), stored in the
     harness's tables over `engine` (module docstring).
 
-    `turn_specs` reads the spec blocks the open turn's own session
-    (`ConversationState.session_id`) holds, which `load` reads back for
-    `ConversationState.close_turn`. `adk.reimport` runs before `load` reads
-    a conversation (`adk.moved` answers whether ADK has moved since), so a
-    conversation the previous release still writes to ADK is read as ADK
-    last stored it. `claim_segment`/`renew`/`checkpoint`/`request_cancel` are
-    the segment lease API: together they keep at most one instance streaming
-    a conversation at a time.
+    `claim_segment`/`renew`/`checkpoint`/`request_cancel` are the segment
+    lease API: together they keep at most one instance streaming a
+    conversation at a time.
 
     Lease expiry is decided on the database's clock: `time_sql` is the SQL
     expression every lease statement reads the time from, epoch seconds,
@@ -805,14 +748,10 @@ class StudioStore:
         self,
         engine: AsyncEngine,
         *,
-        turn_specs: TurnSpecs,
-        adk: AdkBridge,
         clock: Callable[[], float] = time.time,
         time_sql: str = DATABASE_NOW,
     ) -> None:
         self._engine = engine
-        self._turn_specs = turn_specs
-        self._adk = adk
         self._runtime: dict[tuple[str, str], _RuntimeEntry] = {}
         self._clock = clock
         self._time_sql = time_sql
@@ -995,26 +934,12 @@ class StudioStore:
                         flat[f"{prefix}{ident}"] = value
         return row, flat
 
-    async def adk_moved(self, principal: str, conversation_id: str) -> bool:
-        """Whether ADK's ledger session for `conversation_id` moved since
-        `load` last copied or refused it (`AdkBridge.moved`)."""
-        return await self._adk.moved(principal, conversation_id)
-
-    def adk_convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
-        """`specs` from turn session `session_id`, converted
-        (`AdkBridge.convert_specs`)."""
-        return self._adk.convert_specs(session_id, specs)
-
     async def load(self, principal: str, conversation_id: str) -> ConversationState | None:
-        """Reload `conversation_id`'s durable fields, after `adk.reimport`
-        has brought its rows up to date with ADK. `None` when the store does
-        not hold the conversation. Raises what `adk.reimport` raises:
-        `ConversationHeld`, or the failure of a copy, before anything is
-        read or written. An open turn's spec blocks are read through
-        `turn_specs` and passed through `adk.convert_specs`, which reports a
-        block that does not convert."""
+        """Reload `conversation_id`'s durable fields. `None` when the store
+        does not hold the conversation. An open turn's spec blocks are left
+        empty: its cursor holds them (`harness.turn.store.TurnStore.specs`),
+        and whoever carries the turn on reads them there."""
         entry = self._entry(principal, conversation_id)
-        await self._adk.reimport(principal, conversation_id)
         stamp = self._clock()
         stored = await self._read(principal, conversation_id)
         if stored is None:
@@ -1037,10 +962,7 @@ class StudioStore:
         if segment is None or segment.id != entry.held:
             entry.held = None
         if entry.state.turn_index and not entry.state.turn_recorded:
-            session_id = entry.state.session_id
-            entry.state.turn_specs = self._adk.convert_specs(
-                session_id, await self._turn_specs(principal, session_id)
-            )
+            entry.state.turn_specs = {}
         return entry.state
 
     def claim_segment(
@@ -1225,8 +1147,7 @@ class StudioStore:
         component_ids: Collection[str] = (),
     ) -> CompositionManifest | JSONResponse | None:
         """`/composition`'s canvas write, unfenced, since a user's edit lands
-        whoever streams the conversation. After `adk.reimport` has brought
-        the rows up to date, one transaction locks the conversation's row,
+        whoever streams the conversation. One transaction locks the conversation's row,
         reads its stored canvas and the digest entries
         (`conversation_components`) of the components `component_ids`
         names, none when it names none, hands both to `mutate`, and writes
@@ -1240,12 +1161,10 @@ class StudioStore:
         `mutate` returning the manifest it was handed (a no-op) or a
         `JSONResponse` (a refusal) writes nothing and returns it. Any other
         manifest is written and returned. Returns None, and calls nothing,
-        when the store does not hold the conversation. Raises what
-        `adk.reimport` raises. This instance's live state, when it holds
+        when the store does not hold the conversation. This instance's live state, when it holds
         one, takes the canvas read or written unless it already holds a
         later revision.
         """
-        await self._adk.reimport(principal, conversation_id)
         entry = self._entry(principal, conversation_id)
         components_table = _ITEM_TABLES[_COMPONENT_ITEM_PREFIX]
         async with entry.write_lock:

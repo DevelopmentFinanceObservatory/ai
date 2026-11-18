@@ -3,10 +3,9 @@ local stand-in for the Langfuse server, so a test can assert on the spans that
 reach the wire.
 
 `isolated_telemetry` starts a test from an unconfigured `common.telemetry`
-with no telemetry env vars, no global tracer provider and no tracer left bound
-by ADK's module-level tracers, and puts back what it found: OpenTelemetry
-allows one global provider per process and other suites in the session install
-their own. `fake_langfuse` points the SDK's env vars at a local server that
+with no telemetry env vars and no global tracer provider, and puts back what
+it found: OpenTelemetry allows one global provider per process and other
+suites in the session install their own. `fake_langfuse` points the SDK's env vars at a local server that
 answers the credentials check and records every OTLP trace export. Both mirror
 `packages/common/tests/conftest.py` and `test_telemetry_export.py`; a fixture
 cannot be imported across suites.
@@ -17,12 +16,10 @@ from __future__ import annotations
 import gzip
 import json
 import os
-import sys
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
 
 import pytest
 from common import telemetry
@@ -30,7 +27,6 @@ from langfuse._client.resource_manager import LangfuseResourceManager
 from opentelemetry import trace
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from opentelemetry.proto.trace.v1.trace_pb2 import Span
-from opentelemetry.sdk import trace as sdk_trace
 from opentelemetry.util._once import Once
 
 _PROJECTS_BODY = {
@@ -60,51 +56,6 @@ class FakeLangfuse:
         return [span for _, span in self.scoped_spans()]
 
 
-def _adk_tracer_slots() -> Iterator[tuple[Any, str, Any]]:
-    """Every module-level `(module, attribute, tracer)` in the `google.adk` modules."""
-    for name, module in list(sys.modules.items()):
-        if not name.startswith("google.adk"):
-            continue
-        for attribute, value in list(getattr(module, "__dict__", {}).items()):
-            if isinstance(value, trace.ProxyTracer | sdk_trace.Tracer):
-                yield module, attribute, value
-
-
-def _unbind_adk_tracers() -> list[tuple[Any, str, Any]]:
-    """Make ADK's module-level tracers resolve the current global provider, and
-    return the SDK tracers that were replaced so `_rebind_adk_tracers` can put
-    them back.
-
-    ADK builds each tracer once at import. When no provider is global then, it
-    is an OpenTelemetry `ProxyTracer`, which keeps the first real tracer it
-    resolves for the life of the process; when the shared span provider from
-    the root `conftest.py` is already global, it is an SDK tracer bound to that
-    provider for good. Left alone, either would keep feeding whichever provider
-    it first met, and a test that installs its own provider would see none of
-    ADK's spans. A proxy is cleared, and an SDK tracer is swapped for a proxy
-    that resolves the provider current when it is first used.
-    """
-    replaced: list[tuple[Any, str, Any]] = []
-    for module, attribute, value in _adk_tracer_slots():
-        if isinstance(value, trace.ProxyTracer):
-            value._real_tracer = None
-            continue
-        info = value.instrumentation_info
-        proxy = trace.ProxyTracer(info.name, info.version, info.schema_url)
-        setattr(module, attribute, proxy)
-        replaced.append((module, attribute, value))
-    return replaced
-
-
-def _rebind_adk_tracers(replaced: list[tuple[Any, str, Any]]) -> None:
-    """Put back the SDK tracers `_unbind_adk_tracers` replaced, and clear any proxy."""
-    for module, attribute, original in replaced:
-        setattr(module, attribute, original)
-    for _, _, value in _adk_tracer_slots():
-        if isinstance(value, trace.ProxyTracer):
-            value._real_tracer = None
-
-
 @pytest.fixture
 def isolated_telemetry(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for var in (
@@ -118,7 +69,6 @@ def isolated_telemetry(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     saved_once = trace._TRACER_PROVIDER_SET_ONCE
     trace._TRACER_PROVIDER = None
     trace._TRACER_PROVIDER_SET_ONCE = Once()
-    replaced_tracers = _unbind_adk_tracers()
     telemetry._configured = False
     telemetry._backend = None
     telemetry._event_failure_warned = False
@@ -132,7 +82,6 @@ def isolated_telemetry(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         os.environ.pop(telemetry._CAPTURE_MESSAGE_CONTENT_VAR, None)
         trace._TRACER_PROVIDER = saved_provider
         trace._TRACER_PROVIDER_SET_ONCE = saved_once
-        _rebind_adk_tracers(replaced_tracers)
         telemetry._configured = False
         telemetry._backend = None
         telemetry._event_failure_warned = False
@@ -183,7 +132,7 @@ def fake_langfuse(
     finally:
         # Shutting the client down flushes it, which needs the server up. It
         # leaves the tracer provider's batch thread running, and libraries that
-        # cache the provider's tracer (ADK does) would keep feeding it spans
+        # cache the provider's tracer would keep feeding it spans
         # for later tests to export at a server that is gone, so the provider
         # is shut down as well.
         provider = trace.get_tracer_provider()

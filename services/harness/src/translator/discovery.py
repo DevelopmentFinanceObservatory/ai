@@ -956,14 +956,8 @@ def save_log(state: SessionState, log: DiscoveryLog) -> None:
     """Record `log` as the session's discovery log.
 
     Persisted as a dict keyed by each record's own `id`, with `sources`
-    keyed the same way `DiscoveryLog.sources` already is -- never as one JSON
-    string. ADK merges two concurrent tool calls' state deltas with
-    `deep_merge_dicts` (`google.adk.flows.llm_flows.tools._batch_executor`),
-    which recurses into a dict shared by both deltas but replaces a string
-    leaf outright with whichever delta is listed last. A record keyed by its
-    own `id` under a shared `"records"` dict is exactly such a shared dict,
-    so the merge unions the two calls' records instead of one replacing the
-    other's.
+    keyed the same way `DiscoveryLog.sources` already is, never as one JSON
+    string.
     """
     state[DISCOVERY_STATE_KEY] = {
         "records": {record.id: record.model_dump(mode="json") for record in log.records},

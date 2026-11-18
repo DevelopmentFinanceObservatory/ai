@@ -331,7 +331,9 @@ class _PendingChoice:
 
 @dataclass
 class _PendingInterrupt:
-    """One wire interrupt id, mapped back to its ADK interrupt."""
+    """One wire interrupt the conversation is paused on, with what
+    `/interrupt` checks an answer to it against. `adk_id` is the wire
+    interrupt id, under the key stored conversations hold it by."""
 
     adk_id: str
     kind: str  # "plan" | "elicitation"
@@ -381,9 +383,6 @@ class _PendingInterrupt:
     # `plan.approved` frame (`StudioRunner._checkpointed`), so a retry resuming
     # the same answer sends it only when the dead attempt did not.
     approved_sent: bool = False
-    # Whether this elicitation is a question the planner asked while
-    # replanning for a pick on the plan card.
-    pick_replan: bool = False
 
 
 # A conversation's active stream may run on any instance; this is the
@@ -523,9 +522,9 @@ class ConversationState:
     # graph last wrote (`harness.graph.state.ORCHESTRATOR_PLAN_RECORDS_KEY`,
     # `ORCHESTRATOR_SEARCHES_KEY`, `ORCHESTRATOR_SPECS_KEY`), set by
     # `harness.studio` as events stream. `turn_specs` is process-local: the
-    # turn's own ADK session holds the blocks, and `StudioStore.load` reads
-    # them back from it, so storage keeps only the blocks `close_turn`
-    # keeps.
+    # open turn's `turn_specs` rows hold the blocks
+    # (`harness.turn.store.TurnStore.specs`), so storage keeps only the
+    # blocks `close_turn` keeps.
     turn_plans: list[dict[str, Any]] = field(default_factory=list)
     turn_readings: list[dict[str, Any]] = field(default_factory=list)
     turn_specs: dict[str, Any] = field(default_factory=dict)
@@ -1021,13 +1020,6 @@ class ConversationState:
             if p.resuming_segment != segment_id
         }
 
-    @property
-    def session_id(self) -> str:
-        """The current turn's ADK session id. Scoped by conversation_id so two
-        conversations of one principal never share a graph session (ADK keys
-        sessions on (app_name, user_id, session_id) alone)."""
-        return f"{self.conversation_id}#t{self.turn_index}"
-
     def start_plan_lineage(self) -> None:
         """Forget the plan version ids given out and the choice labels the
         turn's switches kept. The next plan card is the first of a new line, as
@@ -1038,8 +1030,7 @@ class ConversationState:
 
     def begin_turn(self) -> None:
         """Reset per-turn wire state. Abandons any pending interrupt: a fresh
-        turn.request on a paused conversation ends the pause, and the paused
-        ADK invocation stays parked in its own per-turn session."""
+        turn.request on a paused conversation ends the pause."""
         self.turn_index += 1
         self.seq = 0
         self.trace_id = _wire_id("tr")

@@ -449,10 +449,10 @@ def user_spoke_since_recorded(call: PlannerCall, version: int) -> bool:
     (a `message` step). A
     refusal, a skip, a referral and the planner adapter's own messages are not.
 
-    `harness.studio_state.ConversationState.session_id` opens a new ADK
-    session for every Studio turn, and every turn starts with the user's
-    message. A plan this session holds no recording response for was
-    recorded before that message, so this answers `True`. The planner adapter
+    Every Studio turn has a transcript of its own (`planner.session`), and
+    every turn starts with the user's message. A plan this transcript holds
+    no recording response for was recorded before that message, so this
+    answers `True`. The planner adapter
     seeds such a plan from the graph's record
     (`harness.planner_adapter.PlannerAdapter`).
     """

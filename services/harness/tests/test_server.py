@@ -19,12 +19,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
-from google.adk.sessions import DatabaseSessionService
 from harness import __version__
 from harness import server as server_module
 from harness.mcp_client import McpExecutor
 from harness.server import create_app
-from harness.session_store import build_session_service
 from harness.settings import (
     ANALYSIS_MCP_MOUNT_PATH,
     DATA_MCP_MOUNT_PATH,
@@ -730,61 +728,24 @@ def test_studio_routes_are_mounted(pg_database_url: str) -> None:
     assert response.status_code == 401
 
 
-async def test_build_session_service_database_url_yields_a_working_database_session_service(
-    pg_database_url: str,
-) -> None:
-    """`DATABASE_URL=<postgres url>` yields a real
-    `DatabaseSessionService`: a session created through it round-trips
-    through `get_session`, and `close` disposes the engine it built for
-    itself without raising."""
-    settings = Settings(database_url=pg_database_url)
-
-    service = build_session_service(settings=settings).service
-
-    assert isinstance(service, DatabaseSessionService)
-    await service.create_session(app_name="harness", user_id="user-1", session_id="conv-1")
-    reloaded = await service.get_session(app_name="harness", user_id="user-1", session_id="conv-1")
-    assert reloaded is not None
-    assert reloaded.id == "conv-1"
-    await service.close()
-
-
-async def test_lifespan_prepares_database_tables_eagerly_and_disposes_on_shutdown(
+async def test_lifespan_disposes_the_database_on_shutdown(
     monkeypatch, pg_database_url: str
 ) -> None:
-    """With a `DatabaseSessionService` over Postgres, the lifespan's startup
-    phase calls `prepare_tables` before the app accepts traffic (so a
-    session created right after startup needs no lazy table creation of its
-    own), and its shutdown phase disposes the engine `build_session_service`
-    built for it (`harness.session_store.SessionServiceHandle`)."""
-    prepared: list[bool] = []
-    original_prepare_tables = DatabaseSessionService.prepare_tables
-
-    async def tracking_prepare_tables(self: DatabaseSessionService) -> None:
-        prepared.append(True)
-        await original_prepare_tables(self)
-
-    monkeypatch.setattr(DatabaseSessionService, "prepare_tables", tracking_prepare_tables)
-
+    """The lifespan's shutdown phase disposes the engine `build_database`
+    built (`harness.db.engine.DatabaseHandle`), and not before."""
     app = create_app(settings=Settings(database_url=pg_database_url))
-    assert isinstance(app.state.session_service, DatabaseSessionService)
 
     closed: list[bool] = []
-    original_aclose = app.state.session_service_aclose
+    original_aclose = app.state.database_aclose
 
     async def tracking_aclose() -> None:
         closed.append(True)
         await original_aclose()
 
-    monkeypatch.setattr(app.state, "session_service_aclose", tracking_aclose)
+    monkeypatch.setattr(app.state, "database_aclose", tracking_aclose)
 
     async with _running_lifespan(app):
-        assert prepared == [True]
         assert closed == []
-        session = await app.state.session_service.create_session(
-            app_name="harness", user_id="user-1", session_id="conv-1"
-        )
-        assert session.id == "conv-1"
 
     assert closed == [True]
 
@@ -792,8 +753,8 @@ async def test_lifespan_prepares_database_tables_eagerly_and_disposes_on_shutdow
 async def test_lifespan_applies_the_harness_migrations_on_postgres(
     pg_empty_engine: AsyncEngine,
 ) -> None:
-    """Startup on a Postgres `DATABASE_URL` creates the harness's own tables
-    beside ADK's. The test database is a throwaway one, since the migrations
+    """Startup on a Postgres `DATABASE_URL` creates the harness's tables. The
+    test database is a throwaway one, since the migrations
     write to whichever schema the connection's `search_path` names."""
     base_url = pg_empty_engine.url
     name = f"t_{uuid.uuid4().hex[:12]}"
@@ -804,7 +765,7 @@ async def test_lifespan_applies_the_harness_migrations_on_postgres(
     try:
         app = create_app(settings=Settings(database_url=url.render_as_string(hide_password=False)))
         async with _running_lifespan(app):
-            engine = app.state.session_service_engine
+            engine = app.state.database_engine
             async with engine.connect() as conn:
                 tables = set(
                     (
@@ -816,54 +777,19 @@ async def test_lifespan_applies_the_harness_migrations_on_postgres(
                         )
                     ).scalars()
                 )
-        assert {"conversations", "runs", "harness_schema_migrations", "sessions"} <= tables
+        assert {"conversations", "runs", "harness_schema_migrations"} <= tables
     finally:
         async with admin.connect() as conn:
             await conn.execute(text(f"DROP DATABASE {name} WITH (FORCE)"))
         await admin.dispose()
 
 
-async def test_lifespan_startup_prepare_tables_honors_the_configured_connect_timeout(
-    monkeypatch, pg_database_url: str
-) -> None:
-    """`_lifespan`'s eager `prepare_tables` call is bounded by
-    `session_store_connect_timeout_s`, not a hardcoded deadline: a setting
-    far below how long the call actually takes fails startup. The retry
-    budget is zeroed so the first timeout exhausts it immediately -- the
-    retry behaviour itself is covered directly, against
-    `_prepare_tables_with_retries`, below."""
-    monkeypatch.setattr(server_module, "_STARTUP_DB_RETRY_BUDGET_S", 0.0)
-    original_prepare_tables = DatabaseSessionService.prepare_tables
-
-    async def slow_prepare_tables(self: DatabaseSessionService) -> None:
-        await asyncio.sleep(0.2)
-        await original_prepare_tables(self)
-
-    monkeypatch.setattr(DatabaseSessionService, "prepare_tables", slow_prepare_tables)
-
-    app = create_app(
-        settings=Settings(
-            database_url=pg_database_url,
-            session_store_connect_timeout_s=0.01,
-        )
-    )
-    assert isinstance(app.state.session_service, DatabaseSessionService)
-
-    # The mounted MCP apps' own lifespans wrap this in nested exception
-    # groups (`fastmcp`'s `combine_lifespans`); the `TimeoutError` itself is
-    # in there somewhere.
-    with pytest.raises(BaseException) as excinfo:
-        async with _running_lifespan(app):
-            pass
-    assert excinfo.group_contains(TimeoutError)
-
-
 def _fake_clock_and_sleep(
     start: float = 0.0,
 ) -> tuple[Callable[[], float], Callable[[float], Awaitable[None]]]:
     """A mutable fake clock plus a `sleep` that advances it by the requested
-    duration instead of actually waiting -- `_prepare_tables_with_retries`'s
-    deadline arithmetic runs against this pair, so a test exercises the
+    duration instead of actually waiting -- `_retry_startup_step`'s deadline
+    arithmetic runs against this pair, so a test exercises the
     real budget/backoff logic without any real delay."""
     clock = [start]
 
@@ -876,23 +802,22 @@ def _fake_clock_and_sleep(
     return now, sleep
 
 
-async def test_prepare_tables_with_retries_succeeds_after_transient_failures() -> None:
-    """A `prepare_tables` that fails twice then succeeds returns normally,
+async def test_a_startup_step_succeeds_after_transient_failures() -> None:
+    """A startup step that fails twice then succeeds returns normally,
     having paused between attempts through the injected `sleep` and `now`
     -- no real delay, so the test stays fast."""
     attempts: list[int] = []
 
-    class _FlakyService:
-        async def prepare_tables(self) -> None:
-            attempts.append(len(attempts) + 1)
-            if len(attempts) < 3:
-                raise RuntimeError("transient connector failure")
+    async def flaky_step() -> None:
+        attempts.append(len(attempts) + 1)
+        if len(attempts) < 3:
+            raise RuntimeError("transient connector failure")
 
     now, sleep = _fake_clock_and_sleep()
 
-    await server_module._prepare_tables_with_retries(
-        cast(DatabaseSessionService, _FlakyService()),
-        connect_timeout_s=5.0,
+    await server_module._retry_startup_step(
+        "flaky_step",
+        flaky_step,
         budget_s=60.0,
         sleep=sleep,
         now=now,
@@ -901,22 +826,21 @@ async def test_prepare_tables_with_retries_succeeds_after_transient_failures() -
     assert attempts == [1, 2, 3]
 
 
-async def test_prepare_tables_with_retries_raises_after_the_budget_is_exhausted() -> None:
-    """A `prepare_tables` that always fails re-raises the last error once the
+async def test_a_startup_step_raises_after_the_budget_is_exhausted() -> None:
+    """A startup step that always fails re-raises the last error once the
     retry budget runs out, rather than retrying forever."""
     attempts: list[int] = []
 
-    class _AlwaysFailingService:
-        async def prepare_tables(self) -> None:
-            attempts.append(len(attempts) + 1)
-            raise RuntimeError(f"connector failure {len(attempts)}")
+    async def failing_step() -> None:
+        attempts.append(len(attempts) + 1)
+        raise RuntimeError(f"connector failure {len(attempts)}")
 
     now, sleep = _fake_clock_and_sleep()
 
     with pytest.raises(RuntimeError, match="connector failure"):
-        await server_module._prepare_tables_with_retries(
-            cast(DatabaseSessionService, _AlwaysFailingService()),
-            connect_timeout_s=5.0,
+        await server_module._retry_startup_step(
+            "failing_step",
+            failing_step,
             budget_s=3.0,
             sleep=sleep,
             now=now,
@@ -944,32 +868,6 @@ async def test_a_slow_migration_is_not_cut_short(
     await server_module._apply_migrations_with_retries(cast(AsyncEngine, object()), budget_s=0.0)
 
     assert attempts == [1]
-
-
-async def test_the_migration_step_gets_what_the_first_step_left_of_one_startup_deadline(
-    monkeypatch: pytest.MonkeyPatch, pg_database_url: str
-) -> None:
-    budgets: list[float] = []
-
-    async def slow_prepare(*_: Any, **__: Any) -> None:
-        await asyncio.sleep(0.3)
-
-    async def stop_at_migrations(engine: object, *, budget_s: float) -> None:
-        budgets.append(budget_s)
-        raise RuntimeError("startup stops here")
-
-    monkeypatch.setattr(server_module, "_STARTUP_DB_RETRY_BUDGET_S", 10.0)
-    monkeypatch.setattr(server_module, "_prepare_tables_with_retries", slow_prepare)
-    monkeypatch.setattr(server_module, "_apply_migrations_with_retries", stop_at_migrations)
-    app = create_app(settings=Settings(database_url=pg_database_url))
-
-    with pytest.raises(BaseException) as excinfo:
-        async with _running_lifespan(app):
-            pass
-
-    assert excinfo.group_contains(RuntimeError, match="startup stops here")
-    (budget,) = budgets
-    assert budget <= 9.7
 
 
 async def _preflight(app: FastAPI, origin: str) -> httpx2.Response:

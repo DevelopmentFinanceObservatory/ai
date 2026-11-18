@@ -24,7 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .store_clock import StoreClock
 from .test_run_ledger import _another_engine
-from .turn_driver import NO_ADK, no_turn_specs
 
 PRINCIPAL = "principal"
 CONVERSATION = "conv_01conflict0"
@@ -45,8 +44,6 @@ async def engines(pg_engine: AsyncEngine) -> AsyncIterator[list[AsyncEngine]]:
 def _store(engine: AsyncEngine, *, clock: StoreClock | None = None) -> StudioStore:
     return StudioStore(
         engine,
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **(clock.store_kwargs if clock is not None else {}),
     )
 

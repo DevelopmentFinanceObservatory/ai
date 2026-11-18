@@ -496,11 +496,11 @@ def check_expect_keys(turn: dict[str, Any], *, label: str) -> list[str]:
     for key, rules in turn.get("expect", {}).items():
         if key not in known:
             violations.append(f"{label}: expect key {key!r} is not one the runner checks")
-        elif known[key] is not None and isinstance(rules, dict):
+        elif (subkeys := known[key]) is not None and isinstance(rules, dict):
             violations.extend(
                 f"{label}: expect.{key} key {sub!r} is not one the runner checks"
                 for sub in rules
-                if sub not in known[key]
+                if sub not in subkeys
             )
     expect = turn.get("expect", {})
     if "reply" in expect:
@@ -1077,6 +1077,7 @@ async def run_suite(
             }
             try:
                 if mode == "scripted":
+                    assert engine is not None  # checked on entry
                     outcome = await _run_scripted_case(case, engine=engine)
                 else:
                     assert client is not None  # only the scripted mode has none

@@ -87,7 +87,6 @@ from harness.studio_state import (
 )
 from harness.studio_store import (
     ConversationExists,
-    ConversationHeld,
     ConversationStale,
     StudioStore,
 )
@@ -1161,25 +1160,7 @@ class _BoundedRequest(Request):
         return self._body
 
 
-class _StudioRoute(APIRoute):
-    """Every Studio route: a conversation `StudioStore.load` refuses as held
-    (`ConversationHeld`), wherever the route meets it, answers
-    `_held_response()`. A route lets go of its lock before the refusal
-    leaves it, as for any other failure."""
-
-    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
-        handler = super().get_route_handler()
-
-        async def held_answered(request: Request) -> Response:
-            try:
-                return await handler(request)
-            except ConversationHeld:
-                return _held_response()
-
-        return held_answered
-
-
-class _BoundedTurnRoute(_StudioRoute):
+class _BoundedTurnRoute(APIRoute):
     """The `/turn` route, whose body is read through `_BoundedRequest`, so a
     request past the size cap is refused before FastAPI parses it. Each seed
     is checked on its own (`harness.seeds.seeds_slot`) and refused in its own
@@ -1218,26 +1199,6 @@ def _unknown_conversation_response(conversation_id: str) -> JSONResponse:
             pointer="/conversation_id",
         ),
         status_code=404,
-    )
-
-
-def _held_response() -> JSONResponse:
-    """The 409 every route answers for a conversation `StudioStore.load`
-    cannot serve until an operator acts (`ConversationHeld`). A retry
-    cannot succeed, so it is `do_not_retry`; the operator's command is in
-    the log line the store's `adk.reimport` wrote."""
-    return _tool_error_response(
-        ToolError(
-            error=ErrorCode.CONSTRAINT_VIOLATION,
-            retry=RetryMode.DO_NOT_RETRY,
-            constraint_id="conversation_diverged",
-            detail=(
-                "This conversation changed in two places during an upgrade, so it cannot be "
-                "continued until it is repaired."
-            ),
-            pointer="/conversation_id",
-        ),
-        status_code=409,
     )
 
 
@@ -1403,7 +1364,7 @@ async def _unclaimed(
 
 
 def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRouter:
-    router = APIRouter(prefix="/api/studio", route_class=_StudioRoute)
+    router = APIRouter(prefix="/api/studio")
 
     async def turn(  # noqa: PLR0911 -- one distinct refusal per claim guard the route enforces
         body: TurnRequest, authorization: str | None = Header(default=None)

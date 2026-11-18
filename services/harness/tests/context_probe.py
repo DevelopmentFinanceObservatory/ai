@@ -30,20 +30,20 @@ planner on a `ScriptedGenai` client and hands each request it recorded to
 see: the system instruction, the tool declarations, and the full `contents`
 history, not whatever a fixture believes it passed in.
 
-A request's own `contents` carry the history. ADK relays another agent's
-turn into that history as `role="user"` text (`google.adk.flows.llm_flows.
-_fencing`), one event per relayed turn: a preamble stating that fenced content
-is data, not instructions, then one fenced part per relayed payload,
-each prefixed with the relaying agent's name. Every one of those parts contains
-the fence marker, so every one buckets as `text(fenced-relay)`, and the by-agent
-breakdown names the author from its `[<author>]` tag.
+A request's own `contents` carry the history. An agent framework that relays
+another agent's turn into that history does so as `role="user"` text: a
+preamble stating that fenced content is data, not instructions, then one fenced
+part per relayed payload, each prefixed with the relaying agent's name, the
+framing ADK used. Every one of those parts contains the fence marker, so
+every one buckets as `text(fenced-relay)`, and the by-agent breakdown names the
+author from its `[<author>]` tag. No agent relays into a planner request, so
+the bucket stays empty.
 
 The preamble carries the markers too and has no author tag, so it gets its own
-bucket named `untagged`. It is ADK's own framing text, 409 characters
-per relayed event at ADK 2.9.1, and it disappears with the relay it introduces.
-Grouping by the marker, not by the author tag, is what makes this bucket
-the exact text a fix has to remove: a change that silenced the payloads but left
-the framing behind would still read as a non-zero bucket.
+bucket named `untagged`. Grouping by the marker, not by the author tag, is what
+makes this bucket the exact text a fix has to remove: a change that silenced
+the payloads but left the framing behind would still read as a non-zero
+bucket.
 
 `harness.planner_adapter.PlannerAdapter._message` is the other text part on the
 planner path, and it buckets separately as `text(planner-brief)` on its own opening
@@ -66,6 +66,7 @@ import json
 import re
 from typing import Any
 
+from google.genai import types
 from planner.plan import (
     MAX_ACROSS_WORDS,
     MAX_DECISION_DESCRIPTION_CHARS,
@@ -106,20 +107,18 @@ from planner.records import (
     RankDirection,
     Reduction,
 )
+from pydantic import BaseModel
 
-# ADK's own fence marker (`google.adk.flows.llm_flows.context._fencing.QUOTED_CONTENT_BEGIN`).
-# Spelled out literally, not imported: the point of counting this bucket is to
-# notice if the marker or the relaying it marks ever moves, which importing the
-# same constant from the module that emits it would hide.
+# The fence marker ADK put around another agent's quoted turn.
 RELAY_MARKER = "<<<BEGIN_QUOTED_AGENT_CONTENT>>>"
 
-# `_fencing._present_other_agent_message` prefixes each relayed payload with
-# `[<author>]`, so the same text that carries the relay also names the agent it
-# came from. The breakdown is by that name, and every author gets its own row:
-# ADK's own preamble carries the markers without an author tag, so it gets its
-# own bucket, not absorbed into the author's. That matters because the
-# preamble is pure overhead, about 409 chars emitted once per relayed event: it
-# scales with the count of relays, not with what any of them said.
+# A relay prefixes each relayed payload with `[<author>]`, so the same text that
+# carries the relay also names the agent it came from. The breakdown is by that
+# name, and every author gets its own row: the preamble carries the markers
+# without an author tag, so it gets its own bucket, not absorbed into the
+# author's. That matters because the preamble is pure overhead, emitted once
+# per relayed event: it scales with the count of relays, not with what any of
+# them said.
 _UNTAGGED = "untagged"
 _RELAY_AUTHOR = re.compile(r"^\[([^\]]+)\]")
 
@@ -132,7 +131,7 @@ RELAY_BUCKET_PREFIX = RELAY_BUCKET + ":"
 
 # The planner brief, bucketed on the opening words of `harness.planner_adapter.
 # _READINGS_CONTEXT`: the one part of a planner request this adapter assembles
-# itself, not ADK relaying or a tool answering. Spelled out, not imported from `planner_adapter`, for the same
+# itself, not a relay or a tool answering. Spelled out, not imported from `planner_adapter`, for the same
 # reason `RELAY_MARKER` is: importing it would hide the fact that the text
 # moved, which is the thing this bucket exists to measure. It is the one input
 # on the planner path that varies with the plan, the readings and the digests.
@@ -141,6 +140,15 @@ BRIEF_BUCKET = "text(planner-brief)"
 
 
 # Measurement -------------------------------------------------------------------
+
+
+class ModelRequest(BaseModel):
+    """One request the planner hands the genai client: the model, the
+    contents and the config, the three arguments of `generate_content_stream`."""
+
+    model: str
+    contents: list[types.Content]
+    config: types.GenerateContentConfig
 
 
 def _json_chars(value: Any) -> int:
@@ -251,9 +259,10 @@ def contents_composition(contents: list[Any]) -> dict[str, Any]:
 def compose(llm_request: Any, *, agent: str, scenario: str, call_index: int) -> dict[str, Any]:
     """One request's composition record, as the baseline stores it.
 
-    `total_chars` is the serialised request (system instruction, tool
-    declarations and contents as the planner sent them), so a segment that grows
-    while another shrinks is still visible in the total.
+    `total_chars` is the serialised request (the model, and the contents and
+    config as the planner sent them to the genai client, unset fields left
+    out), so a segment that grows while another shrinks is still visible in
+    the total.
     """
     config = llm_request.config
     declarations = _declarations(config)
@@ -262,7 +271,7 @@ def compose(llm_request: Any, *, agent: str, scenario: str, call_index: int) -> 
         "agent": agent,
         "scenario": scenario,
         "call_index": call_index,
-        "total_chars": len(llm_request.model_dump_json()),
+        "total_chars": len(llm_request.model_dump_json(exclude_none=True)),
         "system_instruction_chars": _system_instruction_chars(config),
         "declaration_total_chars": sum(item["chars"] for item in declarations),
         "declarations": declarations,
@@ -306,7 +315,7 @@ def contents_leading(llm_request: Any) -> tuple[str, ...]:
 def relay_buckets(record: dict[str, Any]) -> dict[str, int]:
     """Every relayed author's chars in `record`, keyed by author.
 
-    Each relaying agent by name, `untagged` for ADK's own preamble, and any
+    Each relaying agent by name, `untagged` for the relay's own preamble, and any
     other author that ever appears, each on its own row, so an unmoved author cannot hide
     behind a moved one.
     """

@@ -136,7 +136,7 @@ from .test_turn_records import (
     _served_identity,
     _switchable_scope,
 )
-from .turn_driver import NO_ADK, TurnDriver, no_turn_specs, scripted_models, unconnected_store
+from .turn_driver import TurnDriver, scripted_models, unconnected_store
 
 
 async def _dummy_executor(*, tool: str, args: dict[str, object]) -> dict[str, object]:
@@ -167,7 +167,7 @@ async def _stored_conversation(engine: AsyncEngine) -> tuple[StudioStore, Conver
     """A store on `engine` holding conversation `c1` as the current one, with
     a segment claimed: the store a landing card is written through, fenced
     on that segment."""
-    store = StudioStore(engine, adk=NO_ADK, turn_specs=no_turn_specs)
+    store = StudioStore(engine)
     conversation = await store.create("principal", "c1")
     store.claim_segment("principal", "c1")
     await store.save("principal", "c1")
@@ -2037,9 +2037,7 @@ async def test_component_frames_land_true_holds_when_auto_add_is_off(
 
     events = [getattr(f, "event", None) for f in frames]
     assert events == ["component.created"]
-    stored = await StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs).load(
-        "principal", "c1"
-    )
+    stored = await StudioStore(pg_engine).load("principal", "c1")
     assert stored is not None
     assert stored.composition is None
     assert stored.components["cmp_two"] == conversation.components["cmp_two"]
@@ -2114,7 +2112,7 @@ async def test_a_create_that_returns_no_write_token_is_logged_at_error_level(
 ) -> None:
     """That card is rebuilt as a new card on its next edit, so the missing
     token is a defect an operator must see, once per create."""
-    store = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs)
+    store = StudioStore(pg_engine)
     current_conversation_key.set(("alice", "c1"))
     current_conversation_id.set("alice/c1")
     await store.create("alice", "c1")
@@ -2136,7 +2134,7 @@ async def test_a_revise_returning_no_write_token_logs_nothing(
     caplog: pytest.LogCaptureFixture, pg_engine: AsyncEngine
 ) -> None:
     """Only a create is issued a token; a revise's reply never carries one."""
-    store = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs)
+    store = StudioStore(pg_engine)
     current_conversation_key.set(("alice", "c1"))
     await store.create("alice", "c1")
     recorder = _RecordingExecutor(
@@ -2156,7 +2154,7 @@ async def test_a_revise_returning_no_write_token_logs_nothing(
 async def test_the_record_of_a_revise_leaves_the_write_token_out(
     pg_engine: AsyncEngine,
 ) -> None:
-    store = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs)
+    store = StudioStore(pg_engine)
     current_conversation_key.set(("alice", "c1"))
     current_conversation_id.set("alice/c1")
     await store.create("alice", "c1")

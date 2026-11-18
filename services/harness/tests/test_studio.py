@@ -98,8 +98,6 @@ from harness.studio_state import (
 )
 from harness.studio_store import (
     SEQ_BLOCK,
-    ConversationExists,
-    ConversationHeld,
     ConversationStale,
     StudioStore,
     _deserialize_pending,
@@ -172,7 +170,7 @@ from .scripted_tools import (
 )
 from .store_clock import StoreClock
 from .studio_routes import AUTH, ScriptLlm, orchestrator_app, stream, studio_client, turn_body
-from .turn_driver import CONVERSATION, NO_ADK, no_turn_specs
+from .turn_driver import CONVERSATION
 
 SPEC_A = "spec_" + "a" * 32
 REF_A = {"spec_id": SPEC_A, "content_version": "cv_" + "1" * 32}
@@ -2074,8 +2072,6 @@ async def test_an_approval_is_recorded_with_its_approver_and_its_revision() -> N
     below covers."""
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(*_plan(), store=store)
 
@@ -2108,8 +2104,6 @@ async def test_an_interrupt_under_a_closed_token_gate_records_auth_enforced() ->
     draw."""
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(
         *_plan(),
@@ -2143,8 +2137,6 @@ async def test_a_raise_building_the_approval_record_leaves_the_pending_entry_for
     unpatched attempt still succeeds."""
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(*_plan(), store=store)
 
@@ -2170,8 +2162,6 @@ async def test_a_raise_building_the_approval_record_leaves_the_pending_entry_for
         assert not conversation.lock.locked()
         stored = await StudioStore(
             _engine(),
-            adk=NO_ADK,
-            turn_specs=no_turn_specs,
         ).load(PRINCIPAL, CONVERSATION)
         assert stored is not None and stored.approvals == []
         assert stored.pending[plan["interrupt_id"]].answer is None
@@ -2198,8 +2188,6 @@ async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claim
     abandoned, and the next `/turn` is accepted."""
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(_text("Hello."), store=store)
     turns = app.state.studio.turns
@@ -2238,8 +2226,6 @@ async def test_a_turn_whose_claim_loses_forgets_the_turn_it_began() -> None:
     the instance forgets them, and keeps the conversation's lock."""
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     lock = store.lock_for(PRINCIPAL, CONVERSATION)
     app = _app(_text("Hello."), store=store)
@@ -2272,8 +2258,6 @@ async def test_a_failure_before_a_resume_streams_keeps_the_answer_for_a_same_ans
     state it changed and never saved."""
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(*_ask("reading A", "reading B"), _text("You meant reading B."), store=store)
     async with _client(app) as client:
@@ -2537,8 +2521,6 @@ async def test_a_raise_building_the_elicitation_frame_leaves_no_orphaned_pending
     later, unpatched turn still reaches a real elicitation clean."""
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(*_ask(), *_ask(), store=store)
 
@@ -2754,14 +2736,10 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
     clock = await StoreClock.start(_engine())
     store_a = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     store_b = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     app_a = _app(
@@ -2803,8 +2781,6 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
 
     reloaded = await StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert len(reloaded.approvals) == 1
@@ -2818,14 +2794,10 @@ async def test_a_retry_after_an_attempt_that_died_before_the_approval_sends_it()
     clock = await StoreClock.start(_engine())
     store_a = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     store_b = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     app_a = _app(*_plan(), store=store_a)
@@ -2875,14 +2847,10 @@ async def test_a_cancel_on_a_lapsed_lease_fences_out_the_stream_still_running_un
     clock = await StoreClock.start(_engine())
     store_a = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     store_b = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     state_a = await store_a.create(PRINCIPAL, CONVERSATION)
@@ -2905,8 +2873,6 @@ async def test_a_cancel_on_a_lapsed_lease_fences_out_the_stream_still_running_un
         await store_a.checkpoint(PRINCIPAL, CONVERSATION, segment_id)
     reloaded = await StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert reloaded.segment is None
@@ -2962,14 +2928,10 @@ async def test_a_retried_approval_is_dated_by_its_first_answer(
     clock = await StoreClock.start(_engine())
     store_a = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     store_b = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     app_a = _app(*_plan(), tool_surface=ScriptedSurface(), store=store_a)
@@ -3009,8 +2971,6 @@ async def test_a_retried_approval_is_dated_by_its_first_answer(
     assert surface.calls == []
     reloaded = await StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert [record.at for record in reloaded.approvals] == [answered]
@@ -3023,14 +2983,10 @@ async def test_a_different_answer_after_a_crashed_resume_expires_is_refused() ->
     clock = await StoreClock.start(_engine())
     store_a = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     store_b = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     app_a = _app(
@@ -3062,8 +3018,6 @@ async def test_a_different_answer_after_a_crashed_resume_expires_is_refused() ->
     assert body["error"] == "edit_conflict"
     reloaded = await StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert plan["interrupt_id"] in reloaded.pending
@@ -3086,14 +3040,10 @@ async def test_a_retried_resume_of_an_ask_must_carry_the_answers_that_resumed_it
     clock = await StoreClock.start(_engine())
     store_a = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     store_b = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     resolver = _HangingResolver()
@@ -3196,8 +3146,6 @@ async def test_an_answer_refused_as_busy_leaves_no_unsaved_approval_behind() -> 
     store = app.state.studio.store
     other = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
 
     async with _client(app) as client:
@@ -3217,8 +3165,6 @@ async def test_an_answer_refused_as_busy_leaves_no_unsaved_approval_behind() -> 
     assert store.current(PRINCIPAL, CONVERSATION).approvals == []
     reloaded = await StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None and reloaded.approvals == []
     assert reloaded.pending[plan["interrupt_id"]].answer is None
@@ -3235,8 +3181,6 @@ async def test_a_turn_refused_as_busy_leaves_the_live_state_as_loaded(
     store = app.state.studio.store
     other = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     ended: list[tuple[str | None, str]] = []
     real_end = studio_state_module.end_turn_span
@@ -3360,9 +3304,7 @@ async def test_an_answer_whose_turn_holds_no_pause_keeps_its_saved_answer_and_sp
     live = store.current(PRINCIPAL, CONVERSATION)
     assert live.segment is None
     assert live.pending[plan["interrupt_id"]].answer is not None
-    stored = await StudioStore(_engine(), adk=NO_ADK, turn_specs=no_turn_specs).load(
-        PRINCIPAL, CONVERSATION
-    )
+    stored = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
     assert stored is not None and stored.segment is None
     assert stored.pending[plan["interrupt_id"]].answer == live.pending[plan["interrupt_id"]].answer
     assert _turn_spans(otlp_spans) == 0
@@ -3942,8 +3884,6 @@ async def test_a_client_that_leaves_at_the_pause_frame_still_releases_the_segmen
     `/interrupt` that answers the plan streams at once."""
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(*_plan(), store=store)
     releasing = asyncio.Event()
@@ -4008,8 +3948,6 @@ async def test_a_client_that_leaves_at_the_pause_frame_still_releases_the_segmen
     plan = _frame(first, "plan.proposed")
     ledger = await StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert ledger is not None
     assert ledger.segment is None
@@ -4449,8 +4387,6 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
 
     reloaded = await StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded.write_tokens == {component_id: token}
     assert "cmw_" not in json.dumps(reloaded.components)
@@ -4792,9 +4728,7 @@ async def test_a_revise_whose_card_write_lost_its_acknowledgement_reports_one_ca
 
     assert faults == [1]
     (updated,) = [f for f in frames if f["event"] == "composition.updated"]
-    reloaded = await StudioStore(_engine(), adk=NO_ADK, turn_specs=no_turn_specs).load(
-        PRINCIPAL, CONVERSATION
-    )
+    reloaded = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
     assert reloaded.composition.revision == landed["revision"] + 1
     assert updated["manifest"]["revision"] == reloaded.composition.revision
     assert reloaded.composition.blocks[0].revision == 2
@@ -4846,18 +4780,14 @@ async def test_an_edit_whose_canvas_write_failed_lands_when_repeated(
 
         monkeypatch.setattr(store, "_write_composition", fail_once)
         failed = await _stream(client, "/api/studio/turn", _edit_body("rename it"))
-        stored = await StudioStore(_engine(), adk=NO_ADK, turn_specs=no_turn_specs).load(
-            PRINCIPAL, CONVERSATION
-        )
+        stored = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
         repeated = await _stream(client, "/api/studio/turn", _edit_body("rename it"))
 
     assert _events(failed)[-1] == "error"
     assert stored.components["cmp_01test0001"]["revision"] == 1
     assert stored.composition.blocks[0].revision == 1
     assert _frame(repeated, "message.complete")["text"] == "Renamed."
-    reloaded = await StudioStore(_engine(), adk=NO_ADK, turn_specs=no_turn_specs).load(
-        PRINCIPAL, CONVERSATION
-    )
+    reloaded = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
     assert reloaded.composition.blocks[0].revision == 2
     assert reloaded.components["cmp_01test0001"]["revision"] == 2
 
@@ -5681,7 +5611,6 @@ async def test_a_stop_after_a_question_the_planner_asked_while_replanning_reoffe
         )
         elicitation = _frame(asked, "elicitation.request")
         conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
-        assert conversation.pending[elicitation["interrupt_id"]].pick_replan
         resumed = asyncio.ensure_future(
             _stream(
                 client,
@@ -6425,7 +6354,7 @@ async def test_the_lock_is_held_from_the_route_not_from_the_first_frame() -> Non
     """Eagerness itself, which the route test above cannot see: a second
     acquisition is refused before any stream has started, and only for the
     conversation that holds the lock."""
-    store = StudioStore(_engine(), adk=NO_ADK, turn_specs=no_turn_specs)
+    store = StudioStore(_engine())
 
     first = await _acquire_or_conflict(store, "u_a", CONVERSATION)
     assert isinstance(first, asyncio.Lock)
@@ -6517,8 +6446,6 @@ async def test_a_failed_turn_is_recorded_with_its_error() -> None:
 
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(*_plan(), tool_surface=BrokenSurface(), store=store)
     async with _client(app) as client:
@@ -6628,8 +6555,6 @@ async def test_the_recorder_keeps_concurrent_conversations_apart() -> None:
         executor,
         store=StudioStore(
             _engine(),
-            adk=NO_ADK,
-            turn_specs=no_turn_specs,
         ),
     )
     current_conversation_id.set("u_a/conv_a")
@@ -6663,8 +6588,6 @@ async def test_the_recorder_closes_a_call_that_raises_or_is_cancelled_as_a_faile
         executor,
         store=StudioStore(
             _engine(),
-            adk=NO_ADK,
-            turn_specs=no_turn_specs,
         ),
     )
     current_conversation_id.set("u_a/conv_a")
@@ -6690,8 +6613,6 @@ async def test_the_recorder_closes_a_call_that_raises_or_is_cancelled_as_a_faile
 async def test_a_rejected_plan_turn_is_recorded() -> None:
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(*_plan(), store=store)
     async with _client(app) as client:
@@ -6711,8 +6632,6 @@ async def test_a_rejected_plan_turn_is_recorded() -> None:
 async def test_an_amendment_reaches_the_turn_record() -> None:
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(
         *_plan(),
@@ -6740,8 +6659,6 @@ async def test_an_amendment_reaches_the_turn_record() -> None:
 async def test_a_superseded_pause_is_recorded_as_abandoned() -> None:
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(*_plan(), store=store)
     async with _client(app) as client:
@@ -6781,8 +6698,6 @@ async def test_a_recreated_edit_card_reaches_the_turn_record() -> None:
     rebuilt = {**COMPONENT, "component_id": "cmp_01test0002", "type": "bar_chart"}
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(
         *_card(),
@@ -6849,8 +6764,6 @@ async def test_a_recreated_edit_cards_resolved_window_reaches_the_turn_record() 
     }
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(
         *_card(),
@@ -6904,8 +6817,6 @@ async def test_a_component_missing_fact_summary_never_lands(
     missing = {key: value for key, value in COMPONENT.items() if key != "fact_summary"}
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(
         *_card(),
@@ -6970,8 +6881,6 @@ async def test_first_write_ok_then_cancellation_before_drain_leaves_the_canvas_u
     first turn left it, with no card landed partway through the second."""
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     executor = _WritesUntil(_hang)
     app = _app(
@@ -7045,8 +6954,6 @@ async def test_first_write_ok_then_second_write_raises_still_announces_what_actu
     never reaches the canvas."""
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(
         *_card(),
@@ -7123,8 +7030,6 @@ async def test_a_plan_paused_on_one_instance_is_approved_and_continued_on_anothe
     assert _events(second)[-1] == "done"
     state = await StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert state is not None
     assert state.turn_index == 2
@@ -7218,51 +7123,9 @@ async def test_two_instances_racing_the_first_turn_on_a_brand_new_conversation_b
     assert _events(second_b)[-1] == "done"
     state = await StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert state is not None
     assert state.turn_index == 2
-
-
-async def test_a_first_turn_whose_reload_finds_the_conversation_held_answers_it_diverged() -> None:
-    """Another instance created the conversation between this request's load
-    and its create, and the reload's copy finds it changed on both sides."""
-    reads = 0
-
-    class HeldOnReload:
-        async def reimport(self, principal: str, conversation_id: str) -> None:
-            nonlocal reads
-            reads += 1
-            if reads > 1:
-                raise ConversationHeld(conversation_id)
-
-        async def moved(self, principal: str, conversation_id: str) -> bool:
-            return False
-
-        def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
-            return specs
-
-    store = StudioStore(
-        _engine(),
-        adk=HeldOnReload(),
-        turn_specs=no_turn_specs,
-    )
-
-    async def created_elsewhere(principal: str, conversation_id: str) -> Any:
-        raise ConversationExists(conversation_id)
-
-    store.create = created_elsewhere
-    app = _app(_text("Hello."), store=store)
-
-    async with _client(app) as client:
-        response = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
-
-    assert (response.status_code, response.json()["constraint_id"]) == (
-        409,
-        "conversation_diverged",
-    )
-    assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
 
 
 async def test_a_composition_edit_on_one_instance_survives_a_concurrent_turns_release() -> None:
@@ -7288,8 +7151,6 @@ async def test_a_composition_edit_on_one_instance_survives_a_concurrent_turns_re
 
     reloaded = await StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     blocks = reloaded.composition.blocks
@@ -7355,8 +7216,6 @@ async def test_ledger_at_turn_n_with_no_stream_running_lets_the_next_turn_succee
 
     state = await StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert state is not None
     assert state.turn_index == 2
@@ -7407,8 +7266,6 @@ async def test_a_stalled_segments_expiry_lets_another_instance_take_over(
     clock = await StoreClock.start(_engine())
     store_a = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     stalled = asyncio.Event()
@@ -7421,8 +7278,6 @@ async def test_a_stalled_segments_expiry_lets_another_instance_take_over(
     monkeypatch.setattr(store_a, "renew", stalled_renew)
     store_b = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     resolver = _HangingResolver()
@@ -7464,8 +7319,6 @@ async def test_a_heartbeat_that_cannot_renew_ends_the_stream_once_its_clock_pass
     loaded_at = clock.at
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
 
@@ -7563,8 +7416,6 @@ async def test_composition_after_a_heartbeat_renewal_still_sees_a_remote_write(
 
         store_b = StudioStore(
             _engine(),
-            adk=NO_ADK,
-            turn_specs=no_turn_specs,
         )
         await store_b.load(PRINCIPAL, CONVERSATION)
         block = CompositionBlock(
@@ -7604,8 +7455,6 @@ async def test_composition_after_a_heartbeat_renewal_still_sees_a_remote_write(
 
     reloaded = await StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded.composition.blocks[0].pinned is True
 
@@ -8013,8 +7862,6 @@ async def test_a_remote_composition_write_during_a_stream_reaches_its_done_frame
 
     reloaded = await StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert reloaded.composition is not None
@@ -8308,8 +8155,6 @@ async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block() -> 
     spec_ids it can pin from a stored block, without the block."""
     store = StudioStore(
         _engine(),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
     )
     app = _app(store=store)
     opened = _OpenedTurns(app)

@@ -324,8 +324,9 @@ def scripted_client(answer: ScriptedAnswer) -> Client:
     The answer streams as one chunk, a model turn of that one part finished with
     `STOP` and no usage. Everything else a model class reads off a client is a
     real `Client`'s, so the planner takes it as `harness.planner_adapter.PlannerAdapter`'s
-    `client`, and an ADK model as `Gemini(client=...)`, each driven by one
-    script over the requests it puts on the wire.
+    `client`, and the orchestrator's model as its genai client
+    (`orchestrator.model.orchestrator_model`), each driven by one script over
+    the requests it puts on the wire.
     """
     client = Client(api_key="scripted")
 

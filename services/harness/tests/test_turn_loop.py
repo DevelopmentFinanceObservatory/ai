@@ -44,31 +44,8 @@ CONVERSATION = "conv-1"
 BEAT = 0.02
 
 
-class _NoAdk:
-    """The `AdkBridge` of a store whose conversations ADK never held."""
-
-    async def reimport(self, principal: str, conversation_id: str) -> None:
-        del principal, conversation_id
-
-    async def moved(self, principal: str, conversation_id: str) -> bool:
-        del principal, conversation_id
-        return False
-
-    async def take_copy(self, principal: str, conversation_id: str) -> None:
-        del principal, conversation_id
-
-    def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
-        del session_id
-        return specs
-
-
-async def _no_turn_specs(principal: str, session_id: str) -> dict[str, Any]:
-    del principal, session_id
-    return {}
-
-
 async def _instance(engine: AsyncEngine, clock: StoreClock) -> StudioStore:
-    return StudioStore(engine, turn_specs=_no_turn_specs, adk=_NoAdk(), **clock.store_kwargs)
+    return StudioStore(engine, **clock.store_kwargs)
 
 
 async def _claim(lease: StudioStore) -> str:

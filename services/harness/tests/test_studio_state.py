@@ -29,7 +29,7 @@ import json
 import logging
 import ssl
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,12 +40,9 @@ import asyncpg
 import pytest
 from compiler.sources import source_from_spec_block
 from fastapi.responses import JSONResponse
-from google.adk.sessions import InMemorySessionService
-from google.adk.sessions.base_session_service import GetSessionConfig
 from harness import studio_state, studio_store
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.conversation import current_conversation_key
-from harness.graph.state import ORCHESTRATOR_SPECS_KEY
 from harness.studio_edit import _refresh_block
 from harness.studio_state import (
     CANVAS_DIGEST_MAX_BYTES,
@@ -85,7 +82,6 @@ from . import drawn_cards
 from .resolved_revision import resolved_revision
 from .store_clock import StoreClock
 from .test_turn_records import _scoped_part, _top_donors
-from .turn_driver import NO_ADK
 
 CONVERSATION = "conv_01test0000"
 
@@ -1776,45 +1772,14 @@ def test_drop_resuming_removes_only_entries_under_the_named_segment() -> None:
 # --- and the segment lease: claim_segment / renew / request_cancel ----------
 
 
-def session_turn_specs(
-    service: InMemorySessionService, *, app_name: str
-) -> Callable[[str, str], Awaitable[dict[str, Any]]]:
-    """A `StudioStore` `turn_specs` reader over `service`: the spec blocks
-    turn session `session_id` holds, as stored."""
-
-    async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
-        session = await service.get_session(
-            app_name=app_name,
-            user_id=principal,
-            session_id=session_id,
-            config=GetSessionConfig(num_recent_events=0),
-        )
-        return dict((session.state.get(ORCHESTRATOR_SPECS_KEY) or {}) if session else {})
-
-    return turn_specs
-
-
 @pytest.fixture
-def turn_sessions() -> InMemorySessionService:
-    """The per-turn ADK sessions, where an open turn's spec blocks live."""
-    return InMemorySessionService()
-
-
-@pytest.fixture
-def new_store(
-    pg_engine: AsyncEngine, turn_sessions: InMemorySessionService
-) -> Callable[..., StudioStore]:
-    """A fresh `StudioStore` over the test's Postgres schema and turn
-    sessions: each call stands for another instance. With `clock`, the
+def new_store(pg_engine: AsyncEngine) -> Callable[..., StudioStore]:
+    """A fresh `StudioStore` over the test's Postgres schema: each call
+    stands for another instance. With `clock`, the
     store reads its leases' time from that clock instead of the database's."""
 
     def build(*, clock: StoreClock | None = None) -> StudioStore:
-        return StudioStore(
-            pg_engine,
-            adk=NO_ADK,
-            turn_specs=session_turn_specs(turn_sessions, app_name="app"),
-            **(clock.store_kwargs if clock is not None else {}),
-        )
+        return StudioStore(pg_engine, **(clock.store_kwargs if clock is not None else {}))
 
     return build
 
@@ -1841,11 +1806,12 @@ def _approval(**overrides: Any) -> ApprovalRecord:
 
 
 async def test_the_ledger_stores_a_turns_blocks_only_when_the_turn_closes(
-    new_store, turn_sessions, pg_engine
+    new_store, pg_engine
 ) -> None:
     """A checkpoint after a search writes no spec block to the conversation's
     rows; closing the turn on another instance stores the block of the source
-    its plan used, read from the turn's own session."""
+    its plan used, given the blocks as the studio reads them from the turn's
+    cursor (`harness.turn.store.TurnStore.specs`)."""
     used = _PLAN.sources[0].spec_id
     candidate = "spec_" + "d" * 32
     blocks = {used: {"spec_id": used, "note": "used block"}, candidate: {"note": "unused block"}}
@@ -1854,12 +1820,6 @@ async def test_the_ledger_stores_a_turns_blocks_only_when_the_turn_closes(
     segment_id = store_a.claim_segment("principal", CONVERSATION)
     state.begin_turn()
     await store_a.save("principal", CONVERSATION)
-    await turn_sessions.create_session(
-        app_name="app",
-        user_id="principal",
-        session_id=state.session_id,
-        state={ORCHESTRATOR_SPECS_KEY: blocks},
-    )
     state.turn_specs = dict(blocks)
     state.turn_plans = [_PLAN_JSON]
 
@@ -1870,6 +1830,7 @@ async def test_the_ledger_stores_a_turns_blocks_only_when_the_turn_closes(
 
     resumed = await new_store().load("principal", CONVERSATION)
     assert resumed is not None
+    resumed.turn_specs = dict(blocks)
     resumed.close_turn(final_text="The top donor was the United States.")
 
     assert resumed.turns[-1]["specs"] == {used: blocks[used]}
@@ -2125,21 +2086,12 @@ async def test_the_lease_holders_own_save_is_not_refused(new_store) -> None:
 
 
 async def test_instances_whose_clocks_disagree_agree_on_a_lease_by_the_databases_clock(
-    pg_engine, turn_sessions
+    pg_engine,
 ) -> None:
     """B's own clock runs a day ahead of A's. A's lease is live by the
     database's clock, so B can neither claim it nor miss it when cancelling."""
-    store_a = StudioStore(
-        pg_engine,
-        adk=NO_ADK,
-        turn_specs=session_turn_specs(turn_sessions, app_name="app"),
-    )
-    store_b = StudioStore(
-        pg_engine,
-        adk=NO_ADK,
-        turn_specs=session_turn_specs(turn_sessions, app_name="app"),
-        clock=lambda: time.time() + 86_400,
-    )
+    store_a = StudioStore(pg_engine)
+    store_b = StudioStore(pg_engine, clock=lambda: time.time() + 86_400)
     await store_a.create("principal", CONVERSATION)
     store_a.claim_segment("principal", CONVERSATION)
     await store_a.save("principal", CONVERSATION)

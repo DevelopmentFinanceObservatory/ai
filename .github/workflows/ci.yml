@@ -68,6 +68,9 @@ jobs:
       - name: ty check -- presentation-mcp
         run: uv run ty check services/presentation-mcp/src
 
+      - name: ty check -- evals
+        run: uv run ty check evals
+
   test:
     if: >-
       github.event.pull_request.draft != true &&

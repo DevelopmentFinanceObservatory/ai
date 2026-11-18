@@ -1509,8 +1509,7 @@ class _Translator:
         self.paused = False
         # Whether the planner's latest entry replans for a pick on the plan
         # card (`PlannerStarted.pick`): its drafted plan keeps the planner
-        # decisions' labels (`_node_done`), and a question it asks is kept
-        # as one (`_PendingInterrupt.pick_replan`).
+        # decisions' labels (`_node_done`).
         self._pick_replan = False
         # The running status line.
         self._status: _StatusLine | None = None
@@ -2373,11 +2372,9 @@ class _Translator:
                 for question in asked
             ]
             skippable = not several
-            pick_replan = False
         else:
             questions = [_planner_question(payload)]
             skippable = True
-            pick_replan = self._pick_replan
         frame = ElicitationRequest(
             event="elicitation.request",
             seq=conversation.next_seq(),
@@ -2398,7 +2395,6 @@ class _Translator:
                 for question in questions
             ),
             skippable=skippable,
-            pick_replan=pick_replan,
         )
         return [frame]
 

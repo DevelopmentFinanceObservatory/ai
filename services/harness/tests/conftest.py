@@ -49,10 +49,10 @@ database `HARNESS_TEST_DATABASE_URL` names (an asyncpg SQLAlchemy URL, see
 tables applied. Every connection of the engine resolves unqualified names in
 that schema, which is dropped when the test ends. `pg_database_url` is a
 fresh database on the same server, copied from a template with the harness
-tables and ADK's applied, for a test that builds the app with
+tables applied, for a test that builds the app with
 `Settings(database_url=...)`. The variable is separate from `DATABASE_URL`
-because `Settings` reads that one and would route every test's session
-service to Postgres. Without the variable a test using any of these fixtures
+because `Settings` reads that one and would route every test's app to
+Postgres. Without the variable a test using any of these fixtures
 fails, so no run passes by skipping them.
 """
 
@@ -84,7 +84,6 @@ from data_mcp import node_lookup, resolution
 from data_mcp.graph_wire import NotHeldEntry
 from fastapi import FastAPI
 from fastmcp.client.transports import StreamableHttpTransport
-from google.adk.sessions import DatabaseSessionService
 from harness.conversation import (
     NO_CONVERSATION,
     current_conversation_id,
@@ -513,11 +512,10 @@ async def pg_engine(pg_empty_engine: AsyncEngine) -> AsyncEngine:
 
 @pytest.fixture(scope="session")
 def _pg_template_database() -> Iterator[str]:
-    """The name of a database holding the harness migrations and ADK's session
-    tables, built once per session and dropped at its end, which every
-    `pg_database_url` database is copied from. Copying a template takes tens of
-    milliseconds where applying the migrations and creating ADK's tables takes
-    seconds."""
+    """The name of a database holding the harness migrations, built once per
+    session and dropped at its end, which every `pg_database_url` database is
+    copied from. Copying a template takes tens of milliseconds where applying
+    the migrations takes seconds."""
     base = make_url(_test_database_url())
     name = f"tmpl_{uuid.uuid4().hex[:12]}"
 
@@ -529,7 +527,6 @@ def _pg_template_database() -> Iterator[str]:
         engine = create_async_engine(base.set(database=name))
         try:
             await apply_pending(engine)
-            await DatabaseSessionService(db_engine=engine).prepare_tables()
         finally:
             await engine.dispose()
 
@@ -551,8 +548,8 @@ async def pg_database_url(_pg_template_database: str) -> AsyncIterator[str]:
     """The URL of a fresh Postgres database, dropped after the test, for a test
     that builds the app through `Settings(database_url=...)`. A whole database
     rather than a schema, because the app's own startup applies its migrations
-    and ADK's tables to the URL's default schema. It is a copy of a template
-    that already has both, so that startup finds nothing left to apply."""
+    to the URL's default schema. It is a copy of a template that already has
+    them, so that startup finds nothing left to apply."""
     base = make_url(_test_database_url())
     name = f"t_{uuid.uuid4().hex[:12]}"
     admin = create_async_engine(base, isolation_level="AUTOCOMMIT")

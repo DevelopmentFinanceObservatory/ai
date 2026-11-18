@@ -85,7 +85,7 @@ NO_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
 
 type Usage = types.GenerateContentResponseUsageMetadata
 
-# What every id `client_call_id` makes starts with. It is the prefix google-adk
+# What every id `client_call_id` makes starts with. It is the prefix ADK
 # gave such ids, so the planner records and conversations stored under them
 # read the same.
 CLIENT_CALL_ID_PREFIX = "adk-"

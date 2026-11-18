@@ -34,9 +34,6 @@ from harness.turn_records import Origin, SearchReading, open_prices
 if TYPE_CHECKING:
     from harness.turn.node import NodeCtx
 
-# The ADK app name every stored conversation's sessions are keyed under.
-AGENT_NAME = "dfo_analyst_graph"
-
 # The interrupt id the `approve` node pauses under, read by
 # `harness.studio_translate` to tell the plan card from a question.
 APPROVE_INTERRUPT = "approve"

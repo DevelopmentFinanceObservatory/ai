@@ -42,7 +42,6 @@ import itertools
 import json
 import math
 import re
-from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence, Set
 from dataclasses import dataclass
 from typing import Any
@@ -1337,17 +1336,6 @@ def check_transcript(
 # Case checks: properties a case names in its `checks` list
 # ---------------------------------------------------------------------------
 
-# The fence google-adk put around another agent's quoted turn. No request may
-# show one: each agent reads its own hand-backs and answers.
-RELAY_MARKER = "<<<BEGIN_QUOTED_AGENT_CONTENT>>>"
-# The function call google-adk paused a turn on for the user's input. No
-# request may show one: a pause and its answer reach the browser alone.
-REQUEST_INPUT_NAME = "adk_request_input"
-
-# A fenced payload opens with the relaying agent's name in brackets; the
-# framing sentence around it carries the marker with no name.
-_AUTHOR_TAG = re.compile(r"^\[([^\]\n]+)\]")
-
 
 @dataclass(frozen=True)
 class Evidence:
@@ -1373,86 +1361,12 @@ def _contents_text(request: dict[str, Any]) -> str:
     return json.dumps(request["contents"], ensure_ascii=False)
 
 
-def _label(request: dict[str, Any], log: list[dict[str, Any]]) -> str:
-    ordinal = sum(
-        1
-        for entry in log[: log.index(request)]
-        if entry["kind"] == "request" and entry["agent"] == request["agent"]
-    )
-    return f"{request['agent']} request {ordinal + 1}"
-
-
 def _need_log(evidence: Evidence, check: str) -> list[str]:
     return (
         []
         if evidence.log is not None
         else [f"{check}: needs the scripted orchestrator's request log"]
     )
-
-
-def approval_payload_absent_after_approval(evidence: Evidence) -> list[str]:
-    """No model request made after the plan's first step ran mentions a pause for
-    the user's input. The approval pause carries the whole plan and the user's
-    answer to it; the browser reads both from the stream, and no model is
-    meant to."""
-    if missing := _need_log(evidence, "approval_payload_absent_after_approval"):
-        return missing
-    log = evidence.log or []
-    started = next(
-        (
-            index
-            for index, entry in enumerate(log)
-            if entry["kind"] == "call" and entry["layer"] == "step"
-        ),
-        None,
-    )
-    if started is None:
-        return ["approval_payload_absent_after_approval: no plan step ran, so nothing was approved"]
-    return [
-        f"{_label(entry, log)} after approval carries a pause for input ({REQUEST_INPUT_NAME})"
-        for entry in log[started:]
-        if entry["kind"] == "request" and REQUEST_INPUT_NAME in _contents_text(entry)
-    ]
-
-
-def _fenced_authors(request: dict[str, Any]) -> list[str]:
-    """The author named on each fenced block in `request`'s contents, `untagged`
-    for the framing sentence, which names none."""
-    authors = []
-    for content in request["contents"]:
-        for part in content.get("parts", []):
-            text = part.get("text") or ""
-            if RELAY_MARKER in text:
-                tag = _AUTHOR_TAG.match(text)
-                authors.append(tag.group(1) if tag else "untagged")
-    return authors
-
-
-def _relay_marker_violations(evidence: Evidence, *, check: str, agent: str | None) -> list[str]:
-    if missing := _need_log(evidence, check):
-        return missing
-    log = evidence.log or []
-    return [
-        f"{_label(entry, log)} holds fenced quoted blocks by "
-        f"{dict(sorted(Counter(authors).items()))}"
-        for entry in _requests(evidence, agent=agent)
-        if (authors := _fenced_authors(entry))
-    ]
-
-
-def no_relay_marker(evidence: Evidence) -> list[str]:
-    """No model request holds a fence around another agent's quoted turn
-    (`RELAY_MARKER`). The orchestrator and the planner read their own
-    hand-backs and answers; a fenced block presents a graph node's output as
-    another agent's speech."""
-    return _relay_marker_violations(evidence, check="no_relay_marker", agent=None)
-
-
-def planner_sees_no_relay_marker(evidence: Evidence) -> list[str]:
-    """`no_relay_marker` over the planner's requests alone: a planner entered a
-    second time in a turn reads the turn's transcript, and the orchestrator's
-    hand-back from the first plan is in it."""
-    return _relay_marker_violations(evidence, check="planner_sees_no_relay_marker", agent="planner")
 
 
 _SPEC_ID = re.compile(r"spec_[0-9a-f]{32}")
@@ -1731,9 +1645,6 @@ def every_ask_accounted_for(evidence: Evidence) -> list[str]:
 
 
 CASE_CHECKS: dict[str, Callable[[Evidence], list[str]]] = {
-    "approval_payload_absent_after_approval": approval_payload_absent_after_approval,
-    "no_relay_marker": no_relay_marker,
-    "planner_sees_no_relay_marker": planner_sees_no_relay_marker,
     "planner_first_message_carries_search_evidence": planner_first_message_carries_search_evidence,
     "previous_final_message_in_view": previous_final_message_in_view,
     "earlier_plan_in_view": earlier_plan_in_view,

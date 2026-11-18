@@ -51,7 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from .data_mcp_definitions import DataMcpDefinitions
 from .scripted_genai import Reply, Request, ScriptedGenai, _stream
 from .scripted_tools import no_resolver
-from .turn_driver import CONVERSATION, MODEL, NO_ADK, no_turn_specs
+from .turn_driver import CONVERSATION, MODEL
 
 AUTH = {"Authorization": "Bearer test-token"}
 
@@ -141,7 +141,7 @@ def orchestrator_app(
     if store is None:
         if engine is None:
             raise TypeError("orchestrator_app needs a store, or the engine to build one on")
-        store = StudioStore(engine, adk=NO_ADK, turn_specs=no_turn_specs)
+        store = StudioStore(engine)
     resolved_settings = settings or Settings()
     model = ScriptLlm(script)
     resolver = resolver or no_resolver

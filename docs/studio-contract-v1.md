@@ -77,9 +77,8 @@ checkpoint that fails ends the stream with a stream-fatal
 frame the client sees already matches the stored conversation. The
 database is a deployment setting (`DATABASE_URL` or the `SESSION_STORE_*`
 family, see `services/harness/README.md`). The harness refuses to start
-without it. What a stalled owner writes after losing its segment stays
-unfenced: its per-turn ADK session writes race
-the new owner's (ADK's own compare-and-swap fails one of the two), and a
+without it. A stalled owner that lost its segment can no longer write the
+conversation or its turn, whose writes are fenced on the lease, but a
 presentation-platform write already in flight can land as an orphaned
 component. One piece of state stays bound to the instance that produced
 it regardless of the database: editing a component requires the
@@ -254,16 +253,6 @@ conversation. `/cancel` on an unknown or idle conversation is a no-op
 204, and a second `/turn` while one is already claimed on that
 conversation answers 409 `transient_unavailable` with
 `retry_after_seconds` set to the live segment's remaining lease.
-
-A conversation that changed both in ADK's session store and in the
-harness's tables since it was last copied across cannot be served until
-an operator repairs it. `/turn`, `/interrupt` and
-`/composition` on it answer 409 `constraint_violation`, `do_not_retry`,
-`constraint_id: "conversation_diverged"`, `pointer: "/conversation_id"`,
-and `detail` is one sentence for the user. `/cancel` answers 204 when the
-conversation has a live stream, which it signals to stop, and the same
-409 otherwise. A 409 request changes nothing, and the same request
-succeeds once the conversation is repaired.
 
 ### `interrupt_id` is opaque (delta 7)
 

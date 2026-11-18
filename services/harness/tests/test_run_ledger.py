@@ -37,7 +37,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from .store_clock import StoreClock
-from .turn_driver import NO_ADK, no_turn_specs
 
 PRINCIPAL = "principal"
 CONVERSATION = "conv_01run00000"
@@ -67,8 +66,6 @@ def _store(
 ) -> StudioStore:
     return StudioStore(
         engine,
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
         clock=clock,
         time_sql=time_sql,
     )

@@ -61,13 +61,10 @@ class Settings(BaseServiceSettings):
     (point it at the split-out service's URL instead of the loopback path).
     `database_url` and the `session_store_*` fields together select the
     harness's Postgres database (`harness.db.engine.build_database`), which
-    holds the studio's conversations and ADK's session tables, and the ADK
-    session backend on it (`harness.session_store.build_session_service`):
-    no database when none of them is set (`harness.server.create_app`
-    refuses to build the app then), `DatabaseSessionService` over an asyncpg
-    SQLAlchemy URL when `database_url` is set, or
-    `DatabaseSessionService` over an async engine built on the Cloud SQL
-    Python Connector (PSC, IAM auth) when
+    holds the studio's conversations: no database when none of them is set
+    (`harness.server.create_app` refuses to build the app then), an asyncpg
+    SQLAlchemy URL when `database_url` is set, or an async engine built on
+    the Cloud SQL Python Connector (PSC, IAM auth) when
     `session_store_instance_connection_name` is set. Setting both
     `database_url` and `session_store_instance_connection_name` is a
     validation error, and so is setting any one or two of
@@ -195,8 +192,8 @@ class Settings(BaseServiceSettings):
     - `turn_model_time_s` (90) meters model time: the seconds the request's
       model calls spend waiting on their streams, from the moment each request
       is sent, genai's own HTTP retries included, to each chunk in turn. The
-      prefix cache's create does not count, and neither do the tools ADK runs
-      while a call waits at a response it has delivered. It ends 1 of 187 simple and 3 of 182 plan requests
+      prefix cache's create does not count, and neither do the tools that
+      run while a call waits at a response it has delivered. It ends 1 of 187 simple and 3 of 182 plan requests
       measured on dev. It cuts a call that is still streaming.
     - `turn_model_calls_max` (30) counts model calls, a first-chunk retry not
       included. Dev's most in one request was 61, local runs' 29.
@@ -423,13 +420,13 @@ class Settings(BaseServiceSettings):
         ):
             raise ValueError(
                 "DATABASE_URL and SESSION_STORE_INSTANCE_CONNECTION_NAME are both set. "
-                "They select two different session backends "
-                "(harness.session_store.build_session_service) -- unset one of them."
+                "They select two different databases "
+                "(harness.db.engine.build_database) -- unset one of them."
             )
         # All three fields select the connector path or none of them do. A
         # partial combination (e.g. the database and user set without the
-        # connection name) would leave `build_session_service` with no
-        # database and raise, so it is refused here, naming the missing field.
+        # connection name) would leave `build_database` with no database and
+        # `create_app` refusing, so it is refused here, naming the missing field.
         connector_fields = (
             (
                 "SESSION_STORE_INSTANCE_CONNECTION_NAME",

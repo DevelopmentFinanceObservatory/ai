@@ -3,47 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from google.adk.events import Event, EventActions
-from google.adk.sessions import DatabaseSessionService
 from google.cloud.sql.connector import IPTypes
 from harness.db import engine as engine_module
-from harness.session_store import build_session_service
+from harness.db.engine import build_database
 from harness.settings import Settings
-
-
-def test_unset_backend_is_refused() -> None:
-    with pytest.raises(RuntimeError, match="Postgres"):
-        build_session_service(settings=Settings())
-
-
-async def test_database_url_round_trips_a_session_and_disposes_on_aclose(
-    pg_database_url: str,
-) -> None:
-    """`DATABASE_URL=<postgres url>` yields a working
-    `DatabaseSessionService`: a session created, appended to, and reloaded
-    carries the state the append wrote, and `aclose` disposes the engine it
-    built for itself without raising."""
-    settings = Settings(database_url=pg_database_url)
-    handle = build_session_service(settings=settings)
-
-    assert isinstance(handle.service, DatabaseSessionService)
-
-    session = await handle.service.create_session(
-        app_name="harness", user_id="user-1", session_id="conv-1"
-    )
-    await handle.service.append_event(
-        session=session,
-        event=Event(author="test", actions=EventActions(state_delta={"studio:turn_index": 1})),
-    )
-
-    reloaded = await handle.service.get_session(
-        app_name="harness", user_id="user-1", session_id="conv-1"
-    )
-
-    assert reloaded is not None
-    assert reloaded.state["studio:turn_index"] == 1
-
-    await handle.aclose()
 
 
 class _FakeConnector:
@@ -91,12 +54,12 @@ async def test_connector_backend_passes_iam_auth_and_psc_settings_through(
         session_store_runtime_db_user="ai-run",
         session_store_connect_timeout_s=12.0,
     )
-    handle = build_session_service(settings=settings)
-
-    assert isinstance(handle.service, DatabaseSessionService)
+    database = build_database(settings=settings)
+    assert database is not None
 
     with pytest.raises(RuntimeError, match="never dials a real Cloud SQL instance"):
-        await handle.service.create_session(app_name="harness", user_id="u", session_id="s")
+        async with database.engine.connect():
+            pass
 
     assert fake_connector.create_async_connector_kwargs == {  # type: ignore[attr-defined]
         "refresh_strategy": "lazy",
@@ -113,7 +76,7 @@ async def test_connector_backend_passes_iam_auth_and_psc_settings_through(
         }
     ]
 
-    await handle.aclose()
+    await database.aclose()
 
 
 async def test_connector_backend_aclose_disposes_engine_and_closes_connector(
@@ -124,12 +87,14 @@ async def test_connector_backend_aclose_disposes_engine_and_closes_connector(
         session_store_database="sessions",
         session_store_runtime_db_user="ai-run",
     )
-    handle = build_session_service(settings=settings)
+    database = build_database(settings=settings)
+    assert database is not None
 
     with pytest.raises(RuntimeError, match="never dials a real Cloud SQL instance"):
-        await handle.service.create_session(app_name="harness", user_id="u", session_id="s")
+        async with database.engine.connect():
+            pass
 
-    await handle.aclose()
+    await database.aclose()
 
     assert fake_connector.closed is True
 
@@ -145,12 +110,14 @@ async def test_connector_backend_builds_the_connector_only_once_across_pooled_co
         session_store_runtime_db_user="ai-run",
         session_store_pool_size=1,
     )
-    handle = build_session_service(settings=settings)
+    database = build_database(settings=settings)
+    assert database is not None
 
     for _ in range(2):
         with pytest.raises(RuntimeError, match="never dials a real Cloud SQL instance"):
-            await handle.service.create_session(app_name="harness", user_id="u", session_id="s")
+            async with database.engine.connect():
+                pass
 
     assert len(fake_connector.connect_calls) == 2
 
-    await handle.aclose()
+    await database.aclose()

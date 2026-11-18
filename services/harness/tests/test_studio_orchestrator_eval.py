@@ -202,7 +202,6 @@ DECLINED = {"ask": "B", "declined": "the data found cannot answer this as asked"
 RAN = {"ask": "A", "answered_by": [{"step": "s1", "status": "data"}]}
 SPEC = "spec_" + "1" * 32
 READING = {"spec_id": SPEC, "window": {"start": 1990, "end": 2020}, "warnings": [{"code": "w_one"}]}
-FENCED = f"[dfo_analyst_graph] said:\n{checks.RELAY_MARKER}\nbody"
 CLOSING = 'The series rose. Would you like "Uganda" too?'
 TURN_ONE = [{"kind": "turn", "index": 1}, _request("orchestrator", "first")]
 
@@ -210,32 +209,6 @@ TURN_ONE = [{"kind": "turn", "index": 1}, _request("orchestrator", "first")]
 @pytest.mark.parametrize(
     ("name", "turn_frames", "log", "violated"),
     [
-        (
-            "approval_payload_absent_after_approval",
-            [],
-            [_step(), _request("orchestrator", "ok")],
-            False,
-        ),
-        (
-            "approval_payload_absent_after_approval",
-            [],
-            [_step(), _request("orchestrator", f"called tool `{checks.REQUEST_INPUT_NAME}`")],
-            True,
-        ),
-        # A pause before the first step is the approval itself, and is not held against it.
-        (
-            "approval_payload_absent_after_approval",
-            [],
-            [_request("planner", checks.REQUEST_INPUT_NAME), _step()],
-            False,
-        ),
-        # No step ran, so nothing was approved: a case that proves nothing fails.
-        ("approval_payload_absent_after_approval", [], [_request("orchestrator", "ok")], True),
-        ("no_relay_marker", [], [_request("orchestrator", "plain")], False),
-        ("no_relay_marker", [], [_request("orchestrator", FENCED)], True),
-        ("no_relay_marker", [], [_request("planner", "x", system=checks.RELAY_MARKER)], False),
-        ("planner_sees_no_relay_marker", [], [_request("orchestrator", FENCED)], False),
-        ("planner_sees_no_relay_marker", [], [_request("planner", FENCED)], True),
         (
             "planner_first_message_carries_search_evidence",
             [],
@@ -400,7 +373,8 @@ def test_every_case_can_fail() -> None:
     for case in cases:
         label = case["id"]
         assert len(case.get("xfail", "x" * 21)) > 20, f"{label}: xfail without a reason"
-        assert not checks.check_names(case.get("checks", ["no_relay_marker"]), label=label)
+        if "checks" in case:
+            assert not checks.check_names(case["checks"], label=label)
         assert (
             case.get("rubrics") or case.get("checks") or any(t.get("expect") for t in case["turns"])
         )

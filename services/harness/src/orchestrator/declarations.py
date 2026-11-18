@@ -6,7 +6,7 @@ parameters become one pydantic model, `<name>Params`, whose JSON schema is the
 declaration's `parameters_json_schema`, so an `Annotated[..., Field(...)]`
 parameter's description and constraints reach the model, and a tool with no
 other parameter declares none. The docstring is cleaned as `inspect.getdoc`
-cleans it. The declarations are byte for byte the ones google-adk's
+cleans it. The declarations are byte for byte the ones ADK's
 `FunctionTool` built for the same functions, recorded in
 `tests/fixtures/orchestrator_requests` (`tests/orchestrator/test_declarations.py`),
 so the model reads the same tools.

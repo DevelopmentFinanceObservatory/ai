@@ -28,22 +28,22 @@ from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.utilities.lifespan import combine_lifespans
 from google import genai
-from google.adk.sessions import DatabaseSessionService
 from mcp import MCPError
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from orchestrator.agent import orchestrator_agent
 from orchestrator.model import orchestrator_model
 from presentation_mcp.server import mcp as presentation_mcp
 from pydantic_ai.models.google import GoogleModel
+from sqlalchemy import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.routing import get_route_path
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocketClose
 
 from harness import __version__
-from harness.adk_import import open_turn_specs, reimport_on_access
 from harness.agents import build_tool_surface
 from harness.combined_mcp import build_combined_mcp, children_start_once, combined_http_app
+from harness.db.engine import DatabaseHandle, build_database
 from harness.db.migrate import MigrationChecksumError, apply_pending
 from harness.early_mint import EarlyMints
 from harness.generative import GeminiEdit
@@ -56,7 +56,6 @@ from harness.planner_adapter import content_on_spans
 from harness.prefix_cache import PrefixCache
 from harness.provenance import ProvenanceStore
 from harness.run_ledger import StudioRunLedger
-from harness.session_store import build_session_service
 from harness.settings import (
     ANALYSIS_MCP_MOUNT_PATH,
     COMBINED_MCP_MOUNT_PATH,
@@ -182,23 +181,20 @@ def _loopback_only(app: ASGIApp) -> ASGIApp:
     return guarded
 
 
-# Total wall-clock budget `_lifespan` gives the startup database steps
-# (`DatabaseSessionService.prepare_tables`, then `apply_pending`), one
-# deadline the second step inherits what the first left of. A runtime
-# identity's IAM grant can still be propagating when a fresh revision
-# starts, taking minutes rather than seconds to land; Cloud Run's default
-# startup probe window is 240 s, so this leaves headroom for the rest of
-# startup.
+# Total wall-clock budget `_lifespan` gives the startup migrations
+# (`apply_pending`). A runtime identity's IAM grant can still be propagating
+# when a fresh revision starts, taking minutes rather than seconds to land;
+# Cloud Run's default startup probe window is 240 s, so this leaves headroom
+# for the rest of startup.
 _STARTUP_DB_RETRY_BUDGET_S = 120.0
-_PREPARE_TABLES_INITIAL_BACKOFF_S = 1.0
-_PREPARE_TABLES_MAX_BACKOFF_S = 30.0
+_STARTUP_INITIAL_BACKOFF_S = 1.0
+_STARTUP_MAX_BACKOFF_S = 30.0
 
 
 async def _retry_startup_step(
     name: str,
     step: Callable[[], Awaitable[object]],
     *,
-    attempt_timeout_s: float | None,
     budget_s: float,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], float] = time.monotonic,
@@ -206,25 +202,20 @@ async def _retry_startup_step(
 ) -> None:
     """Run the awaitable `step()` returns, retrying with bounded exponential backoff.
 
-    Each attempt is bounded by `attempt_timeout_s` unless it is None. A
-    failed attempt is logged with its exception and followed by a `sleep`
-    pause that doubles up to `_PREPARE_TABLES_MAX_BACKOFF_S`, capped so it
+    A failed attempt is logged with its exception and followed by a `sleep`
+    pause that doubles up to `_STARTUP_MAX_BACKOFF_S`, capped so it
     never pushes the call past `budget_s` total. The last exception is
     re-raised once no time remains in the budget, and an exception in `fatal`
     is re-raised at once. `sleep` and `now` are parameters for tests to
     replace real waiting and a real clock with instant, deterministic fakes.
     """
     deadline = now() + budget_s
-    backoff_s = _PREPARE_TABLES_INITIAL_BACKOFF_S
+    backoff_s = _STARTUP_INITIAL_BACKOFF_S
     attempt = 0
     while True:
         attempt += 1
         try:
-            if attempt_timeout_s is None:
-                await step()
-            else:
-                async with asyncio.timeout(attempt_timeout_s):
-                    await step()
+            await step()
             return
         except fatal:
             raise
@@ -245,28 +236,7 @@ async def _retry_startup_step(
                 remaining_s,
             )
             await sleep(min(backoff_s, remaining_s))
-            backoff_s = min(backoff_s * 2, _PREPARE_TABLES_MAX_BACKOFF_S)
-
-
-async def _prepare_tables_with_retries(
-    session_service: DatabaseSessionService,
-    *,
-    connect_timeout_s: float,
-    budget_s: float,
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    now: Callable[[], float] = time.monotonic,
-) -> None:
-    """Retry `prepare_tables` under `_retry_startup_step`'s budget, each
-    attempt bounded by `connect_timeout_s`, the deadline of one connector
-    dial."""
-    await _retry_startup_step(
-        "prepare_tables",
-        session_service.prepare_tables,
-        attempt_timeout_s=connect_timeout_s,
-        budget_s=budget_s,
-        sleep=sleep,
-        now=now,
-    )
+            backoff_s = min(backoff_s * 2, _STARTUP_MAX_BACKOFF_S)
 
 
 async def _apply_migrations_with_retries(
@@ -285,33 +255,36 @@ async def _apply_migrations_with_retries(
     await _retry_startup_step(
         "apply_pending",
         lambda: apply_pending(engine),
-        attempt_timeout_s=None,
         budget_s=budget_s,
         fatal=(MigrationChecksumError,),
     )
 
 
+def _postgres_database(settings: Settings) -> DatabaseHandle:
+    """The database `settings` selects (`harness.db.engine.build_database`).
+    Raises `RuntimeError` when it selects none, or a `database_url` for
+    another database than Postgres, before building an engine for it."""
+    url = settings.database_url
+    postgres = url is None or make_url(url).get_backend_name() == "postgresql"
+    database = build_database(settings=settings) if postgres else None
+    if database is None:
+        raise RuntimeError(
+            "the studio stores conversations in Postgres: set DATABASE_URL to a Postgres "
+            "URL or the SESSION_STORE_* variables of the Cloud SQL Connector"
+        )
+    return database
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
-    # Runs at startup: an instance that can't reach its database fails its
-    # startup probe (`DatabaseSessionService.prepare_tables`'s own docstring
-    # recommends this for latency-sensitive services), since every studio
-    # route needs the session service. It's a no-op after the first call, so
-    # this costs nothing beyond startup. `_prepare_tables_with_retries`
-    # bounds each attempt by `session_store_connect_timeout_s` and retries
-    # transient failures; both steps share one deadline.
-    deadline = time.monotonic() + _STARTUP_DB_RETRY_BUDGET_S
-    await _prepare_tables_with_retries(
-        app.state.session_service,
-        connect_timeout_s=app.state.settings.session_store_connect_timeout_s,
-        budget_s=_STARTUP_DB_RETRY_BUDGET_S,
-    )
-    # The harness's own tables, in the same Postgres database as ADK's
-    # (`create_app` refuses any other database).
+    # Runs at startup: an instance that can't reach its database, or whose
+    # tables are behind this release's migrations, fails its startup probe,
+    # since every studio route needs the conversation tables. `create_app`
+    # refuses any database but Postgres.
     await _apply_migrations_with_retries(
-        app.state.session_service_engine,
-        budget_s=max(0.0, deadline - time.monotonic()),
+        app.state.database_engine,
+        budget_s=_STARTUP_DB_RETRY_BUDGET_S,
     )
     # A 401 from a mounted app reaches an MCP client as a raised `MCPError`,
     # not a tool result: `raise_on_error=False` on `call_tool` doesn't catch
@@ -356,15 +329,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.live_refresh.aclose()
     except Exception:
         logger.exception("failed to close the live refresh clients during shutdown")
-    # Disposes whatever `build_session_service` opened for the session
-    # service above: the engine for the plain-`DATABASE_URL` backend, and the
-    # engine plus the connector for the Cloud SQL Connector path
-    # (`harness.session_store.SessionServiceHandle`). Guarded the same way as
-    # the studio close above.
+    # Disposes whatever `build_database` opened: the engine for the
+    # plain-`DATABASE_URL` backend, and the engine plus the connector for the
+    # Cloud SQL Connector path (`harness.db.engine.DatabaseHandle`). Guarded
+    # the same way as the studio close above.
     try:
-        await app.state.session_service_aclose()
+        await app.state.database_aclose()
     except Exception:
-        logger.exception("failed to close the session service during shutdown")
+        logger.exception("failed to close the database during shutdown")
 
 
 def create_app(
@@ -373,12 +345,13 @@ def create_app(
 ) -> FastAPI:
     """Build the harness FastAPI app.
 
-    Builds the session service eagerly so wiring failures surface at
-    startup rather than on first request. `settings` is injectable for
+    Builds the database engine eagerly so wiring failures surface at
+    startup rather than on first request, and refuses a missing database or
+    one that is not Postgres. `settings` is injectable for
     tests.
 
     Logging is configured here as well as in the lifespan, so eager
-    construction below, which logs its session-service choice, has its
+    construction below, which logs its database choice, has its
     output captured ahead of the logging module's pre-configuration
     defaults. `configure_logging` is idempotent, so the lifespan's call is
     a no-op.
@@ -450,10 +423,10 @@ def create_app(
     app.state.settings = resolved_settings
     # `create_app` needs the `aclose` half too, for `_lifespan`'s shutdown
     # phase.
-    session_service_handle = build_session_service(settings=resolved_settings)
-    app.state.session_service = session_service_handle.service
-    app.state.session_service_engine = session_service_handle.engine
-    app.state.session_service_aclose = session_service_handle.aclose
+    database = _postgres_database(resolved_settings)
+    engine = database.engine
+    app.state.database_engine = engine
+    app.state.database_aclose = database.aclose
 
     # Built before the studio stack, which replays a card's frame through it.
     live_refresh = build_live_refresh(settings=resolved_settings)
@@ -520,21 +493,7 @@ def create_app(
         logger.info("early mints: off (EARLY_MINT=false)")
     # The store exists before the graph because the recall function is
     # bound to it (conversation resolved per request via contextvar).
-    engine = session_service_handle.engine
-    if engine.dialect.name != "postgresql":
-        raise RuntimeError(
-            "the studio stores conversations in Postgres: set DATABASE_URL to a Postgres "
-            "URL or the SESSION_STORE_* variables of the Cloud SQL Connector"
-        )
-    # The previous release may still finish turns on ADK while this one
-    # serves, so each load first brings the conversation up to date with its
-    # ADK ledger session (`harness.adk_import.reimport_on_access`), and an
-    # open turn's spec blocks are read as the import reads them.
-    store = StudioStore(
-        engine,
-        turn_specs=open_turn_specs(engine),
-        adk=reimport_on_access(engine),
-    )
+    store = StudioStore(engine)
     # Built once and threaded into both the `execute` node below and
     # `build_planner`'s planner (which reads skills through it and
     # passes it on to the translator), so the two compile against one set

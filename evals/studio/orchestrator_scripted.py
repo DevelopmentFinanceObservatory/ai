@@ -469,28 +469,6 @@ def _planner_adapter(
     )
 
 
-class _NoAdk:
-    """The eval's conversations start in the tables, and ADK never held them."""
-
-    async def reimport(self, principal: str, conversation_id: str) -> None:
-        del principal, conversation_id
-
-    async def moved(self, principal: str, conversation_id: str) -> bool:
-        del principal, conversation_id
-        return False
-
-    def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
-        del session_id
-        return specs
-
-
-async def _no_turn_specs(principal: str, session_id: str) -> dict[str, Any]:
-    """The store's `turn_specs` reader: no ADK session holds an eval turn's
-    spec blocks, which the turn's own cursor keeps (`harness.turn.store`)."""
-    del principal, session_id
-    return {}
-
-
 def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) -> FastAPI:
     """The studio for one case, its conversations and turns stored on `engine`."""
     settings = Settings()
@@ -555,7 +533,7 @@ def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) 
     studio = StudioRunner(
         create_graph=create_graph,
         executor=LoggingExecutor(log=log),
-        store=StudioStore(engine, adk=_NoAdk(), turn_specs=_no_turn_specs),
+        store=StudioStore(engine),
         turns=TurnStore(engine),
         run_ledger=run_ledger,
         tool_surface=surface,

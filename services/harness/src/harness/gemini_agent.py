@@ -96,7 +96,7 @@ def holds_no_answer(response: ModelResponse) -> bool:
 
 def tool_not_found(name: str, tools: Sequence[str]) -> dict[str, str]:
     """The answer to a call of `name`, a tool the agent lacks, naming the tools
-    it can call in the order they are declared. It is google-adk's answer to a
+    it can call in the order they are declared. It is ADK's answer to a
     call of a tool an agent lacks, word for word, so stored conversations read
     the same."""
     available = ", ".join(tools) or "none"
