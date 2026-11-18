@@ -2643,29 +2643,32 @@ _FAILED_AT_ORCHESTRATE = {
 
 
 @pytest.mark.parametrize(
-    ("status", "error"),
+    ("status", "error", "recorded"),
     [
-        pytest.param(TurnStatus.DONE, None, id="done"),
-        pytest.param(TurnStatus.FAILED, _FAILED_AT_ORCHESTRATE, id="failed"),
-        pytest.param(TurnStatus.CANCELLED, None, id="cancelled"),
+        pytest.param(TurnStatus.DONE, None, "state_not_saved", id="done"),
+        pytest.param(
+            TurnStatus.FAILED, _FAILED_AT_ORCHESTRATE, "capability_unavailable", id="failed"
+        ),
+        pytest.param(TurnStatus.CANCELLED, None, "cancelled", id="cancelled"),
     ],
 )
 @pytest.mark.parametrize("lease", ["lapsed", "live"])
-async def test_a_turn_closed_under_a_failed_closing_write_is_recorded_unsaved_by_the_next_load(
+async def test_a_turn_closed_under_a_failed_closing_write_is_recorded_as_its_stream_ended(
     new_store,
     clock,
     pg_engine,
     monkeypatch,
     status: TurnStatus,
     error: dict[str, Any] | None,
+    recorded: str,
     lease: str,
 ) -> None:
-    """The turn's cursor closes, then the stream's closing write fails, so
-    the client was told the turn could not be saved and the record stays
-    open. Once the lease has lapsed, the next load records the turn
-    `state_not_saved` with no reply, whatever the cursor's status, keeping
-    the plans and readings the cursor's state holds, and the next turn
-    claims and opens. While the lease is live its holder records the turn,
+    """The turn's cursor closes, then the stream's closing write fails, and
+    the record stays open. Once the lease has lapsed, the next load records
+    the turn with the error the stream told the client, with no reply: a
+    Stop's `cancelled`, a failed turn's own code, and otherwise
+    `state_not_saved`. It keeps the plans and readings the cursor's state
+    holds, and the next turn claims and opens. While the lease is live its holder records the turn,
     so a load leaves the record open."""
     store = new_store(clock=clock)
     state = await store.create("principal", CONVERSATION)
@@ -2713,7 +2716,7 @@ async def test_a_turn_closed_under_a_failed_closing_write_is_recorded_unsaved_by
         return
     assert loaded.turn_recorded
     record = loaded.turns[-1]
-    assert (record["error"], record["assistant"]) == ("state_not_saved", "")
+    assert (record["error"], record["assistant"]) == (recorded, "")
     assert record["plans"] == [_PLAN_JSON]
     assert record["readings"][0] == {"part": "kenya gdp"}
     stored = await new_store(clock=clock).load("principal", CONVERSATION)

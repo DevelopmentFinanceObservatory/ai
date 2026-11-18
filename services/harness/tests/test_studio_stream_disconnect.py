@@ -4,8 +4,8 @@ A Studio stream has one owner: a task, created by the route as its last step,
 that runs the segment, writes its close and puts the stream's frames on a
 channel. The response class relays the channel to the client and, in a
 `finally` around its ASGI `__call__`, sets the client-gone flag and awaits the
-owner under a shield. These tests run that response class (`_Relay`) with a
-scripted owner on uvicorn over a real socket, with the server configuration
+owner under a shield. These tests run that response class
+(`harness.studio_stream.StudioStream`) with a scripted owner on uvicorn over a real socket, with the server configuration
 `harness.server.main` uses, and check every way a stream can end: the client
 closes before the response starts, while the relay waits for a frame, while
 the relay is blocked sending, or during a slow owner write; the server shuts
@@ -15,7 +15,7 @@ keep-alive connection carries a second request after a stream.
 In each shape the `finally` runs, the owner finishes uncancelled, and it
 finishes before the ASGI call returns. Past a graceful-shutdown timeout uvicorn
 stops waiting for the response, so the app's lifespan shutdown also awaits
-every live owner; without that wait the event loop's teardown cancels an owner
+every live owner (`harness.studio_stream.LiveOwners`); without that wait the event loop's teardown cancels an owner
 still in its closing write.
 
 uvicorn's HTTP protocols report ASGI spec version 2.3, so Starlette's
@@ -37,7 +37,9 @@ from typing import override
 
 import uvicorn
 from fastapi import APIRouter, FastAPI, Header, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
+from harness.studio_stream import Channel, LiveOwners, StudioStream
+from pydantic import BaseModel
 from starlette.types import Message, Receive, Scope, Send
 
 # Every wait in this file is bounded by this, so a shape that hangs fails.
@@ -62,6 +64,12 @@ class Script:
     frame_bytes: int = 0
 
 
+class _Frame(BaseModel):
+    event: str
+    n: int = 0
+    pad: str = ""
+
+
 @dataclass
 class Probe:
     """What one stream did, as the relay and the owner recorded it."""
@@ -77,9 +85,7 @@ class Probe:
     relay_waiting: asyncio.Event = field(default_factory=asyncio.Event)
 
 
-async def _owner(
-    script: Script, *, channel: asyncio.Queue[str | None], gone: asyncio.Event, probe: Probe
-) -> None:
+async def _owner(script: Script, *, channel: Channel, gone: asyncio.Event, probe: Probe) -> None:
     """A scripted owner: reads the gone flag only while it waits for the work."""
     log = probe.owner_log
     try:
@@ -95,13 +101,13 @@ async def _owner(
             if gone.is_set():
                 outcome = "left"
                 break
-            channel.put_nowait(f"data: {json.dumps({'n': n, 'pad': 'x' * script.frame_bytes})}\n\n")
+            channel.put_nowait(_Frame(event="frame", n=n, pad="x" * script.frame_bytes))
             n += 1
         log.append(f"closing:{outcome}")
         await asyncio.sleep(script.close_s)
         log.append("closed")
         if outcome == "done":
-            channel.put_nowait("event: done\ndata: {}\n\n")
+            channel.put_nowait(_Frame(event="done"))
         channel.put_nowait(None)
         log.append("finished")
     except asyncio.CancelledError:
@@ -109,36 +115,29 @@ async def _owner(
         raise
 
 
-class _Relay(StreamingResponse):
-    """The response class: relays the owner's channel and awaits the owner."""
+class _Watched(asyncio.Queue[BaseModel | None]):
+    """The owner's channel, noting when the response waits on it."""
+
+    def __init__(self, probe: Probe) -> None:
+        super().__init__()
+        self._probe = probe
+
+    @override
+    async def get(self) -> BaseModel | None:
+        self._probe.relay_waiting.set()
+        return await super().get()
+
+
+class _Probed(StudioStream):
+    """The response class, with what its ASGI call did recorded on `probe`."""
 
     def __init__(
-        self,
-        *,
-        channel: asyncio.Queue[str | None],
-        owner: asyncio.Task[None],
-        gone: asyncio.Event,
-        probe: Probe,
-        heartbeat_s: float = 1.0,
+        self, *, channel: Channel, owner: asyncio.Task[None], gone: asyncio.Event, probe: Probe
     ) -> None:
-        super().__init__(self._serialised(), media_type="text/event-stream")
-        self._channel = channel
-        self._owner = owner
-        self._gone = gone
+        super().__init__(channel=channel, owner=owner, gone=gone, keepalive_s=1.0)
+        self._watched_owner = owner
+        self._watched_gone = gone
         self._probe = probe
-        self._heartbeat_s = heartbeat_s
-
-    async def _serialised(self) -> AsyncIterator[str]:
-        while True:
-            self._probe.relay_waiting.set()
-            try:
-                item = await asyncio.wait_for(self._channel.get(), timeout=self._heartbeat_s)
-            except TimeoutError:
-                yield ": ka\n\n"
-                continue
-            if item is None:
-                return
-            yield item
 
     @override
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -159,10 +158,8 @@ class _Relay(StreamingResponse):
             self._probe.exit = type(exc).__name__
             raise
         finally:
-            self._probe.finally_ran = True
-            self._gone.set()
-            await asyncio.shield(self._owner)
-            self._probe.owner_done_at_return = self._owner.done()
+            self._probe.finally_ran = self._watched_gone.is_set()
+            self._probe.owner_done_at_return = self._watched_owner.done()
             self._probe.returned.set()
 
 
@@ -173,7 +170,7 @@ class Stage:
     script: Script = field(default_factory=lambda: Script(frames=3))
     probe: Probe = field(default_factory=Probe)
     wait_for_disconnect: bool = False
-    owners: set[asyncio.Task[None]] = field(default_factory=set)
+    owners: LiveOwners = field(default_factory=LiveOwners)
 
 
 def _app(stage: Stage) -> FastAPI:
@@ -184,19 +181,17 @@ def _app(stage: Stage) -> FastAPI:
     @router.post("/turn")
     async def turn(
         request: Request, body: dict[str, str], authorization: str | None = Header(default=None)
-    ) -> _Relay:
+    ) -> _Probed:
         del body, authorization
         if stage.wait_for_disconnect:
             while not await request.is_disconnected():
                 await asyncio.sleep(0.01)
-        channel: asyncio.Queue[str | None] = asyncio.Queue()
+        channel = _Watched(stage.probe)
         gone = asyncio.Event()
-        owner = asyncio.create_task(
+        owner = stage.owners.start(
             _owner(stage.script, channel=channel, gone=gone, probe=stage.probe)
         )
-        stage.owners.add(owner)
-        owner.add_done_callback(stage.owners.discard)
-        return _Relay(channel=channel, owner=owner, gone=gone, probe=stage.probe)
+        return _Probed(channel=channel, owner=owner, gone=gone, probe=stage.probe)
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -204,8 +199,7 @@ def _app(stage: Stage) -> FastAPI:
         # Past a graceful-shutdown timeout uvicorn cancels each request task
         # and moves on to this shutdown; once `serve` returns, the event
         # loop's teardown would cancel every owner still running.
-        if stage.owners:
-            await asyncio.wait(stage.owners, timeout=_DEADLINE_S)
+        await stage.owners.wait(timeout=_DEADLINE_S)
 
     app = FastAPI(lifespan=lifespan)
     app.include_router(router)
@@ -403,7 +397,7 @@ async def test_a_graceful_shutdown_lets_the_stream_end() -> None:
         chunks = await client.body()
         await _returned(stage.probe)
         await client.close()
-    assert chunks[-1].startswith(b"event: done")
+    assert json.loads(chunks[-1].removeprefix(b"data: "))["event"] == "done"
     assert stage.probe.exit == "returned"
     _assert_owner_finished(stage.probe, outcome="done")
 
@@ -437,7 +431,7 @@ async def test_a_keep_alive_connection_serves_the_next_request_after_a_stream() 
         client.writer.write(b"GET /healthz HTTP/1.1\r\nHost: test\r\n\r\n")
         head = await client.headers()
         await client.close()
-    assert chunks[-1].startswith(b"event: done")
+    assert json.loads(chunks[-1].removeprefix(b"data: "))["event"] == "done"
     assert head.startswith(b"HTTP/1.1 200")
     assert stage.probe.exit == "returned"
     _assert_owner_finished(stage.probe, outcome="done")

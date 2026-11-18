@@ -20,9 +20,9 @@ different groups never conflict:
   stores the turn state and clears the lease, and closes the turn
   `cancelled`, record and cursor, when a Stop is live for it, in one
   transaction.
-- `load` records `state_not_saved` a turn whose cursor closed while its
-  record stayed open, compare-and-swapped on `version` and only while no
-  lease is live.
+- `load` records a turn whose cursor closed while its record stayed open,
+  with the error its stream told the client (`closed_turn_error`),
+  compare-and-swapped on `version` and only while no lease is live.
 - `change_canvas` is a checkpoint with a card change applied: each card
   the turn lands, holds, swaps, revises or removes commits with its canvas
   block and every other changed durable field in one transaction, fenced
@@ -93,6 +93,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.approval import ApprovalRecord
+from harness.fatal_codes import recorded_code
 from harness.graph.state import (
     ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
@@ -592,6 +593,22 @@ class SegmentClose(StrEnum):
     STOPPED = "stopped"
     LOST = "lost"
     FAILED = "failed"
+
+
+def closed_turn_error(cursor: Cursor) -> str:
+    """The error a turn record closes on when its cursor closed and the
+    stream's closing write failed (`StudioStore.load`): what the stream told
+    the client (`harness.studio_stream.ending`'s `failed` column). A Stop's
+    close is `cancelled`; a failed turn's is the code of its error frame
+    (`harness.fatal_codes.recorded_code`); any other was told its state could
+    not be saved, `state_not_saved`."""
+    match cursor.status:
+        case TurnStatus.CANCELLED:
+            return ErrorCode.CANCELLED.value
+        case TurnStatus.FAILED:
+            return recorded_code(cursor.error or {}).value
+        case _:
+            return HarnessCode.STATE_NOT_SAVED.value
 
 
 _OPEN_STATUSES = frozenset({"running", "paused"})
@@ -1143,11 +1160,12 @@ class StudioStore:
         The turn's cursor is the authority on whether the turn is closed. A
         load that finds the cursor closed and the conversation's record of
         the turn open, with no live lease on the row, records the turn
-        (`_record_unsaved`) before it returns. A stream sends its ending
+        (`_record_closed_turn`) before it returns. A stream sends its ending
         frame only once its closing write (`close_segment`) commits, so that
-        state means the closing write failed and the client was told the
-        turn could not be saved, or the instance died and was told nothing;
-        without the repair the next turn would record the turn `abandoned`.
+        state means the closing write failed, and the client was told what
+        `harness.studio_stream.ending` sends for a failed close, or the
+        instance died and the client was told nothing; without the repair
+        the next turn would record the turn `abandoned`.
         While a lease is live its holder records the turn."""
         entry = self._entry(principal, conversation_id)
         stamp = self._clock()
@@ -1160,7 +1178,7 @@ class StudioStore:
         version = row.version
         lease = _row_segment(row)
         if closed is not None and (lease is None or lease.expires_at <= row.db_now):
-            recorded = await self._record_unsaved(row.id, row.version, durable, closed)
+            recorded = await self._record_closed_turn(row.id, row.version, durable, closed)
             if recorded is not None:
                 durable, version = recorded
         entry.pk, entry.version, entry.read_at = row.id, version, row.db_now
@@ -1181,21 +1199,22 @@ class StudioStore:
             entry.state.turn_specs = {}
         return entry.state
 
-    async def _record_unsaved(
+    async def _record_closed_turn(
         self, pk: int, version: int, durable: ConversationState, cursor: Cursor
     ) -> tuple[ConversationState, int] | None:
         """Record the turn `cursor`, closed, as the client was told it ended:
         on a copy of `durable`, the conversation as read at `version`, keep
         the records the cursor's state holds (`keep_turn_records`) and close
-        the record with error `state_not_saved` and no reply, whatever the
-        cursor's status, then store the change. One transaction under the row
+        the record with `closed_turn_error`'s error and no reply, then store
+        the change. One transaction under the row
         lock, compare-and-swapped on `version` and refused while a lease is
         live, so a writer that moved the row since the read wins and this
         records nothing. Returns the copy and the row's new version, `None`
         when it recorded nothing."""
         recorded = _shallow_copy(durable)
         keep_turn_records(recorded, cursor.state)
-        recorded.close_turn(final_text="", error=HarnessCode.STATE_NOT_SAVED.value)
+        error = closed_turn_error(cursor)
+        recorded.close_turn(final_text="", error=error)
         delta = _changed_since(_serialize_durable(recorded), _serialize_durable(durable))
         async with self._transaction() as conn:
             row = (await conn.execute(self._lock_conversation, {"pk": pk})).first()
@@ -1209,10 +1228,11 @@ class StudioStore:
             stored = await self._write(conn, pk, delta)
         logger.info(
             "studio store: conversation %s's turn %s was closed %s with its record open; "
-            "recorded it state_not_saved",
+            "recorded it %s",
             durable.conversation_id,
             cursor.turn_index,
             cursor.status.value,
+            error,
         )
         return recorded, stored
 

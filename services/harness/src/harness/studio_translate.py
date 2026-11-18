@@ -64,7 +64,6 @@ from compiler.surface import (
 )
 from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from executor.artifacts import declared_ranked_before_limit
-from executor.classify import internal_fault
 from executor.outcomes import RefusalKind
 from executor.run import RESULT_RECEIVED, current_step_id
 from google.genai import types
@@ -81,6 +80,7 @@ from pydantic import ValidationError
 
 from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
+from harness.fatal_codes import stated_refusal, wire_error
 from harness.graph.events import AgentStatus, GraphEvent, PlannerStarted, StepProgress
 from harness.graph.interfaces import Executor
 from harness.graph.orchestrate import HAND_OFF_EDGES
@@ -359,23 +359,9 @@ def _fatal_frame(
     """
     if timeout_tool is not None:
         refusal = _timeout_refusal(conversation, tool=timeout_tool, key=timeout_key or timeout_tool)
-        wire_code = ErrorCode.TRANSIENT_UNAVAILABLE.value
     else:
-        refusal = refusal or ({} if transient else internal_fault())
-        wire_code = refusal.get("code")
-    try:
-        error_code = ErrorCode(wire_code)
-        retry = RetryMode(refusal.get("retry_mode", RetryMode.DO_NOT_RETRY))
-    except ValueError:
-        try:
-            retry = RetryMode(refusal.get("retry_mode", RetryMode.RETRY_AFTER_DELAY))
-        except ValueError:
-            retry = RetryMode.RETRY_AFTER_DELAY
-        error_code = (
-            ErrorCode.TRANSIENT_UNAVAILABLE
-            if retry is RetryMode.RETRY_AFTER_DELAY
-            else ErrorCode.CAPABILITY_UNAVAILABLE
-        )
+        refusal = stated_refusal(refusal, transient=transient)
+    error_code, retry = wire_error(refusal, timed_out=timeout_tool is not None)
     stated = refusal if refusal.get("code") else {**refusal, "code": HarnessCode.RAISED.value}
     detail = failure_detail({**stated, "retry_mode": retry.value})
     conversation.close_turn(
