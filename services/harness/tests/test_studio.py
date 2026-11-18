@@ -165,6 +165,7 @@ from .scripted_tools import (
 )
 from .store_clock import StoreClock
 from .studio_routes import AUTH, ScriptLlm, orchestrator_app, stream, studio_client, turn_body
+from .test_turn_records import _top_donors
 from .turn_driver import CONVERSATION
 
 SPEC_A = "spec_" + "a" * 32
@@ -4352,6 +4353,82 @@ async def test_a_turn_abandons_the_previous_turn_as_its_owner_last_wrote_it(
         assert (conversation.turn_index, conversation.segment.id) == (1, segment_a)
 
 
+@pytest.mark.parametrize("lapsed", ["finishes_the_turn", "writes_the_record"])
+async def test_a_turn_claimed_over_a_lapsed_segment_s_last_write_builds_on_it(
+    monkeypatch: pytest.MonkeyPatch, lapsed: str
+) -> None:
+    """A's turn is left running under a lease that lapsed, and between B's
+    `/turn` read and its claim A either finishes the turn `done`, its
+    record unwritten, or saves the conversation's record, which moves the
+    row's version. B claims on a fresh load, and streams. The turn A
+    finished is recorded with the readings, plans and specs its cursor
+    holds. The turn A wrote the record of is abandoned on that record."""
+    _, record = _top_donors()
+    plan = record.model_dump(mode="json")
+    used = record.sources[0].spec_id
+    turn_state = {
+        ORCHESTRATOR_SEARCHES_KEY: [_reading(1)],
+        ORCHESTRATOR_PLAN_RECORDS_KEY: [plan],
+        ORCHESTRATOR_SPECS_KEY: {used: {"spec_id": used}},
+    }
+    clock = await StoreClock.start(_engine())
+    store_a = StudioStore(_engine(), **clock.store_kwargs)
+    turns = turn_store_module.TurnStore(_engine())
+    state_a = await store_a.create(PRINCIPAL, CONVERSATION)
+    segment_a = store_a.claim_segment(PRINCIPAL, CONVERSATION)
+    state_a.begin_turn()
+    state_a.turn_user_message = "aid to Kenya"
+    await store_a.save(PRINCIPAL, CONVERSATION)
+    left = await turns.open_turn(
+        PRINCIPAL,
+        CONVERSATION,
+        segment_id=segment_a,
+        turn_index=1,
+        node="plan",
+        inputs={},
+        state=turn_state,
+    )
+    await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)  # A's lease has lapsed
+
+    store_b = StudioStore(_engine(), **clock.store_kwargs)
+    app_b = _app(_text("Hello."), store=store_b)
+    read = app_b.state.studio.turns.open_cursor
+    wrote: list[str] = []
+
+    async def read_then_write(principal: str, conversation_id: str) -> Any:
+        cursor = await read(principal, conversation_id)
+        if cursor is not None and not wrote:
+            wrote.append(lapsed)
+            if lapsed == "finishes_the_turn":
+                await turns.finish(
+                    left, segment_id=segment_a, status=TurnStatus.DONE, state=turn_state
+                )
+            else:
+                state_a.turn_final_text = "written by A"
+                await store_a.save(PRINCIPAL, CONVERSATION)
+        return cursor
+
+    monkeypatch.setattr(app_b.state.studio.turns, "open_cursor", read_then_write)
+    async with _client(app_b) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body("hi"))
+
+    assert wrote == [lapsed]
+    assert _events(frames)[-1] == "done"
+    stored = await turns.turn(left.id)
+    conversation = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert conversation is not None
+    first = conversation.turns[0]
+    if lapsed == "finishes_the_turn":
+        assert stored.status is TurnStatus.DONE
+        assert first["error"] == "state_not_saved"
+        assert first["readings"][0] == _reading(1)
+        assert [p["revision"] for p in first["plans"]] == [plan["revision"]]
+        assert first["specs"] == {used: {"spec_id": used}}
+    else:
+        assert stored.status is TurnStatus.ABANDONED
+        assert (first["error"], first["assistant"]) == ("abandoned", "written by A")
+
+
 class _CallingSurface(ScriptedSurface):
     """`ScriptedSurface`, recording the name of every tool it is called with."""
 
@@ -4740,7 +4817,8 @@ async def test_an_answer_after_a_refused_turn_resumes_on_the_paused_turn_s_span(
             client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
         )
 
-    assert (stale.status_code, refused) == (409, [CONVERSATION])
+    # Every attempt at the claim loses (`_CLAIM_ATTEMPTS`).
+    assert (stale.status_code, refused) == (409, [CONVERSATION] * studio_module._CLAIM_ATTEMPTS)
     trace_id = _frame(second, "done")["trace_id"]
     turns = [span for span in otlp_spans.get_finished_spans() if span.name == "turn"]
     assert (turns[-1].attributes or {})["dfo.external_id"] == trace_id
@@ -5521,7 +5599,15 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
         records.extend(drained)
         return drained
 
+    release = _RecordingExecutor.release
+
+    def _keep_and_release(self: _RecordingExecutor, conversation: str) -> None:
+        # The records the stream did not translate, which its owner's end drops.
+        records.extend(self.drain(conversation))
+        release(self, conversation)
+
     monkeypatch.setattr(_RecordingExecutor, "drain", _drain_and_keep)
+    monkeypatch.setattr(_RecordingExecutor, "release", _keep_and_release)
     provenance = ProvenanceStore()
     provenance.put(conversation=f"{PRINCIPAL}/{CONVERSATION}", manifest={}, **REF_A)
     edit_model = ScriptedEditModel(

@@ -448,9 +448,12 @@ class _Records:
     segment's stream owner alone drains (`take`). `count` is how many records
     a conversation has had appended, which an event carries
     (`_EventRecords`), so that the owner takes exactly the records made
-    before it. The counts never start afresh: an event still queued holds
-    a count from before any drain, so a count reused after a drain emptied
-    the queue would hand that event a record made after it."""
+    before it. The counts never start afresh while the segment's stream
+    owner runs: an event still queued holds a count from before any drain,
+    so a count reused after a drain emptied the queue would hand that
+    event a record made after it. Once the owner ends, no event of the
+    segment is left to drain, and `forget` drops the conversation's records
+    and counts."""
 
     def __init__(self) -> None:
         self.items: list[_ExecutorRecord] = []
@@ -464,6 +467,12 @@ class _Records:
 
     def count(self, conversation: str) -> int:
         return self._appended.get(conversation, 0)
+
+    def forget(self, conversation: str) -> None:
+        """Drop this conversation's records and counts."""
+        self.items = [record for record in self.items if record.conversation != conversation]
+        self._appended.pop(conversation, None)
+        self._taken.pop(conversation, None)
 
     def take(self, conversation: str, upto: int | None = None) -> list[_ExecutorRecord]:
         """This conversation's records, preserving order: every one, or the
@@ -634,6 +643,11 @@ class _RecordingExecutor:
         """Take (only) this conversation's records, preserving order: every
         one, or those appended before its `upto`th (`_Records.take`)."""
         return self._records.take(conversation, upto)
+
+    def release(self, conversation: str) -> None:
+        """Drop this conversation's records and counts once its segment's
+        stream owner has ended (`_Records.forget`)."""
+        self._records.forget(conversation)
 
     async def aclose(self) -> None:
         """Release the wrapped executor's resources, if it holds any.
@@ -990,6 +1004,15 @@ class _RecordingSurface:
                 key: started for key, started in self._in_flight.items() if key[0] != conversation
             }
         return self._records.take(conversation, upto)
+
+    def release(self, conversation: str) -> None:
+        """Drop this conversation's records, counts and calls still in
+        flight once its segment's stream owner has ended
+        (`_Records.forget`)."""
+        self._in_flight = {
+            key: started for key, started in self._in_flight.items() if key[0] != conversation
+        }
+        self._records.forget(conversation)
 
     def count(self, conversation: str) -> int:
         """How many records this conversation has had appended (`_Records`)."""

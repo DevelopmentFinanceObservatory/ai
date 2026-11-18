@@ -896,12 +896,14 @@ def _close_work(
     conversation: ConversationState, renew_now: asyncio.Event, runner: StudioRunner
 ) -> None:
     """Let go of a work's `renew_now`, when the conversation still holds it,
-    and empty the recorders of the calls its stream did not translate."""
+    and empty the recorders of the calls its stream did not translate,
+    their counts included, since no event of the segment is left to drain
+    (`harness.studio_translate._Records.forget`)."""
     if conversation.renew_now is renew_now:
         conversation.renew_now = None
-    runner.recorder.drain(current_conversation_id.get())
+    runner.recorder.release(current_conversation_id.get())
     if runner.surface_recorder is not None:
-        runner.surface_recorder.drain(current_conversation_id.get())
+        runner.surface_recorder.release(current_conversation_id.get())
 
 
 def _streaming_conflict_response(detail: str, *, retry_after_seconds: int = 5) -> JSONResponse:
@@ -1308,9 +1310,10 @@ def _set_turn_context(
     start_turn_budget(settings)
 
 
-# How many times `/turn` builds its claim on the turn left open before it
-# answers a retryable 409, when that turn's lapsed segment keeps writing it
-# between the read and the claim save (`_left_open_unmoved`).
+# How many times `/turn` builds its claim on a fresh load before it answers
+# a retryable 409, when the conversation keeps moving between its load and
+# its claim save: the turn left open (`_left_open_unmoved`) or the row's
+# version (`ConversationStale`).
 _CLAIM_ATTEMPTS = 3
 
 
@@ -1523,79 +1526,84 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         claimed: str | None = None
         begun: ConversationState | None = None
         try:
-            conversation = await studio.store.load(principal, body.conversation_id)
-            if conversation is None:
-                if body.component_ref is not None or body.apply_choice is not None:
-                    # The client refers to state (a card to edit or to follow
-                    # up on, or a chip under an answer) this store never had.
-                    lock.release()
-                    return _unknown_conversation_response(body.conversation_id)
-                try:
-                    conversation = await studio.store.create(principal, body.conversation_id)
-                except ConversationExists:
-                    # Another instance's `/turn` created this same
-                    # never-before-seen conversation between this request's
-                    # own load and create. Load what it created and continue
-                    # to the claim below. Its compare-and-swap decides the
-                    # race, and a lost claim is the `ConversationStale`
-                    # 409, not a bare 500.
+            # The claim is built on the conversation as loaded, up to
+            # `_CLAIM_ATTEMPTS` times. A segment whose lease lapsed can still
+            # write the turn (its cursor, its record) until the claim
+            # commits, so the claim save checks, with the conversation
+            # locked, that the turn stands as read (`_left_open_unmoved`),
+            # and compares the row's version with the load's. A claim that
+            # finds either moved is built again from a fresh load, which
+            # records a turn the lapsed segment closed as its cursor holds it
+            # (`StudioStore.load`). Once the claim commits, that segment's
+            # writes are fenced out. A live lease another segment holds
+            # answers 409 (`SegmentBusy`).
+            for attempt in itertools.count(1):
+                conversation = await studio.store.load(principal, body.conversation_id)
+                if conversation is None:
+                    if body.component_ref is not None or body.apply_choice is not None:
+                        # The client refers to state (a card to edit or to follow
+                        # up on, or a chip under an answer) this store never had.
+                        lock.release()
+                        return _unknown_conversation_response(body.conversation_id)
+                    try:
+                        conversation = await studio.store.create(principal, body.conversation_id)
+                    except ConversationExists:
+                        # Another instance's `/turn` created this same
+                        # never-before-seen conversation between this request's
+                        # own load and create. Load what it created and continue
+                        # to the claim below. Its compare-and-swap decides the
+                        # race, and a lost claim is the `ConversationStale`
+                        # 409, not a bare 500.
+                        conversation = await studio.store.load(principal, body.conversation_id)
+                        assert conversation is not None
+                elif await studio.store.stop_live(principal, body.conversation_id):
+                    # A Stop live for the turn left open, by a stream whose close
+                    # failed or whose lease lapsed, ends that turn before this
+                    # one begins.
+                    refused = await _close_stopped_turn(studio, principal, body.conversation_id)
+                    if refused is not None:
+                        return await _unclaimed(
+                            studio.store, principal, body.conversation_id, lock, refused
+                        )
                     conversation = await studio.store.load(principal, body.conversation_id)
                     assert conversation is not None
-            elif await studio.store.stop_live(principal, body.conversation_id):
-                # A Stop live for the turn left open, by a stream whose close
-                # failed or whose lease lapsed, ends that turn before this
-                # one begins.
-                refused = await _close_stopped_turn(studio, principal, body.conversation_id)
-                if refused is not None:
-                    return await _unclaimed(
-                        studio.store, principal, body.conversation_id, lock, refused
-                    )
-                conversation = await studio.store.load(principal, body.conversation_id)
-                assert conversation is not None
-            if (
-                body.component_ref is not None
-                and body.component_ref.intent is ComponentRefIntent.FOLLOW_UP
-                and body.component_ref.component_id not in conversation.components
-            ):
-                # A follow-up about a card this conversation never stored
-                # would run as a plain turn with no card in view.
-                lock.release()
-                return _tool_error_response(
-                    ToolError(
-                        error=ErrorCode.NOT_FOUND,
-                        retry=RetryMode.DO_NOT_RETRY,
-                        detail=(
-                            "This card is not part of this conversation, so the agent "
-                            "cannot answer about it. Ask again without the card."
-                        ),
-                        pointer="/component_ref/component_id",
-                    ),
-                    status_code=404,
-                )
-            chip_label: str | None = None
-            if (pick := body.apply_choice) is not None:
-                label = _chip_label(conversation, pick)
-                if isinstance(label, JSONResponse):
+                if (
+                    body.component_ref is not None
+                    and body.component_ref.intent is ComponentRefIntent.FOLLOW_UP
+                    and body.component_ref.component_id not in conversation.components
+                ):
+                    # A follow-up about a card this conversation never stored
+                    # would run as a plain turn with no card in view.
                     lock.release()
-                    return label
-                chip_label = label
-            # A turn still open on the conversation, paused on a question or
-            # left running by a segment whose lease lapsed, is abandoned once
-            # this request holds the lease. Its records are taken first, so
-            # `begin_turn` keeps them in the record it closes the turn with.
-            # A turn the tables record as open with no cursor closes on what
-            # the conversation holds. Every change up to the claim save is
-            # made on a working copy, which the save swaps into the live
-            # state once it commits. A request that claims nothing leaves
-            # the live state as loaded.
-            #
-            # The segment whose lease lapsed can still write the turn until
-            # the claim commits, so the claim save checks, with the
-            # conversation locked, that the turn stands as read here
-            # (`_left_open_unmoved`). Once the claim commits, that segment's
-            # writes are fenced out. A turn that moved is read again and the
-            # claim built on it afresh, so the turn closes on its last write.
-            for attempt in itertools.count(1):
+                    return _tool_error_response(
+                        ToolError(
+                            error=ErrorCode.NOT_FOUND,
+                            retry=RetryMode.DO_NOT_RETRY,
+                            detail=(
+                                "This card is not part of this conversation, so the agent "
+                                "cannot answer about it. Ask again without the card."
+                            ),
+                            pointer="/component_ref/component_id",
+                        ),
+                        status_code=404,
+                    )
+                chip_label: str | None = None
+                if (pick := body.apply_choice) is not None:
+                    label = _chip_label(conversation, pick)
+                    if isinstance(label, JSONResponse):
+                        lock.release()
+                        return label
+                    chip_label = label
+                # A turn still open on the conversation, paused on a question or
+                # left running by a segment whose lease lapsed, is abandoned once
+                # this request holds the lease. Its records are taken first, so
+                # `begin_turn` keeps them in the record it closes the turn with.
+                # A turn the tables record as open with no cursor closes on what
+                # the conversation holds. Every change up to the claim save is
+                # made on a working copy, which the save swaps into the live
+                # state once it commits. A request that claims nothing leaves
+                # the live state as loaded.
+                #
                 work = studio.store.draft(principal, body.conversation_id)
                 left_open = await studio.turns.open_cursor(principal, body.conversation_id)
                 if left_open is not None and not work.turn_recorded:
@@ -1642,8 +1650,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # saved before the turn opens and before the SSE response
                 # starts. This save is a compare-and-swap against what this
                 # instance last loaded, so a `ConversationStale` here means
-                # another instance's `/turn` claimed a turn on this
-                # conversation since. Claiming first leaves no crash window: a
+                # another writer moved the row since: another instance's
+                # claim, whose live lease the next load meets, or the lapsed
+                # segment's own record write. Claiming first leaves no crash window: a
                 # crash between the claim and the turn's opening leaves the
                 # store at the new turn_index with no turn open, and the next
                 # `/turn` claims the one after it. The segment it also claimed
@@ -1659,22 +1668,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         work,
                         alongside=_left_open_unmoved(left_open),
                     )
-                except _LeftOpenMoved:
-                    if attempt < _CLAIM_ATTEMPTS:
-                        studio.store.drop_draft(principal, body.conversation_id)
-                        continue
-                    return await _unclaimed(
-                        studio.store,
-                        principal,
-                        body.conversation_id,
-                        lock,
-                        _streaming_conflict_response(
-                            "the conversation's previous turn is still being written",
-                            retry_after_seconds=1,
-                        ),
-                        turn=work,
-                    )
                 except StopPending:
+                    # A `ConversationStale` of its own kind, so it is caught first.
                     return await _answer_after_stop(
                         studio,
                         principal,
@@ -1685,14 +1680,21 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         ),
                         turn=work,
                     )
-                except ConversationStale:
+                except (_LeftOpenMoved, ConversationStale) as exc:
+                    if attempt < _CLAIM_ATTEMPTS:
+                        studio.store.drop_draft(principal, body.conversation_id)
+                        continue
+                    moved = isinstance(exc, _LeftOpenMoved)
                     return await _unclaimed(
                         studio.store,
                         principal,
                         body.conversation_id,
                         lock,
                         _streaming_conflict_response(
-                            "another request is streaming on this conversation"
+                            "the conversation's previous turn is still being written"
+                            if moved
+                            else "another request is streaming on this conversation",
+                            retry_after_seconds=1 if moved else 5,
                         ),
                         turn=work,
                     )

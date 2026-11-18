@@ -14,6 +14,7 @@ import json
 import logging
 import ssl
 from collections.abc import Callable, Mapping, Sequence
+from types import SimpleNamespace
 from typing import Any, cast
 
 import aiohttp
@@ -49,6 +50,7 @@ from harness.scripted_plan import scripted_plan
 from harness.seeds import SEED_STEP_TOOL
 from harness.sentences import DECLINE_REASONS, DROPPED_REASON, failure_sentence
 from harness.settings import Settings
+from harness.studio import _close_work
 from harness.studio_state import (
     ConversationState,
     _next_manifest,
@@ -1694,6 +1696,32 @@ def test_a_drain_that_empties_the_queue_keeps_the_counts_the_queued_events_hold(
     assert records.count("c1") == 2
     assert records.take("c1", 1) == []
     assert [record.step_id for record in records.take("c1", 2)] == ["pop"]
+
+
+def test_the_end_of_a_segment_s_stream_owner_drops_the_conversation_s_counts() -> None:
+    """Once the owner ends, no event of its segment is left to drain, so
+    the recorders drop the conversation's records and counts, and keep
+    another conversation's."""
+    translator, surface_recorder = _progress_translator()
+    recorder = translator._recorder
+    for conversation in ("c1", "c2"):
+        current_conversation_id.set(conversation)
+        recorder.record_step(tool="get_data", args={}, result={"outcome": "ok"}, step_id="s")
+        surface_recorder._records.append(
+            _ExecutorRecord(
+                tool="get_data", args={}, result={}, duration_ms=1, conversation=conversation
+            )
+        )
+    current_conversation_id.set("c1")
+    recorder.drain("c1", 1)
+    runner = cast(Any, SimpleNamespace(recorder=recorder, surface_recorder=surface_recorder))
+
+    _close_work(ConversationState(conversation_id="c1"), asyncio.Event(), runner)
+
+    for records in (recorder._records, surface_recorder._records):
+        assert (records.count("c1"), records.count("c2")) == (0, 1)
+        assert "c1" not in {*records._appended, *records._taken}
+        assert [record.conversation for record in records.items] == ["c2"]
 
 
 async def test_a_call_recorded_after_a_drain_shows_after_the_events_marked_before_it() -> None:

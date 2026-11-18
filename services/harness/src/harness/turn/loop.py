@@ -406,6 +406,7 @@ async def _enter[E](
         except _NOT_THE_TURNS:
             raise
         except Exception as exc:
+            _cut(exc)
             logger.exception("turn %s: accepting the answer at node %s failed", key, node)
             raise _Closes(TurnStatus.FAILED, exc) from exc
         owed = answer.value
@@ -471,10 +472,13 @@ async def drive[E](
 
     A cut (a Stop that ends the turn, a lost lease, a client that left)
     reaches the node as a cancellation of the task running `drive`. The
-    cancellation is raised again once the node returns or raises, and once
-    its work after the commit has run, so a node that catches it neither
-    writes its result nor leads to another node, and the segment settles
-    on the cut as when the cancellation escapes (`run_segment`).
+    cancellation is raised again once the node returns or raises, once a
+    boundary write or the answer's acceptance raises, and once the node's
+    work after the commit has run, so work that catches it neither writes
+    the node's result, closes the turn `failed`, nor leads to another node,
+    and the segment settles on the cut as when the cancellation escapes
+    (`run_segment`). The `NodeDone` of a move or end the store committed is
+    emitted before that last check.
 
     Raises:
         ValueError: the cursor is paused and no `answer` was given.
@@ -574,10 +578,19 @@ async def drive[E](
         except _NOT_THE_TURNS:
             raise
         except Exception as exc:
+            # The write may have committed, which the cut's settlement
+            # reads back, the pause it wrote included.
+            _cut(exc)
             segment.pausing = None
             logger.exception("turn %s: the write after node %s failed", key, node)
             return await close(TurnStatus.FAILED, node, exc)
         await _after_commit(ctx, node)
+        # A committed move or end is reported before a cut that landed
+        # after the write is raised, so its frames reach the stream. A
+        # committed pause is the cut's settlement to report (`_settle`).
+        if segment.pausing is None:
+            assert isinstance(result, Next)
+            emit(NodeDone(node=node, label=result.label, output=result.output))
         _cut()
 
         if segment.pausing is not None:
@@ -585,8 +598,6 @@ async def drive[E](
             emit(segment.pausing)
             segment.pausing = None
             return segment
-        assert isinstance(result, Next)
-        emit(NodeDone(node=node, label=result.label, output=result.output))
         if following == END:
             segment.outcome = Outcome.DONE
             return segment
