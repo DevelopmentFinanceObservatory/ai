@@ -581,7 +581,10 @@ async def test_a_write_the_serving_release_makes_during_a_reimport_is_a_conflict
         async with side.connect() as writer:
             transaction = await writer.begin()
             await writer.execute(
-                text("UPDATE conversations SET version = version + 1 WHERE conversation_id = :id"),
+                text(
+                    "UPDATE conversations SET version = version + 1, "
+                    "seq_reserved = seq_reserved + 1 WHERE conversation_id = :id"
+                ),
                 {"id": TEXT_ONLY},
             )
             rerun = asyncio.create_task(import_conversations(adk, apply=True))
@@ -785,11 +788,13 @@ async def test_a_paused_turn_s_mapping_form_block_is_served_converted_through_it
     ]
 
 
-async def test_a_served_block_that_does_not_convert_is_logged_with_its_turn_and_reason(
-    adk: AsyncEngine, caplog: pytest.LogCaptureFixture
+async def test_a_served_block_that_does_not_convert_is_logged_once_with_its_turn_and_reason(
+    adk: AsyncEngine, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The load of the open turn and a resumed stream's first spec write each
-    name the block they keep as stored: its turn session, spec id and why."""
+    """The block the serving release keeps as stored is named once per
+    process, with its turn session, spec id and why, however many loads and
+    resumed streams read it."""
+    monkeypatch.setattr(adk_import, "_logged_unconvertible", set())
     spec_id = next(iter(EXPECTED[FULL]["view"]["turn_specs"]))
     block = {**_mapping_block(), "spec_id": spec_id, "_bound_refs": "g7"}
     await _put_open_turn_block(adk, block)
@@ -797,19 +802,18 @@ async def test_a_served_block_that_does_not_convert_is_logged_with_its_turn_and_
     store = _reimporting_store(adk)
 
     with caplog.at_level("WARNING", logger="harness.adk_import"):
-        state = await store.load(PRINCIPAL, FULL)
-        assert state is not None
-        resumed = Event(
-            author="orchestrator",
-            actions=EventActions(state_delta={ORCHESTRATOR_SPECS_KEY: {spec_id: block}}),
-        )
-        _keep_turn_records(state, resumed, store)
+        for _ in range(2):
+            state = await store.load(PRINCIPAL, FULL)
+            assert state is not None
+            resumed = Event(
+                author="orchestrator",
+                actions=EventActions(state_delta={ORCHESTRATOR_SPECS_KEY: {spec_id: block}}),
+            )
+            _keep_turn_records(state, resumed, store)
 
-    logged = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-    assert len(logged) == 2
-    for message in logged:
-        assert f"{FULL}#t4: the _bound_refs of spec block {spec_id} does not convert" in message
-        assert message.endswith("TypeError: _bound_refs is of type str")
+    (logged,) = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert f"{FULL}#t4: the _bound_refs of spec block {spec_id} does not convert" in logged
+    assert logged.endswith("TypeError: _bound_refs is of type str")
 
 
 async def test_close_open_turns_keeps_a_mapping_form_turn_block_as_rows(

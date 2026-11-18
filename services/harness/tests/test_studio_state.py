@@ -24,8 +24,11 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import errno
 import json
 import logging
+import socket
+import ssl
 import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -59,7 +62,7 @@ from harness.studio_state import (
     make_recall_part,
     remove_cards,
 )
-from harness.studio_store import SEQ_BLOCK, ConversationStale, StudioStore
+from harness.studio_store import SEQ_BLOCK, AdkBridge, ConversationStale, StudioStore
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
 from harness.wire import (
     AddOp,
@@ -1784,12 +1787,14 @@ def new_store(
 ) -> Callable[..., StudioStore]:
     """A fresh `StudioStore` over the test's Postgres schema and turn
     sessions: each call stands for another instance. With `clock`, the
-    store reads its leases' time from that clock instead of the database's."""
+    store reads its leases' time from that clock instead of the database's.
+    `adk` is the store's `AdkBridge`, one for conversations ADK never held
+    unless given."""
 
-    def build(*, clock: StoreClock | None = None) -> StudioStore:
+    def build(*, clock: StoreClock | None = None, adk: AdkBridge = NO_ADK) -> StudioStore:
         return StudioStore(
             pg_engine,
-            adk=NO_ADK,
+            adk=adk,
             turn_specs=session_turn_specs(turn_sessions, app_name="app"),
             **(clock.store_kwargs if clock is not None else {}),
         )
@@ -2624,6 +2629,10 @@ async def test_a_card_write_failing_past_the_lease_deadline_reports_the_database
     ("fault", "retried"),
     [
         pytest.param(ConnectionResetError("connection reset"), True, id="reset-socket"),
+        pytest.param(TimeoutError("connect timed out"), True, id="connect-timeout"),
+        pytest.param(ssl.SSLError("handshake failed"), True, id="tls-failure"),
+        pytest.param(socket.gaierror("name does not resolve"), True, id="unresolved-name"),
+        pytest.param(OSError(errno.EHOSTUNREACH, "No route to host"), True, id="unreachable-host"),
         pytest.param(
             OperationalError("UPDATE", {}, ConnectionRefusedError("refused")),
             True,
@@ -2650,8 +2659,9 @@ async def test_a_card_write_failing_past_the_lease_deadline_reports_the_database
 async def test_a_card_write_retries_a_lost_connection_alone(
     new_store, monkeypatch, fault: Exception, retried: bool
 ) -> None:
-    """A retry outlasts the connection failing. A statement or lock timeout,
-    or a misuse of the connection, no retry mends, so it raises at once."""
+    """A retry outlasts the connection failing, however it surfaces. A
+    statement or lock timeout, or a misuse of the connection, no retry
+    mends, so it raises at once."""
     monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
     store = new_store()
     await store.create("principal", CONVERSATION)
@@ -2814,9 +2824,27 @@ async def _row_digest(store: StudioStore) -> tuple[int, str]:
         return version, await adk_import._stored_digest(conn, pk)
 
 
-async def _with_an_open_turn(new_store) -> StudioStore:
-    """A conversation whose first turn was left open, and a store that has
-    loaded it."""
+class _ReimportingAdk:
+    """An `AdkBridge` that says it re-imports on access, as the serving
+    release's does, over conversations ADK never held."""
+
+    reimports_on_access = True
+
+    async def reimport(self, principal: str, conversation_id: str) -> None:
+        del principal, conversation_id
+
+    async def moved(self, principal: str, conversation_id: str) -> bool:
+        del principal, conversation_id
+        return False
+
+    def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
+        del session_id
+        return specs
+
+
+async def _with_an_open_turn(new_store, *, adk: AdkBridge | None = None) -> StudioStore:
+    """A conversation whose first turn was left open, and a store over `adk`
+    (one that re-imports on access unless given) that has loaded it."""
     first = new_store()
     state = await first.create("principal", CONVERSATION)
     state.begin_turn()
@@ -2824,42 +2852,58 @@ async def _with_an_open_turn(new_store) -> StudioStore:
     segment_id = first.claim_segment("principal", CONVERSATION)
     await first.save("principal", CONVERSATION)
     await first.release("principal", CONVERSATION, segment_id)
-    store = new_store()
+    store = new_store(adk=adk or _ReimportingAdk())
     await store.load("principal", CONVERSATION)
     return store
 
 
-async def test_an_undone_claim_leaves_the_rows_as_they_stood(new_store) -> None:
-    """The claim closes the open turn into a new turn row, opens the next
-    turn and takes the lease. Undoing it writes every row back, version
-    included, so the rows digest as before, and the live state is the one
-    read."""
-    store = await _with_an_open_turn(new_store)
-    before = await _row_digest(store)
-    state = store.current("principal", CONVERSATION)
-    state.begin_turn()
+async def _claim(store: StudioStore) -> str:
+    """Open the next turn on `store`'s live state and save its claim."""
+    store.current("principal", CONVERSATION).begin_turn()
     segment_id = store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
-    assert (await _row_digest(store)) != before
+    return segment_id
+
+
+async def test_an_undone_claim_leaves_the_rows_as_they_stood_at_a_later_version(
+    new_store,
+) -> None:
+    """The claim closes the open turn into a new turn row, opens the next
+    turn and takes the lease. Undoing it writes every row back, so the rows
+    digest as before, at the version after the claim's: an instance that
+    read the claim's version cannot save over it. The store forgets the
+    conversation, so its next load reads the canvas a `/composition` edit
+    wrote after the claim."""
+    store = await _with_an_open_turn(new_store)
+    before = await _row_digest(store)
+    segment_id = await _claim(store)
+    claimed = await _row_digest(store)
+    assert claimed[1] != before[1]
+    during = new_store()
+    await during.load("principal", CONVERSATION)
+    await store.mutate_composition("principal", CONVERSATION, _one_block_manifest)
 
     await store.undo_claim("principal", CONVERSATION, segment_id)
 
-    assert (await _row_digest(store)) == before
-    assert (state.turn_index, state.segment, state.turns) == (1, None, [])
-    reloaded = await new_store().load("principal", CONVERSATION)
-    assert reloaded.turn_user_message == "the first question"
-    # The store's own next claim saves against the row as read.
-    state.begin_turn()
-    store.claim_segment("principal", CONVERSATION)
+    version, digest = await _row_digest(store)
+    assert version == claimed[0] + 1
+    assert digest != before[1]  # the canvas the edit wrote stays
+    async with store.engine.begin() as conn:
+        await conn.execute(text("UPDATE conversations SET composition = NULL"))
+    assert (await _row_digest(store))[1] == before[1]
+    assert store.current("principal", CONVERSATION) is None
+    reloaded = await store.load("principal", CONVERSATION)
+    assert (reloaded.turn_index, reloaded.turn_user_message) == (1, "the first question")
+    reloaded.auto_add = False
     await store.save("principal", CONVERSATION)
+    during.current("principal", CONVERSATION).turn_final_text = "written over the save"
+    with pytest.raises(ConversationStale):
+        await during.save("principal", CONVERSATION)
 
 
 async def test_a_claim_whose_turn_state_moved_is_left_and_its_lease_dropped(new_store) -> None:
     store = await _with_an_open_turn(new_store)
-    state = store.current("principal", CONVERSATION)
-    state.begin_turn()
-    segment_id = store.claim_segment("principal", CONVERSATION)
-    await store.save("principal", CONVERSATION)
+    segment_id = await _claim(store)
     async with store.engine.begin() as conn:
         await conn.execute(text("UPDATE conversations SET version = version + 1"))
 
@@ -2868,6 +2912,60 @@ async def test_a_claim_whose_turn_state_moved_is_left_and_its_lease_dropped(new_
     reloaded = await new_store().load("principal", CONVERSATION)
     assert (reloaded.turn_index, reloaded.segment) == (2, None)
     assert [turn["error"] for turn in reloaded.turns] == ["abandoned"]
+
+
+async def test_a_store_that_does_not_reimport_keeps_nothing_to_undo_a_claim(new_store) -> None:
+    """Only a store whose bridge re-imports on access can meet the previous
+    release's turn, so only it keeps what a claim overwrote. Without it an
+    undo drops the lease alone."""
+    store = await _with_an_open_turn(new_store, adk=NO_ADK)
+    segment_id = await _claim(store)
+
+    assert store._runtime[("principal", CONVERSATION)].claim_undo is None
+    await store.undo_claim("principal", CONVERSATION, segment_id)
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert (reloaded.turn_index, reloaded.segment) == (2, None)
+
+
+async def test_an_undo_puts_back_the_item_rows_a_write_replaced_or_added(new_store) -> None:
+    """A row the write replaced gets its value back, keeping its place, and
+    a row it added is deleted."""
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await store.change_canvas("principal", CONVERSATION, lambda work: land_component(work, _CARD))
+    before = await _row_digest(store)
+    delta = {
+        "component:cmp_two": {**state.components["cmp_two"], "title": "Rewritten"},
+        "component:cmp_new": {"title": "Added"},
+        "write_token:cmp_new": "token-new",
+    }
+    pk = store._runtime[("principal", CONVERSATION)].pk
+
+    async with store.engine.begin() as conn:
+        stored = await studio_store._stored_items(conn, pk, delta)
+        await studio_store._write_delta(conn, pk, delta)
+        await studio_store._restore_items(conn, pk, stored)
+
+    assert (await _row_digest(store))[1] == before[1]
+
+
+@pytest.mark.parametrize("ends", ["streamed", "released"])
+async def test_a_claim_keeps_its_undo_until_its_stream_starts_or_its_segment_is_released(
+    new_store, ends: str
+) -> None:
+    store = await _with_an_open_turn(new_store)
+    segment_id = await _claim(store)
+    entry = store._runtime[("principal", CONVERSATION)]
+    assert entry.claim_undo is not None
+
+    if ends == "streamed":
+        store.claim_streamed("principal", CONVERSATION)
+    else:
+        await store.release("principal", CONVERSATION, segment_id)
+
+    assert entry.claim_undo is None
 
 
 async def test_a_removal_that_cannot_reach_the_database_ends_the_stream_unsaved(

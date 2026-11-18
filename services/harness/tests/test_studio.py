@@ -2328,6 +2328,8 @@ async def test_a_turn_whose_session_exists_while_adk_moved_deletes_nothing_and_a
     session_service = _new_session_service()
 
     class MovedAdk:
+        reimports_on_access = False
+
         async def reimport(self, principal: str, conversation_id: str) -> None:
             await NO_ADK.reimport(principal, conversation_id)
 
@@ -3651,6 +3653,57 @@ async def test_cancel_aborts_a_streaming_turn_with_a_cancelled_error_frame() -> 
     assert _events(frames)[-1] == "error"
     assert _frame(frames, "error")["error"]["error"] == "cancelled"
     assert "done" not in _events(frames)
+
+
+async def test_a_claim_whose_stream_started_keeps_nothing_to_undo() -> None:
+    """A store that re-imports on access keeps what a claim save overwrote,
+    for a claim that meets the previous release's turn. Once the stream
+    starts, the claim is no longer undone, so that copy is dropped."""
+
+    class ReimportingAdk:
+        reimports_on_access = True
+
+        async def reimport(self, principal: str, conversation_id: str) -> None:
+            del principal, conversation_id
+
+        async def moved(self, principal: str, conversation_id: str) -> bool:
+            del principal, conversation_id
+            return False
+
+        def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
+            del session_id
+            return specs
+
+    session_service = _new_session_service()
+    store = StudioStore(
+        _engine(),
+        adk=ReimportingAdk(),
+        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+    )
+    resolver = _HangingResolver()
+    app = _app(*_card(), resolver=resolver, session_service=session_service, store=store)
+    saved: list[bool] = []
+    real_save = store.save
+
+    async def noting_save(principal: str, conversation_id: str) -> None:
+        await real_save(principal, conversation_id)
+        saved.append(store._runtime[(principal, conversation_id)].claim_undo is not None)
+
+    store.save = noting_save  # type: ignore[method-assign]
+
+    async with _client(app) as client:
+        stream_task = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
+        await asyncio.wait_for(resolver.entered.wait(), timeout=5)
+        kept = store._runtime[(PRINCIPAL, CONVERSATION)].claim_undo
+        await client.post(
+            "/api/studio/cancel",
+            json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
+            headers=AUTH,
+        )
+        await asyncio.wait_for(stream_task, timeout=5)
+
+    assert saved[-1] is True
+    assert kept is None
 
 
 async def test_cancelling_an_idle_conversation_is_a_no_op_204() -> None:
@@ -7309,6 +7362,8 @@ async def test_a_first_turn_whose_reload_finds_the_conversation_held_answers_it_
     reads = 0
 
     class HeldOnReload:
+        reimports_on_access = False
+
         async def reimport(self, principal: str, conversation_id: str) -> None:
             nonlocal reads
             reads += 1
@@ -7541,8 +7596,10 @@ async def test_a_heartbeat_that_cannot_renew_ends_the_stream_once_its_clock_pass
     heartbeat interval, for as long as the store's instance clock reads
     before 10 seconds short of a TTL past the load the claim's lease expiry
     was dated from. Moving that clock past the deadline, with no real time
-    elapsed, is what ends the stream with a stream-fatal `segment_lost`
-    error. A claim whose session creation is slow (`claim_takes` seconds)
+    elapsed, is what ends the stream with a stream-fatal transient error.
+    No other instance owns the turn, so the stream closes it as
+    `state_not_saved`, as a store write meeting the same outage does. A
+    claim whose session creation is slow (`claim_takes` seconds)
     starts its heartbeat later and keeps the same deadline, since the lease
     expires on the same date."""
     monkeypatch.setattr(studio_module, "HEARTBEAT_INTERVAL_S", 0.05)
@@ -7585,8 +7642,12 @@ async def test_a_heartbeat_that_cannot_renew_ends_the_stream_once_its_clock_pass
         frames = await asyncio.wait_for(stream_task, timeout=5)
 
     assert _events(frames)[-1] == "error"
-    assert _frame(frames, "error")["error"]["error"] == "transient_unavailable"
+    error = _frame(frames, "error")["error"]
+    assert error["error"] == "transient_unavailable"
+    assert error["detail"] == classed_sentence(HarnessCode.STATE_NOT_SAVED, "retry_after_delay")
     assert "done" not in _events(frames)
+    assert state.turn_recorded is True
+    assert state.turns[-1]["error"] == "state_not_saved"
 
 
 async def test_cancel_from_another_instance_stops_the_live_stream_within_a_heartbeat(

@@ -638,13 +638,20 @@ def _converted_specs(session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
     return specs if converted is specs else dict(converted)
 
 
+# Each unconvertible spec block this process has logged, by the reason it
+# was logged with, which names its turn session and spec id.
+_logged_unconvertible: set[str] = set()
+
+
 def _log_unconvertible(blocks: Blocks) -> None:
-    """Log each spec block the serving release keeps as stored, since it
-    does not convert: the turn session (conversation and turn) holding it,
-    its spec id and why. A turn that closes with it loses its entity refs,
-    since the reader refuses the mapping form."""
+    """Log, once per process, each spec block the serving release keeps as
+    stored, since it does not convert: the turn session (conversation and
+    turn) holding it, its spec id and why. A turn that closes with it loses
+    its entity refs, since the reader refuses the mapping form."""
     for reason in blocks.unconvertible:
-        logger.warning("adk import: a spec block is served as stored: %s", reason)
+        if reason not in _logged_unconvertible:
+            _logged_unconvertible.add(reason)
+            logger.warning("adk import: a spec block is served as stored: %s", reason)
 
 
 async def _find_row(conn: AsyncConnection, names: dict[str, str], *, lock: bool) -> int | None:
@@ -717,11 +724,14 @@ _UNCOMPARED_LEASE_FIELD = "cancel"
 
 async def _stored_digest(conn: AsyncConnection, pk: int) -> str:
     """A digest of every row the tables hold for the conversation, its lease
-    included bar `_UNCOMPARED_LEASE_FIELD`."""
+    included bar `_UNCOMPARED_LEASE_FIELD`. The row's `version` is left out:
+    every write that moves it changes a column the digest reads, and an
+    undone claim (`StudioStore.undo_claim`) writes the rows back as they
+    stood at a higher version."""
     conversation = (
         await conn.execute(
             text(
-                "SELECT to_jsonb(c) - 'id' - 'created_at' - 'updated_at' "
+                "SELECT to_jsonb(c) - 'id' - 'created_at' - 'updated_at' - 'version' "
                 f"- 'lease_{_UNCOMPARED_LEASE_FIELD}' FROM conversations c WHERE id = :pk"
             ),
             {"pk": pk},
@@ -1209,6 +1219,8 @@ def reimport_on_access(engine: AsyncEngine) -> AdkBridge:
 class _AdkOnAccess:
     """`reimport_on_access`'s `AdkBridge`."""
 
+    reimports_on_access = True
+
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
         # Each refused conversation, with the ledger session's `update_time` the
@@ -1283,6 +1295,8 @@ def _diverged(principal: str, conversation_id: str) -> ConversationHeld:
 
 class _NoAdk:
     """The job's stores read the tables as they stand and serve no turn."""
+
+    reimports_on_access = False
 
     async def reimport(self, principal: str, conversation_id: str) -> None:
         del principal, conversation_id

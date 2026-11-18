@@ -157,7 +157,12 @@ type TurnSpecs = Callable[[str, str], Awaitable[dict[str, Any]]]
 
 class AdkBridge(Protocol):
     """How `StudioStore` reads conversations the previous release still
-    writes to ADK (`harness.adk_import.reimport_on_access`)."""
+    writes to ADK (`harness.adk_import.reimport_on_access`).
+    `reimports_on_access` says whether it copies in what that release
+    wrote, so a `/turn` claim may collide with its turn and need undoing
+    (`StudioStore.undo_claim`)."""
+
+    reimports_on_access: bool
 
     async def reimport(self, principal: str, conversation_id: str) -> None:
         """Bring one conversation's rows up to date with its ADK ledger
@@ -272,21 +277,23 @@ async def _run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
 
 def _transient(exc: BaseException) -> bool:
     """Whether `exc` is the connection to the database failing, a fault a
-    retry may outlast: a connection SQLAlchemy invalidated, a socket the
-    server refused or reset (`ConnectionError`, raised as it is or as the
-    driver error's cause), or the pool timing out. Anything else, a
-    statement or lock timeout and a misuse of the connection included, no
-    retry mends, so it raises at once."""
+    retry may outlast, however it surfaces: a connection SQLAlchemy
+    invalidated, the pool timing out, or an `OSError` raised as it is or as
+    a driver error's cause. That covers a refused, reset or timed-out
+    socket, an unreachable host, a name that does not resolve and a TLS
+    failure, which the Cloud SQL connector raises unwrapped when it cannot
+    connect. A statement or lock timeout and a misuse of the connection are
+    driver errors from no `OSError`; no retry mends them, so they raise at
+    once."""
     if isinstance(exc, DBAPIError):
         return exc.connection_invalidated or _connection_lost(exc.orig)
     return isinstance(exc, SQLAlchemyTimeoutError) or _connection_lost(exc)
 
 
 def _connection_lost(exc: BaseException | None) -> bool:
-    """Whether `exc`, or the error it was raised from, is a socket the
-    server refused or reset."""
+    """Whether `exc`, or an error it was raised from, is an `OSError`."""
     while exc is not None:
-        if isinstance(exc, ConnectionError):
+        if isinstance(exc, OSError):
             return True
         exc = exc.__cause__
     return False
@@ -643,6 +650,19 @@ class _ItemTable:
             f"SELECT {self.ident}, {self.value} FROM {self.table} WHERE conversation = :pk{order}"
         )
 
+    def select_idents(self) -> Any:
+        """The rows of the idents bound to `:idents`."""
+        return text(
+            f"SELECT {self.ident}, {self.value} FROM {self.table} "
+            f"WHERE conversation = :pk AND {self.ident} = ANY(:idents)"
+        )
+
+    def delete_idents(self) -> Any:
+        """Delete the rows of the idents bound to `:idents`."""
+        return text(
+            f"DELETE FROM {self.table} WHERE conversation = :pk AND {self.ident} = ANY(:idents)"
+        )
+
 
 _ITEM_TABLES = {
     _TURN_ITEM_PREFIX: _ItemTable(
@@ -768,24 +788,25 @@ class _ClaimUndo:
     """What a claim save overwrote, for `StudioStore.undo_claim` to write
     back: the conversation's row as it stood (`before`), the stored value of
     each item row the save wrote, by key prefix and ident (`items`; an ident
-    absent from its map had no row), the baseline the save diffed against,
-    and the version the save wrote (`claimed`)."""
+    absent from its map had no row), and the version the save wrote
+    (`claimed`)."""
 
     before: Any
     items: dict[str, tuple[list[Any], dict[Any, Any]]]
-    baseline: dict[str, Any]
     claimed: int
 
 
 async def _write_back(conn: AsyncConnection, pk: int, undo: _ClaimUndo, segment_id: str) -> bool:
     """`StudioStore.undo_claim`'s write: when the row still holds the claim
-    save's version and `segment_id`'s lease, write back the row and item
-    rows `undo` holds. Whether it wrote."""
+    save's version and `segment_id`'s lease, write back the row's content
+    and item rows `undo` holds, at the version after the claim's, so the
+    version only rises and a save compared against the claim's version
+    fails. Whether it wrote."""
     before = undo.before
     written = (
         await conn.execute(
             text(
-                "UPDATE conversations SET version = :version, "
+                "UPDATE conversations SET version = version + 1, "
                 "turn_state = CAST(:turn_state AS jsonb), seq_next = :seq_next, "
                 "seq_reserved = :seq_reserved, lease_segment_id = :segment_id, "
                 "lease_owner = :owner, lease_expires_at = :expires_at, lease_cancel = :cancel, "
@@ -795,7 +816,6 @@ async def _write_back(conn: AsyncConnection, pk: int, undo: _ClaimUndo, segment_
             ),
             {
                 "pk": pk,
-                "version": before.version,
                 "turn_state": json.dumps(before.turn_state),
                 "seq_next": before.seq_next,
                 "seq_reserved": before.seq_reserved,
@@ -822,14 +842,9 @@ async def _stored_items(
     map."""
     stored: dict[str, tuple[list[Any], dict[Any, Any]]] = {}
     for prefix, rows in _delta_write(delta).rows.items():
-        items = _ITEM_TABLES[prefix]
         idents = [row["ident"] for row in rows]
         result = await conn.execute(
-            text(
-                f"SELECT {items.ident}, {items.value} FROM {items.table} "
-                f"WHERE conversation = :pk AND {items.ident} = ANY(:idents)"
-            ),
-            {"pk": pk, "idents": idents},
+            _ITEM_TABLES[prefix].select_idents(), {"pk": pk, "idents": idents}
         )
         stored[prefix] = (idents, dict(result.tuples().all()))
     return stored
@@ -842,25 +857,20 @@ async def _restore_items(
     a row, no row where it had none."""
     for prefix, (idents, values) in stored.items():
         items = _ITEM_TABLES[prefix]
-        for ident in idents:
-            if ident in values:
-                value = values[ident]
-                await conn.execute(
-                    items.upsert(),
+        if values:
+            await conn.execute(
+                items.upsert(),
+                [
                     {
                         "pk": pk,
                         "ident": ident,
                         "value": json.dumps(value) if items.json_value else value,
-                    },
-                )
-            else:
-                await conn.execute(
-                    text(
-                        f"DELETE FROM {items.table} "
-                        f"WHERE conversation = :pk AND {items.ident} = :ident"
-                    ),
-                    {"pk": pk, "ident": ident},
-                )
+                    }
+                    for ident, value in values.items()
+                ],
+            )
+        if absent := [ident for ident in idents if ident not in values]:
+            await conn.execute(items.delete_idents(), {"pk": pk, "idents": absent})
 
 
 @dataclass
@@ -887,7 +897,8 @@ class _RuntimeEntry:
     `cancel_event` and `_telemetry_span` keep their identity across a reload.
     `baseline` is the last durable snapshot known stored, the reference a
     save diffs against. `claim_undo` is what the last claim save since the
-    last read overwrote (`StudioStore.undo_claim`). `composition_lock` serialises same-instance
+    last read overwrote (`StudioStore.undo_claim`), kept until that claim's
+    stream starts or its segment is released. `composition_lock` serialises same-instance
     `/composition` calls on the shared `state` object, separate from `lock`
     since a canvas edit must land while a turn streams. `write_lock`
     serialises this instance's own
@@ -1185,7 +1196,9 @@ class StudioStore:
         turn starts past the stored reserved end when that moved since the
         load: the lapsed stream the claim takes over reserved more numbers
         before its lease lapsed, and may have sent them. A claim save keeps
-        what it overwrote, for `undo_claim`.
+        what it overwrote, for `undo_claim`, when the store's `adk` re-imports
+        on access (`AdkBridge.reimports_on_access`), the one case a claim may
+        meet the previous release's turn.
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
@@ -1214,12 +1227,11 @@ class StudioStore:
                     entry.state.seq = row.seq_reserved
                     reserved = row.seq_reserved + SEQ_BLOCK
                     delta = _changed_since(_serialize_durable(entry.state), entry.baseline)
-                items = await _stored_items(conn, entry.pk, delta) if claimed is not None else {}
+                undoable = claimed is not None and self._adk.reimports_on_access
+                items = await _stored_items(conn, entry.pk, delta) if undoable else {}
                 version = await self._write(conn, entry.pk, delta, seq_reserved=reserved)
-            if claimed is not None:
-                entry.claim_undo = _ClaimUndo(
-                    before=row, items=items, baseline=dict(entry.baseline), claimed=version
-                )
+            if undoable:
+                entry.claim_undo = _ClaimUndo(before=row, items=items, claimed=version)
             entry.version = version
             entry.baseline.update(delta)
             if claimed is not None:
@@ -1332,12 +1344,8 @@ class StudioStore:
                 components: dict[str, dict[str, Any]] = {}
                 if component_ids:
                     rows = await conn.execute(
-                        text(
-                            f"SELECT {components_table.ident}, {components_table.value} "
-                            f"FROM {components_table.table} WHERE conversation = :pk "
-                            f"AND {components_table.ident} = ANY(:ids)"
-                        ),
-                        {"pk": row.id, "ids": list(component_ids)},
+                        components_table.select_idents(),
+                        {"pk": row.id, "idents": list(component_ids)},
                     )
                     components = dict(rows.tuples().all())
                 result = mutate(manifest, components)
@@ -1681,6 +1689,7 @@ class StudioStore:
         timeout: float,
     ) -> None:
         """`release`'s save, run as its own task."""
+        self._entry(principal, conversation_id).claim_undo = None
         try:
             async with asyncio.timeout(timeout):
                 state.drop_resuming(segment_id)
@@ -1778,9 +1787,11 @@ class StudioStore:
         """Take back the claim save of `segment_id`, a claim whose stream
         never started, when nothing has written the turn state since: one
         transaction that, while the row still holds that save's version and
-        lease, writes back the row and the item rows as they stood before
-        it, its version included, and returns this instance's live state to
-        what it read. The rows then digest as they did, so a conversation
+        lease, writes back the row's content and the item rows as they stood
+        before it, at the next version (`_write_back`). This instance then
+        forgets the conversation (its runtime entry, live state included),
+        so its next request reads the row afresh, a canvas edit made since
+        the load included. The rows then digest as they did, so a conversation
         the previous release moved meanwhile re-imports cleanly on the next
         load (`harness.adk_import.reimport_on_access`) in place of being
         held as changed on both sides. When the version moved, the row is
@@ -1806,12 +1817,8 @@ class StudioStore:
                 if undo is not None and entry.pk is not None:
                     async with self._transaction() as conn:
                         undone = await _write_back(conn, entry.pk, undo, segment_id)
-                    if undone:
-                        entry.version = undo.before.version
-                        entry.seq_reserved = undo.before.seq_reserved
-                        entry.held = None
-                        entry.claim_undo = None
-                        _take_durable(entry, conversation_id, undo.baseline)
+                    if undone and self._runtime.get((principal, conversation_id)) is entry:
+                        del self._runtime[(principal, conversation_id)]
         except Exception:
             logger.exception(
                 "studio store: conversation %s failed to undo the claim of segment %s",
@@ -1826,6 +1833,11 @@ class StudioStore:
                 segment_id,
             )
             await self._drop_lease(principal, conversation_id, segment_id, timeout=timeout)
+
+    def claim_streamed(self, principal: str, conversation_id: str) -> None:
+        """The claim's stream has started, so its claim save is no longer
+        undone (`undo_claim`): drop what it kept for that."""
+        self._entry(principal, conversation_id).claim_undo = None
 
     async def request_cancel(self, principal: str, conversation_id: str) -> bool:
         """Set the cancel flag on `conversation_id`'s live segment, whoever

@@ -555,13 +555,13 @@ async def _sse_stream(
     with no `plan.proposed`: a Stop never leaves a stream open. Once that
     frame passes, the deadline is met, so a slow unwind after it leaves the
     paused turn open.
-    `"segment_lost"` (this stream's segment lease was taken over, or this
-    instance's own renewal could not keep it alive) yields a stream-fatal
-    `transient_unavailable` frame without closing the turn. Another
-    instance now owns the segment and may still complete it.
-    `"state_not_saved"` (a write could not reach the database before the
-    lease's deadline) closes the turn as `state_not_saved` first, since no
-    other instance will, and yields the same frame. Either way the segment
+    `"segment_lost"` (this stream's segment lease was taken over) yields a
+    stream-fatal `transient_unavailable` frame without closing the turn.
+    Another instance now owns the segment and may still complete it.
+    `"state_not_saved"` (a write, or the heartbeat's renewal, could not
+    reach the database before the lease's deadline) closes the turn as
+    `state_not_saved` first, since no other instance will, and yields the
+    same frame. Either way the segment
     generator is closed, unwinding the ADK run.
 
     A Stop, a `segment_lost` transient-unavailable frame, or a stream-fatal
@@ -1024,9 +1024,11 @@ class StudioRunner:
         A `renew` call that raises is retried every interval until the
         lease's deadline (`StudioStore.lease_deadline`, on this instance's
         own clock, anchored just before the read or renewal that set the
-        lease's expiry), then also ends the stream as lost: an instance this
-        deaf to its own renewal cannot be trusted to still own the segment,
-        even though nothing else has claimed it yet. A span on one clock
+        lease's expiry), then ends the stream as `state_not_saved`, as a
+        store write meeting the same outage does (`DatabaseUnavailable`): an
+        instance this deaf to its own renewal cannot be trusted to still own
+        the segment, and nothing else has claimed it yet, so the turn is
+        closed here. A span on one clock
         leaves the gap between this clock and the database's, which decides
         the lease, out of the deadline. The store's writes stop retrying at
         the same deadline.
@@ -1050,7 +1052,7 @@ class StudioRunner:
                     return
                 if self.store.now() < self.store.lease_deadline(principal, conversation_id):
                     continue
-                _end_stream(conversation, "segment_lost")
+                _end_stream(conversation, "state_not_saved")
                 return
             if result == "ok":
                 continue
@@ -1169,6 +1171,7 @@ class StudioRunner:
         `StudioStore.release`), and still could not strand the lock, since
         releasing it does not depend on the release call having succeeded.
         """
+        self.store.claim_streamed(principal, conversation_id)
         heartbeat = asyncio.ensure_future(
             self._heartbeat(principal, conversation_id, segment_id, conversation)
         )

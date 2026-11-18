@@ -395,6 +395,8 @@ async def no_turn_specs(principal: str, session_id: str) -> dict[str, Any]:
 class _NoAdk:
     """An `AdkBridge` for a store whose conversations ADK never held."""
 
+    reimports_on_access = False
+
     async def reimport(self, principal: str, conversation_id: str) -> None:
         del principal, conversation_id
 
