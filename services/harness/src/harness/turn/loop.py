@@ -29,15 +29,16 @@ answer the turn accepted when the cursor still owes it (`Cursor.owed`).
 
 `run_segment` runs `drive` under the conversation's lease
 (`StudioStore.renew`), renewing it every `HEARTBEAT_INTERVAL_S`. The renewal
-reports the conversation's latest Stop request from any instance
-(`StudioStore.request_cancel`), and the segment acts once on each request it
-has not acted on: while a node holds the turn's `StopScope` armed, the Stop
-ends only the scope's work; any other Stop cancels the node and closes the
-turn `cancelled`. A lost lease cancels the node and leaves the cursor to
-the instance that holds the lease now. Either way the segment then reads the
-turn back, and reports a close or a pause that committed before the cut as
-the store holds it; a pause the segment wrote is reported (`Paused`) and
-kept, whichever cut came after it.
+reports the Stop live for the turn, posted from any instance
+(`StudioStore.request_cancel`, `harness.studio_store.StopState`): while a
+node holds the turn's `StopScope` armed, the first Stop ends only the
+scope's work, and the turn's next pause write records it taken, which ends
+it; any other Stop cancels the node and closes the turn `cancelled`. A lost
+lease cancels the node and leaves the cursor to the instance that holds the
+lease now. Either way the segment then reads the turn back, and reports a
+close or a pause that committed before the cut as the store holds it; a
+pause the segment wrote is reported (`Paused`) and kept, whichever cut came
+after it.
 
 The caller may hand `run_segment` an event that makes the heartbeat renew
 at once (`renew_now`): a Stop posted on the instance that runs the segment
@@ -144,15 +145,12 @@ class Answer:
 @dataclass
 class Segment:
     """One run of the loop under one lease: the cursor as last written, how
-    the run ended (`None` while it runs), the `Paused` event of a pause
-    the segment is writing and has not yet reported, and the Stop request
-    the segment last acted on (`stop_id`), so a renewal that reports it
-    again before the write that records it commits changes nothing."""
+    the run ended (`None` while it runs), and the `Paused` event of a pause
+    the segment is writing and has not yet reported."""
 
     cursor: Cursor
     outcome: Outcome | None = None
     pausing: Paused | None = None
-    stop_id: str | None = None
 
 
 # The attributes an exception sets to name the MCP call whose pinned timeout
@@ -256,7 +254,9 @@ async def _write_boundary(
     ctx: NodeCtx[Any],
 ) -> Cursor:
     """The write that records `node`'s `result`: a pause under
-    `interrupt_id`, the turn's end, or the move to `following`."""
+    `interrupt_id`, the turn's end, or the move to `following`. A pause
+    records the Stop the turn's `StopScope` took (`StopScope.taken`), which
+    ends that Stop."""
     if isinstance(result, Pause):
         ctx.transcript.append(
             entries.pause(
@@ -277,6 +277,7 @@ async def _write_boundary(
             payload=result.payload,
             state=ctx.state,
             records=ctx.transcript.take(),
+            stop_taken_id=ctx.stop.taken,
         )
     if following == END:
         return await store.finish(
@@ -546,9 +547,7 @@ async def abandon(store: TurnStore, cursor: Cursor, *, segment_id: str) -> Curso
     """Close the open turn at `cursor` `abandoned` without running its node,
     writing under `segment_id`, the conversation lease the caller claimed to
     open the conversation's next turn. Its error is a `TurnAbandoned` at the
-    node it stands at. A paused turn's pause is dropped. A turn whose
-    conversation holds an unread Stop closes `cancelled` instead, acting on
-    that Stop (`harness.turn.store.TurnStore.finish`).
+    node it stands at. A paused turn's pause is dropped.
 
     Raises:
         SegmentLost: `segment_id` no longer holds the conversation's lease.
@@ -616,52 +615,6 @@ async def _settle(
         )
 
 
-async def _scope_takes(
-    lease: StudioStore,
-    stop: StopScope,
-    *,
-    principal: str,
-    conversation_id: str,
-    segment_id: str,
-    stop_id: str,
-    key: TurnKey,
-) -> bool | None:
-    """Record the Stop `stop_id` acted on (`StudioStore.acknowledge_stop`)
-    and set the scope's event. Returns whether the scope took it; `False`
-    when its work ended while the record was written, which leaves the Stop
-    recorded read and the turn's to act on; `None` when nothing was
-    recorded, for the next renewal to try again."""
-    try:
-        acknowledged = await lease.acknowledge_stop(principal, conversation_id, segment_id, stop_id)
-    except Exception:
-        logger.exception("turn %s: recording the Stop the scope takes failed", key)
-        return None
-    if not acknowledged:
-        return None
-    return stop.take()
-
-
-async def _hand_back_stop(
-    lease: StudioStore,
-    *,
-    principal: str,
-    conversation_id: str,
-    segment_id: str,
-    stop_id: str,
-    key: TurnKey,
-) -> None:
-    """Mark the Stop `stop_id` unread again (`StudioStore.hand_back_stop`):
-    it was recorded for a scope whose work ended first, and the drive ended
-    too, so the release of the lease acts on it."""
-    try:
-        await lease.hand_back_stop(principal, conversation_id, segment_id, stop_id)
-    except Exception:
-        logger.exception(
-            "turn %s: a Stop recorded for a scope that had closed could not be handed back",
-            key,
-        )
-
-
 async def run_segment[E](
     store: TurnStore,
     lease: StudioStore,
@@ -681,24 +634,23 @@ async def run_segment[E](
     once whenever `renew_now` is set, and return the segment once the turn
     pauses or ends, a Stop closes it, or the lease is lost.
 
-    A renewal reports a Stop request no party has acted on
-    (`harness.studio_store.StopRead`). While a node holds the turn's
-    `StopScope` armed, the store records the Stop acted on
-    (`StudioStore.acknowledge_stop`) and then the scope's event is set; the
-    node goes on. When the scope's work ended while that record was written,
-    the Stop is the turn's: it closes the turn as below, or, once the drive
-    has finished, is marked unread again for the release. Any other unread Stop cancels the node, leaves no task of
-    the segment running, and closes the turn `cancelled`, a close that
-    records every Stop so far acted on. The segment keeps the request it
-    acted on (`Segment.stop_id`), so a renewal that reports it again before
-    that write commits changes nothing. One a renewal reads after the drive
-    finished is left unread, for the release of the lease. A renewal that
-    finds the lease taken, or that keeps failing until the lease's deadline
+    A renewal reports the Stop live for the turn (`Renewal.stop_id`). While
+    a node holds the turn's `StopScope` armed, the first Stop it reports
+    sets the scope's event and the scope keeps its id (`StopScope.take`),
+    with no write: the node goes on, and the turn's next pause write records
+    the id taken (`TurnStore.pause`), so renewals stop reporting it. Until
+    then the Stop stays live: a close of the turn ends it, and a client
+    that leaves first leaves it to the release of the lease. Any other Stop
+    cancels the node, leaves no task of the segment running, and
+    closes the turn `cancelled`. One a renewal reads after the drive
+    finished is left to the release of the lease, which acts on a Stop
+    still live (`StudioStore.release`). A renewal that finds the lease
+    taken, or that keeps failing until the lease's deadline
     (`StudioStore.lease_deadline`, dated from the claim or the last renewal
-    that landed), cancels the node and ends the segment
-    `lost` without writing the cursor. After either cut the turn is read
-    back (`_settle`), so a close or pause that committed before the cut is
-    reported as stored.
+    that landed), cancels the node and ends the segment `lost` without
+    writing the cursor. After either cut the turn is read back (`_settle`),
+    so a close or pause that committed before the cut is reported as
+    stored.
 
     `cursor` must be read after the caller claimed the lease; `drive`
     refuses one another write has moved since (`CursorStale`).
@@ -736,12 +688,6 @@ async def run_segment[E](
     )
     # Why the heartbeat cancelled the node, when it did.
     ended: list[Outcome] = []
-    # Clear while the heartbeat records a Stop the scope takes; the segment
-    # lets that step finish before it ends, so a Stop it recorded is acted
-    # on or handed back unread.
-    acking = asyncio.Event()
-    acking.set()
-    exiting = False
 
     def end(outcome: Outcome) -> None:
         if outcome is Outcome.CANCELLED:
@@ -763,51 +709,14 @@ async def run_segment[E](
             if not renewal.held:
                 end(Outcome.LOST)
                 return
-            if renewal.stop_id is None or renewal.stop_id == segment.stop_id:
+            if renewal.stop_id is None or renewal.stop_id == stop.taken:
                 continue
-            if stop.armed:
-                # The scope takes the Stop once the store records it acted
-                # on, so no later reader acts on it again. The segment waits
-                # for this step before it ends (`acking`).
-                acking.clear()
-                try:
-                    taken = await _scope_takes(
-                        lease,
-                        stop,
-                        principal=principal,
-                        conversation_id=conversation_id,
-                        segment_id=segment_id,
-                        stop_id=renewal.stop_id,
-                        key=key,
-                    )
-                    if taken is None:
-                        continue
-                    if taken:
-                        segment.stop_id = renewal.stop_id
-                        continue
-                    # The scope's work ended while the record was written,
-                    # so the Stop is the turn's.
-                    if task.done() or exiting:
-                        await _hand_back_stop(
-                            lease,
-                            principal=principal,
-                            conversation_id=conversation_id,
-                            segment_id=segment_id,
-                            stop_id=renewal.stop_id,
-                            key=key,
-                        )
-                        return
-                finally:
-                    acking.set()
-                segment.stop_id = renewal.stop_id
-                end(Outcome.CANCELLED)
-                return
+            if stop.take(renewal.stop_id):
+                continue
             if task.done():
                 # The turn's last write landed before this renewal read the
-                # Stop, so the segment acts on none: the release of the
-                # lease reads it (`harness.studio_store.StopRead`).
+                # Stop: the release of the lease acts on it.
                 return
-            segment.stop_id = renewal.stop_id
             end(Outcome.CANCELLED)
             return
 
@@ -834,8 +743,6 @@ async def run_segment[E](
         segment.outcome = Outcome.LOST
         return segment
     finally:
-        exiting = True
-        await acking.wait()
         beat.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await beat

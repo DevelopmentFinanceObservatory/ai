@@ -824,8 +824,6 @@ class _RuntimeEntry:
     state: ConversationState | None = None
     baseline: dict[str, Any] = field(default_factory=dict)
     draft: tuple[ConversationState, ConversationState] | None = None
-    # SHIM(stop-loop): read by `stop_unread` alone.
-    stop_hint: bool = False
     claimed: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -1049,9 +1047,6 @@ class StudioStore:
         row, flat = stored
         entry.pk, entry.version, entry.read_at = row.id, row.version, row.db_now
         entry.read_stamp = stamp
-        entry.stop_hint = row.lease_cancel or (
-            row.stop_id is not None and row.stop_turn == row.turn_index
-        )
         entry.seq_reserved, entry.claimed_reserved = row.seq_reserved, None
         durable = ConversationState(conversation_id=conversation_id)
         _apply_delta(durable, flat)
@@ -1527,9 +1522,9 @@ class StudioStore:
         (`StopState.live`), read after the update locked the row: a set
         `lease_cancel` is recorded as a fresh id naming the row's turn index
         in the same update (`_STAMP_STOP`). The renewal marks nothing read,
-        so later renewals report the same Stop until its turn closes, and the
-        caller acts once on each id it has not acted on. A
-        database error propagates, as does a `TimeoutError` when the renewal
+        so later renewals report the same Stop until its turn closes or a
+        pause write records it taken (`harness.turn.store.TurnStore.pause`).
+        A database error propagates, as does a `TimeoutError` when the renewal
         takes longer than `timeout`; the caller's own heartbeat decides how
         long to keep trying.
 
@@ -1854,21 +1849,6 @@ class StudioStore:
             lease = _row_segment(row)
             live_lease = lease is not None and lease.expires_at > row.db_now
             return (await _stop_state(conn, row, lease_live=live_lease)).live
-
-    # SHIM(stop-loop): `harness.turn.loop` and `harness.studio` still call
-    # these three; they go once the loop and the routes read `stop_live`.
-    async def acknowledge_stop(
-        self, principal: str, conversation_id: str, segment_id: str, stop_id: str
-    ) -> bool:
-        return True
-
-    async def hand_back_stop(
-        self, principal: str, conversation_id: str, segment_id: str, stop_id: str
-    ) -> bool:
-        return True
-
-    def stop_unread(self, principal: str, conversation_id: str) -> bool:
-        return self._runtime[(principal, conversation_id)].stop_hint
 
     def claimed_event(self, principal: str, conversation_id: str) -> asyncio.Event:
         """An event set when the next claim save on this instance commits

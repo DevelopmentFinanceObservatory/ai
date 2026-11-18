@@ -578,7 +578,6 @@ def create_app(
         executor=executor,
         store=store,
         turns=TurnStore(engine),
-        run_ledger=run_ledger,
         edit_model=GeminiEdit(
             model_name=resolved_settings.model_name,
             timeout_s=resolved_settings.turn_model_time_s,

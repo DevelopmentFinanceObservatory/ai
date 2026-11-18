@@ -728,7 +728,7 @@ class _StoppedPlanner(_RevisingPlanner):
         )
         store_searched_pin_readings(cast(SessionState, ctx.state))
         assert _SEARCHED_PIN in [r["spec_id"] for r in ctx.state[ORCHESTRATOR_SEARCHES_KEY]]
-        assert ctx.stop.take(), "the revision runs under the turn's open stop scope"
+        assert ctx.stop.take("stop_1"), "the revision runs under the turn's open stop scope"
         return await self._stopped()
 
     async def _stopped(self) -> dict[str, Any]:
@@ -1356,7 +1356,7 @@ async def test_a_stopped_revision_ends_the_switch_as_stopped_however_it_unwinds(
     revision = _unwinding_revision(unwinding, error=error)
     switch = asyncio.ensure_future(switch_module._unless_stopped(ctx, revision()))
     await asyncio.sleep(0)
-    assert ctx.stop.take()
+    assert ctx.stop.take("stop_1")
 
     with pytest.raises(SwitchFailedError) as stopped:
         await asyncio.wait_for(switch, timeout=5)
@@ -1371,7 +1371,7 @@ async def test_a_replan_that_asked_in_the_same_wait_as_the_stop_stays_paused() -
     ctx = node_ctx()
 
     async def replan() -> dict[str, Any]:
-        assert ctx.stop.take()
+        assert ctx.stop.take("stop_1")
         return _ASKED
 
     answered = await asyncio.wait_for(switch_module._unless_stopped(ctx, replan()), timeout=5)
@@ -1392,7 +1392,7 @@ async def test_a_switch_cancelled_while_its_stopped_revision_unwinds_stays_cance
 
     switch = asyncio.ensure_future(switch_module._unless_stopped(ctx, revision()))
     await asyncio.sleep(0)
-    assert ctx.stop.take()
+    assert ctx.stop.take("stop_1")
     await asyncio.wait_for(unwinding.wait(), timeout=5)
     switch.cancel()
 

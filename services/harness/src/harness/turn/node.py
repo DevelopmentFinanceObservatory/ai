@@ -63,16 +63,19 @@ class StopScope:
     plan-card switch, a pick's replan), not the turn.
 
     While a node holds the scope open, the first Stop sets the event `open`
-    yielded, and the node goes on along its own edge. Any Stop while no
-    scope is open, or once the open scope's event is set, ends the turn:
-    the loop marks it (`mark_turn_stopped`) before it cancels the node, so
-    work the cancellation reaches tells a Stop (`turn_stopped`) from a
-    client that left or a lost lease, which leave the turn for a later
-    segment to carry on."""
+    yielded and the scope keeps that Stop's id (`taken`); the node goes on
+    along its own edge, and the turn's next pause write records the id on
+    the turn's cursor, which ends that Stop. Any Stop while no scope is
+    open, or once the open scope's event is set, ends the turn: the loop
+    marks it (`mark_turn_stopped`) before it cancels the node, so work the
+    cancellation reaches tells a Stop (`turn_stopped`) from a client that
+    left or a lost lease, which leave the turn for a later segment to carry
+    on."""
 
     def __init__(self) -> None:
         self._event: asyncio.Event | None = None
         self._turn_stopped = False
+        self.taken: str | None = None
 
     @contextlib.asynccontextmanager
     async def open(self) -> AsyncIterator[asyncio.Event]:
@@ -88,12 +91,14 @@ class StopScope:
         """Whether a Stop now would end only the open scope's work."""
         return self._event is not None and not self._event.is_set()
 
-    def take(self) -> bool:
-        """Stop the open scope's work. Returns whether the scope was armed;
-        when it was not, the Stop is the turn's."""
+    def take(self, stop_id: str) -> bool:
+        """Stop the open scope's work on the Stop `stop_id`, keeping its id
+        (`taken`). Returns whether the scope was armed; when it was not, the
+        Stop is the turn's and nothing changes."""
         if self._event is None or self._event.is_set():
             return False
         self._event.set()
+        self.taken = stop_id
         return True
 
     def mark_turn_stopped(self) -> None:

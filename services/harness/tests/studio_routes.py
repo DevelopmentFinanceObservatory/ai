@@ -179,7 +179,6 @@ def orchestrator_app(
         executor=executor or ScriptedExecutor(),
         store=store,
         turns=TurnStore(store.engine),
-        run_ledger=ledger,
         tool_surface=tool_surface,
         edit_model=edit_model,
         early_mints=early_mints,

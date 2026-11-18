@@ -538,7 +538,6 @@ def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) 
         executor=LoggingExecutor(log=log),
         store=StudioStore(engine),
         turns=TurnStore(engine),
-        run_ledger=run_ledger,
         tool_surface=surface,
     )
     app = FastAPI()

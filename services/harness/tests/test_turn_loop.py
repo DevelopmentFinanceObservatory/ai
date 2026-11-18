@@ -51,9 +51,10 @@ async def _instance(engine: AsyncEngine, clock: StoreClock) -> StudioStore:
 
 
 async def _claim(lease: StudioStore) -> str:
-    """Claim the conversation's lease, creating the conversation on first use."""
+    """Claim the conversation's lease, creating the conversation on first use
+    with its turn index at 1, the turn `_open` opens."""
     if await lease.load(PRINCIPAL, CONVERSATION) is None:
-        await lease.create(PRINCIPAL, CONVERSATION)
+        (await lease.create(PRINCIPAL, CONVERSATION)).begin_turn()
     segment_id = lease.claim_segment(PRINCIPAL, CONVERSATION)
     await lease.save(PRINCIPAL, CONVERSATION)
     return segment_id
@@ -576,9 +577,10 @@ async def test_the_first_stop_ends_only_the_scoped_work_and_the_second_ends_the_
     assert await lease_b.request_cancel(PRINCIPAL, CONVERSATION)
     await _until(lambda: _at(store, "approve"))
     assert events == [NodeDone(node="switch", label="offer", output={"stopped": True})]
-    # The renewals that acted on the Stop left it stored; the segment acts
-    # on each request once.
+    # The scope took the Stop with no write, so it stays live until a pause
+    # write records it taken: a release now would close the turn on it.
     assert await _stop_request(pg_engine) is not None
+    assert await lease_b.stop_live(PRINCIPAL, CONVERSATION)
     assert not running.done()
 
     assert await lease_b.request_cancel(PRINCIPAL, CONVERSATION)
@@ -589,6 +591,48 @@ async def test_the_first_stop_ends_only_the_scoped_work_and_the_second_ends_the_
     assert ran == ["approve"]
     left = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
     assert left == []
+
+
+async def test_the_pause_after_a_scope_took_a_stop_records_it_taken(
+    pg_engine: AsyncEngine, clock: StoreClock
+) -> None:
+    """The scope takes the first Stop and the node goes on to a node that
+    pauses: the pause write records the Stop taken, so no Stop is live on
+    the paused turn and the renewals in between did not cut the node."""
+    store = TurnStore(pg_engine)
+    lease_a, lease_b = await _instance(pg_engine, clock), await _instance(pg_engine, clock)
+    segment_id = await _claim(lease_a)
+    switching = asyncio.Event()
+
+    async def switch(ctx: NodeCtx, node_input: Any) -> Next:
+        async with ctx.stop.open() as stopped:
+            switching.set()
+            await stopped.wait()
+            # Renewals report the taken Stop meanwhile, and change nothing.
+            await asyncio.sleep(BEAT * 5)
+        return Next("offer")
+
+    async def offer(ctx: NodeCtx, node_input: Any) -> Pause:
+        return Pause(kind="approve", payload={"plan": "unchanged"})
+
+    graph = Graph(
+        start="switch",
+        nodes={"switch": Node(run=switch), "offer": Node(run=offer, resume=offer)},
+        edges={("switch", "offer"): "offer"},
+    )
+    running = asyncio.create_task(
+        _segment(store, lease_a, await _open(store, segment_id, graph), segment_id, graph, [])
+    )
+    await switching.wait()
+    assert await lease_b.request_cancel(PRINCIPAL, CONVERSATION)
+    segment = await asyncio.wait_for(running, 5)
+
+    assert segment.outcome is Outcome.PAUSED
+    stop_id = await _stop_request(pg_engine)
+    async with pg_engine.connect() as conn:
+        taken = (await conn.execute(text("SELECT stop_taken_id FROM turn_cursors"))).scalar_one()
+    assert stop_id is not None and taken == stop_id
+    assert not await lease_b.stop_live(PRINCIPAL, CONVERSATION)
 
 
 async def _at(store: TurnStore, node: str) -> bool:
@@ -886,15 +930,39 @@ class _HeldAfterClosing(TurnStore):
         return finished
 
 
+class _ReportsAfterClosing(StudioStore):
+    """A lease store whose renewal that reads a Stop reports it only once
+    `closed` is set: the Stop was live when the renewal read it, and the
+    turn's close commits before the heartbeat acts on it."""
+
+    def __init__(self, engine: AsyncEngine, *, closed: asyncio.Event, **kwargs: Any) -> None:
+        super().__init__(engine, **kwargs)
+        self.closed = closed
+        self.read_stop = asyncio.Event()
+
+    async def renew(self, *args: Any, **kwargs: Any) -> Any:
+        renewal = await super().renew(*args, **kwargs)
+        if renewal.stop_id is not None:
+            self.read_stop.set()
+            await self.closed.wait()
+        return renewal
+
+
 @pytest.mark.parametrize("cut_by", ["stop", "lost-lease"])
 async def test_a_segment_cut_off_after_the_turn_closed_reports_the_stored_close(
     pg_engine: AsyncEngine, clock: StoreClock, cut_by: str
 ) -> None:
     store = _HeldAfterClosing(pg_engine)
-    lease_a, lease_b = await _instance(pg_engine, clock), await _instance(pg_engine, clock)
+    lease_b = await _instance(pg_engine, clock)
+    lease_a = _ReportsAfterClosing(pg_engine, closed=store.closed, **clock.store_kwargs)
     segment_id = await _claim(lease_a)
 
     async def work(ctx: NodeCtx, node_input: Any) -> Next:
+        if cut_by == "stop":
+            # A renewal reads the Stop while the turn runs, and reports it
+            # once the close below has committed.
+            assert await lease_b.request_cancel(PRINCIPAL, CONVERSATION)
+            await lease_a.read_stop.wait()
         return Next("done")
 
     graph = Graph(start="work", nodes={"work": Node(run=work)}, edges={("work", "done"): END})
@@ -902,9 +970,7 @@ async def test_a_segment_cut_off_after_the_turn_closed_reports_the_stored_close(
         _segment(store, lease_a, await _open(store, segment_id, graph), segment_id, graph, [])
     )
     await store.closed.wait()
-    if cut_by == "stop":
-        assert await lease_b.request_cancel(PRINCIPAL, CONVERSATION)
-    else:
+    if cut_by == "lost-lease":
         async with pg_engine.begin() as conn:
             await conn.execute(text("UPDATE conversations SET lease_segment_id = 'segment-b'"))
     segment = await asyncio.wait_for(running, 5)

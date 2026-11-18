@@ -10,11 +10,12 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+import harness.turn.store as turn_store_module
 import httpx2
 import pytest
 from compiler.surface import ProgressCallback, ToolCallResult
 from executor.completion import PUBLISH_ATTEMPTS
-from executor.ledger import Fail, RunChange, RunRecord, RunStatus, idempotency_key
+from executor.ledger import RunRecord, RunStatus, idempotency_key
 from fastapi import FastAPI
 from google.genai import types
 from harness.conversation import current_conversation_key
@@ -472,27 +473,24 @@ async def test_a_stop_after_the_client_left_ends_the_run_it_left(pg_engine: Asyn
     assert store.current(PRINCIPAL, CONVERSATION).turns[0]["error"] == "cancelled"
 
 
-class _StopUnrecorded(StudioRunLedger):
-    """A `StudioRunLedger` whose `Fail` records raise while `down` is set, as a
-    store that cannot be written does."""
-
-    down = True
-
-    async def record(self, run_id: str, change: RunChange) -> RunRecord:
-        if self.down and isinstance(change, Fail):
-            raise ConnectionError("the run store is unreachable")
-        return await super().record(run_id, change)
-
-
 async def test_a_stop_that_cannot_end_the_runs_left_answers_retry_and_leaves_the_turn_open(
-    pg_engine: AsyncEngine,
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A Stop with no live segment whose run ledger cannot record the left
     run stopped answers a retryable 503 and changes nothing, so the run is
     never carried on as though the user had not stopped it; the Stop
     retried once the ledger is back ends both."""
     store = StudioStore(pg_engine)
-    ledger = _StopUnrecorded(store)
+    ledger = StudioRunLedger(store)
+    end_unfinished = turn_store_module.end_unfinished
+    down = [True]
+
+    async def unless_down(*args: Any, **kwargs: Any) -> None:
+        if down[0]:
+            raise ConnectionError("the run store is unreachable")
+        await end_unfinished(*args, **kwargs)
+
+    monkeypatch.setattr(turn_store_module, "end_unfinished", unless_down)
     surface = _HeldAggregate()
     app, _ = orchestrator_app(
         plan_call("Kenya's debt service since 2015"),
@@ -506,7 +504,7 @@ async def test_a_stop_that_cannot_end_the_runs_left_answers_retry_and_leaves_the
         refused = await client.post("/api/studio/cancel", json=cancel_body, headers=AUTH)
         left = await app.state.studio.turns.open_cursor(PRINCIPAL, CONVERSATION)
         (unended,) = await _runs(pg_engine, ledger)
-        ledger.down = False
+        down[0] = False
         retried = await client.post("/api/studio/cancel", json=cancel_body, headers=AUTH)
 
     assert refused.status_code == 503
