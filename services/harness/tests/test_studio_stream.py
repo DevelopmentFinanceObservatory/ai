@@ -581,9 +581,10 @@ class FakeStore:
             return SegmentClose.FAILED
         stopped = world.stop_live()
         if stopped:
+            # The Stop closes the record `cancelled`, whatever error the
+            # work's own close recorded first.
             world.cursor = "cancelled"
-            error = c.turns[-1].get("error") if c.turn_recorded else ErrorCode.CANCELLED.value
-            world.stored = (True, error, (), c.seq)
+            world.stored = (True, ErrorCode.CANCELLED.value, (), c.seq)
         else:
             world.stored = _durable(c)
         world.lease = None
@@ -593,6 +594,7 @@ class FakeStore:
         if stopped:
             c.pending.clear()
             c.close_turn(final_text=c.turn_final_text, error=ErrorCode.CANCELLED.value)
+            c.turns[-1] = {**c.turns[-1], "error": ErrorCode.CANCELLED.value}
         return SegmentClose.STOPPED if stopped else SegmentClose.SAVED
 
     def evict(self, principal: str, conversation_id: str) -> None:
@@ -715,11 +717,16 @@ def _broken(run: Run, owner: asyncio.Task[None], spans: Spans, wire: str) -> lis
                 if recorded or not answerable or world.cursor != "paused":
                     broken.append(f"I2: pause sent, stored {world.stored} cursor {world.cursor}")
             case "error" if last["error"]["error"] == ErrorCode.CANCELLED.value:
-                if not (
-                    world.cursor == "cancelled"
-                    or (recorded and error == ErrorCode.CANCELLED.value)
-                    or world.stop_live()
-                ):
+                # A committed close stores the turn `cancelled`, record and
+                # cursor both; an unsaved one leaves a cursor closed
+                # `cancelled`, or a Stop live, for the next load or claim.
+                closed = (
+                    recorded and error == ErrorCode.CANCELLED.value and world.cursor == "cancelled"
+                )
+                unsaved = not world.committed_close and (
+                    world.cursor == "cancelled" or world.stop_live()
+                )
+                if not (closed or unsaved):
                     broken.append(f"I2: cancelled sent, stored {world.stored} {world.cursor}")
             case _:
                 pass

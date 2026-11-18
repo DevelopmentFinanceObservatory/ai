@@ -307,6 +307,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             "check MCP_API_TOKEN (and MCP_AUTH_DISABLED) agree across this process"
         ) from exc
     yield
+    # The owners of Studio streams still running finish their closing writes
+    # before anything they use closes. Past a graceful-shutdown timeout the
+    # server stops waiting for their responses, and the event loop's teardown
+    # would cancel an owner mid-write (`harness.studio_stream.LiveOwners`).
+    try:
+        await app.state.studio.owners.wait()
+    except Exception:
+        logger.exception("failed to wait for the studio stream owners during shutdown")
     # Early mints still running are cancelled before the clients they call
     # through close. apis finishes any mint already posted.
     try:

@@ -40,7 +40,8 @@ request cancels. For its segment it alone:
   is the ending's, with `dfo.saved` and `dfo.client_gone` beside it.
 
 The closing frames are numbered from the conversation's `seq` as the owner
-read it before the closing write, and that write stores `seq` past every
+read it before the closing write, or from the work's ending frame's own
+number when nothing went out after that frame, and that write stores `seq` past every
 number they can take, so a later segment numbers past them. After the
 closing write the owner changes no conversation state.
 
@@ -448,6 +449,9 @@ class _Owner:
         self._ready = asyncio.Event()
         self._task: asyncio.Task[Outcome] | None = None
         self._held: EndingFrame | None = None
+        # Whether nothing went on the channel since the work sent the held
+        # frame, so the number the work gave it is still unsent.
+        self._held_last = False
         self._lines = _OpenLines()
         # The first number the closing frames take.
         self._first_seq = conversation.seq
@@ -525,6 +529,7 @@ class _Owner:
         if isinstance(frame, _ENDING_FRAMES):
             if self._held is None:
                 self._held = frame
+                self._held_last = True
             else:
                 logger.error(
                     "studio stream: conversation %s segment %s sent a second ending frame "
@@ -536,6 +541,7 @@ class _Owner:
             return False
         self._lines.observe(frame)
         self._channel.put_nowait(frame)
+        self._held_last = False
         if saving and getattr(frame, "event", None) == "plan.approved":
             return await self._approved()
         return False
@@ -592,6 +598,7 @@ class _Owner:
             exc_info=error,
         )
         self._held = self._work.fatal(error)
+        self._held_last = True
         return Finish.UNCLOSED
 
     async def _close(self, finish: Finish) -> SegmentClose | None:
@@ -600,9 +607,12 @@ class _Owner:
         `cancelled` first, and every finish but `left` drops the pending
         entries resuming under the segment: a client that left keeps them,
         for a retry of the same answer to carry the turn on. The write stores
-        `seq` past every number the closing frames can take."""
+        `seq` past every number the closing frames can take. They start at
+        the number the work gave its ending frame when nothing went out after
+        it, so a stream that closes no lines keeps that number on the wire."""
         conversation = self._conversation
-        self._first_seq = conversation.seq
+        held = self._held
+        self._first_seq = held.seq if held is not None and self._held_last else conversation.seq
         if finish in (Finish.LOST, Finish.ABANDONED):
             return None
         if finish is Finish.CANCELLED:
@@ -611,7 +621,7 @@ class _Owner:
             )
         if finish is not Finish.LEFT:
             conversation.drop_resuming(self._segment_id)
-        conversation.seq += len(self._lines) + 1
+        conversation.seq = max(conversation.seq, self._first_seq + len(self._lines) + 1)
         try:
             return await self._store.close_segment(
                 self._principal, self._conversation_id, self._segment_id

@@ -17,12 +17,10 @@ import json
 import logging
 import sys
 from collections.abc import AsyncGenerator, Callable, Iterator
-from contextlib import aclosing, contextmanager, suppress
-from functools import partial
+from contextlib import contextmanager, suppress
 from types import AsyncGeneratorType
 from typing import Any
 
-import harness.studio as studio_module
 import httpx2
 import pytest
 from common.telemetry import init_telemetry
@@ -175,6 +173,7 @@ async def test_a_response_torn_down_at_a_frame_still_exports_the_turn_once_and_c
     init_telemetry(service_name="harness")
     conversation = ConversationState(conversation_id=CONVERSATION)
     conversation.begin_turn()
+    conversation.open_segment_span()
     conversation.turn_user_message = "q"
 
     with (
@@ -323,28 +322,19 @@ async def test_a_model_call_exports_its_prompt_and_response(
     )
 
 
-# --- a client that leaves while the turn waits for the next frame -----------------
+# --- a client that leaves once the turn paused -------------------------------------
 
 
-async def _post_and_leave_at_the_pause(
-    app: Any,
-    body: dict[str, Any],
-    *,
-    how: str,
-    at_pause: asyncio.Event,
-) -> str:
-    """POST a turn straight to the ASGI app and drop the response once the
-    stream is parked after `plan.proposed`; returns that frame's interrupt id.
-    `how="cancel"` cancels the response task while the stream awaits its next
-    frame (`asyncio.CancelledError` at the wait); `how="close"` lets the stream
-    emit a heartbeat that never finishes sending, then cancels the response
-    task, so the event loop closes the abandoned generator at the heartbeat
-    `yield` (`GeneratorExit`)."""
+async def _post_and_leave_at_the_pause(app: Any, body: dict[str, Any], *, how: str) -> str:
+    """POST a turn straight to the ASGI app and drop the response once
+    `plan.proposed` has been sent; returns that frame's interrupt id.
+    `how="cancel"` cancels the response task (ASGI spec 2.4 and later, where
+    Starlette does nothing else), `how="disconnect"` delivers
+    `http.disconnect` (earlier spec versions)."""
     raw = json.dumps(body).encode()
     sent = False
     disconnect = asyncio.Event()
-    heartbeat_blocked = asyncio.Event()
-    never = asyncio.Event()
+    at_pause = asyncio.Event()
     chunks: list[str] = []
 
     async def receive() -> dict[str, Any]:
@@ -360,13 +350,12 @@ async def _post_and_leave_at_the_pause(
             return
         chunk = message.get("body", b"").decode()
         chunks.append(chunk)
-        if how == "close" and at_pause.is_set() and chunk.startswith(": ka"):
-            heartbeat_blocked.set()
-            await never.wait()
+        if '"plan.proposed"' in chunk:
+            at_pause.set()
 
     scope = {
         "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "asgi": {"version": "3.0", "spec_version": "2.4" if how == "cancel" else "2.3"},
         "http_version": "1.1",
         "method": "POST",
         "scheme": "http",
@@ -384,9 +373,10 @@ async def _post_and_leave_at_the_pause(
     }
     task = asyncio.create_task(app(scope, receive, send))
     await asyncio.wait_for(at_pause.wait(), timeout=30)
-    if how == "close":
-        await asyncio.wait_for(heartbeat_blocked.wait(), timeout=15)
-    task.cancel()
+    if how == "cancel":
+        task.cancel()
+    else:
+        disconnect.set()
     done, _ = await asyncio.wait({task}, timeout=15)
     assert done, "the response task did not end"
     with suppress(asyncio.CancelledError):
@@ -399,35 +389,18 @@ async def _post_and_leave_at_the_pause(
     return plan["interrupt_id"]
 
 
-@pytest.mark.parametrize("how", ["cancel", "close"])
+@pytest.mark.parametrize("how", ["cancel", "disconnect"])
 async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_trace(
-    fake_langfuse: Any, monkeypatch: pytest.MonkeyPatch, how: str, pg_engine: AsyncEngine
+    fake_langfuse: Any, how: str, pg_engine: AsyncEngine
 ) -> None:
-    """The client goes away right after `plan.proposed`, while the stream
-    awaits the next frame. The turn stays open and unrecorded, so the
-    `/interrupt` that approves the plan resumes it on the same trace: the
-    paused segment's `turn` span and the resumed one's, each ended, the
-    execution spans under the second, and no cancellation on the turn's
-    record."""
+    """The client goes away right after `plan.proposed`, the stream's last
+    frame. The turn stays open and unrecorded, so the `/interrupt` that
+    approves the plan resumes it on the same trace: the paused segment's
+    `turn` span and the resumed one's, each ended, the execution spans under
+    the second, and no cancellation on the turn's record."""
     init_telemetry(service_name="harness")
     app = _planned_app(pg_engine)
     studio: StudioRunner = app.state.studio
-    at_pause = asyncio.Event()
-    paused_once = False
-    frames_of_segment = studio._frames
-
-    async def parked_after_the_plan(*args: Any, **kwargs: Any) -> AsyncGenerator[Any]:
-        nonlocal paused_once
-        async with aclosing(frames_of_segment(*args, **kwargs)) as frames:
-            async for frame in frames:
-                yield frame
-                if frame.event == "plan.proposed" and not paused_once:
-                    paused_once = True
-                    at_pause.set()
-                    await asyncio.Event().wait()  # the run has not drained yet
-
-    monkeypatch.setattr(studio, "_frames", parked_after_the_plan)
-    monkeypatch.setattr(studio_module, "_sse_stream", partial(_sse_stream, heartbeat_seconds=0.02))
     body = {
         "schema_version": 1,
         "conversation_id": CONVERSATION,
@@ -435,19 +408,11 @@ async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_
         "message": "comprehensive overview of life expectancy in Kenya",
     }
 
-    with _abandoned_streams() as abandoned:
-        interrupt_id = await _post_and_leave_at_the_pause(app, body, how=how, at_pause=at_pause)
-        principal = "u_" + hashlib.sha256(b"test").hexdigest()[:16]
-        conversation = studio.store.current(principal, CONVERSATION)
-        assert conversation is not None
-        await _until(lambda: not conversation.lock.locked() and conversation.renew_now is None)
-        if how == "close":
-            await _until(
-                lambda: any(
-                    inspect.getasyncgenstate(generator) == inspect.AGEN_CLOSED
-                    for generator in abandoned()
-                )
-            )
+    interrupt_id = await _post_and_leave_at_the_pause(app, body, how=how)
+    principal = "u_" + hashlib.sha256(b"test").hexdigest()[:16]
+    conversation = studio.store.current(principal, CONVERSATION)
+    assert conversation is not None
+    assert not conversation.lock.locked()
     assert conversation.awaiting_answer
 
     async with httpx2.AsyncClient(
@@ -489,6 +454,7 @@ async def test_a_client_that_leaves_while_the_turn_runs_ends_the_turn_span_as_di
     init_telemetry(service_name="harness")
     conversation = ConversationState(conversation_id=CONVERSATION)
     conversation.begin_turn()
+    conversation.open_segment_span()
     conversation.turn_user_message = "q"
     running = asyncio.Event()
 

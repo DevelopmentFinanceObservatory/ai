@@ -539,8 +539,9 @@ class ConversationState:
     # as `changed_from` for a choice that holds another label now.
     turn_choice_baseline: dict[str, str] = field(default_factory=dict)
     turn_recorded: bool = False
-    # This instance's telemetry span for the turn's current segment, on the
-    # turn's `trace_id`. `begin_turn` or `open_segment_span` opens it, and
+    # This instance's telemetry span for the turn's current `/interrupt` or
+    # Edit Card segment, on the turn's `trace_id`. `open_segment_span` opens
+    # it, and
     # `end_segment_span` ends it once when the segment ends on this instance,
     # so no span outlives the segment. Streams make it current with
     # `in_turn_span`.
@@ -1037,7 +1038,10 @@ class ConversationState:
         turn.request on a paused conversation ends the pause. Returns the
         previous turn when this closed it as `abandoned`, whatever state it
         was left in, for the caller to record its closing span once the new
-        turn's claim commits (`record_closed_turn_span`)."""
+        turn's claim commits (`record_closed_turn_span`). It opens no span:
+        the owner of the segment the claim starts opens that segment's
+        (`harness.studio_stream`), and an Edit Card stream opens its own
+        (`open_segment_span`)."""
         previous = ClosedTurn(self.trace_id, self.turn_user_message, "abandoned")
         abandoned = None
         self.turn_index += 1
@@ -1061,7 +1065,6 @@ class ConversationState:
         self.turn_specs = {}
         self.turn_applied_choice = None
         self.turn_recorded = False
-        self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
         return abandoned
 
     def end_segment_span(self, status: str, *, stored: str | None = None) -> bool:
@@ -1105,11 +1108,11 @@ class ConversationState:
     def open_segment_span(self) -> None:
         """Open a span for the segment about to run, on this conversation's
         `trace_id`, ending any span still held first (`end_leftover_span`).
-        `begin_turn` opens the first segment's; each later segment of the
-        turn, the `/interrupt` that resumes a pause on any instance, opens
-        its own here, on the same trace. Both run on the request's working
-        copy (`StudioStore.draft`), and its save hands the span to the live
-        state (`StudioStore._take_draft`)."""
+        The Edit Card stream opens its own here once its claim commits, and
+        each later segment of the turn, the `/interrupt` that resumes a pause
+        on any instance, opens its own here on the request's working copy
+        (`StudioStore.draft`), whose save hands the span to the live state
+        (`StudioStore._take_draft`)."""
         self.end_leftover_span()
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
@@ -1353,6 +1356,23 @@ def record_closed_turn_span(conversation_id: str, turn: ClosedTurn) -> None:
         request=turn.user_message,
         error=turn.status,
         level="WARNING",
+    )
+
+
+def record_unstreamed_span(
+    conversation_id: str, *, trace_id: str, user_message: str, status: str
+) -> None:
+    """Record a zero-length span on `trace_id`, with `status` at the level
+    `span_level` gives it and `user_message` as its input, for a `/turn`
+    request that let go of its claim before its stream started: refused
+    before its claim save committed (`not_started`), or failed (`failed`) or
+    cancelled (`cancelled`) after it. A stream's own span is its owner's
+    (`harness.studio_stream`)."""
+    end_turn_span(
+        start_turn_span(trace_id, session_id=conversation_id),
+        request=user_message,
+        error=status,
+        level=span_level(status),
     )
 
 

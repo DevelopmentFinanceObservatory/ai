@@ -15,7 +15,9 @@ open pause and runs the next. The translator from the segment's events to
 frames is `harness.studio_translate`; per-conversation state and the
 composition rules are `harness.studio_state`; the Edit Card route is
 `harness.studio_edit`. This module owns the routes, the `StudioRunner` that
-runs a segment, and the SSE transport.
+runs a segment, and the SSE transport of the `/interrupt` and Edit Card
+streams. A `/turn` segment's stream has an owner and a response of its own
+(`harness.studio_stream`), with this module's `_SegmentWork` as its work.
 
 Conversation identity (contract delta 5): the client mints
 `conversation_id`; the bearer token resolves to a principal
@@ -54,6 +56,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 from planner.plan import current_earlier_block, current_recorded_identity
+from pydantic import BaseModel
 
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
@@ -89,6 +92,7 @@ from harness.studio_state import (
     _PendingQuestion,
     _tool_error_response,
     record_closed_turn_span,
+    record_unstreamed_span,
     renew_lease_now,
     stream_loss,
 )
@@ -100,6 +104,7 @@ from harness.studio_store import (
     retry_delays,
     run_to_completion,
 )
+from harness.studio_stream import LiveOwners, open_stream
 from harness.studio_translate import (
     SEGMENT_LOST_DETAIL,
     _checkpoint_failed_frame,
@@ -114,7 +119,16 @@ from harness.studio_translate import (
 )
 from harness.turn import transcript as entries
 from harness.turn.events import TurnEvent, TurnFailed
-from harness.turn.loop import Answer, Graph, Outcome, abandon, reject, run_segment, stop_turn
+from harness.turn.loop import (
+    Answer,
+    Graph,
+    Outcome,
+    Segment,
+    abandon,
+    reject,
+    run_segment,
+    stop_turn,
+)
 from harness.turn.store import Cursor, CursorStale, TurnStatus, TurnStore
 from harness.turn_budget import start_turn_budget
 from harness.turn_records import CHIP_STALE_NOTE, stored_choice
@@ -795,8 +809,10 @@ class StudioRunner:
     `store` keeps conversations in. `early_mints` is the graph's own
     (`harness.early_mint`): a segment's response waits for the calls of the
     card it offered before it closes, while the request still has CPU
-    (`_settling`). A stream renews the conversation's lease every
-    `heartbeat_seconds`.
+    (`_settling`, or the owner's `settle` on a `/turn` stream). A stream renews the conversation's lease every
+    `heartbeat_seconds`. `owners` holds the owners of the `/turn` streams
+    running on this instance (`harness.studio_stream`), which the app's
+    lifespan shutdown waits for before it closes the database.
     """
 
     def __init__(
@@ -817,6 +833,7 @@ class StudioRunner:
         self.store = store
         self.turns = turns
         self.heartbeat_seconds = heartbeat_seconds
+        self.owners = LiveOwners()
         # `_RecordingExecutor` binds the store, to keep a create's write
         # token (`harness.studio_translate`) on the same conversations the
         # rest of this runner reads and writes.
@@ -1049,8 +1066,8 @@ class StudioRunner:
         frame goes out alone, and the reservation's failure is logged with
         it. `frames` is closed whenever this stops relaying it (`_closing`).
         A `_Stopped` item passes through. This is the one interception point
-        for every route this runs under (`/turn`, its edit-card branch, and
-        `/interrupt`).
+        for every stream this runs under (the Edit Card branch of `/turn`,
+        and `/interrupt`).
 
         Every ending frame is offered to `ending` with its cause
         (`_StreamEnding.offer`): `done` and `paused` once their checkpoint
@@ -1363,6 +1380,121 @@ class StudioRunner:
         return "closed"
 
 
+class _SegmentWork:
+    """The work of a claimed `/turn` segment, for its owner
+    (`harness.studio_stream.Work`): one segment of the turn at `cursor`
+    (`harness.turn.loop.run_segment`) under `segment_id`, its events
+    translated into wire frames (`_Translator`).
+
+    While it runs, `conversation.renew_now` is the segment's, so a Stop
+    posted on this instance reaches its heartbeat at once
+    (`harness.studio_state.renew_lease_now`). A segment that pauses or ends
+    closes on `_Translator.finish`'s frames, with the turn's records as its
+    cursor stores them (`keep_turn_records`). A turn that failed ends on the
+    translator's frame for its `TurnFailed` event, or on one worded from the
+    error the cursor records when the close committed with no event
+    (`recorded_fatal`). A taken Stop whose close could not be written
+    (`unclosed` with no `TurnFailed`) leaves the turn open with that Stop
+    live, so the work ends `cancelled` and the owner's closing write closes
+    the turn. A turn another instance abandoned ends `abandoned`; one this
+    segment closed `abandoned` on a node's failure ends `failed` on that
+    failure's frame. A card write fenced out by another instance's takeover,
+    or one that could not reach the database before the lease's deadline
+    (`StudioStore.change_canvas`), ends it `lost`. Cancelling it cancels the
+    segment and waits for it, which leaves the cursor as last written and
+    its runs unfinished, for the next request to carry on. A step the
+    executor finished after the last translated event belongs to this
+    segment, so the recorders are emptied however it ends."""
+
+    def __init__(
+        self,
+        runner: StudioRunner,
+        *,
+        principal: str,
+        conversation: ConversationState,
+        cursor: Cursor,
+        segment_id: str,
+    ) -> None:
+        self._runner = runner
+        self._principal = principal
+        self._conversation = conversation
+        self._cursor = cursor
+        self._segment_id = segment_id
+
+    async def run(self, send: Callable[[BaseModel], None]) -> Outcome:
+        """Run the segment, `send` each frame, and return how it ended."""
+        runner, conversation = self._runner, self._conversation
+        translator = _Translator(
+            conversation=conversation,
+            recorder=runner.recorder,
+            surface_recorder=runner.surface_recorder,
+        )
+        failed = False
+
+        def emit(event: GraphEvent | TurnEvent) -> None:
+            nonlocal failed
+            failed = failed or isinstance(event, TurnFailed)
+            translator.emit(event)
+
+        renew_now = conversation.renew_now = asyncio.Event()
+        segment_task: asyncio.Task[Segment] | None = None
+        try:
+            # The turn's records so far, for a segment that resumes a turn
+            # another instance began.
+            keep_turn_records(conversation, self._cursor.state)
+            segment_task = asyncio.create_task(
+                run_segment(
+                    runner.turns,
+                    runner.store,
+                    self._cursor,
+                    principal=self._principal,
+                    conversation_id=conversation.conversation_id,
+                    segment_id=self._segment_id,
+                    graph=runner.graph,
+                    emit=emit,
+                    heartbeat_seconds=runner.heartbeat_seconds,
+                    renew_now=renew_now,
+                )
+            )
+            async for frame in translator.frames(segment_task):
+                send(frame)
+            segment = segment_task.result()
+            keep_turn_records(conversation, segment.cursor.state)
+            outcome = segment.outcome
+            match outcome:
+                case Outcome.PAUSED | Outcome.DONE:
+                    for frame in await translator.finish():
+                        send(frame)
+                case Outcome.FAILED if not failed:
+                    send(recorded_fatal(conversation, segment.cursor.error or {}))
+                case Outcome.UNCLOSED if not failed:
+                    return Outcome.CANCELLED
+                case Outcome.ABANDONED if failed:
+                    return Outcome.FAILED
+            assert outcome is not None
+            return outcome
+        except (SegmentLost, DatabaseUnavailable) as exc:
+            _log_save_failure("card write", conversation, self._segment_id, exc)
+            return Outcome.LOST
+        finally:
+            if conversation.renew_now is renew_now:
+                conversation.renew_now = None
+            if segment_task is not None and not segment_task.done():
+                segment_task.cancel()
+                await asyncio.wait({segment_task})
+            runner.recorder.drain(current_conversation_id.get())
+            if runner.surface_recorder is not None:
+                runner.surface_recorder.drain(current_conversation_id.get())
+
+    def fatal(self, error: BaseException) -> ErrorFrame:
+        """The stream-fatal frame for `error` (`_stream_fatal`), which
+        records the turn failed on it; a cancellation of the work's own is a
+        fault of the segment's frames."""
+        if not isinstance(error, Exception):
+            error = RuntimeError("the segment's frames were cancelled")
+        return _stream_fatal(self._conversation, error)
+
+
 def _log_save_failure(
     what: str, conversation: ConversationState, segment_id: str, exc: Exception
 ) -> None:
@@ -1596,12 +1728,21 @@ async def _close_stopped_turn(
 
 
 async def _answer_after_stop(
-    studio: StudioRunner, principal: str, conversation_id: str, lock: asyncio.Lock, then: Response
+    studio: StudioRunner,
+    principal: str,
+    conversation_id: str,
+    lock: asyncio.Lock,
+    then: Response,
+    *,
+    turn: ConversationState | None = None,
 ) -> Response:
     """Close the turn a live Stop names (`_close_stopped_turn`), release
-    `lock`, and answer that close's refusal, else `then`."""
+    `lock` (`_unclaimed`, given `turn`), and answer that close's refusal,
+    else `then`."""
     refused = await _close_stopped_turn(studio, principal, conversation_id)
-    return await _unclaimed(studio.store, principal, conversation_id, lock, refused or then)
+    return await _unclaimed(
+        studio.store, principal, conversation_id, lock, refused or then, turn=turn
+    )
 
 
 async def _release_claim(
@@ -1612,6 +1753,7 @@ async def _release_claim(
     segment_id: str | None,
     *,
     cause: BaseException | None = None,
+    turn: ConversationState | None = None,
 ) -> None:
     """Let go of a request whose stream never started, on every path,
     cancellation included. A claim that never committed gives up its
@@ -1622,8 +1764,11 @@ async def _release_claim(
     the exception that ended the request, gives `cancelled` when it is this
     task's own cancellation (the client gone) and `failed` otherwise, a
     `CancelledError` an inner task let out among them, and a refusal, with
-    no `cause`, gives `not_started`. Then `lock` is released and any span
-    that ended is exported."""
+    no `cause`, gives `not_started`. A `/turn` request opens no span before
+    its stream, whose owner opens one: `turn`, the working copy its claim
+    began a turn on, gets a zero-length span with that status on the turn's
+    trace when no span ended (`record_unstreamed_span`). Then `lock` is
+    released and any span that ended is exported."""
     task = asyncio.current_task()
     if cause is None:
         status = "not_started"
@@ -1640,6 +1785,14 @@ async def _release_claim(
         live = store.current(principal, conversation_id)
         if segment_id is not None and live is not None:
             ended = live.end_segment_span(status) or ended
+        if turn is not None and not ended:
+            record_unstreamed_span(
+                conversation_id,
+                trace_id=turn.trace_id,
+                user_message=turn.turn_user_message,
+                status=status,
+            )
+            ended = True
         lock.release()
         if ended:
             await flush_telemetry()
@@ -1818,11 +1971,13 @@ async def _unclaimed(
     conversation_id: str,
     lock: asyncio.Lock,
     response: Response,
+    *,
+    turn: ConversationState | None = None,
 ) -> Response:
     """Answer `response` for a request whose claim save never committed,
-    once it has let go of it (`_release_claim`), so the live state stays as
-    loaded."""
-    await _release_claim(store, principal, conversation_id, lock, None)
+    once it has let go of it (`_release_claim`, given `turn`), so the live
+    state stays as loaded."""
+    await _release_claim(store, principal, conversation_id, lock, None, turn=turn)
     return response
 
 
@@ -1906,8 +2061,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         if isinstance(lock, JSONResponse):
             return lock
         # The segment this request claimed once its claim save landed, which
-        # every failure before the stream starts releases.
+        # every failure before the stream starts releases, and the working
+        # copy its claim began the turn on, whose trace records how it let
+        # go (`_release_claim`).
         claimed: str | None = None
+        begun: ConversationState | None = None
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
@@ -1979,6 +2137,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             if left_open is not None and not work.turn_recorded:
                 keep_turn_records(work, left_open.state)
             abandoned = work.begin_turn()
+            begun = work
             work.auto_add = body.auto_add
             if pick is None:
                 work.turn_user_message = body.message
@@ -2010,6 +2169,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         "another request is streaming on this conversation",
                         retry_after_seconds=exc.retry_after_seconds,
                     ),
+                    turn=work,
                 )
             # The claim: advancing turn_index (and the segment above) is
             # saved before the turn opens and before the SSE response
@@ -2035,6 +2195,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     _streaming_conflict_response(
                         "the conversation's previous turn was stopped", retry_after_seconds=1
                     ),
+                    turn=work,
                 )
             except ConversationStale:
                 return await _unclaimed(
@@ -2045,6 +2206,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     _streaming_conflict_response(
                         "another request is streaming on this conversation"
                     ),
+                    turn=work,
                 )
             claimed = segment_id
             conversation = studio.store.current(principal, body.conversation_id)
@@ -2065,7 +2227,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # resolve, no plan, no turn on the loop, just the card, the
                 # model's patch-or-recreate decision, and the platform write.
                 # It streams under the same segment the claim save above
-                # just persisted.
+                # just persisted, in a span of its own.
+                conversation.open_segment_span()
                 return StreamingResponse(
                     studio._segment_stream(
                         principal,
@@ -2127,34 +2290,41 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 state=state,
                 records=[entries.user_message(text)],
             )
-            return StreamingResponse(
-                studio._settling(
-                    studio._segment_stream(
-                        principal,
-                        body.conversation_id,
-                        conversation,
-                        segment_id,
-                        studio._frames(
-                            principal=principal,
-                            conversation=conversation,
-                            cursor=cursor,
-                            segment_id=segment_id,
-                        ),
-                    )
+            # The segment's owner takes the lease and the lock from here on.
+            return open_stream(
+                _SegmentWork(
+                    studio,
+                    principal=principal,
+                    conversation=conversation,
+                    cursor=cursor,
+                    segment_id=segment_id,
                 ),
-                media_type=SSE_MEDIA_TYPE,
+                owners=studio.owners,
+                store=studio.store,
+                conversation=conversation,
+                principal=principal,
+                conversation_id=body.conversation_id,
+                segment_id=segment_id,
+                settle=studio.early_mints.settle if studio.early_mints is not None else None,
             )
         except BaseException as exc:
-            # The stream wrapper normally releases the segment and the lock.
-            # A failure before the response starts streaming releases them
-            # here (`_release_claim`). Before the claim save commits, the
-            # working copy is given up and the live state stays as loaded.
-            # After it, the lease is dropped. The claim save already covers
-            # `begin_turn`'s effects, and a turn opened here stays open, so
-            # the next `/turn` closes both as it closes any open turn.
+            # The stream's owner, or the Edit Card stream's wrapper, releases
+            # the segment and the lock. A failure before the response starts
+            # streaming releases them here (`_release_claim`). Before the
+            # claim save commits, the working copy is given up and the live
+            # state stays as loaded. After it, the lease is dropped. The
+            # claim save already covers `begin_turn`'s effects, and a turn
+            # opened here stays open, so the next `/turn` closes both as it
+            # closes any open turn.
             if lock.locked():
                 await _release_claim(
-                    studio.store, principal, body.conversation_id, lock, claimed, cause=exc
+                    studio.store,
+                    principal,
+                    body.conversation_id,
+                    lock,
+                    claimed,
+                    cause=exc,
+                    turn=begun,
                 )
             raise
 

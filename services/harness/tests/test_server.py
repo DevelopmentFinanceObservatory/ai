@@ -175,6 +175,31 @@ async def test_lifespan_shutdown_closes_the_studio_executor(
     assert closed == [True]
 
 
+async def test_lifespan_shutdown_waits_for_the_stream_owners_before_it_closes_the_database(
+    pg_database_url: str,
+) -> None:
+    """A Studio stream's owner still making its closing write at shutdown
+    finishes before `_lifespan` closes the database it writes to
+    (`harness.studio_stream.LiveOwners`)."""
+    app = create_app(settings=Settings(database_url=pg_database_url))
+    order: list[str] = []
+    close_database = app.state.database_aclose
+
+    async def recorded_close() -> None:
+        order.append("database closed")
+        await close_database()
+
+    async def closing_write() -> None:
+        await asyncio.sleep(0.2)
+        order.append("owner finished")
+
+    app.state.database_aclose = recorded_close
+    async with _running_lifespan(app):
+        app.state.studio.owners.start(closing_write())
+
+    assert order == ["owner finished", "database closed"]
+
+
 async def test_the_app_starts_presentation_mcps_chart_worker_once_and_stops_it(
     monkeypatch: pytest.MonkeyPatch,
     pg_database_url: str,

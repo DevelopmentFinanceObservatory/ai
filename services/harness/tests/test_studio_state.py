@@ -96,8 +96,10 @@ from .test_turn_store import ADMITTED_RUN
 CONVERSATION = "conv_01test0000"
 
 
-@pytest.mark.parametrize("method", ["begin_turn", "open_segment_span"])
-def test_a_turn_span_opens_on_the_new_trace_id_in_the_conversations_session(monkeypatch, method):
+def test_a_turn_span_opens_on_the_new_trace_id_in_the_conversations_session(monkeypatch):
+    """`open_segment_span` opens the segment's span on the turn's trace id;
+    `begin_turn` opens none, since a `/turn` segment's owner opens its own
+    (`harness.studio_stream`)."""
     fake_span = MagicMock()
     started_with = []
     monkeypatch.setattr(
@@ -110,7 +112,9 @@ def test_a_turn_span_opens_on_the_new_trace_id_in_the_conversations_session(monk
     )
 
     state = ConversationState(conversation_id=CONVERSATION)
-    getattr(state, method)()
+    state.begin_turn()
+    assert started_with == []
+    state.open_segment_span()
 
     assert started_with == [(state.trace_id, CONVERSATION)]
     assert state._telemetry_span is fake_span
@@ -132,6 +136,7 @@ def test_a_segment_s_span_ends_once_when_the_segment_ends(monkeypatch):
 
     state = ConversationState(conversation_id=CONVERSATION)
     state.begin_turn()
+    state.open_segment_span()
     state.turn_user_message = "life expectancy in Kenya"
     state.close_turn(final_text="done", basis_line="Source: WDI.")
     assert ended == []

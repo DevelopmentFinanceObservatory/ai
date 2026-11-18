@@ -1004,9 +1004,9 @@ class StudioStore:
         that saves nothing (`drop_draft`), the live state stays as loaded.
         The copy is one level deep (`_shallow_copy`), with each pending
         interrupt copied too, since an answer is marked on its entry. The
-        copy starts with no telemetry span. A `begin_turn` on it opens the
-        span of the segment its claim starts, which the save hands to the
-        live state."""
+        copy starts with no telemetry span. An `/interrupt`'s
+        `ConversationState.open_segment_span` on it opens the span of the
+        segment its claim starts, which the save hands to the live state."""
         entry = self._runtime[(principal, conversation_id)]
         assert entry.state is not None
         work = _shallow_copy(entry.state)
@@ -1017,7 +1017,7 @@ class StudioStore:
 
     def drop_draft(self, principal: str, conversation_id: str) -> bool:
         """Give up the working copy `draft` handed out, its claim unsaved. A
-        turn span the copy opened (`begin_turn`) ends as `not_started`, at
+        turn span the copy opened (`open_segment_span`) ends as `not_started`, at
         level `WARNING`, since no turn exists for it. Returns whether it
         ended one, for the caller to flush."""
         entry = self._runtime.get((principal, conversation_id))
@@ -1352,8 +1352,8 @@ class StudioStore:
     def _take_draft(entry: _RuntimeEntry, state: ConversationState) -> None:
         """Assign each field the working copy `state` changed since `draft`
         took it to the live state, once its save committed. Nothing when
-        `state` is the live state itself. A span the copy opened (`begin_turn`
-        or `ConversationState.open_segment_span`), the span of the segment its
+        `state` is the live state itself. A span the copy opened
+        (`ConversationState.open_segment_span`), the span of the segment its
         claim starts, then moves to the live state. A span the live state
         still holds at that moment breaks the rule that every segment ends
         its own span before the lock is free. It is logged and ended
@@ -1928,7 +1928,9 @@ class StudioStore:
         cursor through `harness.turn.store.finish_on`, which ends the
         conversation's unfinished runs, and the record with the cursor's
         records kept and the pending interrupts cleared, so no answer
-        reaches them. A Stop that commits after this transaction finds no
+        reaches them. A record the stream's own close already wrote on a
+        failure, its cursor still open, is recorded `cancelled` in its place,
+        so record, cursor and stream agree. A Stop that commits after this transaction finds no
         live lease, and `/cancel` takes it under the conversation lock.
 
         Returns how the write ended (`SegmentClose`). It makes one attempt,
@@ -2010,10 +2012,20 @@ class StudioStore:
                     status=TurnStatus.CANCELLED,
                     now=datetime.fromtimestamp(self._clock(), UTC),
                 )
-                if not work.turn_recorded:
-                    keep_turn_records(work, cursor.state)
                 work.pending = {}
-                work.close_turn(final_text=work.turn_final_text, error=ErrorCode.CANCELLED.value)
+                if work.turn_recorded:
+                    # The work's own close recorded the turn on its failure
+                    # while its cursor stayed open; the Stop closes it
+                    # `cancelled`, as the cursor and the stream say.
+                    work.turns = [
+                        *work.turns[:-1],
+                        {**work.turns[-1], "error": ErrorCode.CANCELLED.value},
+                    ]
+                else:
+                    keep_turn_records(work, cursor.state)
+                    work.close_turn(
+                        final_text=work.turn_final_text, error=ErrorCode.CANCELLED.value
+                    )
             changed = _changed_since(_serialize_durable(work), entry.baseline)
             version = await self._write(conn, entry.pk, changed) if changed else row.version
         entry.version = version
