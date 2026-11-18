@@ -581,23 +581,37 @@ class _TurnSpecs:
 async def _turn_session_specs(
     engine: AsyncEngine, principal: str, session_id: str
 ) -> _TurnSpecs | None:
-    """The spec blocks a turn's own ADK session holds, empty when it holds
-    none. None when the session does not exist."""
-    async with engine.connect() as conn:
-        return await _read_turn_session(conn, principal, session_id)
+    """The spec blocks a turn's own ADK session holds, converted, empty when
+    it holds none. None when the session does not exist."""
+    return _converted_turn(session_id, await _turn_session_row(engine, principal, session_id))
 
 
 async def _read_turn_session(
     conn: AsyncConnection, principal: str, session_id: str
 ) -> _TurnSpecs | None:
     """`_turn_session_specs` on `conn`."""
-    stored = await _stored_turn_specs(conn, principal, session_id)
+    return _converted_turn(session_id, await _stored_turn_specs(conn, principal, session_id))
+
+
+def _converted_turn(
+    session_id: str, stored: tuple[dict[str, Any], int] | None
+) -> _TurnSpecs | None:
+    """The turn session `session_id`'s spec blocks as stored
+    (`_stored_turn_specs`), converted (`_converted_specs`)."""
     if stored is None:
         return None
     specs, size = stored
     blocks = Blocks()
-    converted = _convert_blocks(specs, session_id, blocks)
-    return _TurnSpecs(specs=dict(converted), blocks=blocks, size=size)
+    return _TurnSpecs(specs=_converted_specs(session_id, specs, blocks), blocks=blocks, size=size)
+
+
+async def _turn_session_row(
+    engine: AsyncEngine, principal: str, session_id: str
+) -> tuple[dict[str, Any], int] | None:
+    """`_stored_turn_specs` on a connection of its own: the one read of a
+    turn session's row outside the import's transaction."""
+    async with engine.connect() as conn:
+        return await _stored_turn_specs(conn, principal, session_id)
 
 
 async def _stored_turn_specs(
@@ -631,13 +645,12 @@ def open_turn_specs(engine: AsyncEngine) -> TurnSpecs:
     as stored. Empty when the session holds none or does not exist.
     `StudioStore.load` converts what it reads, once, through its bridge's
     `convert_specs`. The server serves Studio through it, and `--verify`
-    reads open turns through it and the same conversion
-    (`_converted_specs`), so the gate checks the blocks the serving release
-    loads."""
+    reads open turns through it and the job's bridge (`_NoAdk`), whose
+    conversion is the serving bridge's (`_converted_specs`), so the gate
+    checks the blocks the serving release loads."""
 
     async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
-        async with engine.connect() as conn:
-            stored = await _stored_turn_specs(conn, principal, session_id)
+        stored = await _turn_session_row(engine, principal, session_id)
         return stored[0] if stored is not None else {}
 
     return turn_specs
@@ -1394,12 +1407,12 @@ async def _stored_runs(engine: AsyncEngine, principal: str, conversation_id: str
 
 async def _read_turn_specs(engine: AsyncEngine, principal: str, state: ConversationState) -> None:
     """Set the open turn's spec blocks on `state` from its turn session,
-    through the reader and the conversion `StudioStore.load` uses
-    (`open_turn_specs`, `_converted_specs`)."""
+    through the reader and the bridge the tables side's `StudioStore.load`
+    uses (`open_turn_specs`, `_NoAdk.convert_specs`)."""
     if state.turn_index and not state.turn_recorded:
         session_id = state.session_id
         stored = await open_turn_specs(engine)(principal, session_id)
-        state.turn_specs = _converted_specs(session_id, stored, Blocks())
+        state.turn_specs = _NoAdk().convert_specs(session_id, stored)
 
 
 async def _adk_view(engine: AsyncEngine, session: _Session) -> dict[str, Any]:

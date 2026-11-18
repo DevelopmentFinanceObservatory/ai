@@ -1073,6 +1073,19 @@ class ConversationState:
         self.turn_recorded = False
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
+    def abandon_turn_span(self) -> None:
+        """End the turn's telemetry span, when this instance holds one, as
+        `close_turn` ends it for an abandoned turn, without recording the
+        turn: the state holding it is about to be dropped
+        (`StudioStore.discard_unsaved`), and no later close could end it."""
+        end_turn_span(
+            self._telemetry_span,
+            request=self.turn_user_message,
+            response=self.turn_final_text,
+            error="abandoned",
+        )
+        self._telemetry_span = None
+
     def ensure_turn_span(self) -> None:
         """Open a turn span on this conversation's `trace_id` when it holds
         none. `begin_turn` opens the span for the instance that starts a

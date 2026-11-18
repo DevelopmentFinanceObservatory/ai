@@ -68,8 +68,9 @@ from collections.abc import (
     Collection,
     Coroutine,
     Iterable,
+    Iterator,
 )
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -77,7 +78,6 @@ from executor.ledger import RunStatus
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.approval import ApprovalRecord
@@ -272,37 +272,53 @@ async def _run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
     return task.result()
 
 
-# The `OSError`s no retry mends: a socket path or certificate file that is
-# missing or may not be read, and a server certificate that does not verify.
-_PERMANENT_OS_ERRORS = (FileNotFoundError, PermissionError, ssl.SSLCertVerificationError)
+class _ConnectFailedError(Exception):
+    """Acquiring a connection to the database failed (a pool checkout or a
+    connect), raised from what failed, by `StudioStore._transaction`."""
+
+
+# The faults no retry of a connect mends: a socket path or certificate file
+# that is missing, is not a file or may not be read, and a server
+# certificate that does not verify.
+_PERMANENT_CONNECT_FAULTS = (
+    FileNotFoundError,
+    PermissionError,
+    IsADirectoryError,
+    NotADirectoryError,
+    ssl.SSLCertVerificationError,
+)
+
+
+def _chain(exc: BaseException) -> Iterator[BaseException]:
+    """`exc` and every error it was raised from, a driver error's original
+    included."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        if isinstance(current, DBAPIError) and isinstance(current.orig, BaseException):
+            yield from _chain(current.orig)
+        current = current.__cause__
 
 
 def _transient(exc: BaseException) -> bool:
-    """Whether `exc` is the network to the database failing, a fault a retry
-    may outlast, raised as it is or as a driver error's cause: a connection
-    SQLAlchemy invalidated, the pool timing out, or any `OSError` (a
-    refused, reset or timed-out socket, an unreachable host or network, a
-    name that does not resolve, a TLS failure, the errno-less error asyncio
-    raises when every address of the host refuses) bar the permanent
-    faults `_PERMANENT_OS_ERRORS` names. The Cloud SQL connector raises
-    those unwrapped when it cannot connect. Anything else raises at once: a
-    statement or lock timeout the database reports, a misuse of the
-    connection, and a permanent fault."""
-    if isinstance(exc, DBAPIError):
-        return exc.connection_invalidated or _network_failed(exc.orig)
-    return isinstance(exc, SQLAlchemyTimeoutError) or _network_failed(exc)
-
-
-def _network_failed(exc: BaseException | None) -> bool:
-    """Whether `exc`, or an error it was raised from, is the network failing
-    (`_transient`)."""
-    while exc is not None:
-        if isinstance(exc, _PERMANENT_OS_ERRORS):
-            return False
-        if isinstance(exc, OSError):
-            return True
-        exc = exc.__cause__
-    return False
+    """Whether `exc` is a fault a retry may outlast, decided by the phase it
+    was raised in. A connect (`_ConnectFailedError`) that failed is
+    retried whatever failed (a refused, reset or timed-out socket, an
+    unreachable host, a name that does not resolve, a TLS failure, the pool
+    timing out, too many open files), unless anything in its chain is a
+    permanent fault (`_PERMANENT_CONNECT_FAULTS`): the network or the
+    server may come back, a missing or unreadable file will not. A
+    statement that failed is retried only when the connection was lost
+    under it: SQLAlchemy invalidated the connection, or a `ConnectionError`
+    is in the chain. A statement or lock timeout, a client-side
+    `TimeoutError` and a misuse of the connection raise at once."""
+    if isinstance(exc, _ConnectFailedError):
+        return not any(isinstance(e, _PERMANENT_CONNECT_FAULTS) for e in _chain(exc))
+    if isinstance(exc, DBAPIError) and exc.connection_invalidated:
+        return True
+    return any(isinstance(e, ConnectionError) for e in _chain(exc))
 
 
 def _changed_since(full: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
@@ -884,11 +900,17 @@ class StudioStore:
 
     def discard_unsaved(self, principal: str, conversation_id: str) -> None:
         """Drop this instance's live state of the conversation, which holds
-        changes no save stored (a turn begun, a segment claimed in memory),
-        keeping its runtime entry and so its locks. `current` returns None
-        until the next `load`, which reads the row afresh."""
+        changes no save stored (a turn begun, a segment claimed in memory, an
+        answer marked), keeping its runtime entry and so its locks. The
+        turn's telemetry span ends first, as abandoned
+        (`ConversationState.abandon_turn_span`), since nothing left holds it.
+        `current` returns None until the next `load`, which reads the row
+        afresh. Called after any lease drop (`drop_lease`), whose
+        bookkeeping reads the entry this clears."""
         entry = self._runtime.get((principal, conversation_id))
         if entry is not None:
+            if entry.state is not None:
+                entry.state.abandon_turn_span()
             entry.state = None
             entry.claimed_reserved = None
             entry.held = None
@@ -922,9 +944,22 @@ class StudioStore:
     def _entry(self, principal: str, conversation_id: str) -> _RuntimeEntry:
         return self._runtime.setdefault((principal, conversation_id), _RuntimeEntry())
 
-    def _transaction(self) -> AbstractAsyncContextManager[AsyncConnection]:
-        """One read-committed transaction. Every write goes through here."""
-        return self._engine.begin()
+    @asynccontextmanager
+    async def _transaction(self) -> AsyncIterator[AsyncConnection]:
+        """One read-committed transaction. Every write goes through here.
+        Acquiring its connection, which may check one out of the pool or
+        connect, raises `_ConnectFailedError` from what failed, so a retried
+        write can tell a failed connect from a failed statement
+        (`_transient`)."""
+        try:
+            conn = await self._engine.connect()
+        except Exception as exc:
+            raise _ConnectFailedError(f"no connection to the database: {exc}") from exc
+        try:
+            async with conn.begin():
+                yield conn
+        finally:
+            await conn.close()
 
     async def _write(
         self,

@@ -23,6 +23,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import logging
 import time
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -122,6 +123,7 @@ from harness.wire import (
     ComponentType,
     CompositionActor,
     CompositionBlock,
+    Done,
     ErrorCode,
     ErrorFrame,
     MessageDelta,
@@ -2220,14 +2222,18 @@ async def test_a_raise_building_the_approval_record_leaves_the_pending_entry_for
                     _interrupt_body(plan["interrupt_id"], "approve"),
                 )
 
-        conversation = store.current(PRINCIPAL, CONVERSATION)
+        assert store.current(PRINCIPAL, CONVERSATION) is None  # nothing unsaved kept
+        assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
+        conversation = await store.load(PRINCIPAL, CONVERSATION)
+        assert conversation is not None
         assert plan["interrupt_id"] in conversation.pending
         assert conversation.approvals == []
-        assert not conversation.lock.locked()
 
         await _stream(
             client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
         )
+        conversation = await store.load(PRINCIPAL, CONVERSATION)
+        assert conversation is not None
 
     # The retry reaches `ApprovalRecord` unpatched: the record is appended
     # and the pending entry it was keyed on is finally consumed. (This
@@ -2237,11 +2243,14 @@ async def test_a_raise_building_the_approval_record_leaves_the_pending_entry_for
     assert plan["interrupt_id"] not in conversation.pending
 
 
-async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claimed_lease() -> None:
+async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claimed_lease(
+    otlp_spans: InMemorySpanExporter,
+) -> None:
     """A leftover per-turn session cannot be replaced after the claim save
     landed, so `/turn` fails before its stream starts. The lock and the
-    segment it claimed are both released, and the next `/turn` is
-    accepted."""
+    segment it claimed are both released, the instance's copy of the row
+    no longer names the segment, the turn's span ends, and the next
+    `/turn` is accepted."""
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
@@ -2262,6 +2271,11 @@ async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claim
             await _stream(client, "/api/studio/turn", _turn_body("hi"))
 
         assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
+        assert store.current(PRINCIPAL, CONVERSATION) is None
+        assert (
+            store._entry(PRINCIPAL, CONVERSATION).baseline[studio_store_module._KEY_SEGMENT] is None
+        )
+        assert [span.name for span in otlp_spans.get_finished_spans()] == ["turn"]
         stored = await store.load(PRINCIPAL, CONVERSATION)
         assert stored is not None and stored.segment is None
         app.state.studio._replace_leftover_session = replace
@@ -2380,7 +2394,8 @@ async def test_a_failure_before_a_resume_streams_keeps_the_answer_for_a_same_ans
 ) -> None:
     """`/interrupt` fails after its claim save, before its stream starts:
     only the lease is dropped, so the same answer retried at once claims
-    and resumes the turn, and the pause survives."""
+    and resumes the turn, and the pause survives. The instance forgets the
+    state it changed and never saved."""
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
@@ -2406,7 +2421,8 @@ async def test_a_failure_before_a_resume_streams_keeps_the_answer_for_a_same_ans
             with pytest.raises(RuntimeError, match="answer lookup failed"):
                 await _stream(client, "/api/studio/interrupt", body)
 
-        assert not store.current(PRINCIPAL, CONVERSATION).lock.locked()
+        assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
+        assert store.current(PRINCIPAL, CONVERSATION) is None
         stored = await store.load(PRINCIPAL, CONVERSATION)
         assert stored is not None and stored.segment is None
         assert stored.pending[elicitation["interrupt_id"]].resuming_segment is not None
@@ -3166,6 +3182,7 @@ async def test_a_different_answer_after_a_crashed_resume_expires_is_refused() ->
     assert mismatched.status_code == 409
     body = mismatched.json()
     assert body["error"] == "edit_conflict"
+    assert store_b.current(PRINCIPAL, CONVERSATION) is None  # its claim, never saved, forgotten
     reloaded = await StudioStore(
         _engine(),
         adk=NO_ADK,
@@ -3286,8 +3303,47 @@ async def test_two_concurrent_first_answers_to_one_interrupt_give_one_stream_and
 
     statuses = sorted(response.status_code for response in responses)
     assert statuses == [200, 409]
-    conflict = next(response for response in responses if response.status_code == 409)
+    conflict, loser = next(
+        (response, app)
+        for response, app in zip(responses, (app_a, app_b), strict=True)
+        if response.status_code == 409
+    )
     assert conflict.json()["error"] == "transient_unavailable"
+    # The losing instance forgets the answer it marked and never saved.
+    assert loser.state.studio.store.current(PRINCIPAL, CONVERSATION) is None
+
+
+async def test_an_answer_refused_as_busy_leaves_no_unsaved_approval_behind() -> None:
+    """Another instance streams on the conversation, so an approval's claim
+    is refused as busy. The approval it recorded and never saved is
+    forgotten with the rest of the instance's live state, and a load reads
+    the row without it."""
+    session_service = _database_session_service()
+    app = _app(*_plan(), tool_surface=ScriptedSurface(), session_service=session_service)
+    store = app.state.studio.store
+    other = StudioStore(
+        _engine(),
+        adk=NO_ADK,
+        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+    )
+
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        await other.load(PRINCIPAL, CONVERSATION)
+        other.claim_segment(PRINCIPAL, CONVERSATION)
+        await other.save(PRINCIPAL, CONVERSATION)
+
+        busy = await client.post(
+            "/api/studio/interrupt",
+            json=_interrupt_body(plan["interrupt_id"], "approve"),
+            headers=AUTH,
+        )
+
+    assert busy.status_code == 409
+    assert store.current(PRINCIPAL, CONVERSATION) is None
+    reloaded = await store.load(PRINCIPAL, CONVERSATION)
+    assert reloaded is not None and reloaded.approvals == []
 
 
 async def test_a_resumed_segments_stream_fatal_error_leaves_no_resuming_entry() -> None:
@@ -7847,6 +7903,57 @@ async def test_a_pause_frame_is_not_sent_when_its_checkpoint_fails() -> None:
     assert is_user_sentence(error["detail"])
 
 
+@pytest.mark.parametrize("write", ["reserve_frames", "checkpoint"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(SegmentLost("taken over"), id="segment-lost"),
+        pytest.param(DatabaseUnavailable("unreachable"), id="database-unavailable"),
+    ],
+)
+async def test_a_lost_segment_at_a_save_ends_the_stream_as_the_heartbeat_does(
+    caplog: pytest.LogCaptureFixture, write: str, failure: Exception
+) -> None:
+    """A frame-number reservation or a checkpoint that finds the segment
+    lost, or the database unreachable until the lease's deadline, ends the
+    stream with the frame a heartbeat that cannot renew sends, logs a
+    warning, and leaves the turn as stored."""
+    studio = _app().state.studio
+    conversation = await studio.store.create("u_a", CONVERSATION)
+    segment_id = studio.store.claim_segment("u_a", CONVERSATION)
+
+    async def failing(*args: Any, **kwargs: Any) -> None:
+        raise failure
+
+    setattr(studio.store, write, failing)
+
+    async def frames() -> Any:
+        yield Done(event="done", seq=0, trace_id="trace")
+
+    with caplog.at_level("WARNING"):
+        sent = [
+            frame
+            async for frame in studio._checkpointed(
+                "u_a", CONVERSATION, segment_id, conversation, frames()
+            )
+        ]
+
+    assert [frame.model_dump(mode="json", exclude_none=True) for frame in sent] == [
+        {
+            "event": "error",
+            "seq": sent[0].seq,
+            "error": {
+                "error": "transient_unavailable",
+                "retry": "retry_after_delay",
+                "detail": classed_sentence("transient_unavailable", "retry_after_delay"),
+                "retry_after_seconds": 30,
+            },
+        }
+    ]
+    assert not conversation.turn_recorded
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+
+
 @pytest.mark.parametrize(
     ("failure", "relayed"),
     [
@@ -7933,10 +8040,11 @@ async def test_a_card_fenced_out_by_a_takeover_ends_the_turn_as_transient(
             frames = await _stream(client, "/api/studio/turn", _turn_body())
 
     error = _frame(frames, "error")["error"]
-    assert (error["error"], error["retry"], error["retry_after_seconds"]) == (
+    assert (error["error"], error["retry"], error["retry_after_seconds"], error["detail"]) == (
         "transient_unavailable",
         "retry_after_delay",
         30,
+        classed_sentence("transient_unavailable", "retry_after_delay"),
     )
     assert not store.current(PRINCIPAL, CONVERSATION).turn_recorded
     assert not [r for r in caplog.records if "studio turn failed" in r.getMessage()]

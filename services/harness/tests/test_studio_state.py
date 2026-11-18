@@ -2623,49 +2623,120 @@ async def test_a_card_write_failing_past_the_lease_deadline_reports_the_database
     assert state.composition is None
 
 
+def _wrapped_in(fault: BaseException, wrapper: BaseException) -> BaseException:
+    wrapper.__cause__ = fault
+    return wrapper
+
+
+class _FailingConnect:
+    """An engine whose next connect raises `fault`; everything else goes to
+    `engine`."""
+
+    def __init__(self, engine: Any, fault: BaseException) -> None:
+        self._engine = engine
+        self.fault: BaseException | None = fault
+
+    async def connect(self) -> Any:
+        if self.fault is not None:
+            fault, self.fault = self.fault, None
+            raise fault
+        return await self._engine.connect()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine, name)
+
+
 @pytest.mark.parametrize(
-    ("fault", "retried"),
+    ("phase", "fault", "retried"),
     [
-        pytest.param(ConnectionResetError("connection reset"), True, id="reset-socket"),
-        pytest.param(ssl.SSLError("handshake failed"), True, id="tls-failure"),
-        pytest.param(socket.gaierror("name does not resolve"), True, id="unresolved-name"),
-        pytest.param(OSError(errno.EHOSTUNREACH, "No route to host"), True, id="unreachable-host"),
+        pytest.param("connect", ConnectionRefusedError("refused"), True, id="connect-refused"),
+        pytest.param("connect", ssl.SSLError("handshake failed"), True, id="connect-tls-failure"),
         pytest.param(
-            OSError(errno.ENETUNREACH, "Network is unreachable"), True, id="unreachable-network"
+            "connect", socket.gaierror("name does not resolve"), True, id="connect-unresolved"
         ),
-        pytest.param(OSError(errno.ETIMEDOUT, "timed out"), True, id="socket-timeout"),
-        pytest.param(OSError(errno.ENETDOWN, "Network is down"), True, id="network-down"),
-        pytest.param(OSError(errno.EHOSTDOWN, "Host is down"), True, id="host-down"),
         pytest.param(
+            "connect",
+            OSError(errno.EHOSTUNREACH, "No route to host"),
+            True,
+            id="connect-unreachable-host",
+        ),
+        pytest.param(
+            "connect",
             OSError("Multiple exceptions: [Errno 111] refused, [Errno 99] unavailable"),
             True,
-            id="every-address-refused",
+            id="connect-every-address-refused",
         ),
-        pytest.param(TimeoutError("timed out"), True, id="timeout"),
-        pytest.param(FileNotFoundError("no socket at /cloudsql/x"), False, id="missing-socket"),
-        pytest.param(PermissionError("client key"), False, id="unreadable-certificate"),
+        pytest.param("connect", TimeoutError("timed out"), True, id="connect-timeout"),
         pytest.param(
+            "connect",
+            OSError(errno.EMFILE, "Too many open files"),
+            True,
+            id="connect-too-many-open-files",
+        ),
+        pytest.param(
+            "connect", SQLAlchemyTimeoutError("QueuePool limit reached"), True, id="pool-timeout"
+        ),
+        pytest.param(
+            "connect",
+            OperationalError("connect", {}, ConnectionRefusedError("refused")),
+            True,
+            id="connect-driver-refused",
+        ),
+        pytest.param(
+            "connect", FileNotFoundError("no socket at /cloudsql/x"), False, id="missing-socket"
+        ),
+        pytest.param("connect", PermissionError("client key"), False, id="unreadable-key"),
+        pytest.param(
+            "connect", IsADirectoryError("sslrootcert"), False, id="certificate-is-a-directory"
+        ),
+        pytest.param(
+            "connect", NotADirectoryError("sslrootcert"), False, id="certificate-not-a-directory"
+        ),
+        pytest.param(
+            "connect",
             ssl.SSLCertVerificationError("certificate verify failed"),
             False,
             id="unverified-certificate",
         ),
         pytest.param(
-            OperationalError("UPDATE", {}, ConnectionRefusedError("refused")),
-            True,
-            id="refused-socket",
+            "connect",
+            _wrapped_in(
+                ssl.SSLCertVerificationError("certificate verify failed"),
+                OSError("connector could not connect"),
+            ),
+            False,
+            id="unverified-certificate-wrapped",
         ),
         pytest.param(
+            "statement",
+            OperationalError("UPDATE", {}, ConnectionResetError("connection reset")),
+            True,
+            id="statement-reset-socket",
+        ),
+        pytest.param(
+            "statement", ConnectionResetError("connection reset"), True, id="statement-reset-raw"
+        ),
+        pytest.param(
+            "statement",
             OperationalError("UPDATE", {}, Exception("closed"), connection_invalidated=True),
             True,
-            id="invalidated",
+            id="statement-invalidated",
         ),
-        pytest.param(SQLAlchemyTimeoutError("QueuePool limit reached"), True, id="pool-timeout"),
+        pytest.param("statement", TimeoutError("timed out"), False, id="statement-timeout"),
         pytest.param(
+            "statement",
+            OSError(errno.EMFILE, "Too many open files"),
+            False,
+            id="statement-os-error",
+        ),
+        pytest.param(
+            "statement",
             OperationalError("UPDATE", {}, Exception("canceling statement due to lock timeout")),
             False,
             id="lock-timeout",
         ),
         pytest.param(
+            "statement",
             InterfaceError("UPDATE", {}, Exception("another operation is in progress")),
             False,
             id="connection-misuse",
@@ -2673,38 +2744,44 @@ async def test_a_card_write_failing_past_the_lease_deadline_reports_the_database
     ],
 )
 async def test_a_card_write_retries_a_lost_connection_alone(
-    new_store, monkeypatch, fault: Exception, retried: bool
+    new_store, monkeypatch, phase: str, fault: Exception, retried: bool
 ) -> None:
-    """A retry outlasts the network to the database failing, however it
-    surfaces. A lock timeout the database reports, a misuse of the
-    connection, a missing or unreadable file and a certificate that does
-    not verify, no retry mends, so they raise at once."""
+    """A failed connect is retried unless what failed is a file or a
+    certificate no retry mends; a failed statement is retried only when the
+    connection was lost under it. Anything else raises at once."""
     monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
     store = new_store()
     await store.create("principal", CONVERSATION)
     store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
-    real_write = store._write_composition
-    faults: list[Exception] = []
+    if phase == "connect":
+        store._engine = _FailingConnect(store._engine, fault)
+    else:
+        real_write = store._write_composition
+        faults: list[Exception] = []
 
-    async def failing_once(*args: Any, **kwargs: Any) -> None:
-        if not faults:
-            faults.append(fault)
-            raise fault
-        await real_write(*args, **kwargs)
+        async def failing_once(*args: Any, **kwargs: Any) -> None:
+            if not faults:
+                faults.append(fault)
+                raise fault
+            await real_write(*args, **kwargs)
 
-    store._write_composition = failing_once
+        store._write_composition = failing_once
 
     if retried:
         await store.change_canvas(
             "principal", CONVERSATION, lambda work: land_component(work, _CARD)
         )
     else:
-        with pytest.raises(type(fault)):
+        with pytest.raises(Exception) as raised:
             await store.change_canvas(
                 "principal", CONVERSATION, lambda work: land_component(work, _CARD)
             )
+        assert not isinstance(raised.value, DatabaseUnavailable)
+        assert fault in {raised.value, raised.value.__cause__}
 
+    if phase == "connect":
+        assert store._engine.fault is None
     reloaded = await new_store().load("principal", CONVERSATION)
     assert (reloaded.composition is not None) == retried
 
