@@ -15,7 +15,7 @@ different groups never conflict:
 - `save` writes the turn state compare-and-swapped on the row's `version`
   (`ConversationStale` when another instance moved it, or holds a live
   lease).
-- `checkpoint` and `start_release` write the turn state fenced on the segment
+- `checkpoint` and `release` write the turn state fenced on the segment
   (`SegmentLost` when another instance holds the lease).
 - `change_canvas` is a checkpoint with a card change applied: each card
   the turn lands, holds, swaps, revises or removes commits with its canvas
@@ -85,13 +85,13 @@ from harness.studio_state import (
     DatabaseUnavailable,
     Segment,
     SegmentBusy,
-    SegmentEnding,
     SegmentLost,
     _PendingChoice,
     _PendingInterrupt,
     _PendingOption,
     _PendingQuestion,
     _wire_id,
+    turn_status,
 )
 from harness.wire import CompositionManifest, PlanProposed
 
@@ -261,13 +261,11 @@ def _shallow_copy(state: ConversationState) -> ConversationState:
     )
 
 
-async def _run_to_completion[T](work: Coroutine[Any, Any, T] | asyncio.Future[T]) -> T:
-    """Run `work` in a task of its own, or wait for the task or future it
-    is, until it finishes even when the caller is cancelled, then re-raise
-    the caller's cancellation. A caller that passes its own task reads the
-    result from it after the cancellation.
+async def _run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
+    """Run `work` in a task of its own and wait for it to finish even when
+    the caller is cancelled, then re-raise the caller's cancellation.
 
-    A write the stream makes from a `finally` (`start_release`) or from a task the
+    A write the stream makes from a `finally` (`release`) or from a task the
     stream cancels (`renew`, on the heartbeat) is cancelled with
     `Task.cancel`, which no anyio shield stops. Cancelled mid-statement, the
     write never lands.
@@ -1182,13 +1180,8 @@ class StudioStore:
         entry.draft = None
         live = entry.state
         assert live is not None
-        if work._telemetry_span is not None and live._telemetry_span is not None:
-            logger.warning(
-                "studio store: conversation %s still held a segment span when a new "
-                "segment claimed it; ending it as orphaned",
-                live.conversation_id,
-            )
-            live.end_segment_span("orphaned")
+        if work._telemetry_span is not None:
+            live.end_leftover_span()
         _assign_changed(live, work, base)
         if work._telemetry_span is not None:
             live._telemetry_span = work._telemetry_span
@@ -1417,7 +1410,7 @@ class StudioStore:
         field the live stream changes during the write keeps its new value,
         which differs from the baseline and goes out with the next write.
 
-        A `retried` write that clears the lease (`start_release`'s) and finds the
+        A `retried` write that clears the lease (`release`'s) and finds the
         row holding no lease at the version the earlier attempt's commit
         would have written (`entry.version` + 1) was saved by that attempt,
         whose acknowledgement was lost. It writes nothing and records the
@@ -1579,7 +1572,7 @@ class StudioStore:
         """The save of a streaming segment: this instance's changed keys,
         fenced on `segment_id`. Runs before every actionable pause frame and
         before `done` (never `message.complete`), and once more, with the
-        segment cleared, at the end of the segment (`start_release`).
+        segment cleared, at the end of the segment (`release`).
 
         Under the row lock: raises `SegmentLost` and writes nothing when the
         stored lease is not `segment_id` (another instance's claim outlived
@@ -1602,38 +1595,45 @@ class StudioStore:
             ),
         )
 
-    def start_release(
+    async def release(
         self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0
-    ) -> asyncio.Future[SegmentEnding]:
-        """Start the end-of-segment save as a task of its own and return it:
-        drop this segment's still-resuming pending entries, clear the segment
-        if it is still ours, then `checkpoint`. The caller awaits the task
-        through `_run_to_completion`, so the save runs to the end even when
-        the caller is cancelled, and reads how the segment ended
-        (`SegmentEnding`, which names the status its span ends with) from the
-        task's result (`harness.studio.StudioRunner._locked`). It runs in a
-        `finally` on client-disconnect and generator-finaliser paths, where a
-        disconnect cancels the task running it (`_unwind`'s `Task.cancel`);
-        cancelled mid-checkpoint, the segment would stay live until its TTL.
-        The timeout cancels the checkpoint once (`asyncio.timeout`); anyio's
-        `move_on_after` would re-cancel at every await until its scope exits,
-        cutting short the rollback and connection close.
+    ) -> None:
+        """The end-of-segment save: drop this segment's still-resuming
+        pending entries, clear the segment if it is still ours, then
+        `checkpoint`. Runs to the end even when the caller is cancelled
+        (`_run_to_completion`), since it runs in a `finally` on
+        client-disconnect and generator-finaliser paths, where a disconnect
+        cancels the task running it (`_unwind`'s `Task.cancel`). Cancelled
+        mid-checkpoint, the segment would stay live until its TTL. The
+        timeout cancels the checkpoint once (`asyncio.timeout`); anyio's
+        `move_on_after` would re-cancel at every await until its scope
+        exits, cutting short the rollback and connection close.
 
-        The task never raises: a `checkpoint` that cannot land (fenced out by
-        a takeover, a database unreachable until the lease's deadline,
-        another database error, or the timeout above) is logged, each as
-        what it is, and swallowed. The segment then expires by its own TTL,
-        which is what makes it safe to give up here. A conversation this
-        instance holds no state for has nothing to save, and its future is
-        already done with `saved`."""
+        Never raises anything but the caller's own cancellation: a
+        `checkpoint` that cannot land (fenced out by a takeover, a database
+        unreachable until the lease's deadline, another database error, or
+        the timeout above) is logged, each as what it is, and swallowed. The
+        segment then expires by its own TTL, which is what makes it safe to
+        give up here. What the release saved is read afterwards from this
+        instance's baseline (`stored_turn`).
+        """
         entry = self._runtime.get((principal, conversation_id))
         if entry is None or entry.state is None:
-            done: asyncio.Future[SegmentEnding] = asyncio.get_running_loop().create_future()
-            done.set_result("saved")
-            return done
-        return asyncio.ensure_future(
+            return
+        await _run_to_completion(
             self._save_release(entry.state, principal, conversation_id, segment_id, timeout=timeout)
         )
+
+    def stored_turn(self, principal: str, conversation_id: str) -> str:
+        """How the conversation's current turn stands as this instance last
+        saved it (`harness.studio_state.turn_status` of its baseline): `done`
+        or the recorded error code, `paused`, or `open`. A save that failed
+        leaves the baseline at the last one that committed."""
+        entry = self._runtime.get((principal, conversation_id))
+        saved = ConversationState(conversation_id=conversation_id)
+        if entry is not None:
+            _apply_delta(saved, entry.baseline)
+        return turn_status(saved)
 
     async def _save_release(
         self,
@@ -1643,11 +1643,11 @@ class StudioStore:
         segment_id: str,
         *,
         timeout: float,
-    ) -> SegmentEnding:
-        """`start_release`'s save, run as its own task. A release that did not land
+    ) -> None:
+        """`release`'s save, run as its own task. A release that did not land
         gives the lease up all the same: this instance stops counting
         `segment_id` as held, so none of its later saves writes under it."""
-        ending: SegmentEnding = "failed"
+        saved = False
         try:
             async with asyncio.timeout(timeout):
                 state.drop_resuming(segment_id)
@@ -1655,9 +1655,8 @@ class StudioStore:
                     state.segment = None
                 try:
                     await self.checkpoint(principal, conversation_id, segment_id)
-                    ending = "saved"
+                    saved = True
                 except SegmentLost:
-                    ending = "segment_lost"
                     logger.warning(
                         "studio store release: conversation %s segment %s was already "
                         "taken over; nothing saved",
@@ -1665,7 +1664,6 @@ class StudioStore:
                         segment_id,
                     )
                 except DatabaseUnavailable as exc:
-                    ending = "database_unavailable"
                     logger.error(
                         "studio store release: conversation %s segment %s could not reach the "
                         "database before the lease's deadline; nothing saved, and the lease "
@@ -1687,9 +1685,8 @@ class StudioStore:
             )
         finally:
             entry = self._runtime[(principal, conversation_id)]
-            if ending != "saved" and entry.held == segment_id:
+            if not saved and entry.held == segment_id:
                 entry.held = None
-        return ending
 
     async def drop_lease(
         self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0
@@ -1705,7 +1702,7 @@ class StudioStore:
         the retry's `load` reads the row afresh.
 
         Runs to the end even when the caller is cancelled, and never raises
-        anything but that cancellation, as `start_release`: a clear that cannot
+        anything but that cancellation, as `release`: a clear that cannot
         land is logged, and the lease then expires by its own TTL.
         """
         await _run_to_completion(

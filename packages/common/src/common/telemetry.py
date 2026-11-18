@@ -606,6 +606,7 @@ def end_turn_span(
     response: Any = None,
     error: str | None = None,
     level: EventLevel = "ERROR",
+    attributes: Mapping[str, str] | None = None,
 ) -> None:
     """Close a span opened by `start_turn_span`. A no-op for `None`.
 
@@ -615,7 +616,9 @@ def end_turn_span(
     on one trace, and the trace's own input and output are those of whichever
     root Langfuse ingests last. An `error` (a machine-readable code, never
     exception text) sets the observation's level to `level` with `error` as
-    its status message. Off Langfuse all four are ignored.
+    its status message. Off Langfuse all four are ignored. `attributes` go
+    on the span itself, on any backend, and on Langfuse into the
+    observation's metadata as well.
 
     Callable from any asyncio task: the span's scope is exited in the context
     it was entered in. Swallows any error from closing it, since telemetry
@@ -623,6 +626,13 @@ def end_turn_span(
     """
     if not isinstance(handle, _TurnSpan):
         return
+    if attributes:
+        try:
+            from opentelemetry import trace
+
+            trace.get_current_span(handle.otel_context).set_attributes(dict(attributes))
+        except Exception:
+            logger.debug("failed to set a turn span's attributes -- continuing", exc_info=True)
     if handle.observation is not None:
         try:
             handle.observation.update(
@@ -630,6 +640,7 @@ def end_turn_span(
                 output=response,
                 level=level if error else None,
                 status_message=error or None,
+                **({"metadata": dict(attributes)} if attributes else {}),
             )
         except Exception:
             logger.debug("failed to record a turn's input and output -- continuing", exc_info=True)

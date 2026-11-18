@@ -35,6 +35,7 @@ import logging
 import time
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import AbstractContextManager, aclosing, nullcontext, suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -86,9 +87,7 @@ from harness.studio_state import (
     ConversationState,
     DatabaseUnavailable,
     SegmentBusy,
-    SegmentEnding,
     SegmentLost,
-    StreamLoss,
     _apply_operations,
     _end_stream,
     _next_manifest,
@@ -103,7 +102,6 @@ from harness.studio_store import (
     ConversationHeld,
     ConversationStale,
     StudioStore,
-    _run_to_completion,
 )
 from harness.studio_translate import (
     SEGMENT_LOST_DETAIL,
@@ -115,6 +113,7 @@ from harness.studio_translate import (
     held_labels,
     segment_lost_frame,
 )
+from harness.tool_contracts import HarnessCode
 from harness.turn_budget import start_turn_budget
 from harness.turn_records import CHIP_STALE_NOTE, stored_choice
 from harness.wire import (
@@ -535,6 +534,7 @@ async def _sse_stream(
     conversation: ConversationState | None = None,
     switch: bool = False,
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
+    ending: _StreamEnding | None = None,
 ) -> AsyncGenerator[str]:
     """Serialise frames as SSE `data:` lines, one loop owning all three
     transport concerns: `: ka` comment heartbeats while the next frame is
@@ -589,7 +589,10 @@ async def _sse_stream(
     generator and the event loop closes it later from another context, where
     leaving the scope detaches nothing (`common.telemetry.use_turn_span`). On
     either path the finished spans are exported (`flush_telemetry`) as the
-    stream ends, while the request still has CPU."""
+    stream ends, while the request still has CPU. When the cancel branch
+    is taken, the frame it sends is the stream's ending, and it is set on
+    `ending` (`_StreamEnding`) before the segment unwinds and its span
+    ends."""
     turn_span: AbstractContextManager[None] = (
         conversation.in_turn_span() if conversation is not None else nullcontext()
     )
@@ -660,17 +663,23 @@ async def _sse_stream(
                                     conversation.cancel_reason = None
                                     cancel_wait = asyncio.ensure_future(armed_cancel.wait())
                                     continue
-                                lost = conversation.cancel_reason in (
-                                    "segment_lost",
-                                    "database_unavailable",
-                                )
+                                reason = conversation.cancel_reason
+                                lost = reason in ("segment_lost", "database_unavailable")
+                                if ending is not None:
+                                    # The branch's frame is the stream's
+                                    # ending, set before the unwind ends the
+                                    # segment's span.
+                                    ending.status = reason if lost else "cancelled"
                                 if not lost:
                                     # Closed before the segment unwinds, so
-                                    # its release saves the turn as stopped.
+                                    # its release saves the turn as stopped,
+                                    # with no pause left to answer, as
+                                    # `/cancel` closes a paused turn.
                                     conversation.close_turn(
                                         final_text=conversation.turn_final_text,
                                         error=ErrorCode.CANCELLED.value,
                                     )
+                                    conversation.pending.clear()
                                 await _unwind(next_frame)
                                 if lost:
                                     # Another instance took the segment over,
@@ -776,7 +785,7 @@ async def _unwind(pending: asyncio.Future[Any]) -> None:
     waiting task to it, and Starlette's anyio task group re-cancels the
     response task on every loop iteration once the response is cancelled.
     Unshielded, that re-cancels `pending`'s own cleanup (the session
-    service's rollback and connection close, `StudioStore.start_release`) at
+    service's rollback and connection close, `StudioStore.release`) at
     each of its awaits, and a SQLAlchemy connection torn down twice over
     asyncpg leaves a task that never finishes."""
     pending.cancel()
@@ -1060,7 +1069,7 @@ class StudioRunner:
         conversation: ConversationState,
         frames: AsyncGenerator[Any],
         *,
-        report: Callable[[StreamLoss], None],
+        ending: _StreamEnding,
     ) -> AsyncGenerator[Any]:
         """Relay `frames`, each once its `seq` lies inside the segment's
         reserved frame numbers (`StudioStore.reserve_frames`), checkpointing
@@ -1081,17 +1090,25 @@ class StudioRunner:
         segment, or cannot reach the database, ends `frames` with the same
         frame, which is relayed, its number reserved first, like any other;
         when that reservation fails too, the card write's frame goes out
-        alone. Each loss is logged and handed to `report` (`stream_loss`)
-        once, before its frame goes out. `frames` is closed whenever this
-        stops relaying it. This is the one interception point for every
-        route this runs under (`/turn`, its edit-card branch, and
-        `/interrupt`)."""
+        alone, logged once. `frames` is closed whenever this stops relaying
+        it. This is the one interception point for every route this runs
+        under (`/turn`, its edit-card branch, and `/interrupt`).
+
+        Every ending frame this relays or builds sets `ending` to its cause
+        before it goes out: `done` and `paused` for those frames once their
+        checkpoint landed, the loss (`stream_loss`) or `state_not_saved` for
+        a save that failed, and the turn's recorded code for a stream-fatal
+        error frame of `frames`."""
 
         def failed(what: str, exc: Exception) -> ErrorFrame:
             _log_save_failure(what, conversation, segment_id, exc)
-            if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
-                report(stream_loss(exc))
-            return _checkpoint_failed_frame(conversation, exc)
+            frame = _checkpoint_failed_frame(conversation, exc)
+            ending.status = (
+                stream_loss(exc)
+                if isinstance(exc, (SegmentLost, DatabaseUnavailable))
+                else HarnessCode.STATE_NOT_SAVED.value
+            )
+            return frame
 
         card_write_lost: ErrorFrame | None = None
 
@@ -1127,6 +1144,12 @@ class StudioRunner:
                         outgoing = frame.model_copy(
                             update={"composition": conversation.composition}
                         )
+                if event == "done":
+                    ending.status = "done"
+                elif event in _CHECKPOINT_BEFORE_EVENTS:
+                    ending.status = "paused"
+                elif isinstance(frame, ErrorFrame) and frame is not card_write_lost:
+                    ending.status = _failure_status(conversation, frame)
                 yield outgoing
                 if event == "plan.approved":
                     # Saved once sent, so a retry of the same answer after this
@@ -1150,6 +1173,7 @@ class StudioRunner:
         conversation: ConversationState,
         segment_id: str,
         frames: AsyncGenerator[Any],
+        ending: _StreamEnding | None = None,
     ) -> AsyncGenerator[Any]:
         """Stream frames, checkpointing before any that report success
         (`_checkpointed`), then release the segment and the conversation
@@ -1163,68 +1187,76 @@ class StudioRunner:
         A heartbeat task renews `segment_id` for as long as this generator is
         live, so the segment's lease outlives a single checkpoint's TTL push;
         it is cancelled and awaited before release, so it never races the
-        release's own write (`StudioStore.start_release`). Unwinding it,
+        release's own write (`StudioStore.release`). Unwinding it,
         releasing the segment (and this segment's resuming pending entries),
         and releasing the local lock each sit in their own nested `finally`,
         so a heartbeat that ends with a non-cancel exception still reaches
         both releases; `_unwind` re-raises that exception once they have run.
         A DB error the release cannot itself raise (it never does; see
-        `StudioStore.start_release`), and still could not strand the lock,
-        since releasing it does not depend on the release having succeeded.
+        `StudioStore.release`), and still could not strand the lock, since
+        releasing it does not depend on the release having succeeded.
 
-        The segment's span ends here (`segment_span_status`), from how the
-        release ended and the first loss the stream met: one a save in
-        `_checkpointed` reported, else one `_end_stream` armed
-        (`conversation.cancel_reason`: the heartbeat, a card removal, the
-        run ledger). The release's save runs as one task
-        (`StudioStore.start_release`), so its ending is read from the task
-        even when this generator is cancelled while it waits.
+        The segment's span ends here, once the release ran
+        (`harness.studio_state.span_level`'s table). Its status is the cause
+        of the last ending frame the stream chose to send (`ending`, which
+        `_checkpointed` and `_sse_stream`'s cancel branch set); a stream that
+        chose none ended because its frames ran out (`failed`) or because it
+        was closed or cancelled first (`disconnected`). Its `stored` is the
+        turn as this instance last saved it (`StudioStore.stored_turn`),
+        read after the release, which runs to the end even when this
+        generator is cancelled while it waits.
         """
-        loss: StreamLoss | None = None
-
-        def report(reported: StreamLoss) -> None:
-            nonlocal loss
-            loss = loss or reported
+        ending = ending or _StreamEnding()
+        ran_out = False
 
         heartbeat = asyncio.ensure_future(
             self._heartbeat(principal, conversation_id, segment_id, conversation)
         )
         try:
             async for frame in self._checkpointed(
-                principal, conversation_id, segment_id, conversation, frames, report=report
+                principal, conversation_id, segment_id, conversation, frames, ending=ending
             ):
                 yield frame
+            ran_out = True
         finally:
             try:
                 await _unwind(heartbeat)
             finally:
-                release: asyncio.Future[SegmentEnding] | None = None
                 try:
-                    release = self.store.start_release(principal, conversation_id, segment_id)
-                    await _run_to_completion(release)
+                    await self.store.release(principal, conversation_id, segment_id)
                 finally:
-                    # The segment ends here on this instance, and its span
-                    # with it; the stream's end exports the span
-                    # (`_sse_stream`).
-                    armed = conversation.cancel_reason
-                    if armed in ("segment_lost", "database_unavailable"):
-                        report(armed)
-                    conversation.end_segment_span(_released(release), loss)
-                    conversation.lock.release()
+                    try:
+                        # The segment ends here on this instance, and its
+                        # span with it; the stream's end exports the span
+                        # (`_sse_stream`).
+                        conversation.end_segment_span(
+                            ending.status or ("failed" if ran_out else "disconnected"),
+                            stored=self.store.stored_turn(principal, conversation_id),
+                        )
+                    finally:
+                        conversation.lock.release()
 
 
-def _released(release: asyncio.Future[SegmentEnding] | None) -> SegmentEnding:
-    """How the release's task (`StudioStore.start_release`) ended the
-    segment: its result, or `failed` when it never started or did not
-    return one."""
-    if (
-        release is not None
-        and release.done()
-        and not release.cancelled()
-        and release.exception() is None
-    ):
-        return release.result()
-    return "failed"
+@dataclass
+class _StreamEnding:
+    """The cause of the last ending frame a segment's stream chose to send,
+    in the turn record's vocabulary (`harness.studio_state.span_level`'s
+    table): set by `StudioRunner._checkpointed` for the frames it relays or
+    builds and by `_sse_stream`'s cancel branch when it takes it, and read
+    once, as the segment's span ends (`StudioRunner._locked`). `None` while
+    the stream chose none."""
+
+    status: str | None = None
+
+
+def _failure_status(conversation: ConversationState, frame: ErrorFrame) -> str:
+    """The cause of a stream-fatal error frame of the segment's own frames:
+    the error code the turn's record names, else the frame's own code."""
+    if conversation.turn_recorded and conversation.turns:
+        recorded = conversation.turns[-1].get("error")
+        if recorded:
+            return recorded
+    return frame.error.error.value
 
 
 def _log_save_failure(
@@ -1472,7 +1504,7 @@ async def _release_claim(
     cancelled = (
         isinstance(cause, asyncio.CancelledError) and task is not None and task.cancelling() > 0
     )
-    ending: SegmentEnding = "cancelled" if cancelled else "failed"
+    status = "cancelled" if cancelled else "failed"
     ended = False
     try:
         ended = store.drop_draft(principal, conversation_id)
@@ -1481,7 +1513,7 @@ async def _release_claim(
     finally:
         live = store.current(principal, conversation_id)
         if segment_id is not None and live is not None:
-            ended = live.end_segment_span(ending) or ended
+            ended = live.end_segment_span(status) or ended
         lock.release()
         if ended:
             await flush_telemetry()
@@ -1687,6 +1719,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # model's patch-or-recreate decision, and the platform write.
                 # It streams under the same segment the claim save above
                 # just persisted.
+                ending = _StreamEnding()
                 return StreamingResponse(
                     _sse_stream(
                         studio._locked(
@@ -1701,13 +1734,16 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                                 component_id=body.component_ref.component_id,
                                 message=body.message,
                             ),
+                            ending,
                         ),
                         conversation=conversation,
+                        ending=ending,
                     ),
                     media_type=SSE_MEDIA_TYPE,
                 )
             text = body.message if chip_label is None else f"Count {chip_label}."
             message = types.Content(role="user", parts=[types.Part.from_text(text=text)])
+            ending = _StreamEnding()
             return StreamingResponse(
                 studio._settling(
                     _sse_stream(
@@ -1719,8 +1755,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                             studio._frames(
                                 principal=principal, conversation=conversation, message=message
                             ),
+                            ending,
                         ),
                         conversation=conversation,
+                        ending=ending,
                     )
                 ),
                 media_type=SSE_MEDIA_TYPE,
@@ -2107,6 +2145,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 message=message,
                 approving=approving,
             )
+            ending = _StreamEnding()
             return StreamingResponse(
                 studio._settling(
                     _sse_stream(
@@ -2116,9 +2155,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                             conversation,
                             segment_id,
                             frames,
+                            ending,
                         ),
                         conversation=conversation,
                         switch=switching,
+                        ending=ending,
                     )
                 ),
                 media_type=SSE_MEDIA_TYPE,

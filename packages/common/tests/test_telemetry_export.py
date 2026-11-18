@@ -255,6 +255,34 @@ def test_record_event_adds_a_span_event_on_the_otlp_backend(isolated_telemetry) 
     assert dict(event.attributes or {}) == {"reason": "no_rows", "count": 3, "level": "WARNING"}
 
 
+def test_a_turn_span_ended_with_attributes_exports_them_on_the_otlp_backend(
+    isolated_telemetry,
+) -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    telemetry._backend = "otel"
+
+    end_turn_span(start_turn_span("tr_export0005"), attributes={"dfo.stored": "paused"})
+
+    (span,) = exporter.get_finished_spans()
+    assert (span.attributes or {}).get("dfo.stored") == "paused"
+
+
+def test_a_turn_span_ended_with_attributes_exports_them_on_langfuse(
+    fake_langfuse: FakeLangfuse,
+) -> None:
+    init_telemetry(service_name="harness")
+    _join_auth_check_thread()
+
+    end_turn_span(start_turn_span("tr_export0006"), error="done", attributes={"dfo.stored": "done"})
+    get_client().flush()
+
+    (turn,) = [span for span in fake_langfuse.spans() if span.name == "turn"]
+    assert _attribute(turn, "dfo.stored") == "done"
+
+
 async def test_a_turn_continued_in_a_second_task_exports_as_one_trace(
     fake_langfuse: FakeLangfuse, caplog: pytest.LogCaptureFixture
 ) -> None:
