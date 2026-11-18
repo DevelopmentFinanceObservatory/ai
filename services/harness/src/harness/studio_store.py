@@ -26,7 +26,11 @@ different groups never conflict:
 - `renew` and `request_cancel` each update the lease columns in one
   conditional statement and leave `version` alone. A Stop request is an id
   (`lease_stop_id`) that renewals read and never clear, so a renewal whose
-  acknowledgement is lost cannot drop it; a claim starts with none.
+  acknowledgement is lost cannot drop it; a claim starts with none. The
+  boolean `lease_cancel` carries a Stop between instances of the previous
+  release and this one: `request_cancel` sets it beside the id, and a
+  renewal that finds it set clears it and records a fresh id in the same
+  update.
 - `reserve_frames` extends the frame numbers the live segment may send,
   fenced on the segment and its lease being live.
 
@@ -637,7 +641,7 @@ def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
             _check_column("segment expiry", segment.expires_at, (int, float))
         sets.append(
             "lease_segment_id = :segment_id, lease_owner = :owner, "
-            "lease_expires_at = :expires_at, lease_stop_id = :stop_id"
+            "lease_expires_at = :expires_at, lease_stop_id = :stop_id, lease_cancel = false"
         )
         params |= {
             "segment_id": segment.id if segment else None,
@@ -1396,7 +1400,9 @@ class StudioStore:
         `segment_id` (another instance took over after this one's TTL
         lapsed); the caller ends the stream fatally. Otherwise
         `Renewal.stop_id` is the latest Stop request made of the segment
-        (`request_cancel`), or `None`. The renewal leaves it stored, so a
+        (`request_cancel`), or `None`. A set `lease_cancel`, the Stop an
+        instance of the previous release requests, is cleared and recorded
+        as a fresh id in the same update. The renewal leaves the id stored, so a
         renewal whose acknowledgement is lost reports the same request
         again, and the caller acts once on each id it has not acted on. A
         database error propagates, as does a `TimeoutError` when the renewal
@@ -1424,7 +1430,10 @@ class StudioStore:
                         await conn.execute(
                             text(
                                 "UPDATE conversations"
-                                f" SET lease_expires_at = {self._time_sql} + :ttl"
+                                f" SET lease_expires_at = {self._time_sql} + :ttl,"
+                                " lease_stop_id = CASE WHEN lease_cancel THEN :minted"
+                                " ELSE lease_stop_id END,"
+                                " lease_cancel = false"
                                 " WHERE principal = :principal"
                                 " AND conversation_id = :conversation_id"
                                 " AND lease_segment_id = :segment_id"
@@ -1435,6 +1444,7 @@ class StudioStore:
                                 "conversation_id": conversation_id,
                                 "segment_id": segment_id,
                                 "ttl": SEGMENT_TTL_S,
+                                "minted": _wire_id("stop"),
                             },
                         )
                     ).first()
@@ -1613,7 +1623,8 @@ class StudioStore:
                     await conn.execute(
                         text(
                             "UPDATE conversations SET lease_segment_id = NULL, "
-                            "lease_owner = NULL, lease_expires_at = NULL, lease_stop_id = NULL "
+                            "lease_owner = NULL, lease_expires_at = NULL, lease_stop_id = NULL, "
+                            "lease_cancel = false "
                             "WHERE principal = :principal "
                             "AND conversation_id = :conversation_id "
                             "AND lease_segment_id = :segment_id"
@@ -1640,8 +1651,10 @@ class StudioStore:
     async def request_cancel(self, principal: str, conversation_id: str) -> bool:
         """Record a Stop request, under a fresh id, on `conversation_id`'s
         live segment, whoever owns it, this instance included; the segment's
-        heartbeat reads it at its next renewal (`renew`). One conditional
-        update of the lease columns.
+        heartbeat reads it at its next renewal (`renew`). It also sets
+        `lease_cancel`, which an instance of the previous release reads, so
+        a Stop reaches a segment of either release. One conditional update
+        of the lease columns.
 
         Returns whether a live segment was found and signalled: `False`
         when there is none, or the one on record has already expired by the
@@ -1655,7 +1668,7 @@ class StudioStore:
                 row = (
                     await conn.execute(
                         text(
-                            "UPDATE conversations SET lease_stop_id = :stop_id "
+                            "UPDATE conversations SET lease_stop_id = :stop_id, lease_cancel = true "
                             "WHERE principal = :principal AND conversation_id = :conversation_id "
                             "AND lease_segment_id IS NOT NULL "
                             f"AND lease_expires_at > {self._time_sql} "

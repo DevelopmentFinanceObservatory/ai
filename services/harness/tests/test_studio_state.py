@@ -2299,6 +2299,52 @@ async def test_renew_reports_cancelled_and_still_pushes_the_ttl_forward(new_stor
     assert reloaded.segment.expires_at == clock.at + studio_state.SEGMENT_TTL_S
 
 
+async def _lease_cancel(engine: AsyncEngine) -> bool:
+    async with engine.connect() as conn:
+        return (
+            await conn.execute(
+                text("SELECT lease_cancel FROM conversations WHERE conversation_id = :c"),
+                {"c": CONVERSATION},
+            )
+        ).scalar_one()
+
+
+async def test_a_stop_from_the_previous_release_reaches_a_renewal(
+    new_store, clock, pg_engine
+) -> None:
+    """An instance of the previous release requests a Stop by setting
+    `lease_cancel`. A renewal reports it under an id, clears the flag, and
+    reports the same id again, so a lost acknowledgement drops nothing."""
+    store = new_store(clock=clock)
+    await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE conversations SET lease_cancel = true WHERE conversation_id = :c"),
+            {"c": CONVERSATION},
+        )
+
+    first = await store.renew("principal", CONVERSATION, segment_id)
+    assert first.held and first.stop_id is not None
+    assert await store.renew("principal", CONVERSATION, segment_id) == first
+    assert await _lease_cancel(pg_engine) is False
+
+
+async def test_a_stop_reaches_a_segment_of_the_previous_release(
+    new_store, clock, pg_engine
+) -> None:
+    """`request_cancel` sets `lease_cancel` beside the id, which is what a
+    renewal of the previous release reads."""
+    store = new_store(clock=clock)
+    await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+
+    assert await new_store(clock=clock).request_cancel("principal", CONVERSATION) is True
+    assert await _lease_cancel(pg_engine) is True
+
+
 async def test_request_cancel_returns_false_with_no_live_segment(new_store) -> None:
     store = new_store()
     await store.create("principal", CONVERSATION)
