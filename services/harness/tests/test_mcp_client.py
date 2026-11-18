@@ -985,29 +985,22 @@ async def test_the_executor_withholds_a_card_with_no_linked_lineage_as_a_harness
 
 
 class _CardLineages:
-    """One instance's view of the lineages a conversation's card writes
-    commit, read back as `StudioStore.card_lineage` reads them: by card, or by
-    the frame a card was drawn from or its write named. `instance` gives
-    another instance's view of the same rows."""
+    """The lineages a conversation's card writes commit, read back as
+    `StudioStore.card_lineage` reads them: card `component_id`'s own row, else
+    one drawn from `frame`, else one whose write named it, latest first."""
 
-    def __init__(self, rows: list[CardLineage] | None = None) -> None:
-        self.committed: list[CardLineage] = [] if rows is None else rows
+    def __init__(self) -> None:
+        self.committed: list[CardLineage] = []
         self.reads: list[dict[str, Any]] = []
-        # The cards this instance knows have a row.
-        self.known: set[str] = set()
         # How many reads fail first, as a store whose retries ran out does.
         self.fails = 0
         # Raised by every read when set, as a row that does not decode is.
         self.undecodable: Exception | None = None
 
-    def instance(self) -> _CardLineages:
-        return _CardLineages(self.committed)
-
     def commit(self, card: CardLineage) -> None:
         """A card write's commit: the first row for a card stands."""
         if all(row.component_id != card.component_id for row in self.committed):
             self.committed.append(card)
-        self.known.add(card.component_id)
 
     async def card_lineage(
         self,
@@ -1024,25 +1017,22 @@ class _CardLineages:
             raise DatabaseUnavailable("the conversation store stayed unreachable")
         if self.undecodable is not None:
             raise self.undecodable
-        found = next(
-            (
-                card
-                for card in self.committed
-                if card.component_id == component_id
-                or (component_id is None and frame in (card.frame, card.requested))
-            ),
-            None,
-        )
-        if found is not None and component_id is not None:
-            self.known.add(component_id)
-        return found
-
-    def card_lineage_stored(self, principal: str, conversation_id: str, component_id: str) -> bool:
-        del principal, conversation_id
-        return component_id in self.known
+        latest = list(reversed(self.committed))
+        for matches in (
+            lambda card: component_id is not None and card.component_id == component_id,
+            lambda card: frame is not None and card.frame == frame,
+            lambda card: frame is not None and card.requested == frame,
+        ):
+            found = next((card for card in latest if matches(card)), None)
+            if found is not None:
+                return found
+        return None
 
 
 _FRAME_F = {"spec_id": "ops_" + "6" * 32, "content_version": "ocv_" + "6" * 32}
+_KEY_F = (_FRAME_F["spec_id"], _FRAME_F["content_version"])
+# A frame no card was drawn from.
+_FRAME_G = {"spec_id": "ops_" + "b" * 32, "content_version": "ocv_" + "b" * 32}
 
 
 def _drawn_on_f() -> ProvenanceStore:
@@ -1070,25 +1060,18 @@ def _written_on_f(component_id: str, *, revision: int = 1) -> SimpleNamespace:
     )
 
 
-async def test_a_revise_of_a_card_with_no_lineage_row_borrows_its_frames_and_gains_a_row(
+async def test_a_revise_of_a_card_with_no_lineage_row_borrows_the_row_of_a_card_on_its_frame(
     scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
 ) -> None:
     """Card X was drawn on frame F before lineages were stored, and card Y
-    later drawn on F stored F's. A fresh executor revises X: it reads X's own
-    lineage, finds none, reads the frame X's stored intent names (one
-    `describe_component`), and draws X with Y's sources and count. X's revise
-    carries the lineage for its write to commit; a revise of Y on the
-    instance that drew it reads nothing and carries none."""
+    later drawn on F stored F's. A fresh executor revises X, naming F as Edit
+    Card does: one read finds no row of X's and Y's row for F, and X is drawn
+    with Y's sources and count. A revise of Y on the instance that drew it,
+    which holds F, reads nothing. Each revise carries its card's lineage for
+    its write to commit, and the store keeps a card's first row."""
     client = scripted_presentation_client(
         [
             _written_on_f("cmp_y"),
-            _tool_result(
-                {
-                    "component_id": "cmp_x",
-                    "revision": 1,
-                    "stored_intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F},
-                }
-            ),
             _written_on_f("cmp_x", revision=2),
             _written_on_f("cmp_y", revision=2),
         ]
@@ -1101,28 +1084,16 @@ async def test_a_revise_of_a_card_with_no_lineage_row_borrows_its_frames_and_gai
         args={"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F}},
     )
     lineages.commit(drawn_y.pop(CARD_LINEAGE_KEY))
-    fresh_lineages = lineages.instance()
-    fresh = McpExecutor(
-        settings=Settings(), provenance=ProvenanceStore(), card_lineages=fresh_lineages
-    )
+    fresh = McpExecutor(settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages)
+    revise = {"intent": {"title": "New"}, CARD_FRAME_KEY: _FRAME_F}
 
-    revised_x = await fresh(
-        tool="write_component", args={"component_id": "cmp_x", "intent": {"title": "New"}}
-    )
-    revised_y = await drawing(
-        tool="write_component", args={"component_id": "cmp_y", "intent": {"title": "New"}}
-    )
+    revised_x = await fresh(tool="write_component", args={"component_id": "cmp_x", **revise})
+    revised_y = await drawing(tool="write_component", args={"component_id": "cmp_y", **revise})
 
-    assert client.calls == [
-        "write_component",
-        "describe_component",
-        "write_component",
-        "write_component",
-    ]
-    assert fresh_lineages.reads == [
-        {"component_id": "cmp_x", "frame": None},
-        {"component_id": None, "frame": (_FRAME_F["spec_id"], _FRAME_F["content_version"])},
-    ]
+    # The frame the caller read rides no call to the platform.
+    assert client.calls == ["write_component"] * 3
+    assert all(CARD_FRAME_KEY not in arguments for arguments in client.arguments)
+    assert lineages.reads == [{"component_id": "cmp_x", "frame": _KEY_F}]
     assert revised_x["outcome"] == "ok", revised_x
     drawn, revised = drawn_y["component"], revised_x["component"]
     assert [source["id"] for source in drawn["provenance"]["sources"]] == ["src:7", "src:8"]
@@ -1130,9 +1101,29 @@ async def test_a_revise_of_a_card_with_no_lineage_row_borrows_its_frames_and_gai
     assert revised["fact_summary"]["attribution"] == drawn["fact_summary"]["attribution"]
     assert revised_x[CARD_LINEAGE_KEY].component_id == "cmp_x"
     assert revised_x[CARD_LINEAGE_KEY].lineage == lineages.committed[0].lineage
-    assert lineages.reads == []
     assert revised_y["outcome"] == "ok", revised_y
-    assert CARD_LINEAGE_KEY not in revised_y
+    assert revised_y[CARD_LINEAGE_KEY].component_id == "cmp_y"
+
+
+async def test_a_card_on_a_bare_spec_id_the_platform_resolves_to_a_held_frame_draws(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """An intent naming a bare `spec_` id names no pair the executor can look
+    up, so nothing is read and the write goes on. The platform resolves it to
+    a frame the store holds, and the card draws."""
+    scripted_presentation_client([_written_on_f("cmp_1")])
+    current_conversation_key.set(("principal", current_conversation_id.get()))
+    lineages = _CardLineages()
+    executor = McpExecutor(settings=Settings(), provenance=_drawn_on_f(), card_lineages=lineages)
+
+    drawn = await executor(
+        tool="write_component",
+        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": {"spec_id": "spec_1"}}},
+    )
+
+    assert drawn["outcome"] == "ok", drawn
+    assert lineages.reads == []
+    assert drawn[CARD_LINEAGE_KEY].frame == _KEY_F
 
 
 async def test_a_lineage_that_cannot_be_read_refuses_the_write_before_it_is_sent(
@@ -1150,11 +1141,8 @@ async def test_a_lineage_that_cannot_be_read_refuses_the_write_before_it_is_sent
         args={"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F}},
     )
     lineages.commit(drawn.pop(CARD_LINEAGE_KEY))
-    fresh_lineages = lineages.instance()
-    fresh_lineages.fails = 1
-    fresh = McpExecutor(
-        settings=Settings(), provenance=ProvenanceStore(), card_lineages=fresh_lineages
-    )
+    lineages.fails = 1
+    fresh = McpExecutor(settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages)
     args = {"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F}}
 
     refused = await fresh(tool="write_component", args=args)
@@ -1170,55 +1158,6 @@ async def test_a_lineage_that_cannot_be_read_refuses_the_write_before_it_is_sent
         drawn_again["component"]["provenance"]["sources"]
         == (drawn["component"]["provenance"]["sources"])
     )
-
-
-_KEY_F = (_FRAME_F["spec_id"], _FRAME_F["content_version"])
-# A frame no card was drawn from.
-_FRAME_G = {"spec_id": "ops_" + "b" * 32, "content_version": "ocv_" + "b" * 32}
-
-
-async def test_a_revise_commits_its_cards_lineage_until_the_card_is_known_to_have_a_row(
-    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
-) -> None:
-    """Card X has no row; card Y on its frame has one. A fresh instance's
-    first edit of X carries the lineage, and commits nothing (a no-op edit
-    lands no card write). The second edit, reading nothing now that the frame
-    is held, carries it again and commits it. The third carries none."""
-    client = scripted_presentation_client(
-        [_written_on_f("cmp_x", revision=revision) for revision in (2, 3, 4)]
-    )
-    current_conversation_key.set(("principal", current_conversation_id.get()))
-    lineages = _CardLineages()
-    lineages.commit(
-        CardLineage(
-            component_id="cmp_y",
-            frame=_KEY_F,
-            lineage=_drawn_on_f().get(conversation=current_conversation_id.get(), **_FRAME_F) or (),
-            stat_var_count=1,
-        )
-    )
-    fresh_lineages = lineages.instance()
-    fresh = McpExecutor(
-        settings=Settings(), provenance=ProvenanceStore(), card_lineages=fresh_lineages
-    )
-    revise = {"component_id": "cmp_x", "intent": {"title": "New"}, CARD_FRAME_KEY: _FRAME_F}
-
-    first = await fresh(tool="write_component", args=revise)
-    second = await fresh(tool="write_component", args=revise)
-    fresh_lineages.commit(second.pop(CARD_LINEAGE_KEY))
-    third = await fresh(tool="write_component", args=revise)
-
-    assert [first["outcome"], second["outcome"], third["outcome"]] == ["ok"] * 3
-    assert first[CARD_LINEAGE_KEY].component_id == "cmp_x"
-    assert CARD_LINEAGE_KEY not in third
-    assert fresh_lineages.reads == [
-        {"component_id": "cmp_x", "frame": None},
-        {"component_id": None, "frame": _KEY_F},
-    ]
-    # The frame the caller read rides no call to the platform.
-    assert client.calls == ["write_component"] * 3
-    assert all(CARD_FRAME_KEY not in arguments for arguments in client.arguments)
-    assert [row.component_id for row in lineages.committed] == ["cmp_y", "cmp_x"]
 
 
 @pytest.mark.parametrize(
@@ -1271,39 +1210,6 @@ async def test_a_write_whose_frame_has_no_lineage_anywhere_is_refused_before_it_
     assert client.calls == []
 
 
-async def test_a_revise_whose_stored_card_read_meets_a_transient_refusal_is_not_sent(
-    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
-) -> None:
-    """Card X has no row and the caller named no frame, so the executor reads
-    X's stored intent. Every read is refused for now: the revise is refused
-    `transient_unavailable` and nothing is written."""
-    unavailable = _presentation_result(
-        Refusal(
-            error="service_unavailable",
-            retry=RetryMode.RETRY_AFTER_DELAY,
-            detail="try again shortly",
-        ),
-        tool="describe_component",
-    )
-    client = scripted_presentation_client([unavailable] * MAX_ATTEMPTS_PER_STEP)
-    current_conversation_key.set(("principal", current_conversation_id.get()))
-    executor = McpExecutor(
-        settings=Settings(),
-        provenance=ProvenanceStore(),
-        card_lineages=_CardLineages(),
-        sleep=_Sleeps(),
-    )
-
-    refused = await executor(
-        tool="write_component", args={"component_id": "cmp_x", "intent": {"title": "New"}}
-    )
-
-    assert refused["outcome"] == "refusal"
-    assert refused["refusal"]["code"] == HarnessCode.TRANSIENT_UNAVAILABLE
-    assert refused["refusal"]["retry_mode"] == "retry_after_delay"
-    assert client.calls == ["describe_component"] * MAX_ATTEMPTS_PER_STEP
-
-
 async def test_a_card_on_a_retrieval_served_under_another_pair_restores_by_either_pair(
     scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
 ) -> None:
@@ -1347,7 +1253,7 @@ async def test_a_card_on_a_retrieval_served_under_another_pair_restores_by_eithe
     redrawn = []
     for frame_ref in (named, served):
         fresh = McpExecutor(
-            settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages.instance()
+            settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages
         )
         redrawn.append(
             await fresh(
@@ -1435,9 +1341,7 @@ async def test_a_rolling_recreate_on_a_fresh_executor_states_the_first_draws_sou
     )
     lineages.commit(drawn_card.pop(CARD_LINEAGE_KEY))
 
-    second = McpExecutor(
-        settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages.instance()
-    )
+    second = McpExecutor(settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages)
     redrawn = await second(
         tool="write_component",
         args={

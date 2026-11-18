@@ -71,10 +71,6 @@ _MAX_MANIFESTS_PER_CONVERSATION = 64
 # why this, not the per-bucket cap above, is the bound that matters.
 _MAX_CONVERSATIONS = 256
 
-# Ceiling on the cards whose frame the store remembers, across every
-# conversation; least-recently-used eviction past it.
-_MAX_CARD_FRAMES = _MAX_CONVERSATIONS * _MAX_MANIFESTS_PER_CONVERSATION
-
 _FrameKey = tuple[str | None, str | None]
 
 
@@ -215,15 +211,10 @@ class CardLineages(Protocol):
         component_id: str | None = None,
         frame: _FrameKey | None = None,
     ) -> CardLineage | None:
-        """The stored lineage of card `component_id`, or of any card drawn
-        from `frame` or whose write named it; `None` when none is stored.
-        Raises `CardLineageDecodeError` for a row that does not decode."""
-        ...
-
-    def card_lineage_stored(self, principal: str, conversation_id: str, component_id: str) -> bool:
-        """Whether this instance knows card `component_id` has a stored
-        lineage: a read by the card found one, or this instance committed
-        one. `False` says only that it does not know."""
+        """The stored lineage of card `component_id`, else of a card drawn
+        from `frame`, else of a card whose write named `frame`; `None` when
+        none is stored. Raises `CardLineageDecodeError` for a row that does
+        not decode."""
         ...
 
 
@@ -239,9 +230,6 @@ class ProvenanceStore:
         # a distinction `get`'s bare `None` cannot carry without changing
         # its return type for every caller.
         self._evicted: OrderedDict[tuple[str, _FrameKey], None] = OrderedDict()
-        # The frame each card this instance drew or restored was drawn from,
-        # by conversation and component id (`card_frame`).
-        self._card_frames: OrderedDict[tuple[str, str], _FrameKey] = OrderedDict()
 
     def put(
         self,
@@ -356,12 +344,10 @@ class ProvenanceStore:
     ) -> CardLineage | None:
         """The `CardLineage` card `component_id` commits when it is drawn from
         the frame `(spec_id, content_version)`, or `None` when the store holds
-        no lineage for that frame. The store remembers the card's frame
-        (`card_frame`)."""
+        no lineage for that frame."""
         entry = self._entry(conversation, (spec_id, content_version))
         if entry is None:
             return None
-        self._remember_card_frame(conversation, component_id, (spec_id, content_version))
         return CardLineage(
             component_id=component_id,
             frame=(spec_id, content_version),
@@ -371,28 +357,11 @@ class ProvenanceStore:
 
     def restore(self, *, conversation: str, card: CardLineage) -> None:
         """Put a stored card's lineage back under its frame, and under the
-        frame its create asked for, wherever the store holds none, and
-        remember the card's frame (`card_frame`)."""
-        self._remember_card_frame(conversation, card.component_id, card.frame)
+        frame its write named, wherever the store holds none."""
         entry = _Entry(card.lineage, card.stat_var_count)
         for key in dict.fromkeys(key for key in (card.frame, card.requested) if key is not None):
             if self._entry(conversation, key) is None:
                 self._store(conversation=conversation, key=key, entry=entry)
-
-    def card_frame(self, *, conversation: str, component_id: str) -> _FrameKey | None:
-        """The frame card `component_id` was drawn from, when this store
-        built or restored its lineage, else `None`. A card's frame never
-        changes, since a revise cannot move it."""
-        frame = self._card_frames.get((conversation, component_id))
-        if frame is not None:
-            self._card_frames.move_to_end((conversation, component_id))
-        return frame
-
-    def _remember_card_frame(self, conversation: str, component_id: str, frame: _FrameKey) -> None:
-        self._card_frames[(conversation, component_id)] = frame
-        self._card_frames.move_to_end((conversation, component_id))
-        while len(self._card_frames) > _MAX_CARD_FRAMES:
-            self._card_frames.popitem(last=False)
 
     def _store(self, *, conversation: str, key: _FrameKey, entry: _Entry) -> None:
         bucket = self._by_conversation.get(conversation)

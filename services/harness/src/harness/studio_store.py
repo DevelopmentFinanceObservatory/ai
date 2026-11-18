@@ -871,39 +871,68 @@ _INSERT_CARD_LINEAGE = text(
     "ON CONFLICT (conversation, component_id) DO NOTHING"
 )
 
-# A card's stored lineage: the card's own row when `:component_id` is set,
-# else a card drawn from the frame `:spec_id`/`:content_version` or whose
-# create asked for it. Cards on one frame share one lineage, so any one serves.
+# A card's stored lineage in conversation `:pk`: the row of card
+# `:component_id`, else one drawn from the frame `:spec_id`/`:content_version`,
+# else one whose write named that frame, the latest written first among equals.
+# Cards on one frame share one lineage, so any of them serves.
 _SELECT_CARD_LINEAGE = text(
-    "SELECT l.component_id, l.spec_id, l.content_version, l.requested_spec_id, "
-    "l.requested_content_version, l.members, l.stat_var_count "
-    "FROM conversation_card_lineage l JOIN conversations c ON c.id = l.conversation "
-    "WHERE c.principal = :principal AND c.conversation_id = :conversation_id AND ("
-    "l.component_id = :component_id OR (CAST(:component_id AS text) IS NULL AND ("
-    "(l.spec_id = :spec_id AND l.content_version = :content_version) OR "
-    "(l.requested_spec_id = :spec_id AND l.requested_content_version = :content_version)))) "
+    "SELECT component_id, spec_id, content_version, requested_spec_id, "
+    "requested_content_version, members, stat_var_count "
+    "FROM conversation_card_lineage WHERE conversation = :pk AND ("
+    "component_id = :component_id "
+    "OR (spec_id = :spec_id AND content_version = :content_version) "
+    "OR (requested_spec_id = :spec_id AND requested_content_version = :content_version)) "
+    "ORDER BY COALESCE(component_id = :component_id, false) DESC, "
+    "COALESCE(spec_id = :spec_id AND content_version = :content_version, false) DESC, "
+    "created_at DESC, component_id "
     "LIMIT 1"
 )
 
 
-async def _insert_card_lineage(conn: AsyncConnection, pk: int, lineage: CardLineage) -> None:
-    """Store `lineage` for its card on row `pk`. A card's lineage is written
-    once: its frame never changes, and a write retried after a commit whose
-    acknowledgement was lost finds the row there."""
+def _card_lineage_row(lineage: CardLineage) -> dict[str, Any] | None:
+    """`lineage` as the parameters of its row, its members as JSON text, or
+    `None`, logged at error, when JSON cannot hold them (a NaN or an
+    infinity among a manifest's values, which `json` would write as a bare
+    token Postgres refuses). The card then lands without its row."""
+    try:
+        members = json.dumps(lineage.members_json(), allow_nan=False)
+    except (TypeError, ValueError):
+        logger.exception(
+            "studio store: the lineage of component_id=%r cannot be stored as JSON; "
+            "the card lands without it",
+            lineage.component_id,
+        )
+        return None
     requested = lineage.requested or (None, None)
-    await conn.execute(
-        _INSERT_CARD_LINEAGE,
-        {
-            "pk": pk,
-            "component_id": lineage.component_id,
-            "spec_id": lineage.frame[0],
-            "content_version": lineage.frame[1],
-            "requested_spec_id": requested[0],
-            "requested_content_version": requested[1],
-            "members": json.dumps(lineage.members_json()),
-            "stat_var_count": lineage.stat_var_count,
-        },
-    )
+    return {
+        "component_id": lineage.component_id,
+        "spec_id": lineage.frame[0],
+        "content_version": lineage.frame[1],
+        "requested_spec_id": requested[0],
+        "requested_content_version": requested[1],
+        "members": members,
+        "stat_var_count": lineage.stat_var_count,
+    }
+
+
+async def _insert_card_lineage(conn: AsyncConnection, pk: int, row: Mapping[str, Any]) -> None:
+    """Store a card's lineage `row` (`_card_lineage_row`) on conversation `pk`,
+    in a savepoint, so a failed insert leaves the card's write to commit. A
+    card's lineage is written once: its frame never changes, and a write
+    retried after a commit whose acknowledgement was lost finds the row there.
+    A transient fault raises, for the whole write to be retried; any other
+    is logged at error and the card lands without its row."""
+    try:
+        async with conn.begin_nested():
+            await conn.execute(_INSERT_CARD_LINEAGE, {**row, "pk": pk})
+    except Exception as exc:
+        if transient(exc):
+            raise
+        logger.exception(
+            "studio store: the lineage of component_id=%r was not stored; the card lands "
+            "without it",
+            row["component_id"],
+        )
 
 
 def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any]) -> None:
@@ -968,9 +997,6 @@ class _RuntimeEntry:
     baseline: dict[str, Any] = field(default_factory=dict)
     draft: tuple[ConversationState, ConversationState] | None = None
     claimed: asyncio.Event = field(default_factory=asyncio.Event)
-    # The cards this instance knows have a stored lineage
-    # (`StudioStore.card_lineage_stored`).
-    lineage_rows: set[str] = field(default_factory=set)
 
 
 class StudioStore:
@@ -1467,8 +1493,10 @@ class StudioStore:
         line beside it. No other field is written, so a write the turn's
         drive makes (`harness.studio_state.make_remove_cards`) commits
         nothing the stream's owner has changed. `lineage`, the drawn card's
-        frame lineage, commits in the same transaction, once per card
-        (`_insert_card_lineage`).
+        frame lineage, is serialised before the row lock is taken and commits
+        in the same transaction, once per card. A lineage that cannot be
+        stored leaves the card to land without it (`_card_lineage_row`,
+        `_insert_card_lineage`).
 
         Raises `SegmentLost` and writes nothing when the stored lease is not
         that segment, so a stream another instance took over lands no card.
@@ -1487,10 +1515,11 @@ class StudioStore:
         segment_id = state.segment.id if state.segment is not None else None
         if segment_id is None:
             raise SegmentLost(f"conversation {conversation_id!r} holds no segment")
+        row = _card_lineage_row(lineage) if lineage is not None else None
         return await self._retrying(
             entry,
             conversation_id,
-            lambda: self._fenced_save(entry, conversation_id, segment_id, change, lineage=lineage),
+            lambda: self._fenced_save(entry, conversation_id, segment_id, change, lineage_row=row),
         )
 
     async def _retrying[T](
@@ -1539,13 +1568,13 @@ class StudioStore:
         change: Callable[[ConversationState], T],
         *,
         snapshot: Callable[[], Snapshot] | None = None,
-        lineage: CardLineage | None = None,
+        lineage_row: Mapping[str, Any] | None = None,
     ) -> T:
         """`checkpoint` and `change_canvas`'s one write. Under the row lock
         and fenced on `segment_id`, run `change` on a one-level copy of the live
         state holding the canvas as stored, then write the copy's canvas when
         `change` replaced it, and the durable keys below whose value differs
-        from `entry.baseline`, and `lineage` when given, in one transaction.
+        from `entry.baseline`, and `lineage_row` when given, in one transaction.
         Once it commits, record the
         written keys in the baseline and the version, and assign the canvas
         read back and each field `change` changed to the live state.
@@ -1590,10 +1619,8 @@ class StudioStore:
                         else None,
                     )
                 version = await self._write(conn, entry.pk, changed) if changed else row.version
-                if lineage is not None:
-                    await _insert_card_lineage(conn, entry.pk, lineage)
-            if lineage is not None:
-                entry.lineage_rows.add(lineage.component_id)
+                if lineage_row is not None:
+                    await _insert_card_lineage(conn, entry.pk, lineage_row)
             entry.version = version
             entry.baseline.update(changed)
             _assign_changed(state, work, base)
@@ -2038,20 +2065,27 @@ class StudioStore:
         component_id: str | None = None,
         frame: tuple[str | None, str | None] | None = None,
     ) -> CardLineage | None:
-        """The stored lineage of card `component_id`, or, with no
-        `component_id`, of a card drawn from `frame` or whose write named it
-        (`harness.provenance.CardLineages`). One indexed read with no lock, so
-        any instance can read it before a write. A transient database fault
-        is retried until the lease's deadline (`_retrying`), as the stream's
-        card writes are, then raises `DatabaseUnavailable`. A row that does
-        not decode is logged with its key and raises `CardLineageDecodeError`.
-        `None` when no such card's lineage is stored."""
+        """The stored lineage of card `component_id`, else of a card drawn from
+        `frame`, else of a card whose write named `frame`
+        (`harness.provenance.CardLineages`), read in one statement on the
+        conversation this instance loaded, with no lock. A transient database
+        fault is retried until the lease's deadline (`_retrying`), as the
+        stream's card writes are, then raises `DatabaseUnavailable`. A row
+        that does not decode is logged with its key and raises
+        `CardLineageDecodeError`. `None` when no such card's lineage is
+        stored.
+
+        Raises:
+            LookupError: This instance has not loaded the conversation.
+        """
         spec_id, content_version = frame if frame is not None else (None, None)
         if component_id is None and (spec_id is None or content_version is None):
             return None
+        entry = self._runtime.get((principal, conversation_id))
+        if entry is None or entry.pk is None:
+            raise LookupError(f"conversation {conversation_id!r} is not loaded here")
         params = {
-            "principal": principal,
-            "conversation_id": conversation_id,
+            "pk": entry.pk,
             "component_id": component_id,
             "spec_id": spec_id,
             "content_version": content_version,
@@ -2061,7 +2095,6 @@ class StudioStore:
             async with self._transaction() as conn:
                 return (await conn.execute(_SELECT_CARD_LINEAGE, params)).first()
 
-        entry = self._entry(principal, conversation_id)
         row = await self._retrying(entry, conversation_id, read)
         if row is None:
             return None
@@ -2074,8 +2107,6 @@ class StudioStore:
                 row.component_id,
             )
             raise
-        if component_id is not None:
-            entry.lineage_rows.add(component_id)
         requested = (row.requested_spec_id, row.requested_content_version)
         return CardLineage(
             component_id=row.component_id,
@@ -2084,13 +2115,6 @@ class StudioStore:
             stat_var_count=row.stat_var_count,
             requested=requested if requested != (None, None) else None,
         )
-
-    def card_lineage_stored(self, principal: str, conversation_id: str, component_id: str) -> bool:
-        """Whether this instance knows card `component_id` has a stored
-        lineage: `card_lineage` read it by the card, or a card write of this
-        instance committed it. No database access."""
-        entry = self._runtime.get((principal, conversation_id))
-        return entry is not None and component_id in entry.lineage_rows
 
     async def run_statuses(
         self, principal: str, conversation_id: str, *, conversation: ConversationState
