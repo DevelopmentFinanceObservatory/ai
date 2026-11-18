@@ -1282,27 +1282,59 @@ async def test_close_open_turns_leaves_a_turn_cursors_turn_opened_while_its_writ
     assert (dry.closed, dry.in_turn_cursors) == ([], [f"{_name(PLAN_PAUSED)} turn 1"])
 
 
-async def test_the_close_guard_reads_the_turn_index_the_row_holds(adk: AsyncEngine) -> None:
-    """The guard finds a `turn_cursors` row for the turn index the locked
-    row holds, though the job loaded another, and finds none while the
-    table does not exist."""
+async def test_close_open_turns_refuses_a_moved_turn_index_and_always_clears_the_lease(
+    adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Between the job's load and its write, one conversation's row moves to
+    another turn index, and the other's gains a lapsed lease, both without
+    a version change. The first is listed as changed and left open, and the
+    second closes with no lease on its row."""
     await import_conversations(adk, apply=True)
-    plan_paused = await _row_id(adk, PLAN_PAUSED)
-    async with adk.connect() as conn:
-        assert not await adk_import._turn_cursor_exists(conn, plan_paused, 1)
-    async with adk.begin() as conn:
-        await conn.execute(text(_TURN_CURSORS))
-        await conn.execute(
-            text(
-                "INSERT INTO turn_cursors (conversation, turn_index, status) "
-                "VALUES (:pk, 1, 'paused')"
-            ),
-            {"pk": plan_paused},
-        )
 
+    class Moving(StudioStore):
+        async def load(self, principal: str, conversation_id: str) -> Any:
+            state = await super().load(principal, conversation_id)
+            async with adk.begin() as conn:
+                if conversation_id == PLAN_PAUSED:
+                    await conn.execute(
+                        text(
+                            "UPDATE conversations SET turn_state = "
+                            "jsonb_set(turn_state, '{turn_index}', '9') WHERE conversation_id = :id"
+                        ),
+                        {"id": conversation_id},
+                    )
+                else:
+                    await conn.execute(
+                        text(
+                            "UPDATE conversations SET lease_segment_id = 'seg_lapsed', "
+                            "lease_owner = 'other', "
+                            "lease_expires_at = extract(epoch FROM now()) - 1 "
+                            "WHERE conversation_id = :id"
+                        ),
+                        {"id": conversation_id},
+                    )
+            return state
+
+    monkeypatch.setattr(adk_import, "StudioStore", Moving)
+
+    report = await close_open_turns(adk, apply=True)
+
+    assert (report.closed, report.changed) == (
+        [f"{_name(FULL)} turn 4"],
+        [f"{_name(PLAN_PAUSED)} turn 1"],
+    )
     async with adk.connect() as conn:
-        assert await adk_import._turn_cursor_exists(conn, plan_paused, 7)
-        assert not await adk_import._turn_cursor_exists(conn, await _row_id(adk, FULL), 7)
+        leases = dict(
+            (
+                await conn.execute(
+                    text("SELECT conversation_id, lease_segment_id FROM conversations")
+                )
+            ).all()
+        )
+    assert leases[FULL] is None
+    monkeypatch.undo()
+    left = await _load(adk, PLAN_PAUSED)
+    assert left is not None and not left.turn_recorded and left.pending
 
 
 async def test_verify_and_close_open_turns_keep_one_conversation_at_a_time(

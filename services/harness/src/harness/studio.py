@@ -1897,16 +1897,19 @@ def _turn_session_state(conversation: ConversationState, body: TurnRequest) -> d
     return state
 
 
-def _ending_status(cause: BaseException | None) -> str:
+def _ending_status(cause: BaseException | None, *, response: bool) -> str:
     """The status a released claim's segment span ends with, by `cause`,
     the exception that ended the request, `None` when its response
-    returned (span_level's table). The client's own disconnect is
-    `disconnected`: `ClientDisconnect` or `OSError` from a send, or a
-    return, since under ASGI spec 2.3 Starlette's response returns once the
-    client's disconnect cancelled its send task (`_ClaimedStream`). The
-    request task's own cancellation is `cancelled`. Anything else is
-    `failed`, a `CancelledError` an inner task let out among them."""
-    if cause is None or isinstance(cause, ClientDisconnect | OSError):
+    returned (span_level's table). `response` says the release runs as
+    the response ends (`_ClaimedStream`), where the client's own
+    disconnect is `disconnected`: `ClientDisconnect` or `OSError` from a
+    send, or a return, since under ASGI spec 2.3 Starlette's response
+    returns once the client's disconnect cancelled its send task. On the
+    route's own path an `OSError` is the route's failure, a database
+    connection reset among them. On either path the request task's own
+    cancellation is `cancelled`, and anything else `failed`, a
+    `CancelledError` an inner task let out among them."""
+    if response and (cause is None or isinstance(cause, ClientDisconnect | OSError)):
         return "disconnected"
     task = asyncio.current_task()
     if isinstance(cause, asyncio.CancelledError) and task is not None and task.cancelling() > 0:
@@ -1914,14 +1917,16 @@ def _ending_status(cause: BaseException | None) -> str:
     return "failed"
 
 
-async def _release_claim(claim: _Claim, *, cause: BaseException | None = None) -> None:
+async def _release_claim(
+    claim: _Claim, *, cause: BaseException | None = None, response: bool = False
+) -> None:
     """Let go of a request whose stream never started, on every path,
     cancellation included. A claim that never committed gives up its
     working copy (`StudioStore.drop_draft`), whose span ends `not_started`.
     A claim that committed (`claim.segment_id`) drops its lease
     (`StudioStore.drop_lease`, which runs to the end under cancellation),
     and the segment's span, if one opened, ends as `_ending_status` reads
-    `cause`. Then the claim's hold lets go of the lock, and any span that
+    `cause` on the route's path, or with `response` on the response's. Then the claim's hold lets go of the lock, and any span that
     ended is exported, whatever the span end raised. It does nothing once
     the hold has let go: the working copy and the lease are then another
     request's."""
@@ -1938,7 +1943,7 @@ async def _release_claim(claim: _Claim, *, cause: BaseException | None = None) -
             try:
                 live = store.current(principal, conversation_id)
                 if claim.segment_id is not None and live is not None:
-                    ended = live.end_segment_span(_ending_status(cause)) or ended
+                    ended = live.end_segment_span(_ending_status(cause, response=response)) or ended
             finally:
                 claim.hold.release()
         finally:
@@ -2001,7 +2006,7 @@ class _ClaimedStream(StreamingResponse):
             try:
                 await self.body_iterator.aclose()
             finally:
-                await _release_claim(self._claim, cause=cause)
+                await _release_claim(self._claim, cause=cause, response=True)
 
 
 def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRouter:

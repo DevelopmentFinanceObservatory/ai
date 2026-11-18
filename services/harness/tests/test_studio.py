@@ -9259,13 +9259,44 @@ async def test_a_claim_whose_span_end_raises_still_releases_the_lock(
     assert flushes == ["flush"]
 
 
+async def test_an_os_error_after_the_claim_ends_the_span_failed(
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/turn` claims, and replacing the leftover session it met raises a
+    connection reset from the database. On the route's own path an
+    `OSError` is the route's failure: the segment's span ends `failed` at
+    error level, and the lock is released."""
+    app = _app(_text("Hello."))
+    studio = app.state.studio
+    await studio.runner.session_service.create_session(
+        app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t1"
+    )
+
+    async def reset(**kwargs: Any) -> None:
+        raise ConnectionResetError("the database reset the connection")
+
+    monkeypatch.setattr(studio, "_replace_leftover_session", reset)
+    ended = _recording_span_ends(monkeypatch)
+
+    async with _client(app) as client:
+        with pytest.raises(ConnectionResetError):
+            await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
+
+    assert ended == [("failed", "ERROR")]
+    assert not studio.store.lock_for(PRINCIPAL, CONVERSATION).locked()
+
+
 async def _post_with_the_body_unstarted(
-    app: FastAPI, path: str, payload: dict[str, Any], *, send_fails: bool = False
+    app: FastAPI,
+    path: str,
+    payload: dict[str, Any],
+    *,
+    send_error: Exception | None = None,
 ) -> None:
     """POST `payload` to `path` through the app's ASGI callable under spec
     2.3, as uvicorn serves it, with a client that leaves at once, or, with
-    `send_fails`, stays while the response's first send raises. Either way
-    the response ends before its body is pulled."""
+    `send_error`, stays while the response's first send raises it. Either
+    way the response ends before its body is pulled."""
     body = json.dumps(payload).encode()
     received = 0
 
@@ -9274,7 +9305,7 @@ async def _post_with_the_body_unstarted(
         received += 1
         if received == 1:
             return {"type": "http.request", "body": body, "more_body": False}
-        if send_fails:
+        if send_error is not None:
             await asyncio.Event().wait()
         return {"type": "http.disconnect"}
 
@@ -9284,8 +9315,8 @@ async def _post_with_the_body_unstarted(
         # A server's send yields to the loop, where the disconnect's
         # cancellation lands before the body is pulled.
         await asyncio.sleep(0)
-        if send_fails:
-            raise RuntimeError("the send failed")
+        if send_error is not None:
+            raise send_error
         sent.append(message)
 
     scope = {
@@ -9306,8 +9337,8 @@ async def _post_with_the_body_unstarted(
         "client": ("127.0.0.1", 1),
         "server": ("test", 80),
     }
-    if send_fails:
-        with pytest.raises(RuntimeError, match="the send failed"):
+    if send_error is not None:
+        with pytest.raises(type(send_error)):
             await asyncio.wait_for(app(scope, receive, send), timeout=10)
     else:
         await asyncio.wait_for(app(scope, receive, send), timeout=10)
@@ -9315,16 +9346,21 @@ async def _post_with_the_body_unstarted(
 
 
 @pytest.mark.parametrize(
-    ("send_fails", "span"),
+    ("send_error", "span"),
     [
-        pytest.param(False, ("disconnected", "WARNING"), id="client-gone"),
-        pytest.param(True, ("failed", "ERROR"), id="send-fails"),
+        pytest.param(None, ("disconnected", "WARNING"), id="client-gone"),
+        pytest.param(
+            ConnectionResetError("the client reset the connection"),
+            ("disconnected", "WARNING"),
+            id="send-reset",
+        ),
+        pytest.param(RuntimeError("the send failed"), ("failed", "ERROR"), id="send-fails"),
     ],
 )
 async def test_a_turn_whose_body_never_starts_ends_as_a_failure_before_the_stream(
     otlp_spans: InMemorySpanExporter,
     monkeypatch: pytest.MonkeyPatch,
-    send_fails: bool,
+    send_error: Exception | None,
     span: tuple[str, str],
 ) -> None:
     """Under ASGI spec 2.3 Starlette reads the client's disconnect beside
@@ -9333,13 +9369,14 @@ async def test_a_turn_whose_body_never_starts_ends_as_a_failure_before_the_strea
     before the stream starts does: the lock is released, the lease dropped
     and the turn left open, and the next `/turn` claims and records it
     `abandoned`. The segment's span ends `disconnected` when the client
-    left, and `failed` when the response failed otherwise."""
+    left, a send's `OSError` among the ways it shows, and `failed` when the
+    response failed otherwise."""
     app = _app(_text("Hello."), _text("Again."))
     store = app.state.studio.store
     ended = _recording_span_ends(monkeypatch)
 
     await _post_with_the_body_unstarted(
-        app, "/api/studio/turn", _turn_body("hi"), send_fails=send_fails
+        app, "/api/studio/turn", _turn_body("hi"), send_error=send_error
     )
 
     assert ended == [span]

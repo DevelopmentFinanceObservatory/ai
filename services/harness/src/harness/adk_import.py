@@ -87,9 +87,10 @@ Verbs:
   writer first commits the lease and the turn index on the conversation's
   row, then inserts the turn's row under `FOR SHARE` on the conversation's
   row where `lease_segment_id` is its lease. The closing write refuses a
-  live lease it does not hold (`ConversationStale`, listed as changed),
-  reads `turn_cursors` under its `FOR UPDATE` on the same row, and clears
-  the lease. So a turn whose row committed, or waits to commit, before
+  live lease it does not hold (`ConversationStale`) and a row whose turn
+  index moved since the load, each listed as changed, reads
+  `turn_cursors` under its `FOR UPDATE` on the same row, and writes the
+  lease columns null. So a turn whose row committed, or waits to commit, before
   that lock is left open, and an insert that waits behind the lock finds
   the lease gone and opens no turn. Whether the table exists is read
   under the same lock. A block that does not convert is kept as stored, as
@@ -1691,15 +1692,24 @@ async def _close_one(
         report.not_on_adk.append(name)
         return
     turn_index = state.turn_index
+    refusal: _Refusal | None = None
 
-    async def not_in_turn_cursors(conn: AsyncConnection, locked: int) -> bool:
-        return not await _turn_cursor_exists(conn, locked, turn_index)
+    async def closing(conn: AsyncConnection, locked: int) -> bool:
+        nonlocal refusal
+        refusal = await _close_refusal(conn, locked, turn_index)
+        if refusal is None:
+            await conn.execute(_CLEAR_LEASE, {"pk": locked})
+        return refusal is None
 
     if not apply:
         async with engine.connect() as conn:
-            if await _turn_cursor_exists(conn, pk, turn_index):
-                report.in_turn_cursors.append(name)
-                return
+            refusal = await _close_refusal(conn, pk, turn_index)
+        if refusal == "moved":
+            report.changed.append(name)
+            return
+        if refusal == "in_turn_cursors":
+            report.in_turn_cursors.append(name)
+            return
     # A block that does not convert is kept as stored, as `import` keeps one.
     if bridge.blocks.unconvertible:
         report.findings[name] = bridge.blocks.unconvertible
@@ -1713,24 +1723,36 @@ async def _close_one(
     # the lease id alone and would otherwise write over the turn this closes.
     state.segment = None
     try:
-        await store.save(principal, conversation_id, guard=not_in_turn_cursors)
+        await store.save(principal, conversation_id, guard=closing)
     except SaveRefusedError:
-        # Left open, so none of its blocks is closed as stored.
-        report.findings.pop(name, None)
-        report.in_turn_cursors.append(name)
+        if refusal == "moved":
+            report.changed.append(name)
+        else:
+            # Left open, so none of its blocks is closed as stored.
+            report.findings.pop(name, None)
+            report.in_turn_cursors.append(name)
     except ConversationStale:
         report.changed.append(name)
     else:
         report.closed.append(name)
 
 
-async def _turn_cursor_exists(conn: AsyncConnection, pk: int, turn_index: int) -> bool:
-    """Whether `turn_cursors` holds a row for turn `turn_index` of the
-    conversation whose row id is `pk`, or for the turn index the row holds
-    as read here: never while the table does not exist. The table may not
-    exist, and a statement that names a missing table fails, so one
-    statement probes the table and reads the row's turn index, and a second
-    reads `turn_cursors` only when the table exists."""
+type _Refusal = Literal["moved", "in_turn_cursors"]
+
+# The closing write leaves no lease on the row, whatever its load read.
+_CLEAR_LEASE = text(
+    "UPDATE conversations SET lease_segment_id = NULL, lease_owner = NULL, "
+    "lease_expires_at = NULL, lease_cancel = false WHERE id = :pk"
+)
+
+
+async def _close_refusal(conn: AsyncConnection, pk: int, turn_index: int) -> _Refusal | None:
+    """Why the job must leave turn `turn_index` of the conversation whose
+    row id is `pk` open, or `None` when it may close it: `moved` when the
+    row holds another turn index, `in_turn_cursors` when `turn_cursors`
+    holds the turn. A statement that names a missing table fails, so one
+    statement reads the row's turn index and probes `turn_cursors`, and a
+    second reads it only when the table exists."""
     probe = (
         await conn.execute(
             text(
@@ -1741,14 +1763,15 @@ async def _turn_cursor_exists(conn: AsyncConnection, pk: int, turn_index: int) -
             {"pk": pk},
         )
     ).one()
+    if probe.stored != turn_index:
+        return "moved"
     if not probe.present:
-        return False
-    indices = [turn_index] if probe.stored in {None, turn_index} else [turn_index, probe.stored]
+        return None
     found = await conn.execute(
-        text("SELECT 1 FROM turn_cursors WHERE conversation = :pk AND turn_index = ANY(:indices)"),
-        {"pk": pk, "indices": indices},
+        text("SELECT 1 FROM turn_cursors WHERE conversation = :pk AND turn_index = :turn_index"),
+        {"pk": pk, "turn_index": turn_index},
     )
-    return found.first() is not None
+    return "in_turn_cursors" if found.first() is not None else None
 
 
 def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
