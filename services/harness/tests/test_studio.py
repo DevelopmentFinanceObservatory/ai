@@ -3549,7 +3549,7 @@ async def test_a_release_that_times_out_ends_the_segment_s_span(
     await conversation.lock.acquire()
     segment_id = store.claim_segment("u_a", CONVERSATION)
     await store.save("u_a", CONVERSATION)
-    conversation.ensure_turn_span()
+    conversation.open_segment_span()
     ended = _recording_span_ends(monkeypatch)
     real_release = store.start_release
 
@@ -3584,7 +3584,7 @@ async def test_a_release_whose_caller_is_cancelled_ends_the_span_as_the_save_lef
     await conversation.lock.acquire()
     segment_id = store.claim_segment("u_a", CONVERSATION)
     await store.save("u_a", CONVERSATION)
-    conversation.ensure_turn_span()
+    conversation.open_segment_span()
     ended = _recording_span_ends(monkeypatch)
     real_checkpoint = store.checkpoint
     saving, proceed = asyncio.Event(), asyncio.Event()
@@ -3903,6 +3903,22 @@ async def _row_turn_over_one_that_failed_before_streaming(
         await _stream(client, "/api/studio/turn", _turn_body("hi again"))
 
 
+async def _row_answer_over_a_span_left_on_the_live_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _app(*_plan(), tool_surface=ScriptedSurface())
+    store = app.state.studio.store
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        live = store.current(PRINCIPAL, CONVERSATION)
+        assert live is not None
+        live._telemetry_span = start_turn_span("tr_leftover", session_id=CONVERSATION)
+        await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
+        )
+
+
 async def _row_span_left_on_the_live_state(monkeypatch: pytest.MonkeyPatch) -> None:
     app = _app(_text("Hello."), _text("Hello again."))
     store = app.state.studio.store
@@ -4005,6 +4021,11 @@ _ABANDONED = ("abandoned", "WARNING")
             [_DONE, ("orphaned", "WARNING"), _DONE],
             id="span-left-on-the-live-state",
         ),
+        pytest.param(
+            _row_answer_over_a_span_left_on_the_live_state,
+            [_PAUSED, ("orphaned", "WARNING"), _DONE],
+            id="answer-over-a-span-left-on-the-live-state",
+        ),
     ],
 )
 async def test_each_way_a_segment_ends_or_a_turn_closes_ends_its_span_as_the_table_says(
@@ -4021,6 +4042,32 @@ async def test_each_way_a_segment_ends_or_a_turn_closes_ends_its_span_as_the_tab
     assert ended == spans
     turns = [span for span in otlp_spans.get_finished_spans() if span.name == "turn"]
     assert len(turns) == len(spans)
+
+
+async def test_an_orphaned_span_ends_with_the_turn_it_was_opened_for(
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A span left on the live state ends `orphaned` with the question of
+    the turn it was opened for, before the next turn's claim replaces it."""
+    app = _app(_text("Hello."), _text("Hello again."))
+    store = app.state.studio.store
+    requests: list[tuple[str | None, Any]] = []
+    real_end = studio_state_module.end_turn_span
+
+    def recording_end(handle: Any, **kwargs: Any) -> None:
+        if handle is not None:
+            requests.append((kwargs.get("error"), kwargs.get("request")))
+        real_end(handle, **kwargs)
+
+    monkeypatch.setattr(studio_state_module, "end_turn_span", recording_end)
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("hi"))
+        live = store.current(PRINCIPAL, CONVERSATION)
+        assert live is not None
+        live._telemetry_span = start_turn_span("tr_leftover", session_id=CONVERSATION)
+        await _stream(client, "/api/studio/turn", _turn_body("hi again"))
+
+    assert requests == [("done", "hi"), ("orphaned", "hi"), ("done", "hi again")]
 
 
 async def test_a_paused_segment_s_span_ends_paused_and_the_answer_opens_its_own(
@@ -8627,7 +8674,7 @@ async def test_a_release_failure_does_not_strand_the_local_lock(
     await conversation.lock.acquire()
     segment_id = studio.store.claim_segment("u_a", CONVERSATION)
     await studio.store.save("u_a", CONVERSATION)
-    conversation.ensure_turn_span()
+    conversation.open_segment_span()
     ended = _recording_span_ends(monkeypatch)
 
     def broken_release(*args: Any, **kwargs: Any) -> Any:
@@ -8810,10 +8857,15 @@ async def test_a_lost_segment_at_a_save_ends_the_stream_as_the_heartbeat_does(
     assert [r.levelno for r in caplog.records] == [logging.WARNING]
 
 
-async def test_a_card_write_that_loses_the_segment_reserves_its_frame_s_number() -> None:
+@pytest.mark.parametrize("reservation_fails", [False, True], ids=["reserved", "unreserved"])
+async def test_a_card_write_that_loses_the_segment_reserves_its_frame_s_number(
+    caplog: pytest.LogCaptureFixture, reservation_fails: bool
+) -> None:
     """A card write in the relayed frames finds the database unreachable. Its
     stream-fatal frame goes out like any other, once its number lies inside
-    the segment's reservation, and the loss is reported by its cause."""
+    the segment's reservation, and the loss is logged and reported once, by
+    its cause. When that reservation finds the database unreachable too,
+    the card write's frame still goes out alone, logged and reported once."""
     studio = _app().state.studio
     conversation = await studio.store.create("u_a", CONVERSATION)
     segment_id = studio.store.claim_segment("u_a", CONVERSATION)
@@ -8821,6 +8873,8 @@ async def test_a_card_write_that_loses_the_segment_reserves_its_frame_s_number()
 
     async def reserve(*args: Any, **kwargs: Any) -> None:
         reserved.append(conversation.seq)
+        if reservation_fails:
+            raise DatabaseUnavailable("unreachable")
 
     studio.store.reserve_frames = reserve  # type: ignore[method-assign]
 
@@ -8829,16 +8883,52 @@ async def test_a_card_write_that_loses_the_segment_reserves_its_frame_s_number()
         yield  # pragma: no cover
 
     reported: list[str] = []
+    with caplog.at_level("WARNING", logger="harness.studio"):
+        sent = [
+            frame
+            async for frame in studio._checkpointed(
+                "u_a", CONVERSATION, segment_id, conversation, frames(), report=reported.append
+            )
+        ]
+
+    assert [(frame.seq, frame.error.error.value) for frame in sent] == [
+        (0, "transient_unavailable")
+    ]
+    assert reserved == [1]
+    assert reported == ["database_unavailable"]
+    assert len(caplog.records) == 1
+
+
+async def test_a_failed_checkpoint_closes_the_frames_it_relayed() -> None:
+    """The checkpoint before `done` fails, so the relay stops there. The
+    segment's frames are closed as it stops, in the stream's own context,
+    and their `finally` has run before the error frame's stream ends."""
+    studio = _app().state.studio
+    conversation = await studio.store.create("u_a", CONVERSATION)
+    segment_id = studio.store.claim_segment("u_a", CONVERSATION)
+    closed: list[str] = []
+
+    async def failing(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("a lock timeout")
+
+    studio.store.checkpoint = failing  # type: ignore[method-assign]
+
+    async def frames() -> Any:
+        try:
+            yield Done(event="done", seq=0, trace_id="trace")
+            yield MessageDelta(event="message.delta", seq=1, text="never relayed")
+        finally:
+            closed.append("closed")
+
     sent = [
-        frame
+        frame.event
         async for frame in studio._checkpointed(
-            "u_a", CONVERSATION, segment_id, conversation, frames(), report=reported.append
+            "u_a", CONVERSATION, segment_id, conversation, frames(), report=lambda loss: None
         )
     ]
 
-    assert [frame.error.error.value for frame in sent] == ["transient_unavailable"]
-    assert reserved == [sent[0].seq + 1]
-    assert reported == ["database_unavailable"]
+    assert sent == ["error"]
+    assert closed == ["closed"]
 
 
 @pytest.mark.parametrize(

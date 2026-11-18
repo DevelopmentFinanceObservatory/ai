@@ -776,7 +776,7 @@ async def _unwind(pending: asyncio.Future[Any]) -> None:
     waiting task to it, and Starlette's anyio task group re-cancels the
     response task on every loop iteration once the response is cancelled.
     Unshielded, that re-cancels `pending`'s own cleanup (the session
-    service's rollback and connection close, `StudioStore.release`) at
+    service's rollback and connection close, `StudioStore.start_release`) at
     each of its awaits, and a SQLAlchemy connection torn down twice over
     asyncpg leaves a task that never finishes."""
     pending.cancel()
@@ -1079,10 +1079,13 @@ class StudioRunner:
         the stream the same way, and any other failure there is
         logged alone. A card's canvas write in `frames` that loses the
         segment, or cannot reach the database, ends `frames` with the same
-        frame, which is relayed, its number reserved first, like any other.
-        Each loss is handed to `report` (`stream_loss`) before its frame goes
-        out. This is the one interception point for every route this runs
-        under (`/turn`, its edit-card branch, and `/interrupt`)."""
+        frame, which is relayed, its number reserved first, like any other;
+        when that reservation fails too, the card write's frame goes out
+        alone. Each loss is logged and handed to `report` (`stream_loss`)
+        once, before its frame goes out. `frames` is closed whenever this
+        stops relaying it. This is the one interception point for every
+        route this runs under (`/turn`, its edit-card branch, and
+        `/interrupt`)."""
 
         def failed(what: str, exc: Exception) -> ErrorFrame:
             _log_save_failure(what, conversation, segment_id, exc)
@@ -1090,45 +1093,55 @@ class StudioRunner:
                 report(stream_loss(exc))
             return _checkpoint_failed_frame(conversation, exc)
 
-        async def relayed() -> AsyncGenerator[Any]:
-            try:
-                async for frame in frames:
-                    yield frame
-            except (SegmentLost, DatabaseUnavailable) as exc:
-                yield failed("card write", exc)
+        card_write_lost: ErrorFrame | None = None
 
-        async for frame in relayed():
-            try:
-                await self.store.reserve_frames(principal, conversation_id, segment_id)
-            except Exception as exc:
-                yield failed("frame reservation", exc)
-                return
-            event = getattr(frame, "event", None)
-            outgoing = frame
-            if event in _CHECKPOINT_BEFORE_EVENTS:
-                conversation.drop_resuming(segment_id)
+        async def relayed() -> AsyncGenerator[Any]:
+            nonlocal card_write_lost
+            async with aclosing(frames):
                 try:
-                    await self.store.checkpoint(principal, conversation_id, segment_id)
+                    async for frame in frames:
+                        yield frame
+                except (SegmentLost, DatabaseUnavailable) as exc:
+                    card_write_lost = failed("card write", exc)
+                    yield card_write_lost
+
+        async with aclosing(relayed()) as source:
+            async for frame in source:
+                try:
+                    await self.store.reserve_frames(principal, conversation_id, segment_id)
                 except Exception as exc:
-                    yield failed("checkpoint", exc)
+                    # A card write that lost the segment has logged, reported
+                    # and built its frame already.
+                    yield frame if frame is card_write_lost else failed("frame reservation", exc)
                     return
-                if event == "done":
-                    outgoing = frame.model_copy(update={"composition": conversation.composition})
-            yield outgoing
-            if event == "plan.approved":
-                # Saved once sent, so a retry of the same answer after this
-                # segment dies does not send it again. A crash before the
-                # save sends it twice, which beats never.
-                conversation.mark_approved_sent(segment_id)
-                try:
-                    await self.store.checkpoint(principal, conversation_id, segment_id)
-                except Exception as exc:
-                    if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
-                        yield failed("checkpoint after plan.approved", exc)
+                event = getattr(frame, "event", None)
+                outgoing = frame
+                if event in _CHECKPOINT_BEFORE_EVENTS:
+                    conversation.drop_resuming(segment_id)
+                    try:
+                        await self.store.checkpoint(principal, conversation_id, segment_id)
+                    except Exception as exc:
+                        yield failed("checkpoint", exc)
                         return
-                    _log_save_failure(
-                        "checkpoint after plan.approved", conversation, segment_id, exc
-                    )
+                    if event == "done":
+                        outgoing = frame.model_copy(
+                            update={"composition": conversation.composition}
+                        )
+                yield outgoing
+                if event == "plan.approved":
+                    # Saved once sent, so a retry of the same answer after this
+                    # segment dies does not send it again. A crash before the
+                    # save sends it twice, which beats never.
+                    conversation.mark_approved_sent(segment_id)
+                    try:
+                        await self.store.checkpoint(principal, conversation_id, segment_id)
+                    except Exception as exc:
+                        if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
+                            yield failed("checkpoint after plan.approved", exc)
+                            return
+                        _log_save_failure(
+                            "checkpoint after plan.approved", conversation, segment_id, exc
+                        )
 
     async def _locked(
         self,
@@ -1147,17 +1160,17 @@ class StudioRunner:
         response. A lazily-acquired lock let two requests pass the 409
         guard and clobber each other's turn state and cancel event.
 
-        A heartbeat task renews `segment_id` for as long as this generator
-        is live, so the segment's lease outlives a single checkpoint's TTL
-        push; it is cancelled and awaited before release, so it never races
-        `store.release`'s own write. Unwinding it, releasing the segment
-        (and this segment's resuming pending entries), and releasing the
-        local lock each sit in their own nested `finally`, so a heartbeat
-        that ends with a non-cancel exception still reaches both releases;
-        `_unwind` re-raises that exception once they have run. A DB error
-        `store.release` cannot itself raise (it never does; see
-        `StudioStore.release`), and still could not strand the lock, since
-        releasing it does not depend on the release call having succeeded.
+        A heartbeat task renews `segment_id` for as long as this generator is
+        live, so the segment's lease outlives a single checkpoint's TTL push;
+        it is cancelled and awaited before release, so it never races the
+        release's own write (`StudioStore.start_release`). Unwinding it,
+        releasing the segment (and this segment's resuming pending entries),
+        and releasing the local lock each sit in their own nested `finally`,
+        so a heartbeat that ends with a non-cancel exception still reaches
+        both releases; `_unwind` re-raises that exception once they have run.
+        A DB error the release cannot itself raise (it never does; see
+        `StudioStore.start_release`), and still could not strand the lock,
+        since releasing it does not depend on the release having succeeded.
 
         The segment's span ends here (`segment_span_status`), from how the
         release ended and the first loss the stream met: one a save in
@@ -1641,8 +1654,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
             if abandoned is not None:
-                # The paused turn this one closed ends its trace as the
-                # record does; the stream's end exports the span.
+                # The unrecorded turn this one closed as `abandoned` ends its
+                # trace as its record now does; the stream's end exports the
+                # span.
                 record_closed_turn_span(body.conversation_id, abandoned)
             # Set in the request task's context (each request gets a fresh
             # one, so nothing leaks across requests); the streamed generator
@@ -1789,7 +1803,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # still running under it: its checkpoint is fenced on the lease
             # id alone, and would otherwise write over the turn this closes.
             conversation.segment = None
-            # With no live segment there is nothing for `release` to fence
+            # With no live segment there is nothing for a release to fence
             # against; a plain save persists the clear. A stale write (a
             # segment claimed the instant after `request_cancel` checked) is
             # a rare enough race that losing this save is acceptable. The
@@ -1938,7 +1952,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # A crash between this save and the resumed stream's own
             # checkpoint still leaves a durable, retryable record.
             # `_checkpointed` drops it once the resumed segment reaches its
-            # own pause or terminal frame; `release` drops it on every
+            # own pause or terminal frame; its release drops it on every
             # other ending (error, cancel, disconnect); only a crash
             # leaves it for this same retry path to pick back up.
             pending.answer = requested_answer
@@ -1950,6 +1964,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     **held_labels(pending.card),
                     **work.turn_choice_baseline,
                 }
+            # The resumed segment opens its own telemetry span on the turn's
+            # trace, whichever instance runs it; the save hands it to the
+            # live state.
+            work.open_segment_span()
             # Saved before the resume stream starts: a double answer to the
             # same interrupt across two instances loses cleanly here, with a
             # 409, rather than each resuming its own segment of the turn.
@@ -1978,13 +1996,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
             pending = conversation.pending[body.interrupt_id]
-            # The resumed segment opens its own telemetry span on the turn's
-            # trace, whichever instance runs it. A workflow's own steps run
-            # as concurrent waves, whose recording order `_RecordingSurface`
-            # needs the plan's own step order to undo
-            # (`_PendingInterrupt.step_order`'s docstring). Both are set
+            # A workflow's own steps run as concurrent waves, whose recording
+            # order `_RecordingSurface` needs the plan's own step order to
+            # undo (`_PendingInterrupt.step_order`'s docstring). It is set
             # before anything below can run the graph or close the turn.
-            conversation.ensure_turn_span()
             if studio.surface_recorder is not None:
                 studio.surface_recorder.set_step_order(
                     f"{principal}/{body.conversation_id}", pending.step_order, pending.step_labels

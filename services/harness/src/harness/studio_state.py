@@ -12,7 +12,7 @@ composition changes: `_apply_operations` for the user's mutations,
 mechanism that keeps at most one instance streaming a conversation at a
 time: `StudioStore.claim_segment` takes it, `renew` pushes its TTL forward,
 `checkpoint` writes the rest of the conversation's state to storage
-mid-stream (and at end of segment, through `release`), and
+mid-stream (and at end of segment, through `start_release`), and
 `request_cancel` signals it from any instance. See `Segment`,
 `SegmentBusy`, `SegmentLost` and `DatabaseUnavailable`.
 """
@@ -457,7 +457,7 @@ class ConversationState:
     composition: CompositionManifest | None = None
     # The durable lease on this conversation's active stream. None when no
     # segment is live. Set by `claim_segment`, refreshed by `renew`,
-    # cleared by `release`; a `checkpoint` writes whatever value it holds
+    # cleared by `start_release`; a `checkpoint` writes whatever value it holds
     # like any other durable field.
     segment: Segment | None = None
     # Armed while a segment streams; POST /api/studio/cancel and
@@ -553,7 +553,7 @@ class ConversationState:
     turn_choice_baseline: dict[str, str] = field(default_factory=dict)
     turn_recorded: bool = False
     # This instance's telemetry span for the turn's current segment, on the
-    # turn's `trace_id`: opened by `begin_turn` or `ensure_turn_span`, and
+    # turn's `trace_id`: opened by `begin_turn` or `open_segment_span`, and
     # ended once when the segment ends on this instance (`end_segment_span`),
     # so no span outlives the segment. Streams make it current with
     # `in_turn_span`.
@@ -1091,14 +1091,15 @@ class ConversationState:
         )
         return True
 
-    def ensure_turn_span(self) -> None:
-        """Open a span for the segment about to run on this conversation's
-        `trace_id` when this instance holds none. `begin_turn` opens the
-        first segment's; each later segment of the turn, the `/interrupt`
-        that resumes a pause on any instance, opens its own here, on the
-        same trace."""
-        if self._telemetry_span is None:
-            self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
+    def open_segment_span(self) -> None:
+        """Open a span for the segment about to run, on this conversation's
+        `trace_id`. `begin_turn` opens the first segment's; each later
+        segment of the turn, the `/interrupt` that resumes a pause on any
+        instance, opens its own here, on the same trace. Both run on the
+        request's working copy (`StudioStore.draft`), which holds no span,
+        and its save hands the span to the live state
+        (`StudioStore._take_draft`)."""
+        self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
     def in_turn_span(self) -> AbstractContextManager[None]:
         """Make this segment's telemetry span current for a `with` block.
@@ -1197,8 +1198,7 @@ _SPAN_STATUS_LEVELS: dict[str, EventLevel] = {
 def stream_loss(exc: SegmentLost | DatabaseUnavailable) -> StreamLoss:
     """How a lost segment or an unreachable database that ends a stream
     ends its segment. Every place that ends a stream for either cause names
-    it through this or arms the same literal, so one cause gives one
-    status."""
+    it through this, so one cause gives one status."""
     return "segment_lost" if isinstance(exc, SegmentLost) else "database_unavailable"
 
 

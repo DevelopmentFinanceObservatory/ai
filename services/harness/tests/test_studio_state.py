@@ -89,7 +89,7 @@ from .test_turn_records import _scoped_part, _top_donors
 CONVERSATION = "conv_01test0000"
 
 
-@pytest.mark.parametrize("method", ["begin_turn", "ensure_turn_span"])
+@pytest.mark.parametrize("method", ["begin_turn", "open_segment_span"])
 def test_a_turn_span_opens_on_the_new_trace_id_in_the_conversations_session(monkeypatch, method):
     fake_span = MagicMock()
     started_with = []
@@ -2175,7 +2175,7 @@ async def test_each_claim_numbers_its_frames_past_every_number_reserved_before(
     await store_a.save("principal", CONVERSATION)
     assert state_a.seq == 0
     state_a.seq = 37
-    await store_a.release("principal", CONVERSATION, first)
+    await store_a.start_release("principal", CONVERSATION, first)
 
     store_b = new_store(clock=clock)
     state_b = await store_b.load("principal", CONVERSATION)
@@ -2603,7 +2603,7 @@ async def test_a_release_whose_commit_lost_its_acknowledgement_is_recorded_as_sa
     faults = _dropping_connection(store, acknowledged=True)
 
     with caplog.at_level(logging.INFO, logger=studio_store.__name__):
-        await store.release("principal", CONVERSATION, segment_id)
+        await store.start_release("principal", CONVERSATION, segment_id)
 
     assert faults == [1]
     assert [r.levelno for r in caplog.records if r.levelno >= logging.WARNING] == [logging.WARNING]
@@ -2823,7 +2823,7 @@ async def test_a_release_that_cannot_reach_the_database_logs_it_saved_nothing(
     store._write = dropped
 
     with caplog.at_level(logging.WARNING, logger=studio_store.__name__):
-        await store.release("principal", CONVERSATION, segment_id)
+        await store.start_release("principal", CONVERSATION, segment_id)
 
     (record,) = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert record.levelno == logging.ERROR
@@ -2857,14 +2857,14 @@ async def test_a_release_retried_after_another_instance_claimed_and_released_is_
             state_b.turn_final_text = "B's words"
             b_segment = store_b.claim_segment("principal", CONVERSATION)
             await store_b.save("principal", CONVERSATION)
-            await store_b.release("principal", CONVERSATION, b_segment)
+            await store_b.start_release("principal", CONVERSATION, b_segment)
             raise _connection_reset("COMMIT")
 
     store_a._transaction = losing_the_ack
     version_before = store_a._runtime[("principal", CONVERSATION)].version
 
     with caplog.at_level(logging.WARNING, logger=studio_store.__name__):
-        await store_a.release("principal", CONVERSATION, segment_id)
+        await store_a.start_release("principal", CONVERSATION, segment_id)
 
     assert faults == [1]
     assert any("taken over" in r.getMessage() for r in caplog.records)
@@ -3067,7 +3067,7 @@ async def test_release_drops_resuming_entries_clears_the_segment_and_persists(
     state.pending["int_other"] = _pending(resuming_segment="seg_other")
     state.turn_final_text = "done"
 
-    await store.release("principal", CONVERSATION, segment_id)
+    await store.start_release("principal", CONVERSATION, segment_id)
 
     reloaded = await new_store().load("principal", CONVERSATION)
     assert set(reloaded.pending) == {"int_other"}
@@ -3075,16 +3075,17 @@ async def test_release_drops_resuming_entries_clears_the_segment_and_persists(
     assert reloaded.turn_final_text == "done"
 
 
-@pytest.mark.parametrize("method", ["release", "renew"])
+@pytest.mark.parametrize("method", ["start_release", "renew"])
 async def test_a_cancelled_segment_write_still_lands_then_reraises_the_cancel(
     new_store,
     method: str,
     clock,
 ) -> None:
-    """A disconnect cancels the task running `release`, and the stream's end
-    cancels the heartbeat running `renew`, while the write is opening its
-    transaction. The write runs to the end and the caller's cancellation is
-    raised once it has."""
+    """A disconnect cancels the task waiting on `start_release`'s task
+    (through `_run_to_completion`, as `StudioRunner._locked` waits), and the
+    stream's end cancels the heartbeat running `renew`, while the write is
+    opening its transaction. The write runs to the end and the caller's
+    cancellation is raised once it has."""
     store = new_store(clock=clock)
     await store.create("principal", CONVERSATION)
     segment_id = store.claim_segment("principal", CONVERSATION)
@@ -3101,7 +3102,12 @@ async def test_a_cancelled_segment_write_still_lands_then_reraises_the_cancel(
             yield conn
 
     store._transaction = slow_transaction
-    writing = asyncio.ensure_future(getattr(store, method)("principal", CONVERSATION, segment_id))
+    write = getattr(store, method)
+    writing = asyncio.ensure_future(
+        studio_store._run_to_completion(write("principal", CONVERSATION, segment_id))
+        if method == "start_release"
+        else write("principal", CONVERSATION, segment_id)
+    )
     await reading.wait()
     writing.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -3109,7 +3115,7 @@ async def test_a_cancelled_segment_write_still_lands_then_reraises_the_cancel(
 
     store._transaction = real_transaction
     reloaded = await new_store().load("principal", CONVERSATION)
-    if method == "release":
+    if method == "start_release":
         assert reloaded.segment is None
     else:
         assert reloaded.segment is not None
@@ -3150,7 +3156,7 @@ async def test_release_never_raises_on_a_db_error(new_store) -> None:
 
     store._transaction = broken_transaction
 
-    await store.release("principal", CONVERSATION, segment_id)  # must not raise
+    await store.start_release("principal", CONVERSATION, segment_id)  # must not raise
 
 
 async def test_release_swallows_a_takeover_and_still_never_raises(new_store, clock) -> None:
@@ -3165,7 +3171,7 @@ async def test_release_swallows_a_takeover_and_still_never_raises(new_store, clo
     store_b.claim_segment("principal", CONVERSATION)
     await store_b.save("principal", CONVERSATION)
 
-    await store_a.release("principal", CONVERSATION, segment_id)  # must not raise
+    await store_a.start_release("principal", CONVERSATION, segment_id)  # must not raise
 
 
 async def test_a_release_that_saved_nothing_holds_the_lease_no_longer(new_store, clock) -> None:
@@ -3183,7 +3189,7 @@ async def test_a_release_that_saved_nothing_holds_the_lease_no_longer(new_store,
         raise _connection_reset("UPDATE")
 
     store._write = dropped
-    await store.release("principal", CONVERSATION, segment_id)
+    await store.start_release("principal", CONVERSATION, segment_id)
     store._write = real_write
 
     state = await store.load("principal", CONVERSATION)
@@ -3220,7 +3226,7 @@ async def test_a_release_past_its_timeout_cancels_the_checkpoint_once(new_store)
 
     store._transaction = stuck_transaction
 
-    await store.release("principal", CONVERSATION, segment_id, timeout=0.05)
+    await store.start_release("principal", CONVERSATION, segment_id, timeout=0.05)
 
     assert cleanup_cancels == 0
     assert cleaned_up
