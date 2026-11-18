@@ -207,7 +207,7 @@ def _context(
     amendment: bool | None = None,
     pins: dict[str, PinSource] | None = None,
 ) -> Any:
-    """The part of ADK's `ToolContext` `propose_plan` reads.
+    """The part of a tool call's context `propose_plan` reads.
 
     `across_years` numbers the asks the orchestrator marked, and
     `amendment` is what the adapter recorded of the entry, `None` for a session

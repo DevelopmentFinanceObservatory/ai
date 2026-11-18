@@ -96,8 +96,8 @@ def plan(decision: Any, requirement: Any, derived_requirement: Any) -> Plan:
 async def test_the_planner_calls_the_gemini_model_adks_registry_resolves(
     plan: Plan, named: str
 ) -> None:
-    """A planner model name ADK's registry resolves, a class prefix included,
-    names the same model in every request."""
+    """A planner model name with a class prefix names the same model in every request
+    as the name without one."""
     scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
     surface = FixtureSurface(schemas=[])
     adapter = PlannerAdapter(
@@ -531,7 +531,7 @@ async def test_a_refused_ask_put_in_the_models_place_is_replayed_without_its_cal
 ) -> None:
     """A referral the user decides puts an ask in the model's place under an
     `adk-` call id. The ask tool refuses it, the run goes on, and the next
-    request replays the ask and its answer with ADK's own call id removed and
+    request replays the ask and its answer with its drawn call id removed and
     the placeholder signature kept."""
     entry = await _entry(
         _Script(

@@ -6995,8 +6995,8 @@ async def test_a_plan_paused_on_one_instance_is_approved_and_continued_on_anothe
         tool_surface=ScriptedSurface(),
     )
     # B's own model answers only after the hand-back: `/interrupt` resumes
-    # the ADK invocation A's own `/turn` already started, in the per-turn
-    # session A created, so B never sees the first turn's question.
+    # the turn A's own `/turn` already started, on the conversation
+    # A created, so B never sees the first turn's question.
     app_b = _app(tool_surface=ScriptedSurface())
 
     async with _client(app_a) as client_a, _client(app_b) as client_b:

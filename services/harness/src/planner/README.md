@@ -406,7 +406,7 @@ to, is the harness workflow's business.
 proposes and `REJECTED` when the user declines. The status that says a plan is
 ready to approve is the translator's alone, minted by `Plan.with_translation`,
 which refuses anything but a `DRAFT`; `APPROVED` is the harness workflow's to
-write, once the user answers. ADK has no per-key owner for session state, so
+write, once the user answers. Session state has no per-key owner, so
 this is an invariant a test holds rather than the framework.
 
 **An amendment mints a new version.** Calling `propose_plan` again with

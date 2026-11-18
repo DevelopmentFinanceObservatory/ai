@@ -49,8 +49,8 @@ one quietly from several, nor borrow a source discovered for a different
 requirement -- the log keeps each requirement's own view of a source, even one
 two requirements both found.
 
-ADK dispatches several function calls from one turn with `asyncio.gather` over
-one shared `session.state` dict, so two concurrent `discover_source` calls can
+Pydantic AI runs several function calls from one model response concurrently over
+one shared session state mapping, so two concurrent `discover_source` calls can
 each want to spend the same slice of `DISCOVERY_CALL_BUDGET` before either has
 written a record for it. `discovery_lock` serialises only the budget check,
 the reservation it makes, and the log's own read-modify-write; the `search`
@@ -881,8 +881,8 @@ def load_log(state: SessionState) -> DiscoveryLog:
     """Return the session's discovery log, empty when none has been written.
 
     Rebuilds `records` sorted by `DiscoveryRecord.sequence`: the persisted
-    dict (see `save_log`) is a union of several calls' own snapshots once ADK
-    has merged their state deltas, and a dict has no order of its own, so
+    dict (see `save_log`) is a union of several calls' own snapshots once
+    they have merged into one state, and a dict has no order of its own, so
     `sequence` is what recovers "call order, latest last" for `_select_definite`
     and every other scan that relies on it.
 
@@ -2214,9 +2214,9 @@ def _cut_off(tool: ToolId, time_left: float) -> ToolSurfaceUnavailableError:
 
 # The prefix of the key each part Search answered a `resolve_definition` call
 # of the turn with is stored under, followed by the sha256 of the call's
-# arguments (`resolving_once`). A Studio turn is one ADK session
-# (`harness.studio`), so the parts last the turn: every invocation of it (the
-# first message, each plan card switch, the approval) is served what an
+# arguments (`resolving_once`). A Studio turn runs on one conversation's
+# state (`harness.studio`), so the parts last the turn: every invocation of it
+# (the first message, each plan card switch, the approval) is served what an
 # earlier one was answered, on any instance, and the next turn starts empty.
 # A part is written once, when it is resolved. A switch that fails or is
 # stopped keeps them: `harness.graph.switch._restore` puts back the drafting

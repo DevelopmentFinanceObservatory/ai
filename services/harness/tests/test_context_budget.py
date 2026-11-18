@@ -15,8 +15,8 @@ file with the reason it sits where it does.
 
 The fenced foreign-agent relay is the exception to every other ceiling's
 rounding: no relayed text may reach the planner at all. An agent framework
-relays another agent's turn into a request as fenced user text, as ADK
-did, and no other agent runs inside a planner run, so any relayed part is a
+relays another agent's turn into a request as fenced user text, as the
+earlier framework did, and no other agent runs inside a planner run, so any relayed part is a
 regression.
 
 Every realistic-input ceiling is proved live by `test_every_ceiling_fails_when_its_segment_grows`.
@@ -677,7 +677,7 @@ def test_the_relay_check_measures_a_relay_that_is_there() -> None:
     The control for `test_no_relayed_foreign_agent_text_reaches_the_planner`: a
     bucket that always read empty, or a marker match that had drifted from
     the relay's framing, would pass that test for the wrong reason. The
-    relay built here is ADK's framing: one tagged part naming the author,
+    relay built here is the earlier framework's framing: one tagged part naming the author,
     then the fenced payload.
     """
     request = _request(
@@ -798,7 +798,7 @@ def _request(
     """A `ModelRequest` carrying the named declarations and text parts, oversized.
 
     `relay`, when given, prepends a fenced relay of `(author, chars)` in the
-    framing ADK emitted, so the relay bucket is exercised against a
+    framing the earlier framework emitted, so the relay bucket is exercised against a
     shape a framework used, not one this test invented. `brief`, when given, prepends a planner-brief part of
     that many chars, `harness.planner_adapter._READINGS_CONTEXT`'s own opening
     words, which is what `context_probe` buckets on, so the brief ceiling is

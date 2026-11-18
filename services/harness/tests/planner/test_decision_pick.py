@@ -179,7 +179,7 @@ def _ranked_donors() -> list[Any]:
 
 
 def _context() -> Any:
-    """The part of ADK's `ToolContext` `propose_plan` reads, holding no asks."""
+    """The part of a tool call's context `propose_plan` reads, holding no asks."""
     return SimpleNamespace(
         state={ASKS_STATE_KEY: []},
         function_call_id=None,

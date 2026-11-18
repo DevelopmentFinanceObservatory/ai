@@ -1,6 +1,6 @@
 """The Edit Card route: `component_ref.intent: "edit"`.
 
-No resolve, no plan, no ADK session: the card is described, the model
+No resolve, no plan, no agent run: the card is described, the model
 decides between a revise patch (title / select / order) and a full recreate
 (type, window, frame_ref), and the platform write streams back as
 `component.revised` or `component.created`. A recreated component takes

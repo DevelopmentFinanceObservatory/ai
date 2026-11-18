@@ -181,7 +181,7 @@ def _decisions(variant: str, decision: Callable[..., Decision]) -> list[Decision
 
 
 def _context() -> Any:
-    """The part of ADK's `ToolContext` `propose_plan` reads: state, events and actions."""
+    """The part of a tool call's context `propose_plan` reads: state, events and actions."""
     return SimpleNamespace(state={}, function_call_id=None, run_ended=False, records=[])
 
 

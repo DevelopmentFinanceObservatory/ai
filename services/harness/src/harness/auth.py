@@ -11,8 +11,8 @@ a route.
 `principal_for`. It takes the live-refresh principal alone
 (`live_refresh_admits`), and that value opens no other route.
 
-The returned principal is a stable derivation of the token: it becomes the
-ADK session `user_id`, and session ids must not embed credentials. Two
+The returned principal is a stable derivation of the token: it keys the
+stored conversations, which must not embed credentials. Two
 requests with the same token always land on the
 same principal, which is what keys conversation isolation.
 """

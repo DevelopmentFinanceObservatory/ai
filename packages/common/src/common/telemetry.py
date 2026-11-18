@@ -2,7 +2,7 @@
 
 `init_telemetry` selects a backend from the environment and `backend()` reports
 it: `"langfuse"`, `"otel"` or `"off"`. Service-specific instrumentation (e.g.
-ADK or FastMCP span attributes) is layered on top by each service; this module
+Pydantic AI or FastMCP span attributes) is layered on top by each service; this module
 owns env-var detection so services don't each hand-roll it. Third-party imports
 are lazy so the module stays cheap to import when telemetry is off, as it is in
 tests and in local dev without creds.
@@ -22,18 +22,10 @@ Recognised env vars:
 - None of them set -- the state is off.
 
 When a backend comes up, `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`
-is set to `SPAN_ONLY` unless the environment already sets it, so ADK's
-`generate_content` spans carry each model call's prompt and response and its
-`execute_tool` spans each tool's arguments and result. ADK writes every
-streamed response as its own output message and thought summaries as plain
-text parts.
-
-The spans follow ADK's telemetry schema v2, its default.
-`ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN=otel_semconv_1_36` selects schema v1,
-whose spans reach Langfuse as ADK writes them: each model call is priced
-twice, on `call_llm` and on `generate_content`, and Langfuse's default span
-filter drops ADK's attribute-less `invocation` spans, so the `invoke_workflow`
-spans under them lose their parent.
+is set to `SPAN_ONLY` unless the environment already sets it.
+`harness.planner_adapter.content_on_spans` reads it, and the planner and
+orchestrator agents then put each model call's prompt and response and each
+tool's arguments and result on their spans.
 
 `start_turn_span`/`end_turn_span` open and close one root span per unit of
 work (a harness turn, say) on whichever backend is active. `use_turn_span`
@@ -75,8 +67,8 @@ _LANGFUSE_ENV_VARS = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BA
 _AUTH_CHECK_THREAD_NAME = "langfuse-auth-check"
 _FLUSH_THREAD_NAME = "telemetry-flush"
 
-# The OpenTelemetry GenAI variable that decides whether ADK writes message
-# content on its spans (`_capture_message_content`).
+# The OpenTelemetry GenAI variable that decides whether the agents write message
+# content on their spans (`_capture_message_content`).
 _CAPTURE_MESSAGE_CONTENT_VAR = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
 
 # The longest a response waits on `flush_telemetry`. An export to a healthy
@@ -196,16 +188,13 @@ def _start_backend(*, service_name: str) -> str | None:
 
 
 def _capture_message_content() -> None:
-    """Have ADK write prompts, responses, tool arguments and tool results on
-    its spans, unless the environment already says otherwise.
+    """Have the agents write prompts, responses, tool arguments and tool results
+    on their spans, unless the environment already says otherwise.
 
-    ADK's telemetry schema v2 puts a model call's messages on its
-    `generate_content` span and a tool's arguments and result on its
-    `execute_tool` span only when `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`
-    is `SPAN_ONLY` or `SPAN_AND_EVENT`. Unset, the spans carry none. ADK reads
-    the variable each time it builds a telemetry config, which it does per
-    model and tool call, so setting it here, before the first run, reaches
-    every call. A value already set, even an empty one, is left as it is.
+    The agents put message content on their spans only when
+    `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is `SPAN_ONLY` or
+    `SPAN_AND_EVENT` (`harness.planner_adapter.content_on_spans`). Unset, the
+    spans carry none. A value already set, even an empty one, is left as it is.
     """
     os.environ.setdefault(_CAPTURE_MESSAGE_CONTENT_VAR, "SPAN_ONLY")
 
@@ -243,7 +232,7 @@ def _init_langfuse(*, service_name: str) -> None:
 
     The client is built with `_langfuse_exporter` and the SDK's default span
     filter, which exports its own spans and every span with a `gen_ai.*`
-    attribute, so every span ADK opens. The SDK keeps the first client built
+    attribute, so every span the agents open. The SDK keeps the first client built
     in a process and ignores the arguments of a later one, and `get_client()`
     returns that first client, so this has to run before anything else builds
     one. A client that already exists is reported.
@@ -421,11 +410,11 @@ def start_turn_span(external_id: str, *, session_id: str | None = None) -> Any |
     `session_id` is the Langfuse session the turn belongs to, so turns that
     share it group in Langfuse's Sessions view. It and the trace name
     `TURN_SPAN_NAME` reach every span started under `use_turn_span(handle)` in
-    this process, ADK's included, and only on the Langfuse backend. Spans an
+    this process, the agents' included, and only on the Langfuse backend. Spans an
     MCP server opens for a call it receives over HTTP start in the server's own
     context, and `turn_call_meta` carries the session to it. The Langfuse SDK
     drops a `session_id` over 200 characters with a warning, so the trace
-    carries no session and ADK's spans fall back to their
+    carries no session and the agents' spans fall back to their
     per-turn `gen_ai.conversation.id`.
     """
     if _backend is None:
@@ -755,8 +744,8 @@ def record_span(name: str, attributes: dict[str, Any]) -> None:
     therefore opens the span through `get_client().start_as_current_observation`
     (`attributes` passed as `metadata`), which nests it under the current
     OTel context -- no `trace_context` needed, since the caller here always
-    runs inside a span another instrumentor already made current (e.g. ADK's
-    own span). Any other backend keeps using the plain OTel tracer, which
+    runs inside a span another instrumentor already made current (e.g. a Pydantic AI
+    agent's own span). Any other backend keeps using the plain OTel tracer, which
     Langfuse's own auto-configuration is not present to filter.
 
     Swallows any error opening or closing the span, the same contract as

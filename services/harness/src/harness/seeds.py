@@ -4,7 +4,7 @@ A seed is a Search result the user carries into a turn. This module reads each
 one as a `harness.wire.Seed` (`seeds_slot`, `take_seeds`), checks Search's
 current answer for its identity (`resolve_seed`, `answered_block`), and
 words the seeds a turn keeps and drops for the orchestrator's agent
-(`seeds_hand_back`). Nothing here touches the ADK `Context` or routing;
+(`seeds_hand_back`). Nothing here touches the turn's context or routing;
 `harness.graph` calls it from its nodes and `harness.studio` calls
 `seeds_slot` before the turn opens.
 """

@@ -560,7 +560,7 @@ async def test_a_hand_back_for_a_call_that_does_not_wait_is_refused() -> None:
 
 
 async def test_a_seed_hand_back_follows_the_question_on_every_request() -> None:
-    """As ADK's `prepend_digests` placed it: digests, question, seed, then the run."""
+    """As the recorded requests place it: digests, question, seed, then the run."""
     scripted = ScriptedGenai([reply(_SEARCH), reply(text_part("Done."))])
 
     await _run(scripted, seeded="The user brought Life expectancy from Search.")

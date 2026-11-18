@@ -69,8 +69,8 @@ class Step(NamedTuple):
 
     `message` is a message the user typed into the session, which the
     planner adapter's own messages are not (`planner.session._user_message`).
-    `call` is an ask, the planner's own (`PLANNER_ASK`) or a workflow
-    interrupt's `adk_request_input`, with its id and `args`. `answer` is a
+    `call` is an ask, the planner's own (`PLANNER_ASK`) or a pause the turn
+    put to the user, with its id and `args`. `answer` is a
     response to one, with its id, the `args` of the nearest preceding call
     sharing that id (`None` when none precedes it) and the response body.
     `response` is any other tool's response, with its `name` and body.
@@ -416,10 +416,10 @@ def _said(answer: object) -> str:
 def _is_answer(body: Mapping[str, Any]) -> bool:
     """Whether an ask's response body carries something the user said.
 
-    A user's answer is `{"result": ...}` (`harness.studio`'s `/interrupt` route wraps
-    it, as ADK wraps any non-dict value), read as `harness.graph.state.resume_answers`
+    A user's answer is `{"result": ...}` (`planner.session.session_steps` wraps
+    it), read as `harness.graph.state.resume_answers`
     reads it: a pick of a candidate, or free text for a reply outside the offered
-    options. A body with no `result` is a call the tool or ADK rejected. A dismissal of
+    options. A body with no `result` is a call the tool rejected. A dismissal of
     the pause and a question left to the planner are the user declining to choose, and
     blank text says nothing.
     """
@@ -493,7 +493,7 @@ def answers_since_referral(call: PlannerCall) -> ReferralAnswers:
     once, in order. An ask after that response is one the
     model raised knowing the referral, and its `id` is remembered. A response counts as the
     user's answer when it pairs by `id` with one of those asks and `_is_answer` holds. An ask
-    issued before the referral, a call the tool or ADK rejected, and a skip do not count. A skip
+    issued before the referral, a call the tool rejected, and a skip do not count. A skip
     is the user declining to choose, which the planner may not substitute for, so the planner
     ends the turn by telling them what cannot be done.
 
@@ -512,7 +512,7 @@ def answers_since_referral(call: PlannerCall) -> ReferralAnswers:
     pairs them. A pick made before the referral is not counted. Picks keep the
     order the answers came in. An ask with no answer, a skip included, leaves
     every id it offered unanswered. An ask whose response has no `result`,
-    one the tool or ADK refused, never reached the user, so it offered
+    one the tool refused, never reached the user, so it offered
     nothing. A pending ask has no response and stays unanswered.
 
     `picked_ever` holds the user's standing picks since the first referral,
@@ -605,7 +605,7 @@ def combination_picks(
     It asks about the combination the latest `combination_unasked` refusal before it names, read
     off that refusal's own response, so the model cannot point an ask at another sum. A
     refusal binds the first ask after it that reached the user and no other, so an ask
-    with no refusal of its own before it asks about nothing. An ask the tool or ADK refused
+    with no refusal of its own before it asks about nothing. An ask the tool refused
     leaves no step (`planner.session.session_steps`), so it binds nothing and leaves the
     refusal for the next ask. Each response pairs with the nearest preceding call sharing
     its `id`, as `elected_spec_ids` pairs them. The combination ask is one question, `q1`

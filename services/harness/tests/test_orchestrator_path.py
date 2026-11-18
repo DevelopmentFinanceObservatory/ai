@@ -659,7 +659,7 @@ def _the_hand_back(request: Any, name: str) -> dict[str, Any]:
 
 async def test_a_trailing_hand_back_is_the_one_result_of_its_plan_call(pg_engine: AsyncEngine):
     """The model's request right after a plan ran ends on the plan's
-    hand-back. ADK merges every response to the call there, the later
+    hand-back. The request holds every response to the call there, the later
     replacing the earlier, so the call shows the hand-back and not `_pend`'s
     record of the hand-off."""
     runner, model = orchestrator_runner(
@@ -685,8 +685,8 @@ async def test_a_trailing_hand_back_is_the_one_result_of_its_plan_call(pg_engine
 
 async def test_a_hand_back_in_history_is_the_one_result_of_its_plan_call(pg_engine: AsyncEngine):
     """A later request holds the plan's hand-back in its history, with the
-    agent's `ask_user` call and its answer after it. ADK pairs a call in
-    history with its last response, so the plan call still shows the
+    agent's `ask_user` call and its answer after it. A call in
+    history pairs with its last response, so the plan call still shows the
     hand-back alone, and the question its answer alone."""
     runner, model = orchestrator_runner(
         pg_engine,

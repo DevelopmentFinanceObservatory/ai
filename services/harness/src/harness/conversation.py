@@ -5,7 +5,7 @@ MCP client the harness holds reads it through `current_conversation_caller`
 to pick the conversation's client, which names the conversation to the MCP
 servers in its `x-dfo-caller` header (`common.caller`), which data-mcp and
 analysis-mcp record as a stored frame's `writer`. It is a contextvar
-because the value has to cross the graph: studio -> ADK runner -> graph
+because the value has to cross the graph: studio -> turn engine -> graph
 node -> executor, and none of those layers carries wire identity, since the
 graph must stay runnable without any studio layer at all.
 

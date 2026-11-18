@@ -152,7 +152,7 @@ def _attribute(span: Span, key: str) -> str | int | float | bool | None:
 
 
 def _child_span(name: str) -> None:
-    """Open and close a span with a `gen_ai` attribute, the kind ADK and
+    """Open and close a span with a `gen_ai` attribute, the kind Pydantic AI and
     fastmcp emit, which Langfuse's default filter exports."""
     with trace.get_tracer("test.child").start_as_current_span(name) as child:
         child.set_attribute("gen_ai.system", "test")
@@ -419,9 +419,9 @@ def _spans_with_an_unexported_parent(spans: list[Span]) -> list[Span]:
 async def test_adks_spans_export_under_the_turn_and_bare_spans_do_not(
     fake_langfuse: FakeLangfuse,
 ) -> None:
-    """ADK's schema v2 spans carry `gen_ai.*` attributes, so the Langfuse
-    default filter exports them, `invoke_workflow` as a child of `turn`. A span
-    with no such attribute, from ADK's scope or any other, is dropped."""
+    """An instrumentor's spans carrying `gen_ai.*` attributes export under the
+    Langfuse default filter, `invoke_workflow` as a child of `turn`. A span
+    with no such attribute, from that instrumentor's scope or any other, is dropped."""
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
@@ -639,8 +639,8 @@ def test_the_langfuse_exporter_matches_the_one_the_sdk_builds_by_default(
 
 
 def _adk_child_span(name: str) -> None:
-    """A span like ADK's `generate_content`: a separate tracer, with ADK's own
-    per-turn conversation id."""
+    """A span like a model call's `generate_content`: a separate tracer, with the
+    per-turn conversation id an agent framework sets."""
     with trace.get_tracer("gcp.vertex.agent").start_as_current_span(name) as span:
         span.set_attribute("gen_ai.conversation.id", "conv-1#t1")
 

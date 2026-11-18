@@ -1305,7 +1305,7 @@ async def test_a_non_timeout_failure_does_not_tear_down_a_concurrent_call_on_the
     `describe` fails for a reason other than its own timeout while `search`
     is still awaiting its own `call_tool`. `_call_held`'s eviction of the
     broken client (`CallerClients.discard`) must not disconnect it
-    until `search` has released its own hold -- ADK can dispatch a turn's
+    until `search` has released its own hold -- Pydantic AI dispatches a response's
     tool calls concurrently, so one call failing must not break a sibling
     still using the same conversation's client. Asserts `exited` itself,
     not just that `search` still gets an answer: a `discard` that tore the

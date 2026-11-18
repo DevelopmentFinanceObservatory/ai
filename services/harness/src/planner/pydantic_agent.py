@@ -225,7 +225,7 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
 
     It runs the spec's body (`serve_tool`) over the call's `PlannerCall`, whose
     state is the view the response's calls write through. An answer that is
-    no dict is wrapped under `result`, as ADK wraps one. A body that raises is
+    no dict is wrapped under `result`. A body that raises is
     answered with `tool_failed`'s answer, and a cancellation propagates. An
     answer of the body's holding an `error` key, the refusal of a call missing a required
     argument (`planner.tool_spec.missing_arguments`), marks the call's span

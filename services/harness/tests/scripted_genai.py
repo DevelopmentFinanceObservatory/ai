@@ -281,7 +281,7 @@ async def _stream(step: Reply) -> AsyncIterator[types.GenerateContentResponse]:
 
 
 def _chunk(step: Reply, parts: list[types.Part], *, final: bool) -> types.GenerateContentResponse:
-    # Each chunk gets a copy because ADK writes its own call ids into the parts it is handed.
+    # Each chunk gets a copy because a consumer may write call ids into the parts it is handed.
     parts = copy.deepcopy(parts)
     if step.prompt_feedback is not None:
         return types.GenerateContentResponse(prompt_feedback=step.prompt_feedback)

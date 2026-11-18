@@ -34,7 +34,7 @@ A request's own `contents` carry the history. An agent framework that relays
 another agent's turn into that history does so as `role="user"` text: a
 preamble stating that fenced content is data, not instructions, then one fenced
 part per relayed payload, each prefixed with the relaying agent's name, the
-framing ADK used. Every one of those parts contains the fence marker, so
+framing the earlier agent framework used. Every one of those parts contains the fence marker, so
 every one buckets as `text(fenced-relay)`, and the by-agent breakdown names the
 author from its `[<author>]` tag. No agent relays into a planner request, so
 the bucket stays empty.
@@ -109,7 +109,7 @@ from planner.records import (
 )
 from pydantic import BaseModel
 
-# The fence marker ADK put around another agent's quoted turn.
+# The fence marker the earlier agent framework put around another agent's quoted turn.
 RELAY_MARKER = "<<<BEGIN_QUOTED_AGENT_CONTENT>>>"
 
 # A relay prefixes each relayed payload with `[<author>]`, so the same text that

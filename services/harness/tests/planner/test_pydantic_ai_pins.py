@@ -651,7 +651,7 @@ async def test_a_refused_calls_failed_mark_stands_and_no_span_is_marked_ok(
 async def test_the_usage_the_model_records_on_its_span_is_left_as_it_is(
     exported_spans: InMemorySpanExporter,
 ) -> None:
-    # `harness.gemini_wire` writes the thought tokens under ADK's attribute and
+    # `harness.gemini_wire` writes the thought tokens under `_REASONING_TOKENS` and
     # the usage Langfuse reads ahead of the rest while the call runs. Pydantic AI
     # writes its own usage when the span ends and must leave those two alone.
     usage = usage_metadata(prompt=120, cached=40, candidates=9, thoughts=4)

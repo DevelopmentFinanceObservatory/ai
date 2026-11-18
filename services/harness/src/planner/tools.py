@@ -225,7 +225,7 @@ def _transient_retry(arguments: Mapping[str, Any], state: SessionState) -> Plan 
 def ask_refusal(args: Mapping[str, Any]) -> dict[str, object] | None:
     """The refusal an ask earns on its arguments alone, or `None` for one that pauses.
 
-    ADK hands the model's arguments over unchecked. A refusal answers the
+    The model's arguments arrive unchecked. A refusal answers the
     call at once, so the run goes on and Studio asks nothing. An ask this
     accepts ends the planner's run, and the graph's planner node pauses on
     it with these arguments as its `RequestInput`'s `payload`, from which

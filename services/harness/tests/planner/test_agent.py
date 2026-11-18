@@ -1,8 +1,8 @@
 """Tests for the planner agent: plan-lifecycle tools and agent construction.
 
 Most tool functions are exercised directly (through `call_planner_tool`) against a fake
-tool context, rather than through a full ADK `Runner` -- what belongs to this
-package is the business logic each tool function runs once ADK decides to call
+tool context, rather than through a model run -- what belongs to this
+package is the business logic each tool function runs once the model calls
 it. `_FakeToolContext` carries no `tool_confirmation`: `declare_ready` and
 `ready_and_end` gate nothing of their own, so a body that tried to touch it would raise
 `AttributeError` here rather than silently working again -- see the tests
@@ -2783,8 +2783,8 @@ def test_propose_plan_rejects_a_decision_whose_chosen_is_not_in_options(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
 
-    # A plain dict, not a `Decision`: this is what ADK's own arg
-    # preprocessing hands `propose_plan` when a single item in the list
+    # A plain dict, not a `Decision`: this is what
+    # `convert_arguments` hands `propose_plan` when a single item in the list
     # fails validation -- it silently falls back to raw dicts for the whole
     # list rather than raising. `propose_plan` has to catch this itself.
     # Fails validating `decisions`, so `evidence_requirements` is never
@@ -2818,7 +2818,7 @@ def test_propose_plan_rejects_a_malformed_requirement(decision: DecisionFactory)
     tools = _tools_by_name()
     ctx = _FakeToolContext()
 
-    # Missing the required `period` -- same ADK raw-dict-fallback scenario as
+    # Missing the required `period` -- same raw-dict-fallback scenario as
     # the Decision case above, for a requirement.
     bad_requirement = {
         "kind": "dataset",
@@ -2844,7 +2844,7 @@ def test_propose_plan_rejects_a_malformed_requirement(decision: DecisionFactory)
 def test_propose_plan_accepts_a_mixed_list_of_dataset_and_derived_dicts(
     decision: DecisionFactory,
 ) -> None:
-    # The shape ADK actually hands a union-typed list parameter: plain dicts,
+    # The shape `convert_arguments` hands a union-typed list parameter: plain dicts,
     # one per kind, never pre-built model instances. `propose_plan` has to
     # rebuild the models itself through `_REQUIREMENTS_ADAPTER`.
     tools = _tools_by_name()
@@ -3438,7 +3438,7 @@ def test_a_field_name_the_model_supplies_reaches_the_refusal_cut_short(
 def test_propose_plan_rejects_a_null_list(
     missing: str, decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
-    # ADK converts a `list[BaseModel]` argument only when the incoming value is
+    # `convert_arguments` converts a `list[BaseModel]` argument only when the incoming value is
     # already a list, and a JSON `null` is not a missing mandatory argument --
     # the key is present -- so `None` reaches the function body untouched.
     tools = _tools_by_name()
@@ -12033,7 +12033,7 @@ def test_a_decision_naming_the_pin_is_refused_as_invalid_data(
 def test_requirements_that_are_no_list_are_an_invalid_plan(
     decision: DecisionFactory, raw: object
 ) -> None:
-    """ADK passes a value that is no list unconverted, so admission answers it
+    """`convert_arguments` passes a value that is no list unconverted, so admission answers it
     as any malformed draft, and the turn goes on."""
     ctx = _FakeToolContext()
 
@@ -13873,13 +13873,13 @@ def test_elected_spec_ids_pairs_a_response_with_the_call_that_precedes_it() -> N
     assert elected_spec_ids(session_call(tool_context)) == frozenset({SPEC})
 
 
-# --- The declaration ADK builds from a union-typed parameter --------------------------
+# --- The declaration built from a union-typed parameter --------------------------
 
 
 def test_propose_plans_declaration_describes_every_requirement_kind() -> None:
     # `evidence_requirements: list[EvidenceRequirement]` is a discriminated
-    # union; ADK has to be able to build a `FunctionDeclaration` from it, or
-    # the model never sees a schema to draft against. ADK keeps the union's
+    # union; `function_declaration` has to build a `FunctionDeclaration` from it, or
+    # the model never sees a schema to draft against. The declaration keeps the union's
     # `Annotated` metadata, so the declaration is pydantic's own `oneOf` with
     # the `kind` discriminator (Gemini reads `oneOf` as `anyOf`).
     tools = _tools_by_name()
@@ -13910,9 +13910,7 @@ def _undescribed_properties(schema: dict[str, Any]) -> list[str]:
     """Return `"Model.field"` for every field of every `$defs` model with no `description`.
 
     Reads `$defs` rather than `model_fields`, since `$defs` is what a model
-    the tool actually sees is built from -- ADK's legacy
-    `_parse_schema_from_parameter` path drops a nested model's description
-    even when `model_fields` carries one. A `$defs` entry with no
+    the tool actually sees is built from. A `$defs` entry with no
     `properties` is an enum, which carries nothing to describe here.
     """
     undescribed: list[str] = []
@@ -13930,8 +13928,8 @@ def test_propose_plans_declaration_describes_every_field() -> None:
     # Every argument and every property of every model `propose_plan`'s
     # declaration carries has a description, so the model sees what each
     # field means without it having to live in `_PLANNING` prose.
-    # `_undescribed_properties` walks `$defs`, the shape ADK actually sends
-    # the model. The fields every requirement kind shares are described once,
+    # `_undescribed_properties` walks `$defs`, the shape the model
+    # is actually sent. The fields every requirement kind shares are described once,
     # on the `evidence_requirements` argument.
     tools = _tools_by_name()
 
@@ -18068,7 +18066,7 @@ def test_an_entity_node_must_be_the_one_the_user_picked_for_it(
 def test_an_ask_in_the_proposals_own_response_is_not_an_unanswered_pick(
     decision, requirements, serving, valid
 ):
-    """[ask, propose_plan] in one response after an entity referral. ADK writes the
+    """[ask, propose_plan] in one response after an entity referral. `run_planner` yields the
     response's answers after every call ends, so the ask has none while the proposal runs. It
     may still be refused, and reaches the user only once the run ends, so the proposal reads
     the session as it stood before the response and does not hold the ask's candidates
@@ -18208,7 +18206,7 @@ def _plan_write_response(ctx: Any, *names: str) -> None:
 def _plan_write(
     ctx: Any, index: int, name: str, decision: DecisionFactory, requirements: RequirementPair
 ) -> dict[str, object]:
-    """Run the response's call `index`, a `name` call, as ADK does for each call in turn.
+    """Run the response's call `index`, a `name` call, as a served response does for each call in turn.
     A proposal amends the plan on record under its question, or drafts `q<index>`."""
     ctx.function_call_id = f"call-{index}"
     tools = _tools_by_name()

@@ -44,7 +44,7 @@ reads its calls as it sent them. Every request streams. A non-streamed call
 refuses, since it would bypass all of the above.
 
 Each call's span, Pydantic AI's `chat <model>`, is current while the call runs
-and carries what Langfuse reads of an ADK `generate_content` span that
+and carries the usage Langfuse reads from a GenAI span, which
 Pydantic AI leaves out (`_record_usage`). That is the reasoning tokens and the
 usage Langfuse derives from such a span, set outright so that the usage
 details Pydantic AI adds are not summed into the call's total. A turn put in
@@ -85,9 +85,9 @@ NO_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
 
 type Usage = types.GenerateContentResponseUsageMetadata
 
-# What every id `client_call_id` makes starts with. It is the prefix ADK
-# gave such ids, so the planner records and conversations stored under them
-# read the same.
+# What every id `client_call_id` makes starts with. It is the prefix earlier
+# releases gave such ids, so the planner records and conversations stored under
+# them read the same.
 CLIENT_CALL_ID_PREFIX = "adk-"
 
 # A planner call is sent at most this many times. The second send happens when
@@ -100,7 +100,7 @@ _ATTEMPTS = 2
 # `gen_ai.usage.*` attribute.
 _OBSERVATION_TYPE = "langfuse.observation.type"
 _USAGE_DETAILS = "langfuse.observation.usage_details"
-# The OpenTelemetry GenAI attribute ADK records a call's thought tokens under.
+# The OpenTelemetry GenAI attribute a call's thought tokens go under.
 _REASONING_TOKENS = "gen_ai.usage.reasoning.output_tokens"
 # The number of a call's attempts discarded for ending on a function call
 # Gemini could not parse, set only when one was.
@@ -420,15 +420,15 @@ def _added(spent: Usage | None, usage: Usage | None) -> Usage | None:
 
 def _record_usage(span: trace.Span, usage: Usage | None) -> None:
     """Put `usage`, summed over a call's attempts (`_added`), on `span` as
-    Langfuse reads it from an ADK `generate_content` span.
+    Langfuse reads it from a GenAI span.
 
-    ADK records a call's input (prompt and tool-use tokens), output (candidate
+    A call's usage is its input (prompt and tool-use tokens), output (candidate
     and thought tokens), cached and thought tokens, each only when Gemini
     reported it, and nothing when it reported neither input nor output.
     Langfuse takes the cached tokens out of the input and the thought tokens
     out of the output. Pydantic AI records the thought tokens only as a
     `gen_ai.usage.details.*` attribute, and Langfuse adds each of those to the
-    call's total, so the thought tokens go on under ADK's attribute and the
+    call's total, so the thought tokens go on under `_REASONING_TOKENS` and the
     usage Langfuse derives goes on as its usage details, which it reads ahead
     of the rest.
     """
