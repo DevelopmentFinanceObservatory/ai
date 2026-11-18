@@ -41,11 +41,12 @@ do not retry. The run ledger
 
 The open turn's spec blocks are the one thing read from elsewhere: the
 turn's own ADK session holds them, and `load` reads them back through the
-`turn_specs` reader the store is given (`harness.adk_import.open_turn_specs`,
-which converts blocks stored before `planner.workflow.BoundEntity`).
-Before it reads a conversation's rows, `load` runs the `AdkBridge.reimport`
-of the `adk` it is given, which copies in what the previous release wrote
-to the conversation's ADK ledger session since the tables last took it
+`turn_specs` reader the store is given
+(`harness.adk_import.open_turn_specs`) and converts blocks stored before
+`planner.workflow.BoundEntity` through `AdkBridge.convert_specs`. Before
+it reads a conversation's rows, `load` runs the `AdkBridge.reimport` of the
+`adk` it is given, which copies in what the previous release wrote to the
+conversation's ADK ledger session since the tables last took it
 (`harness.adk_import.reimport_on_access`).
 """
 
@@ -54,11 +55,9 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
-import errno
 import json
 import logging
 import math
-import socket
 import ssl
 import time
 import uuid
@@ -70,7 +69,7 @@ from collections.abc import (
     Coroutine,
     Iterable,
 )
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -273,35 +272,22 @@ async def _run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
     return task.result()
 
 
-class _ConnectTimeoutError(TimeoutError):
-    """Connecting to the database timed out (`StudioStore._transaction`), as
-    against a statement timing out on a connection it holds."""
-
-
-# The errnos of a network that dropped or refused the connection.
-_NETWORK_ERRNOS = frozenset(
-    {
-        errno.EHOSTUNREACH,
-        errno.ENETUNREACH,
-        errno.ECONNREFUSED,
-        errno.ECONNRESET,
-        errno.ETIMEDOUT,
-        errno.EPIPE,
-    }
-)
+# The `OSError`s no retry mends: a socket path or certificate file that is
+# missing or may not be read, and a server certificate that does not verify.
+_PERMANENT_OS_ERRORS = (FileNotFoundError, PermissionError, ssl.SSLCertVerificationError)
 
 
 def _transient(exc: BaseException) -> bool:
     """Whether `exc` is the network to the database failing, a fault a retry
     may outlast, raised as it is or as a driver error's cause: a connection
-    SQLAlchemy invalidated, the pool timing out, a connect that timed out
-    (`_ConnectTimeoutError`), a refused, reset or aborted socket
-    (`ConnectionError`), a name that does not resolve, a TLS failure, or an
-    `OSError` carrying a network errno (`_NETWORK_ERRNOS`). The Cloud SQL
-    connector raises those unwrapped when it cannot connect. Anything else
-    raises at once: a statement or lock timeout, a misuse of the
-    connection, and an `OSError` such as a missing socket path or a
-    certificate it may not read, which no retry mends."""
+    SQLAlchemy invalidated, the pool timing out, or any `OSError` (a
+    refused, reset or timed-out socket, an unreachable host or network, a
+    name that does not resolve, a TLS failure, the errno-less error asyncio
+    raises when every address of the host refuses) bar the permanent
+    faults `_PERMANENT_OS_ERRORS` names. The Cloud SQL connector raises
+    those unwrapped when it cannot connect. Anything else raises at once: a
+    statement or lock timeout the database reports, a misuse of the
+    connection, and a permanent fault."""
     if isinstance(exc, DBAPIError):
         return exc.connection_invalidated or _network_failed(exc.orig)
     return isinstance(exc, SQLAlchemyTimeoutError) or _network_failed(exc)
@@ -311,9 +297,9 @@ def _network_failed(exc: BaseException | None) -> bool:
     """Whether `exc`, or an error it was raised from, is the network failing
     (`_transient`)."""
     while exc is not None:
-        if isinstance(exc, (_ConnectTimeoutError, ConnectionError, socket.gaierror, ssl.SSLError)):
-            return True
-        if isinstance(exc, OSError) and exc.errno in _NETWORK_ERRNOS:
+        if isinstance(exc, _PERMANENT_OS_ERRORS):
+            return False
+        if isinstance(exc, OSError):
             return True
         exc = exc.__cause__
     return False
@@ -896,6 +882,17 @@ class StudioStore:
         entry = self._runtime.get((principal, conversation_id))
         return entry.state if entry is not None else None
 
+    def discard_unsaved(self, principal: str, conversation_id: str) -> None:
+        """Drop this instance's live state of the conversation, which holds
+        changes no save stored (a turn begun, a segment claimed in memory),
+        keeping its runtime entry and so its locks. `current` returns None
+        until the next `load`, which reads the row afresh."""
+        entry = self._runtime.get((principal, conversation_id))
+        if entry is not None:
+            entry.state = None
+            entry.claimed_reserved = None
+            entry.held = None
+
     def lease_deadline(self, principal: str, conversation_id: str) -> float:
         """When, on this instance's clock (`now`), it stops trusting that it
         still holds the lease it claimed on `conversation_id`:
@@ -925,20 +922,9 @@ class StudioStore:
     def _entry(self, principal: str, conversation_id: str) -> _RuntimeEntry:
         return self._runtime.setdefault((principal, conversation_id), _RuntimeEntry())
 
-    @asynccontextmanager
-    async def _transaction(self) -> AsyncIterator[AsyncConnection]:
-        """One read-committed transaction. Every write goes through here. A
-        connect that times out raises `_ConnectTimeoutError`, which a retried
-        write retries (`_transient`)."""
-        try:
-            conn = await self._engine.connect()
-        except TimeoutError as exc:
-            raise _ConnectTimeoutError(f"connecting to the database timed out: {exc}") from exc
-        try:
-            async with conn.begin():
-                yield conn
-        finally:
-            await conn.close()
+    def _transaction(self) -> AbstractAsyncContextManager[AsyncConnection]:
+        """One read-committed transaction. Every write goes through here."""
+        return self._engine.begin()
 
     async def _write(
         self,

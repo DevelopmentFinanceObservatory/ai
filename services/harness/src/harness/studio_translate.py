@@ -102,6 +102,7 @@ from harness.seeds import SEED_STEP_TOOL, SEEDS_STEP_ID
 from harness.sentences import DROPPED_REASON, MAX_SENTENCE_CHARS, failure_sentence
 from harness.studio_state import (
     ConversationState,
+    DatabaseUnavailable,
     SegmentLost,
     _PendingChoice,
     _PendingInterrupt,
@@ -349,23 +350,6 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
     )
 
 
-def _state_not_saved(exc: Exception) -> dict[str, Any]:
-    return harness_refusal(
-        code=HarnessCode.STATE_NOT_SAVED, message=f"the turn's state could not be saved: {exc}"
-    )
-
-
-def _close_unsaved_turn(conversation: ConversationState, exc: Exception) -> str:
-    """Close the turn whose state `exc` kept from being saved, its record
-    naming `state_not_saved`, and return the sentence that says so."""
-    refusal = _state_not_saved(exc)
-    detail = failure_detail(refusal)
-    conversation.close_turn(
-        final_text=conversation.turn_final_text or detail, error=refusal["code"]
-    )
-    return detail
-
-
 def _checkpoint_failed_frame(conversation: ConversationState, exc: Exception) -> ErrorFrame:
     """The stream-fatal frame a stream yields when its state cannot be
     saved: `StudioRunner._checkpointed` when a checkpoint before a pause or
@@ -373,15 +357,22 @@ def _checkpoint_failed_frame(conversation: ConversationState, exc: Exception) ->
     frame it would have carried, and the turn and edit streams when a
     card's canvas write fails (`StudioStore.change_canvas`). A
     `SegmentLost` means another instance's claim has already outlived this
-    one's TTL and now owns the conversation, so the turn is left open for it
-    rather than closed here; anything else (a database error, or
-    `DatabaseUnavailable`) closes the turn, since nothing else will finish
-    it (`_close_unsaved_turn`). The frame, whose grammar has no
-    `state_not_saved` member, carries the transient code."""
-    if isinstance(exc, SegmentLost):
-        detail = failure_detail(_state_not_saved(exc))
-    else:
-        detail = _close_unsaved_turn(conversation, exc)
+    one's TTL and now owns the conversation, and `DatabaseUnavailable` that
+    the database stayed unreachable until the lease's deadline, so no close
+    could be saved: either way the turn is left as stored, for the instance
+    that owns it or for a retry once the lease lapses, as when the
+    heartbeat's renewals fail. Anything else (a database error) closes the
+    turn, since nothing else will finish it. The turn's record names
+    `state_not_saved`, and the frame, whose grammar has no such member, the
+    transient code."""
+    refusal = harness_refusal(
+        code=HarnessCode.STATE_NOT_SAVED, message=f"the turn's state could not be saved: {exc}"
+    )
+    detail = failure_detail(refusal)
+    if not isinstance(exc, (SegmentLost, DatabaseUnavailable)):
+        conversation.close_turn(
+            final_text=conversation.turn_final_text or detail, error=refusal["code"]
+        )
     return ErrorFrame(
         event="error",
         seq=conversation.next_seq(),

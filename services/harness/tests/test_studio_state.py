@@ -2634,9 +2634,21 @@ async def test_a_card_write_failing_past_the_lease_deadline_reports_the_database
             OSError(errno.ENETUNREACH, "Network is unreachable"), True, id="unreachable-network"
         ),
         pytest.param(OSError(errno.ETIMEDOUT, "timed out"), True, id="socket-timeout"),
-        pytest.param(TimeoutError("statement timed out"), False, id="statement-timeout"),
+        pytest.param(OSError(errno.ENETDOWN, "Network is down"), True, id="network-down"),
+        pytest.param(OSError(errno.EHOSTDOWN, "Host is down"), True, id="host-down"),
+        pytest.param(
+            OSError("Multiple exceptions: [Errno 111] refused, [Errno 99] unavailable"),
+            True,
+            id="every-address-refused",
+        ),
+        pytest.param(TimeoutError("timed out"), True, id="timeout"),
         pytest.param(FileNotFoundError("no socket at /cloudsql/x"), False, id="missing-socket"),
         pytest.param(PermissionError("client key"), False, id="unreadable-certificate"),
+        pytest.param(
+            ssl.SSLCertVerificationError("certificate verify failed"),
+            False,
+            id="unverified-certificate",
+        ),
         pytest.param(
             OperationalError("UPDATE", {}, ConnectionRefusedError("refused")),
             True,
@@ -2664,8 +2676,9 @@ async def test_a_card_write_retries_a_lost_connection_alone(
     new_store, monkeypatch, fault: Exception, retried: bool
 ) -> None:
     """A retry outlasts the network to the database failing, however it
-    surfaces. A statement or lock timeout, a misuse of the connection, and
-    a missing or unreadable file, no retry mends, so they raise at once."""
+    surfaces. A lock timeout the database reports, a misuse of the
+    connection, a missing or unreadable file and a certificate that does
+    not verify, no retry mends, so they raise at once."""
     monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
     store = new_store()
     await store.create("principal", CONVERSATION)
@@ -2694,36 +2707,6 @@ async def test_a_card_write_retries_a_lost_connection_alone(
 
     reloaded = await new_store().load("principal", CONVERSATION)
     assert (reloaded.composition is not None) == retried
-
-
-async def test_a_card_write_whose_connect_times_out_is_retried(new_store, monkeypatch) -> None:
-    """A `TimeoutError` while connecting is the network failing, unlike one a
-    statement raises, so the write is retried."""
-    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
-    store = new_store()
-    await store.create("principal", CONVERSATION)
-    store.claim_segment("principal", CONVERSATION)
-    await store.save("principal", CONVERSATION)
-    engine = store._engine
-    faults: list[int] = []
-
-    class TimingOutOnce:
-        def __getattr__(self, name: str) -> Any:
-            return getattr(engine, name)
-
-        def connect(self) -> Any:
-            if not faults:
-                faults.append(1)
-                raise TimeoutError("connect timed out")
-            return engine.connect()
-
-    store._engine = TimingOutOnce()
-
-    await store.change_canvas("principal", CONVERSATION, lambda work: land_component(work, _CARD))
-
-    assert faults == [1]
-    reloaded = await new_store().load("principal", CONVERSATION)
-    assert reloaded.composition is not None
 
 
 async def test_a_release_that_cannot_reach_the_database_logs_it_saved_nothing(
@@ -2850,11 +2833,11 @@ async def test_a_block_refresh_whose_commit_lost_its_acknowledgement_mints_one_r
     )
 
 
-async def test_a_removal_that_cannot_reach_the_database_ends_the_stream_unsaved(
+async def test_a_removal_that_cannot_reach_the_database_ends_the_stream_as_lost(
     new_store, clock
 ) -> None:
-    """No instance took the conversation over, so the stream ends as
-    `state_not_saved`, which closes the turn."""
+    """No close could be saved while the database is down, so the stream
+    ends as a heartbeat that cannot renew ends it, with the turn as stored."""
     store = new_store(clock=clock)
     state = await store.create("principal", CONVERSATION)
     store.claim_segment("principal", CONVERSATION)
@@ -2876,7 +2859,7 @@ async def test_a_removal_that_cannot_reach_the_database_ends_the_stream_unsaved(
         current_conversation_key.reset(token)
 
     assert state.cancel_event.is_set()
-    assert state.cancel_reason == "state_not_saved"
+    assert state.cancel_reason == "segment_lost"
 
 
 async def test_a_removal_fenced_out_by_a_takeover_ends_the_stream(new_store, clock) -> None:

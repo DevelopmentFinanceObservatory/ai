@@ -58,7 +58,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from .orchestrator_fakes import (
     AUTH,
-    NO_ADK,
     orchestrator_app,
     request_text,
     stream,
@@ -126,7 +125,9 @@ def _view(state: ConversationState) -> dict[str, Any]:
 
 
 def _store(engine: AsyncEngine) -> StudioStore:
-    return StudioStore(engine, adk=NO_ADK, turn_specs=open_turn_specs(engine))
+    """A store over the tables as the job builds one: the reader the server
+    serves, and a bridge that converts what it reads."""
+    return adk_import._store(engine)
 
 
 async def _load(engine: AsyncEngine, conversation_id: str) -> ConversationState | None:
@@ -810,6 +811,31 @@ async def test_a_served_block_that_does_not_convert_is_logged_once_with_its_turn
     (logged,) = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert f"{FULL}#t4: the _bound_refs of spec block {spec_id} does not convert" in logged
     assert logged.endswith("TypeError: _bound_refs is of type str")
+
+
+async def test_a_load_converts_an_open_turn_s_blocks_once(
+    adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reader returns the blocks as stored and the bridge converts them,
+    so each block is converted once per load."""
+    spec_id = next(iter(EXPECTED[FULL]["view"]["turn_specs"]))
+    await _put_open_turn_block(adk, {**_mapping_block(), "spec_id": spec_id})
+    await import_conversations(adk, apply=True)
+    store = _reimporting_store(adk)
+    converted: list[str] = []
+    convert = adk_import._convert_block
+
+    def counting(block: Any) -> Any:
+        converted.append(block.get("spec_id"))
+        return convert(block)
+
+    monkeypatch.setattr(adk_import, "_convert_block", counting)
+
+    state = await store.load(PRINCIPAL, FULL)
+
+    assert state is not None
+    assert converted.count(spec_id) == 1
+    source_from_spec_block(state.turn_specs[spec_id])
 
 
 def test_a_bridge_remembers_the_blocks_it_logged_within_its_bound(

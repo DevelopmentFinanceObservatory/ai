@@ -1662,36 +1662,6 @@ async def test_a_segment_lost_closes_the_activity_lines_its_stream_left_running(
     assert conversation.turn_recorded is False  # the turn stays open for the takeover to finish
 
 
-async def test_a_stream_ended_unsaved_closes_its_turn_as_state_not_saved() -> None:
-    """A removal that could not reach the database before the lease's
-    deadline ends the stream as `state_not_saved`. No other instance owns
-    the turn, so the stream closes it before the transient frame."""
-
-    async def segment():
-        yield _running_line(0)
-        await asyncio.Event().wait()
-
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    conversation.begin_turn()
-    conversation.seq = 1
-    stream = _sse_stream(segment(), conversation=conversation, heartbeat_seconds=0.02)
-    sent = [await anext(stream)]
-    _end_stream(conversation, "state_not_saved")
-    frames = _data_frames(sent + [chunk async for chunk in stream])
-
-    assert [(f["event"], f.get("status")) for f in frames] == [
-        ("activity.step", "running"),
-        ("activity.step", "failed"),
-        ("error", None),
-    ]
-    assert frames[2]["error"]["error"] == "transient_unavailable"
-    assert frames[2]["error"]["detail"] == classed_sentence(
-        HarnessCode.STATE_NOT_SAVED, "retry_after_delay"
-    )
-    assert conversation.turn_recorded is True
-    assert conversation.turns[-1]["error"] == "state_not_saved"
-
-
 async def test_an_approval_the_approve_node_refuses_sends_no_approved_plan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2291,7 +2261,7 @@ async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claim
         with pytest.raises(RuntimeError, match="session backend unavailable"):
             await _stream(client, "/api/studio/turn", _turn_body("hi"))
 
-        assert not store.current(PRINCIPAL, CONVERSATION).lock.locked()
+        assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
         stored = await store.load(PRINCIPAL, CONVERSATION)
         assert stored is not None and stored.segment is None
         app.state.studio._replace_leftover_session = replace
@@ -2381,6 +2351,7 @@ async def test_a_turn_whose_session_exists_while_adk_moved_deletes_nothing_and_a
         adk=MovedAdk(),
         turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
     )
+    lock = store.lock_for(PRINCIPAL, CONVERSATION)
     app = _app(_text("Hello."), session_service=session_service, store=store)
     await session_service.create_session(
         app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t1"
@@ -2395,9 +2366,13 @@ async def test_a_turn_whose_session_exists_while_adk_moved_deletes_nothing_and_a
         app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t1"
     )
     assert kept is not None
-    assert not store.current(PRINCIPAL, CONVERSATION).lock.locked()
+    # The turn begun and the segment claimed in memory were never saved, so
+    # the instance forgets them, and keeps the conversation's lock.
+    assert store.current(PRINCIPAL, CONVERSATION) is None
+    assert store.lock_for(PRINCIPAL, CONVERSATION) is lock
+    assert not lock.locked()
     stored = await store.load(PRINCIPAL, CONVERSATION)
-    assert stored is not None and stored.segment is None
+    assert stored is not None and (stored.turn_index, stored.segment) == (0, None)
 
 
 async def test_a_failure_before_a_resume_streams_keeps_the_answer_for_a_same_answer_retry(
@@ -7927,26 +7902,24 @@ async def test_a_lost_segment_after_plan_approved_ends_the_stream(
 
 
 @pytest.mark.parametrize(
-    ("failure", "closed_as"),
+    "failure",
     [
-        pytest.param(SegmentLost("taken over"), None, id="taken-over"),
+        pytest.param(SegmentLost("taken over"), id="taken-over"),
         pytest.param(
             DatabaseUnavailable("unreachable until the lease's deadline"),
-            "state_not_saved",
             id="database-unavailable",
         ),
     ],
 )
 async def test_a_card_fenced_out_by_a_takeover_ends_the_turn_as_transient(
-    caplog: pytest.LogCaptureFixture, failure: Exception, closed_as: str | None
+    caplog: pytest.LogCaptureFixture, failure: Exception
 ) -> None:
     """Another instance took the conversation over while this stream drew a
     card, so the card's canvas write is fenced out. The stream ends as at a
     fenced-out checkpoint: a transient error, the turn left open for the
     instance that owns it, and no internal fault in the log. A write that
     could not reach the database before the lease's deadline ends it the
-    same way, and closes the turn as `state_not_saved`, since no other
-    instance owns it."""
+    same way, leaving the turn as stored, since no close could be saved."""
     app = _app(*_card(), resolver=_search())
     store = app.state.studio.store
 
@@ -7965,10 +7938,7 @@ async def test_a_card_fenced_out_by_a_takeover_ends_the_turn_as_transient(
         "retry_after_delay",
         30,
     )
-    state = store.current(PRINCIPAL, CONVERSATION)
-    assert state.turn_recorded is (closed_as is not None)
-    if closed_as is not None:
-        assert state.turns[-1]["error"] == closed_as
+    assert not store.current(PRINCIPAL, CONVERSATION).turn_recorded
     assert not [r for r in caplog.records if "studio turn failed" in r.getMessage()]
 
 

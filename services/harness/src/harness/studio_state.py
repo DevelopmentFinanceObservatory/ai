@@ -419,9 +419,8 @@ class SegmentLost(Exception):  # noqa: N818 -- named for the wire condition, not
 class DatabaseUnavailable(Exception):  # noqa: N818 -- named for the condition the stream reports
     """Raised by `StudioStore`'s retried writes (`checkpoint`,
     `change_canvas`, `reserve_frames`) when the database stayed unreachable
-    until the lease's deadline. No other instance took the conversation
-    over, so nothing else will finish the turn: the stream closes it as
-    `state_not_saved`."""
+    until the lease's deadline. The stream ends as a lost segment does,
+    leaving the turn as stored, since no close could be saved either."""
 
 
 @dataclass(frozen=True)
@@ -465,10 +464,10 @@ class ConversationState:
     # `StudioRunner._heartbeat` set it.
     cancel_event: asyncio.Event | None = None
     # Set alongside `cancel_event`, naming why it was armed: "cancelled" (a
-    # client's Stop, from this instance or another), "segment_lost" (this
+    # client's Stop, from this instance or another) or "segment_lost" (this
     # stream's segment was taken over, or its own renewal could not keep it
-    # alive) or "state_not_saved" (a write could not reach the database
-    # before the lease's deadline). `_sse_stream`'s cancel branch reads it once to pick the
+    # alive, or a write could not reach the database before the lease's
+    # deadline). `_sse_stream`'s cancel branch reads it once to pick the
     # frame; reset to `None` alongside `cancel_event` when the stream ends.
     cancel_reason: str | None = None
     # Armed while a plan-card switch streams (`harness.graph.switch.
@@ -1179,7 +1178,7 @@ def make_remove_cards(store: StudioStore) -> Any:
     A `SegmentLost` or `DatabaseUnavailable` there ends the stream
     (`_end_stream`) before it propagates: raised inside the tool, it would
     reach the model as a failed call and the turn would run on without the
-    lease or without its state saved."""
+    lease or without its state saved. Either leaves the turn as stored."""
 
     async def remove(*, component_ids: list[str], all_cards: bool) -> tuple[list[str], list[str]]:
         key = current_conversation_key.get()
@@ -1199,11 +1198,8 @@ def make_remove_cards(store: StudioStore) -> Any:
 
         try:
             return await store.change_canvas(*key, change)
-        except SegmentLost:
+        except (SegmentLost, DatabaseUnavailable):
             _end_stream(conversation, "segment_lost")
-            raise
-        except DatabaseUnavailable:
-            _end_stream(conversation, "state_not_saved")
             raise
 
     return remove

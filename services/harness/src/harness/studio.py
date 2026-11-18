@@ -101,7 +101,6 @@ from harness.studio_store import (
 )
 from harness.studio_translate import (
     _checkpoint_failed_frame,
-    _close_unsaved_turn,
     _RecordingExecutor,
     _RecordingSurface,
     _stream_fatal,
@@ -556,13 +555,11 @@ async def _sse_stream(
     frame passes, the deadline is met, so a slow unwind after it leaves the
     paused turn open.
     `"segment_lost"` (this stream's segment lease was taken over, or this
-    instance's own renewal could not keep it alive) yields a stream-fatal
+    instance's renewal or a store write could not reach the database
+    before the lease's deadline) yields a stream-fatal
     `transient_unavailable` frame without closing the turn. Another
     instance now owns the segment, or may claim it once its lease lapses,
-    and may still complete it. `"state_not_saved"` (a write could not reach
-    the database before the lease's deadline) closes the turn as
-    `state_not_saved` first, since no other instance will, and yields the
-    same frame. Either way the segment
+    and may still complete it. Either way the segment
     generator is closed, unwinding the ADK run.
 
     A Stop, a `segment_lost` transient-unavailable frame, or a stream-fatal
@@ -657,25 +654,13 @@ async def _sse_stream(
                                     continue
                                 await _unwind(next_frame)
                                 if conversation.cancel_reason == "segment_lost":
-                                    # Another instance took the segment over.
+                                    # Another instance took the segment over,
+                                    # or this one could not reach the database
+                                    # before the lease's deadline.
                                     lost = failure_sentence(
                                         ErrorCode.TRANSIENT_UNAVAILABLE,
                                         RetryMode.RETRY_AFTER_DELAY,
                                     )
-                                elif conversation.cancel_reason == "state_not_saved":
-                                    # A write could not reach the database
-                                    # before the lease's deadline, and no
-                                    # other instance will finish the turn.
-                                    lost = _close_unsaved_turn(
-                                        conversation,
-                                        DatabaseUnavailable(
-                                            "the database was unreachable until the lease's "
-                                            "deadline"
-                                        ),
-                                    )
-                                else:
-                                    lost = None
-                                if lost is not None:
                                     for closing in open_steps.close(conversation, detail=lost):
                                         yield _sse_data(closing)
                                     yield _sse_data(
@@ -1507,6 +1492,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             try:
                 segment_id = studio.store.claim_segment(principal, body.conversation_id)
             except SegmentBusy as exc:
+                studio.store.discard_unsaved(principal, body.conversation_id)
                 lock.release()
                 return _streaming_conflict_response(
                     "another request is streaming on this conversation",
@@ -1534,7 +1520,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 except ConversationStale:
                     # An instance still running on ADK sessions opened this
                     # turn since the load. Nothing is claimed, so the retry's
-                    # load re-imports what it wrote and meets its lease.
+                    # load re-imports what it wrote and meets its lease. The
+                    # turn begun above was never saved, so this instance
+                    # forgets it.
+                    studio.store.discard_unsaved(principal, body.conversation_id)
                     lock.release()
                     return _streaming_conflict_response(
                         "another request is streaming on this conversation"
@@ -1552,6 +1541,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             try:
                 await studio.store.save(principal, body.conversation_id)
             except ConversationStale:
+                studio.store.discard_unsaved(principal, body.conversation_id)
                 lock.release()
                 return _streaming_conflict_response(
                     "another request is streaming on this conversation"
@@ -1611,12 +1601,14 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
         except BaseException:
             # The stream wrapper normally releases the segment and the lock;
-            # a failure before the response starts streaming drops the lease
-            # and releases the lock here. The claim save already covers
+            # a failure before the response starts streaming drops the lease,
+            # forgets the live state, whose later changes no save stored, and
+            # releases the lock here. The claim save already covers
             # `begin_turn`'s effects, so the turn stays open and the next
             # `/turn` closes it as `begin_turn` closes any open turn. A path
             # above that let go of the lock itself cleared `claimed` first.
             if lock.locked():
+                studio.store.discard_unsaved(principal, body.conversation_id)
                 await _abandon_claim(studio.store, principal, body.conversation_id, claimed, lock)
             raise
 
