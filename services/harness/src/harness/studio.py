@@ -1326,12 +1326,22 @@ async def _act_on_unread_stop(
     """Act on an unread Stop (`StudioStore.stop_unread`) before a request
     claims the conversation: an open turn, running or paused, is closed
     `cancelled` (`_stop_turn_at`). With no open turn the claim itself reads
-    the Stop. Returns the error to answer when the turn's unfinished runs
-    could not be ended, and `None` otherwise."""
+    the Stop. Returns the error to answer, and `None` when the request may
+    go on: when the turn's unfinished runs could not be ended, the 503
+    `_stop_turn_at` answers; when the turn is still open after the attempt
+    (its close was refused), a retryable 409, so the request starts nothing
+    on a turn whose runs a Stop should have ended."""
     cursor = await studio.turns.open_cursor(principal, conversation_id)
     if cursor is None:
         return None
-    return await _stop_turn_at(studio, principal, conversation_id, conversation, cursor)
+    refused = await _stop_turn_at(studio, principal, conversation_id, conversation, cursor)
+    if refused is not None:
+        return refused
+    if await studio.turns.open_cursor(principal, conversation_id) is not None:
+        return _streaming_conflict_response(
+            "the conversation's previous turn is still being stopped", retry_after_seconds=1
+        )
+    return None
 
 
 async def _abandon_claim(
@@ -1655,8 +1665,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             if left_open is not None and not work.turn_recorded:
                 keep_turn_records(work, left_open.state)
                 if studio.store.stop_unread(principal, body.conversation_id):
-                    # A Stop the claimant above could not act on: the
-                    # abandon below closes the turn `cancelled` on it.
+                    # A Stop left unread after the act above: the abandon
+                    # below closes the turn `cancelled` on it.
                     work.close_turn(
                         final_text=work.turn_final_text, error=ErrorCode.CANCELLED.value
                     )
@@ -1861,7 +1871,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         | Lease live, turn closed, lease not yet released | the release | unchanged | nothing more |
         | The release kept the lease and closing failed, such as ending the turn's runs | the next claimant, as the lease is dropped | `cancelled` | nothing more; the next `/turn` streams, an `/interrupt` answers 404 |
         | The release's write failed or timed out | the next claimant, once the lease lapses | `cancelled` | nothing more; the next `/turn` streams, an `/interrupt` answers 404 |
-        | The same, and the next `/turn`'s close of the turn is refused | that `/turn`, in the close of the turn it abandons | `cancelled` | nothing more; the new turn streams |
+        | The same, and the next `/turn`'s close of the turn is refused | the `/turn` retried after its 409 | `cancelled` | nothing more; that `/turn` answers a retryable 409 and starts nothing, and its retry streams |
         | No live lease, turn paused | this route, under the lock | `cancelled`, pending cleared | 204 |
         | No live lease, turn left running | this route, under the lock | `cancelled` once its runs are ended | 204, or 503 when they cannot be |
         | No live lease, no open turn | this route, under the lock, finding nothing open | unchanged | 204 |

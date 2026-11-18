@@ -6117,8 +6117,8 @@ async def _stop_whose_scope_closes_while_it_is_recorded(row: _Row):
 async def _stop_whose_claimant_cannot_close_the_turn(row: _Row):
     """A Stop left unread on a paused turn whose lease lapsed. The next
     `/turn` acts on it first, but its close is refused (another writer moved
-    the cursor), and the `/turn` goes on: the close of the turn it abandons
-    acts on the Stop, so the new turn runs."""
+    the cursor), so that `/turn` answers a retryable 409 and starts nothing;
+    its retry acts on the Stop and runs the new turn."""
     app = await row.build(*_plan(), _text("Hello."), clock=True)
     store = app.state.studio.store
     sent: list[httpx2.Response] = []
@@ -6139,7 +6139,14 @@ async def _stop_whose_claimant_cannot_close_the_turn(row: _Row):
         async def moved(*_args: Any, **_kwargs: Any) -> Any:
             raise CursorStale("another writer moved the cursor")
 
+        real_stop_turn = studio_module.stop_turn
         row.monkeypatch.setattr(studio_module, "stop_turn", moved)
+        busy = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
+        assert busy.status_code == 409
+        assert busy.json()["retry"] == "retry_after_delay"
+        assert await _turn_statuses() == ["paused"]
+        assert (await _stop_columns()).unread
+        row.monkeypatch.setattr(studio_module, "stop_turn", real_stop_turn)
         return await _stream(client, "/api/studio/turn", _turn_body("hi")), sent[0]
 
 
@@ -6499,7 +6506,7 @@ async def _stop_whose_claim_is_abandoned(row: _Row):
             ["cancelled", "done"],
             "done",
             {"claim": 1},
-            id="claimant-close-refused-its-abandon-acts",
+            id="claimant-close-refused-turn-refused-retry-acts",
         ),
         pytest.param(
             _stop_with_no_lease(running=False),
