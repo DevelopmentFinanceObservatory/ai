@@ -24,13 +24,12 @@ different groups never conflict:
 - `mutate_composition` writes the canvas column alone for each
   `/composition` edit, unfenced, and leaves `version` alone.
 - `renew` and `request_cancel` each update the lease columns in one
-  conditional statement and leave `version` alone. A Stop request is an id
-  (`lease_stop_id`) that renewals read and never clear, so a renewal whose
-  acknowledgement is lost cannot drop it; a claim starts with none. The
-  boolean `lease_cancel` carries a Stop between instances of the previous
-  release and this one: `request_cancel` sets it beside the id, and a
-  renewal that finds it set clears it and records a fresh id in the same
-  update.
+  conditional statement and leave `version` alone. `request_cancel` sets
+  the boolean `lease_cancel`, as does any writer that knows only that flag.
+  A renewal that finds it set clears it and records the Stop as a fresh id
+  (`lease_stop_id`) in the same update, and renewals then read the id and
+  never clear it, so a renewal whose acknowledgement is lost cannot drop the
+  Stop; a claim starts with neither.
 - `reserve_frames` extends the frame numbers the live segment may send,
   fenced on the segment and its lease being live.
 
@@ -1400,9 +1399,9 @@ class StudioStore:
         `segment_id` (another instance took over after this one's TTL
         lapsed); the caller ends the stream fatally. Otherwise
         `Renewal.stop_id` is the latest Stop request made of the segment
-        (`request_cancel`), or `None`. A set `lease_cancel`, the Stop an
-        instance of the previous release requests, is cleared and recorded
-        as a fresh id in the same update. The renewal leaves the id stored, so a
+        (`request_cancel`), or `None`: a set `lease_cancel` is cleared and
+        recorded as a fresh id in the same update, and any other renewal
+        leaves the id as stored. The renewal never clears the id, so a
         renewal whose acknowledgement is lost reports the same request
         again, and the caller acts once on each id it has not acted on. A
         database error propagates, as does a `TimeoutError` when the renewal
@@ -1431,7 +1430,8 @@ class StudioStore:
                             text(
                                 "UPDATE conversations"
                                 f" SET lease_expires_at = {self._time_sql} + :ttl,"
-                                " lease_stop_id = CASE WHEN lease_cancel THEN :minted"
+                                " lease_stop_id = CASE WHEN lease_cancel THEN 'stop_' ||"
+                                " left(replace(gen_random_uuid()::text, '-', ''), 16)"
                                 " ELSE lease_stop_id END,"
                                 " lease_cancel = false"
                                 " WHERE principal = :principal"
@@ -1444,7 +1444,6 @@ class StudioStore:
                                 "conversation_id": conversation_id,
                                 "segment_id": segment_id,
                                 "ttl": SEGMENT_TTL_S,
-                                "minted": _wire_id("stop"),
                             },
                         )
                     ).first()
@@ -1649,12 +1648,11 @@ class StudioStore:
             )
 
     async def request_cancel(self, principal: str, conversation_id: str) -> bool:
-        """Record a Stop request, under a fresh id, on `conversation_id`'s
-        live segment, whoever owns it, this instance included; the segment's
-        heartbeat reads it at its next renewal (`renew`). It also sets
-        `lease_cancel`, which an instance of the previous release reads, so
-        a Stop reaches a segment of either release. One conditional update
-        of the lease columns.
+        """Record a Stop request on `conversation_id`'s live segment, whoever
+        owns it, this instance included, by setting `lease_cancel`; the
+        segment's next renewal (`renew`) records it under a fresh id and
+        reports it, and a segment that reads only the flag sees it as well.
+        One conditional update of the lease columns.
 
         Returns whether a live segment was found and signalled: `False`
         when there is none, or the one on record has already expired by the
@@ -1662,23 +1660,19 @@ class StudioStore:
         with no active segment.
         """
         entry = self._entry(principal, conversation_id)
-        stop_id = _wire_id("stop")
         async with entry.write_lock:
             async with self._transaction() as conn:
                 row = (
                     await conn.execute(
                         text(
-                            "UPDATE conversations SET lease_stop_id = :stop_id, lease_cancel = true "
+                            "UPDATE conversations SET lease_cancel = true "
                             "WHERE principal = :principal AND conversation_id = :conversation_id "
                             "AND lease_segment_id IS NOT NULL "
                             f"AND lease_expires_at > {self._time_sql} "
-                            "RETURNING lease_segment_id, lease_owner, lease_expires_at"
+                            "RETURNING lease_segment_id, lease_owner, lease_expires_at, "
+                            "lease_stop_id"
                         ),
-                        {
-                            "principal": principal,
-                            "conversation_id": conversation_id,
-                            "stop_id": stop_id,
-                        },
+                        {"principal": principal, "conversation_id": conversation_id},
                     )
                 ).first()
             if row is None:
@@ -1689,7 +1683,7 @@ class StudioStore:
                     id=row.lease_segment_id,
                     owner=row.lease_owner,
                     expires_at=row.lease_expires_at,
-                    stop_id=stop_id,
+                    stop_id=row.lease_stop_id,
                 ),
             )
             return True

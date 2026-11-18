@@ -345,11 +345,10 @@ async def test_a_response_s_tool_answers_carry_the_state_its_calls_wrote() -> No
     sent = json.dumps(answered.state, sort_keys=True)
     state["orchestrator:searches"].append({"written": "later"})
     state[ORCHESTRATOR_SPECS_KEY]["spec_later"] = {"written": "later"}
+    assert answered.state[ORCHESTRATOR_SPECS_KEY]
+    for block in state[ORCHESTRATOR_SPECS_KEY].values():
+        block["changed"] = "in place"
     assert json.dumps(answered.state, sort_keys=True) == sent
-    # Spec blocks are replaced whole, so the event shares them.
-    specs = answered.state[ORCHESTRATOR_SPECS_KEY]
-    assert specs
-    assert all(block is state[ORCHESTRATOR_SPECS_KEY][key] for key, block in specs.items())
 
 
 async def test_a_stream_resumed_over_output_ends_the_run_as_a_dropped_connection() -> None:

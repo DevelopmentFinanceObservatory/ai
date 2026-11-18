@@ -931,12 +931,14 @@ class _ClosesNothing(TurnStore):
         raise ConnectionError("the database is unreachable")
 
 
+@pytest.mark.parametrize("paused", [False, True], ids=["running", "paused-without-resume"])
 async def test_a_close_that_cannot_be_written_still_reports_the_nodes_error(
-    pg_engine: AsyncEngine, clock: StoreClock
+    pg_engine: AsyncEngine, clock: StoreClock, paused: bool
 ) -> None:
-    """The node's exception reaches the client as not closing the turn, and
-    the segment ends `running`: the turn stays open, as last written, for a
-    Stop or the conversation's next turn to close."""
+    """The node's exception, or the expiry of a pause its node can no longer
+    resume, reaches the client, and the segment ends with the status the
+    store still holds: the turn stays open, as last written, for a Stop or
+    the conversation's next turn to close."""
     store, lease = _ClosesNothing(pg_engine), await _instance(pg_engine, clock)
     segment_id = await _claim(lease)
     refused = RuntimeError("plan_start broke")
@@ -945,14 +947,30 @@ async def test_a_close_that_cannot_be_written_still_reports_the_nodes_error(
         raise refused
 
     graph = Graph(start="plan_start", nodes={"plan_start": Node(run=plan_start)}, edges={})
+    answer: Answer | None = None
+    if paused:
+        asking = _asking([])
+        before = Graph(start="ask", nodes={"ask": asking}, edges={("ask", "next"): END})
+        asked: list[TurnEvent] = []
+        await _segment(
+            store, lease, await _open(store, segment_id, before), segment_id, before, asked
+        )
+        [event] = asked
+        assert isinstance(event, Paused)
+        answer = Answer(interrupt_id=event.interrupt_id, round=1, value={})
+        graph = Graph(start="ask", nodes={"ask": Node(run=asking.run)}, edges={})
+        cursor = await _open_cursor(store)
+    else:
+        cursor = await _open(store, segment_id, graph)
     events: list[TurnEvent] = []
-    segment = await _segment(
-        store, lease, await _open(store, segment_id, graph), segment_id, graph, events
-    )
+    segment = await _segment(store, lease, cursor, segment_id, graph, events, answer=answer)
 
-    assert events == [TurnFailed(node="plan_start", error=refused, closed=False)]
-    assert segment.outcome is Outcome.RUNNING
-    assert (await _open_cursor(store)).status is TurnStatus.RUNNING
+    [failed] = events
+    assert isinstance(failed, TurnFailed)
+    assert isinstance(failed.error, TurnExpired) if paused else failed.error is refused
+    held = TurnStatus.PAUSED if paused else TurnStatus.RUNNING
+    assert segment.outcome == Outcome(held.value)
+    assert (await _open_cursor(store)).status is held
 
 
 class _AcknowledgementLost(StudioStore):

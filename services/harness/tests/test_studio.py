@@ -2736,8 +2736,9 @@ async def test_an_answer_runs_on_the_cursor_read_after_its_claim(moved: str, str
     """A write lands on the turn between `/interrupt`'s first read of the
     cursor and its claim save. When the turn still holds the same open
     pause, the answer resumes it from the cursor read after the claim;
-    when it does not, the answer is refused with a retryable 409 and the
-    claim is dropped."""
+    when it does not, the answer is refused with a 409 to reload and answer
+    again, and nothing of it is kept: no claim, no approval, no entry marked
+    resuming."""
     app = _app(*_plan(), tool_surface=ScriptedSurface())
     store = app.state.studio.store
     real_save = store.save
@@ -2763,9 +2764,11 @@ async def test_an_answer_runs_on_the_cursor_read_after_its_claim(moved: str, str
         refused = await client.post("/api/studio/interrupt", json=body, headers=AUTH)
 
     assert refused.status_code == 409
-    assert refused.json()["retry"] == "retry_after_delay"
+    assert refused.json()["retry"] == "refresh_then_retry"
     stored = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
     assert stored is not None and stored.segment is None
+    assert stored.approvals == []
+    assert stored.pending[plan["interrupt_id"]].resuming_segment is None
 
 
 async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable_answer() -> None:
@@ -6518,8 +6521,10 @@ async def test_a_failed_turn_whose_close_was_not_written_is_closed_by_what_comes
     then: str, closed_as: str
 ) -> None:
     """A node fails and its close cannot be written: the client gets the
-    node's error frame, the turn stays running and its record open, and a
-    later Stop or turn closes both the same way."""
+    node's error frame, and the conversation's record of the turn holds
+    that error. The turn stays running until a later Stop closes it
+    `cancelled` or a later turn `abandoned`, which leave the record as it
+    is."""
 
     class BrokenSurface(ScriptedSurface):
         async def call_tool(self, **kwargs: Any) -> ToolCallResult:
@@ -6544,7 +6549,7 @@ async def test_a_failed_turn_whose_close_was_not_written_is_closed_by_what_comes
         )
         assert frames[-1]["event"] == "error"
         assert frames[-1]["error"]["error"] == "capability_unavailable"
-        assert store.current(PRINCIPAL, CONVERSATION).turns == []
+        (shown,) = store.current(PRINCIPAL, CONVERSATION).turns
         left = await turns.open_cursor(PRINCIPAL, CONVERSATION)
         assert left is not None and left.status is TurnStatus.RUNNING
 
@@ -6561,8 +6566,10 @@ async def test_a_failed_turn_whose_close_was_not_written_is_closed_by_what_comes
             )
 
     (record, *_) = (await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)).turns
+    assert record == shown
     assert record["user"] == "q that dies"
-    assert record["error"] == closed_as
+    assert record["error"] == "capability_unavailable"
+    assert record["assistant"] == frames[-1]["error"]["detail"]
     async with _engine().connect() as conn:
         status = (
             await conn.execute(

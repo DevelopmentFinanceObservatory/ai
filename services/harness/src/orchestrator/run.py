@@ -44,7 +44,6 @@ from harness.gemini_agent import (
     without_unsigned_thoughts,
 )
 from harness.gemini_wire import StreamResumedError, resumed_over_output
-from harness.graph.state import ORCHESTRATOR_SPECS_KEY
 from pydantic import BaseModel, SerializerFunctionWrapHandler, field_serializer, field_validator
 from pydantic_ai import (
     Agent,
@@ -365,20 +364,10 @@ def _text(event: object) -> str | None:
 
 
 def _written_state(deps: OrchestratorDeps) -> dict[str, Any]:
-    """A copy of each state key the response's calls wrote, for a
+    """A deep copy of each state key the response's calls wrote, for a
     `ToolsAnswered` event that may wait in the translator's queue while
-    later calls change the state. Spec blocks are copied one level: a block
-    is replaced whole, never changed in place, and the turn store writes
-    any block that was."""
-    return {
-        key: (
-            dict(deps.state[key])
-            if key == ORCHESTRATOR_SPECS_KEY
-            else copy.deepcopy(deps.state[key])
-        )
-        for key in deps.view.written
-        if key in deps.state
-    }
+    later calls change the state, in place or not."""
+    return {key: copy.deepcopy(deps.state[key]) for key in deps.view.written if key in deps.state}
 
 
 def _answer(event: FunctionToolResultEvent, tools: Sequence[str]) -> types.FunctionResponse:

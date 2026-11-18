@@ -847,10 +847,11 @@ class StudioRunner:
                     yield _Stopped("segment_lost")
                 case Outcome.FAILED if not failed:
                     yield recorded_fatal(conversation, segment.cursor.error or {})
-                case Outcome.FAILED | Outcome.ABANDONED | Outcome.RUNNING:
+                case _ if failed:
                     # The translator sent the `TurnFailed` event's error
-                    # frame; a `running` turn's close could not be written,
-                    # and it stays open for a Stop or the next turn.
+                    # frame. A segment that ends `running` or `paused` here
+                    # could not write the turn's close, and the turn stays
+                    # open for a Stop or the next turn.
                     pass
                 case _:
                     for frame in await translator.finish():
@@ -1767,35 +1768,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         status_code=404,
                     ),
                 )
-            # A switch revises the plan and approves nothing, so it leaves
-            # no approval record.
-            if (
-                not resuming
-                and pending.kind == "plan"
-                and body.decision is not InterruptDecision.SWITCH
-            ):
-                # Recorded once per interrupt id, on its first answer only:
-                # a resumed retry of the SAME answer (below) must not
-                # duplicate it. The record is of the act, not of what the
-                # graph goes on to do with it
-                # (`harness.approval.ApprovalRecord`'s docstring).
-                #
-                # Appended before the pending entry is marked resuming: if
-                # constructing the record ever raises, the entry is
-                # untouched and the interrupt can still be answered fresh.
-                assert pending.plan_revision is not None  # every plan interrupt carries one
-                work.approvals.append(
-                    ApprovalRecord(
-                        revision=pending.plan_revision,
-                        approver=principal,
-                        decision=_APPROVAL_DECISION[body.decision],
-                        at=datetime.now(UTC),
-                        conversation_id=body.conversation_id,
-                        interrupt_id=body.interrupt_id,
-                        plan_version=pending.plan_version,
-                        auth_enforced=settings.studio_api_token is not None,
-                    )
-                )
             # The segment lease: claimed before the save below persists it.
             # `SegmentBusy` here means a segment is still live, either
             # this interrupt's own earlier resume, still running, or (on a
@@ -1843,6 +1815,86 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         status_code=409,
                     ),
                 )
+            # The claim is saved alone, before the answer is recorded: a
+            # double answer to the same interrupt across two instances loses
+            # cleanly here, with a 409, rather than each resuming its own
+            # segment of the turn.
+            try:
+                await studio.store.save(principal, body.conversation_id, work)
+            except ConversationStale:
+                return await _unclaimed(
+                    studio.store,
+                    principal,
+                    body.conversation_id,
+                    lock,
+                    _streaming_conflict_response("another request already answered this interrupt"),
+                )
+        except BaseException:
+            if not lock.locked():
+                raise
+            studio.store.drop_draft(principal, body.conversation_id)
+            lock.release()
+            raise
+
+        # Every failure from here to the stream's start drops the lease the
+        # save above claimed, and releases the lock. Only the lease: once the
+        # answer is saved below, the pending entry stays resuming under the
+        # dropped segment with the answer recorded, so a retry of the same
+        # answer claims at once and resumes. The turn lines added below stay
+        # unsaved, and the retry's load reads the row afresh.
+        try:
+            # The read above only gated the claim. A segment whose lease
+            # lapsed can still write the turn until the claim commits, so
+            # the answer runs on the cursor read after it, and is refused
+            # when that cursor no longer holds the same open pause. Nothing
+            # of the answer is saved yet, so the refusal leaves the entry
+            # to be answered again as the reloaded conversation shows it.
+            claimed = await studio.turns.open_cursor(principal, body.conversation_id)
+            if not _same_open_pause(cursor, claimed):
+                await _abandon_claim(
+                    studio.store, principal, body.conversation_id, segment_id, lock
+                )
+                return _tool_error_response(
+                    ToolError(
+                        error=ErrorCode.EDIT_CONFLICT,
+                        retry=RetryMode.REFRESH_THEN_RETRY,
+                        detail="the turn moved while this answer was claimed",
+                        fix="reload the conversation and answer what it now shows",
+                    ),
+                    status_code=409,
+                )
+            cursor = claimed
+            work = studio.store.draft(principal, body.conversation_id)
+            pending = work.pending[body.interrupt_id]
+            # A switch revises the plan and approves nothing, so it leaves
+            # no approval record.
+            if (
+                not resuming
+                and pending.kind == "plan"
+                and body.decision is not InterruptDecision.SWITCH
+            ):
+                # Recorded once per interrupt id, on its first answer only:
+                # a resumed retry of the SAME answer (below) must not
+                # duplicate it. The record is of the act, not of what the
+                # graph goes on to do with it
+                # (`harness.approval.ApprovalRecord`'s docstring).
+                #
+                # Appended before the pending entry is marked resuming: if
+                # constructing the record ever raises, the entry is
+                # untouched and the interrupt can still be answered fresh.
+                assert pending.plan_revision is not None  # every plan interrupt carries one
+                work.approvals.append(
+                    ApprovalRecord(
+                        revision=pending.plan_revision,
+                        approver=principal,
+                        decision=_APPROVAL_DECISION[body.decision],
+                        at=datetime.now(UTC),
+                        conversation_id=body.conversation_id,
+                        interrupt_id=body.interrupt_id,
+                        plan_version=pending.plan_version,
+                        auth_enforced=settings.studio_api_token is not None,
+                    )
+                )
             # The entry is kept, marked resuming under this fresh segment.
             # A crash between this save and the resumed stream's own
             # checkpoint still leaves a durable, retryable record.
@@ -1859,47 +1911,19 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     **held_labels(pending.card),
                     **work.turn_choice_baseline,
                 }
-            # Saved before the resume stream starts: a double answer to the
-            # same interrupt across two instances loses cleanly here, with a
-            # 409, rather than each resuming its own segment of the turn.
             try:
                 await studio.store.save(principal, body.conversation_id, work)
             except ConversationStale:
-                return await _unclaimed(
-                    studio.store,
-                    principal,
-                    body.conversation_id,
-                    lock,
-                    _streaming_conflict_response("another request already answered this interrupt"),
+                studio.store.drop_draft(principal, body.conversation_id)
+                await _abandon_claim(
+                    studio.store, principal, body.conversation_id, segment_id, lock
+                )
+                return _streaming_conflict_response(
+                    "another request already answered this interrupt"
                 )
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
             pending = conversation.pending[body.interrupt_id]
-        except BaseException:
-            if not lock.locked():
-                raise
-            studio.store.drop_draft(principal, body.conversation_id)
-            lock.release()
-            raise
-
-        # Every failure from here to the stream's start drops the lease the
-        # save above claimed, and releases the lock. Only the lease: the
-        # pending entry stays resuming under the dropped segment with the
-        # answer recorded, so a retry of the same answer claims at once and
-        # resumes. The turn lines added below stay unsaved, and the retry's
-        # load reads the row afresh.
-        try:
-            # The read above only gated the claim. A segment whose lease
-            # lapsed can still write the turn until the claim commits, so
-            # the answer runs on the cursor read after it, and is refused
-            # when that cursor no longer holds the same open pause.
-            claimed = await studio.turns.open_cursor(principal, body.conversation_id)
-            if not _same_open_pause(cursor, claimed):
-                await _abandon_claim(
-                    studio.store, principal, body.conversation_id, segment_id, lock
-                )
-                return _streaming_conflict_response("the turn moved while this answer was claimed")
-            cursor = claimed
             # The instance that resumes a paused turn may not be the one that
             # opened it: its telemetry span is process-local and never persisted,
             # and a workflow's own steps run as concurrent waves whose recording
@@ -2044,6 +2068,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 media_type=SSE_MEDIA_TYPE,
             )
         except BaseException:
+            studio.store.drop_draft(principal, body.conversation_id)
             if lock.locked():
                 await _abandon_claim(
                     studio.store, principal, body.conversation_id, segment_id, lock

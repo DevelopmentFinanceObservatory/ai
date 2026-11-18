@@ -466,6 +466,35 @@ async def test_the_cursor_holds_spec_blocks_as_stored_and_a_block_changed_in_pla
     assert await store.specs(second) == {"spec_a": {**stored["spec_a"], "v": 2}}
 
 
+async def test_a_write_decodes_only_the_spec_blocks_it_changed(pg_engine: AsyncEngine) -> None:
+    """A block whose digest did not change is carried as the cursor holds it
+    decoded, and a write without state keeps the cursor's blocks."""
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    first = await store.advance(
+        await _open(store),
+        segment_id=SEGMENT,
+        node="planner",
+        node_input=None,
+        state={SPECS_KEY: {"spec_a": {"v": 1}, "spec_b": {"v": 1}}},
+    )
+    held = first.state[SPECS_KEY]
+
+    second = await store.advance(
+        first,
+        segment_id=SEGMENT,
+        node="approve",
+        node_input=None,
+        state={SPECS_KEY: {"spec_a": {"v": 1}, "spec_b": {"v": 2}}},
+    )
+    closed = await store.finish(second, segment_id=SEGMENT, status=TurnStatus.DONE)
+
+    assert second.state[SPECS_KEY]["spec_a"] is held["spec_a"]
+    assert second.state[SPECS_KEY]["spec_b"] == {"v": 2}
+    assert closed.state[SPECS_KEY]["spec_a"] is held["spec_a"]
+    assert closed.state[SPECS_KEY]["spec_b"] is second.state[SPECS_KEY]["spec_b"]
+
+
 async def test_a_pause_round_takes_one_answer(pg_engine: AsyncEngine) -> None:
     await _conversation(pg_engine)
     store = TurnStore(pg_engine)

@@ -2299,21 +2299,23 @@ async def test_renew_reports_cancelled_and_still_pushes_the_ttl_forward(new_stor
     assert reloaded.segment.expires_at == clock.at + studio_state.SEGMENT_TTL_S
 
 
-async def _lease_cancel(engine: AsyncEngine) -> bool:
+async def _stop_columns(engine: AsyncEngine) -> tuple[bool, str | None]:
     async with engine.connect() as conn:
-        return (
+        row = (
             await conn.execute(
-                text("SELECT lease_cancel FROM conversations WHERE conversation_id = :c"),
+                text(
+                    "SELECT lease_cancel, lease_stop_id FROM conversations "
+                    "WHERE conversation_id = :c"
+                ),
                 {"c": CONVERSATION},
             )
-        ).scalar_one()
+        ).one()
+    return row.lease_cancel, row.lease_stop_id
 
 
-async def test_a_stop_from_the_previous_release_reaches_a_renewal(
-    new_store, clock, pg_engine
-) -> None:
-    """An instance of the previous release requests a Stop by setting
-    `lease_cancel`. A renewal reports it under an id, clears the flag, and
+async def test_a_stop_set_only_as_the_flag_reaches_a_renewal(new_store, clock, pg_engine) -> None:
+    """A writer that knows only the `lease_cancel` flag requests a Stop by
+    setting it. A renewal reports it under an id, clears the flag, and
     reports the same id again, so a lost acknowledgement drops nothing."""
     store = new_store(clock=clock)
     await store.create("principal", CONVERSATION)
@@ -2328,21 +2330,25 @@ async def test_a_stop_from_the_previous_release_reaches_a_renewal(
     first = await store.renew("principal", CONVERSATION, segment_id)
     assert first.held and first.stop_id is not None
     assert await store.renew("principal", CONVERSATION, segment_id) == first
-    assert await _lease_cancel(pg_engine) is False
+    assert await _stop_columns(pg_engine) == (False, first.stop_id)
 
 
-async def test_a_stop_reaches_a_segment_of_the_previous_release(
+async def test_a_stop_request_sets_only_the_flag_and_the_renewal_records_its_id(
     new_store, clock, pg_engine
 ) -> None:
-    """`request_cancel` sets `lease_cancel` beside the id, which is what a
-    renewal of the previous release reads."""
+    """`request_cancel` sets `lease_cancel` and leaves the id to the
+    renewal, so a reader of the flag alone sees the Stop and the id a
+    renewal reported is the one that stays stored."""
     store = new_store(clock=clock)
     await store.create("principal", CONVERSATION)
-    store.claim_segment("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
 
     assert await new_store(clock=clock).request_cancel("principal", CONVERSATION) is True
-    assert await _lease_cancel(pg_engine) is True
+    assert await _stop_columns(pg_engine) == (True, None)
+    renewed = await store.renew("principal", CONVERSATION, segment_id)
+    assert renewed.stop_id is not None
+    assert await _stop_columns(pg_engine) == (False, renewed.stop_id)
 
 
 async def test_request_cancel_returns_false_with_no_live_segment(new_store) -> None:

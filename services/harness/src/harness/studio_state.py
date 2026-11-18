@@ -429,9 +429,9 @@ class Segment:
     segment (`renew`, `checkpoint`) is fenced against it, never against
     `owner`. `owner` is the claiming instance's id, carried for logs only.
     `expires_at` is a wall-clock epoch second past which the claim is dead
-    and takeable. `stop_id` names the latest Stop request
-    `StudioStore.request_cancel` made of the segment, from any instance,
-    which the owner's own heartbeat reads; a claim starts with none."""
+    and takeable. `stop_id` names the latest Stop request made of the
+    segment from any instance (`StudioStore.request_cancel`), as a renewal
+    recorded it (`StudioStore.renew`); a claim starts with none."""
 
     id: str
     owner: str
@@ -1058,8 +1058,7 @@ class ConversationState:
         """End the turn's telemetry span, when this instance holds one, with
         `status` at `level`, without recording the turn: the stream lost its
         segment (`segment_lost`), its client left (`disconnected`), the
-        request that opened the span claimed nothing (`not_started`), a node
-        failed and the turn's close could not be written (`unclosed`), or a
+        request that opened the span claimed nothing (`not_started`), or a
         turn begun on a working copy closed this one (`abandoned`, as
         `close_turn` marks it). Whichever instance
         goes on with the turn opens a span of its own (`ensure_turn_span`)."""

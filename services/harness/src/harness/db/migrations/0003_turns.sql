@@ -6,8 +6,8 @@
 -- the same transaction (`harness.turn.store.TurnStore`). The lease, the Stop
 -- request and the frame numbering stay on `conversations`.
 
--- The id of the latest Stop request on the conversation's live segment
--- (`StudioStore.request_cancel`), or NULL when it has none.
+-- The id of the latest Stop request on the conversation's live segment, as
+-- a renewal recorded it (`StudioStore.renew`), or NULL when it has none.
 ALTER TABLE conversations ADD COLUMN lease_stop_id text;
 
 -- Every value column is `json`, which keeps the text as written: a node's

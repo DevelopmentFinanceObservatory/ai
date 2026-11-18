@@ -37,24 +37,20 @@ class Paused:
 
 @dataclass(frozen=True)
 class TurnFailed:
-    """The turn ended on `error` at `node`, and its cursor records it unless
-    `closed` is false: a node raised (closed `failed`), or the cursor named
-    a node the running graph cannot run (closed `abandoned`, `error` a
-    `harness.turn.loop.TurnExpired`).
+    """The turn ended on `error` at `node`: a node raised (closed `failed`),
+    or the cursor named a node the running graph cannot run (closed
+    `abandoned`, `error` a `harness.turn.loop.TurnExpired`). The cursor
+    records it unless the close could not be written, which leaves the turn
+    as last written (`harness.turn.loop.Outcome`).
 
     `error` is the exception itself, so the Studio error frame reads what it
     states (`harness.studio_translate._stream_fatal`): its `refusal`, the MCP
     call whose pinned timeout it hit, and its cause chain. The cursor's
     `error` records the same facts for a reader with no exception at hand
-    (`harness.turn.loop.failure`).
-
-    `closed` is false when the close could not be written: the turn stays
-    running as last written, and the conversation's record of it stays open
-    for whatever closes the turn next."""
+    (`harness.turn.loop.failure`)."""
 
     node: str
     error: Exception
-    closed: bool = True
 
 
 type TurnEvent = NodeDone | Paused | TurnFailed
