@@ -3320,10 +3320,13 @@ async def test_two_concurrent_first_answers_to_one_interrupt_give_one_stream_and
     assert lost.pending[plan["interrupt_id"]].answer is None
 
 
-async def test_an_answer_refused_as_busy_leaves_no_unsaved_approval_behind() -> None:
+async def test_an_answer_refused_as_busy_leaves_no_unsaved_approval_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Another instance streams on the conversation, so an approval's claim
     is refused as busy. The approval it recorded and never saved is
-    dropped from the instance's live state."""
+    dropped from the instance's live state, and with no span opened there
+    is nothing to flush."""
     session_service = _database_session_service()
     app = _app(*_plan(), tool_surface=ScriptedSurface(), session_service=session_service)
     store = app.state.studio.store
@@ -3339,6 +3342,12 @@ async def test_an_answer_refused_as_busy_leaves_no_unsaved_approval_behind() -> 
         await other.load(PRINCIPAL, CONVERSATION)
         other.claim_segment(PRINCIPAL, CONVERSATION)
         await other.save(PRINCIPAL, CONVERSATION)
+        flushes: list[str] = []
+
+        async def flush() -> None:
+            flushes.append("flush")
+
+        monkeypatch.setattr(studio_module, "flush_telemetry", flush)
 
         busy = await client.post(
             "/api/studio/interrupt",
@@ -3347,6 +3356,7 @@ async def test_an_answer_refused_as_busy_leaves_no_unsaved_approval_behind() -> 
         )
 
     assert busy.status_code == 409
+    assert flushes == []
     assert store.current(PRINCIPAL, CONVERSATION).approvals == []
     reloaded = await StudioStore(
         _engine(),
@@ -3406,6 +3416,82 @@ async def test_a_turn_refused_as_busy_leaves_the_live_state_as_loaded(
     assert (reloaded.trace_id, reloaded.turn_index) == before[:2]
     assert ended == [("not_started", "WARNING")]
     assert flushes == [2]  # the first turn's span, then the refused one's
+
+
+async def test_a_refusal_whose_draft_cannot_be_dropped_still_releases_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Giving up the working copy raises on a `/turn` refused as busy; the
+    conversation's lock is released all the same."""
+    session_service = _database_session_service()
+    app = _app(_text("Hello."), session_service=session_service)
+    store = app.state.studio.store
+    other = StudioStore(
+        _engine(),
+        adk=NO_ADK,
+        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+    )
+
+    def broken_drop(*args: Any) -> bool:
+        raise RuntimeError("drop failed")
+
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("hi"))
+        await other.load(PRINCIPAL, CONVERSATION)
+        other.claim_segment(PRINCIPAL, CONVERSATION)
+        await other.save(PRINCIPAL, CONVERSATION)
+        monkeypatch.setattr(store, "drop_draft", broken_drop)
+        with pytest.raises(RuntimeError, match="drop failed"):
+            await client.post("/api/studio/turn", json=_turn_body("again"), headers=AUTH)
+
+    assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
+
+
+async def test_a_raise_right_after_an_answer_s_claim_save_drops_its_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first read of the live state after `/interrupt`'s claim save
+    raises. The request goes through the post-claim path: the lease is
+    dropped and the lock released, so the same answer retried at once
+    resumes."""
+    app = _app(*_ask("reading A", "reading B"), _text("You meant reading B."))
+    store = app.state.studio.store
+    real_save = store.save
+    real_current = store.current
+    saved: list[bool] = []
+
+    async def noting_save(*args: Any, **kwargs: Any) -> None:
+        await real_save(*args, **kwargs)
+        saved.append(True)
+
+    def failing_current(*args: Any) -> Any:
+        if saved:
+            saved.clear()
+            raise RuntimeError("read failed")
+        return real_current(*args)
+
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
+        elicitation = _frame(first, "elicitation.request")
+        (question,) = elicitation["questions"]
+        body = _interrupt_body(
+            elicitation["interrupt_id"],
+            "answer",
+            answers={"q1": _pick(question["options"][1]["id"])},
+        )
+        monkeypatch.setattr(store, "save", noting_save)
+        monkeypatch.setattr(store, "current", failing_current)
+        with pytest.raises(RuntimeError, match="read failed"):
+            await client.post("/api/studio/interrupt", json=body, headers=AUTH)
+        monkeypatch.setattr(store, "save", real_save)
+        monkeypatch.setattr(store, "current", real_current)
+
+        assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
+        stored = await store.load(PRINCIPAL, CONVERSATION)
+        assert stored is not None and stored.segment is None
+        frames = await _stream(client, "/api/studio/interrupt", body)
+
+    assert _events(frames)[-1] == "done"
 
 
 async def test_a_turn_over_a_paused_one_ends_the_paused_turn_s_span(
@@ -8120,28 +8206,45 @@ async def test_a_lost_segment_at_a_save_ends_the_stream_as_the_heartbeat_does(
 
 
 @pytest.mark.parametrize(
-    ("failure", "relayed"),
+    ("failure", "relayed", "logged"),
     [
-        pytest.param(SegmentLost("taken over"), ["plan.approved", "error"], id="segment-lost"),
+        pytest.param(
+            SegmentLost("taken over"),
+            ["plan.approved", "error"],
+            (logging.WARNING, False),
+            id="segment-lost",
+        ),
         pytest.param(
             DatabaseUnavailable("unreachable"),
             ["plan.approved", "error"],
+            (logging.WARNING, False),
             id="database-unavailable",
         ),
         pytest.param(
-            RuntimeError("db is down"),
+            ConnectionResetError("connection reset"),
             ["plan.approved", "message.delta"],
+            (logging.WARNING, True),
+            id="transient-failure",
+        ),
+        pytest.param(
+            RuntimeError("a bug"),
+            ["plan.approved", "message.delta"],
+            (logging.ERROR, True),
             id="other-failure",
         ),
     ],
 )
 async def test_a_lost_segment_after_plan_approved_ends_the_stream(
-    caplog: pytest.LogCaptureFixture, failure: Exception, relayed: list[str]
+    caplog: pytest.LogCaptureFixture,
+    failure: Exception,
+    relayed: list[str],
+    logged: tuple[int, bool],
 ) -> None:
     """The save after `plan.approved` is sent fails. A lost segment ends the stream
     with a stream-fatal error frame, as at every other checkpoint, since another
     instance now owns the conversation; any other failure is logged and the stream
-    goes on."""
+    goes on, logged as a warning when a retry may outlast it and as an error
+    otherwise."""
     studio = _app().state.studio
     conversation = await studio.store.create("u_a", CONVERSATION)
     segment_id = studio.store.claim_segment("u_a", CONVERSATION)
@@ -8172,12 +8275,9 @@ async def test_a_lost_segment_after_plan_approved_ends_the_stream(
         ]
 
     assert sent == relayed
-    # A warning either way: with the traceback only for the failure the
-    # stream goes on past.
-    tolerated = "message.delta" in relayed
-    assert [(r.levelno, r.exc_info is not None) for r in caplog.records] == [
-        (logging.WARNING, tolerated)
-    ]
+    # A lost segment and a transient fault are warnings, only the one the
+    # stream goes on past with its traceback; any other fault is an error.
+    assert [(r.levelno, r.exc_info is not None) for r in caplog.records] == [logged]
 
 
 @pytest.mark.parametrize(

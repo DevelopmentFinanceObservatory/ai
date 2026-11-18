@@ -227,6 +227,27 @@ LEASE_MARGIN_S = 10
 _CONTAINERS = (dict, list, set)
 
 
+def _assign_changed(
+    live: ConversationState,
+    work: ConversationState,
+    base: ConversationState,
+    *,
+    skip: frozenset[str] = frozenset(),
+) -> None:
+    """Assign to `live` each field of `work`, a copy taken from it
+    (`_shallow_copy`), that changed since `base`, the snapshot taken with
+    the copy, bar the fields `skip` names: a container that compares
+    unequal, any other value that is not the same object. A field `live`
+    changed meanwhile and `work` did not keeps `live`'s value."""
+    for f in dataclasses.fields(ConversationState):
+        if f.name in skip:
+            continue
+        value = getattr(work, f.name)
+        before = getattr(base, f.name)
+        if value != before if isinstance(value, _CONTAINERS) else value is not before:
+            setattr(live, f.name, value)
+
+
 def _shallow_copy(state: ConversationState) -> ConversationState:
     """A copy of `state` whose dict, list and set fields are copies one
     level deep and whose other fields hold the same objects. A change that
@@ -869,17 +890,21 @@ class StudioStore:
         entry.draft = (work, _shallow_copy(entry.state))
         return work
 
-    def drop_draft(self, principal: str, conversation_id: str) -> None:
+    def drop_draft(self, principal: str, conversation_id: str) -> bool:
         """Give up the working copy `draft` handed out, its claim unsaved. A
         turn span the copy opened (`begin_turn`) ends as `not_started`, at
-        level `WARNING`, since no turn exists for it; the caller flushes it."""
+        level `WARNING`, since no turn exists for it. Returns whether it
+        ended one, for the caller to flush."""
         entry = self._runtime.get((principal, conversation_id))
         if entry is None or entry.draft is None:
-            return
+            return False
         work, _ = entry.draft
         entry.draft = None
         entry.claimed_reserved = None
+        if work._telemetry_span is None:
+            return False
         work.end_turn_span_unrecorded("not_started")
+        return True
 
     def lease_deadline(self, principal: str, conversation_id: str) -> float:
         """When, on this instance's clock (`now`), it stops trusting that it
@@ -1148,9 +1173,10 @@ class StudioStore:
         """Assign each field the working copy `state` changed since `draft`
         took it to the live state, once its save committed. Nothing when
         `state` is the live state itself. A turn the copy began
-        (`begin_turn`) brings its own telemetry span; the live state's, a
-        turn the copy closed as abandoned, ends as `close_turn` would have
-        ended it there."""
+        (`begin_turn`) brings its own telemetry span. The live state's ends:
+        as `close_turn` would have ended it when the loaded turn was open,
+        which the copy closed as abandoned, and with no error status when
+        another instance recorded that turn."""
         if entry.draft is None or entry.draft[0] is not state:
             return
         work, base = entry.draft
@@ -1158,15 +1184,13 @@ class StudioStore:
         live = entry.state
         assert live is not None
         if work._telemetry_span is not None:
-            live.end_turn_span_unrecorded("abandoned", level="ERROR")
+            if base.turn_recorded:
+                # A span left over from a turn another instance recorded.
+                live.end_turn_span_unrecorded(None)
+            else:
+                live.end_turn_span_unrecorded("abandoned", level="ERROR")
             live._telemetry_span = work._telemetry_span
-        for f in dataclasses.fields(ConversationState):
-            if f.name == "_telemetry_span":
-                continue
-            value = getattr(work, f.name)
-            before = getattr(base, f.name)
-            if value != before if isinstance(value, _CONTAINERS) else value is not before:
-                setattr(live, f.name, value)
+        _assign_changed(live, work, base, skip=frozenset({"_telemetry_span"}))
 
     async def reserve_frames(self, principal: str, conversation_id: str, segment_id: str) -> None:
         """Keep the frame numbers the live stream sends inside its
@@ -1445,11 +1469,7 @@ class StudioStore:
             entry.baseline.update(changed)
             if work.segment is None:
                 entry.held = None
-            for f in dataclasses.fields(ConversationState):
-                value = getattr(work, f.name)
-                before = getattr(base, f.name)
-                if value != before if isinstance(value, _CONTAINERS) else value is not before:
-                    setattr(state, f.name, value)
+            _assign_changed(state, work, base)
             return result
 
     async def renew(
@@ -1617,7 +1637,10 @@ class StudioStore:
         *,
         timeout: float,
     ) -> None:
-        """`release`'s save, run as its own task."""
+        """`release`'s save, run as its own task. A release that did not land
+        gives the lease up all the same: this instance stops counting
+        `segment_id` as held, so none of its later saves writes under it."""
+        landed = False
         try:
             async with asyncio.timeout(timeout):
                 state.drop_resuming(segment_id)
@@ -1625,6 +1648,7 @@ class StudioStore:
                     state.segment = None
                 try:
                     await self.checkpoint(principal, conversation_id, segment_id)
+                    landed = True
                 except SegmentLost:
                     logger.warning(
                         "studio store release: conversation %s segment %s was already "
@@ -1632,9 +1656,9 @@ class StudioStore:
                         conversation_id,
                         segment_id,
                     )
-                    self._lose_segment(state, principal, conversation_id)
+                    self._lose_segment(state, principal, conversation_id, taken_over=True)
                 except DatabaseUnavailable as exc:
-                    self._lose_segment(state, principal, conversation_id)
+                    self._lose_segment(state, principal, conversation_id, taken_over=False)
                     logger.error(
                         "studio store release: conversation %s segment %s could not reach the "
                         "database before the lease's deadline; nothing saved, and the lease "
@@ -1654,22 +1678,35 @@ class StudioStore:
                 conversation_id,
                 timeout,
             )
+        finally:
+            entry = self._runtime[(principal, conversation_id)]
+            if not landed and entry.held == segment_id:
+                entry.held = None
 
-    def _lose_segment(self, state: ConversationState, principal: str, conversation_id: str) -> None:
-        """A release saved nothing because the segment was lost or the
-        database stayed unreachable. When the turn as last stored was
-        running (neither recorded nor paused on an interrupt still to be
-        answered), this instance's turn span ends as `segment_lost`, since
-        whichever instance goes on with the turn opens a span of its own; a
-        pause whose checkpoint landed keeps the span for the answer that
-        resumes it. The stream's end flushes the span."""
-        stored = self._runtime[(principal, conversation_id)].baseline
-        paused = any(
-            pending.resuming_segment is None
-            for pending in _deserialize_pending(stored.get(_KEY_PENDING) or {}).values()
-        )
-        if not stored.get(_KEY_TURN_RECORDED) and not paused:
-            state.end_turn_span_unrecorded("segment_lost")
+    def _lose_segment(
+        self,
+        state: ConversationState,
+        principal: str,
+        conversation_id: str,
+        *,
+        taken_over: bool,
+    ) -> None:
+        """A release saved nothing because the segment was taken over
+        (`taken_over`) or the database stayed unreachable. This instance's
+        turn span ends as `segment_lost`, since whichever instance goes on
+        with the turn opens a span of its own, except when the database was
+        unreachable and the turn as last stored is paused on an interrupt
+        still to be answered: the lease is still this instance's, and the
+        span waits for the answer that resumes the pause. The stream's end
+        flushes the span."""
+        if not taken_over:
+            stored = self._runtime[(principal, conversation_id)].baseline
+            if any(
+                pending.resuming_segment is None
+                for pending in _deserialize_pending(stored.get(_KEY_PENDING) or {}).values()
+            ):
+                return
+        state.end_turn_span_unrecorded("segment_lost")
 
     async def drop_lease(
         self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0

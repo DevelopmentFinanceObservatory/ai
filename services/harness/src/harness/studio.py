@@ -40,7 +40,7 @@ from typing import Any
 
 import anyio
 from common.telemetry import flush_telemetry
-from compiler.surface import ToolSurface
+from compiler.surface import ToolSurface, transient
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
@@ -1102,7 +1102,9 @@ class StudioRunner:
                         conversation,
                         segment_id,
                         exc,
-                        level=logging.WARNING,
+                        # A fault a retry may outlast, which the stream goes
+                        # on past; anything else is a fault in this code.
+                        level=logging.WARNING if transient(exc) else logging.ERROR,
                     )
                     if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
                         yield _checkpoint_failed_frame(conversation, exc)
@@ -1409,11 +1411,15 @@ async def _unclaimed(
 ) -> Response:
     """Answer `response` for a request whose claim save never committed:
     give up its working copy (`StudioStore.drop_draft`), so the live state
-    stays as loaded, release `lock`, and export the span the copy's turn
-    opened, if any."""
-    store.drop_draft(principal, conversation_id)
-    lock.release()
-    await flush_telemetry()
+    stays as loaded, release `lock` whatever that raised, and export the
+    span the copy's turn opened, when it opened one."""
+    ended = False
+    try:
+        ended = store.drop_draft(principal, conversation_id)
+    finally:
+        lock.release()
+        if ended:
+            await flush_telemetry()
     return response
 
 
@@ -1646,9 +1652,17 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # effects, so the turn stays open and the next `/turn` closes it
             # as `begin_turn` closes any open turn.
             if lock.locked():
-                studio.store.drop_draft(principal, body.conversation_id)
-                await _abandon_claim(studio.store, principal, body.conversation_id, claimed, lock)
-                await flush_telemetry()
+                ended = False
+                try:
+                    ended = studio.store.drop_draft(principal, body.conversation_id)
+                finally:
+                    try:
+                        await _abandon_claim(
+                            studio.store, principal, body.conversation_id, claimed, lock
+                        )
+                    finally:
+                        if ended:
+                            await flush_telemetry()
             raise
 
     router.add_api_route("/turn", turn, methods=["POST"], route_class_override=_BoundedTurnRoute)
@@ -1885,14 +1899,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     lock,
                     _streaming_conflict_response("another request already answered this interrupt"),
                 )
-            conversation = studio.store.current(principal, body.conversation_id)
-            assert conversation is not None
-            pending = conversation.pending[body.interrupt_id]
         except BaseException:
             if not lock.locked():
                 raise
-            studio.store.drop_draft(principal, body.conversation_id)
-            lock.release()
+            try:
+                studio.store.drop_draft(principal, body.conversation_id)
+            finally:
+                lock.release()
             raise
 
         # Every failure from here to the stream's start drops the lease the
@@ -1902,6 +1915,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         # resumes. The turn lines added below stay unsaved, and the retry's
         # load reads the row afresh.
         try:
+            conversation = studio.store.current(principal, body.conversation_id)
+            assert conversation is not None
+            pending = conversation.pending[body.interrupt_id]
             # The instance that resumes a paused turn may not be the one that
             # opened it: its telemetry span is process-local and never persisted,
             # and a workflow's own steps run as concurrent waves whose recording

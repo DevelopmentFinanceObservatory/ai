@@ -1073,12 +1073,15 @@ class ConversationState:
         self.turn_recorded = False
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
-    def end_turn_span_unrecorded(self, status: str, *, level: EventLevel = "WARNING") -> None:
+    def end_turn_span_unrecorded(
+        self, status: str | None, *, level: EventLevel = "WARNING"
+    ) -> None:
         """End the turn's telemetry span, when this instance holds one, with
         `status` at `level`, without recording the turn: the stream lost its
         segment (`segment_lost`), the request that opened the span claimed
         nothing (`not_started`), or a turn begun on a working copy closed
-        this one (`abandoned`, as `close_turn` marks it). Whichever instance
+        this one (`abandoned`, as `close_turn` marks it). No `status` ends
+        it with none, for a turn another instance recorded. Whichever instance
         goes on with the turn opens a span of its own (`ensure_turn_span`)."""
         end_turn_span(
             self._telemetry_span,

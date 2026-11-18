@@ -3139,13 +3139,8 @@ async def test_release_swallows_a_takeover_and_still_never_raises(new_store, clo
     await store_a.release("principal", CONVERSATION, segment_id)  # must not raise
 
 
-@pytest.mark.parametrize(("paused", "ended"), [(False, ["segment_lost"]), (True, [])])
-async def test_a_release_that_lost_its_segment_ends_a_running_turn_s_span_alone(
-    new_store, clock, monkeypatch, paused: bool, ended: list[str]
-) -> None:
-    """A's release is fenced out by B's takeover. A turn that was running
-    ends A's span as lost; a turn whose pause A had stored keeps it for the
-    answer that resumes it."""
+def _recorded_span_ends(monkeypatch) -> list[str | None]:
+    """The status each turn span that ends carries, recorded in order."""
     calls: list[str | None] = []
 
     def recording_end(handle: Any, **kwargs: Any) -> None:
@@ -3153,8 +3148,27 @@ async def test_a_release_that_lost_its_segment_ends_a_running_turn_s_span_alone(
             calls.append(kwargs.get("error"))
 
     monkeypatch.setattr(studio_state, "end_turn_span", recording_end)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("how", "paused", "ended"),
+    [
+        ("taken-over", False, ["segment_lost"]),
+        ("taken-over", True, ["segment_lost"]),
+        ("unreachable", False, ["segment_lost"]),
+        ("unreachable", True, []),
+    ],
+)
+async def test_a_release_that_saved_nothing_ends_the_span_unless_the_pause_is_still_ours(
+    new_store, clock, monkeypatch, how: str, paused: bool, ended: list[str]
+) -> None:
+    """A's release saves nothing. Taken over by B, A's span ends as lost
+    whatever the turn's state: B goes on with it. With the database out of
+    reach, the lease is still A's, so a turn whose pause A stored keeps its
+    span for the answer that resumes it, and a running turn's ends."""
+    calls = _recorded_span_ends(monkeypatch)
     store_a = new_store(clock=clock)
-    store_b = new_store(clock=clock)
     state = await store_a.create("principal", CONVERSATION)
     segment_id = store_a.claim_segment("principal", CONVERSATION)
     if paused:
@@ -3162,11 +3176,70 @@ async def test_a_release_that_lost_its_segment_ends_a_running_turn_s_span_alone(
     await store_a.save("principal", CONVERSATION)
     state._telemetry_span = object()
 
-    await clock.advance(studio_state.SEGMENT_TTL_S + 1)
-    await store_b.load("principal", CONVERSATION)
-    store_b.claim_segment("principal", CONVERSATION)
-    await store_b.save("principal", CONVERSATION)
+    if how == "taken-over":
+        await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+        store_b = new_store(clock=clock)
+        await store_b.load("principal", CONVERSATION)
+        store_b.claim_segment("principal", CONVERSATION)
+        await store_b.save("principal", CONVERSATION)
+    else:
+        await clock.set(store_a.lease_deadline("principal", CONVERSATION))
+
+        async def dropped(*args: Any, **kwargs: Any) -> None:
+            raise _connection_reset("UPDATE")
+
+        store_a._write = dropped
     await store_a.release("principal", CONVERSATION, segment_id)
+
+    assert calls == ended
+
+
+async def test_a_release_that_saved_nothing_holds_the_lease_no_longer(new_store, clock) -> None:
+    """The database is out of reach for the release, so the stored lease is
+    still this instance's segment until its TTL. The instance gives it up
+    all the same: a later save that claims nothing is fenced out by it."""
+    store = new_store(clock=clock)
+    await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await clock.set(store.lease_deadline("principal", CONVERSATION))
+    real_write = store._write
+
+    async def dropped(*args: Any, **kwargs: Any) -> None:
+        raise _connection_reset("UPDATE")
+
+    store._write = dropped
+    await store.release("principal", CONVERSATION, segment_id)
+    store._write = real_write
+
+    state = await store.load("principal", CONVERSATION)
+    assert state is not None and state.segment is not None  # the lease, still stored
+    state.turn_final_text = "written without the lease"
+    with pytest.raises(ConversationStale):
+        await store.save("principal", CONVERSATION)
+
+
+@pytest.mark.parametrize(("recorded", "ended"), [(False, ["abandoned"]), (True, [None])])
+async def test_a_turn_begun_over_a_leftover_span_ends_it_as_the_loaded_turn_stood(
+    new_store, monkeypatch, recorded: bool, ended: list[str | None]
+) -> None:
+    """The live state holds a span from an earlier turn, and a claim save
+    begins a new turn over it. A loaded turn still open was abandoned, so
+    its span ends as such; one another instance recorded ends with no error
+    status."""
+    monkeypatch.setattr(studio_state, "start_turn_span", lambda *args, **kwargs: object())
+    calls = _recorded_span_ends(monkeypatch)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    state.turn_index = 1
+    state.turn_recorded = recorded
+    await store.save("principal", CONVERSATION)
+    state._telemetry_span = object()
+
+    work = store.draft("principal", CONVERSATION)
+    work.begin_turn()
+    store.claim_segment("principal", CONVERSATION, work)
+    await store.save("principal", CONVERSATION, work)
 
     assert calls == ended
 
