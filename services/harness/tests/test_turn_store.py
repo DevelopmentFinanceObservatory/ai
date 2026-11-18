@@ -340,6 +340,52 @@ async def test_a_turn_closes_with_an_error_exactly_when_it_failed_or_was_abandon
         await store.finish(closed, segment_id=SEGMENT, status=status, error=error)
 
 
+@pytest.mark.parametrize(
+    ("status", "error", "read"),
+    [
+        (TurnStatus.CANCELLED, None, True),
+        (TurnStatus.DONE, None, False),
+        (TurnStatus.FAILED, {"type": "x", "message": "y"}, False),
+    ],
+)
+@pytest.mark.parametrize(
+    "stops",
+    [
+        "lease_cancel = true",
+        "lease_stop_id = 'stop_1'",
+        "lease_stop_id = 'stop_1', lease_cancel = true",
+    ],
+)
+async def test_only_a_cancelled_close_records_every_stop_acted_on(
+    pg_engine: AsyncEngine,
+    status: TurnStatus,
+    error: dict[str, str] | None,
+    read: bool,
+    stops: str,
+) -> None:
+    """A close `cancelled` records every Stop on the conversation acted on,
+    in its own transaction: a flagged one gets an id. Any other close leaves
+    them unread."""
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    opened = await _open(store)
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f"UPDATE conversations SET {stops}"))
+
+    await store.finish(opened, segment_id=SEGMENT, status=status, error=error)
+
+    async with pg_engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT lease_stop_id, stop_acted_id, lease_cancel FROM conversations")
+            )
+        ).one()
+    unread = row.lease_cancel or row.lease_stop_id != row.stop_acted_id
+    assert unread is not read
+    if read:
+        assert row.stop_acted_id is not None
+
+
 async def _spec_rows(engine: AsyncEngine) -> dict[str, tuple[int, int]]:
     """Each stored spec block's (position, writing transaction id)."""
     async with engine.connect() as conn:

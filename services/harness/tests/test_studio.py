@@ -26,7 +26,7 @@ import json
 import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from types import SimpleNamespace
@@ -100,6 +100,7 @@ from harness.studio_state import (
 from harness.studio_store import (
     SEQ_BLOCK,
     ConversationStale,
+    StopRead,
     StudioStore,
     _deserialize_pending,
 )
@@ -2691,6 +2692,16 @@ async def _never_written(*args: Any, **kwargs: Any) -> Any:
     raise SegmentLost("the instance died before this write")
 
 
+async def _crash_leaves_no_stop() -> None:
+    """The Stop `_dies_on_a_stop` dies on only triggers the crash. Recorded
+    acted on, it leaves the crash alone for a retry to meet; unread, the
+    next claimant would close the turn on it."""
+    async with _engine().begin() as conn:
+        await conn.execute(
+            text("UPDATE conversations SET stop_acted_id = lease_stop_id, lease_cancel = false")
+        )
+
+
 def _dies_on_a_stop(app: FastAPI) -> None:
     """Stand `app`'s instance in for one that dies as a Stop reaches it:
     neither its segment's release nor its turn's close is written
@@ -2723,6 +2734,7 @@ async def _approve_plan_then_hang(
     assert cancel.status_code == 204
     crashed = await asyncio.wait_for(interrupt_task, timeout=5)
     assert _events(crashed)[-1] == "error"
+    await _crash_leaves_no_stop()
     return hanging
 
 
@@ -2913,6 +2925,7 @@ async def test_a_retry_after_an_attempt_that_died_before_the_approval_sends_it()
         assert cancel.status_code == 204
         dead = await asyncio.wait_for(attempt, timeout=5)
         assert "plan.approved" not in _events(dead)
+        await _crash_leaves_no_stop()
 
     await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)  # A's segment has expired
     app_b = _app(tool_surface=ScriptedSurface(), store=store_b)
@@ -3044,6 +3057,7 @@ async def test_a_retried_approval_is_dated_by_its_first_answer(
             )
             assert cancel.status_code == 204
             assert _events(await asyncio.wait_for(resume, timeout=5))[-1] == "error"
+            await _crash_leaves_no_stop()
 
     surface = _CallingSurface()
     app_b = _app(tool_surface=surface, store=store_b)
@@ -3162,6 +3176,7 @@ async def test_a_retried_resume_of_an_ask_must_carry_the_answers_that_resumed_it
         )
         assert cancel.status_code == 204
         await asyncio.wait_for(resume, timeout=5)
+        await _crash_leaves_no_stop()
 
     app_b = _app(_text("Reading A."), store=store_b)
     async with _client(app_b) as client_b:
@@ -5861,36 +5876,85 @@ async def test_a_stop_while_a_switch_runs_offers_the_plan_unchanged_on_a_live_pa
 _STOP = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
 
 
+async def _stop_columns() -> StopRead:
+    async with _engine().connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT lease_stop_id, stop_acted_id, lease_cancel FROM conversations")
+            )
+        ).one()
+    return StopRead.from_row(row)
+
+
 class _StopReaders:
-    """Who read each Stop: the heartbeat (renewals reporting a new stop id,
-    `_StopsTaken`), the release of the lease (`_close_after_release`), or
-    `/cancel` under the lock (`_stop_open_turn`)."""
+    """Who acted on each Stop: the heartbeat (renewals reporting a new
+    unread stop id, `_StopsTaken`); the release of the lease (a release
+    whose write read the Stop, or a stream closing the turn under the lease
+    it kept, `_close_on_stop`); a claimant that found the Stop unread and
+    left it read (`_act_on_unread_stop`); or `/cancel` under the lock
+    (`_stop_open_turn`)."""
 
     def __init__(self, app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
         self.heartbeat = _StopsTaken(app.state.studio.store)
-        self.release = 0
-        self.cancel = 0
-        after_release = studio_module._close_after_release
+        self.counts = {"release": 0, "claim": 0, "cancel": 0}
+        store = app.state.studio.store
+        release = store.release
+        close_on_stop = studio_module._close_on_stop
+        act_on_unread = studio_module._act_on_unread_stop
         stop_open = studio_module._stop_open_turn
 
-        async def counted_release(*args: Any, **kwargs: Any) -> bool:
-            self.release += 1
-            return await after_release(*args, **kwargs)
+        async def counted_release(*args: Any, **kwargs: Any) -> Any:
+            before = (await _stop_columns()).unread
+            kept = await release(*args, **kwargs)
+            if before and not kept and not (await _stop_columns()).unread:
+                self.counts["release"] += 1
+            return kept
+
+        async def counted_close(*args: Any, **kwargs: Any) -> bool:
+            closed = await close_on_stop(*args, **kwargs)
+            self.counts["release"] += closed
+            return closed
+
+        async def counted_claim(*args: Any, **kwargs: Any) -> Any:
+            refused = await act_on_unread(*args, **kwargs)
+            if not (await _stop_columns()).unread:
+                self.counts["claim"] += 1
+            return refused
 
         async def counted_cancel(*args: Any, **kwargs: Any) -> Any:
-            self.cancel += 1
+            self.counts["cancel"] += 1
             return await stop_open(*args, **kwargs)
 
-        monkeypatch.setattr(studio_module, "_close_after_release", counted_release)
+        store.release = counted_release
+        monkeypatch.setattr(studio_module, "_close_on_stop", counted_close)
+        monkeypatch.setattr(studio_module, "_act_on_unread_stop", counted_claim)
         monkeypatch.setattr(studio_module, "_stop_open_turn", counted_cancel)
 
     def read(self) -> dict[str, int]:
-        counts = {
-            "heartbeat": self.heartbeat.taken,
-            "release": self.release,
-            "cancel": self.cancel,
-        }
+        counts = {"heartbeat": self.heartbeat.taken, **self.counts}
         return {party: count for party, count in counts.items() if count}
+
+
+class _Row:
+    """One row's instance: its app, the readers on it, and its clock."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.monkeypatch = monkeypatch
+        self.app: FastAPI | None = None
+        self.readers: _StopReaders | None = None
+        self.clock: StoreClock | None = None
+
+    async def build(self, *script: types.Part, clock: bool = False, **kwargs: Any) -> FastAPI:
+        if clock:
+            self.clock = await StoreClock.start(_engine())
+            kwargs["store"] = StudioStore(_engine(), **self.clock.store_kwargs)
+        self.app = _app(*script, **kwargs)
+        self.readers = _StopReaders(self.app, self.monkeypatch)
+        return self.app
+
+    async def lapse(self) -> None:
+        assert self.clock is not None
+        await self.clock.advance(studio_state_module.SEGMENT_TTL_S + 1)
 
 
 async def _wait_for_stream(app: FastAPI) -> None:
@@ -5902,107 +5966,252 @@ async def _wait_for_stream(app: FastAPI) -> None:
         await asyncio.sleep(0.01)
 
 
-async def _latest_turn_status() -> str:
+async def _turn_statuses() -> list[str]:
     async with _engine().connect() as conn:
-        return (
-            await conn.execute(text("SELECT status FROM turn_cursors ORDER BY id DESC LIMIT 1"))
-        ).scalar_one()
+        return list(
+            (await conn.execute(text("SELECT status FROM turn_cursors ORDER BY id"))).scalars()
+        )
 
 
-async def _stop_while_a_node_runs(app, client, monkeypatch):
-    stream = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
-    await asyncio.wait_for(_wait_for_stream(app), timeout=5)
-    cancel = await client.post("/api/studio/cancel", json=_STOP, headers=AUTH)
-    return await asyncio.wait_for(stream, timeout=5), cancel
+async def _post_stop(client: httpx2.AsyncClient) -> httpx2.Response:
+    return await client.post("/api/studio/cancel", json=_STOP, headers=AUTH)
+
+
+async def _stop_while_a_node_runs(row: _Row):
+    app = await row.build(*_card(), resolver=_HangingResolver(), heartbeat_seconds=0.1)
+    async with _client(app) as client:
+        stream = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
+        await asyncio.wait_for(_wait_for_stream(app), timeout=5)
+        cancel = await _post_stop(client)
+        return await asyncio.wait_for(stream, timeout=5), cancel
+
+
+def _switch_held_by_a_stop(row: _Row, *, deaf: bool) -> None:
+    """The switch's revision hangs until cancelled; a deaf switch holds the
+    scope open without hearing its event."""
+    entered = asyncio.Event()
+    row.switch_entered = entered  # type: ignore[attr-defined]
+
+    async def revising(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        entered.set()
+        await asyncio.sleep(5)
+        raise AssertionError("a stopped revision is cancelled")
+
+    async def deaf_scope(_ctx: Any, revision: Any, **_kwargs: Any) -> dict[str, Any]:
+        async with _ctx.stop.open():
+            return await revision
+
+    row.monkeypatch.setattr(switch_module, "_switched_plan", revising)
+    if deaf:
+        row.monkeypatch.setattr(switch_module, "_unless_stopped", deaf_scope)
 
 
 def _stop_while_a_switch_runs(stops: int):
-    async def scenario(app, client, monkeypatch):
-        entered = asyncio.Event()
-
-        async def revising(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-            entered.set()
-            await asyncio.sleep(5)
-            raise AssertionError("a stopped revision is cancelled")
-
-        async def deaf(_ctx: Any, revision: Any, **_kwargs: Any) -> dict[str, Any]:
-            async with _ctx.stop.open():
-                return await revision
-
-        monkeypatch.setattr(switch_module, "_switched_plan", revising)
-        if stops == 2:
-            monkeypatch.setattr(switch_module, "_unless_stopped", deaf)
-        plan = await _plan_with_a_choice(app, client)
-        stream = asyncio.ensure_future(_stream(client, "/api/studio/interrupt", _switch_body(plan)))
-        await asyncio.wait_for(entered.wait(), timeout=5)
-        for sent in range(1, stops + 1):
-            cancel = await client.post("/api/studio/cancel", json=_STOP, headers=AUTH)
-            assert cancel.status_code == 204
-            await _READERS[app].heartbeat.reach(sent)
-        return await asyncio.wait_for(stream, timeout=5), cancel
+    async def scenario(row: _Row):
+        _switch_held_by_a_stop(row, deaf=stops == 2)
+        app = await row.build(*_plan())
+        async with _client(app) as client:
+            plan = await _plan_with_a_choice(app, client)
+            stream = asyncio.ensure_future(
+                _stream(client, "/api/studio/interrupt", _switch_body(plan))
+            )
+            await asyncio.wait_for(row.switch_entered.wait(), timeout=5)  # type: ignore[attr-defined]
+            for sent in range(1, stops + 1):
+                cancel = await _post_stop(client)
+                assert cancel.status_code == 204
+                assert row.readers is not None
+                await row.readers.heartbeat.reach(sent)
+            return await asyncio.wait_for(stream, timeout=5), cancel
 
     return scenario
 
 
-async def _stop_in_after_commit_work(app, client, monkeypatch):
+async def _stop_taken_by_the_scope_then_the_client_leaves(row: _Row):
+    """The scope takes the first Stop and the client leaves before the
+    stream ends: the release finds the Stop already acted on, so the turn
+    stays as the client left it, for the next turn to abandon."""
+    _switch_held_by_a_stop(row, deaf=True)
+    app = await row.build(*_plan(), _text("Hello."))
+    async with _client(app) as client:
+        plan = await _plan_with_a_choice(app, client)
+        stream = asyncio.ensure_future(_stream(client, "/api/studio/interrupt", _switch_body(plan)))
+        await asyncio.wait_for(row.switch_entered.wait(), timeout=5)  # type: ignore[attr-defined]
+        cancel = await _post_stop(client)
+        assert row.readers is not None
+        await row.readers.heartbeat.reach(1)
+        while (await _stop_columns()).unread:  # the scope's record has landed
+            await asyncio.sleep(0.01)
+        stream.cancel()
+        with suppress(asyncio.CancelledError):
+            await stream
+        while app.state.studio.store.lock_for(PRINCIPAL, CONVERSATION).locked():
+            await asyncio.sleep(0.01)
+        return await _stream(client, "/api/studio/turn", _turn_body("hi")), cancel
+
+
+async def _stop_in_after_commit_work(row: _Row):
     entered = asyncio.Event()
     real = turn_loop_module._after_commit
 
     async def held(ctx: Any, node: str) -> None:
-        if await _latest_turn_status() == "paused":
+        if (await _turn_statuses())[-1] == "paused":
             entered.set()
             await asyncio.sleep(5)
         await real(ctx, node)
 
-    monkeypatch.setattr(turn_loop_module, "_after_commit", held)
-    stream = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body("q with forks")))
-    await asyncio.wait_for(entered.wait(), timeout=5)
-    cancel = await client.post("/api/studio/cancel", json=_STOP, headers=AUTH)
-    return await asyncio.wait_for(stream, timeout=5), cancel
+    row.monkeypatch.setattr(turn_loop_module, "_after_commit", held)
+    app = await row.build(*_plan())
+    async with _client(app) as client:
+        stream = asyncio.ensure_future(
+            _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        cancel = await _post_stop(client)
+        return await asyncio.wait_for(stream, timeout=5), cancel
 
 
-def _stop_before_the_release(message: str):
-    async def scenario(app, client, monkeypatch):
+def _stop_before_the_release(message: str, *, contested: bool = False):
+    """The Stop commits after the stream's last renewal and before its
+    release. `contested`: while the stream acts on it under the lease it
+    kept, another instance's answer to the card is refused as busy."""
+
+    async def scenario(row: _Row):
+        script = (_text("Hello."),) if message == "hi" else _plan()
+        app = await row.build(*script)
         store = app.state.studio.store
-        real = store.release
-        sent: list[Any] = []
+        sent: list[httpx2.Response] = []
+        async with _client(app) as client:
+            real = store.release
 
-        async def stopped_first(*args: Any, **kwargs: Any) -> Any:
-            if not sent:
-                sent.append(await client.post("/api/studio/cancel", json=_STOP, headers=AUTH))
-            return await real(*args, **kwargs)
+            async def stopped_first(*args: Any, **kwargs: Any) -> Any:
+                if not sent:
+                    sent.append(await _post_stop(client))
+                return await real(*args, **kwargs)
 
-        store.release = stopped_first
-        frames = await _stream(client, "/api/studio/turn", _turn_body(message))
+            store.release = stopped_first
+            if contested:
+                other = _app()
+                close_on_stop = studio_module._close_on_stop
+
+                async def contested_close(*args: Any, **kwargs: Any) -> bool:
+                    plan_id = store.current(PRINCIPAL, CONVERSATION).pending
+                    async with _client(other) as other_client:
+                        for interrupt_id in list(plan_id):
+                            busy = await other_client.post(
+                                "/api/studio/interrupt",
+                                json=_interrupt_body(interrupt_id, "approve"),
+                                headers=AUTH,
+                            )
+                            assert busy.status_code == 409
+                    return await close_on_stop(*args, **kwargs)
+
+                row.monkeypatch.setattr(studio_module, "_close_on_stop", contested_close)
+            frames = await _stream(client, "/api/studio/turn", _turn_body(message))
         return frames, sent[0]
 
     return scenario
 
 
+async def _stop_whose_release_cannot_close_the_running_turn(row: _Row):
+    """A node fails and its close is not written, so the turn is left
+    running; the Stop commits before the release, which keeps the lease,
+    and ending the turn's runs fails. The lease lapses with the Stop unread,
+    and the next turn acts on it first."""
+
+    class BrokenSurface(ScriptedSurface):
+        async def call_tool(self, **kwargs: Any) -> ToolCallResult:
+            raise RuntimeError("analysis mount went away")
+
+    app = await row.build(*_plan(), _text("Hello."), tool_surface=BrokenSurface(), clock=True)
+    studio = app.state.studio
+    real_finish = studio.turns.finish
+
+    async def finish_unwritten(cursor: Any, **kwargs: Any) -> Any:
+        if kwargs.get("status") is TurnStatus.FAILED:
+            raise ConnectionError("the database is unreachable")
+        return await real_finish(cursor, **kwargs)
+
+    end_left_runs = studio_module._end_left_runs
+    failures = [RuntimeError("the run ledger is unreachable")]
+
+    async def ends_once(*args: Any, **kwargs: Any) -> None:
+        if failures:
+            raise failures.pop()
+        await end_left_runs(*args, **kwargs)
+
+    row.monkeypatch.setattr(studio_module, "_end_left_runs", ends_once)
+    async with _client(app) as client:
+        plan = _frame(
+            await _stream(client, "/api/studio/turn", _turn_body("q with forks")), "plan.proposed"
+        )
+        studio.turns.finish = finish_unwritten
+        real_release = studio.store.release
+        sent: list[httpx2.Response] = []
+
+        async def stopped_first(*args: Any, **kwargs: Any) -> Any:
+            if not sent:
+                sent.append(await _post_stop(client))
+            return await real_release(*args, **kwargs)
+
+        studio.store.release = stopped_first
+        await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+        assert (await _stop_columns()).unread
+        await row.lapse()
+        return await _stream(client, "/api/studio/turn", _turn_body("hi")), sent[0]
+
+
+async def _stop_whose_release_write_fails(row: _Row):
+    """The Stop commits before the release, and the release's write never
+    lands. The lease lapses with the Stop unread, and the next turn acts on
+    it first."""
+    app = await row.build(*_plan(), _text("Hello."), clock=True)
+    store = app.state.studio.store
+    sent: list[httpx2.Response] = []
+    async with _client(app) as client:
+        real_release = store.release
+
+        async def stop_then_fail(*args: Any, **kwargs: Any) -> Any:
+            if not sent:
+                sent.append(await _post_stop(client))
+                return False
+            return await real_release(*args, **kwargs)
+
+        store.release = stop_then_fail
+        await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        assert (await _stop_columns()).unread
+        await row.lapse()
+        return await _stream(client, "/api/studio/turn", _turn_body("hi")), sent[0]
+
+
 def _stop_with_no_lease(running: bool):
-    async def scenario(app, client, monkeypatch):
-        frames = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
-        if running:
-            async with _engine().begin() as conn:
-                await conn.execute(
-                    text(
-                        "UPDATE turn_cursors SET status = 'running', pause_kind = NULL, "
-                        "interrupt_id = NULL, pause_payload = NULL"
+    async def scenario(row: _Row):
+        app = await row.build(*_plan())
+        async with _client(app) as client:
+            frames = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+            if running:
+                async with _engine().begin() as conn:
+                    await conn.execute(
+                        text(
+                            "UPDATE turn_cursors SET status = 'running', pause_kind = NULL, "
+                            "interrupt_id = NULL, pause_payload = NULL"
+                        )
                     )
-                )
-        cancel = await client.post("/api/studio/cancel", json=_STOP, headers=AUTH)
-        return frames, cancel
+            return frames, await _post_stop(client)
 
     return scenario
 
 
-async def _stop_after_the_turn_ended(app, client, monkeypatch):
-    frames = await _stream(client, "/api/studio/turn", _turn_body("hi"))
-    cancel = await client.post("/api/studio/cancel", json=_STOP, headers=AUTH)
-    return frames, cancel
+async def _stop_after_the_turn_ended(row: _Row):
+    app = await row.build(_text("Hello."))
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body("hi"))
+        return frames, await _post_stop(client)
 
 
-async def _stop_before_the_claim_save(app, client, monkeypatch):
+async def _stop_before_the_claim_save(row: _Row):
+    app = await row.build(*_card(), resolver=_HangingResolver(), heartbeat_seconds=0.1)
     store = app.state.studio.store
     real = store.save
     entered, go = asyncio.Event(), asyncio.Event()
@@ -6014,142 +6223,210 @@ async def _stop_before_the_claim_save(app, client, monkeypatch):
         return await real(*args, **kwargs)
 
     store.save = held
-    stream = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
-    await asyncio.wait_for(entered.wait(), timeout=5)
-    cancel_task = asyncio.ensure_future(client.post("/api/studio/cancel", json=_STOP, headers=AUTH))
-    await asyncio.sleep(0.2)
-    assert not cancel_task.done()  # it waits on the claim
-    go.set()
-    cancel = await asyncio.wait_for(cancel_task, timeout=5)
-    return await asyncio.wait_for(stream, timeout=5), cancel
+    async with _client(app) as client:
+        stream = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        cancel_task = asyncio.ensure_future(_post_stop(client))
+        await asyncio.sleep(0.2)
+        assert not cancel_task.done()  # it waits on the claim
+        go.set()
+        cancel = await asyncio.wait_for(cancel_task, timeout=5)
+        return await asyncio.wait_for(stream, timeout=5), cancel
 
 
-_READERS: dict[Any, _StopReaders] = {}
+async def _stop_whose_claim_is_abandoned(row: _Row):
+    """`/cancel` waits on an `/interrupt` that holds the lock, the Stop lands
+    on the claim, and the `/interrupt` then abandons its claim (the pause
+    moved). The Stop stays unread, and the next turn acts on it first."""
+    app = await row.build(*_plan(), _text("Hello."))
+    studio = app.state.studio
+    store = studio.store
+    async with _client(app) as client:
+        plan = _frame(
+            await _stream(client, "/api/studio/turn", _turn_body("q with forks")), "plan.proposed"
+        )
+        real_save, real_open = store.save, studio.turns.open_cursor
+        entered, go, stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        opened = 0
+
+        async def held_save(*args: Any, **kwargs: Any) -> Any:
+            if not entered.is_set():
+                entered.set()
+                await go.wait()
+                async with _engine().begin() as conn:
+                    await conn.execute(text("UPDATE turn_cursors SET interrupt_id = 'int_moved'"))
+            return await real_save(*args, **kwargs)
+
+        async def open_after_the_stop(*args: Any, **kwargs: Any) -> Any:
+            nonlocal opened
+            opened += 1
+            if opened == 2:
+                await stopped.wait()
+            return await real_open(*args, **kwargs)
+
+        store.save = held_save
+        studio.turns.open_cursor = open_after_the_stop
+        answer = asyncio.ensure_future(
+            client.post(
+                "/api/studio/interrupt",
+                json=_interrupt_body(plan["interrupt_id"], "approve"),
+                headers=AUTH,
+            )
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        cancel_task = asyncio.ensure_future(_post_stop(client))
+        await asyncio.sleep(0.2)
+        assert not cancel_task.done()  # it waits on the claim
+        go.set()
+        cancel = await asyncio.wait_for(cancel_task, timeout=5)
+        stopped.set()
+        assert (await asyncio.wait_for(answer, timeout=5)).status_code == 409
+        store.save, studio.turns.open_cursor = real_save, real_open
+        assert (await _stop_columns()).unread
+        return await _stream(client, "/api/studio/turn", _turn_body("hi")), cancel
 
 
 @pytest.mark.parametrize(
-    ("scenario", "script", "turn_after", "last_frame", "readers"),
+    ("scenario", "turns_after", "last_frame", "readers"),
     [
         pytest.param(
             _stop_while_a_node_runs,
-            "card",
-            "cancelled",
+            ["cancelled"],
             "cancelled",
             {"heartbeat": 1},
             id="lease-live-node-running",
         ),
         pytest.param(
             _stop_while_a_switch_runs(1),
-            "plan",
-            "paused",
+            ["paused"],
             "plan.proposed",
             {"heartbeat": 1},
             id="lease-live-scope-armed-first-stop",
         ),
         pytest.param(
             _stop_while_a_switch_runs(2),
-            "plan",
-            "cancelled",
+            ["cancelled"],
             "cancelled",
             {"heartbeat": 2},
             id="lease-live-scope-armed-second-stop",
         ),
         pytest.param(
+            _stop_taken_by_the_scope_then_the_client_leaves,
+            ["abandoned", "done"],
+            "done",
+            {"heartbeat": 1},
+            id="lease-live-scope-took-it-then-the-client-left",
+        ),
+        pytest.param(
             _stop_in_after_commit_work,
-            "plan",
-            "cancelled",
+            ["cancelled"],
             "cancelled",
             {"heartbeat": 1},
             id="lease-live-pause-committed-after-commit-work",
         ),
         pytest.param(
             _stop_before_the_release("q with forks"),
-            "plan",
-            "cancelled",
+            ["cancelled"],
             "cancelled",
             {"release": 1},
             id="lease-live-segment-returned-paused",
         ),
         pytest.param(
+            _stop_before_the_release("q with forks", contested=True),
+            ["cancelled"],
+            "cancelled",
+            {"release": 1},
+            id="lease-live-segment-returned-paused-another-claim-refused",
+        ),
+        pytest.param(
             _stop_before_the_release("hi"),
-            "text",
-            "done",
+            ["done"],
             "done",
             {"release": 1},
             id="lease-live-turn-closed",
         ),
         pytest.param(
+            _stop_whose_release_cannot_close_the_running_turn,
+            ["cancelled", "done"],
+            "done",
+            {"claim": 1},
+            id="lease-kept-closing-fails-next-claim-acts",
+        ),
+        pytest.param(
+            _stop_whose_release_write_fails,
+            ["cancelled", "done"],
+            "done",
+            {"claim": 1},
+            id="release-write-fails-next-claim-acts",
+        ),
+        pytest.param(
             _stop_with_no_lease(running=False),
-            "plan",
-            "cancelled",
+            ["cancelled"],
             "plan.proposed",
             {"cancel": 1},
             id="no-lease-turn-paused",
         ),
         pytest.param(
             _stop_with_no_lease(running=True),
-            "plan",
-            "cancelled",
+            ["cancelled"],
             "plan.proposed",
             {"cancel": 1},
             id="no-lease-turn-left-running",
         ),
         pytest.param(
             _stop_after_the_turn_ended,
-            "text",
-            "done",
+            ["done"],
             "done",
             {"cancel": 1},
             id="no-lease-no-open-turn",
         ),
         pytest.param(
             _stop_before_the_claim_save,
-            "card",
-            "cancelled",
+            ["cancelled"],
             "cancelled",
             {"heartbeat": 1},
             id="lock-held-before-the-claim-save",
+        ),
+        pytest.param(
+            _stop_whose_claim_is_abandoned,
+            ["cancelled", "done"],
+            "done",
+            {"claim": 1},
+            id="lock-held-claim-abandoned-next-claim-acts",
         ),
     ],
 )
 async def test_each_stop_is_read_by_exactly_one_party(
     monkeypatch: pytest.MonkeyPatch,
     scenario: Any,
-    script: str,
-    turn_after: str,
+    turns_after: list[str],
     last_frame: str,
     readers: dict[str, int],
 ) -> None:
     """One row per row of `/cancel`'s table: the Stop, posted through the
-    route at the named point, is read by the one party the row names, the
-    turn ends as the row says, and the stream's last frame is the row's."""
-    match script:
-        case "card":
-            app = _app(*_card(), resolver=_HangingResolver(), heartbeat_seconds=0.1)
-        case "plan":
-            app = _app(*_plan())
-        case _:
-            app = _app(_text("Hello."))
-    _READERS[app] = _StopReaders(app, monkeypatch)
-    try:
-        async with _client(app) as client:
-            frames, cancel = await scenario(app, client, monkeypatch)
-            if turn_after == "cancelled" and "plan.proposed" in _events(frames):
-                plan = _frame(frames, "plan.proposed")
-                refused = await client.post(
-                    "/api/studio/interrupt",
-                    json=_interrupt_body(plan["interrupt_id"], "approve"),
-                    headers=AUTH,
-                )
-                assert refused.status_code == 404
-    finally:
-        readers_seen = _READERS.pop(app).read()
+    route at the named point, is acted on by the one party the row names,
+    every turn ends as the row says, the last stream's last frame is the
+    row's, and no Stop is left unread."""
+    row = _Row(monkeypatch)
+    frames, cancel = await scenario(row)
 
     assert cancel.status_code == 204
-    assert await _latest_turn_status() == turn_after
+    assert await _turn_statuses() == turns_after
     last = frames[-1]
     assert (last["error"]["error"] if last["event"] == "error" else last["event"]) == last_frame
-    assert readers_seen == readers
+    assert row.readers is not None
+    assert row.readers.read() == readers
+    assert not (await _stop_columns()).unread
+    if turns_after[0] == "cancelled" and "plan.proposed" in _events(frames):
+        assert row.app is not None
+        async with _client(row.app) as client:
+            plan = _frame(frames, "plan.proposed")
+            refused = await client.post(
+                "/api/studio/interrupt",
+                json=_interrupt_body(plan["interrupt_id"], "approve"),
+                headers=AUTH,
+            )
+        assert refused.status_code == 404
 
 
 @pytest.mark.parametrize("stops", [1, 2], ids=["one-stop", "a-second-stop"])

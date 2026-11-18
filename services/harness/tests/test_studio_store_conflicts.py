@@ -20,6 +20,7 @@ from harness.run_ledger import StudioRunLedger
 from harness.studio_state import _next_manifest
 from harness.studio_store import ConversationStale, Renewal, StudioStore
 from harness.wire import ComponentType, CompositionActor, CompositionBlock, CompositionManifest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .store_clock import StoreClock
@@ -128,7 +129,9 @@ async def test_heartbeat_checkpoint_canvas_cancel_and_runs_commit_side_by_side(
     ]
     assert reloaded.turn_final_text == f"answer {ROUNDS - 1}"
     assert reloaded.segment is not None and reloaded.segment.id == segment_id
-    assert reloaded.segment.stop_id is not None
+    async with engines[0].connect() as conn:
+        stop_id = (await conn.execute(text("SELECT lease_stop_id FROM conversations"))).scalar_one()
+    assert stop_id is not None
     token = current_conversation_key.set((PRINCIPAL, CONVERSATION))
     try:
         assert len(await ledger.unfinished()) == ROUNDS

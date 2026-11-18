@@ -979,9 +979,9 @@ async def test_a_close_that_cannot_be_written_still_reports_the_nodes_error(
     pg_engine: AsyncEngine, clock: StoreClock, paused: bool
 ) -> None:
     """The node's exception, or the expiry of a pause its node can no longer
-    resume, reaches the client, and the segment ends `unclosed`, never
-    `paused`: the turn stays open, running or paused as last written, for a
-    Stop or the conversation's next turn to close."""
+    resume, reaches the client, and the segment ends `unclosed`. The turn
+    stays open, running or paused as last written, for a Stop or the
+    conversation's next turn to close."""
     store, lease = _ClosesNothing(pg_engine), await _instance(pg_engine, clock)
     segment_id = await _claim(lease)
     refused = RuntimeError("plan_start broke")

@@ -6598,8 +6598,8 @@ def with_blocks(
     """`held`, spec blocks by spec_id, with each of `blocks`, a newer answer,
     held for its spec_id: the newer answer holds it, and the held block's
     scope content stands where it says more (`standing_block`). A held
-    block `blocks` does not answer is kept as the same object, since a
-    block is replaced whole, never changed in place."""
+    block `blocks` does not answer is kept as the same object: writers
+    replace a block whole, so the shared object stays as stored."""
     return {
         **held,
         **{

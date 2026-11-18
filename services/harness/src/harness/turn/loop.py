@@ -146,8 +146,8 @@ class Segment:
     """One run of the loop under one lease: the cursor as last written, how
     the run ended (`None` while it runs), the `Paused` event of a pause
     the segment is writing and has not yet reported, and the Stop request
-    the segment last acted on (`stop_id`), which the release of its lease
-    compares with the one it reads (`harness.studio_store.StopRead`)."""
+    the segment last acted on (`stop_id`), so a renewal that reports it
+    again before the write that records it commits changes nothing."""
 
     cursor: Cursor
     outcome: Outcome | None = None
@@ -633,15 +633,16 @@ async def run_segment[E](
     once whenever `renew_now` is set, and return the segment once the turn
     pauses or ends, a Stop closes it, or the lease is lost.
 
-    A renewal that reports a Stop request the segment has not acted on
-    while a node holds the turn's `StopScope` armed sets the scope's event;
-    the node goes on. Any other new Stop request cancels the node, leaves no
-    task of the segment running, and closes the turn `cancelled`. A renewal
-    that reports a request the segment already acted on changes nothing, so
-    a renewal retried after a lost acknowledgement neither drops a Stop nor
-    acts on it twice. The segment records the request it acted on
-    (`Segment.stop_id`); one a renewal reads after the drive finished is not
-    acted on, and the release of the lease reads it. A renewal that
+    A renewal reports a Stop request no party has acted on
+    (`harness.studio_store.StopRead`). While a node holds the turn's
+    `StopScope` armed, the store records the Stop acted on
+    (`StudioStore.acknowledge_stop`) and then the scope's event is set; the
+    node goes on. Any other unread Stop cancels the node, leaves no task of
+    the segment running, and closes the turn `cancelled`, a close that
+    records every Stop so far acted on. The segment keeps the request it
+    acted on (`Segment.stop_id`), so a renewal that reports it again before
+    that write commits changes nothing. One a renewal reads after the drive
+    finished is left unread, for the release of the lease. A renewal that
     finds the lease taken, or that keeps failing until the lease's deadline
     (`StudioStore.lease_deadline`, dated from the claim or the last renewal
     that landed), cancels the node and ends the segment
@@ -708,8 +709,21 @@ async def run_segment[E](
                 return
             if renewal.stop_id is None or renewal.stop_id == segment.stop_id:
                 continue
-            if stop.take():
-                segment.stop_id = renewal.stop_id
+            if stop.armed:
+                # The scope takes the Stop once the store records it acted
+                # on, so no later reader acts on it again. Recorded, it is
+                # the scope's, even when the scope's work ended while the
+                # record was written.
+                try:
+                    acknowledged = await lease.acknowledge_stop(
+                        principal, conversation_id, segment_id, renewal.stop_id
+                    )
+                except Exception:
+                    logger.exception("turn %s: recording the Stop the scope takes failed", key)
+                    continue
+                if acknowledged:
+                    stop.take()
+                    segment.stop_id = renewal.stop_id
                 continue
             if task.done():
                 # The turn's last write landed before this renewal read the

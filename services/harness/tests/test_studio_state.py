@@ -61,6 +61,7 @@ from harness.studio_state import (
     remove_cards,
 )
 from harness.studio_store import SEQ_BLOCK, ConversationStale, Renewal, StudioStore
+from harness.turn.store import TurnStore
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
 from harness.wire import (
     AddOp,
@@ -1910,9 +1911,7 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
         resuming_segment="seg_1",
         answer={"decision": "approve", "option_id": "spec_a"},
     )
-    state.segment = Segment(
-        id="seg_1", owner="owner_a", expires_at=1_700_000_045.0, stop_id="stop_1"
-    )
+    state.segment = Segment(id="seg_1", owner="owner_a", expires_at=1_700_000_045.0)
     state.components["cmp_1"] = {"type": "line_chart", "title": "Aid to Kenya", "revision": 1}
     # A record stored before turns held plans and readings, and one that holds them.
     state.turns.append({"user": "q1", "assistant": "a1"})
@@ -1965,9 +1964,7 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
     assert pending.resuming_segment == "seg_1"
     assert pending.answer == {"decision": "approve", "option_id": "spec_a"}
     assert loaded.awaiting_answer is False  # its only entry is resuming
-    assert loaded.segment == Segment(
-        id="seg_1", owner="owner_a", expires_at=1_700_000_045.0, stop_id="stop_1"
-    )
+    assert loaded.segment == Segment(id="seg_1", owner="owner_a", expires_at=1_700_000_045.0)
     assert loaded.components == {
         "cmp_1": {"type": "line_chart", "title": "Aid to Kenya", "revision": 1}
     }
@@ -2252,7 +2249,7 @@ async def test_renew_reports_lost_after_a_takeover(new_store, clock) -> None:
     assert not (await store_a.renew("principal", CONVERSATION, segment_id)).held
 
 
-async def test_renew_reports_ok_and_pushes_the_ttl_forward(new_store, clock) -> None:
+async def test_renew_reports_ok_and_pushes_the_ttl_forward(new_store, clock, pg_engine) -> None:
     store = new_store(clock=clock)
     await store.create("principal", CONVERSATION)
     segment_id = store.claim_segment("principal", CONVERSATION)
@@ -2265,15 +2262,17 @@ async def test_renew_reports_ok_and_pushes_the_ttl_forward(new_store, clock) -> 
 
     reloaded = await new_store().load("principal", CONVERSATION)
     assert reloaded.segment is not None
-    assert reloaded.segment.stop_id is None
+    assert await _stop_columns(pg_engine) == (False, None)
     assert reloaded.segment.expires_at == clock.at + studio_state.SEGMENT_TTL_S
 
 
-async def test_renew_reports_cancelled_and_still_pushes_the_ttl_forward(new_store, clock) -> None:
+async def test_renew_reports_cancelled_and_still_pushes_the_ttl_forward(
+    new_store, clock, pg_engine
+) -> None:
     """`request_cancel`, from another instance, records a Stop request on
-    the segment; the owner's renewals report it -- and still renew, and
-    leave it stored, so a renewal whose acknowledgement is lost cannot drop
-    it. A later request has a new id."""
+    the segment; the owner's renewals report it while no party has acted on
+    it, and still renew, so a renewal whose acknowledgement is lost cannot
+    drop it. A later request has a new id."""
     store_a = new_store(clock=clock)
     store_b = new_store(clock=clock)
     await store_a.create("principal", CONVERSATION)
@@ -2290,7 +2289,7 @@ async def test_renew_reports_cancelled_and_still_pushes_the_ttl_forward(new_stor
 
     reloaded = await new_store().load("principal", CONVERSATION)
     assert reloaded.segment is not None
-    assert reloaded.segment.stop_id == first.stop_id
+    assert await _stop_columns(pg_engine) == (False, first.stop_id)
     assert await store_b.request_cancel("principal", CONVERSATION) is True
     assert (await store_a.renew("principal", CONVERSATION, segment_id)).stop_id not in (
         None,
@@ -2349,6 +2348,68 @@ async def test_a_stop_request_sets_only_the_flag_and_the_renewal_records_its_id(
     renewed = await store.renew("principal", CONVERSATION, segment_id)
     assert renewed.stop_id is not None
     assert await _stop_columns(pg_engine) == (False, renewed.stop_id)
+
+
+@pytest.mark.parametrize(
+    ("act", "turn_open", "read"),
+    [
+        pytest.param("drop_lease", False, False, id="drop-lease"),
+        pytest.param("release", False, True, id="release-no-open-turn"),
+        pytest.param("release", True, False, id="release-open-turn-keeps-the-lease"),
+        pytest.param("claim", False, True, id="claim-no-open-turn"),
+        pytest.param("claim", True, False, id="claim-open-turn"),
+        pytest.param("acknowledge", True, True, id="acknowledge-own-segment"),
+        pytest.param("acknowledge-other", True, False, id="acknowledge-other-segment"),
+    ],
+)
+async def test_a_stop_stays_unread_until_a_party_acts_on_it(
+    new_store, clock, pg_engine, act: str, turn_open: bool, read: bool
+) -> None:
+    """A Stop (`StopRead.unread`) is recorded read only by a write that
+    acts on it: a claim or release with no open turn to stop, or the
+    segment's own record that its scope took it. A release that finds one
+    on an open turn keeps the lease for its holder to act under, and
+    dropping a lease leaves the Stop for whoever claims next."""
+    store = new_store(clock=clock)
+    await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    if turn_open:
+        await TurnStore(pg_engine).open_turn(
+            "principal",
+            CONVERSATION,
+            segment_id=segment_id,
+            turn_index=0,
+            node="seed",
+            inputs={"message": "q"},
+            state={},
+        )
+    assert await new_store(clock=clock).request_cancel("principal", CONVERSATION) is True
+    stop_id = (await store.renew("principal", CONVERSATION, segment_id)).stop_id
+    assert stop_id is not None
+
+    match act:
+        case "drop_lease":
+            await store.drop_lease("principal", CONVERSATION, segment_id)
+        case "release":
+            kept = await store.release("principal", CONVERSATION, segment_id)
+            assert kept is turn_open
+            renewed = await store.renew("principal", CONVERSATION, segment_id)
+            assert renewed.held is turn_open
+        case "claim":
+            await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+            other = new_store(clock=clock)
+            await other.load("principal", CONVERSATION)
+            other.claim_segment("principal", CONVERSATION)
+            await other.save("principal", CONVERSATION)
+        case "acknowledge":
+            assert await store.acknowledge_stop("principal", CONVERSATION, segment_id, stop_id)
+        case "acknowledge-other":
+            assert not await store.acknowledge_stop("principal", CONVERSATION, "seg_other", stop_id)
+
+    reader = new_store(clock=clock)
+    await reader.load("principal", CONVERSATION)
+    assert reader.stop_unread("principal", CONVERSATION) is not read
 
 
 async def test_request_cancel_returns_false_with_no_live_segment(new_store) -> None:

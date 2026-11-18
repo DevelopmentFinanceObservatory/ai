@@ -836,7 +836,6 @@ class StudioRunner:
             async for frame in translator.frames(segment_task):
                 yield frame
             segment = segment_task.result()
-            conversation.stop_acted = segment.stop_id
             keep_turn_records(conversation, segment.cursor.state)
             match segment.outcome:
                 case Outcome.CANCELLED:
@@ -935,9 +934,6 @@ class StudioRunner:
             if not renewal.held:
                 return "segment_lost"
             if renewal.stop_id is not None:
-                live = self.store.current(principal, conversation_id)
-                if live is not None:
-                    live.stop_acted = renewal.stop_id
                 return "cancelled"
 
     async def _checkpointed(
@@ -1039,13 +1035,17 @@ class StudioRunner:
         the stream ends, so the segment has stopped when the lease is let go
         and `release` reads whether it stopped unfinished. The heartbeat is
         cancelled and awaited before release, so it never races
-        `store.release`'s own write. Unwinding
-        it, releasing the segment (and this segment's resuming pending
-        entries), and releasing the local lock each sit in their own nested
-        `finally`, so a failure in one still reaches the others.
+        `store.release`'s own write. A release that keeps the lease for an
+        unread Stop closes the turn under it (`_release`); the stream then
+        reserves frame numbers and sends the `cancelled` frame while it still
+        holds the lease and the lock, and releases the lease once more after
+        it. On a stream that ended abnormally the same close runs and no
+        frame is sent. Unwinding the heartbeat, releasing the segment (and
+        this segment's resuming pending entries), and releasing the local
+        lock each sit in their own nested `finally`, so a failure in one
+        still reaches the others.
         """
         renew_now = conversation.renew_now = asyncio.Event()
-        conversation.stop_acted = None
         heartbeat = (
             asyncio.ensure_future(
                 self._heartbeat(principal, conversation_id, segment_id, renew_now)
@@ -1053,7 +1053,23 @@ class StudioRunner:
             if renewing
             else None
         )
-        ran_out = closed_on_stop = False
+        released = closed_on_stop = False
+
+        async def unwind_heartbeat() -> None:
+            if conversation.renew_now is renew_now:
+                conversation.renew_now = None
+            if heartbeat is not None:
+                await _unwind(heartbeat)
+
+        async def release() -> None:
+            # Runs to the end as its own task, so what it did is known even
+            # when the caller is cancelled while it runs.
+            nonlocal released, closed_on_stop
+            released = True
+            closed_on_stop = await self._release(
+                principal, conversation_id, conversation, segment_id
+            )
+
         try:
             async with aclosing(
                 self._checkpointed(
@@ -1066,22 +1082,24 @@ class StudioRunner:
             ) as checked:
                 async for frame in checked:
                     yield frame
-            ran_out = True
+            await unwind_heartbeat()
+            await run_to_completion(release())
+            if closed_on_stop:
+                # The closing frames go out under the lease and the lock.
+                with suppress(SegmentLost, DatabaseUnavailable):
+                    await self.store.reserve_frames(principal, conversation_id, segment_id)
+                yield _Stopped("cancelled")
         finally:
-            if conversation.renew_now is renew_now:
-                conversation.renew_now = None
             try:
-                if heartbeat is not None:
-                    await _unwind(heartbeat)
+                await unwind_heartbeat()
             finally:
                 try:
-                    closed_on_stop = await run_to_completion(
-                        self._release(principal, conversation_id, conversation, segment_id)
-                    )
+                    if not released:
+                        await run_to_completion(release())
+                    if closed_on_stop:
+                        await self.store.release(principal, conversation_id, segment_id)
                 finally:
                     conversation.lock.release()
-        if ran_out and closed_on_stop:
-            yield _Stopped("cancelled")
 
     async def _release(
         self,
@@ -1090,14 +1108,29 @@ class StudioRunner:
         conversation: ConversationState,
         segment_id: str,
     ) -> bool:
-        """Release `segment_id` (`StudioStore.release`). When the release
-        read a Stop the stream did not act on (`StopRead.unread`), the
-        release is the party that reads it: the open turn closes
-        `cancelled` (`_close_after_release`). Returns whether it closed."""
-        read = await self.store.release(principal, conversation_id, segment_id)
-        if read is None or not read.unread(conversation.stop_acted):
+        """Release `segment_id` (`StudioStore.release`). A release that
+        keeps the lease for an unread Stop on an open turn makes this stream
+        the party that acts on it: the turn closes `cancelled` under the
+        lease (`_close_on_stop`). Returns whether it did, with the lease
+        still held for the closing frames and a last release. When closing
+        fails, the lease is left to lapse with the Stop unread, for the next
+        claimant; when no turn is open after all, the lease is released."""
+        if not await self.store.release(principal, conversation_id, segment_id):
             return False
-        return await _close_after_release(self, principal, conversation_id, conversation)
+        try:
+            closed = await _close_on_stop(
+                self, principal, conversation_id, conversation, segment_id
+            )
+        except Exception:
+            logger.exception(
+                "studio stream: conversation %s's turn could not be closed on a Stop; the "
+                "lease is left to lapse with the Stop unread",
+                conversation_id,
+            )
+            return False
+        if not closed:
+            await self.store.release(principal, conversation_id, segment_id)
+        return closed
 
 
 def _log_save_failure(
@@ -1253,27 +1286,44 @@ async def _acquire_or_conflict(
     return lock
 
 
-async def _close_after_release(
-    studio: StudioRunner, principal: str, conversation_id: str, conversation: ConversationState
+async def _close_on_stop(
+    studio: StudioRunner,
+    principal: str,
+    conversation_id: str,
+    conversation: ConversationState,
+    segment_id: str,
 ) -> bool:
-    """Act on a Stop the release of a stream's lease read and the stream
-    did not act on: close the conversation's turn `cancelled` when it is
-    open, running or paused (`_stop_turn_at`), and leave a closed one alone.
-    Returns whether it closed the turn. A failure is logged, and the turn
-    stays as stored for a later Stop or turn."""
-    try:
-        cursor = await studio.turns.open_cursor(principal, conversation_id)
-        if cursor is None:
-            return False
-        refused = await _stop_turn_at(studio, principal, conversation_id, conversation, cursor)
-    except Exception:
-        logger.exception(
-            "studio stream: conversation %s's turn could not be closed on the Stop its "
-            "release read",
-            conversation_id,
-        )
+    """Close the conversation's open turn `cancelled` on an unread Stop,
+    under `segment_id`, the lease the caller holds: end the runs a running
+    turn left computing (`_end_left_runs`), close the turn's record and
+    clear its pending interrupts (`_close_open_turn`) and save that, then
+    close the turn, which records the Stop acted on in the same transaction
+    (`harness.turn.store.TurnStore.finish`). Returns `False` when no turn
+    is open. Raises what any of those writes raises, which leaves the Stop
+    unread."""
+    cursor = await studio.turns.open_cursor(principal, conversation_id)
+    if cursor is None:
         return False
-    return refused is None
+    if cursor.status is TurnStatus.RUNNING:
+        await _end_left_runs(studio.run_ledger, (principal, conversation_id))
+    await _close_open_turn(studio, conversation, cursor)
+    await studio.store.checkpoint(principal, conversation_id, segment_id)
+    await stop_turn(studio.turns, cursor, segment_id=segment_id)
+    return True
+
+
+async def _act_on_unread_stop(
+    studio: StudioRunner, principal: str, conversation_id: str, conversation: ConversationState
+) -> Response | None:
+    """Act on an unread Stop (`StudioStore.stop_unread`) before a request
+    claims the conversation: an open turn, running or paused, is closed
+    `cancelled` (`_stop_turn_at`). With no open turn the claim itself reads
+    the Stop. Returns the error to answer when the turn's unfinished runs
+    could not be ended, and `None` otherwise."""
+    cursor = await studio.turns.open_cursor(principal, conversation_id)
+    if cursor is None:
+        return None
+    return await _stop_turn_at(studio, principal, conversation_id, conversation, cursor)
 
 
 async def _abandon_claim(
@@ -1356,7 +1406,7 @@ async def _stop_turn_at(
         if cursor.status is TurnStatus.RUNNING:
             # Run writes are fenced on the lease this holds.
             try:
-                await _end_left_runs(studio.run_ledger)
+                await _end_left_runs(studio.run_ledger, (principal, conversation_id))
             except Exception:
                 logger.exception(
                     "studio cancel: conversation %s's unfinished runs could not be ended",
@@ -1402,19 +1452,26 @@ async def _close_open_turn(
     await flush_telemetry()
 
 
-async def _end_left_runs(ledger: RunLedger) -> None:
-    """Record failed `cancelled` every run of the current conversation
-    (`ledger`'s scope) whose computation is unfinished (`admitted` or `running`): the runs a turn
+async def _end_left_runs(ledger: RunLedger, key: tuple[str, str]) -> None:
+    """Record failed `cancelled` every run of the conversation `key`,
+    `(principal, conversation_id)`, whose computation is unfinished (`admitted` or `running`): the runs a turn
     left computing when its segment ended with no Stop, which a Stop of
     that turn ends, as a Stop of a live segment ends them
     (`executor.run.CancelEndsRun`). A run whose computation finished and
     whose publication is pending is left for the next turn. Raises what the
-    ledger raises when it cannot be read or written."""
-    for run in await ledger.unfinished():
-        if run.status in (RunStatus.ADMITTED, RunStatus.RUNNING):
-            await ledger.record(
-                run.run_id, Fail(ExecutorCode.CANCELLED, "the turn running it was stopped")
-            )
+    ledger raises when it cannot be read or written. The ledger is scoped to
+    `key` here, whatever context the caller runs in."""
+    key_token = current_conversation_key.set(key)
+    id_token = current_conversation_id.set(f"{key[0]}/{key[1]}")
+    try:
+        for run in await ledger.unfinished():
+            if run.status in (RunStatus.ADMITTED, RunStatus.RUNNING):
+                await ledger.record(
+                    run.run_id, Fail(ExecutorCode.CANCELLED, "the turn running it was stopped")
+                )
+    finally:
+        current_conversation_id.reset(id_token)
+        current_conversation_key.reset(key_token)
 
 
 def _set_turn_context(
@@ -1463,11 +1520,35 @@ async def _unclaimed(
     return response
 
 
-# How long `/cancel` waits on a lock held with no live lease (a request
-# before its claim save, or a stream after its release) before it answers a
-# retryable 503, and how often it looks again meanwhile.
+# How long, by wall time, `/cancel` waits on a lock held with no live lease
+# (a request before its claim save, or a stream after its release) before it
+# answers a retryable 503.
 CANCEL_LOCK_WAIT_S = 5.0
-_CANCEL_POLL_S = 0.05
+
+
+async def _lock_or_claim(lock: asyncio.Lock, claimed: asyncio.Event, *, timeout: float) -> bool:
+    """Wait up to `timeout` for `lock` or for `claimed`, whichever comes
+    first. Returns whether this now holds `lock`; `False` when a claim
+    committed first or the time ran out."""
+    acquiring = asyncio.ensure_future(lock.acquire())
+    claiming = asyncio.ensure_future(claimed.wait())
+    try:
+        await asyncio.wait(
+            {acquiring, claiming}, timeout=max(timeout, 0), return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        claiming.cancel()
+        if not acquiring.done():
+            acquiring.cancel()
+        with suppress(asyncio.CancelledError):
+            await acquiring
+    if acquiring.cancelled():
+        return False
+    if claimed.is_set():
+        # The claim came first: decide again before holding the lock.
+        lock.release()
+        return False
+    return True
 
 
 def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRouter:
@@ -1502,6 +1583,18 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     # 409, not a bare 500.
                     conversation = await studio.store.load(principal, body.conversation_id)
                     assert conversation is not None
+            elif studio.store.stop_unread(principal, body.conversation_id):
+                # A Stop no party acted on, left by a stream whose close
+                # failed or whose lease lapsed, ends the turn it was for
+                # before this one begins.
+                refused = await _act_on_unread_stop(
+                    studio, principal, body.conversation_id, conversation
+                )
+                if refused is not None:
+                    lock.release()
+                    return refused
+                conversation = await studio.store.load(principal, body.conversation_id)
+                assert conversation is not None
             if (
                 body.component_ref is not None
                 and body.component_ref.intent is ComponentRefIntent.FOLLOW_UP
@@ -1721,26 +1814,32 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         can reach an instance before the first `/turn` has claimed the
         conversation there at all).
 
-        Every Stop answered 204 is read by exactly one party: the holder of
-        a live lease (its heartbeat while it drives the turn, the release
-        of its lease afterwards), or this route under the conversation lock
-        when no lease is live. Whoever reads it closes an open turn
-        `cancelled`, running or paused, and leaves a closed turn alone. The
-        one exception is the first Stop while a node holds the turn's
-        `StopScope` armed, which that node takes.
+        Every Stop answered 204 is acted on by exactly one party, which
+        records the Stop read in the write that acts (`StopRead`): the
+        holder of a live lease (its heartbeat while it drives the turn, the
+        release of its lease afterwards), the next claimant when that holder
+        could not act, or this route under the conversation lock when no
+        lease is live. Whoever acts closes an open turn `cancelled`, running
+        or paused; with no open turn, the next claim or release records the
+        Stop read. The one exception is the first Stop while a node holds
+        the turn's `StopScope` armed, which that node takes.
 
-        | When the Stop commits | Read by | Turn after | Client is told |
+        | When the Stop commits | Acted on by | Turn after | Client is told |
         |---|---|---|---|
         | Lease live, a node running | heartbeat | `cancelled` | `cancelled` frame |
         | Lease live, `StopScope` armed, first Stop | heartbeat, the scope | paused on the re-offered plan | `plan.proposed` |
         | The same, second Stop | heartbeat | `cancelled` | `cancelled` frame |
+        | The scope took the first Stop, then the client left | heartbeat, the scope | left running, abandoned by the next turn | nothing more |
         | Lease live, pause committed, the drive in after-commit work | heartbeat, `_settle` | `cancelled` | `cancelled` frame |
-        | Lease live, the segment returned paused, lease not yet cleared | the release | `cancelled`, pending cleared | `cancelled` frame after the pause frame, while the stream is open |
-        | Lease live, turn closed, lease not yet cleared | the release | unchanged | nothing more |
+        | Lease live, the segment returned paused, lease not yet released | the release, under the lease it keeps | `cancelled`, pending cleared | `cancelled` frame after the pause frame, while the stream is open; another request meanwhile answers 409 |
+        | Lease live, turn closed, lease not yet released | the release | unchanged | nothing more |
+        | The release kept the lease and closing failed, such as ending the turn's runs | the next claimant, once the lease lapses | `cancelled` | nothing more; the next `/turn` streams, an `/interrupt` answers 404 |
+        | The release's write failed or timed out | the next claimant, once the lease lapses | `cancelled` | nothing more; the next `/turn` streams, an `/interrupt` answers 404 |
         | No live lease, turn paused | this route, under the lock | `cancelled`, pending cleared | 204 |
         | No live lease, turn left running | this route, under the lock | `cancelled` once its runs are ended | 204, or 503 when they cannot be |
         | No live lease, no open turn | this route, under the lock, finding nothing open | unchanged | 204 |
         | Lock held here, no live lease | the claim's holder once it claims, or this route once the lock is free | as the row it lands on | 204, or 503 after `CANCEL_LOCK_WAIT_S` |
+        | The same, and the request then abandons its claim | the next claimant | `cancelled` | nothing more; the next `/turn` streams |
 
         A live segment, on any instance, is stopped through its lease:
         `request_cancel` records a Stop request on the conversation, and the
@@ -1750,15 +1849,18 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         reaches it without waiting for the beat; another instance's reads
         the request within `HEARTBEAT_INTERVAL_S`. A Stop that commits after
         the segment's last renewal is read by the release of the lease,
-        under the row lock in the transaction that clears it
+        under the row lock: a release that finds it unread on an open turn
+        keeps the lease and closes the turn under it before releasing
         (`StudioStore.release`, `StudioRunner._release`). This route answers
-        204 without waiting for either.
+        204 without waiting for either. Every claim (`/turn`, `/interrupt`,
+        and this route's own) acts on a Stop still unread before anything
+        else (`_act_on_unread_stop`, `_stop_open_turn`).
 
         A request on this instance that holds the lock with no lease live (a
         `/turn` or `/interrupt` before its claim save, or a stream after its
         release) is waited on: the Stop is recorded once the claim lands,
         or taken under the lock once it is free, and a retryable 503 is
-        answered after `CANCEL_LOCK_WAIT_S`.
+        answered after `CANCEL_LOCK_WAIT_S` of wall time.
 
         With no live segment on record anywhere, this takes the lock,
         reloads, and closes what is left: a turn paused on a question, or
@@ -1771,20 +1873,25 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         """
         principal = principal_for(authorization, settings=settings)
         lock = studio.store.lock_for(principal, body.conversation_id)
-        waited = 0.0
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CANCEL_LOCK_WAIT_S
         while True:
             if await studio.store.request_cancel(principal, body.conversation_id):
                 live = studio.store.current(principal, body.conversation_id)
                 if live is not None:
                     renew_lease_now(live)
                 return Response(status_code=204)
-            if not lock.locked():
+            # No live lease: take the lock, or, while a request on this
+            # instance holds it (a `/turn` or `/interrupt` before its claim
+            # save, or a stream after its release), wait for its claim to
+            # commit or for the lock, then decide again.
+            if await _lock_or_claim(
+                lock,
+                studio.store.claimed_event(principal, body.conversation_id),
+                timeout=deadline - loop.time(),
+            ):
                 break
-            # A request on this instance holds the lock with no live lease:
-            # a `/turn` or `/interrupt` before its claim save, or a stream
-            # after its release. Wait for the claim or the unlock, then
-            # decide again.
-            if waited >= CANCEL_LOCK_WAIT_S:
+            if loop.time() >= deadline:
                 return _tool_error_response(
                     ToolError(
                         error=ErrorCode.TRANSIENT_UNAVAILABLE,
@@ -1794,10 +1901,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     ),
                     status_code=503,
                 )
-            await asyncio.sleep(_CANCEL_POLL_S)
-            waited += _CANCEL_POLL_S
-        await lock.acquire()
         try:
+            if await studio.store.request_cancel(principal, body.conversation_id):
+                # Another instance claimed while this one waited.
+                return Response(status_code=204)
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
                 return Response(status_code=204)
@@ -1824,6 +1931,23 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             if conversation is None:
                 lock.release()
                 return _unknown_conversation_response(body.conversation_id)
+            if studio.store.stop_unread(principal, body.conversation_id):
+                # A Stop no party acted on ends the turn first, which leaves
+                # no pause to answer.
+                refused = await _act_on_unread_stop(
+                    studio, principal, body.conversation_id, conversation
+                )
+                await studio.store.load(principal, body.conversation_id)
+                if refused is not None or body.interrupt_id not in conversation.pending:
+                    lock.release()
+                    return refused or _tool_error_response(
+                        ToolError(
+                            error=ErrorCode.NOT_FOUND,
+                            retry=RetryMode.DO_NOT_RETRY,
+                            detail=f"no pending interrupt {body.interrupt_id!r} on this conversation",
+                        ),
+                        status_code=404,
+                    )
             pending = conversation.pending.get(body.interrupt_id)
             refusal = _interrupt_refusal(conversation.pending, body)
             if refusal is not None:

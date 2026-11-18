@@ -374,8 +374,9 @@ def _written_state(deps: OrchestratorDeps, held: Mapping[str, Any]) -> dict[str,
     later calls change the state. Each key is copied deep, except the spec
     blocks: a block the calls wrote (one that is not the object `held`, the
     blocks before the response, holds under its id) is copied deep, and the
-    rest are shared, since a block is replaced whole, never changed in place
-    (`harness.graph.state.stored_mapping`)."""
+    rest are shared: a writer replaces a block whole
+    (`harness.graph.state.stored_mapping`), so a shared block stays as the
+    event read it."""
     written: dict[str, Any] = {}
     for key in deps.view.written:
         if key not in deps.state:

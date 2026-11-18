@@ -27,9 +27,16 @@ different groups never conflict:
   conditional statement and leave `version` alone. `request_cancel` sets
   the boolean `lease_cancel`, as does any writer that knows only that flag.
   A renewal that finds it set clears it and records the Stop as a fresh id
-  (`lease_stop_id`) in the same update, and renewals then read the id and
-  never clear it, so a renewal whose acknowledgement is lost cannot drop the
-  Stop; a claim starts with neither.
+  (`lease_stop_id`) in the same update.
+
+A Stop stays unread (`StopRead.unread`) until a party acts on it and
+records the id it acted on (`stop_acted_id`) in the write that acts: the
+close of the turn `cancelled` (`harness.turn.store.TurnStore.finish`), a
+`StopScope` taking it (`acknowledge_stop`), or a claim or release that finds
+no open turn, which leaves nothing to stop (`_delta_write`). Nothing else
+clears the Stop columns, so a write that fails, a lease that lapses, or a
+claim that is abandoned leaves the Stop for whoever claims the open turn
+next.
 - `reserve_frames` extends the frame numbers the live segment may send,
   fenced on the segment and its lease being live.
 
@@ -252,7 +259,6 @@ def _serialize_segment(segment: Segment) -> dict[str, Any]:
         "id": segment.id,
         "owner": segment.owner,
         "expires_at": segment.expires_at,
-        "stop_id": segment.stop_id,
     }
 
 
@@ -263,7 +269,6 @@ def _deserialize_segment(value: Any) -> Segment | None:
         id=value["id"],
         owner=value["owner"],
         expires_at=value["expires_at"],
-        stop_id=value.get("stop_id"),
     )
 
 
@@ -505,18 +510,31 @@ class Renewal:
 
 @dataclass(frozen=True)
 class StopRead:
-    """The Stop request a release found on the lease it cleared, read under
-    the row lock in the transaction that clears it: the id a renewal
-    recorded (`stop_id`), and whether `lease_cancel` was still set, a
-    request no renewal has recorded yet (`flagged`)."""
+    """A conversation row's Stop columns: the latest Stop request's id
+    (`lease_stop_id`), the id of the last one acted on (`stop_acted_id`),
+    and whether `lease_cancel` is set, a request no renewal has given an id
+    yet. A Stop is unread until a party acts on it and records that in the
+    same write (module docstring)."""
 
     stop_id: str | None
+    acted_id: str | None
     flagged: bool
 
-    def unread(self, acted: str | None) -> bool:
-        """Whether this holds a Stop the segment, which acted on `acted`,
-        did not act on."""
-        return self.flagged or (self.stop_id is not None and self.stop_id != acted)
+    @classmethod
+    def from_row(cls, row: Any) -> StopRead:
+        return cls(stop_id=row.lease_stop_id, acted_id=row.stop_acted_id, flagged=row.lease_cancel)
+
+    @property
+    def unread(self) -> bool:
+        """Whether a Stop is recorded that no party has acted on."""
+        return self.flagged or (self.stop_id is not None and self.stop_id != self.acted_id)
+
+
+# Whether the conversation (the row being updated) has an open turn.
+_OPEN_TURN_SQL = (
+    "EXISTS (SELECT 1 FROM turn_cursors t WHERE t.conversation = conversations.id "
+    "AND t.status IN ('running', 'paused'))"
+)
 
 
 def _jsonb(value: Any) -> str | None:
@@ -526,7 +544,7 @@ def _jsonb(value: Any) -> str | None:
 
 _CONVERSATION_COLUMNS = (
     "id, version, turn_state, composition, lease_segment_id, lease_owner, "
-    "lease_expires_at, lease_stop_id, lease_cancel, seq_next, seq_reserved"
+    "lease_expires_at, lease_stop_id, stop_acted_id, lease_cancel, seq_next, seq_reserved"
 )
 
 
@@ -537,7 +555,6 @@ def _row_segment(row: Any) -> Segment | None:
         id=row.lease_segment_id,
         owner=row.lease_owner,
         expires_at=row.lease_expires_at,
-        stop_id=row.lease_stop_id,
     )
 
 
@@ -654,15 +671,23 @@ def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
             _check_column("segment id", segment.id, str)
             _check_column("segment owner", segment.owner, str)
             _check_column("segment expiry", segment.expires_at, (int, float))
+        # A claim or a release reads every Stop recorded so far when the
+        # conversation has no open turn, which leaves nothing to stop, and
+        # leaves an unread one in place for the open turn's next claimant.
         sets.append(
             "lease_segment_id = :segment_id, lease_owner = :owner, "
-            "lease_expires_at = :expires_at, lease_stop_id = :stop_id, lease_cancel = false"
+            "lease_expires_at = :expires_at, "
+            f"stop_acted_id = CASE WHEN {_OPEN_TURN_SQL} THEN stop_acted_id "
+            "WHEN lease_cancel THEN :minted ELSE lease_stop_id END, "
+            f"lease_stop_id = CASE WHEN lease_cancel AND NOT {_OPEN_TURN_SQL} THEN :minted "
+            "ELSE lease_stop_id END, "
+            f"lease_cancel = lease_cancel AND {_OPEN_TURN_SQL}"
         )
         params |= {
             "segment_id": segment.id if segment else None,
             "owner": segment.owner if segment else None,
             "expires_at": segment.expires_at if segment else None,
-            "stop_id": segment.stop_id if segment else None,
+            "minted": _wire_id("stop"),
         }
     rows: dict[str, list[dict[str, Any]]] = {}
     for key, value in delta.items():
@@ -755,6 +780,8 @@ class _RuntimeEntry:
     state: ConversationState | None = None
     baseline: dict[str, Any] = field(default_factory=dict)
     draft: tuple[ConversationState, ConversationState] | None = None
+    stop: StopRead = field(default_factory=lambda: StopRead(None, None, False))
+    claimed: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class StudioStore:
@@ -791,7 +818,8 @@ class StudioStore:
             "WHERE principal = :principal AND conversation_id = :conversation_id"
         )
         self._lock_conversation = text(
-            f"SELECT {_CONVERSATION_COLUMNS}, {time_sql} AS db_now FROM conversations "
+            f"SELECT {_CONVERSATION_COLUMNS}, {time_sql} AS db_now, "
+            f"{_OPEN_TURN_SQL} AS open_turn FROM conversations "
             "WHERE id = :pk FOR UPDATE"
         )
 
@@ -977,6 +1005,7 @@ class StudioStore:
         row, flat = stored
         entry.pk, entry.version, entry.read_at = row.id, row.version, row.db_now
         entry.read_stamp = stamp
+        entry.stop = StopRead.from_row(row)
         entry.seq_reserved, entry.claimed_reserved = row.seq_reserved, None
         durable = ConversationState(conversation_id=conversation_id)
         _apply_delta(durable, flat)
@@ -1087,6 +1116,8 @@ class StudioStore:
             self._take_draft(entry, target)
             if claimed is not None:
                 entry.held = claimed.id
+                entry.claimed.set()
+                entry.claimed = asyncio.Event()
             if reserved is not None:
                 entry.seq_reserved = reserved
                 entry.claimed_reserved = None
@@ -1322,7 +1353,7 @@ class StudioStore:
         change: Callable[[ConversationState], T],
         *,
         retried: bool = False,
-        seen: Callable[[StopRead], None] | None = None,
+        keep: Callable[[Any], bool] | None = None,
     ) -> T:
         """`checkpoint` and `change_canvas`'s one write. Under the row lock,
         fenced on `segment_id`: run `change` on a one-level copy of the live
@@ -1344,8 +1375,9 @@ class StudioStore:
         write as made. Any other row, another instance's claim and release
         since included, fences the write out.
 
-        `seen`, when given, is told the Stop request the locked row holds
-        (`StopRead`) before a write fenced on `segment_id` is made."""
+        `keep`, when given, is asked of the locked row whether the write
+        keeps the lease `change` clears; when it says so, the copy holds the
+        stored lease again before the diff is taken."""
         state = entry.state
         assert entry.pk is not None and state is not None
         async with entry.write_lock:
@@ -1364,8 +1396,6 @@ class StudioStore:
                     raise SegmentLost(
                         f"conversation {conversation_id!r} segment {segment_id!r} is not the lease"
                     )
-                if seen is not None and not landed:
-                    seen(StopRead(stop_id=row.lease_stop_id, flagged=row.lease_cancel))
                 stored = (
                     CompositionManifest.model_validate(row.composition) if row.composition else None
                 )
@@ -1373,6 +1403,8 @@ class StudioStore:
                 work = _shallow_copy(state)
                 work.composition = stored
                 result = change(work)
+                if keep is not None and not landed and keep(row):
+                    work.segment = fenced
                 changed = _changed_since(_serialize_durable(work), entry.baseline)
                 if landed:
                     logger.info(
@@ -1458,7 +1490,8 @@ class StudioStore:
                                 " WHERE principal = :principal"
                                 " AND conversation_id = :conversation_id"
                                 " AND lease_segment_id = :segment_id"
-                                " RETURNING lease_owner, lease_stop_id, lease_expires_at"
+                                " RETURNING lease_owner, lease_stop_id, stop_acted_id,"
+                                " lease_expires_at"
                             ),
                             {
                                 "principal": principal,
@@ -1474,14 +1507,10 @@ class StudioStore:
                 entry.lease_stamp = max(entry.lease_stamp, stamp)
                 self._note_segment(
                     entry,
-                    Segment(
-                        id=segment_id,
-                        owner=row.lease_owner,
-                        expires_at=row.lease_expires_at,
-                        stop_id=row.lease_stop_id,
-                    ),
+                    Segment(id=segment_id, owner=row.lease_owner, expires_at=row.lease_expires_at),
                 )
-                return Renewal(held=True, stop_id=row.lease_stop_id)
+                unread = row.lease_stop_id != row.stop_acted_id
+                return Renewal(held=True, stop_id=row.lease_stop_id if unread else None)
 
     def _note_segment(self, entry: _RuntimeEntry, segment: Segment) -> None:
         """Record a lease write in this instance's baseline, and in its live
@@ -1497,7 +1526,7 @@ class StudioStore:
         conversation_id: str,
         segment_id: str,
         *,
-        seen: Callable[[StopRead], None] | None = None,
+        keep: Callable[[Any], bool] | None = None,
     ) -> None:
         """The save of a streaming segment: this instance's changed keys,
         fenced on `segment_id`. Runs before every actionable pause frame and
@@ -1514,8 +1543,8 @@ class StudioStore:
         a `/composition` edit another instance made since this one last
         wrote the canvas reaches the stream's next frame. A transient
         database fault is retried until the lease's deadline (`_retrying`).
-        `seen` is told the Stop request each attempt's locked row holds
-        (`_fenced_save`).
+        `keep` decides from each attempt's locked row whether a write that
+        clears the lease keeps it (`_fenced_save`).
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
@@ -1523,13 +1552,13 @@ class StudioStore:
             entry,
             conversation_id,
             lambda retried: self._fenced_save(
-                entry, conversation_id, segment_id, lambda _work: None, retried=retried, seen=seen
+                entry, conversation_id, segment_id, lambda _work: None, retried=retried, keep=keep
             ),
         )
 
     async def release(
         self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0
-    ) -> StopRead | None:
+    ) -> bool:
         """The end-of-segment save: drop this segment's still-resuming
         pending entries, unless the stream stopped reading it while it ran
         (`ConversationState.unfinished_segment`), so a retry of the same
@@ -1550,14 +1579,20 @@ class StudioStore:
         then expires by its own TTL, which is what makes it safe to give up
         here.
 
-        Returns the Stop request the cleared lease held (`StopRead`), read
-        under the row lock in the transaction that clears it, so a Stop
-        either commits before that read and is returned here, or finds no
-        live lease. `None` when nothing was saved.
+        Returns whether the lease was kept for a Stop. Under the row lock, in
+        the transaction that would clear the lease, an unread Stop
+        (`StopRead.unread`) on an open turn keeps it: the caller acts on the
+        Stop under the lease and then releases again, and when acting fails
+        the lease lapses with the Stop still unread, for the next claimant.
+        With no open turn, the write that clears the lease reads every Stop
+        recorded so far (`_delta_write`). A Stop that commits after this
+        transaction finds no live lease, and `/cancel` takes it under the
+        conversation lock. `False` too when nothing was saved, which leaves
+        the lease to lapse and an unread Stop in place.
         """
         entry = self._runtime.get((principal, conversation_id))
         if entry is None or entry.state is None:
-            return None
+            return False
         return await run_to_completion(
             self._save_release(entry.state, principal, conversation_id, segment_id, timeout=timeout)
         )
@@ -1570,9 +1605,14 @@ class StudioStore:
         segment_id: str,
         *,
         timeout: float,
-    ) -> StopRead | None:
+    ) -> bool:
         """`release`'s save, run as its own task."""
-        read: list[StopRead] = []
+        kept: list[bool] = []
+
+        def keep(row: Any) -> bool:
+            kept.append(StopRead.from_row(row).unread and row.open_turn)
+            return kept[-1]
+
         try:
             async with asyncio.timeout(timeout):
                 if state.unfinished_segment != segment_id:
@@ -1580,8 +1620,8 @@ class StudioStore:
                 if state.segment is not None and state.segment.id == segment_id:
                     state.segment = None
                 try:
-                    await self.checkpoint(principal, conversation_id, segment_id, seen=read.append)
-                    return read[-1] if read else None
+                    await self.checkpoint(principal, conversation_id, segment_id, keep=keep)
+                    return bool(kept) and kept[-1]
                 except SegmentLost:
                     logger.warning(
                         "studio store release: conversation %s segment %s was already "
@@ -1611,7 +1651,7 @@ class StudioStore:
                 conversation_id,
                 timeout,
             )
-        return None
+        return False
 
     def _lose_segment(self, state: ConversationState, principal: str, conversation_id: str) -> None:
         """A release saved nothing because the segment was lost or the
@@ -1661,8 +1701,7 @@ class StudioStore:
                     await conn.execute(
                         text(
                             "UPDATE conversations SET lease_segment_id = NULL, "
-                            "lease_owner = NULL, lease_expires_at = NULL, lease_stop_id = NULL, "
-                            "lease_cancel = false "
+                            "lease_owner = NULL, lease_expires_at = NULL "
                             "WHERE principal = :principal "
                             "AND conversation_id = :conversation_id "
                             "AND lease_segment_id = :segment_id"
@@ -1708,8 +1747,7 @@ class StudioStore:
                             "WHERE principal = :principal AND conversation_id = :conversation_id "
                             "AND lease_segment_id IS NOT NULL "
                             f"AND lease_expires_at > {self._time_sql} "
-                            "RETURNING lease_segment_id, lease_owner, lease_expires_at, "
-                            "lease_stop_id"
+                            "RETURNING lease_segment_id, lease_owner, lease_expires_at"
                         ),
                         {"principal": principal, "conversation_id": conversation_id},
                     )
@@ -1722,10 +1760,50 @@ class StudioStore:
                     id=row.lease_segment_id,
                     owner=row.lease_owner,
                     expires_at=row.lease_expires_at,
-                    stop_id=row.lease_stop_id,
                 ),
             )
             return True
+
+    async def acknowledge_stop(
+        self, principal: str, conversation_id: str, segment_id: str, stop_id: str
+    ) -> bool:
+        """Record that `segment_id`'s turn acted on the Stop `stop_id` without
+        closing (a `harness.turn.node.StopScope` took it), fenced on the
+        segment and on `stop_id` still being the latest Stop. Returns
+        whether it was recorded. One conditional update of the Stop columns,
+        which leaves `version` alone."""
+        entry = self._entry(principal, conversation_id)
+        async with entry.write_lock, self._transaction() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "UPDATE conversations SET stop_acted_id = :stop_id "
+                        "WHERE principal = :principal AND conversation_id = :conversation_id "
+                        "AND lease_segment_id = :segment_id AND lease_stop_id = :stop_id "
+                        "RETURNING id"
+                    ),
+                    {
+                        "principal": principal,
+                        "conversation_id": conversation_id,
+                        "segment_id": segment_id,
+                        "stop_id": stop_id,
+                    },
+                )
+            ).first()
+        return row is not None
+
+    def stop_unread(self, principal: str, conversation_id: str) -> bool:
+        """Whether the row as last loaded on this instance held an unread
+        Stop (`StopRead.unread`). With no live lease, as when a route that
+        holds the conversation lock is about to claim, nothing changes the
+        Stop columns until a claim commits, and a claim moves the version
+        `save` compares."""
+        return self._runtime[(principal, conversation_id)].stop.unread
+
+    def claimed_event(self, principal: str, conversation_id: str) -> asyncio.Event:
+        """An event set when the next claim save on this instance commits
+        for `conversation_id`."""
+        return self._entry(principal, conversation_id).claimed
 
     @asynccontextmanager
     async def fenced(

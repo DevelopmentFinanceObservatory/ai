@@ -56,7 +56,7 @@ from typing import Any, Literal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from harness.studio_state import SegmentLost
+from harness.studio_state import SegmentLost, _wire_id
 
 # The state key whose mapping, spec blocks by spec id, the store keeps as
 # `turn_specs` rows rather than in the stored state.
@@ -237,6 +237,14 @@ def _cursor(row: Any, record_count: int, specs: _StoredSpecs) -> Cursor:
     )
 
 
+# Record every Stop recorded on the conversation as acted on, giving a
+# flagged one (`lease_cancel`) an id (`harness.studio_store.StopRead`).
+_READ_STOPS = text(
+    "UPDATE conversations SET "
+    "stop_acted_id = CASE WHEN lease_cancel THEN :minted ELSE lease_stop_id END, "
+    "lease_stop_id = CASE WHEN lease_cancel THEN :minted ELSE lease_stop_id END, "
+    "lease_cancel = false WHERE id = :conversation"
+)
 _FENCE = text(
     "SELECT id FROM conversations WHERE id = :conversation "
     "AND lease_segment_id = :segment_id FOR SHARE"
@@ -689,7 +697,10 @@ class TurnStore:
         `records`. `FAILED` and `ABANDONED` take an `error` and the others
         none. `state`, its spec blocks included, replaces the stored state
         when given. A paused turn's pause is dropped, so no answer can reach
-        it.
+        it. A close `CANCELLED` acts on every Stop recorded on the
+        conversation so far, and records that in the same transaction
+        (`_READ_STOPS`), so a Stop stays unread until its turn's close
+        commits.
 
         Raises:
             ValueError: `status` is not a closing status, or `error` is
@@ -703,7 +714,7 @@ class TurnStore:
             raise ValueError(f"a turn closed {status.value} takes an error only when it failed")
         async with self._engine.begin() as conn:
             await self._fence(conn, cursor.conversation, segment_id)
-            return await self._swap(
+            closed = await self._swap(
                 conn,
                 cursor,
                 statuses=(TurnStatus.RUNNING, TurnStatus.PAUSED),
@@ -713,3 +724,8 @@ class TurnStore:
                 state=state,
                 records=records,
             )
+            if status is TurnStatus.CANCELLED:
+                await conn.execute(
+                    _READ_STOPS, {"conversation": cursor.conversation, "minted": _wire_id("stop")}
+                )
+            return closed
