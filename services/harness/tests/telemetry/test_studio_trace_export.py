@@ -481,12 +481,15 @@ async def test_a_client_that_leaves_while_the_turn_runs_ends_the_turn_span_as_ca
     fake_langfuse: Any,
 ) -> None:
     """A turn that has not paused is closed by the disconnect: the `turn` span
-    ends once and the record carries the cancellation."""
+    ends once and the record carries the cancellation. The stream records
+    that the client left on its `_StreamEnding`, and the segment closes the
+    turn and ends its span as `StudioRunner._locked` does."""
     init_telemetry(service_name="harness")
     conversation = ConversationState(conversation_id=CONVERSATION)
     conversation.begin_turn()
     conversation.turn_user_message = "q"
     running = asyncio.Event()
+    ending = studio_module._StreamEnding()
 
     async def segment() -> AsyncGenerator[MessageDelta]:
         try:
@@ -498,10 +501,14 @@ async def test_a_client_that_leaves_while_the_turn_runs_ends_the_turn_span_as_ca
             yield MessageDelta(event="message.delta", seq=1, text="two")
         finally:
             # The segment's end, as `StudioRunner._locked` ends it.
-            conversation.end_segment_span("saved")
+            if ending.client_gone and not conversation.awaiting_answer:
+                conversation.close_turn(final_text="", error="cancelled")
+            conversation.end_segment_span("disconnected")
 
     async def consume() -> None:
-        async for _ in _sse_stream(segment(), conversation=conversation, heartbeat_seconds=15):
+        async for _ in _sse_stream(
+            segment(), conversation=conversation, heartbeat_seconds=15, ending=ending
+        ):
             pass
 
     task = asyncio.create_task(consume())

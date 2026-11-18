@@ -41,7 +41,7 @@ from contextlib import (
     nullcontext,
     suppress,
 )
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -94,6 +94,7 @@ from harness.studio_state import (
     DatabaseUnavailable,
     SegmentBusy,
     SegmentLost,
+    StreamLoss,
     _apply_operations,
     _end_stream,
     _next_manifest,
@@ -134,7 +135,6 @@ from harness.wire import (
     CompositionMutation,
     Done,
     ElicitationAnswer,
-    ElicitationRequest,
     ErrorCode,
     ErrorFrame,
     InterruptDecision,
@@ -546,57 +546,43 @@ async def _sse_stream(
     """Serialise frames as SSE `data:` lines, one loop owning all three
     transport concerns: `: ka` comment heartbeats while the next frame is
     slow; cancellation via the conversation's cancel event when one is
-    supplied; and client disconnect, which unwinds the same way minus the
-    frame nobody is left to read. A disconnect records a running turn as
-    cancelled (`close_turn`). A turn that is `awaiting_answer` (paused on an
-    interrupt) is left open, so `/interrupt` still resumes it on the
-    same trace, and `/cancel` or the next `begin_turn` still closes it out.
+    supplied; and client disconnect. This changes no turn state. What it
+    reads goes on `ending` (`_StreamEnding`), and the segment that `frames`
+    is (`StudioRunner._locked`) acts on it in its own task, before its
+    release saves the turn.
 
     The cancel event fires for two different reasons, told apart by
     `conversation.cancel_reason` (set alongside the event by whoever armed
     it, `POST /cancel` or `StudioRunner._locked`'s heartbeat). `"cancelled"`
-    (a client's Stop, from this instance or another) closes the turn and
-    yields the stream-fatal `cancelled` error frame, except
-    on a stream running a plan-card switch (`switch`, which arms
+    is a client's Stop, from this instance or another, except on a stream
+    running a plan-card switch (`switch`, which arms
     `conversation.switch_stop` and `SWITCH_STOP` for the frames this stream
     reads, and clears the one it armed when it ends): the first Stop there
-    sets `switch_stop` and the stream reads
-    on, ending on the `plan.proposed` the `switch` node offers with the
-    plan unchanged (`harness.graph.switch.SWITCH_STOP`). The cancel event
-    is armed again, so a second Stop ends the stream as any Stop does, and
-    so does the stream reaching `SWITCH_REOFFER_SECONDS` after the first
-    with no `plan.proposed`: a Stop never leaves a stream open. Once that
-    frame passes, the deadline is met, so a slow unwind after it leaves the
-    paused turn open.
-    `"segment_lost"` (this stream's segment lease was taken over: the
-    heartbeat's renewal, a card removal or the run ledger found it so) and
-    `"database_unavailable"` (the heartbeat's renewals or a card removal
-    could not reach the database before the lease's deadline) each yield a
-    stream-fatal `transient_unavailable` frame without closing the turn.
-    Another instance now owns the segment, or may claim it once its lease
-    lapses, and may still complete it. Either way the segment generator is
-    closed, unwinding the ADK run.
+    sets `switch_stop` and the stream reads on, ending on the
+    `plan.proposed` the `switch` node offers with the plan unchanged
+    (`harness.graph.switch.SWITCH_STOP`). The cancel event is armed again,
+    so a second Stop ends the stream as any Stop does, and so does the
+    stream reaching `SWITCH_REOFFER_SECONDS` after the first with no
+    `plan.proposed`: a Stop never leaves a stream open. Once that frame
+    passes, the deadline is met, so a slow unwind after it leaves the
+    paused turn open. `"segment_lost"` (this stream's segment lease was
+    taken over: the heartbeat's renewal, a card removal or the run ledger
+    found it so) and `"database_unavailable"` (the heartbeat's renewals or
+    a card removal could not reach the database before the lease's
+    deadline) are a loss: another instance now owns the segment, or may
+    claim it once its lease lapses, and may still complete it.
 
-    A Stop, a lost segment's transient-unavailable frame, or a stream-fatal
-    `error` frame from `frames`, first closes every Activity line the
-    stream left open (`_OpenSteps`) with a `failed` frame, since no step
-    will report on THIS stream again -- a resumed segment reports the same
-    `step_id` again, and the client's line-patching keys on it. A source
-    error frame is then re-stamped with the next `seq`, so `seq` still
-    rises along the stream. A disconnect sends nothing: the turn is
-    closed, and the segment's own `finally` discards its unsent step
-    records.
-
-    An ending frame, once sent, fixes how the stream ended, with one
-    exception. After `done` or a stream-fatal error frame, a Stop or a
-    loss sends nothing and changes nothing; after a pause frame, a Stop
-    still ends the stream on `cancelled` and a loss changes nothing. A
-    disconnect at any point closes a running turn only while the stream has
-    sent no ending frame. Once the segment's release has started
-    (`_StreamEnding.releasing`), neither a Stop nor a disconnect touches
-    the live state, which the release may already have read: a Stop sends
-    the `cancelled` frame alone, and the turn stays as the release saves
-    it.
+    A Stop or a loss is read once (`_StreamEnding.stop`), and the stream
+    reads `frames` on to their end: the segment's frames are cancelled
+    while they run (or the Stop thrown into them where they wait, when a
+    frame was ready), and the segment sends the frames that end the
+    stream. An ending frame, once sent, fixes how the stream ended, with
+    one exception: after `done` or a stream-fatal error frame, a Stop or a
+    loss is ignored, and after a pause frame a loss is, while a Stop still
+    ends the stream on `cancelled`. A stream that ignores one stops
+    listening, clearing the cancel event, so a later `/cancel` takes its
+    own path. A disconnect, at a wait or at any `yield`, records that the
+    client left, and unwinds the segment.
 
     A stream that has a `conversation` runs inside its segment's telemetry
     span (`ConversationState.in_turn_span`), on the turn's trace, so a turn
@@ -607,10 +593,9 @@ async def _sse_stream(
     generator and the event loop closes it later from another context, where
     leaving the scope detaches nothing (`common.telemetry.use_turn_span`). On
     either path the finished spans are exported (`flush_telemetry`) as the
-    stream ends, while the request still has CPU. When the cancel branch
-    is taken, the frame it sends is the stream's ending, and it is set on
-    `ending` (`_StreamEnding`) before the segment unwinds and its span
-    ends."""
+    stream ends, while the request still has CPU. Each frame is recorded
+    on `ending` as it goes out (`_StreamEnding.sent`), which names the
+    stream's ending, and its Activity lines (`_StreamEnding.open_steps`)."""
     turn_span: AbstractContextManager[None] = (
         conversation.in_turn_span() if conversation is not None else nullcontext()
     )
@@ -619,18 +604,15 @@ async def _sse_stream(
     # The loop time by which a stopped switch must have ended the stream.
     reoffer_by: float | None = None
     loop = asyncio.get_running_loop()
-    open_steps = _OpenSteps()
     switch_stop: asyncio.Event | None = None
     # The cancel event this stream last armed, so its `finally` clears only
     # that one and not the event of a request that took the conversation after
     # `_locked` released it.
     armed_cancel: asyncio.Event | None = None
-    # The last ending frame this stream sent: a pause frame, or `done` or a
-    # stream-fatal error frame (`final`).
-    sent: Literal["pause", "final"] | None = None
-    # Whether the cancel branch unwound the segment, which ran its release.
-    unwound = False
     next_frame: asyncio.Future[Any] | None = None
+    # A Stop read while a frame was ready: the frame goes out first, and
+    # the Stop is thrown into the segment where it then waits.
+    throw_stop = False
     if conversation is not None:
         armed_cancel = conversation.cancel_event = asyncio.Event()
         # A reason left by an earlier stream was aimed at that stream.
@@ -647,7 +629,12 @@ async def _sse_stream(
                 iterator = source.__aiter__()
                 try:
                     while True:
-                        next_frame = asyncio.ensure_future(anext(iterator))
+                        next_frame = asyncio.ensure_future(
+                            source.athrow(asyncio.CancelledError())
+                            if throw_stop
+                            else anext(iterator)
+                        )
+                        throw_stop = False
                         while True:
                             race = {next_frame, cancel_wait} if cancel_wait else {next_frame}
                             done, _ = await asyncio.wait(
@@ -690,112 +677,54 @@ async def _sse_stream(
                                     continue
                                 reason = conversation.cancel_reason
                                 lost = reason in ("segment_lost", "database_unavailable")
-                                if sent == "final" or (sent == "pause" and lost):
+                                # Read once: the stream stops listening, and
+                                # reads its frames to their end.
+                                cancel_wait = reoffer_by = None
+                                if ending.final or (ending.status == "paused" and lost):
                                     # The stream's ending frame went out: a
                                     # later Stop or loss sends nothing and
-                                    # changes nothing, and the stream reads
-                                    # on to its end.
-                                    cancel_wait = reoffer_by = None
+                                    # changes nothing. With no stream
+                                    # listening, `/cancel` takes its own path.
+                                    if conversation.cancel_event is armed_cancel:
+                                        conversation.cancel_event = None
                                     continue
-                                # The branch's frame is the stream's ending,
-                                # set before the unwind ends the segment's
-                                # span.
-                                ending.status = reason if lost else "cancelled"
-                                releasing = ending.releasing
-                                if not lost and not releasing:
-                                    # Closed before the segment unwinds, so
-                                    # its release saves the turn as stopped,
-                                    # with no pause left to answer, as
-                                    # `/cancel` closes a paused turn.
-                                    conversation.close_turn(
-                                        final_text=conversation.turn_final_text,
-                                        error=ErrorCode.CANCELLED.value,
-                                    )
-                                    conversation.pending.clear()
-                                # The segment may finish its frames before
-                                # the cancellation reaches it.
-                                with suppress(StopAsyncIteration):
-                                    await _unwind(next_frame)
-                                unwound = True
-                                if lost:
-                                    # Another instance took the segment over,
-                                    # or this one could not reach the database
-                                    # before the lease's deadline.
-                                    for closing in open_steps.close(
-                                        conversation, detail=SEGMENT_LOST_DETAIL
-                                    ):
-                                        yield _sse_data(closing)
-                                    yield _sse_data(segment_lost_frame(conversation))
-                                    return
-                                stopped = failure_sentence(
-                                    ErrorCode.CANCELLED, RetryMode.DO_NOT_RETRY
-                                )
-                                if releasing:
-                                    # The release may already have read the
-                                    # turn, so the live state is left as it
-                                    # read it: the `cancelled` frame alone
-                                    # goes out, numbered without advancing
-                                    # the turn's numbering.
-                                    seq = conversation.seq
-                                else:
-                                    for closing in open_steps.close(conversation, detail=stopped):
-                                        yield _sse_data(closing)
-                                    seq = conversation.next_seq()
-                                yield _sse_data(
-                                    ErrorFrame(
-                                        event="error",
-                                        seq=seq,
-                                        error=ToolError(
-                                            error=ErrorCode.CANCELLED,
-                                            retry=RetryMode.DO_NOT_RETRY,
-                                            detail=stopped,
-                                        ),
-                                    )
-                                )
-                                return
+                                ending.stop = reason if lost else "cancelled"
+                                if not ending.frames_done:
+                                    # The segment's frames end, and it sends
+                                    # the frames that end the stream
+                                    # (`StudioRunner._locked`).
+                                    if next_frame.done():
+                                        throw_stop = True
+                                    else:
+                                        next_frame.cancel()
+                                continue
                             yield ": ka\n\n"
+                        if next_frame.cancelled():
+                            # A segment with no ending frames of its own.
+                            return
                         try:
                             frame = next_frame.result()
                         except StopAsyncIteration:
                             return
-                        if conversation is not None and isinstance(frame, ErrorFrame):
-                            closed = open_steps.close(conversation, detail=frame.error.detail)
-                            for closing in closed:
-                                yield _sse_data(closing)
-                            if closed:
-                                frame = frame.model_copy(update={"seq": conversation.next_seq()})
-                        open_steps.observe(frame)
-                        if isinstance(frame, (PlanProposed, ElicitationRequest)):
-                            sent = "pause"
-                        elif isinstance(frame, (Done, ErrorFrame)):
-                            sent = "final"
+                        ending.open_steps.observe(frame)
+                        ending.sent(frame)
                         yield _sse_data(frame)
                 except (asyncio.CancelledError, GeneratorExit):
                     # CancelledError: the response task was cancelled while
                     # this waited. GeneratorExit: the consumer closed us at a
-                    # yield, a frame's or a heartbeat's. Without unwinding
-                    # here, aclosing(source) would find the anext still
-                    # running and raise. Either way the client is gone. A
-                    # running turn is recorded as cancelled, before the
-                    # segment's release saves it. A stream that sent its
-                    # ending frame, or whose release already started, leaves
-                    # the turn as that frame or the release has it, and a turn
-                    # paused for an answer stays open: `/interrupt` can still
-                    # resume it.
-                    if (
-                        conversation is not None
-                        and sent is None
-                        and not unwound
-                        and not ending.releasing
-                        and not conversation.awaiting_answer
-                    ):
-                        conversation.close_turn(
-                            final_text=conversation.turn_final_text,
-                            error=ErrorCode.CANCELLED.value,
-                        )
+                    # yield, a frame's or a heartbeat's. Either way the
+                    # client is gone, and the segment acts on it
+                    # (`StudioRunner._locked`). Without unwinding here,
+                    # aclosing(source) would find the anext still running
+                    # and raise.
+                    ending.client_gone = True
                     if next_frame is not None:
-                        with suppress(StopAsyncIteration):
+                        try:
                             await _unwind(next_frame)
+                        except StopAsyncIteration:
+                            pass
+                        except Exception:
+                            logger.exception("studio: a segment failed as its client left")
                     raise
         finally:
             if cancel_wait is not None:
@@ -1155,40 +1084,51 @@ class StudioRunner:
         The client never sees a frame that says "paused" or "done" before
         the store agrees. `done`'s frame is rebuilt to carry the canvas
         the checkpoint read back from the store, so a `/composition` edit
-        another instance made meanwhile reaches the client on it. A checkpoint
-        that fails (the segment was taken over, or the write itself failed) yields a
-        stream-fatal error frame instead of the pause or terminal frame it
-        would have carried, and ends the stream there. Once a `plan.approved`
-        frame is sent, the interrupt it answers records it
-        (`ConversationState.mark_approved_sent`) and is checkpointed: a lost
-        segment, or a database unreachable until the lease's deadline, ends
-        the stream the same way, and any other failure there is
-        logged alone. A card's canvas write in `frames` that loses the
-        segment, or cannot reach the database, ends `frames` with the same
-        frame, which is relayed, its number reserved first, like any other;
-        when that reservation fails too, the card write's frame goes out
-        alone, and the reservation's failure is logged with it. `frames` is
-        closed whenever this stops relaying it (`_closing`). This is the one
-        interception point for every route this runs under (`/turn`, its
-        edit-card branch, and `/interrupt`).
+        another instance made meanwhile reaches the client on it. A
+        checkpoint that fails (the segment was taken over, or the write
+        itself failed) yields a stream-fatal error frame instead of the
+        pause or terminal frame it would have carried, and ends the stream
+        there. Once a `plan.approved` frame is sent, the interrupt it answers
+        records it (`ConversationState.mark_approved_sent`) and is
+        checkpointed: a lost segment, or a database unreachable until the
+        lease's deadline, ends the stream the same way, and any other
+        failure there is logged alone. A card's canvas write in `frames`
+        that loses the segment, or cannot reach the database, ends `frames`
+        with the same frame, which is relayed, its number reserved first,
+        like any other; when that reservation fails too, the card write's
+        frame goes out alone, and the reservation's failure is logged with
+        it. `frames` is closed whenever this stops relaying it (`_closing`).
+        This is the one interception point for every route this runs under
+        (`/turn`, its edit-card branch, and `/interrupt`).
 
-        Every ending frame this relays or builds sets `ending` to its cause
-        before it goes out: `done` and `paused` for those frames once their
-        checkpoint landed, the loss (`stream_loss`) or `state_not_saved` for
-        a save that failed, and the turn's recorded code for a stream-fatal
-        error frame of `frames`."""
+        A stream-fatal error frame, from `frames` or built here, goes out
+        after a `failed` frame for every Activity line the stream left open
+        (`_StreamEnding.open_steps`), since no step will report on this
+        stream again (a resumed segment reports the same `step_id` again,
+        and the client's line-patching keys on it), renumbered past them so
+        `seq` still rises along the stream. Every ending frame is offered
+        to `ending` with its cause (`_StreamEnding.offer`): `done` and
+        `paused` once their checkpoint landed, the loss (`stream_loss`) or
+        `state_not_saved` for a save that failed, and the turn's recorded
+        code for a stream-fatal error frame of `frames`."""
 
-        def failed(what: str, exc: Exception) -> ErrorFrame:
+        def failed(what: str, exc: Exception) -> tuple[ErrorFrame, str]:
             _log_save_failure(what, conversation, segment_id, exc)
-            frame = _checkpoint_failed_frame(conversation, exc)
-            ending.status = (
+            status = (
                 stream_loss(exc)
                 if isinstance(exc, (SegmentLost, DatabaseUnavailable))
                 else HarnessCode.STATE_NOT_SAVED.value
             )
-            return frame
+            return _checkpoint_failed_frame(conversation, exc), status
 
-        card_write_lost: ErrorFrame | None = None
+        def ending_with(frame: ErrorFrame, status: str) -> list[Any]:
+            closing = ending.open_steps.close(conversation, detail=frame.error.detail)
+            if closing:
+                frame = frame.model_copy(update={"seq": conversation.next_seq()})
+            ending.offer(frame, status)
+            return [*closing, frame]
+
+        card_write_lost: tuple[ErrorFrame, str] | None = None
 
         async def relayed() -> AsyncGenerator[Any]:
             nonlocal card_write_lost
@@ -1198,20 +1138,27 @@ class StudioRunner:
                         yield frame
                 except (SegmentLost, DatabaseUnavailable) as exc:
                     card_write_lost = failed("card write", exc)
-                    yield card_write_lost
+                    yield card_write_lost[0]
 
         async with _closing(relayed(), "the relayed frames") as source:
             async for frame in source:
+                lost_card = (
+                    card_write_lost
+                    if card_write_lost is not None and frame is card_write_lost[0]
+                    else None
+                )
                 try:
                     await self.store.reserve_frames(principal, conversation_id, segment_id)
                 except Exception as exc:
-                    if frame is card_write_lost:
-                        # The card write that lost the segment has named the
-                        # stream's ending and built its frame already.
+                    if lost_card is not None:
+                        # The card write that lost the segment has logged its
+                        # loss and built its frame already.
                         _log_save_failure("frame reservation", conversation, segment_id, exc)
-                        yield frame
+                        batch = ending_with(*lost_card)
                     else:
-                        yield failed("frame reservation", exc)
+                        batch = ending_with(*failed("frame reservation", exc))
+                    for outgoing in batch:
+                        yield outgoing
                     return
                 event = getattr(frame, "event", None)
                 outgoing = frame
@@ -1220,19 +1167,26 @@ class StudioRunner:
                     try:
                         await self.store.checkpoint(principal, conversation_id, segment_id)
                     except Exception as exc:
-                        yield failed("checkpoint", exc)
+                        for outgoing in ending_with(*failed("checkpoint", exc)):
+                            yield outgoing
                         return
                     if event == "done":
                         outgoing = frame.model_copy(
                             update={"composition": conversation.composition}
                         )
-                if event == "done":
-                    ending.status = "done"
-                elif event in _CHECKPOINT_BEFORE_EVENTS:
-                    ending.status = "paused"
-                elif isinstance(frame, ErrorFrame) and frame is not card_write_lost:
-                    ending.status = _failure_status(conversation, frame)
-                yield outgoing
+                    ending.offer(outgoing, "done" if event == "done" else "paused")
+                if isinstance(frame, ErrorFrame):
+                    status = (
+                        lost_card[1]
+                        if lost_card is not None
+                        else conversation.turn_status
+                        if conversation.turn_recorded
+                        else frame.error.error.value
+                    )
+                    for outgoing in ending_with(frame, status):
+                        yield outgoing
+                else:
+                    yield outgoing
                 if event == "plan.approved":
                     # Saved once sent, so a retry of the same answer after this
                     # segment dies does not send it again. A crash before the
@@ -1242,7 +1196,10 @@ class StudioRunner:
                         await self.store.checkpoint(principal, conversation_id, segment_id)
                     except Exception as exc:
                         if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
-                            yield failed("checkpoint after plan.approved", exc)
+                            for outgoing in ending_with(
+                                *failed("checkpoint after plan.approved", exc)
+                            ):
+                                yield outgoing
                             return
                         _log_save_failure(
                             "checkpoint after plan.approved", conversation, segment_id, exc
@@ -1269,59 +1226,174 @@ class StudioRunner:
         A heartbeat task renews `segment_id` for as long as this generator is
         live, so the segment's lease outlives a single checkpoint's TTL push;
         it is cancelled and awaited before release, so it never races the
-        release's own write (`StudioStore.release`). Unwinding it,
-        releasing the segment (and this segment's resuming pending entries),
-        and releasing the local lock each sit in their own nested `finally`,
-        so a heartbeat that ends with a non-cancel exception still reaches
-        both releases; `_unwind` re-raises that exception once they have run.
-        A DB error the release cannot itself raise (it never does; see
-        `StudioStore.release`), and still could not strand the lock, since
+        release's own write (`StudioStore.release`). On every path out, the
+        heartbeat is stopped, then the segment released (with this
+        segment's resuming pending entries), then the local lock, so a
+        heartbeat that ends with a non-cancel exception still reaches both
+        releases; `_unwind` re-raises that exception once they have run. A
+        DB error the release cannot itself raise (it never does; see
+        `StudioStore.release`) could still not strand the lock, since
         releasing it does not depend on the release having succeeded.
 
-        The segment's span ends here, once the release ran
-        (`harness.studio_state.span_level`'s table). Its status is the cause
-        of the last ending frame the stream chose to send (`ending`, which
-        `_checkpointed` and `_sse_stream`'s cancel branch set); a stream that
-        chose none ended because its frames ran out (`failed`) or because it
-        was closed or cancelled first (`disconnected`). Its `stored` is the
-        turn as this instance last saved it (`StudioStore.stored_turn`),
-        read after the release, which runs to the end even when this
-        generator is cancelled while it waits.
+        Every change a Stop, a loss or a disconnect makes to the turn is made
+        here, in this generator's own task, before the release saves it;
+        `_sse_stream` only records what it read (`_StreamEnding`). A Stop or a
+        loss the stream read before the release ends the segment's frames
+        (cancelling them while they run). A Stop then closes the turn as
+        `cancelled` and drops its pending interrupts, unless the stream already
+        sent `done` or a stream-fatal frame, in which case the stream ignores
+        it. The frames that end the stream, a `failed` frame for every open
+        Activity line and then the `cancelled` frame or a lost segment's
+        `transient_unavailable` frame, are numbered (reserved first for a Stop)
+        before the release, which saves the turn as the Stop left it, and are
+        sent after it. A Stop read while the release writes is applied the same
+        way once it has, with a save of its own (`_stop_frames`); a loss read
+        then changes nothing. A client that leaves before the stream sent an
+        ending frame closes a running turn as `cancelled` before the release; a
+        turn paused for an answer stays open.
+
+        The segment's span ends here, after the last frame this sent
+        (`harness.studio_state.span_level`'s table). Its status is the
+        cause of the last ending frame the stream sent (`_StreamEnding`); a
+        stream that sent none ended because its frames ran out (`failed`) or
+        because it was closed or cancelled first (`disconnected`). Its
+        `stored` is the turn as this instance last saved it
+        (`StudioStore.stored_turn`), read after the release, which runs to
+        the end even when this generator is cancelled while it waits.
         """
         ending = ending or _StreamEnding()
         ran_out = False
+        released = False
+
+        async def release() -> None:
+            nonlocal released
+            released = True
+            await self.store.release(principal, conversation_id, segment_id)
 
         heartbeat = asyncio.ensure_future(
             self._heartbeat(principal, conversation_id, segment_id, conversation)
         )
         try:
-            async with _closing(
-                self._checkpointed(
-                    principal, conversation_id, segment_id, conversation, frames, ending=ending
-                ),
-                "the segment's frames",
-            ) as checked:
-                async for frame in checked:
-                    yield frame
-            ran_out = True
+            try:
+                async with _closing(
+                    self._checkpointed(
+                        principal, conversation_id, segment_id, conversation, frames, ending=ending
+                    ),
+                    "the segment's frames",
+                ) as checked:
+                    async for frame in checked:
+                        yield frame
+                ran_out = True
+            except asyncio.CancelledError:
+                if ending.stop is None:
+                    raise
+                # The stream read a Stop or a loss and cancelled the frames;
+                # the segment ends here as it asked.
+                task = asyncio.current_task()
+                if task is not None:
+                    task.uncancel()
+            ending.frames_done = True
+            await _unwind(heartbeat)
+            stop = ending.stop
+            closing = (
+                await self._stop_frames(
+                    principal, conversation_id, segment_id, conversation, ending
+                )
+                if stop is not None
+                else []
+            )
+            await release()
+            if stop is None and ending.stop == "cancelled":
+                closing = await self._stop_frames(
+                    principal, conversation_id, segment_id, conversation, ending, released=True
+                )
+            # From here a Stop finds no stream to end: `/cancel` takes its
+            # own path.
+            conversation.cancel_event = None
+            for frame in closing:
+                yield frame
         finally:
             try:
-                await _unwind(heartbeat)
+                if not released:
+                    try:
+                        await _unwind(heartbeat)
+                    finally:
+                        if (
+                            ending.client_gone
+                            and ending.status is None
+                            and not conversation.awaiting_answer
+                        ):
+                            conversation.close_turn(
+                                final_text=conversation.turn_final_text,
+                                error=ErrorCode.CANCELLED.value,
+                            )
+                        await release()
             finally:
                 try:
-                    ending.releasing = True
-                    await self.store.release(principal, conversation_id, segment_id)
+                    # The segment ends here on this instance, and its span
+                    # with it; the stream's end exports the span
+                    # (`_sse_stream`).
+                    conversation.end_segment_span(
+                        ending.status or ("failed" if ran_out else "disconnected"),
+                        stored=self._stored_turn(principal, conversation_id),
+                    )
                 finally:
-                    try:
-                        # The segment ends here on this instance, and its
-                        # span with it; the stream's end exports the span
-                        # (`_sse_stream`).
-                        conversation.end_segment_span(
-                            ending.status or ("failed" if ran_out else "disconnected"),
-                            stored=self._stored_turn(principal, conversation_id),
-                        )
-                    finally:
-                        conversation.lock.release()
+                    conversation.lock.release()
+
+    async def _stop_frames(
+        self,
+        principal: str,
+        conversation_id: str,
+        segment_id: str,
+        conversation: ConversationState,
+        ending: _StreamEnding,
+        *,
+        released: bool = False,
+    ) -> list[Any]:
+        """Apply the Stop or loss the stream read (`ending.stop`) to the
+        turn, before the release saves it, and build the frames that end the
+        stream: a `failed` frame for every open Activity line, then the
+        `cancelled` frame, the turn closed and its pending interrupts
+        dropped, or a lost segment's `transient_unavailable` frame, the turn
+        left as stored. A Stop's frames have their numbers reserved; when
+        that fails, they go out all the same, the failure logged. A Stop the
+        stream read while the release wrote (`released`) is applied after
+        it, as `/cancel` applies one to a segment that has ended: its frames
+        go out unreserved, and the closed turn, with their numbers, is saved
+        on its own, the failure of that save logged."""
+        if ending.stop != "cancelled":
+            closing = ending.open_steps.close(conversation, detail=SEGMENT_LOST_DETAIL)
+            frame = segment_lost_frame(conversation)
+            ending.offer(frame, ending.stop or "segment_lost")
+            return [*closing, frame]
+        conversation.close_turn(
+            final_text=conversation.turn_final_text, error=ErrorCode.CANCELLED.value
+        )
+        conversation.pending.clear()
+        stopped = failure_sentence(ErrorCode.CANCELLED, RetryMode.DO_NOT_RETRY)
+        closing = ending.open_steps.close(conversation, detail=stopped)
+        frame = ErrorFrame(
+            event="error",
+            seq=conversation.next_seq(),
+            error=ToolError(
+                error=ErrorCode.CANCELLED, retry=RetryMode.DO_NOT_RETRY, detail=stopped
+            ),
+        )
+        if released:
+            try:
+                await self.store.save(principal, conversation_id)
+            except Exception:
+                logger.exception(
+                    "studio: a Stop read while conversation %s released its segment was not saved",
+                    conversation_id,
+                )
+        else:
+            try:
+                await self.store.reserve_frames(principal, conversation_id, segment_id)
+            except Exception as exc:
+                _log_save_failure("frame reservation", conversation, segment_id, exc)
+        ending.offer(frame, "cancelled")
+        return [*closing, frame]
 
     def _stored_turn(self, principal: str, conversation_id: str) -> str | None:
         """`StudioStore.stored_turn`, or `None` (logged) when it fails, so
@@ -1357,26 +1429,45 @@ class StudioRunner:
 
 @dataclass
 class _StreamEnding:
-    """The cause of the last ending frame a segment's stream chose to send,
-    in the turn record's vocabulary (`harness.studio_state.span_level`'s
-    table): set by `StudioRunner._checkpointed` for the frames it relays or
-    builds and by `_sse_stream`'s cancel branch when it takes it, and read
-    once, as the segment's span ends (`StudioRunner._locked`). `None` while
-    the stream chose none. `releasing` is set by `_locked` as the segment's
-    release starts, after which the stream leaves the live state alone."""
+    """How one segment's stream ends, shared by `_sse_stream`, which reads
+    the client and the cancel event, and `StudioRunner._locked`, which
+    changes the turn in its own task.
+
+    `status` is the cause of the last ending frame the stream sent, in the
+    turn record's vocabulary (`harness.studio_state.span_level`'s table),
+    `None` while it sent none: `_checkpointed` and `_locked` offer each
+    ending frame with its cause (`offer`), and `_sse_stream` sets it as the
+    frame goes out (`sent`). `stop` is a Stop or a loss the stream read and
+    has not ignored, and `client_gone` a client that left; `_locked` acts on
+    both. `frames_done` is set by `_locked` once it has stopped relaying
+    frames, after which a Stop is read before the release instead of by
+    cancelling them. `open_steps` are the Activity lines the stream has
+    sent open."""
 
     status: str | None = None
-    releasing: bool = False
+    stop: Literal["cancelled"] | StreamLoss | None = None
+    client_gone: bool = False
+    frames_done: bool = False
+    open_steps: _OpenSteps = field(default_factory=_OpenSteps)
+    _offers: list[tuple[Any, str]] = field(default_factory=list)
 
+    def offer(self, frame: Any, status: str) -> None:
+        """Name `status` as the cause `frame` ends the stream with."""
+        self._offers.append((frame, status))
 
-def _failure_status(conversation: ConversationState, frame: ErrorFrame) -> str:
-    """The cause of a stream-fatal error frame of the segment's own frames:
-    the error code the turn's record names, else the frame's own code."""
-    if conversation.turn_recorded and conversation.turns:
-        recorded = conversation.turns[-1].get("error")
-        if recorded:
-            return recorded
-    return frame.error.error.value
+    def sent(self, frame: Any) -> None:
+        """Record that `frame` went out; an offered ending frame sets
+        `status`."""
+        for index, (offered, status) in enumerate(self._offers):
+            if offered is frame:
+                self.status = status
+                del self._offers[index]
+                return
+
+    @property
+    def final(self) -> bool:
+        """Whether the stream sent `done` or a stream-fatal frame."""
+        return self.status not in (None, "paused")
 
 
 def _log_save_failure(

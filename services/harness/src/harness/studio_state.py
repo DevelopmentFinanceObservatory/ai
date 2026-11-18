@@ -1003,7 +1003,16 @@ class ConversationState:
         still answer. Excludes an entry already resuming under a segment: a
         disconnect mid-resume closes the turn as cancelled rather than
         looking paused for `/interrupt` to answer again."""
-        return any(p.resuming_segment is None for p in self.pending.values())
+        return awaiting_answer(p.resuming_segment for p in self.pending.values())
+
+    @property
+    def turn_status(self) -> str:
+        """How the current turn stands (`turn_status`)."""
+        return turn_status(
+            recorded=self.turn_recorded,
+            record=self.turns[-1] if self.turns else None,
+            awaiting=self.awaiting_answer,
+        )
 
     def mark_approved_sent(self, segment_id: str) -> None:
         """Record that the stream of `segment_id` sent `plan.approved` for the
@@ -1247,9 +1256,6 @@ def span_level(status: str) -> EventLevel:
     | Stop mid-run, release fails  | `cancelled` | `cancelled`            | WARNING | `open`      |
     | Stop after the pause frame   | pause, then | `cancelled`            | WARNING | `cancelled` |
     |                              | `cancelled` |                        |         |             |
-    | Stop while the release       | `cancelled` | `cancelled`            | WARNING | as the      |
-    | writes                       |             |                        |         | release     |
-    |                              |             |                        |         | saved it    |
     | Loss after the pause frame   | pause       | `paused`               | DEFAULT | `paused`    |
     | Turn fails (model fault,     | error       | the recorded code      | ERROR   | the code,   |
     | `state_not_saved`)           |             |                        |         | or `open`   |
@@ -1285,6 +1291,23 @@ def stream_loss(exc: SegmentLost | DatabaseUnavailable) -> StreamLoss:
     ends its segment. Every place that ends a stream for either cause names
     it through this, so one cause gives one status."""
     return "segment_lost" if isinstance(exc, SegmentLost) else "database_unavailable"
+
+
+def awaiting_answer(resuming_segments: Iterable[str | None]) -> bool:
+    """Whether a turn whose pending interrupts are resuming under
+    `resuming_segments` awaits an answer: one of them is resuming under
+    none (`ConversationState.awaiting_answer`)."""
+    return any(segment is None for segment in resuming_segments)
+
+
+def turn_status(*, recorded: bool, record: Mapping[str, Any] | None, awaiting: bool) -> str:
+    """How a turn stands: `done` or the error code its `record` names once
+    `recorded`, `paused` while it is `awaiting` an answer, and `open`
+    otherwise. Read from the live state (`ConversationState.turn_status`)
+    and from the store's baseline (`StudioStore.stored_turn`)."""
+    if recorded and record is not None:
+        return record.get("error") or "done"
+    return "paused" if awaiting else "open"
 
 
 @dataclass(frozen=True)
