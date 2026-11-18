@@ -560,10 +560,12 @@ def use_turn_span(handle: Any | None) -> Iterator[None]:
 
     It attaches a context token, and a token can only be detached in the
     context that made it. A block that an async generator holds open across a
-    `yield` is left in another context when the event loop closes the
-    generator after its task was cancelled; there is nothing to restore in that
-    context, so leaving the block there detaches nothing. Any other block is
-    entered and left on one task.
+    `yield` is left in another context when the generator is closed outside
+    the task that iterated it: by a response that closes its body in the
+    request task after the send task was cancelled (the harness's
+    `_ClaimedStream`), or by the event loop after its task was cancelled.
+    There is nothing to restore in that context, so leaving the block there
+    detaches nothing. Any other block is entered and left on one task.
     """
     attached: tuple[Any, contextvars.Token[bool]] | None = None
     if isinstance(handle, _TurnSpan):

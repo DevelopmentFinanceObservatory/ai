@@ -908,7 +908,8 @@ async def test_close_open_turns_closes_a_turn_with_a_block_that_does_not_convert
     adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch, changed: bool
 ) -> None:
     """The dry run and the apply list the same block, and so does an apply
-    whose write another instance moved first."""
+    whose write another instance moved first, under the outcome its turn
+    had."""
     await import_conversations(adk, apply=True)
     spec_id = next(iter(EXPECTED[FULL]["view"]["turn_specs"]))
     block = {**_mapping_block(), "spec_id": spec_id, "_bound_refs": "g7"}
@@ -942,6 +943,11 @@ async def test_close_open_turns_closes_a_turn_with_a_block_that_does_not_convert
     assert report.findings == dry.findings
     (finding,) = report.findings[turn]
     assert finding.endswith("does not convert: TypeError: _bound_refs is of type str")
+    outcome = "left open" if changed else "closed"
+    assert (
+        f"{outcome} with blocks as stored, which the turn loader drops: {turn}"
+        in report.render().splitlines()
+    )
     if changed:
         assert turn in report.changed
         return

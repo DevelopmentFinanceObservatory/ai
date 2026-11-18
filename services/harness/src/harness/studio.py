@@ -33,7 +33,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
 from contextlib import (
     AbstractContextManager,
     aclosing,
@@ -43,7 +43,6 @@ from contextlib import (
 )
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from functools import partial
 from typing import Any, Literal, override
 
 import anyio
@@ -62,6 +61,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
 )
 from google.genai import types
 from planner.plan import SEEDS_STATE_KEY, current_earlier_block, current_recorded_identity
+from starlette.requests import ClientDisconnect
 from starlette.types import Receive, Scope, Send
 
 from harness.approval import ApprovalDecision, ApprovalRecord
@@ -588,11 +588,13 @@ async def _sse_stream(
     span (`ConversationState.in_turn_span`), on the turn's trace, so a turn
     resumed by a second request exports on the same trace, and the task
     that produces each frame is created inside that scope. The scope is
-    left on the task that iterates the response. When the response task is
-    cancelled while this generator sits at a `yield`, Starlette abandons the
-    generator and the event loop closes it later from another context, where
-    leaving the scope detaches nothing (`common.telemetry.use_turn_span`). On
-    either path the finished spans are exported (`flush_telemetry`) as the
+    left on the task that iterates the response. When that task is
+    cancelled while this generator sits at a `yield`, `_ClaimedStream`
+    closes the generator as the response ends, in the request task. Under
+    ASGI spec 2.3 Starlette iterates the body in a task of its own, so the
+    close runs in another context, where leaving the scope detaches nothing
+    (`common.telemetry.use_turn_span`). On either path the finished spans
+    are exported (`flush_telemetry`) as the
     stream ends, while the request still has CPU. Each frame is recorded
     on `ending` as it goes out (`_StreamEnding.sent`), which names the
     stream's ending, and its Activity lines (`_StreamEnding.open_steps`)."""
@@ -1886,7 +1888,6 @@ async def _release_claim(
     segment_id: str | None,
     *,
     cause: BaseException | None = None,
-    status: str | None = None,
 ) -> None:
     """Let go of a request whose stream never started, on every path,
     cancellation included. A claim that never committed gives up its
@@ -1896,19 +1897,17 @@ async def _release_claim(
     and the segment's span, if one opened, ends `cancelled` when `cause`,
     the exception that ended the request, is this task's own cancellation
     (the client gone), and `failed` otherwise, a `CancelledError` an inner
-    task let out among them. `status`, when given, is the span's status
-    whatever the cause. Then `hold` lets go of the lock, whatever the span
-    end raised, and any span that ended is exported. It does nothing once
+    task let out among them. Then `hold` lets go of the lock, and any span
+    that ended is exported, whatever the span end raised. It does nothing once
     `hold` has let go: the working copy and the lease are then another
     request's."""
     if not hold.held:
         return
-    if status is None:
-        task = asyncio.current_task()
-        cancelled = (
-            isinstance(cause, asyncio.CancelledError) and task is not None and task.cancelling() > 0
-        )
-        status = "cancelled" if cancelled else "failed"
+    task = asyncio.current_task()
+    cancelled = (
+        isinstance(cause, asyncio.CancelledError) and task is not None and task.cancelling() > 0
+    )
+    status = "cancelled" if cancelled else "failed"
     ended = False
     try:
         ended = store.drop_draft(principal, conversation_id)
@@ -1916,13 +1915,15 @@ async def _release_claim(
             await store.drop_lease(principal, conversation_id, segment_id)
     finally:
         try:
-            live = store.current(principal, conversation_id)
-            if segment_id is not None and live is not None:
-                ended = live.end_segment_span(status) or ended
+            try:
+                live = store.current(principal, conversation_id)
+                if segment_id is not None and live is not None:
+                    ended = live.end_segment_span(status) or ended
+            finally:
+                hold.release()
         finally:
-            hold.release()
-        if ended:
-            await flush_telemetry()
+            if ended:
+                await flush_telemetry()
 
 
 async def _unclaimed(
@@ -1938,33 +1939,85 @@ async def _unclaimed(
     return response
 
 
+@dataclass(frozen=True)
+class _Claim:
+    """A request's claimed segment: what `_ClaimedStream` lets go of when
+    the segment's stream never does."""
+
+    studio: StudioRunner
+    principal: str
+    conversation_id: str
+    hold: _LockHold
+    segment_id: str
+
+
 class _ClaimedStream(StreamingResponse):
     """The SSE response of a claimed segment. Its body,
     `StudioRunner._segment_stream`, releases the segment and lets go of
     the request's lock hold as it ends. A body that never starts runs none
     of that: under ASGI spec 2.3 Starlette cancels the response's send
     task when the client has already left, possibly before the task pulls
-    the first frame. So once the response ends, this closes the body,
-    which runs the ending of a body suspended at a frame, and then lets go
-    of a claim the body never let go of (`_release_claim`, `disconnected`):
-    the lease dropped and the lock released."""
+    the first frame. So once the response ends, this closes the body, in
+    the request task, which runs the ending of a body suspended at a frame,
+    and then ends a claim the body never let go of as `_locked` ends one
+    (`_unstreamed`)."""
 
-    def __init__(
-        self, content: AsyncGenerator[str], *, let_go: Callable[[], Awaitable[None]]
-    ) -> None:
+    def __init__(self, content: AsyncGenerator[str], *, claim: _Claim) -> None:
         super().__init__(content, media_type=SSE_MEDIA_TYPE)
-        self._body = content
-        self._let_go = let_go
+        self._claim = claim
 
     @override
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        cause: BaseException | None = None
         try:
             await super().__call__(scope, receive, send)
+        except BaseException as exc:
+            cause = exc
+            raise
         finally:
             try:
-                await self._body.aclose()
+                if isinstance(self.body_iterator, AsyncGenerator):
+                    await self.body_iterator.aclose()
             finally:
-                await self._let_go()
+                # A response that returns with its body unstarted ended on
+                # the client's disconnect.
+                gone = cause is None or isinstance(
+                    cause, asyncio.CancelledError | ClientDisconnect | OSError
+                )
+                await self._unstreamed(gone=gone)
+
+    async def _unstreamed(self, *, gone: bool) -> None:
+        """End the claim when its stream never started, as `_locked` ends a
+        stream: a client gone (`gone`) closes a turn not paused for an
+        answer as `cancelled`, the release saves the turn and drops the
+        lease, the segment's span ends `disconnected`, or `failed` when the
+        response failed otherwise, the hold lets go and the span is
+        exported. Nothing once the hold has let go."""
+        claim = self._claim
+        if not claim.hold.held:
+            return
+        store = claim.studio.store
+        conversation = store.current(claim.principal, claim.conversation_id)
+        try:
+            if gone and conversation is not None and not conversation.awaiting_answer:
+                conversation.close_turn(
+                    final_text=conversation.turn_final_text, error=ErrorCode.CANCELLED.value
+                )
+            await store.release(claim.principal, claim.conversation_id, claim.segment_id)
+        finally:
+            try:
+                try:
+                    if conversation is not None:
+                        conversation.end_segment_span(
+                            "disconnected" if gone else "failed",
+                            stored=claim.studio._stored_turn(
+                                claim.principal, claim.conversation_id
+                            ),
+                        )
+                finally:
+                    claim.hold.release()
+            finally:
+                await flush_telemetry()
 
 
 def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRouter:
@@ -2118,16 +2171,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     ),
                 )
             claimed = segment_id
-            # A response whose body never starts lets go of the claim.
-            let_go = partial(
-                _release_claim,
-                studio.store,
-                principal,
-                body.conversation_id,
-                hold,
-                segment_id,
-                status="disconnected",
-            )
+            claim = _Claim(studio, principal, body.conversation_id, hold, segment_id)
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
             if abandoned is not None:
@@ -2179,7 +2223,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         ),
                         hold=hold,
                     ),
-                    let_go=let_go,
+                    claim=claim,
                 )
             text = body.message if chip_label is None else f"Count {chip_label}."
             message = types.Content(role="user", parts=[types.Part.from_text(text=text)])
@@ -2196,7 +2240,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         hold=hold,
                     )
                 ),
-                let_go=let_go,
+                claim=claim,
             )
         except BaseException as exc:
             # The stream wrapper normally releases the segment and the lock.
@@ -2462,16 +2506,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         # resuming under the dropped segment with the answer recorded, so a
         # retry of the same answer claims at once and resumes. The turn lines
         # added below stay unsaved, and the retry's load reads the row afresh.
-        # A response whose body never starts lets go the same way.
-        let_go = partial(
-            _release_claim,
-            studio.store,
-            principal,
-            body.conversation_id,
-            hold,
-            segment_id,
-            status="disconnected",
-        )
+        claim = _Claim(studio, principal, body.conversation_id, hold, segment_id)
         try:
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
@@ -2513,7 +2548,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         _rejected(),
                         hold=hold,
                     ),
-                    let_go=let_go,
+                    claim=claim,
                 )
 
             if pending.kind == "elicitation":
@@ -2602,7 +2637,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         switch=switching,
                     )
                 ),
-                let_go=let_go,
+                claim=claim,
             )
         except BaseException as exc:
             await _release_claim(

@@ -9227,7 +9227,8 @@ async def test_a_claim_whose_span_end_raises_still_releases_the_lock(
 ) -> None:
     """`/turn` claims, then the leftover session it met cannot be replaced.
     Ending the claimed segment's span raises as the request lets go; the
-    lock is released all the same."""
+    lock is released all the same, and the span the working copy's drop
+    ended is exported."""
     app = _app(_text("Hello."))
     studio = app.state.studio
     await studio.runner.session_service.create_session(
@@ -9240,22 +9241,35 @@ async def test_a_claim_whose_span_end_raises_still_releases_the_lock(
     def broken_end(self: Any, status: str, **kwargs: Any) -> bool:
         raise RuntimeError("telemetry is down")
 
+    flushes: list[str] = []
+
+    async def flush() -> None:
+        flushes.append("flush")
+
     monkeypatch.setattr(studio, "_replace_leftover_session", unavailable)
     monkeypatch.setattr(studio_state_module.ConversationState, "end_segment_span", broken_end)
+    monkeypatch.setattr(studio.store, "drop_draft", lambda *_: True)
+    monkeypatch.setattr(studio_module, "flush_telemetry", flush)
 
     async with _client(app) as client:
         with pytest.raises(RuntimeError, match="telemetry is down"):
             await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
 
     assert not studio.store.lock_for(PRINCIPAL, CONVERSATION).locked()
+    assert flushes == ["flush"]
 
 
-async def test_a_client_gone_before_the_body_starts_leaves_no_lock_or_lease() -> None:
+@pytest.mark.parametrize("send_fails", [False, True], ids=["client-gone", "send-fails"])
+async def test_a_client_gone_before_the_body_starts_leaves_no_lock_or_lease(
+    send_fails: bool,
+) -> None:
     """Under ASGI spec 2.3 Starlette reads the client's disconnect beside
     the body. A client already gone ends the response before the body's
     first frame is pulled, so the stream's own ending never runs. The lock
-    is released and the lease dropped all the same, and the next `/turn`
-    claims."""
+    is released and the lease dropped all the same, the turn is recorded
+    `cancelled` as a client gone a frame later records it, and the next
+    `/turn` claims. A response whose first send fails leaves the turn open
+    instead, for the next `/turn` to close."""
     app = _app(_text("Hello."), _text("Again."))
     store = app.state.studio.store
     body = json.dumps(_turn_body("hi")).encode()
@@ -9266,6 +9280,8 @@ async def test_a_client_gone_before_the_body_starts_leaves_no_lock_or_lease() ->
         received += 1
         if received == 1:
             return {"type": "http.request", "body": body, "more_body": False}
+        if send_fails:
+            await asyncio.Event().wait()
         return {"type": "http.disconnect"}
 
     sent: list[dict[str, Any]] = []
@@ -9274,6 +9290,8 @@ async def test_a_client_gone_before_the_body_starts_leaves_no_lock_or_lease() ->
         # A server's send yields to the loop, where the disconnect's
         # cancellation lands before the body is pulled.
         await asyncio.sleep(0)
+        if send_fails:
+            raise RuntimeError("the send failed")
         sent.append(message)
 
     scope = {
@@ -9295,7 +9313,11 @@ async def test_a_client_gone_before_the_body_starts_leaves_no_lock_or_lease() ->
         "server": ("test", 80),
     }
 
-    await asyncio.wait_for(app(scope, receive, send), timeout=10)
+    if send_fails:
+        with pytest.raises(RuntimeError, match="the send failed"):
+            await asyncio.wait_for(app(scope, receive, send), timeout=10)
+    else:
+        await asyncio.wait_for(app(scope, receive, send), timeout=10)
 
     assert not any(message.get("body") for message in sent)
     assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
@@ -9303,6 +9325,9 @@ async def test_a_client_gone_before_the_body_starts_leaves_no_lock_or_lease() ->
         PRINCIPAL, CONVERSATION
     )
     assert stored is not None and stored.segment is None
+    assert stored.turn_recorded is not send_fails
+    if not send_fails:
+        assert stored.turns[-1]["error"] == "cancelled"
     async with _client(app) as client:
         again = await _stream(client, "/api/studio/turn", _turn_body("again"))
     assert _frame(again, "done")

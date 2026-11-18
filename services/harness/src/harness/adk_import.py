@@ -83,12 +83,17 @@ Verbs:
   lapsed lease are dropped. A turn the `turn_cursors` table holds a row
   for, by (conversation, turn_index), is left open and listed: it was
   opened there, under the same number as an ADK turn session left behind.
-  A writer of `turn_cursors` inserts that row under `FOR SHARE` on the
-  conversation's row, and the job reads it under the `FOR UPDATE` its
-  closing write takes, so it sees every such turn committed before its
-  write. Whether the table exists is read once, as the run starts. A block
-  that does not convert is kept as stored, as `import` keeps one, and
-  reported. A diverged conversation is
+  A turn opens in `turn_cursors` only under the conversation's lease: its
+  writer first commits the lease and the turn index on the conversation's
+  row, then inserts the turn's row under `FOR SHARE` on the conversation's
+  row where `lease_segment_id` is its lease. The closing write refuses a
+  live lease it does not hold (`ConversationStale`, listed as changed),
+  reads `turn_cursors` under its `FOR UPDATE` on the same row, and clears
+  the lease. So a turn whose row committed, or waits to commit, before
+  that lock is left open, and an insert that waits behind the lock finds
+  the lease gone and opens no turn. Whether the table exists is read once,
+  as the run starts. A block that does not convert is kept as stored, as
+  `import` keeps one, and reported. A diverged conversation is
   left alone and listed, and fails the run: its rows lack the turns ADK
   holds, so `--prefer-adk` must take ADK's copy first. A conversation
   whose close fails is refused and left open, and the run goes on with
@@ -167,6 +172,7 @@ from harness.studio_store import (
     AdkBridge,
     ConversationHeld,
     ConversationStale,
+    SaveRefusedError,
     StudioStore,
     TurnSpecs,
     _apply_delta,
@@ -1601,9 +1607,8 @@ class CloseReport:
             lines.append(f"left open, refused: {name}")
             lines += [f"  {reason}" for reason in reasons]
         for name, found in self.findings.items():
-            lines.append(
-                f"{would}closed with blocks as stored, which the turn loader drops: {name}"
-            )
+            outcome = f"{would}closed" if name in self.closed else "left open"
+            lines.append(f"{outcome} with blocks as stored, which the turn loader drops: {name}")
             lines += [f"  {finding}" for finding in found]
         lines.append(
             f"{len(self.closed)} {would}closed, {len(self.live)} live, "
@@ -1691,9 +1696,8 @@ async def _close_one(
         return
     turn_index = state.turn_index
 
-    async def not_in_turn_cursors(conn: AsyncConnection, locked: int) -> None:
-        if await _turn_cursor_exists(conn, locked, turn_index):
-            raise _TurnCursorExistsError
+    async def not_in_turn_cursors(conn: AsyncConnection, locked: int) -> bool:
+        return not await _turn_cursor_exists(conn, locked, turn_index)
 
     if pk is not None and not apply:
         async with engine.connect() as conn:
@@ -1716,7 +1720,7 @@ async def _close_one(
         await store.save(
             principal, conversation_id, guard=not_in_turn_cursors if pk is not None else None
         )
-    except _TurnCursorExistsError:
+    except SaveRefusedError:
         # Left open, so none of its blocks is closed as stored.
         report.findings.pop(name, None)
         report.in_turn_cursors.append(name)
@@ -1724,10 +1728,6 @@ async def _close_one(
         report.changed.append(name)
     else:
         report.closed.append(name)
-
-
-class _TurnCursorExistsError(Exception):
-    """`turn_cursors` holds the open turn."""
 
 
 async def _turn_cursor_exists(conn: AsyncConnection, pk: int, turn_index: int) -> bool:

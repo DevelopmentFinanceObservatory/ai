@@ -546,6 +546,10 @@ class ConversationStale(Exception):  # noqa: N818 -- named for the wire 409
     `/interrupt` answer 409."""
 
 
+class SaveRefusedError(Exception):
+    """`StudioStore.save`'s `guard` refused the write."""
+
+
 class ConversationExists(Exception):  # noqa: N818 -- named for the race it reports
     """`StudioStore.create` lost the race to create the conversation."""
 
@@ -1111,7 +1115,7 @@ class StudioStore:
         conversation_id: str,
         state: ConversationState | None = None,
         *,
-        guard: Callable[[AsyncConnection, int], Awaitable[None]] | None = None,
+        guard: Callable[[AsyncConnection, int], Awaitable[bool]] | None = None,
     ) -> None:
         """Write this instance's changed durable fields, compare-and-swapped
         on the turn state's version. Given `state`, the working copy `draft`
@@ -1137,15 +1141,16 @@ class StudioStore:
 
         `guard`, when given, runs in the write's transaction once the row is
         locked and its version and lease pass, with the transaction's
-        connection and the locked row's id. A raise from it aborts the
-        write.
+        connection and the locked row's id, and returns whether the write
+        may go ahead. It runs on a save with nothing changed too. Raises
+        `SaveRefusedError`, with nothing written, when it returns `False`.
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
         target = state if state is not None else entry.state
         async with entry.write_lock:
             delta = _changed_since(_serialize_durable(target), entry.baseline)
-            if not delta:
+            if not delta and guard is None:
                 self._take_draft(entry, target)
                 return
             claimed = _deserialize_segment(delta.get(_KEY_SEGMENT))
@@ -1161,13 +1166,17 @@ class StudioStore:
                     and stored_lease.id not in {entry.held, claimed.id if claimed else None}
                 ):
                     raise ConversationStale(conversation_id)
-                if guard is not None:
-                    await guard(conn, entry.pk)
+                if guard is not None and not await guard(conn, entry.pk):
+                    raise SaveRefusedError(conversation_id)
                 if claimed is not None and entry.claim_resumes and row.seq_reserved > target.seq:
                     target.seq = row.seq_reserved
                     reserved = row.seq_reserved + SEQ_BLOCK
                     delta = _changed_since(_serialize_durable(target), entry.baseline)
-                version = await self._write(conn, entry.pk, delta, seq_reserved=reserved)
+                version = (
+                    await self._write(conn, entry.pk, delta, seq_reserved=reserved)
+                    if delta
+                    else row.version
+                )
             entry.version = version
             entry.baseline.update(delta)
             self._take_draft(entry, target)
