@@ -384,17 +384,18 @@ class _TurnSpan:
 
 
 def start_turn_span(external_id: str, *, session_id: str | None = None) -> Any | None:
-    """Open one root span for a unit of work identified by `external_id`
-    (a harness turn's wire `trace_id`, say). Returns an opaque handle for
+    """Open a root span for a piece of work identified by `external_id` (a
+    harness turn's wire `trace_id`, say). Returns an opaque handle for
     `use_turn_span` and `end_turn_span`, or `None` when telemetry never came
     up or opening the span itself errors; either way the caller proceeds
     untraced rather than failing on it.
 
     The span is opened inside a private copy of the caller's context, so it is
     not current on the caller's task and nothing is left attached to it.
-    Spans nest under it only inside `use_turn_span(handle)`. That is what lets
-    one turn span cover several requests: each request's stream attaches the
-    same span for its own duration.
+    Spans nest under it only inside `use_turn_span(handle)`. The harness opens
+    one per segment of a turn, the stretch one request streams, so a turn
+    paused for an answer has a span for each request that ran it, each a root
+    observation on the same trace id.
 
     Only the Langfuse backend gets an exact match: `Langfuse.create_trace_id`
     seeded on `external_id` is the SDK's own documented pattern for
@@ -405,7 +406,8 @@ def start_turn_span(external_id: str, *, session_id: str | None = None) -> Any |
     `dfo.external_id` attribute, for a text search over the same value. A
     generic OTLP endpoint (no Langfuse) has no equivalent deterministic-id
     call in the plain OTel SDK, so there `external_id` goes on the span as
-    that same attribute alone, filterable in whatever reads the export.
+    that same attribute alone, filterable in whatever reads the export, and
+    each span starts a trace of its own.
 
     `session_id` is the Langfuse session the turn belongs to, so turns that
     share it group in Langfuse's Sessions view. It and the trace name
@@ -593,17 +595,19 @@ def end_turn_span(
     response: Any = None,
     error: str | None = None,
     level: EventLevel = "ERROR",
+    attributes: Mapping[str, str] | None = None,
 ) -> None:
     """Close a span opened by `start_turn_span`. A no-op for `None`.
 
     On Langfuse, `request` and `response` become the input and output of the
-    turn's observation, which is the trace's root, so they are the trace's
-    overall input and output and what an evaluator on that observation reads.
-    An `error` (a machine-readable code, never exception text) sets the
-    observation's level to `level`, `ERROR` by default, with `error` as its
-    status message; `WARNING` marks an ending that is no failure, such as a
-    client that left a turn a later request carries on. Off Langfuse all of
-    these are ignored.
+    span's observation, which is what an evaluator on that observation reads.
+    Several spans opened on one `external_id` are several root observations
+    on one trace, and the trace's own input and output are those of whichever
+    root Langfuse ingests last. An `error` (a machine-readable code, never
+    exception text) sets the observation's level to `level`, `ERROR` by
+    default, with `error` as its status message. Off Langfuse all four are
+    ignored. `attributes` go on the span itself, on any backend, and on
+    Langfuse into the observation's metadata as well.
 
     Callable from any asyncio task: the span's scope is exited in the context
     it was entered in. Swallows any error from closing it, since telemetry
@@ -611,6 +615,13 @@ def end_turn_span(
     """
     if not isinstance(handle, _TurnSpan):
         return
+    if attributes:
+        try:
+            from opentelemetry import trace
+
+            trace.get_current_span(handle.otel_context).set_attributes(dict(attributes))
+        except Exception:
+            logger.debug("failed to set a turn span's attributes -- continuing", exc_info=True)
     if handle.observation is not None:
         try:
             handle.observation.update(
@@ -618,6 +629,7 @@ def end_turn_span(
                 output=response,
                 level=level if error else None,
                 status_message=error or None,
+                **({"metadata": dict(attributes)} if attributes else {}),
             )
         except Exception:
             logger.debug("failed to record a turn's input and output -- continuing", exc_info=True)

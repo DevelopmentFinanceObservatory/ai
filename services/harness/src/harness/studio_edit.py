@@ -45,7 +45,6 @@ from harness.studio_state import (
     drawn_series_ids,
 )
 from harness.studio_translate import (
-    _checkpoint_failed_frame,
     _RecordingExecutor,
     _stream_fatal,
     failure_detail,
@@ -105,7 +104,9 @@ async def edit_frames(
 
     Failures serialise INTO the stream as a stream-fatal error frame,
     exactly like `_frames` -- a malformed model draft must not kill the
-    transport with no error frame.
+    transport with no error frame. A lost segment or an unreachable database
+    propagates, and the stream relaying this ends on it
+    (`StudioRunner._checkpointed`).
     """
     try:
         async for frame in _edit_flow(
@@ -116,14 +117,12 @@ async def edit_frames(
             message=message,
         ):
             yield frame
-    except (SegmentLost, DatabaseUnavailable) as exc:
-        # The card's write fenced out by another instance's takeover, which
-        # finishes the turn, or one that could not reach the database before
-        # the lease's deadline (`StudioStore.change_canvas`).
-        logger.warning(
-            "studio edited card write failed (trace_id=%s): %s", conversation.trace_id, exc
-        )
-        yield _checkpoint_failed_frame(conversation, exc)
+    except (SegmentLost, DatabaseUnavailable):
+        # The card's write fenced out by another instance's takeover, or one
+        # that could not reach the database before the lease's deadline
+        # (`StudioStore.change_canvas`), ends the stream where every save
+        # that loses the segment does (`StudioRunner._checkpointed`).
+        raise
     except Exception as exc:
         logger.exception("studio edit turn failed (trace_id=%s)", conversation.trace_id)
         yield _stream_fatal(conversation, exc)

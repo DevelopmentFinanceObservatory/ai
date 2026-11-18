@@ -426,8 +426,9 @@ def _checkpoint_failed_frame(conversation: ConversationState, exc: Exception) ->
     """The stream-fatal frame a stream yields when its state cannot be
     saved: `StudioRunner._checkpointed` when a checkpoint before a pause or
     terminal frame, or a frame-number reservation, fails, in place of the
-    frame it would have carried, and the turn and edit streams when a
-    card's canvas write fails (`StudioStore.change_canvas`). A
+    frame it would have carried, and when a card's canvas write
+    (`StudioStore.change_canvas`) in the turn or edit stream it relays
+    raises `SegmentLost` or `DatabaseUnavailable`. A
     `SegmentLost` means another instance's claim has already outlived this
     one's TTL and now owns the conversation, and `DatabaseUnavailable` that
     the database stayed unreachable until the lease's deadline, so no close
