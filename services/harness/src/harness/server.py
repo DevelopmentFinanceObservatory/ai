@@ -242,7 +242,7 @@ async def _retry_startup_step(
 
 class _MigrationRefusedError(RuntimeError):
     """A migration raised a SQLSTATE beginning `DFA`, its own refusal to run
-    against this database (`0004_rename_adk_tables.sql`). The database does not
+    against this database (`0005_rename_adk_tables.sql`). The database does not
     change by waiting. The message leads with the SQLSTATE, which
     deploy/README.md lists with each refusal's manual step."""
 

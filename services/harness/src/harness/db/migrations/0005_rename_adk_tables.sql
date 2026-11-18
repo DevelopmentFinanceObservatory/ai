@@ -28,7 +28,11 @@
 --   DFA03  A table to rename is not owned by the current user, or the user
 --          lacks CREATE on its schema.
 --   DFA04  A relation or type named `adk_archive_<name>` already exists in
---          the schema, for a table, index or sequence to rename.
+--          the schema, for a table, index or sequence to rename, or a
+--          relation named `adk_archive_<table>` resolves through
+--          `search_path` in any schema, for a table to rename. So after the
+--          rename each `adk_archive_<table>` resolves to the table it
+--          archived, which the statements in `deploy/README.md` rely on.
 
 DO $$
 DECLARE
@@ -79,7 +83,7 @@ BEGIN
 
     IF cardinality(adk_present) > 0 AND cardinality(foreign_present) > 0 THEN
         RAISE EXCEPTION USING ERRCODE = 'DFA01', MESSAGE = format(
-            'ADK''s tables (%s) sit beside %s, which lack the columns of ADK''s tables of those names. 0004 refuses to rename a mixed layout. Rename the foreign tables, or ADK''s tables as deploy/README.md lists, by hand, then restart.',
+            'ADK''s tables (%s) sit beside %s, which lack the columns of ADK''s tables of those names. 0005 refuses to rename a mixed layout. Rename the foreign tables, or ADK''s tables as deploy/README.md lists, by hand, then restart.',
             array_to_string(adk_present, ', '), array_to_string(foreign_present, ', '));
     END IF;
 
@@ -106,12 +110,12 @@ BEGIN
         WHERE c.oid = object_oid;
         IF not_owner THEN
             RAISE EXCEPTION USING ERRCODE = 'DFA03', MESSAGE = format(
-                '%I.%I is owned by %I, not by the current user %I; 0004 cannot rename it. Run the migration as its owner, or change the owner, then restart.',
+                '%I.%I is owned by %I, not by the current user %I; 0005 cannot rename it. Run the migration as its owner, or change the owner, then restart.',
                 object_schema, object_name, owner_name, current_user);
         END IF;
         IF no_create THEN
             RAISE EXCEPTION USING ERRCODE = 'DFA03', MESSAGE = format(
-                'the current user %I lacks CREATE on schema %I, which renaming %I requires; 0004 cannot rename it. Grant CREATE on the schema, or run the migration as a user that has it, then restart.',
+                'the current user %I lacks CREATE on schema %I, which renaming %I requires; 0005 cannot rename it. Grant CREATE on the schema, or run the migration as a user that has it, then restart.',
                 current_user, object_schema, object_name);
         END IF;
     END LOOP;
@@ -126,9 +130,22 @@ BEGIN
         END IF;
         IF has_ledger_sessions AND NOT has_imports THEN
             RAISE EXCEPTION USING ERRCODE = 'DFA02', MESSAGE =
-                'ADK''s `sessions` holds ledger sessions and `adk_ledger_imports` holds no row, so the import never ran. 0004 refuses to rename the tables out from under the conversations. Run the import job of the image that holds it, or rename ADK''s tables by hand as deploy/README.md lists, then restart.';
+                'ADK''s `sessions` holds ledger sessions and `adk_ledger_imports` holds no row, so the import never ran. 0005 refuses to rename the tables out from under the conversations. Run the import job of the image that holds it, or rename ADK''s tables by hand as deploy/README.md lists, then restart.';
         END IF;
     END IF;
+
+    FOREACH table_name IN ARRAY renaming LOOP
+        CONTINUE WHEN to_regclass(table_name) IS NULL;
+        source := to_regclass('adk_archive_' || table_name);
+        IF source IS NOT NULL THEN
+            SELECT n.nspname INTO object_schema
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.oid = source;
+            RAISE EXCEPTION USING ERRCODE = 'DFA04', MESSAGE = format(
+                '%I.%I exists on search_path, so `adk_archive_%s` would not resolve to the renamed `%s`; 0005 refuses to rename it. Rename or drop it by hand, then restart.',
+                object_schema, 'adk_archive_' || table_name, table_name, table_name);
+        END IF;
+    END LOOP;
 
     FOREACH object_oid IN ARRAY renaming_oids LOOP
         SELECT c.relname, n.nspname INTO object_name, object_schema
@@ -138,7 +155,7 @@ BEGIN
            OR to_regtype(format('%I.%I', object_schema, 'adk_archive_' || object_name)) IS NOT NULL
         THEN
             RAISE EXCEPTION USING ERRCODE = 'DFA04', MESSAGE = format(
-                '%I.%I exists; 0004 refuses to rename `%s` onto it. Rename or drop it by hand, then restart.',
+                '%I.%I exists; 0005 refuses to rename `%s` onto it. Rename or drop it by hand, then restart.',
                 object_schema, 'adk_archive_' || object_name, object_name);
         END IF;
     END LOOP;

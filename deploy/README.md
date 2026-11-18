@@ -278,7 +278,7 @@ This image reads saved Studio conversations from the harness's own tables (`harn
 
 ## Renaming the ADK tables
 
-Migration `0004_rename_adk_tables.sql` renames ADK's `sessions`, `events`, `app_states`, `user_states` and `adk_internal_metadata` tables and the import job's `adk_ledger_imports` to `adk_archive_<name>`, in the schema each is in, and renames each table's indexes and owned sequences the same way. It drops nothing and changes no row. A renamed table keeps its rows, keys and foreign keys, and `adk_archive_events` still references `adk_archive_sessions`. The runtime user needs ownership of the tables and `CREATE` on their schema. A table is ADK's when it has the columns of ADK's tables, and tables resolve through `search_path`. `adk_ledger_imports` holds one row per imported conversation. Startup applies the migration, so deploying the image that carries it runs it.
+Migration `0005_rename_adk_tables.sql` renames ADK's `sessions`, `events`, `app_states`, `user_states` and `adk_internal_metadata` tables and the import job's `adk_ledger_imports` to `adk_archive_<name>`, in the schema each is in, and renames each table's indexes and owned sequences the same way. It drops nothing and changes no row. A renamed table keeps its rows, keys and foreign keys, and `adk_archive_events` still references `adk_archive_sessions`. The runtime user needs ownership of the tables and `CREATE` on their schema. A table is ADK's when it has the columns of ADK's tables, and tables resolve through `search_path`. `adk_ledger_imports` holds one row per imported conversation. Startup applies the migration, so deploying the image that carries it runs it.
 
 No revision that reads ADK's tables may take traffic once the migration commits. An instance of the ADK-serving image that starts afterwards recreates empty ADK tables and serves an empty conversation list. Its new rows then sit in neither the harness tables nor the archive, and its fresh tables block the rename-back below. Deploy the image that carries the migration only after the image that serves Studio from ADK, or from the first conversation tables, has stopped taking traffic.
 
@@ -287,18 +287,19 @@ Each check below stops startup at once with its own SQLSTATE and renames nothing
 - `DFA01`: a table of an ADK name lacks ADK's columns while another carries them. Rename the foreign table by hand. With no ADK table at all, tables of those names are left alone without a message.
 - `DFA02`: ADK's `sessions` holds rows of app `dfo_analyst_graph.ledger` and `adk_ledger_imports` holds no row, so the import never ran. Run the import job of the image that holds it. To discard ADK's conversations instead, drop ADK's five tables with the statement below.
 - `DFA03`: a table to rename is not owned by the user the migration runs as, or that user lacks `CREATE` on its schema. Run it as the owner or grant `CREATE`.
-- `DFA04`: a relation or type named `adk_archive_<name>` exists in the schema, for a table, index or sequence to rename. Rename or drop it.
+- `DFA04`: a relation or type named `adk_archive_<name>` exists in the schema, for a table, index or sequence to rename, or a relation named `adk_archive_<table>` resolves through `search_path` in any schema, for a table to rename. Rename or drop it. After the migration each `adk_archive_<table>` therefore resolves to the table it archived, which the statements below rely on.
 
-The statements below act on `current_schema()`, so connect with the harness's `search_path`, as the tables' owner, and run them with `psql`. Each runs in one transaction and stops at the first error.
+The statements below find each table through `search_path`, as the migration does, so each acts on the tables the migration renamed or would rename in whichever schema each sits. Connect with the harness's `search_path`, as the tables' owner, and run them with `psql`. Each runs in one transaction and stops at the first error.
 
 To discard ADK's five tables, for `DFA02` or after a rollback:
 
 ```sql
 \set ON_ERROR_STOP on
 BEGIN;
-SELECT format('DROP TABLE IF EXISTS %I.%I CASCADE', schemaname, tablename)
-FROM pg_tables WHERE schemaname = current_schema()
-  AND tablename IN ('events', 'sessions', 'app_states', 'user_states', 'adk_internal_metadata') \gexec
+SELECT format('DROP TABLE %I.%I CASCADE', n.nspname, c.relname)
+FROM unnest(ARRAY['events', 'sessions', 'app_states', 'user_states', 'adk_internal_metadata']) AS t(name)
+JOIN pg_class c ON c.oid = to_regclass(t.name)
+JOIN pg_namespace n ON n.oid = c.relnamespace \gexec
 COMMIT;
 ```
 
@@ -307,22 +308,41 @@ When ADK's copy is no longer needed, drop the renamed tables:
 ```sql
 \set ON_ERROR_STOP on
 BEGIN;
-SELECT format('DROP TABLE IF EXISTS %I.%I CASCADE', schemaname, tablename)
-FROM pg_tables WHERE schemaname = current_schema() AND tablename LIKE 'adk\_archive\_%' \gexec
+SELECT format('DROP TABLE %I.%I CASCADE', n.nspname, c.relname)
+FROM unnest(ARRAY['events', 'sessions', 'app_states', 'user_states', 'adk_internal_metadata',
+                  'adk_ledger_imports']) AS t(name)
+JOIN pg_class c ON c.oid = to_regclass('adk_archive_' || t.name)
+JOIN pg_namespace n ON n.oid = c.relnamespace \gexec
 COMMIT;
 ```
 
-To roll back to an image that reads ADK's tables, rename every renamed table, index and sequence back before that image starts, so it finds its tables and creates none:
+To roll back to an image that reads ADK's tables, rename every renamed table, with its renamed indexes and owned sequences, back before that image starts, so it finds its tables and creates none. A table that image has already created stops the rename-back with `42P07`:
 
 ```sql
 \set ON_ERROR_STOP on
 BEGIN;
+WITH archived AS (
+    SELECT c.oid
+    FROM unnest(ARRAY['sessions', 'events', 'app_states', 'user_states', 'adk_internal_metadata',
+                      'adk_ledger_imports']) AS t(name)
+    JOIN pg_class c ON c.oid = to_regclass('adk_archive_' || t.name)
+), renamed AS (
+    SELECT oid FROM archived
+    UNION ALL
+    SELECT i.indexrelid FROM pg_index i JOIN archived a ON i.indrelid = a.oid
+    UNION ALL
+    SELECT d.objid FROM pg_depend d
+    JOIN archived a ON d.refobjid = a.oid
+    JOIN pg_class s ON s.oid = d.objid AND s.relkind = 'S'
+    WHERE d.classid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')
+)
 SELECT format('ALTER %s %I.%I RENAME TO %I',
     CASE c.relkind WHEN 'i' THEN 'INDEX' WHEN 'S' THEN 'SEQUENCE' ELSE 'TABLE' END,
     n.nspname, c.relname, substr(c.relname, length('adk_archive_') + 1))
-FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = current_schema() AND c.relname LIKE 'adk\_archive\_%' AND c.relkind IN ('r', 'i', 'S')
-ORDER BY CASE c.relkind WHEN 'r' THEN 0 ELSE 1 END \gexec
+FROM renamed r
+JOIN pg_class c ON c.oid = r.oid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname LIKE 'adk\_archive\_%' \gexec
 COMMIT;
 ```
 
