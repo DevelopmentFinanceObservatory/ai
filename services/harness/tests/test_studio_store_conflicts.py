@@ -17,7 +17,7 @@ import pytest
 from executor.ledger import PlanApproval, SourcePolicy, Start, idempotency_key, new_run
 from harness.conversation import current_conversation_key
 from harness.run_ledger import StudioRunLedger
-from harness.studio_state import _next_manifest
+from harness.studio_state import _next_manifest, _PendingInterrupt
 from harness.studio_store import ConversationStale, Renewal, StudioStore
 from harness.wire import ComponentType, CompositionActor, CompositionBlock, CompositionManifest
 from sqlalchemy import text
@@ -101,7 +101,7 @@ async def test_heartbeat_checkpoint_canvas_cancel_and_runs_commit_side_by_side(
         token = current_conversation_key.set((PRINCIPAL, CONVERSATION))
         try:
             for index in range(ROUNDS):
-                state.turn_final_text = f"answer {index}"
+                state.pending = {"i1": _PendingInterrupt(adk_id=f"answer {index}", kind="plan")}
                 await owner.checkpoint(
                     PRINCIPAL, CONVERSATION, segment_id, owner.snapshot(PRINCIPAL, CONVERSATION)
                 )
@@ -129,7 +129,7 @@ async def test_heartbeat_checkpoint_canvas_cancel_and_runs_commit_side_by_side(
     assert [block.component_id for block in reloaded.composition.blocks] == [
         f"cmp_{index:03d}" for index in range(ROUNDS)
     ]
-    assert reloaded.turn_final_text == f"answer {ROUNDS - 1}"
+    assert reloaded.pending["i1"].adk_id == f"answer {ROUNDS - 1}"
     assert reloaded.segment is not None and reloaded.segment.id == segment_id
     async with engines[0].connect() as conn:
         stop_id = (await conn.execute(text("SELECT stop_id FROM conversations"))).scalar_one()

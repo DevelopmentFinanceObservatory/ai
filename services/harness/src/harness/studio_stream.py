@@ -1,28 +1,33 @@
-"""A Studio stream: one owner per claimed segment, and the response that
-relays it.
+"""A Studio stream's owner: one per claimed segment.
 
 The route that claims a segment hands its work to `open_stream` as its last
-step and returns the response that call gives. From then on two tasks serve
-the stream, and they share one flag, the client-gone flag, beside the
-channel of frames the owner fills and the response drains.
+step and returns the response that call gives (`harness.studio_relay`).
+From then on three tasks serve the stream. The work's drive (`Work.drive`)
+runs the segment's calls and hands each event it makes to the owner over one
+queue. The owner turns the events into frames and puts them on the channel,
+which the response drains. Beside the queue and the channel they share the
+client-gone flag, which the response sets and the owner reads, and the
+segment's `renew_now` event (`harness.studio_state.renew_lease_now`).
 
 The owner (`own_segment`) is a coroutine that never yields and that no
 request cancels. For its segment it alone:
 
-- runs the work (`Work`): the turn loop's segment translated into frames,
-  or the Edit Card stream. A Stop and a lost lease reach the owner only as
-  the work's outcome (`harness.turn.loop.Outcome`);
-- puts each frame the work sends on the channel, except the work's ending
-  frame (a pause frame, `done`, or a stream-fatal `error`), which it holds;
-- saves the conversation once `plan.approved` has gone out, so a retry of the
-  same answer does not send it again. The save writes the conversation as it
-  stood when that frame went out, serialised before the save's first await;
-  what the work changes while the save runs waits for the closing write. A
-  save that finds the lease lost ends the work `lost`;
-- reads the client-gone flag in one place, while it waits for the work's
-  next frame. Once the flag is set it cancels the work with the turn's
+- translates each of the drive's events into frames (`Work.frames`), in the
+  order the drive emitted them, which numbers the frames and writes the
+  conversation state they change, and reads how the work ended once the
+  drive has returned (`Work.end`). A Stop and a lost lease reach the owner
+  only as that outcome (`harness.turn.loop.Outcome`);
+- puts each frame on the channel, except the work's ending frame (a pause
+  frame, `done`, or a stream-fatal `error`), which it holds;
+- saves the pending interrupts once `plan.approved` has gone out, so a retry
+  of the same answer does not send it again. The save reads them as the
+  frames sent so far leave them, before its first await, and writes nothing
+  else. A save that finds the lease lost ends the work `lost`;
+- reads the client-gone flag in one place, while it waits for the drive's
+  next event. Once the flag is set it cancels the drive with the turn's
   `StopScope` unmarked, so the cursor stays as last written for a later
-  segment to carry on, and waits for the work to stop;
+  segment to carry on, waits for it to stop, and translates the events it
+  emitted before it stopped;
 - makes the segment's one closing write (`StudioStore.close_segment`), which
   saves the conversation, clears the lease and, when a Stop is live for the
   open turn, closes it `cancelled`, in one transaction. A segment whose
@@ -43,16 +48,20 @@ request cancels. For its segment it alone:
 
 The closing frames are numbered from the conversation's `seq` as the owner
 read it before the closing write, or from the work's ending frame's own
-number when nothing went out after that frame, and that write stores `seq` past every
-number they can take, so a later segment numbers past them. After the
-closing write the owner changes no conversation state.
+number when nothing went out after that frame, and that write stores `seq`
+past every number they can take. A later segment numbers from the block its
+claim reserves (`harness.studio_store.SEQ_BLOCK`). After the closing write
+the owner changes no conversation state.
 
-The response (`StudioStream`) serialises the channel's frames as SSE `data:`
-lines and sends a `: ka` comment while the next frame is slow. A `finally`
-around its ASGI call sets the client-gone flag and waits, shielded, for the
-owner to finish, however the call ends: the client left, the body ended, or
-the server cancelled the request. It holds the channel, the flag and the
-owner's task, and nothing of the conversation or the store.
+The drive's tool calls still reach the conversation in three ways, each in
+the task that runs the call. A tool reads the live canvas and digest
+(`harness.studio_state.make_canvas_cards` and its siblings). The recording
+executor sets a created card's write token (`_RecordingExecutor`), one
+dictionary key, for a card whose record the owner has yet to translate. The
+`remove_cards` tool writes the canvas through `StudioStore.change_canvas`,
+whose store write lock orders it with the owner's writes and whose copy
+reaches the live state only once it commits. The model reads that tool's
+result in the same model call, so its write cannot wait for the owner.
 
 Past a graceful-shutdown timeout the server stops waiting for responses, and
 the event loop's teardown would cancel an owner still in its closing write.
@@ -68,10 +77,10 @@ import itertools
 import logging
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
+from collections.abc import Awaitable, Callable, Coroutine, Hashable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Final, Protocol, override
+from typing import Any, Final, Protocol
 
 from common.telemetry import (
     EventLevel,
@@ -80,11 +89,10 @@ from common.telemetry import (
     start_turn_span,
     use_turn_span,
 )
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from starlette.types import Receive, Scope, Send
 
 from harness.sentences import failure_sentence
+from harness.studio_relay import Channel, StudioStream
 from harness.studio_state import (
     ConversationState,
     DatabaseUnavailable,
@@ -108,18 +116,10 @@ from harness.wire import (
 
 logger = logging.getLogger(__name__)
 
-SSE_MEDIA_TYPE = "text/event-stream"
-
-# How long the response waits for a frame before it sends a `: ka` comment.
-KEEPALIVE_S = 5.0
-
 # How long the app's lifespan shutdown waits for the owners still running:
 # inside Cloud Run's 10 s between SIGTERM and SIGKILL, with room for the rest
 # of the shutdown. An owner's closing write is bounded at 5 s.
 SHUTDOWN_WAIT_S = 7.0
-
-# The channel from an owner to its response: frames, then `None` at its end.
-type Channel = asyncio.Queue[BaseModel | None]
 
 
 class Finish(StrEnum):
@@ -336,24 +336,60 @@ def ending(work: WorkEnd, close: SegmentClose | None) -> Ending:
     return Ending(built, status, saved=close in (SegmentClose.SAVED, SegmentClose.STOPPED))
 
 
-class Work(Protocol):
-    """A segment's work, as the route that claimed the segment builds it."""
+class Emit(Protocol):
+    """How a drive hands the owner an event. An event emitted with a `key`
+    replaces one with the same key that still waits, so a stream that falls
+    behind its drive translates only the latest of them."""
 
-    async def run(self, send: Callable[[BaseModel], None]) -> Outcome:
-        """Run the segment, `send` each wire frame as it is made, and return
-        how the segment ended. A turn that pauses, ends, or fails sends its
-        ending frame (a pause frame, `done`, or a stream-fatal `error`) and
-        returns `paused`, `done`, `failed` or `unclosed`. A Stop that closed
-        the turn returns `cancelled`, and a lost lease or a turn another
-        instance abandoned `lost` or `abandoned`, with no ending frame.
-        Cancelling the task that runs it stops the segment with the turn's
-        `StopScope` unmarked."""
+    def __call__(self, event: object, /, *, key: Hashable | None = None) -> None: ...
+
+
+class Work(Protocol):
+    """A segment's work, as the route that claimed the segment builds it, in
+    two halves.
+
+    `drive` runs in a task of its own: the turn loop's segment, or the Edit
+    Card's calls, which hands each event it makes to `emit` and writes no
+    conversation state of its own. The owner's task runs the rest: it
+    starts the work (`begin`) before the drive runs, translates each event
+    into wire frames (`frames`), in order, and once the drive has returned,
+    and every event it emitted is translated, reads how the work ended and
+    the frames that close it (`end`)."""
+
+    def begin(self) -> None:
+        """Write the conversation state the work needs before its drive
+        runs."""
+        ...
+
+    async def drive(self, emit: Emit) -> object:
+        """Run the segment's calls, `emit` each event, and return what `end`
+        reads. Cancelling the task that runs it stops the segment with the
+        turn's `StopScope` unmarked."""
+        ...
+
+    async def frames(self, event: object) -> list[BaseModel]:
+        """The wire frames of `event`, numbered, with the conversation state
+        it changes written."""
+        ...
+
+    async def end(self, result: object) -> tuple[Outcome, list[BaseModel]]:
+        """How the segment ended, from `result`, what `drive` returned, and
+        the frames that close it. A turn that pauses, ends, or fails sends its
+        ending frame (a pause frame, `done`, or a stream-fatal `error`), in
+        these frames or in earlier ones, and ends `paused`, `done`, `failed`
+        or `unclosed`. A Stop that closed the turn ends `cancelled`, and a
+        lost lease or a turn another instance abandoned `lost` or
+        `abandoned`, with no ending frame."""
         ...
 
     def fatal(self, error: BaseException) -> ErrorFrame:
         """The stream-fatal frame for work that raised `error`, or that ended
         with no ending frame its outcome needs; it records the turn failed
         on it."""
+        ...
+
+    def close(self) -> None:
+        """Let go of what the work kept for its segment, however it ended."""
         ...
 
 
@@ -415,12 +451,44 @@ class _OpenLines:
         ]
 
 
+class _Events:
+    """The one queue from a drive to its owner: the events the drive
+    emitted and the owner has not taken, each with its key (`Emit`)."""
+
+    def __init__(self) -> None:
+        self._waiting: deque[tuple[Hashable | None, object]] = deque()
+        self._arrived = asyncio.Event()
+
+    def __bool__(self) -> bool:
+        return bool(self._waiting)
+
+    def put(self, event: object, /, *, key: Hashable | None = None) -> None:
+        if key is not None:
+            for place, (waiting, _) in enumerate(self._waiting):
+                if waiting == key:
+                    self._waiting[place] = (key, event)
+                    return
+        self._waiting.append((key, event))
+        self._arrived.set()
+
+    def take(self) -> object:
+        """The oldest event waiting; there must be one."""
+        return self._waiting.popleft()[1]
+
+    def arrived(self) -> Coroutine[Any, Any, bool]:
+        """Wait until an event arrives after the last `take` that emptied
+        the queue."""
+        if not self._waiting:
+            self._arrived.clear()
+        return self._arrived.wait()
+
+
 class _Gone:
-    """The client left while the work runs."""
+    """The client left while the drive runs."""
 
 
 class _Ended:
-    """The work ended and every frame it sent is taken."""
+    """The drive ended and every event it emitted is taken."""
 
 
 _GONE: Final = _Gone()
@@ -450,10 +518,8 @@ class _Owner:
         self._segment_id = segment_id
         self._channel = channel
         self._gone = gone
-        # The frames the work sent and the owner has not taken yet.
-        self._inbox: deque[BaseModel] = deque()
-        self._ready = asyncio.Event()
-        self._task: asyncio.Task[Outcome] | None = None
+        self._events = _Events()
+        self._task: asyncio.Task[object] | None = None
         self._held: EndingFrame | None = None
         # Whether nothing went on the channel since the work sent the held
         # frame, so the number the work gave it is still unsent.
@@ -471,86 +537,122 @@ class _Owner:
         except Exception:
             # A fault in the owner itself: no frame of the work's can be
             # trusted to end the stream, and the closing write's outcome is
-            # unknown.
+            # unknown. The transient frame takes the next unsent number.
             logger.exception(
                 "studio stream: the owner of conversation %s segment %s failed",
                 self._conversation_id,
                 self._segment_id,
             )
+            self._first_seq = self._conversation.seq
             if self._task is not None and not self._task.done():
-                self._task.cancel()
-                await asyncio.wait({self._task})
+                await self._stop(self._task)
             return Ending(_transient_frame(), Status.UNCLOSED, saved=False)
-
-    def _send(self, frame: BaseModel) -> None:
-        self._inbox.append(frame)
-        self._ready.set()
+        finally:
+            self._work.close()
 
     async def _work_to_end(self) -> Finish:
-        """Take the work's frames until it ends, the client leaves, or the
-        save after `plan.approved` finds the lease lost; then how it ended."""
-        self._task = task = asyncio.create_task(self._work.run(self._send))
+        """Translate the drive's events until it ends, the client leaves, or
+        the save after `plan.approved` or a card write finds the lease lost;
+        then how the work ended. When the owner cuts the drive off, it
+        cancels it and waits for it. A client that left still has the events
+        the drive emitted translated, unsaved, so the closing write stores
+        the state they leave; a lost lease drops them, since no write of
+        this segment's can land."""
+        try:
+            self._work.begin()
+        except Exception as error:
+            return self._failed(error)
+        self._task = task = asyncio.create_task(self._work.drive(self._events.put))
         cut: Finish | None = None
-        while cut is None:
-            item = await self._next()
-            if isinstance(item, _Ended):
-                break
-            if isinstance(item, _Gone):
-                cut = Finish.LEFT
-            elif await self._take(item, saving=True):
-                cut = Finish.LOST
-        if cut is not None:
-            task.cancel()
-            await asyncio.wait({task})
-            # Frames the work sent before it stopped.
-            while self._inbox:
-                await self._take(self._inbox.popleft(), saving=False)
-        return self._finish(task, cut)
+        try:
+            while cut is None:
+                event = await self._next()
+                if isinstance(event, _Ended):
+                    return await self._ended(task)
+                if isinstance(event, _Gone):
+                    cut = Finish.LEFT
+                elif await self._take(await self._work.frames(event)):
+                    cut = Finish.LOST
+            await self._stop(task)
+            if cut is Finish.LOST:
+                return cut
+            await self._translate_left()
+            return cut if task.cancelled() else await self._ended(task)
+        except (SegmentLost, DatabaseUnavailable) as lost:
+            # A card write fenced out by another instance's takeover, or one
+            # that could not reach the database before the lease's deadline
+            # (`harness.studio_store.StudioStore.change_canvas`).
+            logger.warning(
+                "studio stream: a card write ended conversation %s segment %s (trace_id=%s): %s",
+                self._conversation_id,
+                self._segment_id,
+                self._conversation.trace_id,
+                lost,
+            )
+            await self._stop(task)
+            return Finish.LOST
+        except Exception as error:
+            await self._stop(task)
+            return self._failed(error)
 
-    async def _next(self) -> BaseModel | _Gone | _Ended:
-        """The work's next frame, `_GONE` once the client has left while the
-        work runs, or `_ENDED` once the work has ended and every frame it
-        sent is taken. The one place the owner reads the client-gone flag."""
+    @staticmethod
+    async def _stop(task: asyncio.Task[object]) -> None:
+        task.cancel()
+        await asyncio.wait({task})
+
+    async def _next(self) -> object:
+        """The drive's next event, `_GONE` once the client has left while
+        the drive runs, or `_ENDED` once the drive has ended and every event
+        it emitted is taken. The one place the owner reads the client-gone
+        flag."""
         assert self._task is not None
         while True:
-            self._ready.clear()
             if self._gone.is_set() and not self._task.done():
                 return _GONE
-            if self._inbox:
-                return self._inbox.popleft()
+            if self._events:
+                return self._events.take()
             if self._task.done():
                 return _ENDED
-            ready = asyncio.ensure_future(self._ready.wait())
+            arrived = asyncio.ensure_future(self._events.arrived())
             left = asyncio.ensure_future(self._gone.wait())
             try:
-                await asyncio.wait({ready, left, self._task}, return_when=asyncio.FIRST_COMPLETED)
+                await asyncio.wait({arrived, left, self._task}, return_when=asyncio.FIRST_COMPLETED)
             finally:
-                ready.cancel()
+                arrived.cancel()
                 left.cancel()
 
-    async def _take(self, frame: BaseModel, *, saving: bool) -> bool:
-        """Hold `frame` when it is the work's ending frame, or put it on the
-        channel. After `plan.approved`, and when `saving`, save the
-        conversation; returns whether that save found the lease lost."""
-        if isinstance(frame, _ENDING_FRAMES):
-            if self._held is None:
-                self._held = frame
-                self._held_last = True
-            else:
-                logger.error(
-                    "studio stream: conversation %s segment %s sent a second ending frame "
-                    "(%s); it is dropped",
-                    self._conversation_id,
-                    self._segment_id,
-                    frame.event,
-                )
-            return False
-        self._lines.observe(frame)
-        self._channel.put_nowait(frame)
-        self._held_last = False
-        if saving and getattr(frame, "event", None) == "plan.approved":
-            return await self._approved()
-        return False
+    async def _translate_left(self) -> None:
+        """Translate, unsaved, the events the drive emitted before the owner
+        stopped it."""
+        while self._events:
+            await self._take(await self._work.frames(self._events.take()), saving=False)
+
+    async def _take(self, frames: list[BaseModel], *, saving: bool = True) -> bool:
+        """Hold the work's ending frame and put every other frame on the
+        channel, in order. After `plan.approved`, when `saving`, save the
+        conversation; returns whether that save found the lease lost. The
+        frames after it are still taken, unsaved."""
+        lost = False
+        for frame in frames:
+            if isinstance(frame, _ENDING_FRAMES):
+                if self._held is None:
+                    self._held = frame
+                    self._held_last = True
+                else:
+                    logger.error(
+                        "studio stream: conversation %s segment %s sent a second ending frame "
+                        "(%s); it is dropped",
+                        self._conversation_id,
+                        self._segment_id,
+                        frame.event,
+                    )
+                continue
+            self._lines.observe(frame)
+            self._channel.put_nowait(frame)
+            self._held_last = False
+            if saving and not lost and getattr(frame, "event", None) == "plan.approved":
+                lost = await self._approved()
+        return lost
 
     async def _approved(self) -> bool:
         """Record that `plan.approved` went out and save it, so a retry of
@@ -559,11 +661,11 @@ class _Owner:
         whether the save found the lease lost; any other failure is logged
         and the stream goes on.
 
-        The work runs on while the save waits for the database, so the
-        conversation is serialised here, before the first await, and the
-        save writes that snapshot: a turn the work records or pauses
-        meanwhile reaches the store only through the closing write, after
-        the client has been told how the stream ended."""
+        The owner alone translates, so the pending interrupts the snapshot
+        reads, with no await since the frame went on the channel, are those
+        of the frames sent so far. The save writes those and nothing else
+        (`harness.studio_store.StudioStore.checkpoint`). The drive runs on
+        while the save waits, and its events wait for the owner."""
         self._conversation.mark_approved_sent(self._segment_id)
         try:
             snapshot = self._store.snapshot(self._principal, self._conversation_id)
@@ -586,25 +688,25 @@ class _Owner:
             )
         return False
 
-    def _finish(self, task: asyncio.Task[Outcome], cut: Finish | None) -> Finish:
-        """How the work ended, with the ending frame its outcome needs. Work
-        the owner cut off ends as `cut` unless it ended on its own first.
-        Work that raised, a cancellation of its own included, or that ended
-        without the frame its outcome needs, ends `unclosed` on the work's
-        fatal frame."""
-        error: BaseException | None
+    async def _ended(self, task: asyncio.Task[object]) -> Finish:
+        """How the work ended, once the drive has ended on its own and every
+        event it emitted is taken: the work's outcome, with the frames that
+        close it taken. A drive that raised, a cancellation of its own
+        included, or work that ended without the ending frame its outcome
+        needs, ends `unclosed` on the work's fatal frame. A lost lease the
+        drive or a card write raised ends it `lost`."""
         if task.cancelled():
-            if cut is not None:
-                return cut
-            error = asyncio.CancelledError()
-        else:
-            error = task.exception()
-        if error is None:
-            finish = Finish(task.result().value)
-            needed = _FINISH_FRAMES.get(finish)
-            if needed is None or isinstance(self._held, needed):
-                return finish
-            error = RuntimeError(f"the segment ended {finish} with no ending frame for it")
+            return self._failed(asyncio.CancelledError())
+        outcome, frames = await self._work.end(task.result())
+        await self._take(frames, saving=False)
+        finish = Finish(outcome.value)
+        needed = _FINISH_FRAMES.get(finish)
+        if needed is None or isinstance(self._held, needed):
+            return finish
+        return self._failed(RuntimeError(f"the segment ended {finish} with no ending frame for it"))
+
+    def _failed(self, error: BaseException) -> Finish:
+        """End the work `unclosed` on its fatal frame for `error`."""
         logger.error(
             "studio stream: conversation %s segment %s's work failed (trace_id=%s)",
             self._conversation_id,
@@ -742,45 +844,6 @@ async def own_segment(
                 await flush_telemetry()
         except Exception:
             logger.exception("studio stream: conversation %s's settle failed", conversation_id)
-
-
-class StudioStream(StreamingResponse):
-    """The response of a Studio stream: relays its owner's channel as SSE
-    and, however its ASGI call ends, sets the client-gone flag and waits for
-    the owner to finish (module docstring)."""
-
-    def __init__(
-        self,
-        *,
-        channel: Channel,
-        owner: asyncio.Task[None],
-        gone: asyncio.Event,
-        keepalive_s: float = KEEPALIVE_S,
-    ) -> None:
-        super().__init__(self._serialised(), media_type=SSE_MEDIA_TYPE)
-        self._channel = channel
-        self._owner = owner
-        self._gone = gone
-        self._keepalive_s = keepalive_s
-
-    async def _serialised(self) -> AsyncIterator[str]:
-        while True:
-            try:
-                frame = await asyncio.wait_for(self._channel.get(), timeout=self._keepalive_s)
-            except TimeoutError:
-                yield ": ka\n\n"
-                continue
-            if frame is None:
-                return
-            yield f"data: {frame.model_dump_json(exclude_none=True)}\n\n"
-
-    @override
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        try:
-            await super().__call__(scope, receive, send)
-        finally:
-            self._gone.set()
-            await asyncio.shield(self._owner)
 
 
 class LiveOwners:

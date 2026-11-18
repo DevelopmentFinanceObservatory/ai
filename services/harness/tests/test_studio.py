@@ -2259,7 +2259,10 @@ async def test_every_ending_this_route_reaches_holds_on_the_real_store(
     ends on the status `ending` gives that cell with `dfo.saved` saying
     whether the write committed, and a fresh instance reads the turn's
     cursor as `cursor`, the record closed on `recorded` (open for `None`),
-    and the lease cleared exactly when the write committed."""
+    and the lease cleared exactly when the write committed. An Edit Card
+    turn has no cursor for the load to read, so one left open after its
+    stream sent the transient frame is recorded `state_not_saved`, the code
+    that frame states, when the next turn begins."""
     drive, script, hangs, surface, after = _WORK_ENDS[route, finish]
     resolver = _HangingResolver() if hangs else None
     kwargs: dict[str, Any] = {
@@ -2292,6 +2295,9 @@ async def test_every_ending_this_route_reaches_holds_on_the_real_store(
     assert stored.turn_recorded is (recorded is not None)
     if recorded is not None:
         assert stored.turns[-1].get("error", "done") == recorded
+    if route == "edit" and wire == _TRANSIENT:
+        stored.begin_turn()
+        assert stored.turns[-1]["error"] == HarnessCode.STATE_NOT_SAVED.value
 
 
 async def _close_claim_refused_before_its_save(monkeypatch: pytest.MonkeyPatch) -> None:

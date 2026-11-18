@@ -40,11 +40,12 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from harness import studio_stream
 from harness.fatal_codes import wire_error
+from harness.studio_relay import Channel, StudioStream
 from harness.studio_state import (
     ConversationState,
     DatabaseUnavailable,
@@ -53,9 +54,9 @@ from harness.studio_state import (
 )
 from harness.studio_store import SegmentClose, Snapshot, closed_turn_error
 from harness.studio_stream import (
+    Emit,
     Finish,
     Status,
-    StudioStream,
     WorkEnd,
     ending,
     own_segment,
@@ -224,7 +225,8 @@ def _wire_code(recorded: str) -> ErrorCode:
         pytest.param(Finish.DONE, TurnStatus.DONE, None, id="done"),
         pytest.param(Finish.CANCELLED, TurnStatus.CANCELLED, None, id="cancelled"),
         *(
-            pytest.param(Finish.FAILED, TurnStatus.FAILED, error, id=f"failed-{name}")
+            pytest.param(Finish.FAILED, status, error, id=f"{status}-{name}")
+            for status in (TurnStatus.FAILED, TurnStatus.ABANDONED)
             for name, error in _CURSOR_ERRORS.items()
         ),
     ],
@@ -236,7 +238,8 @@ def test_a_turn_whose_close_failed_is_recorded_with_the_code_its_stream_sent(
     # failed: the load that finds the cursor closed records the turn with
     # the code of the frame `ending` sent. A failed turn's frame is the one
     # its cursor's error gives, and the live record it closed holds the
-    # same code.
+    # same code. A turn the segment closed `abandoned` on a node's failure
+    # ends `failed` on that failure's frame.
     held: Any = _DONE if finish is Finish.DONE else None
     live = ConversationState(conversation_id=CONVERSATION)
     if finish is Finish.FAILED:
@@ -340,7 +343,8 @@ def _cases() -> list[Case]:
     return cases
 
 
-type Durable = tuple[bool, str | None, tuple[tuple[str, str | None, bool], ...], int]
+type Pending = tuple[tuple[str, str | None, bool], ...]
+type Durable = tuple[bool, str | None, Pending, int]
 
 
 def _durable(conversation: ConversationState) -> Durable:
@@ -403,11 +407,13 @@ class Run:
     close: SegmentClose | None = None
     work_task: asyncio.Task[Any] | None = None
     approved_lost: bool = False
-    # The conversation when the owner marked `plan.approved` sent, what the
-    # save after it stored, and whether the work had changed it by then.
-    boundary: Durable | None = None
-    approved_stored: Durable | None = None
-    moved_during_save: bool = False
+    # The pending interrupts when the owner marked `plan.approved` sent, what
+    # the save after it stored, how many events the drive has emitted, and
+    # whether it emitted any while that save ran.
+    boundary: Pending | None = None
+    approved_stored: Pending | None = None
+    emitted: int = 0
+    emitted_during_save: bool = False
 
     async def land(self, point: Point) -> None:
         """Apply the case's inputs that land at `point`."""
@@ -447,25 +453,40 @@ class Run:
         raise AssertionError("the response never set the client-gone flag")
 
 
+# An event of a fake drive: what the owner's translation of it sends and
+# changes, run in the owner's task.
+type Make = Callable[[], list[BaseModel]]
+
+
 class FakeWork:
-    """A segment's work over the model: sends frames as the translator
-    does, writes the turn's boundary, and sees a Stop or a lost lease at
-    each of its ticks as the turn loop's heartbeat would."""
+    """A segment's work over the model. Its drive moves the turn's cursor,
+    as the turn loop does, sees a Stop or a lost lease at each of its ticks
+    as the turn loop's heartbeat would, and emits events. The owner's
+    translation of each event numbers its frames and writes the conversation
+    state they change, as the translator does."""
 
     def __init__(self, run: Run) -> None:
         self._run = run
         self._c = run.conversation
         self._w = run.world
+        self._emit: Emit | None = None
 
-    def _step(self, step_id: str, status: StepStatus, *, done: bool = False) -> ActivityStep:
-        return ActivityStep(
-            event="activity.step",
-            seq=self._c.next_seq(),
-            step_id=step_id,
-            label=step_id,
-            status=status,
-            duration_ms=5 if done else None,
-        )
+    def _send(self, make: Make) -> None:
+        assert self._emit is not None
+        self._run.emitted += 1
+        self._emit(make)
+
+    def _step(self, step_id: str, status: StepStatus, *, done: bool = False) -> Make:
+        return lambda: [
+            ActivityStep(
+                event="activity.step",
+                seq=self._c.next_seq(),
+                step_id=step_id,
+                label=step_id,
+                status=status,
+                duration_ms=5 if done else None,
+            )
+        ]
 
     async def _tick(self, point: Point | None) -> None:
         if point is not None:
@@ -482,10 +503,14 @@ class FakeWork:
             world.cursor = "cancelled"
             raise _Cut(Outcome.CANCELLED)
 
-    async def run(self, send: Callable[[BaseModel], None]) -> Outcome:
+    def begin(self) -> None:
+        return None
+
+    async def drive(self, emit: Emit) -> Outcome:
+        self._emit = emit
         self._run.work_task = asyncio.current_task()
         try:
-            outcome = await self._script(send)
+            outcome = await self._script()
         except _Cut as cut:
             outcome = cut.outcome
         except asyncio.CancelledError:
@@ -494,29 +519,37 @@ class FakeWork:
                 await self._run.land(Point.CANCEL_BEFORE)
                 await asyncio.sleep(0)
                 await self._run.land(Point.CANCEL_AFTER)
-                self._run.finish = Finish.LOST if self._run.approved_lost else Finish.LEFT
+                self._run.finish = Finish.LEFT
             else:
                 self._run.finish = Finish.UNCLOSED
             raise
         self._run.finish = Finish(outcome.value)
         return outcome
 
-    async def _script(self, send: Callable[[BaseModel], None]) -> Outcome:
+    async def frames(self, event: object) -> list[BaseModel]:
+        return cast(Make, event)()
+
+    async def end(self, result: object) -> tuple[Outcome, list[BaseModel]]:
+        return cast(Outcome, result), []
+
+    async def _script(self) -> Outcome:
         script = self._run.case.script
         c, w = self._c, self._w
         if script is Script.APPROVED:
-            send(
-                PlanApproved(
-                    event="plan.approved",
-                    seq=c.next_seq(),
-                    plan_version_id="pv",
-                    version=1,
-                    title="t",
-                    steps=[],
-                    choices=[],
-                )
+            self._send(
+                lambda: [
+                    PlanApproved(
+                        event="plan.approved",
+                        seq=c.next_seq(),
+                        plan_version_id="pv",
+                        version=1,
+                        title="t",
+                        steps=[],
+                        choices=[],
+                    )
+                ]
             )
-        send(self._step("s1", StepStatus.RUNNING))
+        self._send(self._step("s1", StepStatus.RUNNING))
         if script is Script.APPROVED:
             # The rest of the turn runs while the save after `plan.approved`
             # waits for the database.
@@ -532,24 +565,32 @@ class FakeWork:
                 raise asyncio.CancelledError
             case Script.FAILS:
                 w.cursor = "failed"
-                send(self._fatal(ErrorCode.CAPABILITY_UNAVAILABLE))
+                self._send(lambda: [self._fatal(ErrorCode.CAPABILITY_UNAVAILABLE)])
                 await self._tick(Point.WORK_LATE)
                 return Outcome.FAILED
             case Script.PAUSES:
-                send(self._step("s1", StepStatus.COMPLETE, done=True))
+                self._send(self._step("s1", StepStatus.COMPLETE, done=True))
                 w.cursor = "paused"
-                c.pending["i1"] = _PendingInterrupt(adk_id="i1", kind="plan")
-                send(_PAUSE.model_copy(update={"seq": c.next_seq()}))
+
+                def pause() -> list[BaseModel]:
+                    c.pending["i1"] = _PendingInterrupt(adk_id="i1", kind="plan")
+                    return [_PAUSE.model_copy(update={"seq": c.next_seq()})]
+
+                self._send(pause)
                 await self._tick(Point.WORK_LATE)
                 return Outcome.PAUSED
             case Script.EDIT:
                 # The edit's second line is still open when `done` comes.
-                send(self._step("s2", StepStatus.RUNNING))
+                self._send(self._step("s2", StepStatus.RUNNING))
             case _:
-                send(self._step("s1", StepStatus.COMPLETE, done=True))
+                self._send(self._step("s1", StepStatus.COMPLETE, done=True))
         w.cursor = "done"
-        c.close_turn(final_text="answer")
-        send(_DONE.model_copy(update={"seq": c.next_seq()}))
+
+        def done() -> list[BaseModel]:
+            c.close_turn(final_text="answer")
+            return [_DONE.model_copy(update={"seq": c.next_seq()})]
+
+        self._send(done)
         await self._tick(Point.WORK_LATE)
         return Outcome.DONE
 
@@ -565,6 +606,9 @@ class FakeWork:
         del error
         return self._fatal(ErrorCode.CAPABILITY_UNAVAILABLE)
 
+    def close(self) -> None:
+        return None
+
 
 # How many times the save after `plan.approved` yields to the work before it
 # writes: enough for the work to reach its end when nothing stops it.
@@ -579,11 +623,12 @@ class FakeStore:
         self._c = run.conversation
         self._w = run.world
 
-    def snapshot(self, principal: str, conversation_id: str) -> Durable:
-        return _durable(self._c)
+    def snapshot(self, principal: str, conversation_id: str) -> Pending:
+        """The pending interrupts, the one field the save writes."""
+        return _durable(self._c)[2]
 
     async def checkpoint(
-        self, principal: str, conversation_id: str, segment_id: str, snapshot: Durable
+        self, principal: str, conversation_id: str, segment_id: str, snapshot: Pending
     ) -> None:
         self._w.writes.append("checkpoint")
         self._w.saving.set()
@@ -591,12 +636,15 @@ class FakeStore:
         if self._w.lease != segment_id:
             self._run.approved_lost = True
             raise SegmentLost(conversation_id)
-        # The database is slow: the work runs on, and may record the turn,
+        # The database is slow: the drive runs on, and may end the turn,
         # before the row is written.
+        emitted = self._run.emitted
         for _ in range(_SAVE_YIELDS):
             await asyncio.sleep(0)
-        self._run.moved_during_save = _durable(self._c) != snapshot
-        self._w.stored = self._run.approved_stored = snapshot
+        self._run.emitted_during_save = self._run.emitted != emitted
+        recorded, error, _, seq = self._w.stored
+        self._w.stored = (recorded, error, snapshot, seq)
+        self._run.approved_stored = snapshot
         await self._run.land(Point.APPROVED_AFTER)
 
     async def close_segment(
@@ -699,10 +747,10 @@ async def _run_case(case: Case, spans: Spans) -> tuple[list[str], Run]:
 
     def marked(segment_id: str) -> None:
         mark_approved_sent(segment_id)
-        run.boundary = _durable(conversation)
+        run.boundary = _durable(conversation)[2]
 
     conversation.mark_approved_sent = marked  # type: ignore[method-assign]
-    channel: studio_stream.Channel = asyncio.Queue()
+    channel: Channel = asyncio.Queue()
     owner = asyncio.create_task(
         own_segment(
             FakeWork(run),
@@ -803,11 +851,14 @@ def _broken(run: Run, owner: asyncio.Task[None], spans: Spans, wire: str) -> lis
     if not owner.done() or owner.cancelled():
         broken.append("I4: the owner did not finish uncancelled")
     else:
-        assert run.finish is not None
-        _, want = TABLE[run.finish, run.close]
+        # A save after `plan.approved` that finds the lease lost ends the
+        # work `lost`, however its drive ended.
+        finish = Finish.LOST if run.approved_lost else run.finish
+        assert finish is not None
+        _, want = TABLE[finish, run.close]
         statuses = [status for status, _ in spans.ended]
         if statuses != [want.value] or spans.started != 1:
-            broken.append(f"I4: spans {statuses}, want [{want}] for {run.finish}/{run.close}")
+            broken.append(f"I4: spans {statuses}, want [{want}] for {finish}/{run.close}")
         elif (
             spans.ended[0][1]["dfo.saved"]
             != str(run.close in (SegmentClose.SAVED, SegmentClose.STOPPED)).lower()
@@ -853,10 +904,10 @@ async def test_every_run_of_the_owner_keeps_the_invariants(spans: Spans) -> None
     moved = 0
     for case in cases:
         broken, run = await _run_case(case, spans)
-        moved += run.moved_during_save
+        moved += run.emitted_during_save
         if broken:
             failures[str(case)] = broken
-    print(f"{len(cases)} runs of the owner, {moved} with the work moving during a save")
+    print(f"{len(cases)} runs of the owner, {moved} with the drive emitting during a save")
     assert cases
     assert moved
     assert not failures, (
@@ -879,7 +930,7 @@ async def test_the_owner_ends_a_present_clients_stream_on_the_pause_it_saved(
 
 class _ScriptedWork:
     """Work that sends `frames`, waiting for `between` after the first when
-    given, and returns `outcome`."""
+    given, and returns `outcome`, or raises `raises` when given."""
 
     def __init__(
         self,
@@ -887,22 +938,38 @@ class _ScriptedWork:
         outcome: Outcome,
         *,
         between: asyncio.Event | None = None,
+        raises: Exception | None = None,
     ) -> None:
         self._frames = frames
         self._outcome = outcome
         self._between = between
+        self._raises = raises
 
-    async def run(self, send: Callable[[BaseModel], None]) -> Outcome:
+    def begin(self) -> None:
+        return None
+
+    async def drive(self, emit: Emit) -> Outcome:
         first, *rest = self._frames
-        send(first)
+        emit(first)
         if self._between is not None:
             await self._between.wait()
         for frame in rest:
-            send(frame)
+            emit(frame)
+        if self._raises is not None:
+            raise self._raises
         return self._outcome
+
+    async def frames(self, event: object) -> list[BaseModel]:
+        return [cast(BaseModel, event)]
+
+    async def end(self, result: object) -> tuple[Outcome, list[BaseModel]]:
+        return cast(Outcome, result), []
 
     def fatal(self, error: BaseException) -> ErrorFrame:
         raise AssertionError("the work does not fail") from error
+
+    def close(self) -> None:
+        return None
 
 
 class _LandingStore:
@@ -937,7 +1004,7 @@ async def _owned(
 ) -> list[dict[str, Any]]:
     """Run the owner over `work` to its end; the frames it put on the
     channel, as the wire carries them."""
-    channel: studio_stream.Channel = asyncio.Queue()
+    channel: Channel = asyncio.Queue()
     await own_segment(
         work,
         store=store,
@@ -1090,11 +1157,45 @@ async def test_a_save_after_plan_approved_that_loses_the_lease_ends_the_stream(
     assert [(r.levelno, r.exc_info is not None) for r in caplog.records] == [logged]
 
 
+async def test_an_owner_that_fails_numbers_its_transient_frame_past_every_frame_sent(
+    spans: Spans,
+) -> None:
+    """The work raises, and so does its fatal frame, a fault in the owner
+    itself. The owner ends the stream on the transient frame, numbered past
+    the frames the work numbered as the owner translated them."""
+    conversation = ConversationState(conversation_id=CONVERSATION, trace_id="tr")
+    conversation.begin_turn()
+
+    class Numbering(_ScriptedWork):
+        async def frames(self, event: object) -> list[BaseModel]:
+            return [cast(BaseModel, event).model_copy(update={"seq": conversation.next_seq()})]
+
+    work = Numbering(
+        [_running(conversation, "s0"), _running(conversation, "s1")],
+        Outcome.DONE,
+        raises=RuntimeError("the segment failed"),
+    )
+    conversation.seq = 0
+
+    frames = await _owned(work, conversation, _LandingStore())
+
+    assert [frame["event"] for frame in frames] == [
+        "activity.step",
+        "activity.step",
+        "activity.step",
+        "activity.step",
+        "error",
+    ]
+    assert frames[-1]["error"]["error"] == "transient_unavailable"
+    assert [frame["seq"] for frame in frames] == [0, 1, 2, 3, 4]
+    assert [error for error, _ in spans.ended] == [Status.UNCLOSED.value]
+
+
 async def test_the_response_sends_keepalive_comments_while_the_next_frame_is_slow() -> None:
     """The response sends `: ka` comment lines while the next frame is slow.
     They are SSE comments outside the frame sequence and carry no `seq`, and
     the first frame goes out undelayed."""
-    channel: studio_stream.Channel = asyncio.Queue()
+    channel: Channel = asyncio.Queue()
 
     async def owner() -> None:
         channel.put_nowait(MessageDelta(event="message.delta", seq=0, text="one"))

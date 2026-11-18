@@ -1739,24 +1739,22 @@ def _approval(**overrides: Any) -> ApprovalRecord:
 async def test_the_ledger_stores_a_turns_blocks_only_when_the_turn_closes(
     new_store, pg_engine
 ) -> None:
-    """A checkpoint after a search writes no spec block to the conversation's
-    rows; closing the turn on another instance stores the block of the source
-    its plan used, given the blocks as the studio reads them from the turn's
+    """A save after a search writes no spec block to the conversation's rows;
+    closing the turn on another instance stores the block of the source its
+    plan used, given the blocks as the studio reads them from the turn's
     cursor (`harness.turn.store.TurnStore.specs`)."""
     used = _PLAN.sources[0].spec_id
     candidate = "spec_" + "d" * 32
     blocks = {used: {"spec_id": used, "note": "used block"}, candidate: {"note": "unused block"}}
     store_a = new_store()
     state = await store_a.create("principal", CONVERSATION)
-    segment_id = store_a.claim_segment("principal", CONVERSATION)
+    store_a.claim_segment("principal", CONVERSATION)
     state.begin_turn()
     await store_a.save("principal", CONVERSATION)
     state.turn_specs = dict(blocks)
     state.turn_plans = [_PLAN_JSON]
 
-    await store_a.checkpoint(
-        "principal", CONVERSATION, segment_id, store_a.snapshot("principal", CONVERSATION)
-    )
+    await store_a.save("principal", CONVERSATION)
 
     written = await _stored_rows_text(pg_engine)
     assert "used block" not in written and "unused block" not in written
@@ -2678,16 +2676,19 @@ async def test_checkpoint_raises_segment_lost_after_a_takeover_and_writes_nothin
 async def test_checkpoint_writes_its_snapshot_and_keeps_a_renewal_made_since(
     new_store, clock, pg_engine
 ) -> None:
-    """The checkpoint stores the conversation as its snapshot holds it: a
-    change the live state takes after the snapshot is left for the next
-    write, and a renewal of the lease since keeps its expiry."""
+    """The checkpoint stores the pending interrupts as its snapshot holds
+    them, and nothing else: a change the live state takes after the
+    snapshot, and any other field, is left for the next write, and a renewal
+    of the lease since keeps its expiry."""
     store = new_store(clock=clock)
     state = await store.create("principal", CONVERSATION)
     segment_id = store.claim_segment("principal", CONVERSATION)
+    state.pending["i1"] = _pending(resuming_segment=segment_id)
     await store.save("principal", CONVERSATION)
-    state.turn_final_text = "at the snapshot"
+    state.mark_approved_sent(segment_id)
+    state.turn_final_text = "beside the snapshot"
     snapshot = store.snapshot("principal", CONVERSATION)
-    state.turn_final_text = "after the snapshot"
+    state.pending["i2"] = _pending()
     await clock.advance(10)
     assert (await store.renew("principal", CONVERSATION, segment_id)).held
     renewed = state.segment.expires_at
@@ -2695,9 +2696,76 @@ async def test_checkpoint_writes_its_snapshot_and_keeps_a_renewal_made_since(
     await store.checkpoint("principal", CONVERSATION, segment_id, snapshot)
 
     reloaded = await new_store().load("principal", CONVERSATION)
-    assert reloaded.turn_final_text == "at the snapshot"
+    assert list(reloaded.pending) == ["i1"]
+    assert reloaded.pending["i1"].approved_sent
+    assert reloaded.turn_final_text == ""
     assert reloaded.segment.expires_at == renewed
-    assert state.turn_final_text == "after the snapshot"
+    assert list(state.pending) == ["i1", "i2"]
+
+
+async def test_a_checkpoint_retried_past_a_card_write_keeps_the_card(
+    new_store, monkeypatch
+) -> None:
+    """The save after `plan.approved` meets a dropped connection, and a card
+    lands while it waits to retry. The retry writes no older copy of a field
+    the card's write moved, so the card's digest entry, turn line and canvas
+    block stay, beside the `approved_sent` the save exists for."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0.2)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    state.pending["i1"] = _pending(resuming_segment=segment_id)
+    await store.save("principal", CONVERSATION)
+    state.mark_approved_sent(segment_id)
+    snapshot = store.snapshot("principal", CONVERSATION)
+    real_transaction = store._transaction
+    order: list[str] = []
+    landing: list[asyncio.Task[Any]] = []
+
+    @asynccontextmanager
+    async def dropping() -> Any:
+        async with real_transaction() as conn:
+            yield conn
+            if not landing:
+                # The card lands while the checkpoint waits to retry.
+                landing.append(asyncio.create_task(land()))
+                raise _connection_reset("COMMIT")
+
+    async def land() -> None:
+        await store.change_canvas(
+            "principal", CONVERSATION, lambda work: land_component(work, _CARD)
+        )
+        order.append("card")
+
+    store._transaction = dropping
+    await store.checkpoint("principal", CONVERSATION, segment_id, snapshot)
+    order.append("checkpoint")
+    await landing[0]
+
+    assert order == ["card", "checkpoint"]
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert "cmp_two" in reloaded.components
+    assert [line["component_id"] for line in reloaded.turn_components] == ["cmp_two"]
+    assert [block.component_id for block in reloaded.composition.blocks] == ["cmp_two"]
+    assert reloaded.pending["i1"].approved_sent
+
+
+async def test_an_evicted_instance_holds_no_lease_it_did_not_close(new_store) -> None:
+    """A stream ended with no closing write (a lost lease) evicts its state.
+    The lease it claimed is still stored and live, and a later load on the
+    same instance does not count it as held, so a save without a claim of
+    its own is refused as it would be on any other instance."""
+    store = new_store()
+    await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+
+    store.evict("principal", CONVERSATION)
+    state = await store.load("principal", CONVERSATION)
+    state.turn_final_text = "written under a lease this stream gave up"
+
+    with pytest.raises(ConversationStale):
+        await store.save("principal", CONVERSATION)
 
 
 async def test_checkpoint_raises_segment_lost_when_the_ledger_is_gone(new_store, pg_engine) -> None:

@@ -5,7 +5,7 @@ that runs the segment, writes its close and puts the stream's frames on a
 channel. The response class relays the channel to the client and, in a
 `finally` around its ASGI `__call__`, sets the client-gone flag and awaits the
 owner under a shield. These tests run that response class
-(`harness.studio_stream.StudioStream`) with a scripted owner on uvicorn over a real socket, with the server configuration
+(`harness.studio_relay.StudioStream`) with a scripted owner on uvicorn over a real socket, with the server configuration
 `harness.server.main` uses, and check every way a stream can end: the client
 closes before the response starts, while the relay waits for a frame, while
 the relay is blocked sending, or during a slow owner write; the server shuts
@@ -38,7 +38,8 @@ from typing import override
 import uvicorn
 from fastapi import APIRouter, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
-from harness.studio_stream import Channel, LiveOwners, StudioStream
+from harness.studio_relay import Channel, StudioStream
+from harness.studio_stream import LiveOwners
 from pydantic import BaseModel
 from starlette.types import Message, Receive, Scope, Send
 

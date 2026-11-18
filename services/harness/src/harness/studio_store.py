@@ -142,6 +142,7 @@ _KEY_TURN_PLANS = "turn_plans"
 _KEY_TURN_READINGS = "turn_readings"
 _KEY_TURN_APPLIED_CHOICE = "turn_applied_choice"
 _KEY_TURN_CHOICE_BASELINE = "turn_choice_baseline"
+_KEY_TURN_OPEN_ERROR = "turn_open_error"
 _SCALAR_KEYS = frozenset(
     {
         _KEY_TURN_INDEX,
@@ -160,6 +161,7 @@ _SCALAR_KEYS = frozenset(
         _KEY_TURN_READINGS,
         _KEY_TURN_APPLIED_CHOICE,
         _KEY_TURN_CHOICE_BASELINE,
+        _KEY_TURN_OPEN_ERROR,
     }
 )
 _KEY_COMPOSITION = "composition"
@@ -407,9 +409,13 @@ def _deserialize_pending(data: dict[str, Any]) -> dict[str, _PendingInterrupt]:
     return {interrupt_id: _deserialize_entry(entry) for interrupt_id, entry in data.items()}
 
 
-# A conversation's durable fields as `_serialize_durable` serialises them:
-# what `StudioStore.snapshot` hands out and `StudioStore.checkpoint` writes.
+# Durable fields as `_serialize_durable` serialises them, by key: what
+# `StudioStore.snapshot` hands out and `StudioStore.checkpoint` writes.
 type Snapshot = dict[str, Any]
+
+# The fields the save after `plan.approved` writes: the pending interrupts,
+# whose `approved_sent` it exists to store.
+_CHECKPOINT_KEYS = frozenset({_KEY_PENDING})
 
 
 def _serialize_durable(state: ConversationState) -> Snapshot:
@@ -439,6 +445,7 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_TURN_READINGS: state.turn_readings,
         _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
         _KEY_TURN_CHOICE_BASELINE: state.turn_choice_baseline,
+        _KEY_TURN_OPEN_ERROR: state.turn_open_error,
     }
     for index, turn in enumerate(state.turns):
         data[f"{_TURN_ITEM_PREFIX}{index}"] = turn
@@ -507,6 +514,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_applied_choice = dict(value) if value else None
         elif key == _KEY_TURN_CHOICE_BASELINE:
             state.turn_choice_baseline = dict(value or {})
+        elif key == _KEY_TURN_OPEN_ERROR:
+            state.turn_open_error = value
         elif key.startswith(_TURN_ITEM_PREFIX):
             _set_list_item(state.turns, int(key.removeprefix(_TURN_ITEM_PREFIX)), value)
         elif key.startswith(_COMPONENT_ITEM_PREFIX):
@@ -590,13 +599,14 @@ def closed_turn_error(cursor: Cursor) -> str:
     """The error a turn record closes on when its cursor closed and the
     stream's closing write failed (`StudioStore.load`): what the stream told
     the client (`harness.studio_stream.ending`'s `failed` column). A Stop's
-    close is `cancelled`; a failed turn's is the code of its error frame
-    (`harness.fatal_codes.recorded_code`); any other was told its state could
-    not be saved, `state_not_saved`."""
+    close is `cancelled`. A turn closed `failed` or `abandoned` on a node's
+    failure ended on the error frame its error gives, and records that
+    frame's code (`harness.fatal_codes.recorded_code`). Any other was told
+    its state could not be saved, `state_not_saved`."""
     match cursor.status:
         case TurnStatus.CANCELLED:
             return ErrorCode.CANCELLED.value
-        case TurnStatus.FAILED:
+        case TurnStatus.FAILED | TurnStatus.ABANDONED:
             return recorded_code(cursor.error or {}).value
         case _:
             return HarnessCode.STATE_NOT_SAVED.value
@@ -1484,7 +1494,7 @@ class StudioStore:
         segment_id: str,
         change: Callable[[ConversationState], T],
         *,
-        snapshot: Snapshot | None = None,
+        snapshot: Callable[[], Snapshot] | None = None,
     ) -> T:
         """`checkpoint` and `change_canvas`'s one write. Under the row lock
         and fenced on `segment_id`, run `change` on a one-level copy of the live
@@ -1497,8 +1507,8 @@ class StudioStore:
         Without `snapshot` the durable keys are the copy's, taken under the
         row lock with no await between it and the write, so the write holds
         the live state as it then stood. With `snapshot` (`checkpoint`'s)
-        they are the snapshot's, the lease aside: the lease is the copy's,
-        since a renewal since the snapshot moved it. Either way a field the
+        they are what it gives under the row lock, and the lease: the lease
+        is the copy's, since a renewal since the snapshot moved it. Either way a field the
         live stream changes during the write keeps its new value, which
         differs from the baseline and goes out with the next write."""
         state = entry.state
@@ -1522,7 +1532,7 @@ class StudioStore:
                 result = change(work)
                 durable = _serialize_durable(work)
                 if snapshot is not None:
-                    durable = {**snapshot, _KEY_SEGMENT: durable[_KEY_SEGMENT]}
+                    durable = {**snapshot(), _KEY_SEGMENT: durable[_KEY_SEGMENT]}
                 changed = _changed_since(durable, entry.baseline)
                 if work.composition is not stored:
                     await self._write_composition(
@@ -1621,11 +1631,12 @@ class StudioStore:
             live.segment = segment
 
     def snapshot(self, principal: str, conversation_id: str) -> Snapshot:
-        """The durable fields of this instance's live state of
-        `conversation_id`, serialised now, for `checkpoint` to write."""
+        """The fields `checkpoint` writes (`_CHECKPOINT_KEYS`) of this
+        instance's live state of `conversation_id`, serialised now."""
         entry = self._runtime[(principal, conversation_id)]
         assert entry.state is not None
-        return _serialize_durable(entry.state)
+        durable = _serialize_durable(entry.state)
+        return {key: durable[key] for key in _CHECKPOINT_KEYS}
 
     async def checkpoint(
         self,
@@ -1638,6 +1649,9 @@ class StudioStore:
         `snapshot` at the point the caller saves, that differ from what this
         instance last stored, fenced on `segment_id`. The live state may
         have moved on since the snapshot, and the write holds none of that.
+        A key whose stored value another write (a card's, which commits the
+        live state's changed fields) moved since this call began is left
+        out of every attempt, so no retry writes an older value over it.
 
         Under the row lock, it raises `SegmentLost` and writes nothing when
         the stored lease is not `segment_id` (another instance's claim
@@ -1652,11 +1666,20 @@ class StudioStore:
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
+        stored = {key: entry.baseline.get(key, _NO_BASELINE_VALUE) for key in snapshot}
+
+        def unmoved() -> Snapshot:
+            return {
+                key: value
+                for key, value in snapshot.items()
+                if entry.baseline.get(key, _NO_BASELINE_VALUE) == stored[key]
+            }
+
         await self._retrying(
             entry,
             conversation_id,
             lambda: self._fenced_save(
-                entry, conversation_id, segment_id, lambda _work: None, snapshot=snapshot
+                entry, conversation_id, segment_id, lambda _work: None, snapshot=unmoved
             ),
         )
 
@@ -1786,13 +1809,16 @@ class StudioStore:
         next request loads the row (`load`). The owner of a stream whose
         closing write ended `LOST` or `FAILED` calls it before it releases
         the conversation's lock, since the live state then holds what the
-        row does not. The runtime entry, with its locks, stays."""
+        row does not. It stops counting any segment as held here, since a
+        stream evicted without a closing write left a lease it no longer
+        writes under. The runtime entry, with its locks, stays."""
         entry = self._runtime.get((principal, conversation_id))
         if entry is None:
             return
         entry.state = None
         entry.draft = None
         entry.baseline = {}
+        entry.held = None
 
     async def drop_lease(
         self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0

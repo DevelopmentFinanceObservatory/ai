@@ -1354,8 +1354,11 @@ class _Translator:
     (plan.proposed / elicitation.request) is emitted, which tells the route
     the stream must end without `done` (contract delta 1).
 
-    The segment hands each event to `emit` as it happens, and `frames`
-    translates them in order. The agent's tool calls run through the
+    The segment's event, with the calls recorded before it (`recorded`), is
+    taken as it happens, in the task that runs the segment, and translated
+    later, in order, in the stream owner's task (`translate_recorded`).
+    `emit` and `frames` run both halves for a caller that drives the segment
+    itself. The agent's tool calls run through the
     recording executor and surface, so their steps and cards arrive as the
     records each event took (`_record_frames`); the plan path's events (the
     planner's status lines, the executor's step progress, the approval and
@@ -1493,10 +1496,23 @@ class _Translator:
                 if isinstance(waiting, StepProgress) and waiting.step_id == event.step_id:
                     self._waiting[place] = (event, [])
                     return
-            self._waiting.append((event, []))
-        else:
-            self._waiting.append((event, self._take_records()))
+        self._waiting.append(self.recorded(event))
         self._ready.set()
+
+    def recorded(self, event: SegmentEvent) -> tuple[SegmentEvent, list[_ExecutorRecord]]:
+        """`event` with every call recorded since the event before it, taken
+        as the segment emits it: none for a plan step's progress report
+        (`_translate`). It reads only the recorders, which the segment's
+        calls write, so it runs in the segment's task."""
+        if isinstance(event, StepProgress):
+            return event, []
+        return event, self._take_records()
+
+    async def translate_recorded(
+        self, event: SegmentEvent, records: list[_ExecutorRecord]
+    ) -> list[Any]:
+        """The frames of `event`, taken with `records` (`recorded`)."""
+        return await self._translate(event, records)
 
     async def frames(self, segment: asyncio.Future[Any]) -> AsyncIterator[Any]:
         """The frames of each event `emit` takes, in order, as the events

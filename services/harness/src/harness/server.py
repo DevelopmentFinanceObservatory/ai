@@ -307,6 +307,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             "check MCP_API_TOKEN (and MCP_AUTH_DISABLED) agree across this process"
         ) from exc
     yield
+    # Early mints still running are cancelled first, before the clients they
+    # call through close. apis finishes any mint already posted. No closing
+    # write reads a mint, and cancelling them ends at once every owner's wait
+    # for its stream's mints (`harness.early_mint.EarlyMints.settle`), so the
+    # wait below spends its budget on closing writes alone.
+    try:
+        if app.state.early_mints is not None:
+            await app.state.early_mints.aclose()
+    except Exception:
+        logger.exception("failed to cancel the early mints during shutdown")
     # The owners of Studio streams still running finish their closing writes
     # before anything they use closes. Past a graceful-shutdown timeout the
     # server stops waiting for their responses, and the event loop's teardown
@@ -315,13 +325,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.studio.owners.wait()
     except Exception:
         logger.exception("failed to wait for the studio stream owners during shutdown")
-    # Early mints still running are cancelled before the clients they call
-    # through close. apis finishes any mint already posted.
-    try:
-        if app.state.early_mints is not None:
-            await app.state.early_mints.aclose()
-    except Exception:
-        logger.exception("failed to cancel the early mints during shutdown")
     # `StudioRunner.aclose` releases the studio executor's resources, which
     # are `McpExecutor`'s long-lived per-conversation presentation-mcp
     # clients, the one long-lived client this process opens (every other MCP

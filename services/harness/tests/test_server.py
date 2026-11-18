@@ -180,24 +180,36 @@ async def test_lifespan_shutdown_waits_for_the_stream_owners_before_it_closes_th
 ) -> None:
     """A Studio stream's owner still making its closing write at shutdown
     finishes before `_lifespan` closes the database it writes to
-    (`harness.studio_stream.LiveOwners`)."""
+    (`harness.studio_stream.LiveOwners`). The early mints are cancelled
+    first, which ends an owner's wait for its stream's mints, so the wait
+    for the owners is spent on closing writes."""
     app = create_app(settings=Settings(database_url=pg_database_url))
     order: list[str] = []
     close_database = app.state.database_aclose
+    cancelled = asyncio.Event()
+
+    class Mints:
+        async def aclose(self) -> None:
+            order.append("mints cancelled")
+            cancelled.set()
 
     async def recorded_close() -> None:
         order.append("database closed")
         await close_database()
 
-    async def closing_write() -> None:
-        await asyncio.sleep(0.2)
+    async def settling() -> None:
+        # The closing write, then the wait for the stream's mints, which
+        # gives up after a while.
+        await asyncio.sleep(0.05)
+        await asyncio.wait({asyncio.ensure_future(cancelled.wait())}, timeout=0.5)
         order.append("owner finished")
 
     app.state.database_aclose = recorded_close
     async with _running_lifespan(app):
-        app.state.studio.owners.start(closing_write())
+        app.state.early_mints = Mints()
+        app.state.studio.owners.start(settling())
 
-    assert order == ["owner finished", "database closed"]
+    assert order == ["mints cancelled", "owner finished", "database closed"]
 
 
 async def test_the_app_starts_presentation_mcps_chart_worker_once_and_stops_it(

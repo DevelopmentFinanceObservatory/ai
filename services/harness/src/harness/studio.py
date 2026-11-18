@@ -42,7 +42,7 @@ from contextlib import (
     suppress,
 )
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from common.telemetry import flush_telemetry
 from compiler.surface import ToolSurface
@@ -61,7 +61,7 @@ from harness.conversation import (
 )
 from harness.decision_pick import is_decision_choice
 from harness.early_mint import EarlyMints
-from harness.graph.events import GraphEvent
+from harness.graph.events import GraphEvent, StepProgress
 from harness.graph.interfaces import Executor
 from harness.graph.state import (
     APPLY_CHOICE_STATE_KEY,
@@ -71,12 +71,17 @@ from harness.graph.state import (
 from harness.provenance import ProvenanceStore
 from harness.seeds import seeds_slot
 from harness.settings import Settings
-from harness.studio_edit import edit_frames
+from harness.studio_edit import (
+    EditClosed,
+    EditEvent,
+    EditFailed,
+    edit_event_frames,
+    edit_events,
+)
 from harness.studio_state import (
     HEARTBEAT_INTERVAL_S,
     ClosedTurn,
     ConversationState,
-    DatabaseUnavailable,
     SegmentBusy,
     SegmentLost,
     UnstreamedStatus,
@@ -96,8 +101,10 @@ from harness.studio_store import (
     StudioStore,
     retry_delays,
 )
-from harness.studio_stream import LiveOwners, open_stream
+from harness.studio_stream import Emit, LiveOwners, open_stream
 from harness.studio_translate import (
+    SegmentEvent,
+    _ExecutorRecord,
     _RecordingExecutor,
     _RecordingSurface,
     _stream_fatal,
@@ -106,6 +113,7 @@ from harness.studio_translate import (
     keep_turn_records,
     recorded_fatal,
 )
+from harness.tool_contracts import HarnessCode
 from harness.turn import transcript as entries
 from harness.turn.events import TurnEvent, TurnFailed
 from harness.turn.loop import (
@@ -591,12 +599,12 @@ class StudioRunner:
 class _SegmentWork:
     """The work of a claimed segment that runs the turn loop, for its owner
     (`harness.studio_stream.Work`): one segment of the turn at `cursor`
-    (`harness.turn.loop.run_segment`) under `segment_id`, its events
-    translated into wire frames (`_Translator`). `/turn` opens the turn and
-    runs its first segment; `/interrupt` gives `answer`, the answer to the
-    turn's open pause (`None` when a retry carries on a running turn), and
-    `approving`, the plan card a first answer approves, which `plan.approved`
-    states once the graph takes the approval.
+    (`harness.turn.loop.run_segment`) under `segment_id`, whose events the
+    owner translates into wire frames (`_Translator`). `/turn` opens the turn
+    and runs its first segment; `/interrupt` gives `answer`, the answer to
+    the turn's open pause (`None` when a retry carries on a running turn),
+    and `approving`, the plan card a first answer approves, which
+    `plan.approved` states once the graph takes the approval.
 
     While it runs, `conversation.renew_now` is the segment's, so a Stop
     posted on this instance reaches its heartbeat at once
@@ -610,13 +618,11 @@ class _SegmentWork:
     live, so the work ends `cancelled` and the owner's closing write closes
     the turn. A turn another instance abandoned ends `abandoned`; one this
     segment closed `abandoned` on a node's failure ends `failed` on that
-    failure's frame. A card write fenced out by another instance's takeover,
-    or one that could not reach the database before the lease's deadline
-    (`StudioStore.change_canvas`), ends it `lost`. Cancelling it cancels the
-    segment and waits for it, which leaves the cursor as last written and
-    its runs unfinished, for the next request to carry on. A step the
-    executor finished after the last translated event belongs to this
-    segment, so the recorders are emptied however it ends."""
+    failure's frame. Cancelling the drive cancels the segment, which leaves
+    the cursor as last written and its runs unfinished, for the next request
+    to carry on. A step the executor finished after the last translated
+    event belongs to this segment, so the recorders are emptied however it
+    ends."""
 
     def __init__(
         self,
@@ -635,74 +641,70 @@ class _SegmentWork:
         self._cursor = cursor
         self._segment_id = segment_id
         self._answer = answer
-        self._approving = approving
-
-    async def run(self, send: Callable[[BaseModel], None]) -> Outcome:
-        """Run the segment, `send` each frame, and return how it ended."""
-        runner, conversation = self._runner, self._conversation
-        translator = _Translator(
+        self._translator = _Translator(
             conversation=conversation,
             recorder=runner.recorder,
             surface_recorder=runner.surface_recorder,
-            approving=self._approving,
+            approving=approving,
         )
-        failed = False
+        self._renew_now = asyncio.Event()
+        # Whether a `TurnFailed` event was translated.
+        self._failed = False
 
-        def emit(event: GraphEvent | TurnEvent) -> None:
-            nonlocal failed
-            failed = failed or isinstance(event, TurnFailed)
-            translator.emit(event)
+    def begin(self) -> None:
+        """Make the segment's `renew_now` the conversation's, and keep the
+        turn's records so far, for a segment that resumes a turn another
+        instance began."""
+        self._conversation.renew_now = self._renew_now
+        keep_turn_records(self._conversation, self._cursor.state)
 
-        renew_now = conversation.renew_now = asyncio.Event()
-        segment_task: asyncio.Task[Segment] | None = None
-        try:
-            # The turn's records so far, for a segment that resumes a turn
-            # another instance began.
-            keep_turn_records(conversation, self._cursor.state)
-            segment_task = asyncio.create_task(
-                run_segment(
-                    runner.turns,
-                    runner.store,
-                    self._cursor,
-                    principal=self._principal,
-                    conversation_id=conversation.conversation_id,
-                    segment_id=self._segment_id,
-                    graph=runner.graph,
-                    emit=emit,
-                    answer=self._answer,
-                    heartbeat_seconds=runner.heartbeat_seconds,
-                    renew_now=renew_now,
-                )
-            )
-            async for frame in translator.frames(segment_task):
-                send(frame)
-            segment = segment_task.result()
-            keep_turn_records(conversation, segment.cursor.state)
-            outcome = segment.outcome
-            match outcome:
-                case Outcome.PAUSED | Outcome.DONE:
-                    for frame in await translator.finish():
-                        send(frame)
-                case Outcome.FAILED if not failed:
-                    send(recorded_fatal(conversation, segment.cursor.error or {}))
-                case Outcome.UNCLOSED if not failed:
-                    return Outcome.CANCELLED
-                case Outcome.ABANDONED if failed:
-                    return Outcome.FAILED
-            assert outcome is not None
-            return outcome
-        except (SegmentLost, DatabaseUnavailable) as exc:
-            _log_save_failure("card write", conversation, self._segment_id, exc)
-            return Outcome.LOST
-        finally:
-            if conversation.renew_now is renew_now:
-                conversation.renew_now = None
-            if segment_task is not None and not segment_task.done():
-                segment_task.cancel()
-                await asyncio.wait({segment_task})
-            runner.recorder.drain(current_conversation_id.get())
-            if runner.surface_recorder is not None:
-                runner.surface_recorder.drain(current_conversation_id.get())
+    async def drive(self, emit: Emit) -> Segment:
+        """Run the segment, emitting each event with the calls recorded
+        before it (`_Translator.recorded`); a plan step's progress report
+        replaces one of the same step that still waits."""
+        runner, translator = self._runner, self._translator
+
+        def recorded(event: GraphEvent | TurnEvent) -> None:
+            key = ("progress", event.step_id) if isinstance(event, StepProgress) else None
+            emit(translator.recorded(event), key=key)
+
+        return await run_segment(
+            runner.turns,
+            runner.store,
+            self._cursor,
+            principal=self._principal,
+            conversation_id=self._conversation.conversation_id,
+            segment_id=self._segment_id,
+            graph=runner.graph,
+            emit=recorded,
+            answer=self._answer,
+            heartbeat_seconds=runner.heartbeat_seconds,
+            renew_now=self._renew_now,
+        )
+
+    async def frames(self, event: object) -> list[BaseModel]:
+        """The frames of one event `drive` emitted."""
+        taken, records = cast(tuple[SegmentEvent, list[_ExecutorRecord]], event)
+        self._failed = self._failed or isinstance(taken, TurnFailed)
+        return await self._translator.translate_recorded(taken, records)
+
+    async def end(self, result: object) -> tuple[Outcome, list[BaseModel]]:
+        """How the segment `drive` returned ended, and its closing frames."""
+        segment = cast(Segment, result)
+        conversation = self._conversation
+        keep_turn_records(conversation, segment.cursor.state)
+        outcome = segment.outcome
+        assert outcome is not None
+        match outcome:
+            case Outcome.PAUSED | Outcome.DONE:
+                return outcome, await self._translator.finish()
+            case Outcome.FAILED if not self._failed:
+                return outcome, [recorded_fatal(conversation, segment.cursor.error or {})]
+            case Outcome.UNCLOSED if not self._failed:
+                return Outcome.CANCELLED, []
+            case Outcome.ABANDONED if self._failed:
+                return Outcome.FAILED, []
+        return outcome, []
 
     def fatal(self, error: BaseException) -> ErrorFrame:
         """The stream-fatal frame for `error` (`_stream_fatal`), which
@@ -712,35 +714,45 @@ class _SegmentWork:
             error = RuntimeError("the segment's frames were cancelled")
         return _stream_fatal(self._conversation, error)
 
+    def close(self) -> None:
+        """Let go of `renew_now` and empty the recorders."""
+        _close_work(self._conversation, self._renew_now, self._runner)
+
 
 class _RejectWork:
     """The work of an `/interrupt` that declines the plan, for its owner
     (`harness.studio_stream.Work`). The route closed the turn's cursor
     before the stream (`harness.turn.loop.reject`); this records the turn
-    closed on its reply before the first frame, then sends that reply and
-    `done`. Nothing was computed, so it runs no segment."""
+    closed on its reply, then sends that reply and `done`. Nothing was
+    computed, so its drive runs nothing."""
 
     REPLY = "Plan rejected."
 
     def __init__(self, conversation: ConversationState) -> None:
         self._conversation = conversation
 
-    async def run(self, send: Callable[[BaseModel], None]) -> Outcome:
-        """Record the turn, send its two frames, and return `done`."""
+    def begin(self) -> None:
+        return None
+
+    async def drive(self, emit: Emit) -> None:
+        return None
+
+    async def frames(self, event: object) -> list[BaseModel]:
+        raise AssertionError(f"the rejection emits no events: {event!r}")
+
+    async def end(self, result: object) -> tuple[Outcome, list[BaseModel]]:
+        """Record the turn, and return `done` with its two frames."""
         conversation = self._conversation
         conversation.close_turn(final_text=self.REPLY)
-        send(
-            MessageComplete(event="message.complete", seq=conversation.next_seq(), text=self.REPLY)
-        )
-        send(
+        return Outcome.DONE, [
+            MessageComplete(event="message.complete", seq=conversation.next_seq(), text=self.REPLY),
             Done(
                 event="done",
                 seq=conversation.next_seq(),
                 trace_id=conversation.trace_id,
                 composition=conversation.composition,
-            )
-        )
-        return Outcome.DONE
+            ),
+        ]
 
     def fatal(self, error: BaseException) -> ErrorFrame:
         """The stream-fatal frame for `error` (`_stream_fatal`)."""
@@ -748,23 +760,28 @@ class _RejectWork:
             error = RuntimeError("the rejection's frames were cancelled")
         return _stream_fatal(self._conversation, error)
 
+    def close(self) -> None:
+        return None
+
 
 class _EditWork:
     """The work of an Edit Card stream, for its owner
-    (`harness.studio_stream.Work`): the card edit
-    (`harness.studio_edit.edit_frames`) under `segment_id`, which runs no
+    (`harness.studio_stream.Work`): the card edit's calls
+    (`harness.studio_edit.edit_events`) under `segment_id`, which runs no
     turn loop, beside a heartbeat that renews the lease
-    (`StudioRunner._heartbeat`). While it runs, `conversation.renew_now` is
-    the heartbeat's, so a Stop posted on this instance reaches it at once.
+    (`StudioRunner._heartbeat`), and the owner's frames of the edit's events
+    (`harness.studio_edit.edit_event_frames`). While it runs,
+    `conversation.renew_now` is the heartbeat's, so a Stop posted on this
+    instance reaches it at once.
 
-    The edit ends on `done`, or on a stream-fatal `error` frame that records
-    the turn failed, and the work returns `done` or `failed`. A heartbeat
-    that reads a Stop first cancels the edit and returns `cancelled`; one
-    that finds the lease another's, or cannot renew it before the lease's
-    deadline, returns `lost`, as does a card write fenced out by another
-    instance's takeover or unable to reach the database
-    (`StudioStore.change_canvas`). An ending frame the edit sent before the
-    heartbeat stopped it stands."""
+    The edit ends on its reply and `done`, or on a stream-fatal `error`
+    frame that records the turn failed, and the work ends `done` or
+    `failed`. A heartbeat that reads a Stop first cancels the edit and the
+    work ends `cancelled`; one that finds the lease another's, or cannot
+    renew it before the lease's deadline, ends it `lost`, as does a card
+    write fenced out by another instance's takeover or unable to reach the
+    database (`StudioStore.change_canvas`). An ending the edit emitted
+    before the heartbeat stopped it stands."""
 
     def __init__(
         self,
@@ -782,30 +799,35 @@ class _EditWork:
         self._segment_id = segment_id
         self._component_id = component_id
         self._message = message
+        self._renew_now = asyncio.Event()
 
-    async def run(self, send: Callable[[BaseModel], None]) -> Outcome:
-        """Run the edit, `send` each frame, and return how it ended."""
+    def begin(self) -> None:
+        """Make the heartbeat's `renew_now` the conversation's."""
+        self._conversation.renew_now = self._renew_now
+
+    async def drive(self, emit: Emit) -> Outcome:
+        """Run the edit's calls, emitting each event, beside the heartbeat,
+        and return how the edit ended."""
         runner, conversation = self._runner, self._conversation
-        ended: BaseModel | None = None
+        ended: EditEvent | None = None
 
         async def edit() -> None:
             nonlocal ended
-            async for frame in edit_frames(
+            async for event in edit_events(
                 recorder=runner.recorder,
                 edit_model=runner.edit_model,
                 conversation=conversation,
                 component_id=self._component_id,
                 message=self._message,
             ):
-                send(frame)
-                if isinstance(frame, (Done, ErrorFrame)):
-                    ended = frame
+                emit(event)
+                if isinstance(event, (EditClosed, EditFailed)):
+                    ended = event
 
-        renew_now = conversation.renew_now = asyncio.Event()
         editing = asyncio.create_task(edit())
         heartbeat = asyncio.create_task(
             runner._heartbeat(
-                self._principal, conversation.conversation_id, self._segment_id, renew_now
+                self._principal, conversation.conversation_id, self._segment_id, self._renew_now
             )
         )
         try:
@@ -814,21 +836,25 @@ class _EditWork:
                 editing.cancel()
                 await asyncio.wait({editing})
             if ended is not None:
-                return Outcome.DONE if isinstance(ended, Done) else Outcome.FAILED
+                return Outcome.DONE if isinstance(ended, EditClosed) else Outcome.FAILED
             if editing.cancelled():
                 return heartbeat.result()
-            lost = editing.exception()
-            if isinstance(lost, (SegmentLost, DatabaseUnavailable)):
-                _log_save_failure("card write", conversation, self._segment_id, lost)
-                return Outcome.LOST
             editing.result()
             raise RuntimeError("the edit ended with no ending frame")
         finally:
-            if conversation.renew_now is renew_now:
-                conversation.renew_now = None
             editing.cancel()
             heartbeat.cancel()
             await asyncio.wait({editing, heartbeat})
+
+    async def frames(self, event: object) -> list[BaseModel]:
+        """The frames of one event the edit emitted."""
+        return await edit_event_frames(
+            cast(EditEvent, event), conversation=self._conversation, store=self._runner.store
+        )
+
+    async def end(self, result: object) -> tuple[Outcome, list[BaseModel]]:
+        """How the edit ended; its frames are the events' own."""
+        return cast(Outcome, result), []
 
     def fatal(self, error: BaseException) -> ErrorFrame:
         """The stream-fatal frame for `error` (`_stream_fatal`), which
@@ -837,34 +863,21 @@ class _EditWork:
             error = RuntimeError("the edit's frames were cancelled")
         return _stream_fatal(self._conversation, error)
 
+    def close(self) -> None:
+        """Let go of `renew_now` and empty the recorders."""
+        _close_work(self._conversation, self._renew_now, self._runner)
 
-def _log_save_failure(
-    what: str, conversation: ConversationState, segment_id: str, exc: Exception
+
+def _close_work(
+    conversation: ConversationState, renew_now: asyncio.Event, runner: StudioRunner
 ) -> None:
-    """Log a card write of the stream's work that failed: a lost segment or a
-    database unreachable until the lease's deadline (every transient fault
-    the store's retries did not outlast) as a warning, which ends the
-    stream as the heartbeat does, and anything else, a fault no retry
-    mends such as a lock timeout, a failed login or a bug, as an error with
-    its traceback."""
-    if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
-        logger.warning(
-            "studio %s ended the stream: conversation %s segment %s (trace_id=%s): %s",
-            what,
-            conversation.conversation_id,
-            segment_id,
-            conversation.trace_id,
-            exc,
-        )
-    else:
-        logger.exception(
-            "studio %s failed: conversation %s segment %s (trace_id=%s)",
-            what,
-            conversation.conversation_id,
-            segment_id,
-            conversation.trace_id,
-            exc_info=exc,
-        )
+    """Let go of a work's `renew_now`, when the conversation still holds it,
+    and empty the recorders of the calls its stream did not translate."""
+    if conversation.renew_now is renew_now:
+        conversation.renew_now = None
+    runner.recorder.drain(current_conversation_id.get())
+    if runner.surface_recorder is not None:
+        runner.surface_recorder.drain(current_conversation_id.get())
 
 
 def _streaming_conflict_response(detail: str, *, retry_after_seconds: int = 5) -> JSONResponse:
@@ -1454,6 +1467,16 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             abandoned = work.begin_turn()
             begun = work
             work.auto_add = body.auto_add
+            edit = (
+                body.component_ref is not None
+                and body.component_ref.intent is ComponentRefIntent.EDIT
+            )
+            if edit:
+                # An Edit Card turn opens no cursor, so a load cannot read how
+                # it ended. A closing write that fails leaves its record open
+                # after its stream said the state was not saved, and the next
+                # turn records it so.
+                work.turn_open_error = HarnessCode.STATE_NOT_SAVED.value
             if pick is None:
                 work.turn_user_message = body.message
                 work.turn_user_words = body.message
@@ -1534,10 +1557,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             _set_turn_context(principal, body.conversation_id, conversation, settings)
             if left_open is not None:
                 await abandon(studio.turns, left_open, segment_id=segment_id)
-            if (
-                body.component_ref is not None
-                and body.component_ref.intent is ComponentRefIntent.EDIT
-            ):
+            if edit:
                 # The Edit Card route bypasses the graph entirely: no
                 # resolve, no plan, no turn on the loop, just the card, the
                 # model's patch-or-recreate decision, and the platform write.

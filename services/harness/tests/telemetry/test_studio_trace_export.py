@@ -23,9 +23,10 @@ from common.telemetry import init_telemetry
 from google.genai import types
 from harness.scripted import ScriptedExecutor, ScriptedSurface
 from harness.studio import StudioRunner
+from harness.studio_relay import Channel
 from harness.studio_state import ConversationState
 from harness.studio_store import SegmentClose, Snapshot
-from harness.studio_stream import Channel, own_segment
+from harness.studio_stream import Emit, own_segment
 from harness.turn.loop import Outcome
 from harness.wire import ErrorFrame, MessageDelta
 from langfuse import Langfuse
@@ -330,16 +331,30 @@ class _SlowWork:
         self._conversation = conversation
         self.running = asyncio.Event()
 
-    async def run(self, send: Callable[[BaseModel], None]) -> Outcome:
+    def begin(self) -> None:
+        return None
+
+    async def drive(self, emit: Emit) -> Outcome:
         with trace.get_tracer("test.segment").start_as_current_span(MODEL_CALL) as span:
             span.set_attribute("gen_ai.operation.name", "generate_content")
-        send(MessageDelta(event="message.delta", seq=self._conversation.next_seq(), text="one"))
-        self.running.set()
+        emit("one")
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
+    async def frames(self, event: object) -> list[BaseModel]:
+        self.running.set()
+        return [
+            MessageDelta(event="message.delta", seq=self._conversation.next_seq(), text=str(event))
+        ]
+
+    async def end(self, result: object) -> tuple[Outcome, list[BaseModel]]:
+        raise AssertionError("the drive never returns")
+
     def fatal(self, error: BaseException) -> ErrorFrame:
         raise AssertionError("the work never fails") from error
+
+    def close(self) -> None:
+        return None
 
 
 class _SavingStore:
