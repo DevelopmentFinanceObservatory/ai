@@ -54,9 +54,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
+import errno
 import json
 import logging
 import math
+import socket
+import ssl
 import time
 import uuid
 from collections.abc import (
@@ -67,7 +70,7 @@ from collections.abc import (
     Coroutine,
     Iterable,
 )
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -157,12 +160,7 @@ type TurnSpecs = Callable[[str, str], Awaitable[dict[str, Any]]]
 
 class AdkBridge(Protocol):
     """How `StudioStore` reads conversations the previous release still
-    writes to ADK (`harness.adk_import.reimport_on_access`).
-    `reimports_on_access` says whether it copies in what that release
-    wrote, so a `/turn` claim may collide with its turn and need undoing
-    (`StudioStore.undo_claim`)."""
-
-    reimports_on_access: bool
+    writes to ADK (`harness.adk_import.reimport_on_access`)."""
 
     async def reimport(self, principal: str, conversation_id: str) -> None:
         """Bring one conversation's rows up to date with its ADK ledger
@@ -275,25 +273,47 @@ async def _run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
     return task.result()
 
 
+class _ConnectTimeoutError(TimeoutError):
+    """Connecting to the database timed out (`StudioStore._transaction`), as
+    against a statement timing out on a connection it holds."""
+
+
+# The errnos of a network that dropped or refused the connection.
+_NETWORK_ERRNOS = frozenset(
+    {
+        errno.EHOSTUNREACH,
+        errno.ENETUNREACH,
+        errno.ECONNREFUSED,
+        errno.ECONNRESET,
+        errno.ETIMEDOUT,
+        errno.EPIPE,
+    }
+)
+
+
 def _transient(exc: BaseException) -> bool:
-    """Whether `exc` is the connection to the database failing, a fault a
-    retry may outlast, however it surfaces: a connection SQLAlchemy
-    invalidated, the pool timing out, or an `OSError` raised as it is or as
-    a driver error's cause. That covers a refused, reset or timed-out
-    socket, an unreachable host, a name that does not resolve and a TLS
-    failure, which the Cloud SQL connector raises unwrapped when it cannot
-    connect. A statement or lock timeout and a misuse of the connection are
-    driver errors from no `OSError`; no retry mends them, so they raise at
-    once."""
+    """Whether `exc` is the network to the database failing, a fault a retry
+    may outlast, raised as it is or as a driver error's cause: a connection
+    SQLAlchemy invalidated, the pool timing out, a connect that timed out
+    (`_ConnectTimeoutError`), a refused, reset or aborted socket
+    (`ConnectionError`), a name that does not resolve, a TLS failure, or an
+    `OSError` carrying a network errno (`_NETWORK_ERRNOS`). The Cloud SQL
+    connector raises those unwrapped when it cannot connect. Anything else
+    raises at once: a statement or lock timeout, a misuse of the
+    connection, and an `OSError` such as a missing socket path or a
+    certificate it may not read, which no retry mends."""
     if isinstance(exc, DBAPIError):
-        return exc.connection_invalidated or _connection_lost(exc.orig)
-    return isinstance(exc, SQLAlchemyTimeoutError) or _connection_lost(exc)
+        return exc.connection_invalidated or _network_failed(exc.orig)
+    return isinstance(exc, SQLAlchemyTimeoutError) or _network_failed(exc)
 
 
-def _connection_lost(exc: BaseException | None) -> bool:
-    """Whether `exc`, or an error it was raised from, is an `OSError`."""
+def _network_failed(exc: BaseException | None) -> bool:
+    """Whether `exc`, or an error it was raised from, is the network failing
+    (`_transient`)."""
     while exc is not None:
-        if isinstance(exc, OSError):
+        if isinstance(exc, (_ConnectTimeoutError, ConnectionError, socket.gaierror, ssl.SSLError)):
+            return True
+        if isinstance(exc, OSError) and exc.errno in _NETWORK_ERRNOS:
             return True
         exc = exc.__cause__
     return False
@@ -595,22 +615,6 @@ def _row_segment(row: Any) -> Segment | None:
     )
 
 
-def _take_durable(entry: _RuntimeEntry, conversation_id: str, flat: dict[str, Any]) -> None:
-    """Set the durable fields of `entry`'s live state, creating it when
-    there is none, to the stored `flat` keys, which become the baseline.
-    A live state keeps its identity and process-local fields."""
-    durable = ConversationState(conversation_id=conversation_id)
-    _apply_delta(durable, flat)
-    if entry.state is None:
-        durable.lock = entry.lock
-        entry.state = durable
-    else:
-        for f in dataclasses.fields(ConversationState):
-            if f.name not in _PROCESS_LOCAL_FIELDS:
-                setattr(entry.state, f.name, getattr(durable, f.name))
-    entry.baseline = _serialize_durable(entry.state)
-
-
 def _row_flat(row: Any) -> dict[str, Any]:
     """The flat keys `conversations` holds in its own columns."""
     segment = _row_segment(row)
@@ -655,12 +659,6 @@ class _ItemTable:
         return text(
             f"SELECT {self.ident}, {self.value} FROM {self.table} "
             f"WHERE conversation = :pk AND {self.ident} = ANY(:idents)"
-        )
-
-    def delete_idents(self) -> Any:
-        """Delete the rows of the idents bound to `:idents`."""
-        return text(
-            f"DELETE FROM {self.table} WHERE conversation = :pk AND {self.ident} = ANY(:idents)"
         )
 
 
@@ -783,96 +781,6 @@ async def _run_delta_write(conn: AsyncConnection, pk: int, write: _DeltaWrite) -
     return version
 
 
-@dataclass(frozen=True)
-class _ClaimUndo:
-    """What a claim save overwrote, for `StudioStore.undo_claim` to write
-    back: the conversation's row as it stood (`before`), the stored value of
-    each item row the save wrote, by key prefix and ident (`items`; an ident
-    absent from its map had no row), and the version the save wrote
-    (`claimed`)."""
-
-    before: Any
-    items: dict[str, tuple[list[Any], dict[Any, Any]]]
-    claimed: int
-
-
-async def _write_back(conn: AsyncConnection, pk: int, undo: _ClaimUndo, segment_id: str) -> bool:
-    """`StudioStore.undo_claim`'s write: when the row still holds the claim
-    save's version and `segment_id`'s lease, write back the row's content
-    and item rows `undo` holds, at the version after the claim's, so the
-    version only rises and a save compared against the claim's version
-    fails. Whether it wrote."""
-    before = undo.before
-    written = (
-        await conn.execute(
-            text(
-                "UPDATE conversations SET version = version + 1, "
-                "turn_state = CAST(:turn_state AS jsonb), seq_next = :seq_next, "
-                "seq_reserved = :seq_reserved, lease_segment_id = :segment_id, "
-                "lease_owner = :owner, lease_expires_at = :expires_at, lease_cancel = :cancel, "
-                "updated_at = now() "
-                "WHERE id = :pk AND version = :claimed AND lease_segment_id = :claimed_segment "
-                "RETURNING id"
-            ),
-            {
-                "pk": pk,
-                "turn_state": json.dumps(before.turn_state),
-                "seq_next": before.seq_next,
-                "seq_reserved": before.seq_reserved,
-                "segment_id": before.lease_segment_id,
-                "owner": before.lease_owner,
-                "expires_at": before.lease_expires_at,
-                "cancel": before.lease_cancel,
-                "claimed": undo.claimed,
-                "claimed_segment": segment_id,
-            },
-        )
-    ).first()
-    if written is None:
-        return False
-    await _restore_items(conn, pk, undo.items)
-    return True
-
-
-async def _stored_items(
-    conn: AsyncConnection, pk: int, delta: dict[str, Any]
-) -> dict[str, tuple[list[Any], dict[Any, Any]]]:
-    """For each item table `delta` writes, the idents it writes and the
-    value each already holds; an ident with no row is absent from the
-    map."""
-    stored: dict[str, tuple[list[Any], dict[Any, Any]]] = {}
-    for prefix, rows in _delta_write(delta).rows.items():
-        idents = [row["ident"] for row in rows]
-        result = await conn.execute(
-            _ITEM_TABLES[prefix].select_idents(), {"pk": pk, "idents": idents}
-        )
-        stored[prefix] = (idents, dict(result.tuples().all()))
-    return stored
-
-
-async def _restore_items(
-    conn: AsyncConnection, pk: int, stored: dict[str, tuple[list[Any], dict[Any, Any]]]
-) -> None:
-    """Put back each item row `_stored_items` read: its value where it had
-    a row, no row where it had none."""
-    for prefix, (idents, values) in stored.items():
-        items = _ITEM_TABLES[prefix]
-        if values:
-            await conn.execute(
-                items.upsert(),
-                [
-                    {
-                        "pk": pk,
-                        "ident": ident,
-                        "value": json.dumps(value) if items.json_value else value,
-                    }
-                    for ident, value in values.items()
-                ],
-            )
-        if absent := [ident for ident in idents if ident not in values]:
-            await conn.execute(items.delete_idents(), {"pk": pk, "idents": absent})
-
-
 @dataclass
 class _RuntimeEntry:
     """The process-local anchor for one (principal, conversation_id).
@@ -896,9 +804,7 @@ class _RuntimeEntry:
     requests; `load` refreshes its durable fields in place, so `lock`,
     `cancel_event` and `_telemetry_span` keep their identity across a reload.
     `baseline` is the last durable snapshot known stored, the reference a
-    save diffs against. `claim_undo` is what the last claim save since the
-    last read overwrote (`StudioStore.undo_claim`), kept until that claim's
-    stream starts or its segment is released. `composition_lock` serialises same-instance
+    save diffs against. `composition_lock` serialises same-instance
     `/composition` calls on the shared `state` object, separate from `lock`
     since a canvas edit must land while a turn streams. `write_lock`
     serialises this instance's own
@@ -920,7 +826,6 @@ class _RuntimeEntry:
     claim_resumes: bool = False
     state: ConversationState | None = None
     baseline: dict[str, Any] = field(default_factory=dict)
-    claim_undo: _ClaimUndo | None = None
 
 
 class StudioStore:
@@ -1020,9 +925,20 @@ class StudioStore:
     def _entry(self, principal: str, conversation_id: str) -> _RuntimeEntry:
         return self._runtime.setdefault((principal, conversation_id), _RuntimeEntry())
 
-    def _transaction(self) -> AbstractAsyncContextManager[AsyncConnection]:
-        """One read-committed transaction. Every write goes through here."""
-        return self._engine.begin()
+    @asynccontextmanager
+    async def _transaction(self) -> AsyncIterator[AsyncConnection]:
+        """One read-committed transaction. Every write goes through here. A
+        connect that times out raises `_ConnectTimeoutError`, which a retried
+        write retries (`_transient`)."""
+        try:
+            conn = await self._engine.connect()
+        except TimeoutError as exc:
+            raise _ConnectTimeoutError(f"connecting to the database timed out: {exc}") from exc
+        try:
+            async with conn.begin():
+                yield conn
+        finally:
+            await conn.close()
 
     async def _write(
         self,
@@ -1123,7 +1039,9 @@ class StudioStore:
         has brought its rows up to date with ADK. `None` when the store does
         not hold the conversation. Raises what `adk.reimport` raises:
         `ConversationHeld`, or the failure of a copy, before anything is
-        read or written."""
+        read or written. An open turn's spec blocks are read through
+        `turn_specs` and passed through `adk.convert_specs`, which reports a
+        block that does not convert."""
         entry = self._entry(principal, conversation_id)
         await self._adk.reimport(principal, conversation_id)
         stamp = self._clock()
@@ -1134,15 +1052,25 @@ class StudioStore:
         entry.pk, entry.version, entry.read_at = row.id, row.version, row.db_now
         entry.read_stamp = stamp
         entry.seq_reserved, entry.claimed_reserved = row.seq_reserved, None
-        entry.claim_undo = None
-        _take_durable(entry, conversation_id, flat)
-        assert entry.state is not None
+        durable = ConversationState(conversation_id=conversation_id)
+        _apply_delta(durable, flat)
+        if entry.state is None:
+            durable.lock = entry.lock
+            entry.state = durable
+        else:
+            for f in dataclasses.fields(ConversationState):
+                if f.name not in _PROCESS_LOCAL_FIELDS:
+                    setattr(entry.state, f.name, getattr(durable, f.name))
+        entry.baseline = _serialize_durable(entry.state)
         segment = entry.state.segment
         if segment is None or segment.id != entry.held:
             entry.held = None
         entry.state.turn_specs_settled = False
         if entry.state.turn_index and not entry.state.turn_recorded:
-            entry.state.turn_specs = await self._turn_specs(principal, entry.state.session_id)
+            session_id = entry.state.session_id
+            entry.state.turn_specs = self._adk.convert_specs(
+                session_id, await self._turn_specs(principal, session_id)
+            )
         return entry.state
 
     def claim_segment(self, principal: str, conversation_id: str) -> str:
@@ -1195,10 +1123,7 @@ class StudioStore:
         also stores the frame numbers it reserved. A claim that resumes a
         turn starts past the stored reserved end when that moved since the
         load: the lapsed stream the claim takes over reserved more numbers
-        before its lease lapsed, and may have sent them. A claim save keeps
-        what it overwrote, for `undo_claim`, when the store's `adk` re-imports
-        on access (`AdkBridge.reimports_on_access`), the one case a claim may
-        meet the previous release's turn.
+        before its lease lapsed, and may have sent them.
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
@@ -1227,11 +1152,7 @@ class StudioStore:
                     entry.state.seq = row.seq_reserved
                     reserved = row.seq_reserved + SEQ_BLOCK
                     delta = _changed_since(_serialize_durable(entry.state), entry.baseline)
-                undoable = claimed is not None and self._adk.reimports_on_access
-                items = await _stored_items(conn, entry.pk, delta) if undoable else {}
                 version = await self._write(conn, entry.pk, delta, seq_reserved=reserved)
-            if undoable:
-                entry.claim_undo = _ClaimUndo(before=row, items=items, claimed=version)
             entry.version = version
             entry.baseline.update(delta)
             if claimed is not None:
@@ -1689,7 +1610,6 @@ class StudioStore:
         timeout: float,
     ) -> None:
         """`release`'s save, run as its own task."""
-        self._entry(principal, conversation_id).claim_undo = None
         try:
             async with asyncio.timeout(timeout):
                 state.drop_resuming(segment_id)
@@ -1780,64 +1700,6 @@ class StudioStore:
                 conversation_id,
                 segment_id,
             )
-
-    async def undo_claim(
-        self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0
-    ) -> None:
-        """Take back the claim save of `segment_id`, a claim whose stream
-        never started, when nothing has written the turn state since: one
-        transaction that, while the row still holds that save's version and
-        lease, writes back the row's content and the item rows as they stood
-        before it, at the next version (`_write_back`). This instance then
-        forgets the conversation (its runtime entry, live state included),
-        so its next request reads the row afresh, a canvas edit made since
-        the load included. The rows then digest as they did, so a conversation
-        the previous release moved meanwhile re-imports cleanly on the next
-        load (`harness.adk_import.reimport_on_access`) in place of being
-        held as changed on both sides. When the version moved, the row is
-        left as it is and the lease dropped (`drop_lease`).
-
-        Runs to the end even when the caller is cancelled, and never raises
-        anything but that cancellation, as `drop_lease`: an undo that cannot
-        land is logged, and the lease then expires by its own TTL.
-        """
-        await _run_to_completion(
-            self._undo_claim(principal, conversation_id, segment_id, timeout=timeout)
-        )
-
-    async def _undo_claim(
-        self, principal: str, conversation_id: str, segment_id: str, *, timeout: float
-    ) -> None:
-        """`undo_claim`'s write, run as its own task."""
-        entry = self._entry(principal, conversation_id)
-        undo = entry.claim_undo
-        undone = False
-        try:
-            async with asyncio.timeout(timeout), entry.write_lock:
-                if undo is not None and entry.pk is not None:
-                    async with self._transaction() as conn:
-                        undone = await _write_back(conn, entry.pk, undo, segment_id)
-                    if undone and self._runtime.get((principal, conversation_id)) is entry:
-                        del self._runtime[(principal, conversation_id)]
-        except Exception:
-            logger.exception(
-                "studio store: conversation %s failed to undo the claim of segment %s",
-                conversation_id,
-                segment_id,
-            )
-        if not undone:
-            logger.info(
-                "studio store: conversation %s holds no claim of segment %s to undo, or its "
-                "turn state moved since; dropping its lease alone",
-                conversation_id,
-                segment_id,
-            )
-            await self._drop_lease(principal, conversation_id, segment_id, timeout=timeout)
-
-    def claim_streamed(self, principal: str, conversation_id: str) -> None:
-        """The claim's stream has started, so its claim save is no longer
-        undone (`undo_claim`): drop what it kept for that."""
-        self._entry(principal, conversation_id).claim_undo = None
 
     async def request_cancel(self, principal: str, conversation_id: str) -> bool:
         """Set the cancel flag on `conversation_id`'s live segment, whoever

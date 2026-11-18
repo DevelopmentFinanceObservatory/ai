@@ -466,9 +466,9 @@ class ConversationState:
     cancel_event: asyncio.Event | None = None
     # Set alongside `cancel_event`, naming why it was armed: "cancelled" (a
     # client's Stop, from this instance or another), "segment_lost" (this
-    # stream's segment was taken over) or "state_not_saved" (a write or the
-    # heartbeat's renewal could not reach the database before the lease's
-    # deadline). `_sse_stream`'s cancel branch reads it once to pick the
+    # stream's segment was taken over, or its own renewal could not keep it
+    # alive) or "state_not_saved" (a write could not reach the database
+    # before the lease's deadline). `_sse_stream`'s cancel branch reads it once to pick the
     # frame; reset to `None` alongside `cancel_event` when the stream ends.
     cancel_reason: str | None = None
     # Armed while a plan-card switch streams (`harness.graph.switch.

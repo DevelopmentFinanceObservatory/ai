@@ -581,10 +581,7 @@ async def test_a_write_the_serving_release_makes_during_a_reimport_is_a_conflict
         async with side.connect() as writer:
             transaction = await writer.begin()
             await writer.execute(
-                text(
-                    "UPDATE conversations SET version = version + 1, "
-                    "seq_reserved = seq_reserved + 1 WHERE conversation_id = :id"
-                ),
+                text("UPDATE conversations SET version = version + 1 WHERE conversation_id = :id"),
                 {"id": TEXT_ONLY},
             )
             rerun = asyncio.create_task(import_conversations(adk, apply=True))
@@ -789,12 +786,11 @@ async def test_a_paused_turn_s_mapping_form_block_is_served_converted_through_it
 
 
 async def test_a_served_block_that_does_not_convert_is_logged_once_with_its_turn_and_reason(
-    adk: AsyncEngine, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    adk: AsyncEngine, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The block the serving release keeps as stored is named once per
-    process, with its turn session, spec id and why, however many loads and
-    resumed streams read it."""
-    monkeypatch.setattr(adk_import, "_logged_unconvertible", set())
+    """The block the serving release keeps as stored is named once by the
+    store's bridge, with its turn session, spec id and why, however many
+    loads and resumed streams read it."""
     spec_id = next(iter(EXPECTED[FULL]["view"]["turn_specs"]))
     block = {**_mapping_block(), "spec_id": spec_id, "_bound_refs": "g7"}
     await _put_open_turn_block(adk, block)
@@ -814,6 +810,37 @@ async def test_a_served_block_that_does_not_convert_is_logged_once_with_its_turn
     (logged,) = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert f"{FULL}#t4: the _bound_refs of spec block {spec_id} does not convert" in logged
     assert logged.endswith("TypeError: _bound_refs is of type str")
+
+
+def test_a_bridge_remembers_the_blocks_it_logged_within_its_bound(
+    adk: AsyncEngine, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each bridge keeps its own memo of the blocks it logged, holding the
+    latest `_LOGGED_BLOCKS_KEPT`, so a block pushed out by newer ones is
+    logged again."""
+    monkeypatch.setattr(adk_import, "_LOGGED_BLOCKS_KEPT", 1)
+    first, second = reimport_on_access(adk), reimport_on_access(adk)
+
+    def block(spec_id: str) -> dict[str, Any]:
+        return {spec_id: {**_mapping_block(), "spec_id": spec_id, "_bound_refs": "g7"}}
+
+    with caplog.at_level("WARNING", logger="harness.adk_import"):
+        for bridge, spec_id in [
+            (first, "spec_a"),
+            (first, "spec_a"),
+            (second, "spec_a"),
+            (first, "spec_b"),
+            (first, "spec_a"),
+        ]:
+            bridge.convert_specs(f"{FULL}#t4", block(spec_id))
+
+    logged = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert [m.split("_bound_refs of spec block ")[1].split(" ")[0] for m in logged] == [
+        "spec_a",
+        "spec_a",
+        "spec_b",
+        "spec_a",
+    ]
 
 
 async def test_close_open_turns_keeps_a_mapping_form_turn_block_as_rows(
@@ -1215,23 +1242,24 @@ async def test_a_conversation_never_imported_is_imported_when_first_read(
     assert (await import_conversations(adk, apply=False)).unchanged == [_name(PLAN_PAUSED)]
 
 
-async def test_a_turn_racing_the_previous_release_takes_its_claim_back_and_meets_its_lease(
+async def test_a_turn_racing_the_previous_release_claims_nothing_and_meets_its_lease(
     adk: AsyncEngine,
 ) -> None:
     """The previous release claims turn 3 and creates its turn session between
-    this release's load and its session create. The first `/turn` takes its
-    claim back and answers the retryable 409, leaving that session alone. The
-    rows are as imported, so the retry re-imports the previous release's turn
-    and meets its live lease as a busy stream, with no conflict recorded.
-    Once that lease lapses, a `/turn` streams to `done`."""
+    this release's load and its session create. This release meets that
+    session before its claim save, so it claims nothing and answers the
+    retryable 409, leaving the session alone. The retry re-imports the
+    previous release's turn and meets its live lease as a busy stream, with
+    no conflict recorded. Once that lease lapses, a `/turn` streams to
+    `done`."""
     await import_conversations(adk, apply=True)
     service = DatabaseSessionService(db_engine=adk)
     app, _ = orchestrator_app(engine=adk, session_service=service, store=_reimporting_store(adk))
     studio = app.state.studio
-    ensure_session = studio._ensure_session
+    open_session = studio._open_session
     lease = {"id": "seg_old", "owner": "old", "expires_at": time.time() + 600, "cancel": False}
 
-    async def previous_release_claims_first(**kwargs: Any) -> None:
+    async def previous_release_claims_first(**kwargs: Any) -> bool:
         await _set_adk_state(
             adk, TEXT_ONLY, {"studio:segment": lease, "studio:turn_index": 3, "studio:seq": 99}
         )
@@ -1243,17 +1271,25 @@ async def test_a_turn_racing_the_previous_release_takes_its_claim_back_and_meets
                 ),
                 {"app": AGENT_NAME, "principal": PRINCIPAL, "id": f"{TEXT_ONLY}#t3"},
             )
-        studio._ensure_session = ensure_session
-        await ensure_session(**kwargs)
+        studio._open_session = open_session
+        return await open_session(**kwargs)
 
-    studio._ensure_session = previous_release_claims_first
+    studio._open_session = previous_release_claims_first
     body = turn_body("and a third?", conversation_id=TEXT_ONLY)
 
     async with studio_client(app) as client:
         first = await client.post("/api/studio/turn", json=body, headers=AUTH)
+        async with adk.connect() as conn:
+            leased = (
+                await conn.execute(
+                    text("SELECT lease_segment_id FROM conversations WHERE conversation_id = :id"),
+                    {"id": TEXT_ONLY},
+                )
+            ).scalar_one()
         retry = await client.post("/api/studio/turn", json=body, headers=AUTH)
 
         assert (first.status_code, first.json()["error"]) == (409, "transient_unavailable")
+        assert leased is None
         assert (retry.status_code, retry.json()["error"]) == (409, "transient_unavailable")
         assert retry.json()["retry_after_seconds"] > 0
         assert await _diverged_flags(adk) == []
@@ -1555,7 +1591,7 @@ async def test_a_conversation_another_instance_found_diverged_counts_as_moved(
 ) -> None:
     """The conflict is recorded at ADK's latest `update_time`, so the
     session's time no longer tells that ADK moved; the diverged flag does,
-    and `_ensure_session` leaves the previous release's turn session alone."""
+    and `_open_session` leaves the previous release's turn session alone."""
     await _diverge(adk, TEXT_ONLY)
     with pytest.raises(ConversationHeld):
         await reimport_on_access(adk).reimport(PRINCIPAL, TEXT_ONLY)

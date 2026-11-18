@@ -124,6 +124,7 @@ import json
 import logging
 import math
 import sys
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -619,39 +620,21 @@ def open_turn_specs(engine: AsyncEngine) -> TurnSpecs:
 
     async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
         turn = await _turn_session_specs(engine, principal, session_id)
-        if turn is None:
-            return {}
-        _log_unconvertible(turn.blocks)
-        return turn.specs
+        return turn.specs if turn is not None else {}
 
     return turn_specs
 
 
-def _converted_specs(session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
+def _converted_specs(session_id: str, specs: dict[str, Any], blocks: Blocks) -> dict[str, Any]:
     """`specs`, the spec blocks turn session `session_id` holds, converted
     (`_convert_blocks`), and `specs` itself when no block needed converting.
-    A block that does not convert is kept as it is and logged
-    (`_log_unconvertible`)."""
-    blocks = Blocks()
+    A block that does not convert is kept as it is and named in `blocks`."""
     converted = _convert_blocks(specs, session_id, blocks)
-    _log_unconvertible(blocks)
     return specs if converted is specs else dict(converted)
 
 
-# Each unconvertible spec block this process has logged, by the reason it
-# was logged with, which names its turn session and spec id.
-_logged_unconvertible: set[str] = set()
-
-
-def _log_unconvertible(blocks: Blocks) -> None:
-    """Log, once per process, each spec block the serving release keeps as
-    stored, since it does not convert: the turn session (conversation and
-    turn) holding it, its spec id and why. A turn that closes with it loses
-    its entity refs, since the reader refuses the mapping form."""
-    for reason in blocks.unconvertible:
-        if reason not in _logged_unconvertible:
-            _logged_unconvertible.add(reason)
-            logger.warning("adk import: a spec block is served as stored: %s", reason)
+# How many unconvertible spec blocks a bridge remembers having logged.
+_LOGGED_BLOCKS_KEPT = 1024
 
 
 async def _find_row(conn: AsyncConnection, names: dict[str, str], *, lock: bool) -> int | None:
@@ -724,14 +707,11 @@ _UNCOMPARED_LEASE_FIELD = "cancel"
 
 async def _stored_digest(conn: AsyncConnection, pk: int) -> str:
     """A digest of every row the tables hold for the conversation, its lease
-    included bar `_UNCOMPARED_LEASE_FIELD`. The row's `version` is left out:
-    every write that moves it changes a column the digest reads, and an
-    undone claim (`StudioStore.undo_claim`) writes the rows back as they
-    stood at a higher version."""
+    included bar `_UNCOMPARED_LEASE_FIELD`."""
     conversation = (
         await conn.execute(
             text(
-                "SELECT to_jsonb(c) - 'id' - 'created_at' - 'updated_at' - 'version' "
+                "SELECT to_jsonb(c) - 'id' - 'created_at' - 'updated_at' "
                 f"- 'lease_{_UNCOMPARED_LEASE_FIELD}' FROM conversations c WHERE id = :pk"
             ),
             {"pk": pk},
@@ -1189,8 +1169,9 @@ def reimport_on_access(engine: AsyncEngine) -> AdkBridge:
     (`_ADK_MOVED`), so a `/turn` can tell a per-turn session the previous
     release just created from a leftover one. `AdkBridge.convert_specs`
     converts the spec blocks a turn session holds as the import does
-    (`_converted_specs`), for a stream that resumes a turn the previous
-    release opened.
+    (`_converted_specs`), for a load of an open turn and a stream that
+    resumes a turn the previous release opened, and logs each block that
+    does not convert once (`_AdkOnAccess._log_unconvertible`).
 
     Before each load it reads the conversation's ledger session against
     what was last copied of it (`_ADK_MOVED`). When ADK holds no ledger
@@ -1219,13 +1200,14 @@ def reimport_on_access(engine: AsyncEngine) -> AdkBridge:
 class _AdkOnAccess:
     """`reimport_on_access`'s `AdkBridge`."""
 
-    reimports_on_access = True
-
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
         # Each refused conversation, with the ledger session's `update_time` the
         # refusal read.
         self._refused: dict[tuple[str, str], datetime] = {}
+        # The unconvertible spec blocks this bridge has logged, newest last,
+        # by the reason logged, which names the turn session and spec id.
+        self._logged: OrderedDict[str, None] = OrderedDict()
 
     async def _lookup(self, principal: str, conversation_id: str) -> Row[Any] | None:
         async with self._engine.connect() as conn:
@@ -1247,7 +1229,25 @@ class _AdkOnAccess:
         )
 
     def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
-        return _converted_specs(session_id, specs)
+        blocks = Blocks()
+        converted = _converted_specs(session_id, specs, blocks)
+        for reason in blocks.unconvertible:
+            self._log_unconvertible(reason)
+        return converted
+
+    def _log_unconvertible(self, reason: str) -> None:
+        """Log a spec block served as stored, since it does not convert, once
+        while it stays among the `_LOGGED_BLOCKS_KEPT` this bridge last
+        logged. `reason` names the turn session (conversation and turn)
+        holding it, its spec id and why. A turn that closes with it loses
+        its entity refs, since the reader refuses the mapping form."""
+        if reason in self._logged:
+            self._logged.move_to_end(reason)
+            return
+        self._logged[reason] = None
+        if len(self._logged) > _LOGGED_BLOCKS_KEPT:
+            self._logged.popitem(last=False)
+        logger.warning("adk import: a spec block is served as stored: %s", reason)
 
     async def reimport(self, principal: str, conversation_id: str) -> None:
         row = await self._lookup(principal, conversation_id)
@@ -1296,8 +1296,6 @@ def _diverged(principal: str, conversation_id: str) -> ConversationHeld:
 class _NoAdk:
     """The job's stores read the tables as they stand and serve no turn."""
 
-    reimports_on_access = False
-
     async def reimport(self, principal: str, conversation_id: str) -> None:
         del principal, conversation_id
 
@@ -1306,7 +1304,7 @@ class _NoAdk:
         return False
 
     def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
-        return _converted_specs(session_id, specs)
+        return _converted_specs(session_id, specs, Blocks())
 
 
 def _store(engine: AsyncEngine) -> StudioStore:

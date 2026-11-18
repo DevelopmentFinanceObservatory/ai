@@ -106,6 +106,7 @@ from harness.studio_store import (
     SEQ_BLOCK,
     ConversationExists,
     ConversationHeld,
+    ConversationStale,
     StudioStore,
     _deserialize_pending,
 )
@@ -2267,21 +2268,25 @@ async def test_a_raise_building_the_approval_record_leaves_the_pending_entry_for
 
 
 async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claimed_lease() -> None:
-    """The per-turn session cannot be created after the claim save landed, so
-    `/turn` fails before its stream starts. The lock and the segment it
-    claimed are both released, and the next `/turn` is accepted."""
+    """A leftover per-turn session cannot be replaced after the claim save
+    landed, so `/turn` fails before its stream starts. The lock and the
+    segment it claimed are both released, and the next `/turn` is
+    accepted."""
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
         turn_specs=session_turn_specs(_new_session_service(), app_name=AGENT_NAME),
     )
     app = _app(_text("Hello."), store=store)
-    ensure_session = app.state.studio._ensure_session
+    await app.state.studio.runner.session_service.create_session(
+        app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t1"
+    )
+    replace = app.state.studio._replace_leftover_session
 
     async def _unavailable(**kwargs: Any) -> None:
         raise RuntimeError("session backend unavailable")
 
-    app.state.studio._ensure_session = _unavailable
+    app.state.studio._replace_leftover_session = _unavailable
     async with _client(app) as client:
         with pytest.raises(RuntimeError, match="session backend unavailable"):
             await _stream(client, "/api/studio/turn", _turn_body("hi"))
@@ -2289,7 +2294,7 @@ async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claim
         assert not store.current(PRINCIPAL, CONVERSATION).lock.locked()
         stored = await store.load(PRINCIPAL, CONVERSATION)
         assert stored is not None and stored.segment is None
-        app.state.studio._ensure_session = ensure_session
+        app.state.studio._replace_leftover_session = replace
         frames = await _stream(client, "/api/studio/turn", _turn_body("hi again"))
 
     assert _events(frames)[-1] == "done"
@@ -2319,17 +2324,49 @@ async def test_a_turn_replaces_the_leftover_adk_session_it_meets(
     assert all(turn.get("error") != "abandoned" for turn in state.turns)
 
 
+async def test_a_turn_whose_claim_loses_leaves_the_session_it_met_alone() -> None:
+    """A per-turn session another request of this release created for the
+    same turn is replaced only by the claim that wins. This request's claim
+    loses, so the session keeps the other request's state."""
+    store = StudioStore(
+        _engine(),
+        adk=NO_ADK,
+        turn_specs=session_turn_specs(_new_session_service(), app_name=AGENT_NAME),
+    )
+    app = _app(_text("Hello."), store=store)
+    session_service = app.state.studio.runner.session_service
+    await session_service.create_session(
+        app_name=AGENT_NAME,
+        user_id=PRINCIPAL,
+        session_id=f"{CONVERSATION}#t1",
+        state={"surface": "the other request's"},
+    )
+
+    async def claimed_elsewhere(principal: str, conversation_id: str) -> None:
+        raise ConversationStale(conversation_id)
+
+    store.save = claimed_elsewhere  # type: ignore[method-assign]
+
+    async with _client(app) as client:
+        response = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
+
+    assert (response.status_code, response.json()["error"]) == (409, "transient_unavailable")
+    kept = await session_service.get_session(
+        app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t1"
+    )
+    assert kept is not None and kept.state["surface"] == "the other request's"
+
+
 async def test_a_turn_whose_session_exists_while_adk_moved_deletes_nothing_and_asks_for_a_retry() -> (
     None
 ):
     """When ADK's ledger session moved since the load, the per-turn session
     may be the previous release's live one: `/turn` answers the retryable 409,
-    leaves the session alone, and drops the lease it claimed."""
+    leaves the session alone, and claims nothing, since it meets the
+    session before its claim save."""
     session_service = _new_session_service()
 
     class MovedAdk:
-        reimports_on_access = False
-
         async def reimport(self, principal: str, conversation_id: str) -> None:
             await NO_ADK.reimport(principal, conversation_id)
 
@@ -3653,57 +3690,6 @@ async def test_cancel_aborts_a_streaming_turn_with_a_cancelled_error_frame() -> 
     assert _events(frames)[-1] == "error"
     assert _frame(frames, "error")["error"]["error"] == "cancelled"
     assert "done" not in _events(frames)
-
-
-async def test_a_claim_whose_stream_started_keeps_nothing_to_undo() -> None:
-    """A store that re-imports on access keeps what a claim save overwrote,
-    for a claim that meets the previous release's turn. Once the stream
-    starts, the claim is no longer undone, so that copy is dropped."""
-
-    class ReimportingAdk:
-        reimports_on_access = True
-
-        async def reimport(self, principal: str, conversation_id: str) -> None:
-            del principal, conversation_id
-
-        async def moved(self, principal: str, conversation_id: str) -> bool:
-            del principal, conversation_id
-            return False
-
-        def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
-            del session_id
-            return specs
-
-    session_service = _new_session_service()
-    store = StudioStore(
-        _engine(),
-        adk=ReimportingAdk(),
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
-    )
-    resolver = _HangingResolver()
-    app = _app(*_card(), resolver=resolver, session_service=session_service, store=store)
-    saved: list[bool] = []
-    real_save = store.save
-
-    async def noting_save(principal: str, conversation_id: str) -> None:
-        await real_save(principal, conversation_id)
-        saved.append(store._runtime[(principal, conversation_id)].claim_undo is not None)
-
-    store.save = noting_save  # type: ignore[method-assign]
-
-    async with _client(app) as client:
-        stream_task = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
-        await asyncio.wait_for(resolver.entered.wait(), timeout=5)
-        kept = store._runtime[(PRINCIPAL, CONVERSATION)].claim_undo
-        await client.post(
-            "/api/studio/cancel",
-            json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
-            headers=AUTH,
-        )
-        await asyncio.wait_for(stream_task, timeout=5)
-
-    assert saved[-1] is True
-    assert kept is None
 
 
 async def test_cancelling_an_idle_conversation_is_a_no_op_204() -> None:
@@ -7362,8 +7348,6 @@ async def test_a_first_turn_whose_reload_finds_the_conversation_held_answers_it_
     reads = 0
 
     class HeldOnReload:
-        reimports_on_access = False
-
         async def reimport(self, principal: str, conversation_id: str) -> None:
             nonlocal reads
             reads += 1
@@ -7596,10 +7580,8 @@ async def test_a_heartbeat_that_cannot_renew_ends_the_stream_once_its_clock_pass
     heartbeat interval, for as long as the store's instance clock reads
     before 10 seconds short of a TTL past the load the claim's lease expiry
     was dated from. Moving that clock past the deadline, with no real time
-    elapsed, is what ends the stream with a stream-fatal transient error.
-    No other instance owns the turn, so the stream closes it as
-    `state_not_saved`, as a store write meeting the same outage does. A
-    claim whose session creation is slow (`claim_takes` seconds)
+    elapsed, is what ends the stream with a stream-fatal `segment_lost`
+    error. A claim whose session creation is slow (`claim_takes` seconds)
     starts its heartbeat later and keeps the same deadline, since the lease
     expires on the same date."""
     monkeypatch.setattr(studio_module, "HEARTBEAT_INTERVAL_S", 0.05)
@@ -7619,13 +7601,13 @@ async def test_a_heartbeat_that_cannot_renew_ends_the_stream_once_its_clock_pass
     monkeypatch.setattr(store, "renew", _renew_always_fails)
     resolver = _HangingResolver()
     app = _app(*_card(), resolver=resolver, session_service=session_service, store=store)
-    real_ensure_session = app.state.studio._ensure_session
+    real_open_session = app.state.studio._open_session
 
-    async def slow_ensure_session(**kwargs: Any) -> None:
+    async def slow_open_session(**kwargs: Any) -> bool:
         await clock.advance(claim_takes)
-        await real_ensure_session(**kwargs)
+        return await real_open_session(**kwargs)
 
-    monkeypatch.setattr(app.state.studio, "_ensure_session", slow_ensure_session)
+    monkeypatch.setattr(app.state.studio, "_open_session", slow_open_session)
 
     async with _client(app) as client:
         stream_task = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
@@ -7642,12 +7624,9 @@ async def test_a_heartbeat_that_cannot_renew_ends_the_stream_once_its_clock_pass
         frames = await asyncio.wait_for(stream_task, timeout=5)
 
     assert _events(frames)[-1] == "error"
-    error = _frame(frames, "error")["error"]
-    assert error["error"] == "transient_unavailable"
-    assert error["detail"] == classed_sentence(HarnessCode.STATE_NOT_SAVED, "retry_after_delay")
+    assert _frame(frames, "error")["error"]["error"] == "transient_unavailable"
     assert "done" not in _events(frames)
-    assert state.turn_recorded is True
-    assert state.turns[-1]["error"] == "state_not_saved"
+    assert state.turn_recorded is False  # the turn stays as stored for a retry
 
 
 async def test_cancel_from_another_instance_stops_the_live_stream_within_a_heartbeat(
@@ -7763,13 +7742,16 @@ async def test_composition_after_a_heartbeat_renewal_still_sees_a_remote_write(
 async def test_a_request_cancelled_while_it_drops_its_claim_still_releases_the_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`/turn` claims, then its session cannot be created, and the request is
-    cancelled while it drops the lease it claimed. The drop runs to the end,
-    and the conversation's lock is released, so the next request on this
-    instance is not refused."""
+    """`/turn` claims, then the leftover session it met cannot be replaced,
+    and the request is cancelled while it drops the lease it claimed. The
+    drop runs to the end, and the conversation's lock is released, so the
+    next request on this instance is not refused."""
     app = _app(_text("Hello."))
     studio = app.state.studio
     store = studio.store
+    await studio.runner.session_service.create_session(
+        app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t1"
+    )
 
     async def unavailable(**kwargs: Any) -> None:
         raise RuntimeError("the session cannot be created")
@@ -7782,7 +7764,7 @@ async def test_a_request_cancelled_while_it_drops_its_claim_still_releases_the_l
         await proceed.wait()
         await real_drop(*args, **kwargs)
 
-    monkeypatch.setattr(studio, "_ensure_session", unavailable)
+    monkeypatch.setattr(studio, "_replace_leftover_session", unavailable)
     monkeypatch.setattr(store, "_drop_lease", slow_drop)
     router = create_studio_router(studio, settings=Settings())
     endpoint = next(

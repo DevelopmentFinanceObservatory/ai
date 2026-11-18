@@ -555,11 +555,12 @@ async def _sse_stream(
     with no `plan.proposed`: a Stop never leaves a stream open. Once that
     frame passes, the deadline is met, so a slow unwind after it leaves the
     paused turn open.
-    `"segment_lost"` (this stream's segment lease was taken over) yields a
-    stream-fatal `transient_unavailable` frame without closing the turn.
-    Another instance now owns the segment and may still complete it.
-    `"state_not_saved"` (a write, or the heartbeat's renewal, could not
-    reach the database before the lease's deadline) closes the turn as
+    `"segment_lost"` (this stream's segment lease was taken over, or this
+    instance's own renewal could not keep it alive) yields a stream-fatal
+    `transient_unavailable` frame without closing the turn. Another
+    instance now owns the segment, or may claim it once its lease lapses,
+    and may still complete it. `"state_not_saved"` (a write could not reach
+    the database before the lease's deadline) closes the turn as
     `state_not_saved` first, since no other instance will, and yields the
     same frame. Either way the segment
     generator is closed, unwinding the ADK run.
@@ -875,30 +876,32 @@ class StudioRunner:
         closes it."""
         await self.recorder.aclose()
 
-    async def _ensure_session(
+    async def _open_session(
         self,
         *,
         user_id: str,
         conversation_id: str,
         session_id: str,
-        state: dict[str, Any] | None = None,
-    ) -> None:
-        """Create the turn's per-turn ADK session (`{cid}#t{n}`) for a turn
-        the `/turn` route's store claim has just won. A session already under
-        that id is scratch when the conversation's tables never recorded the
-        turn it belonged to: a conversation served as absent (its ledger
-        session refused, or ADK holds none) whose ADK turn sessions remain,
-        or a `--prefer-adk` copy whose `turn_index` is below the turns the
-        tables recorded. It is deleted and the session created fresh. Two
-        instances of this code cannot both reach this for one turn index,
-        because the claim is a compare-and-swap. An instance still running on
-        ADK sessions can: if ADK's ledger session moved since the load, the
-        session may be its live one, so nothing is deleted and
-        `ConversationStale` asks the caller to take its claim back
-        (`StudioStore.undo_claim`) and answer a retryable 409. The rows are
-        then as they were imported, so the retry's load re-imports what that
-        instance wrote (`harness.adk_import.reimport_on_access`) and meets
-        its live lease as a stream busy on the conversation."""
+        state: dict[str, Any],
+    ) -> bool:
+        """Create the per-turn ADK session (`{cid}#t{n}`) of the turn the
+        `/turn` route is about to claim, before its claim save. True when it
+        created the session.
+
+        A session already under that id is met in one of two ways. When
+        ADK's ledger session moved since the load, an instance still running
+        on ADK sessions may have opened this turn, so nothing is deleted and
+        `ConversationStale` asks the route to answer a retryable 409 with
+        nothing claimed: the retry's load re-imports what that instance
+        wrote (`harness.adk_import.reimport_on_access`) and meets its live
+        lease. Otherwise the session is a leftover of a turn the tables never
+        recorded (a request of this release whose claim lost or crashed, a
+        conversation served as absent whose ADK turn sessions remain, or a
+        `--prefer-adk` copy whose `turn_index` is below the turns the tables
+        recorded), and False asks the route to replace it once its claim
+        has won (`_replace_leftover_session`). A racing request of this
+        release may have created it, and only the winning claim may delete
+        it."""
         session_service = self.runner.session_service
         try:
             await session_service.create_session(
@@ -910,20 +913,25 @@ class StudioRunner:
         except AlreadyExistsError:
             if await self.store.adk_moved(user_id, conversation_id):
                 raise ConversationStale from None
-            logger.warning(
-                "replacing leftover per-turn session %s: the turn it belonged to "
-                "was never recorded",
-                session_id,
-            )
-            await session_service.delete_session(
-                app_name=self.runner.app_name, user_id=user_id, session_id=session_id
-            )
-            await session_service.create_session(
-                app_name=self.runner.app_name,
-                user_id=user_id,
-                session_id=session_id,
-                state=state,
-            )
+            return False
+        return True
+
+    async def _replace_leftover_session(
+        self, *, user_id: str, session_id: str, state: dict[str, Any]
+    ) -> None:
+        """Delete the leftover per-turn session `_open_session` met and create
+        it fresh, for a turn whose claim has won."""
+        logger.warning(
+            "replacing leftover per-turn session %s: the turn it belonged to was never recorded",
+            session_id,
+        )
+        session_service = self.runner.session_service
+        await session_service.delete_session(
+            app_name=self.runner.app_name, user_id=user_id, session_id=session_id
+        )
+        await session_service.create_session(
+            app_name=self.runner.app_name, user_id=user_id, session_id=session_id, state=state
+        )
 
     async def _frames(
         self,
@@ -1024,11 +1032,11 @@ class StudioRunner:
         A `renew` call that raises is retried every interval until the
         lease's deadline (`StudioStore.lease_deadline`, on this instance's
         own clock, anchored just before the read or renewal that set the
-        lease's expiry), then ends the stream as `state_not_saved`, as a
-        store write meeting the same outage does (`DatabaseUnavailable`): an
-        instance this deaf to its own renewal cannot be trusted to still own
-        the segment, and nothing else has claimed it yet, so the turn is
-        closed here. A span on one clock
+        lease's expiry), then also ends the stream as lost: an instance this
+        deaf to its own renewal cannot be trusted to still own the segment,
+        even though nothing else has claimed it yet. The turn stays as
+        stored, its lease lapses by its TTL, and a retry resumes it or
+        closes it as `ConversationState.begin_turn` does. A span on one clock
         leaves the gap between this clock and the database's, which decides
         the lease, out of the deadline. The store's writes stop retrying at
         the same deadline.
@@ -1052,7 +1060,7 @@ class StudioRunner:
                     return
                 if self.store.now() < self.store.lease_deadline(principal, conversation_id):
                     continue
-                _end_stream(conversation, "state_not_saved")
+                _end_stream(conversation, "segment_lost")
                 return
             if result == "ok":
                 continue
@@ -1171,7 +1179,6 @@ class StudioRunner:
         `StudioStore.release`), and still could not strand the lock, since
         releasing it does not depend on the release call having succeeded.
         """
-        self.store.claim_streamed(principal, conversation_id)
         heartbeat = asyncio.ensure_future(
             self._heartbeat(principal, conversation_id, segment_id, conversation)
         )
@@ -1347,24 +1354,55 @@ async def _acquire_or_conflict(
     return lock
 
 
+def _turn_session_state(conversation: ConversationState, body: TurnRequest) -> dict[str, Any]:
+    """The state a `/turn`'s per-turn ADK session starts with: the surface,
+    the canvas and conversation digests, the earlier turns' readings, the
+    posted seeds and the chip to apply."""
+    focus = (
+        body.component_ref.component_id
+        if body.component_ref is not None
+        and body.component_ref.intent is ComponentRefIntent.FOLLOW_UP
+        else None
+    )
+    # The agent reads the canvas through `recall` and starts from counts.
+    digest = conversation.canvas_summary_state(focus=focus)
+    state: dict[str, Any] = {"surface": body.surface.value}
+    if digest:
+        state["canvas_digest"] = json.dumps(digest)
+    history = conversation.conversation_digest_state()
+    if history:
+        state["conversation_digest"] = json.dumps(history)
+    # The orchestrator's planner renders the earlier turns' readings; their
+    # blocks stay in the conversation (`current_earlier_block`).
+    ledger = conversation.prior_ledger_state()
+    if ledger:
+        state[ORCHESTRATOR_PRIOR_LEDGER_KEY] = ledger
+    if isinstance(body.seed_spec, list):
+        # Each seed as the `seed` node takes it, or the refusal its step
+        # fails with: no posted Spec block enters the session.
+        state[SEEDS_STATE_KEY] = json.dumps(seeds_slot(body.seed_spec))
+    elif body.seed_spec is not None:
+        # One reference, the reserved shape: `graph.seed` reports it unused.
+        state[SEEDS_STATE_KEY] = json.dumps(body.seed_spec.model_dump(mode="json"))
+    if body.apply_choice is not None:
+        # `graph.seed` applies the chip, and the turn neither searches nor plans.
+        state[APPLY_CHOICE_STATE_KEY] = json.dumps(body.apply_choice.model_dump())
+    return state
+
+
 async def _abandon_claim(
     store: StudioStore,
     principal: str,
     conversation_id: str,
     segment_id: str | None,
     lock: asyncio.Lock,
-    *,
-    undo: bool = False,
 ) -> None:
     """Let go of a claim whose stream never started: drop `segment_id`'s
-    lease when there is one (`StudioStore.drop_lease`), or with `undo` take
-    the claim save back whole (`StudioStore.undo_claim`), each running to
-    the end under cancellation, then release `lock` whatever that raised, a
+    lease when there is one (`StudioStore.drop_lease`, which runs to the end
+    under cancellation), then release `lock` whatever the drop raised, a
     cancellation of the request included."""
     try:
-        if segment_id is not None and undo:
-            await store.undo_claim(principal, conversation_id, segment_id)
-        elif segment_id is not None:
+        if segment_id is not None:
             await store.drop_lease(principal, conversation_id, segment_id)
     finally:
         lock.release()
@@ -1474,17 +1512,43 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     "another request is streaming on this conversation",
                     retry_after_seconds=exc.retry_after_seconds,
                 )
+            edit = (
+                body.component_ref is not None
+                and body.component_ref.intent is ComponentRefIntent.EDIT
+            )
+            # The turn's ADK session is created before the claim save, so a
+            # turn the previous release opened under the same id is met while
+            # nothing is claimed (`_open_session`). The Edit Card route runs
+            # no ADK session.
+            session_state: dict[str, Any] = {}
+            fresh = True
+            if not edit:
+                session_state = _turn_session_state(conversation, body)
+                try:
+                    fresh = await studio._open_session(
+                        user_id=principal,
+                        conversation_id=body.conversation_id,
+                        session_id=conversation.session_id,
+                        state=session_state,
+                    )
+                except ConversationStale:
+                    # An instance still running on ADK sessions opened this
+                    # turn since the load. Nothing is claimed, so the retry's
+                    # load re-imports what it wrote and meets its lease.
+                    lock.release()
+                    return _streaming_conflict_response(
+                        "another request is streaming on this conversation"
+                    )
             # The claim: advancing turn_index (and the segment above) is
-            # saved before the per-turn ADK session is created and before
-            # the SSE response starts. This save is a compare-and-swap
-            # against what this instance last loaded, so a
+            # saved before the SSE response starts. This save is a
+            # compare-and-swap against what this instance last loaded, so a
             # `ConversationStale` here means another instance's `/turn`
-            # claimed a turn on this conversation since.
-            # Claiming first leaves no crash window: a crash between the
-            # claim and the create leaves the store at the new turn_index
-            # with no matching session, and the next `/turn` claims the one
-            # after it; the segment it also claimed simply expires by its
-            # own TTL.
+            # claimed a turn on this conversation since. The session this
+            # request created is then a leftover, which the next claim of
+            # the same turn replaces; a crash between the create and the
+            # claim leaves the same leftover. A crash after the claim leaves
+            # the store at the new turn_index, and the segment it claimed
+            # expires by its own TTL.
             try:
                 await studio.store.save(principal, body.conversation_id)
             except ConversationStale:
@@ -1493,10 +1557,15 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     "another request is streaming on this conversation"
                 )
             claimed = segment_id
-            if (
-                body.component_ref is not None
-                and body.component_ref.intent is ComponentRefIntent.EDIT
-            ):
+            if not fresh:
+                # Replaced only once the claim has won, so a session another
+                # instance of this release created for the same turn is
+                # never deleted under its stream.
+                await studio._replace_leftover_session(
+                    user_id=principal, session_id=conversation.session_id, state=session_state
+                )
+            if edit:
+                assert body.component_ref is not None
                 # The Edit Card route bypasses the graph entirely: no
                 # resolve, no plan, no ADK session, just the card, the
                 # model's patch-or-recreate decision, and the platform write.
@@ -1520,55 +1589,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         conversation=conversation,
                     ),
                     media_type=SSE_MEDIA_TYPE,
-                )
-            focus = (
-                body.component_ref.component_id
-                if body.component_ref is not None
-                and body.component_ref.intent is ComponentRefIntent.FOLLOW_UP
-                else None
-            )
-            # The agent reads the canvas through `recall` and starts from counts.
-            digest = conversation.canvas_summary_state(focus=focus)
-            state: dict[str, Any] = {"surface": body.surface.value}
-            if digest:
-                state["canvas_digest"] = json.dumps(digest)
-            history = conversation.conversation_digest_state()
-            if history:
-                state["conversation_digest"] = json.dumps(history)
-            # The orchestrator's planner renders the earlier turns' readings;
-            # their blocks stay in the conversation (`current_earlier_block`).
-            ledger = conversation.prior_ledger_state()
-            if ledger:
-                state[ORCHESTRATOR_PRIOR_LEDGER_KEY] = ledger
-            if isinstance(body.seed_spec, list):
-                # Each seed as the `seed` node takes it, or the refusal its
-                # step fails with: no posted Spec block enters the session.
-                state[SEEDS_STATE_KEY] = json.dumps(seeds_slot(body.seed_spec))
-            elif body.seed_spec is not None:
-                # One reference, the reserved shape: `graph.seed` reports it unused.
-                state[SEEDS_STATE_KEY] = json.dumps(body.seed_spec.model_dump(mode="json"))
-            if body.apply_choice is not None:
-                # `graph.seed` applies the chip, and the turn neither searches nor plans.
-                state[APPLY_CHOICE_STATE_KEY] = json.dumps(body.apply_choice.model_dump())
-            try:
-                await studio._ensure_session(
-                    user_id=principal,
-                    conversation_id=body.conversation_id,
-                    session_id=conversation.session_id,
-                    state=state,
-                )
-            except ConversationStale:
-                # An instance still running on ADK sessions moved the
-                # conversation since the load. Nothing has streamed, so the
-                # claim save is taken back whole, and the retry's load
-                # re-imports what that instance wrote and meets its lease
-                # (`_ensure_session`).
-                claimed = None
-                await _abandon_claim(
-                    studio.store, principal, body.conversation_id, segment_id, lock, undo=True
-                )
-                return _streaming_conflict_response(
-                    "another request is streaming on this conversation"
                 )
             text = body.message if chip_label is None else f"Count {chip_label}."
             message = types.Content(role="user", parts=[types.Part.from_text(text=text)])

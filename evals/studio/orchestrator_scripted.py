@@ -473,8 +473,6 @@ def _planner_adapter(
 class _NoAdk:
     """The eval's conversations start in the tables, and ADK never held them."""
 
-    reimports_on_access = False
-
     async def reimport(self, principal: str, conversation_id: str) -> None:
         del principal, conversation_id
 
