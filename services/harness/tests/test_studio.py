@@ -78,7 +78,7 @@ from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.plan_display import decision_option_id
 from harness.planner_adapter import PlannerAdapter
-from harness.provenance import ProvenanceStore
+from harness.provenance import CARD_FRAME_KEY, ProvenanceStore
 from harness.scripted import SCRIPTED_SPEC, ScriptedPlannerModel, ScriptedSurface
 from harness.sentences import FAILURE_CLASS, StopCode, refusal_sentence
 from harness.settings import Settings
@@ -5171,6 +5171,7 @@ async def test_component_ref_edit_patch_streams_component_revised() -> None:
         "intent": {"title": "Aid to Kenya, 2018-2024"},
         "component_id": "cmp_01test0001",
         "write_token": WRITE_TOKEN,
+        CARD_FRAME_KEY: STORED_INTENT["frame_ref"],
     }
 
 
@@ -5470,6 +5471,7 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
     assert revise[0] == "write_component"
     assert revise[1]["component_id"] == component_id
     assert revise[1]["write_token"] == token
+    assert CARD_FRAME_KEY not in revise[1]
 
     conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
     assert conversation.write_tokens == {component_id: token}
@@ -5484,9 +5486,13 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
     ]
     assert "cmw_" not in json.dumps(client_visible, default=str)
     assert "cmw_" not in repr(conversation)
-    assert any(
-        record.tool == "write_component" and "component_id" in record.args for record in records
-    )
+    # The edit names the card's frame, read from its stored intent, so the
+    # executor reads the card's lineage without describing the card again.
+    assert [
+        record.args.get(CARD_FRAME_KEY)
+        for record in records
+        if record.tool == "write_component" and "component_id" in record.args
+    ] == [REF_A]
     assert "cmw_" not in json.dumps(
         [(record.args, record.result) for record in records], default=str
     )
@@ -5546,18 +5552,19 @@ async def test_an_edit_on_another_instance_states_the_sources_and_count_of_the_f
             "trace": {"resolved_stat_vars": [{"ref": f"dcid:{source}"}]},
         }
         drawn.put(conversation=conversation, manifest=manifest, **ref)
-    assert drawn.alias(
-        conversation=conversation,
-        **REF_A,
-        sources=[(ref["spec_id"], ref["content_version"]) for ref, _ in retrievals],
-        stat_var_count=1,
-    )
+    # The plan's chart names the plan's terminal frame, and the platform
+    # draws it from REF_A.
+    for frame in (REF_A, {"spec_id": "ops_" + "9" * 32, "content_version": "ocv_" + "9" * 32}):
+        assert drawn.alias(
+            conversation=conversation,
+            **frame,
+            sources=[(ref["spec_id"], ref["content_version"]) for ref, _ in retrievals],
+            stat_var_count=1,
+        )
     first_store = StudioStore(_engine())
     first = _app(
         *_plan("q with forks", *_charts_the_plan()),
-        executor=McpExecutor(
-            settings=Settings(), provenance=drawn, card_lineages=first_store.card_lineage
-        ),
+        executor=McpExecutor(settings=Settings(), provenance=drawn, card_lineages=first_store),
         store=first_store,
         tool_surface=ScriptedSurface(),
     )
@@ -5572,7 +5579,7 @@ async def test_an_edit_on_another_instance_states_the_sources_and_count_of_the_f
         executor=McpExecutor(
             settings=Settings(),
             provenance=ProvenanceStore(),
-            card_lineages=second_store.card_lineage,
+            card_lineages=second_store,
         ),
         store=second_store,
         edit_model=ScriptedEditModel(edit),
@@ -6101,6 +6108,7 @@ async def test_a_revise_that_needs_another_frame_is_written_as_a_new_card_in_its
         "intent": patch,
         "component_id": "cmp_01test0001",
         "write_token": WRITE_TOKEN,
+        CARD_FRAME_KEY: STORED_INTENT["frame_ref"],
     }
     assert create == {
         "tool": "write_component",

@@ -96,7 +96,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
 )
-from harness.provenance import CardLineage, lineage_from_json
+from harness.provenance import CardLineage, CardLineageDecodeError, lineage_from_json
 from harness.run_ledger import end_unfinished
 from harness.studio_state import (
     SEGMENT_TTL_S,
@@ -968,6 +968,9 @@ class _RuntimeEntry:
     baseline: dict[str, Any] = field(default_factory=dict)
     draft: tuple[ConversationState, ConversationState] | None = None
     claimed: asyncio.Event = field(default_factory=asyncio.Event)
+    # The cards this instance knows have a stored lineage
+    # (`StudioStore.card_lineage_stored`).
+    lineage_rows: set[str] = field(default_factory=set)
 
 
 class StudioStore:
@@ -1589,6 +1592,8 @@ class StudioStore:
                 version = await self._write(conn, entry.pk, changed) if changed else row.version
                 if lineage is not None:
                     await _insert_card_lineage(conn, entry.pk, lineage)
+            if lineage is not None:
+                entry.lineage_rows.add(lineage.component_id)
             entry.version = version
             entry.baseline.update(changed)
             _assign_changed(state, work, base)
@@ -2034,12 +2039,13 @@ class StudioStore:
         frame: tuple[str | None, str | None] | None = None,
     ) -> CardLineage | None:
         """The stored lineage of card `component_id`, or, with no
-        `component_id`, of a card drawn from `frame` or whose create asked for
-        it (`harness.provenance.CardLineageReader`). One indexed read with no
-        lock, so any instance can read it before a write. A transient database
-        fault is retried until the lease's deadline (`_retrying`), as the
-        stream's card writes are, then raises `DatabaseUnavailable`. `None`
-        when no such card's lineage is stored."""
+        `component_id`, of a card drawn from `frame` or whose write named it
+        (`harness.provenance.CardLineages`). One indexed read with no lock, so
+        any instance can read it before a write. A transient database fault
+        is retried until the lease's deadline (`_retrying`), as the stream's
+        card writes are, then raises `DatabaseUnavailable`. A row that does
+        not decode is logged with its key and raises `CardLineageDecodeError`.
+        `None` when no such card's lineage is stored."""
         spec_id, content_version = frame if frame is not None else (None, None)
         if component_id is None and (spec_id is None or content_version is None):
             return None
@@ -2055,17 +2061,36 @@ class StudioStore:
             async with self._transaction() as conn:
                 return (await conn.execute(_SELECT_CARD_LINEAGE, params)).first()
 
-        row = await self._retrying(self._entry(principal, conversation_id), conversation_id, read)
+        entry = self._entry(principal, conversation_id)
+        row = await self._retrying(entry, conversation_id, read)
         if row is None:
             return None
+        try:
+            lineage = lineage_from_json(row.members)
+        except CardLineageDecodeError:
+            logger.exception(
+                "studio store: the lineage row of conversation %s component_id=%r does not decode",
+                conversation_id,
+                row.component_id,
+            )
+            raise
+        if component_id is not None:
+            entry.lineage_rows.add(component_id)
         requested = (row.requested_spec_id, row.requested_content_version)
         return CardLineage(
             component_id=row.component_id,
             frame=(row.spec_id, row.content_version),
-            lineage=lineage_from_json(row.members),
+            lineage=lineage,
             stat_var_count=row.stat_var_count,
             requested=requested if requested != (None, None) else None,
         )
+
+    def card_lineage_stored(self, principal: str, conversation_id: str, component_id: str) -> bool:
+        """Whether this instance knows card `component_id` has a stored
+        lineage: `card_lineage` read it by the card, or a card write of this
+        instance committed it. No database access."""
+        entry = self._runtime.get((principal, conversation_id))
+        return entry is not None and component_id in entry.lineage_rows
 
     async def run_statuses(
         self, principal: str, conversation_id: str, *, conversation: ConversationState

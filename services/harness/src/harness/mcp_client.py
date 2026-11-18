@@ -157,9 +157,11 @@ from harness.conversation import (
 from harness.derived_frames import derived_recipe
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import (
+    CARD_FRAME_KEY,
     CARD_LINEAGE_KEY,
     CardLineage,
-    CardLineageReader,
+    CardLineageDecodeError,
+    CardLineages,
     Lineage,
     ProvenanceStore,
     data_artifact,
@@ -622,7 +624,7 @@ class McpExecutor:
         *,
         settings: Settings,
         provenance: ProvenanceStore | None = None,
-        card_lineages: CardLineageReader | None = None,
+        card_lineages: CardLineages | None = None,
         card_replay: CardReplay | None = None,
         publish_frame: PublishFrame | None = None,
         dataset_versions: DatasetVersions | None = None,
@@ -786,27 +788,22 @@ class McpExecutor:
         the refusal no retry follows, comes back as it is.
         """
         if tool == "write_component":
-            read_stored = _read_once(self._stored_component)
+            hint = _intent_frame({"frame_ref": args.get(CARD_FRAME_KEY)})
+            args = {key: value for key, value in args.items() if key != CARD_FRAME_KEY}
+            read_stored = _StoredReads(self._stored_component)
             try:
-                without_row = await self._restore_card_lineage(args, read_stored=read_stored)
-            except _LineageUnread:
-                return {"outcome": "refusal", "refusal": _lineage_unread_refusal()}
-            try:
+                restored = await self._restore_card_lineage(
+                    args, hint=hint, read_stored=read_stored
+                )
                 admitted = await self._admitted_write(args, read_stored=read_stored)
             except CardWithheld as withheld:
                 return {"outcome": "refusal", "refusal": withheld.refusal}
             outcome = await self._retried(tool, admitted.args, on_progress=on_progress)
             card = outcome.pop(CARD_LINEAGE_KEY, None)
-            if card is not None and (not args.get("component_id") or without_row):
-                # A revise commits its card's lineage only when the card had
-                # none stored, so the card gains its row on its first edit.
-                replayed = admitted.replayed_from
-                outcome[CARD_LINEAGE_KEY] = (
-                    dataclasses.replace(
-                        card, requested=(replayed.get("spec_id"), replayed.get("content_version"))
-                    )
-                    if replayed is not None
-                    else card
+            if card is not None and restored.carry:
+                named = restored.named
+                outcome[CARD_LINEAGE_KEY] = dataclasses.replace(
+                    card, requested=named if named is not None and named != card.frame else None
                 )
             if admitted.stored_card is not None and outcome.get("outcome") == "ok":
                 return _held_to_its_resolved_periods(admitted.stored_card, outcome)
@@ -900,48 +897,63 @@ class McpExecutor:
         return background_outcome(result.structured_content)
 
     async def _restore_card_lineage(
-        self, args: Mapping[str, Any], *, read_stored: ReadStored
-    ) -> bool:
+        self,
+        args: Mapping[str, Any],
+        *,
+        hint: tuple[str | None, str | None] | None,
+        read_stored: _StoredReads,
+    ) -> _Restored:
         """Put back the lineage a `write_component` reads when the store does
         not hold it, before the write is sent, so the rolling-card rules
         (`_admitted_write`) and the card's assembly (`_assemble_component`)
-        read it from the store. Returns whether a revised card has no stored
-        lineage of its own, so its write is to commit one.
+        read it from the store.
 
         A create on a frame the store lacks reads the lineage of a card drawn
-        from that frame. A revise of a card whose frame the store holds
-        (`ProvenanceStore.card_frame`) reads nothing. Any other revise reads
-        the card's own lineage, and when the card has none (one drawn before
-        lineages were stored), the lineage of another card on the frame its
-        stored intent names (`read_stored`, which `_admitted_write` then
-        reuses). A frame no stored card was drawn from stays missing, and its
-        card is withheld `provenance_unavailable`.
+        from that frame or whose write named it. A revise of a card whose
+        frame the store holds (`ProvenanceStore.card_frame`, or `hint`, the
+        frame a caller read from the card's stored intent) reads nothing. Any
+        other revise reads the card's own lineage, and when the card has none
+        (one drawn before lineages were stored), the lineage of another card
+        on its frame: `hint`, else the frame its stored intent names, read
+        once for this write and kept for `_admitted_write` (`read_stored`).
+
+        A revise commits its card's lineage unless the card is known to have
+        one stored (`CardLineages.card_lineage_stored`); the store keeps the
+        first one written. Without a lineage store, nothing is read.
 
         Raises:
-            _LineageUnread: The lineage could not be read. Nothing is sent.
+            CardWithheld: Nothing is to be sent. The write's frame has no
+                lineage here or stored (`provenance_unavailable`), a stored
+                one does not decode (`provenance_unavailable`), or the store
+                or the stored card could not be read (`transient_unavailable`).
         """
         key = current_conversation_key.get()
-        if self._card_lineages is None or key is None:
-            return False
         component_id = args.get("component_id")
         if not (isinstance(component_id, str) and component_id):
             frame = _intent_frame(args.get("intent"))
-            if frame is not None:
+            if self._card_lineages is not None and key is not None and frame is not None:
                 await self._restore_frame(key, frame)
-            return False
-        conversation = current_conversation_id.get()
-        known = self._provenance.card_frame(conversation=conversation, component_id=component_id)
+            return _Restored(named=frame)
+        if self._card_lineages is None or key is None:
+            return _Restored(named=hint)
+        carry = not self._card_lineages.card_lineage_stored(*key, component_id)
+        known = (
+            self._provenance.card_frame(
+                conversation=current_conversation_id.get(), component_id=component_id
+            )
+            or hint
+        )
         if known is not None and self._holds(known):
-            return False
+            return _Restored(named=known, carry=carry)
         card = await self._read_card_lineage(key, component_id=component_id)
         if card is not None:
-            self._provenance.restore(conversation=conversation, card=card)
-            return False
-        body = await read_stored(component_id)
-        frame = _intent_frame(body.get("stored_intent") if body is not None else None)
-        return frame is not None and await self._restore_frame(
-            key, frame, component_id=component_id
-        )
+            self._provenance.restore(conversation=current_conversation_id.get(), card=card)
+            return _Restored(named=card.frame, carry=False)
+        frame = known or await self._stored_frame(component_id, read_stored)
+        if frame is None:
+            return _Restored(carry=carry)
+        await self._restore_frame(key, frame, component_id=component_id)
+        return _Restored(named=frame, carry=carry)
 
     async def _restore_frame(
         self,
@@ -949,19 +961,66 @@ class McpExecutor:
         frame: tuple[str | None, str | None],
         *,
         component_id: str | None = None,
-    ) -> bool:
-        """Put back the stored lineage of a card drawn from `frame` when the
-        store lacks it, held as card `component_id`'s when given, and return
-        whether the store now holds `frame`."""
+    ) -> None:
+        """Put back the stored lineage of a card drawn from `frame`, or whose
+        write named it, when the store lacks it, held as card
+        `component_id`'s when given.
+
+        Raises:
+            CardWithheld: Neither the store nor the stored lineages hold
+                `frame` (`provenance_unavailable`), or the read failed.
+        """
         if self._holds(frame):
-            return True
+            return
         card = await self._read_card_lineage(key, frame=frame)
         if card is None:
-            return False
+            logger.warning(
+                "write_component not sent: no provenance is linked to frame %r here or "
+                "with any stored card",
+                frame,
+            )
+            raise CardWithheld(_no_lineage_refusal())
         if component_id is not None:
             card = dataclasses.replace(card, component_id=component_id)
         self._provenance.restore(conversation=current_conversation_id.get(), card=card)
-        return True
+
+    async def _stored_frame(
+        self, component_id: str, read_stored: _StoredReads
+    ) -> tuple[str | None, str | None] | None:
+        """The frame card `component_id`'s stored intent names, read with the
+        executor's retries (`_retried`) and kept for `_admitted_write`. `None`
+        when the platform refuses the read for good or the intent names no
+        frame.
+
+        Raises:
+            CardWithheld: The read met a refusal a retry may mend, or failed
+                (`transient_unavailable`).
+        """
+        try:
+            described = await self._retried(
+                "describe_component", {"component_id": component_id}, on_progress=None
+            )
+        except Exception as exc:
+            logger.warning(
+                "write_component not sent: component_id=%r could not be read: %r",
+                component_id,
+                exc,
+            )
+            raise CardWithheld(_lineage_unread_refusal()) from exc
+        refusal = described.get("refusal") if described.get("outcome") != "ok" else None
+        if isinstance(refusal, Mapping):
+            if refusal.get("retry_mode") == WireRetryMode.RETRY_AFTER_DELAY.value:
+                raise CardWithheld(_lineage_unread_refusal())
+            read_stored.keep(component_id, None)
+            return None
+        body = described.get("component_body")
+        if not isinstance(body, dict):
+            read_stored.keep(component_id, None)
+            return None
+        read_stored.keep(
+            component_id, {**body, "resolved_payload": described.get("resolved_payload")}
+        )
+        return _intent_frame(body.get("stored_intent"))
 
     def _holds(self, frame: tuple[str | None, str | None]) -> bool:
         """Whether the store holds `frame`'s lineage in this conversation."""
@@ -981,11 +1040,21 @@ class McpExecutor:
         component_id: str | None = None,
         frame: tuple[str | None, str | None] | None = None,
     ) -> CardLineage | None:
-        """`card_lineages` for conversation `key`. A read that fails, after the
-        store's own retries of a transient fault, raises `_LineageUnread`."""
+        """`card_lineages`' stored lineage for conversation `key`.
+
+        Raises:
+            CardWithheld: The stored lineage does not decode
+                (`provenance_unavailable`), or the read failed after the
+                store's own retries of a transient fault
+                (`transient_unavailable`).
+        """
         assert self._card_lineages is not None
         try:
-            return await self._card_lineages(*key, component_id=component_id, frame=frame)
+            return await self._card_lineages.card_lineage(
+                *key, component_id=component_id, frame=frame
+            )
+        except CardLineageDecodeError as exc:
+            raise CardWithheld(_lineage_unreadable_refusal()) from exc
         except Exception as exc:
             logger.exception(
                 "write_component not sent: the lineage of component_id=%r frame=%r could "
@@ -993,7 +1062,7 @@ class McpExecutor:
                 component_id,
                 frame,
             )
-            raise _LineageUnread from exc
+            raise CardWithheld(_lineage_unread_refusal()) from exc
 
     async def _admitted_write(
         self, args: dict[str, Any], *, read_stored: ReadStored | None = None
@@ -1308,8 +1377,38 @@ def _intent_frame(intent: Any) -> tuple[str | None, str | None] | None:
     return (frame_ref.get("spec_id"), frame_ref.get("content_version"))
 
 
-class _LineageUnread(Exception):  # noqa: N818 -- named for the condition
-    """The stored lineage a `write_component` needed could not be read."""
+@dataclasses.dataclass(frozen=True)
+class _Restored:
+    """What the lineage restore before a `write_component` found: the frame
+    the write named, when known, and whether the write commits its card's
+    lineage (`carry`)."""
+
+    named: tuple[str | None, str | None] | None = None
+    carry: bool = True
+
+
+def _no_lineage_refusal() -> dict[str, Any]:
+    """The refusal of a `write_component` whose frame has no lineage here or
+    with any stored card, so the card could state no source."""
+    return harness_refusal(
+        code=HarnessCode.PROVENANCE_UNAVAILABLE,
+        message=(
+            "no source manifest is linked to this frame, so nothing was written; "
+            "a card would state a source it cannot support"
+        ),
+    )
+
+
+def _lineage_unreadable_refusal() -> dict[str, Any]:
+    """The refusal of a `write_component` whose frame's stored lineage does
+    not decode. Another try reads the same row."""
+    return harness_refusal(
+        code=HarnessCode.PROVENANCE_UNAVAILABLE,
+        message=(
+            "the stored sources of this card's frame cannot be read, so nothing was "
+            "written; a card would state a source it cannot support"
+        ),
+    )
 
 
 def _lineage_unread_refusal() -> dict[str, Any]:
@@ -1325,17 +1424,22 @@ def _lineage_unread_refusal() -> dict[str, Any]:
     )
 
 
-def _read_once(read: ReadStored) -> ReadStored:
+class _StoredReads:
     """`read`, reading each component once: the lineage restore and the
-    rolling-card rules of one write share its stored card."""
-    held: dict[str, Mapping[str, Any] | None] = {}
+    rolling-card rules of one write share its stored card. `keep` holds a
+    card the restore read another way."""
 
-    async def once(component_id: str) -> Mapping[str, Any] | None:
-        if component_id not in held:
-            held[component_id] = await read(component_id)
-        return held[component_id]
+    def __init__(self, read: ReadStored) -> None:
+        self._read = read
+        self._held: dict[str, Mapping[str, Any] | None] = {}
 
-    return once
+    async def __call__(self, component_id: str) -> Mapping[str, Any] | None:
+        if component_id not in self._held:
+            self._held[component_id] = await self._read(component_id)
+        return self._held[component_id]
+
+    def keep(self, component_id: str, body: Mapping[str, Any] | None) -> None:
+        self._held[component_id] = body
 
 
 def _withheld_card(component: dict[str, Any] | None, args: dict[str, Any]) -> dict[str, Any] | None:

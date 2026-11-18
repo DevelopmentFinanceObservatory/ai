@@ -42,7 +42,7 @@ from common.mcp_telemetry import WRITE_TOKEN_KEY
 from pydantic import BaseModel
 
 from harness.conversation import current_conversation_key
-from harness.provenance import CardLineage
+from harness.provenance import CARD_FRAME_KEY, CardLineage
 from harness.studio_state import (
     ConversationState,
     _block_title,
@@ -272,10 +272,16 @@ async def _edit_flow(
     # Set when the revise was refused because the new select needs another frame.
     moved = False
     if patch and write_token:
-        written = await recorder(
-            tool="write_component",
-            args={"intent": patch, "component_id": component_id, WRITE_TOKEN_KEY: write_token},
-        )
+        revise_args: dict[str, Any] = {
+            "intent": patch,
+            "component_id": component_id,
+            WRITE_TOKEN_KEY: write_token,
+        }
+        if stored.get("frame_ref"):
+            # The executor reads the card's lineage by this frame, which the
+            # card's stored intent read above names.
+            revise_args[CARD_FRAME_KEY] = stored["frame_ref"]
+        written = await recorder(tool="write_component", args=revise_args)
         moved = (written.get("refusal") or {}).get(
             "code"
         ) == HarnessCode.ROLLING_SELECT_NEEDS_NEW_FRAME

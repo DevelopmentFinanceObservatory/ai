@@ -7,14 +7,18 @@
 --
 -- `spec_id` and `content_version` name the frame the platform's resolved
 -- revision names, and `requested_spec_id` and `requested_content_version`
--- the frame a rolling card's create asked for when it was written on another
--- one (`harness.rolling_cards`). `members` is the frame's lineage, each
+-- the frame the write named: a rolling card's frame before its replay
+-- (`harness.rolling_cards`), or a retrieval's `frame_ref` beside the pair it
+-- is served under. `members` is the frame's lineage, each
 -- retrieval's frame key and whole manifest (`harness.provenance.CardLineage`),
 -- and `stat_var_count` the StatVar count stored with it, null when none was.
 -- `members` is `json` so a manifest keeps its text as written.
 --
--- Additive: a card written before this table existed has no row, and an
--- edit of it is refused `provenance_unavailable`. Creating the table takes
+-- Additive: a card written before this table existed has no row. An edit
+-- of it restores the lineage of another card drawn from the same frame and
+-- commits it as the card's own row, and is refused `provenance_unavailable`
+-- before anything is written when no card on that frame has a row and the
+-- instance holds no lineage for it. Creating the table takes
 -- SHARE ROW EXCLUSIVE on `conversations` for the foreign key, which waits
 -- for open writes of `conversations` rows and holds new ones until the
 -- migration transaction commits. Reads and `FOR UPDATE`/`FOR SHARE` row

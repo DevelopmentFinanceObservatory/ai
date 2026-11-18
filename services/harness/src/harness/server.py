@@ -485,7 +485,7 @@ def create_app(
     executor = McpExecutor(
         settings=resolved_settings,
         provenance=provenance,
-        card_lineages=store.card_lineage,
+        card_lineages=store,
         card_replay=live_refresh.replay,
         dataset_versions=live_refresh.dataset_versions,
     )

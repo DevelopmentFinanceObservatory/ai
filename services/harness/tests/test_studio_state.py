@@ -43,7 +43,7 @@ from harness import studio_state, studio_store
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.conversation import current_conversation_key
 from harness.graph.state import ORCHESTRATOR_PLAN_RECORDS_KEY, ORCHESTRATOR_SEARCHES_KEY
-from harness.provenance import CardLineage, ProvenanceInput
+from harness.provenance import CardLineage, CardLineageDecodeError, ProvenanceInput
 from harness.studio_edit import _refresh_block
 from harness.studio_state import (
     CANVAS_DIGEST_MAX_BYTES,
@@ -2894,12 +2894,37 @@ async def test_a_cards_lineage_commits_with_it_once_and_any_instance_reads_it(ne
 
     store_b = new_store()
     read = store_b.card_lineage
-    assert await read("principal", CONVERSATION, component_id="cmp_two") == first
+    # The committing instance knows the card has a row; another learns it by
+    # reading the card's row, and a read by frame teaches it nothing.
+    assert store_a.card_lineage_stored("principal", CONVERSATION, "cmp_two")
     assert await read("principal", CONVERSATION, frame=("ops_f", "ocv_f")) == first
+    assert not store_b.card_lineage_stored("principal", CONVERSATION, "cmp_two")
+    assert await read("principal", CONVERSATION, component_id="cmp_two") == first
+    assert store_b.card_lineage_stored("principal", CONVERSATION, "cmp_two")
     assert await read("principal", CONVERSATION, frame=("ops_asked", "ocv_asked")) == first
     assert await read("principal", CONVERSATION, component_id="cmp_other") is None
     assert await read("principal", CONVERSATION, frame=("ops_g", "ocv_g")) is None
     assert await read("someone_else", CONVERSATION, component_id="cmp_two") is None
+
+
+async def test_a_card_lineage_row_that_does_not_decode_raises_a_decode_error(
+    new_store, pg_engine
+) -> None:
+    store = new_store()
+    await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await store.change_canvas(
+        "principal",
+        CONVERSATION,
+        lambda work: land_component(work, _CARD),
+        lineage=_card_lineage("cmp_two", count=1),
+    )
+    async with pg_engine.begin() as conn:
+        await conn.execute(text("UPDATE conversation_card_lineage SET members = '{}'"))
+
+    with pytest.raises(CardLineageDecodeError):
+        await new_store().card_lineage("principal", CONVERSATION, component_id="cmp_two")
 
 
 async def test_a_card_write_commits_only_the_fields_its_change_made(new_store) -> None:

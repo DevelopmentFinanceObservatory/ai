@@ -143,6 +143,11 @@ class _Entry:
 # reads it (`harness.studio_translate._RecordingExecutor`).
 CARD_LINEAGE_KEY = "card_lineage"
 
+# The `write_component` argument a caller that already read a revised card's
+# stored intent names the card's frame under (`harness.studio_edit`), so the
+# executor need not read it again. Taken off before the call is sent.
+CARD_FRAME_KEY = "card_frame_ref"
+
 
 @dataclass(frozen=True, slots=True)
 class CardLineage:
@@ -150,9 +155,10 @@ class CardLineage:
     card's write commits it with the card.
 
     `frame` is the frame the platform's resolved revision names
-    (`provenance.inputs[0]`), and `requested` the frame the create's intent
-    named when a rolling card was written on another one
-    (`harness.rolling_cards`). `lineage` holds every member whole, manifest
+    (`provenance.inputs[0]`), and `requested` the frame the write named when
+    that is another pair: a rolling card written on a replayed frame
+    (`harness.rolling_cards`), or a retrieval named by its `frame_ref` and
+    served under another pair (`retrieval_frame_ref`). `lineage` holds every member whole, manifest
     included, and `stat_var_count` the count `ProvenanceStore.alias` stored,
     `None` when it stored none.
     """
@@ -175,28 +181,50 @@ class CardLineage:
         ]
 
 
-def lineage_from_json(members: Sequence[Mapping[str, Any]]) -> Lineage:
-    """The `Lineage` `CardLineage.members_json` wrote."""
-    return tuple(
-        ProvenanceInput(member["spec_id"], member["content_version"], dict(member["manifest"]))
-        for member in members
-    )
+class CardLineageDecodeError(ValueError):
+    """A stored card lineage that does not decode as `CardLineage.members_json`
+    wrote it."""
 
 
-class CardLineageReader(Protocol):
-    """Reads the stored `CardLineage` of a conversation's card
-    (`harness.studio_store.StudioStore.card_lineage`): the card
-    `component_id`, or any card drawn from `frame` or whose create asked for
-    it. `None` when no such card's lineage is stored."""
+def lineage_from_json(members: Any) -> Lineage:
+    """The `Lineage` `CardLineage.members_json` wrote.
 
-    async def __call__(
+    Raises:
+        CardLineageDecodeError: `members` is not that shape.
+    """
+    if not isinstance(members, list) or not members:
+        raise CardLineageDecodeError("stored lineage members are not a non-empty list")
+    try:
+        return tuple(
+            ProvenanceInput(member["spec_id"], member["content_version"], dict(member["manifest"]))
+            for member in members
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CardLineageDecodeError(f"stored lineage members do not decode: {exc!r}") from exc
+
+
+class CardLineages(Protocol):
+    """The lineages stored with a conversation's cards
+    (`harness.studio_store.StudioStore`)."""
+
+    async def card_lineage(
         self,
         principal: str,
         conversation_id: str,
         *,
         component_id: str | None = None,
         frame: _FrameKey | None = None,
-    ) -> CardLineage | None: ...
+    ) -> CardLineage | None:
+        """The stored lineage of card `component_id`, or of any card drawn
+        from `frame` or whose write named it; `None` when none is stored.
+        Raises `CardLineageDecodeError` for a row that does not decode."""
+        ...
+
+    def card_lineage_stored(self, principal: str, conversation_id: str, component_id: str) -> bool:
+        """Whether this instance knows card `component_id` has a stored
+        lineage: a read by the card found one, or this instance committed
+        one. `False` says only that it does not know."""
+        ...
 
 
 class ProvenanceStore:
@@ -699,9 +727,11 @@ def _year(value: object) -> int | None:
 
 
 __all__ = [
+    "CARD_FRAME_KEY",
     "CARD_LINEAGE_KEY",
     "CardLineage",
-    "CardLineageReader",
+    "CardLineageDecodeError",
+    "CardLineages",
     "Lineage",
     "ProvenanceInput",
     "ProvenanceStore",
