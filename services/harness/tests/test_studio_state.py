@@ -27,7 +27,7 @@ import copy
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +38,7 @@ import pytest
 from compiler.sources import source_from_spec_block
 from fastapi.responses import JSONResponse
 from google.adk.sessions import InMemorySessionService
+from google.adk.sessions.base_session_service import GetSessionConfig
 from harness import studio_state, studio_store
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.conversation import current_conversation_key
@@ -75,7 +76,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from . import drawn_cards
-from .orchestrator_fakes import NO_ADK, session_turn_specs
+from .orchestrator_fakes import NO_ADK
 from .resolved_revision import resolved_revision
 from .store_clock import StoreClock
 from .test_turn_records import _scoped_part, _top_donors
@@ -1769,6 +1770,24 @@ def test_drop_resuming_removes_only_entries_under_the_named_segment() -> None:
 # --- and the segment lease: claim_segment / renew / request_cancel ----------
 
 
+def session_turn_specs(
+    service: InMemorySessionService, *, app_name: str
+) -> Callable[[str, str], Awaitable[dict[str, Any]]]:
+    """A `StudioStore` `turn_specs` reader over `service`: the spec blocks
+    turn session `session_id` holds, as stored."""
+
+    async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
+        session = await service.get_session(
+            app_name=app_name,
+            user_id=principal,
+            session_id=session_id,
+            config=GetSessionConfig(num_recent_events=0),
+        )
+        return dict((session.state.get(ORCHESTRATOR_SPECS_KEY) or {}) if session else {})
+
+    return turn_specs
+
+
 @pytest.fixture
 def turn_sessions() -> InMemorySessionService:
     """The per-turn ADK sessions, where an open turn's spec blocks live."""
@@ -1992,7 +2011,7 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
     assert loaded.composition.model_dump(mode="json") == state.composition.model_dump(mode="json")
     # process-local fields are never touched by the ledger
     assert loaded.lock is not state.lock
-    assert loaded.cancel_event is None
+    assert loaded.renew_now is None
     assert loaded._telemetry_span is None
 
 
@@ -2617,7 +2636,8 @@ async def test_a_card_write_failing_past_the_lease_deadline_reports_the_segment_
 async def test_a_removal_fenced_out_by_a_takeover_ends_the_stream(new_store, clock) -> None:
     """`remove_cards` runs inside a model's tool call, where a raise would
     reach the model as a failed call. A removal another instance's claim
-    fenced out ends the stream as lost before it propagates."""
+    fenced out wakes the stream's heartbeat (`renew_lease_now`), whose
+    renewal finds the lease lost and ends the stream, before it propagates."""
     store_a = new_store(clock=clock)
     state_a = await store_a.create("principal", CONVERSATION)
     store_a.claim_segment("principal", CONVERSATION)
@@ -2628,7 +2648,7 @@ async def test_a_removal_fenced_out_by_a_takeover_ends_the_stream(new_store, clo
     await store_b.load("principal", CONVERSATION)
     store_b.claim_segment("principal", CONVERSATION)
     await store_b.save("principal", CONVERSATION)
-    state_a.cancel_event = asyncio.Event()
+    state_a.renew_now = asyncio.Event()
     remove = studio_state.make_remove_cards(store_a)
     token = current_conversation_key.set(("principal", CONVERSATION))
     try:
@@ -2637,8 +2657,7 @@ async def test_a_removal_fenced_out_by_a_takeover_ends_the_stream(new_store, clo
     finally:
         current_conversation_key.reset(token)
 
-    assert state_a.cancel_event.is_set()
-    assert state_a.cancel_reason == "segment_lost"
+    assert state_a.renew_now.is_set()
 
 
 async def test_mutate_composition_no_op_returns_the_same_manifest_without_appending(

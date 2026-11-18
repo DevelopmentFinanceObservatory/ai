@@ -259,7 +259,7 @@ class Settings(BaseServiceSettings):
     studio_prefix_cache: bool = True
     # How many of one plan's wave's tool calls `executor.run._Run` may hold
     # in flight against the MCP servers at once (`harness.graph.workflow.
-    # create_root_workflow(max_concurrent_steps=...)`); a wave wider than
+    # studio_graph(max_concurrent_steps=...)`); a wave wider than
     # this queues at the point of call rather than opening every call at once.
     executor_max_concurrent_steps: int = Field(default=4, ge=1)
     # Whether each card's retrievals are sent before the user approves it

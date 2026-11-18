@@ -24,7 +24,7 @@ import copy
 import hashlib
 import json
 import time
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
@@ -32,8 +32,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import anyio
+import harness.graph.approve as approve_module
 import harness.graph.execute as execute_module
-import harness.graph.planning as planning_module
 import harness.graph.switch as switch_module
 import harness.studio as studio_module
 import harness.studio_state as studio_state_module
@@ -60,20 +60,14 @@ from data_mcp.definition_store import set_store as set_definition_store
 from data_mcp.server import mcp as data_mcp
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from google.adk import Context
-from google.adk.events import Event, EventActions
-from google.adk.models.llm_response import LlmResponse
-from google.adk.sessions import BaseSessionService, DatabaseSessionService, InMemorySessionService
 from google.genai import types
 from harness.conversation import current_conversation_id
 from harness.early_mint import EarlyMints
 from harness.graph.state import (
-    AGENT_NAME,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
-    PICK_REPLAN_KEY,
     frame_id_for,
 )
 from harness.mcp_client import McpExecutor
@@ -86,9 +80,8 @@ from harness.sentences import FAILURE_CLASS, StopCode, refusal_sentence
 from harness.settings import Settings
 from harness.studio import (
     _acquire_or_conflict,
-    _end_stream,
-    _keep_turn_records,
     _sse_stream,
+    _Stopped,
     _unwind,
     create_studio_router,
 )
@@ -107,9 +100,8 @@ from harness.studio_store import (
     StudioStore,
     _deserialize_pending,
 )
-from harness.studio_translate import _RecordingExecutor, _stream_fatal
+from harness.studio_translate import _RecordingExecutor, _stream_fatal, keep_turn_records
 from harness.tool_contracts import HarnessCode, ResolverError, harness_refusal
-from harness.turn_budget import bounded
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from harness.wire import (
@@ -125,7 +117,6 @@ from harness.wire import (
     PlanApproved,
     PlanDecision,
     PlanDecisionOption,
-    PlanProposed,
     RetryMode,
     StepStatus,
     ToolError,
@@ -139,8 +130,6 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from planner.operations import GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
-    PLAN_STATE_KEY,
-    SEEDS_STATE_KEY,
     DatasetRequirement,
     Decision,
     Entity,
@@ -153,7 +142,6 @@ from planner.plan import Plan as PlannerPlan
 from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
 from sqlalchemy.ext.asyncio import AsyncEngine
-from translator.referral import REFERRAL_STATE_KEY, Referral, ReferralKind
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .failure_text import classed_sentence, is_user_sentence
@@ -173,16 +161,14 @@ from .orchestrator_fakes import (
     plan_call,
     request_text,
     search_call,
-    session_turn_specs,
     stream,
     studio_client,
     turn_body,
-    unconnected_store,
 )
 from .resolved_revision import resolved_revision
+from .scope_scenarios import _hashed_scope, _switched_answer
 from .scripted_genai import ScriptedGenai, call_part, reply, text_part
 from .store_clock import StoreClock
-from .test_graph import _hashed_scope, _switched_answer
 
 SPEC_A = "spec_" + "a" * 32
 REF_A = {"spec_id": SPEC_A, "content_version": "cv_" + "1" * 32}
@@ -442,55 +428,25 @@ class _HangingResolver:
         raise AssertionError("unreachable")
 
 
-# The session service backend every route-exercising test in this module
-# builds its store and runner over: `_new_session_service` is the one function
-# `session_service_backend` (below) switches, so the whole suite runs
-# through `InMemorySessionService` and a Postgres-backed
-# `DatabaseSessionService` without any call site naming which one it is
-# under. `engine` is the test's Postgres schema the conversation store
-# runs on (`_engine`).
-class _SessionServiceBackend:
-    factory: Callable[[], BaseSessionService] = staticmethod(InMemorySessionService)
-    engine: AsyncEngine | None = None
-
-
-def _new_session_service() -> BaseSessionService:
-    return _SessionServiceBackend.factory()
-
-
-def _database_session_service() -> DatabaseSessionService:
-    """A `DatabaseSessionService` on the running test's engine, so two of them
-    stand for two instances sharing one database."""
-    return DatabaseSessionService(db_engine=_engine())
-
-
 def _engine() -> AsyncEngine:
     """The engine every store in the running test is built on, so two stores
     stand for two instances sharing one database."""
-    assert _SessionServiceBackend.engine is not None
-    return _SessionServiceBackend.engine
+    assert _Database.engine is not None
+    return _Database.engine
 
 
-@pytest.fixture(autouse=True, params=["memory", "database"])
-async def session_service_backend(
-    request: pytest.FixtureRequest,
-    monkeypatch: pytest.MonkeyPatch,
-    pg_engine: AsyncEngine,
-) -> str:
-    """Every studio-door test in this file runs twice: once building its
-    session service through `InMemorySessionService`, once through a
-    `DatabaseSessionService` on the test's own Postgres schema. Conversations
-    are stored on `pg_engine` either way, and the database backend runs on the
-    same engine, as it does in a deployment. The engine is the fixture's to
-    dispose, so no service is closed."""
-    monkeypatch.setattr(_SessionServiceBackend, "engine", pg_engine)
-    if request.param == "database":
-        monkeypatch.setattr(
-            _SessionServiceBackend,
-            "factory",
-            staticmethod(lambda: DatabaseSessionService(db_engine=pg_engine)),
-        )
-    return request.param
+class _Database:
+    """The running test's Postgres engine (`database`)."""
+
+    engine: AsyncEngine | None = None
+
+
+@pytest.fixture(autouse=True)
+def database(monkeypatch: pytest.MonkeyPatch, pg_engine: AsyncEngine) -> AsyncEngine:
+    """Every studio-door test in this file stores its conversations and
+    turns on the test's own Postgres database."""
+    monkeypatch.setattr(_Database, "engine", pg_engine)
+    return pg_engine
 
 
 def _app(
@@ -501,28 +457,26 @@ def _app(
     tool_surface: ToolSurface | None = None,
     settings: Settings | None = None,
     edit_model: Any | None = None,
-    session_service: BaseSessionService | None = None,
     engine: AsyncEngine | None = None,
     store: StudioStore | None = None,
     served: Sequence[Mapping[str, Any]] = (),
     definition_surface: Any = None,
     early_mints: EarlyMints | None = None,
+    heartbeat_seconds: float | None = None,
 ) -> FastAPI:
-    """`orchestrator_app` over this test's session backend, its agent's
-    model answering from `script` and kept as `app.state.model`. The
-    executor defaults to this module's `ScriptedExecutor`; the planner to
-    `ScriptedPlannerModel`. A cross-instance test passes one
-    `session_service`, shared with a second `_app`; a segment TTL scenario
-    passes its own `store` with its own clock. A module outside this one,
-    where `session_service_backend` does not run, passes the `engine` of its
-    own `pg_engine`."""
+    """`orchestrator_app` on this test's database, its agent's model
+    answering from `script` and kept as `app.state.model`. The executor
+    defaults to this module's `ScriptedExecutor`; the planner to
+    `ScriptedPlannerModel`. A cross-instance test passes a second `store`
+    on the same engine; a segment TTL scenario passes its own `store` with
+    its own clock. A module outside this one, where `database` does not
+    run, passes the `engine` of its own `pg_engine`."""
     app, model = orchestrator_app(
         *script,
         resolver=resolver,
         executor=executor or ScriptedExecutor(),
         planner=planner,
         tool_surface=tool_surface,
-        session_service=session_service or _new_session_service(),
         engine=engine or _engine(),
         store=store,
         settings=settings,
@@ -530,6 +484,7 @@ def _app(
         served=served,
         definition_surface=definition_surface,
         early_mints=early_mints,
+        heartbeat_seconds=heartbeat_seconds,
     )
     app.state.model = model
     return app
@@ -643,21 +598,12 @@ async def test_a_definite_turn_streams_steps_text_and_done() -> None:
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
 
 
-async def test_a_turn_past_its_call_cap_ends_on_the_cap_sentence_with_no_further_model_call(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_a_turn_past_its_call_cap_ends_on_the_cap_sentence_with_no_further_model_call() -> (
+    None
+):
     """The route makes the request's budget current, and a model call past
-    its cap answers the cap's sentence (`harness.turn_budget.bounded`)
+    its cap answers the cap's sentence (`harness.turn_budget.bounded_by`)
     without asking the model: the sentence is the turn's final message."""
-    original = ScriptLlm.generate_content_async
-
-    async def bounded_script(
-        self: ScriptLlm, llm_request: Any, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse]:
-        async for response in bounded(lambda: original(self, llm_request, stream), stream=stream):
-            yield response
-
-    monkeypatch.setattr(ScriptLlm, "generate_content_async", bounded_script)
     app = _app(
         fetch_call(SPEC_A),
         _text("never sent"),
@@ -1390,8 +1336,8 @@ def _tool_steps(frames: list[dict[str, Any]]) -> list[tuple[str, str, str, str |
 
 
 class _PollsOnceSurface(ScriptedSurface):
-    """`ScriptedSurface`, whose `get_data` reports once and yields to the
-    event loop before it answers, as data-mcp does between two polls."""
+    """`ScriptedSurface`, whose `get_data` reports once and waits a moment
+    before it answers, as data-mcp waits between two polls."""
 
     async def call_tool(
         self,
@@ -1402,7 +1348,7 @@ class _PollsOnceSurface(ScriptedSurface):
     ) -> ToolCallResult:
         if tool.name == "get_data" and on_progress is not None:
             on_progress(ProgressReport(progress=12, message=_POLLING))
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.05)
         return await super().call_tool(tool=tool, arguments=arguments)
 
 
@@ -1562,17 +1508,14 @@ async def test_a_stop_closes_the_activity_lines_its_stream_left_running() -> Non
     async def segment():
         yield _running_line(0)
         yield planner_line
-        await asyncio.Event().wait()  # the step's call is still waiting
+        yield _Stopped("cancelled")  # the step's call was still waiting
 
     conversation = ConversationState(conversation_id=CONVERSATION)
     conversation.begin_turn()
     conversation.seq = 2
-    stream = _sse_stream(segment(), conversation=conversation, heartbeat_seconds=0.02)
-    sent = [await anext(stream), await anext(stream)]
-    _end_stream(conversation, "cancelled")
-    rest = [chunk async for chunk in stream]
-
-    frames = _data_frames(sent + rest)
+    frames = _data_frames(
+        [chunk async for chunk in _sse_stream(segment(), conversation=conversation)]
+    )
     assert [(f["event"], f.get("step_id"), f.get("status")) for f in frames] == [
         ("activity.step", "s0", "running"),
         ("activity.step", "s1", "running"),
@@ -1633,17 +1576,14 @@ async def test_a_segment_lost_closes_the_activity_lines_its_stream_left_running(
 
     async def segment():
         yield _running_line(0)
-        await asyncio.Event().wait()  # the step's call is still waiting
+        yield _Stopped("segment_lost")  # the step's call was still waiting
 
     conversation = ConversationState(conversation_id=CONVERSATION)
     conversation.begin_turn()
     conversation.seq = 1
-    stream = _sse_stream(segment(), conversation=conversation, heartbeat_seconds=0.02)
-    sent = [await anext(stream)]
-    _end_stream(conversation, "segment_lost")
-    rest = [chunk async for chunk in stream]
-
-    frames = _data_frames(sent + rest)
+    frames = _data_frames(
+        [chunk async for chunk in _sse_stream(segment(), conversation=conversation)]
+    )
     assert [(f["event"], f.get("step_id"), f.get("status")) for f in frames] == [
         ("activity.step", "s0", "running"),
         ("activity.step", "s0", "failed"),
@@ -1664,7 +1604,7 @@ async def test_an_approval_the_approve_node_refuses_sends_no_approved_plan(
     """The approve node takes no approval whose time it cannot read, and routes the
     answer to the planner as an amendment: the stream offers the plan again and
     names no approved plan."""
-    monkeypatch.setattr(planning_module, "_answered_at", lambda answer: None)
+    monkeypatch.setattr(approve_module, "_answered_at", lambda answer: None)
     app = _app(*_plan(), tool_surface=ScriptedSurface())
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
@@ -2120,13 +2060,12 @@ async def test_an_approval_is_recorded_with_its_approver_and_its_revision() -> N
     lets a record from this case be told apart from one written with the
     token gate closed, which `test_an_interrupt_under_a_closed_token_gate_records_auth_enforced`
     below covers."""
-    session_service = _new_session_service()
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
-    app = _app(*_plan(), session_service=session_service, store=store)
+    app = _app(*_plan(), store=store)
 
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body())
@@ -2155,15 +2094,13 @@ async def test_an_interrupt_under_a_closed_token_gate_records_auth_enforced() ->
     every `ApprovalRecord` it appends, so a closed gate must show up as
     `True` on the record, not merely as the 401 a wrong token would already
     draw."""
-    session_service = _new_session_service()
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
     app = _app(
         *_plan(),
-        session_service=session_service,
         store=store,
         settings=Settings(studio_api_token="test-token"),
     )
@@ -2192,13 +2129,12 @@ async def test_a_raise_building_the_approval_record_leaves_the_pending_entry_for
     This breaks construction on purpose and checks the entry survives, the
     conversation lock is released rather than left held, and a second,
     unpatched attempt still succeeds."""
-    session_service = _new_session_service()
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
-    app = _app(*_plan(), session_service=session_service, store=store)
+    app = _app(*_plan(), store=store)
 
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("approval record construction failed")
@@ -2234,98 +2170,33 @@ async def test_a_raise_building_the_approval_record_leaves_the_pending_entry_for
 
 
 async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claimed_lease() -> None:
-    """The per-turn session cannot be created after the claim save landed, so
-    `/turn` fails before its stream starts. The lock and the segment it
-    claimed are both released, and the next `/turn` is accepted."""
+    """The turn cannot be opened after the claim save landed, so `/turn`
+    fails before its stream starts. The lock and the segment it claimed are
+    both released, and the next `/turn` is accepted."""
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(_new_session_service(), app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
     app = _app(_text("Hello."), store=store)
-    ensure_session = app.state.studio._ensure_session
+    turns = app.state.studio.turns
+    open_turn = turns.open_turn
 
-    async def _unavailable(**kwargs: Any) -> None:
-        raise RuntimeError("session backend unavailable")
+    async def _unavailable(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("turn store unavailable")
 
-    app.state.studio._ensure_session = _unavailable
+    turns.open_turn = _unavailable
     async with _client(app) as client:
-        with pytest.raises(RuntimeError, match="session backend unavailable"):
+        with pytest.raises(RuntimeError, match="turn store unavailable"):
             await _stream(client, "/api/studio/turn", _turn_body("hi"))
 
         assert not store.current(PRINCIPAL, CONVERSATION).lock.locked()
         stored = await store.load(PRINCIPAL, CONVERSATION)
         assert stored is not None and stored.segment is None
-        app.state.studio._ensure_session = ensure_session
+        turns.open_turn = open_turn
         frames = await _stream(client, "/api/studio/turn", _turn_body("hi again"))
 
     assert _events(frames)[-1] == "done"
-
-
-async def test_a_turn_replaces_the_leftover_adk_session_it_meets(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A per-turn ADK session the conversation's tables never recorded (one
-    of a conversation served as absent, whose ADK turn sessions remain) is
-    replaced by the first `/turn`, which streams to `done` on its first
-    attempt and records no abandoned turn."""
-    session_service = _new_session_service()
-    app = _app(_text("Hello."), session_service=session_service)
-    await session_service.create_session(
-        app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t1"
-    )
-
-    with caplog.at_level("WARNING", logger="harness.studio"):
-        async with _client(app) as client:
-            frames = await _stream(client, "/api/studio/turn", _turn_body("hi"))
-
-    assert _events(frames)[-1] == "done"
-    assert f"{CONVERSATION}#t1" in caplog.text
-    state = await app.state.studio.store.load(PRINCIPAL, CONVERSATION)
-    assert state is not None and state.turn_index == 1
-    assert all(turn.get("error") != "abandoned" for turn in state.turns)
-
-
-async def test_a_turn_whose_session_exists_while_adk_moved_deletes_nothing_and_asks_for_a_retry() -> (
-    None
-):
-    """When ADK's ledger session moved since the load, the per-turn session
-    may be the previous release's live one: `/turn` answers the retryable 409,
-    leaves the session alone, and drops the lease it claimed."""
-    session_service = _new_session_service()
-
-    class MovedAdk:
-        async def reimport(self, principal: str, conversation_id: str) -> None:
-            await NO_ADK.reimport(principal, conversation_id)
-
-        async def moved(self, principal: str, conversation_id: str) -> bool:
-            return True
-
-        def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
-            return NO_ADK.convert_specs(session_id, specs)
-
-    store = StudioStore(
-        _engine(),
-        adk=MovedAdk(),
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
-    )
-    app = _app(_text("Hello."), session_service=session_service, store=store)
-    await session_service.create_session(
-        app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t1"
-    )
-
-    async with _client(app) as client:
-        response = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
-
-    assert response.status_code == 409
-    assert response.json()["error"] == "transient_unavailable"
-    kept = await session_service.get_session(
-        app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t1"
-    )
-    assert kept is not None
-    assert not store.current(PRINCIPAL, CONVERSATION).lock.locked()
-    stored = await store.load(PRINCIPAL, CONVERSATION)
-    assert stored is not None and stored.segment is None
 
 
 async def test_a_failure_before_a_resume_streams_keeps_the_answer_for_a_same_answer_retry(
@@ -2337,7 +2208,7 @@ async def test_a_failure_before_a_resume_streams_keeps_the_answer_for_a_same_ans
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(_new_session_service(), app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
     app = _app(*_ask("reading A", "reading B"), _text("You meant reading B."), store=store)
     async with _client(app) as client:
@@ -2551,19 +2422,18 @@ async def test_the_turn_record_keeps_a_picked_count_under_its_spec_id() -> None:
 
 async def test_stop_during_a_pause_invalidates_the_ask_it_left_behind() -> None:
     """POST /cancel while the turn is paused on an elicitation: by then the
-    stream that emitted the pause has already ended, so `cancel_event` is
-    back to `None` and cannot be the signal cancel acts on. The fix must
-    still refuse a later `/interrupt` on that id, and must not resume the
-    workflow. The test proves it by checking the agent's model is not asked again."""
+    stream that emitted the pause has already ended, so no live segment can
+    take the Stop. The route must still refuse a later `/interrupt` on that
+    id, and must not resume the turn. The test proves it by checking the agent's model is not asked again."""
     app = _app(*_ask("reading A", "reading B"))
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
         elicitation = _frame(first, "elicitation.request")
         asked = len(_model(app).requests)
 
-        # The pause already ended the stream that armed cancel_event, same
-        # as production: a Stop press only ever reaches this route after
-        # the SSE connection that showed the ask is long closed.
+        # The pause already ended the stream, same as production: a Stop
+        # press only ever reaches this route after the SSE connection that
+        # showed the ask is long closed.
         cancel = await client.post(
             "/api/studio/cancel",
             json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
@@ -2597,13 +2467,12 @@ async def test_a_raise_building_the_elicitation_frame_leaves_no_orphaned_pending
     with, so the entry would sit in `pending` unresolvable. This breaks
     construction on purpose and checks nothing is left behind, and that a
     later, unpatched turn still reaches a real elicitation clean."""
-    session_service = _new_session_service()
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
-    app = _app(*_ask(), *_ask(), session_service=session_service, store=store)
+    app = _app(*_ask(), *_ask(), store=store)
 
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("elicitation frame construction failed")
@@ -2763,15 +2632,29 @@ async def _noop_release(*args: Any, **kwargs: Any) -> None:
     process's `finally` blocks when it dies."""
 
 
+async def _never_written(*args: Any, **kwargs: Any) -> Any:
+    """Stands in for `TurnStore.finish`: a crashed instance never closes
+    its turn, so the turn stays as its last write left it. Raised as the
+    `SegmentLost` a write under a lost lease is refused with."""
+    raise SegmentLost("the instance died before this write")
+
+
+def _dies_on_a_stop(app: FastAPI) -> None:
+    """Stand `app`'s instance in for one that dies as a Stop reaches it:
+    neither its segment's release nor its turn's close is written
+    (`_noop_release`, `_never_written`)."""
+    app.state.studio.store.release = _noop_release
+    app.state.studio.turns.finish = _never_written
+
+
 async def _approve_plan_then_hang(
     client: httpx2.AsyncClient, app: FastAPI, plan: dict[str, Any]
 ) -> _HangingSurface:
     """Start `/interrupt approve`'s resume stream, let it reach its first
-    (scripted) plan step, and abandon it there with `store.release` patched
-    to a no-op -- `POST /cancel` ends the stream (through the same local
-    fast path a Stop press uses) without ever persisting the segment's
-    release, standing in for a crash between `/interrupt`'s save and the
-    resumed segment's own checkpoint. Returns once the abandoned stream's
+    (scripted) plan step, and abandon it there: `POST /cancel` ends the
+    stream without ever persisting the segment's release or the turn's
+    close (`_dies_on_a_stop`), standing in for a crash between
+    `/interrupt`'s save and the resumed segment's own checkpoint. Returns once the abandoned stream's
     `error` frame has been read off the wire."""
     hanging = _HangingSurface()
     app.state.studio.surface_recorder._surface = hanging
@@ -2779,7 +2662,7 @@ async def _approve_plan_then_hang(
         _stream(client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve"))
     )
     await asyncio.wait_for(hanging.entered.wait(), timeout=5)
-    app.state.studio.store.release = _noop_release  # type: ignore[method-assign]
+    _dies_on_a_stop(app)
     cancel = await client.post(
         "/api/studio/cancel",
         json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
@@ -2801,23 +2684,21 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
     clock), without a second `ApprovalRecord` and past every `seq` A's dead
     attempt may already have sent."""
     clock = await StoreClock.start(_engine())
-    session_service = _database_session_service()
     store_a = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     store_b = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     app_a = _app(
         *_plan(),
         tool_surface=ScriptedSurface(),
-        session_service=session_service,
         store=store_a,
     )
 
@@ -2827,7 +2708,7 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
 
         await _approve_plan_then_hang(client_a, app_a, plan)
 
-    app_b = _app(tool_surface=ScriptedSurface(), session_service=session_service, store=store_b)
+    app_b = _app(tool_surface=ScriptedSurface(), store=store_b)
     async with _client(app_b) as client_b:
         busy = await client_b.post(
             "/api/studio/interrupt",
@@ -2855,7 +2736,7 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
     reloaded = await StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert len(reloaded.approvals) == 1
@@ -2867,38 +2748,37 @@ async def test_a_retry_after_an_attempt_that_died_before_the_approval_sends_it()
     the graph takes the approval, so it never sent `plan.approved`. B's retry of the
     same answer, once A's segment expires, sends the approved plan once."""
     clock = await StoreClock.start(_engine())
-    session_service = _database_session_service()
     store_a = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     store_b = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
-    app_a = _app(*_plan(), session_service=session_service, store=store_a)
+    app_a = _app(*_plan(), store=store_a)
     entered = asyncio.Event()
 
-    async def _dead(**_kwargs: Any) -> AsyncGenerator[Any]:
+    async def _dead(*_args: Any, **_kwargs: Any) -> Any:
         entered.set()
         await asyncio.Event().wait()
-        yield  # an async generator that never yields a frame
 
     async with _client(app_a) as client_a:
         first = await _stream(client_a, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
-        app_a.state.studio._frames = _dead
+        # The turn never takes the answer: its write hangs.
+        app_a.state.studio.turns.record_answer = _dead
         attempt = asyncio.ensure_future(
             _stream(
                 client_a, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
             )
         )
         await asyncio.wait_for(entered.wait(), timeout=5)
-        app_a.state.studio.store.release = _noop_release  # type: ignore[method-assign]
+        _dies_on_a_stop(app_a)
         cancel = await client_a.post(
             "/api/studio/cancel",
             json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
@@ -2909,7 +2789,7 @@ async def test_a_retry_after_an_attempt_that_died_before_the_approval_sends_it()
         assert "plan.approved" not in _events(dead)
 
     await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)  # A's segment has expired
-    app_b = _app(tool_surface=ScriptedSurface(), session_service=session_service, store=store_b)
+    app_b = _app(tool_surface=ScriptedSurface(), store=store_b)
     async with _client(app_b) as client_b:
         resumed = await _stream(
             client_b, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
@@ -2925,17 +2805,16 @@ async def test_a_cancel_on_a_lapsed_lease_fences_out_the_stream_still_running_un
     live segment, so it closes the conversation itself. A's next checkpoint
     is refused, so it cannot write over what the Stop saved."""
     clock = await StoreClock.start(_engine())
-    session_service = _database_session_service()
     store_a = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     store_b = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     state_a = await store_a.create(PRINCIPAL, CONVERSATION)
@@ -2944,7 +2823,7 @@ async def test_a_cancel_on_a_lapsed_lease_fences_out_the_stream_still_running_un
     await store_a.save(PRINCIPAL, CONVERSATION)
     await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)  # A's lease has lapsed
 
-    app_b = _app(tool_surface=ScriptedSurface(), session_service=session_service, store=store_b)
+    app_b = _app(tool_surface=ScriptedSurface(), store=store_b)
     async with _client(app_b) as client_b:
         cancel = await client_b.post(
             "/api/studio/cancel",
@@ -2959,7 +2838,7 @@ async def test_a_cancel_on_a_lapsed_lease_fences_out_the_stream_still_running_un
     reloaded = await StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert reloaded.segment is None
@@ -3013,22 +2892,19 @@ async def test_a_retried_approval_is_dated_by_its_first_answer(
 
     monkeypatch.setattr(PlannerPlan, "approve", _recording_approve)
     clock = await StoreClock.start(_engine())
-    session_service = _database_session_service()
     store_a = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     store_b = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
-    app_a = _app(
-        *_plan(), tool_surface=ScriptedSurface(), session_service=session_service, store=store_a
-    )
+    app_a = _app(*_plan(), tool_surface=ScriptedSurface(), store=store_a)
 
     async with _client(app_a) as client_a:
         first = await _stream(client_a, "/api/studio/turn", _turn_body("q with forks"))
@@ -3044,7 +2920,7 @@ async def test_a_retried_approval_is_dated_by_its_first_answer(
                 )
             )
             await asyncio.wait_for(entered.wait(), timeout=5)
-            app_a.state.studio.store.release = _noop_release  # type: ignore[method-assign]
+            _dies_on_a_stop(app_a)
             cancel = await client_a.post(
                 "/api/studio/cancel",
                 json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
@@ -3054,7 +2930,7 @@ async def test_a_retried_approval_is_dated_by_its_first_answer(
             assert _events(await asyncio.wait_for(resume, timeout=5))[-1] == "error"
 
     surface = _CallingSurface()
-    app_b = _app(tool_surface=surface, session_service=session_service, store=store_b)
+    app_b = _app(tool_surface=surface, store=store_b)
     async with _client(app_b) as client_b:
         await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)  # A's segment has expired
         await _stream(
@@ -3066,7 +2942,7 @@ async def test_a_retried_approval_is_dated_by_its_first_answer(
     reloaded = await StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert [record.at for record in reloaded.approvals] == [answered]
@@ -3077,23 +2953,21 @@ async def test_a_different_answer_after_a_crashed_resume_expires_is_refused() ->
     that actually resumed the turn: refused for good, even once A's
     segment has expired and a matching retry would have succeeded."""
     clock = await StoreClock.start(_engine())
-    session_service = _database_session_service()
     store_a = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     store_b = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     app_a = _app(
         *_plan(),
         tool_surface=ScriptedSurface(),
-        session_service=session_service,
         store=store_a,
     )
 
@@ -3104,7 +2978,6 @@ async def test_a_different_answer_after_a_crashed_resume_expires_is_refused() ->
 
     app_b = _app(
         tool_surface=ScriptedSurface(),
-        session_service=session_service,
         store=store_b,
     )
     async with _client(app_b) as client_b:
@@ -3122,7 +2995,7 @@ async def test_a_different_answer_after_a_crashed_resume_expires_is_refused() ->
     reloaded = await StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert plan["interrupt_id"] in reloaded.pending
@@ -3141,17 +3014,16 @@ async def test_a_retried_resume_of_an_ask_must_carry_the_answers_that_resumed_it
     answers A resumed with; other answers to the same question are refused
     for good."""
     clock = await StoreClock.start(_engine())
-    session_service = _database_session_service()
     store_a = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     store_b = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     resolver = _HangingResolver()
@@ -3159,7 +3031,6 @@ async def test_a_retried_resume_of_an_ask_must_carry_the_answers_that_resumed_it
         *_ask("reading A", "reading B"),
         *_card(),
         resolver=resolver,
-        session_service=session_service,
         store=store_a,
     )
 
@@ -3177,7 +3048,7 @@ async def test_a_retried_resume_of_an_ask_must_carry_the_answers_that_resumed_it
             )
         )
         await asyncio.wait_for(resolver.entered.wait(), timeout=5)
-        app_a.state.studio.store.release = _noop_release  # type: ignore[method-assign]
+        _dies_on_a_stop(app_a)
         cancel = await client_a.post(
             "/api/studio/cancel",
             json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
@@ -3186,7 +3057,7 @@ async def test_a_retried_resume_of_an_ask_must_carry_the_answers_that_resumed_it
         assert cancel.status_code == 204
         await asyncio.wait_for(resume, timeout=5)
 
-    app_b = _app(_text("Reading A."), session_service=session_service, store=store_b)
+    app_b = _app(_text("Reading A."), store=store_b)
     async with _client(app_b) as client_b:
         await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)  # A's segment has expired
         retry = await client_b.post(
@@ -3205,15 +3076,12 @@ async def test_two_concurrent_first_answers_to_one_interrupt_give_one_stream_and
     instance's claim save lands first resumes the turn; the other's save
     finds the ledger already moved and answers the existing 409, rather
     than each resuming its own segment of the turn."""
-    session_service = _database_session_service()
     app_a = _app(
         *_plan(),
         tool_surface=ScriptedSurface(),
-        session_service=session_service,
     )
     app_b = _app(
         tool_surface=ScriptedSurface(),
-        session_service=session_service,
     )
 
     async with _client(app_a) as client_a:
@@ -3599,7 +3467,7 @@ async def test_cancel_aborts_a_streaming_turn_with_a_cancelled_error_frame() -> 
 
     async def _armed() -> None:
         while not any(
-            entry.state is not None and entry.state.cancel_event is not None
+            entry.state is not None and entry.state.renew_now is not None
             for entry in studio.store._runtime.values()
         ):
             await asyncio.sleep(0.01)
@@ -3635,8 +3503,7 @@ async def test_cancelling_an_idle_conversation_is_a_no_op_204() -> None:
 
 async def test_closing_the_sse_stream_unwinds_the_segment_generator() -> None:
     """Unit level: closing the transport generator unwinds the segment
-    generator and disarms the cancel event. (Transport-level disconnect is
-    pinned separately below.)"""
+    generator. (Transport-level disconnect is pinned separately below.)"""
     closed = asyncio.Event()
 
     async def segment():
@@ -3653,175 +3520,12 @@ async def test_closing_the_sse_stream_unwinds_the_segment_generator() -> None:
     await stream.aclose()
 
     await asyncio.wait_for(closed.wait(), timeout=2)
-    assert conversation.cancel_event is None  # disarmed on unwind
-
-
-async def test_a_new_stream_drops_a_cancel_reason_left_for_an_earlier_one() -> None:
-    """A reason recorded after the earlier stream disarmed, with no event left to
-    carry it, was aimed at that stream, so the next stream arms without it."""
-
-    async def segment():
-        yield MessageDelta(event="message.delta", seq=0, text="one")
-
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    conversation.cancel_reason = "segment_lost"
-    stream = _sse_stream(segment(), conversation=conversation)
-    await anext(stream)
-
-    assert conversation.cancel_reason is None
-    await stream.aclose()
-
-
-async def test_a_stream_ending_leaves_the_cancel_event_a_later_stream_armed() -> None:
-    """A request that took the conversation after the lock was released arms its
-    own cancel event. The earlier stream's `finally` runs afterwards and leaves
-    that event and its reason in place, so a Stop still reaches the new stream."""
-
-    async def segment():
-        yield MessageDelta(event="message.delta", seq=0, text="one")
-
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    stream = _sse_stream(segment(), conversation=conversation)
-    await anext(stream)
-    later = conversation.cancel_event = asyncio.Event()
-    conversation.cancel_reason = "cancelled"
-    await stream.aclose()
-
-    assert conversation.cancel_event is later
-    assert conversation.cancel_reason == "cancelled"
-
-
-async def test_a_switch_stream_arms_its_own_stop_and_clears_only_that_one() -> None:
-    """A stream running a switch arms `switch_stop` and the `SWITCH_STOP` its
-    frames read. Ending, it leaves alone a stop a later switch stream armed
-    meanwhile, so an earlier stream's unwind cannot disarm the next switch."""
-    seen: list[asyncio.Event | None] = []
-
-    async def segment():
-        seen.append(switch_module.SWITCH_STOP.get())
-        yield MessageDelta(event="message.delta", seq=0, text="one")
-
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    stream = _sse_stream(segment(), conversation=conversation, switch=True)
-    await anext(stream)
-    armed = conversation.switch_stop
-    later = conversation.switch_stop = asyncio.Event()
-    await stream.aclose()
-
-    assert armed is not None
-    assert seen == [armed]
-    assert conversation.switch_stop is later
-
-
-async def test_a_stopped_switch_still_sending_frames_ends_at_the_reoffer_deadline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A switch that goes on sending frames after the first Stop, faster than any
-    heartbeat wait: the stream still ends with `cancelled` once
-    `SWITCH_REOFFER_SECONDS` pass, so a Stop never leaves a stream open."""
-    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.1)
-
-    async def segment():
-        yield _running_line(0)
-        await asyncio.sleep(0.05)  # idle while the Stop is read
-        seq = 1
-        while True:  # then each frame ready at once, so no wait times out
-            yield _running_line(seq)
-            seq += 1
-
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    conversation.begin_turn()
-    stream = _sse_stream(segment(), conversation=conversation, switch=True, heartbeat_seconds=1)
-    sent = [await anext(stream)]
-    _end_stream(conversation, "cancelled")
-
-    async def rest() -> list[str]:
-        return [chunk async for chunk in stream]
-
-    sent += await asyncio.wait_for(rest(), timeout=5)
-
-    frames = _data_frames(sent)
-    assert frames[-1]["event"] == "error"
-    assert frames[-1]["error"]["error"] == "cancelled"
-
-
-async def test_a_segment_lost_as_the_reoffer_deadline_passes_keeps_the_turn_open(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A stopped switch whose segment is taken over in the same wait in which
-    `SWITCH_REOFFER_SECONDS` pass: the stream ends on `transient_unavailable`
-    for the takeover, and leaves the turn open for the instance that took it."""
-    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.1)
-    conversation = ConversationState(conversation_id=CONVERSATION)
-
-    async def segment():
-        yield _running_line(0)
-        await asyncio.sleep(0.05)  # idle while the Stop is read
-        # Blocks the loop past the deadline, so one wait sees both the
-        # deadline and the takeover the heartbeat records.
-        time.sleep(0.15)
-        _end_stream(conversation, "segment_lost")
-        yield _running_line(1)
-        await asyncio.Event().wait()
-
-    conversation.begin_turn()
-    stream = _sse_stream(segment(), conversation=conversation, switch=True, heartbeat_seconds=1)
-    sent = [await anext(stream)]
-    _end_stream(conversation, "cancelled")
-
-    async def rest() -> list[str]:
-        return [chunk async for chunk in stream]
-
-    sent += await asyncio.wait_for(rest(), timeout=5)
-
-    frames = _data_frames(sent)
-    assert frames[-1]["error"]["error"] == "transient_unavailable"
-    assert not conversation.turn_recorded
-
-
-async def test_a_stopped_switch_that_reoffers_its_plan_keeps_the_turn_open_past_the_deadline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A switch stopped once that offers its plan again, then takes longer than
-    `SWITCH_REOFFER_SECONDS` to unwind: the offered plan ends the deadline, so
-    the stream ends on it with no `cancelled` frame and the paused turn stays
-    open for the card the user now sees."""
-    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.1)
-
-    async def segment():
-        yield _running_line(0)
-        await asyncio.sleep(0.05)  # idle while the Stop is read
-        yield PlanProposed(
-            event="plan.proposed",
-            seq=1,
-            interrupt_id="int_1",
-            plan_version_id="plan_1",
-            version=1,
-            title="Research plan",
-            steps=[],
-            actions=[],
-        )
-        await asyncio.sleep(0.3)  # the segment's teardown outlasts the deadline
-
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    conversation.begin_turn()
-    stream = _sse_stream(segment(), conversation=conversation, switch=True, heartbeat_seconds=1)
-    sent = [await anext(stream)]
-    _end_stream(conversation, "cancelled")
-
-    async def rest() -> list[str]:
-        return [chunk async for chunk in stream]
-
-    sent += await asyncio.wait_for(rest(), timeout=5)
-
-    assert [frame["event"] for frame in _data_frames(sent)] == ["activity.step", "plan.proposed"]
-    assert not conversation.turn_recorded
 
 
 async def test_a_cancelled_response_task_records_the_turn_and_unwinds_the_segment() -> None:
     """What a client disconnect becomes inside the process: uvicorn cancels
-    the response task. The stream must close the segment generator, record
-    the turn as cancelled, and disarm the cancel event on its way out."""
+    the response task. The stream must close the segment generator and
+    record the turn as cancelled on its way out."""
     closed = asyncio.Event()
 
     async def segment():
@@ -3854,7 +3558,6 @@ async def test_a_cancelled_response_task_records_the_turn_and_unwinds_the_segmen
     assert conversation.turns == [
         {"user": "kenya oda 2023", "assistant": "one", "error": "cancelled"}
     ]
-    assert conversation.cancel_event is None
 
 
 async def test_unwinding_under_a_cancelled_response_cancels_the_segment_once() -> None:
@@ -3939,7 +3642,6 @@ async def test_a_client_that_leaves_a_paused_turn_keeps_it_open_and_resumable(ho
     assert not conversation.turn_recorded
     assert conversation.turns == []
     assert conversation._telemetry_span is span
-    assert conversation.cancel_event is None
 
     conversation.begin_turn()
     assert conversation.turns == [{"user": "kenya oda 2023", "assistant": "", "error": "abandoned"}]
@@ -3958,7 +3660,6 @@ async def test_a_client_that_leaves_a_running_turn_records_it_as_cancelled(how: 
     assert conversation.turn_recorded
     assert conversation.turns == [{"user": "kenya oda 2023", "assistant": "", "error": "cancelled"}]
     assert conversation._telemetry_span is None
-    assert conversation.cancel_event is None
 
 
 # NOTE: the transport half of a disconnect cannot be driven in-process --
@@ -3975,13 +3676,12 @@ async def test_a_client_that_leaves_at_the_pause_frame_still_releases_the_segmen
     `http.disconnect`, and the stream cancels the segment task under that
     save. The save still lands, so the ledger holds no live segment and the
     `/interrupt` that answers the plan streams at once."""
-    session_service = _new_session_service()
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
-    app = _app(*_plan(), session_service=session_service, store=store)
+    app = _app(*_plan(), store=store)
     releasing = asyncio.Event()
     real_release = store.release
     real_transaction = store._transaction
@@ -4045,7 +3745,7 @@ async def test_a_client_that_leaves_at_the_pause_frame_still_releases_the_segmen
     ledger = await StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert ledger is not None
     assert ledger.segment is None
@@ -4427,7 +4127,6 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
     monkeypatch.setattr(_RecordingExecutor, "drain", _drain_and_keep)
     provenance = ProvenanceStore()
     provenance.put(conversation=f"{PRINCIPAL}/{CONVERSATION}", manifest={}, **REF_A)
-    session_service = _new_session_service()
     edit_model = ScriptedEditModel(
         {
             "text": "Renamed the card.",
@@ -4442,7 +4141,6 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
         executor=McpExecutor(settings=Settings(), provenance=provenance),
         edit_model=edit_model,
         tool_surface=ScriptedSurface(),
-        session_service=session_service,
     )
     async with _client(app) as client:
         created = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
@@ -4488,7 +4186,7 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
     reloaded = await StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded.write_tokens == {component_id: token}
     assert "cmw_" not in json.dumps(reloaded.components)
@@ -5619,30 +5317,28 @@ class _AskingPickPlanner(ScriptedPlannerModel):
         super().__init__()
         self.replanning = asyncio.Event()
 
-    async def __call__(self, *, ctx: Context, **kwargs: Any) -> dict[str, Any]:
+    async def __call__(self, *, ctx: Any, **kwargs: Any) -> dict[str, Any]:
         if kwargs.get("pick") is None:
             drafted = await super().__call__(ctx=ctx, **kwargs)
             (measure,) = drafted["plan"]["decisions"]
             measure["fixes"] = {"measure": measure["chosen"]}
             return drafted
-        if not ctx.resume_inputs:
+        if kwargs.get("answer") is None:
             return {"asked": {"call_id": "replan_ask", "args": {"message": "Which years?"}}}
         self.replanning.set()
         await asyncio.sleep(5)
         raise AssertionError("a stopped replan is cancelled")
 
 
-@pytest.mark.parametrize("record", ["kept", "cleared"])
-async def test_a_stop_after_a_question_the_planner_asked_while_replanning_reoffers_the_plan(
-    record: str,
-) -> None:
+async def test_a_stop_after_a_question_the_planner_asked_while_replanning_reoffers_the_plan() -> (
+    None
+):
     """The user picks another option for a planner decision, and the planner
     asks a question while it replans. The stream that answers it runs the
     replan, so a Stop there is a switch's Stop: the stream ends on the same
     plan re-offered with `switch_cancelled`, and the turn stays paused on it.
-    The question's pending entry says so (`pick_replan`): with the replan's
-    record cleared from the turn's session, the answer still arms the Stop,
-    so the route reads no session to learn it."""
+    The planner node holds the turn's `StopScope` open over the replan, so
+    the route arms nothing."""
     planner = _AskingPickPlanner()
     app = _app(*_plan(), planner=planner)
     stop = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
@@ -5663,16 +5359,6 @@ async def test_a_stop_after_a_question_the_planner_asked_while_replanning_reoffe
         elicitation = _frame(asked, "elicitation.request")
         conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
         assert conversation.pending[elicitation["interrupt_id"]].pick_replan
-        if record == "cleared":
-            runner = app.state.studio.runner
-            session = await runner.session_service.get_session(
-                app_name=runner.app_name, user_id=PRINCIPAL, session_id=conversation.session_id
-            )
-            assert session is not None and session.state.get(PICK_REPLAN_KEY)
-            await runner.session_service.append_event(
-                session,
-                Event(author="test", actions=EventActions(state_delta={PICK_REPLAN_KEY: None})),
-            )
         resumed = asyncio.ensure_future(
             _stream(
                 client,
@@ -5740,10 +5426,34 @@ async def test_a_switch_approves_nothing_and_the_plan_is_offered_again() -> None
     assert conversation.turn_user_message.endswith("(then: count health and population)")
 
 
+class _StopsTaken:
+    """Counts the Stops `store`'s heartbeat renewals read, so a test sends
+    its next Stop only once the one before it was taken."""
+
+    def __init__(self, store: StudioStore) -> None:
+        self.taken = 0
+        self._changed = asyncio.Condition()
+        renew = store.renew
+
+        async def counting(*args: Any, **kwargs: Any) -> Any:
+            result = await renew(*args, **kwargs)
+            if result == "cancelled":
+                async with self._changed:
+                    self.taken += 1
+                    self._changed.notify_all()
+            return result
+
+        store.renew = counting  # type: ignore[method-assign]
+
+    async def reach(self, taken: int) -> None:
+        async with self._changed:
+            await asyncio.wait_for(self._changed.wait_for(lambda: self.taken >= taken), timeout=5)
+
+
 @pytest.mark.parametrize(
     ("stops", "deaf"),
-    [(1, False), (2, True), (1, True)],
-    ids=["one-stop", "a-second-stop", "no-offer-in-time"],
+    [(1, False), (2, True)],
+    ids=["one-stop", "a-second-stop"],
 )
 async def test_a_stop_while_a_switch_runs_offers_the_plan_unchanged_on_a_live_pause(
     monkeypatch: pytest.MonkeyPatch, stops: int, deaf: bool
@@ -5752,8 +5462,7 @@ async def test_a_stop_while_a_switch_runs_offers_the_plan_unchanged_on_a_live_pa
     ends on the same plan re-offered under a fresh interrupt, carrying
     `switch_failed` `switch_cancelled`, which asking again can get past; the
     turn stays paused on it. A switch that does not hear the Stop ends as any
-    Stop ends a stream, on a second Stop or once `SWITCH_REOFFER_SECONDS`
-    pass with no offer."""
+    Stop ends a stream, on a second Stop."""
     entered = asyncio.Event()
 
     async def _revising(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
@@ -5763,13 +5472,14 @@ async def test_a_stop_while_a_switch_runs_offers_the_plan_unchanged_on_a_live_pa
 
     async def _deaf(_ctx: Any, revision: Any, **_kwargs: Any) -> dict[str, Any]:
         # A switch that does not hear the first Stop.
-        return await revision
+        async with _ctx.stop.open():
+            return await revision
 
     monkeypatch.setattr(switch_module, "_switched_plan", _revising)
-    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.2 if stops == 1 else 4.0)
     if deaf:
         monkeypatch.setattr(switch_module, "_unless_stopped", _deaf)
     app = _app(*_plan())
+    taken = _StopsTaken(app.state.studio.store)
     stop = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
     async with _client(app) as client:
         plan = await _plan_with_a_choice(app, client)
@@ -5778,13 +5488,10 @@ async def test_a_stop_while_a_switch_runs_offers_the_plan_unchanged_on_a_live_pa
             _stream(client, "/api/studio/interrupt", _switch_body(plan))
         )
         await asyncio.wait_for(entered.wait(), timeout=5)
-        for _ in range(stops):
-            armed = conversation.cancel_event
-            assert armed is not None and not armed.is_set()
+        for sent in range(1, stops + 1):
             cancelled = await client.post("/api/studio/cancel", json=stop, headers=AUTH)
             assert cancelled.status_code == 204
-            while conversation.cancel_event is armed:
-                await asyncio.sleep(0.01)
+            await taken.reach(sent)
         frames = await asyncio.wait_for(resumed, timeout=5)
 
     if deaf:
@@ -5805,7 +5512,6 @@ async def test_a_stop_while_a_switch_runs_offers_the_plan_unchanged_on_a_live_pa
     }
     assert list(conversation.pending) == [again["interrupt_id"]]
     assert conversation.awaiting_answer
-    assert conversation.switch_stop is None
 
 
 @pytest.mark.parametrize("stops", [1, 2], ids=["one-stop", "a-second-stop"])
@@ -5814,10 +5520,8 @@ async def test_a_stop_from_another_instance_stops_a_switch_and_a_second_ends_its
 ) -> None:
     """B POSTs `/cancel` while A's switch runs and the switch does not hear it:
     A's heartbeat reads B's durable flag as the Stop of the switch and keeps
-    watching, so a second Stop from B ends A's stream with `cancelled` well
-    before `SWITCH_REOFFER_SECONDS`. One Stop alone lets the stream read on."""
-    monkeypatch.setattr(studio_module, "HEARTBEAT_INTERVAL_S", 0.05)
-    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 30.0)
+    watching, so a second Stop from B ends A's stream with `cancelled`. One
+    Stop alone lets the stream read on."""
     entered = asyncio.Event()
     finish = asyncio.Event()
 
@@ -5827,27 +5531,25 @@ async def test_a_stop_from_another_instance_stops_a_switch_and_a_second_ends_its
         raise switch_module.SwitchFailedError("r", code="c")
 
     async def _deaf(_ctx: Any, revision: Any, **_kwargs: Any) -> dict[str, Any]:
-        return await revision
+        async with _ctx.stop.open():
+            return await revision
 
     monkeypatch.setattr(switch_module, "_switched_plan", _revising)
     monkeypatch.setattr(switch_module, "_unless_stopped", _deaf)
-    session_service = _database_session_service()
-    app_a = _app(*_plan(), session_service=session_service)
-    app_b = _app(session_service=session_service)
+    app_a = _app(*_plan(), heartbeat_seconds=0.05)
+    app_b = _app()
+    taken = _StopsTaken(app_a.state.studio.store)
     stop = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
     async with _client(app_a) as client_a, _client(app_b) as client_b:
         plan = await _plan_with_a_choice(app_a, client_a)
-        conversation = app_a.state.studio.store.current(PRINCIPAL, CONVERSATION)
         resumed = asyncio.ensure_future(
             _stream(client_a, "/api/studio/interrupt", _switch_body(plan))
         )
         await asyncio.wait_for(entered.wait(), timeout=5)
-        switch_stop = conversation.switch_stop
-        assert switch_stop is not None
-        for _ in range(stops):
+        for sent in range(1, stops + 1):
             cancelled = await client_b.post("/api/studio/cancel", json=stop, headers=AUTH)
             assert cancelled.status_code == 204
-            await asyncio.wait_for(switch_stop.wait(), timeout=5)
+            await taken.reach(sent)
         if stops == 1:
             finish.set()
         frames = await asyncio.wait_for(resumed, timeout=5)
@@ -6438,7 +6140,6 @@ async def test_closing_at_a_heartbeat_unwinds_cleanly() -> None:
     assert first.startswith(": ka")
     await stream.aclose()
     await asyncio.wait_for(closed.wait(), timeout=2)
-    assert conversation.cancel_event is None
 
 
 # --- conversation history: turn records and digest ----------------------------
@@ -6491,13 +6192,12 @@ async def test_a_failed_turn_is_recorded_with_its_error() -> None:
         async def call_tool(self, **kwargs: Any) -> ToolCallResult:
             raise RuntimeError("analysis mount went away")
 
-    session_service = _new_session_service()
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
-    app = _app(*_plan(), tool_surface=BrokenSurface(), session_service=session_service, store=store)
+    app = _app(*_plan(), tool_surface=BrokenSurface(), store=store)
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q that dies"))
         plan = _frame(first, "plan.proposed")
@@ -6665,13 +6365,12 @@ async def test_the_recorder_closes_a_call_that_raises_or_is_cancelled_as_a_faile
 
 
 async def test_a_rejected_plan_turn_is_recorded() -> None:
-    session_service = _new_session_service()
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
-    app = _app(*_plan(), session_service=session_service, store=store)
+    app = _app(*_plan(), store=store)
     async with _client(app) as client:
         frames = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(frames, "plan.proposed")
@@ -6687,16 +6386,14 @@ async def test_a_rejected_plan_turn_is_recorded() -> None:
 
 
 async def test_an_amendment_reaches_the_turn_record() -> None:
-    session_service = _new_session_service()
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
     app = _app(
         *_plan(),
         tool_surface=ScriptedSurface(),
-        session_service=session_service,
         store=store,
     )
     async with _client(app) as client:
@@ -6718,13 +6415,12 @@ async def test_an_amendment_reaches_the_turn_record() -> None:
 
 
 async def test_a_superseded_pause_is_recorded_as_abandoned() -> None:
-    session_service = _new_session_service()
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
-    app = _app(*_plan(), session_service=session_service, store=store)
+    app = _app(*_plan(), store=store)
     async with _client(app) as client:
         paused = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         assert paused[-1]["event"] == "plan.proposed"
@@ -6749,11 +6445,10 @@ async def test_a_recreated_edit_card_reaches_the_turn_record() -> None:
             }
 
     rebuilt = {**COMPONENT, "component_id": "cmp_01test0002", "type": "bar_chart"}
-    session_service = _new_session_service()
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
     app = _app(
         *_card(),
@@ -6770,7 +6465,6 @@ async def test_a_recreated_edit_card_reaches_the_turn_record() -> None:
                 {"outcome": "ok", "frame_refs": [], "component": rebuilt},
             ]
         ),
-        session_service=session_service,
         store=store,
         edit_model=TypeSwitchEdit(),
     )
@@ -6819,11 +6513,10 @@ async def test_a_recreated_edit_cards_resolved_window_reaches_the_turn_record() 
             "window": {"start": "2018", "end": "2024"},
         },
     }
-    session_service = _new_session_service()
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
     app = _app(
         *_card(),
@@ -6840,7 +6533,6 @@ async def test_a_recreated_edit_cards_resolved_window_reaches_the_turn_record() 
                 {"outcome": "ok", "frame_refs": [], "component": rebuilt},
             ]
         ),
-        session_service=session_service,
         store=store,
         edit_model=TypeSwitchEdit(),
     )
@@ -6876,17 +6568,15 @@ async def test_a_component_missing_fact_summary_never_lands(
     contract (here, a missing `fact_summary`) is refused like any other
     unusable write. No frame announces it and the canvas is unchanged."""
     missing = {key: value for key, value in COMPONENT.items() if key != "fact_summary"}
-    session_service = _new_session_service()
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
     app = _app(
         *_card(),
         resolver=_search(),
         executor=ScriptedExecutor(_card_results(missing)),
-        session_service=session_service,
         store=store,
     )
     with caplog.at_level("ERROR", logger="harness.studio_translate"):
@@ -6944,11 +6634,10 @@ async def test_first_write_ok_then_cancellation_before_drain_leaves_the_canvas_u
     second lands. `harness.studio.StudioRunner._frames`'s `finally` drops
     both undrained records with the turn. The canvas is exactly what the
     first turn left it, with no card landed partway through the second."""
-    session_service = _new_session_service()
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
     executor = _WritesUntil(_hang)
     app = _app(
@@ -6956,7 +6645,6 @@ async def test_first_write_ok_then_cancellation_before_drain_leaves_the_canvas_u
         *_card(charts=2),
         resolver=_search(2),
         executor=executor,
-        session_service=session_service,
         store=store,
     )
     async with _client(app) as client:
@@ -7021,18 +6709,16 @@ async def test_first_write_ok_then_second_write_raises_still_announces_what_actu
     for real: the server's own composition is exactly what the client was
     told. The second write, which never returned, produces no frame and
     never reaches the canvas."""
-    session_service = _new_session_service()
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
     app = _app(
         *_card(),
         *_card(charts=2),
         resolver=_search(2),
         executor=_WritesUntil(_reset),
-        session_service=session_service,
         store=store,
     )
     async with _client(app) as client:
@@ -7063,16 +6749,14 @@ async def test_a_plan_paused_on_one_instance_is_approved_and_continued_on_anothe
     stale approve on B first gets back the card A sent, read from the
     ledger. A second `/turn` on B then continues the same conversation: the turn
     index advances past what A claimed, and the digest carries A's turn."""
-    session_service = _database_session_service()
     app_a = _app(
         *_plan(),
         tool_surface=ScriptedSurface(),
-        session_service=session_service,
     )
     # B's own model answers only after the hand-back: `/interrupt` resumes
     # the ADK invocation A's own `/turn` already started, in the per-turn
     # session A created, so B never sees the first turn's question.
-    app_b = _app(tool_surface=ScriptedSurface(), session_service=session_service)
+    app_b = _app(tool_surface=ScriptedSurface())
 
     async with _client(app_a) as client_a, _client(app_b) as client_b:
         first = await _stream(client_a, "/api/studio/turn", _turn_body("q with forks"))
@@ -7106,7 +6790,7 @@ async def test_a_plan_paused_on_one_instance_is_approved_and_continued_on_anothe
     state = await StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert state is not None
     assert state.turn_index == 2
@@ -7122,16 +6806,13 @@ async def test_a_double_approve_across_two_instances_gives_one_success_and_one_4
     entry before either wrote. B's save then finds the ledger has moved and
     loses cleanly with a 409, rather than resuming its own segment of a
     turn A has already finished."""
-    session_service = _database_session_service()
     app_a = _app(
         *_plan(),
         tool_surface=ScriptedSurface(),
-        session_service=session_service,
     )
     app_b = _app(
         *_plan(),
         tool_surface=ScriptedSurface(),
-        session_service=session_service,
     )
 
     b_ready = asyncio.Event()
@@ -7178,9 +6859,8 @@ async def test_two_instances_racing_the_first_turn_on_a_brand_new_conversation_b
     `create` raises `ConversationExists`. B must load what A created and
     continue to its own claim, which advances the turn index it just loaded,
     rather than answering a bare 500."""
-    session_service = _database_session_service()
-    app_a = _app(session_service=session_service)
-    app_b = _app(session_service=session_service)
+    app_a = _app()
+    app_b = _app()
 
     a_committed = asyncio.Event()
     real_create = app_b.state.studio.store.create
@@ -7205,7 +6885,7 @@ async def test_two_instances_racing_the_first_turn_on_a_brand_new_conversation_b
     state = await StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert state is not None
     assert state.turn_index == 2
@@ -7214,7 +6894,6 @@ async def test_two_instances_racing_the_first_turn_on_a_brand_new_conversation_b
 async def test_a_first_turn_whose_reload_finds_the_conversation_held_answers_it_diverged() -> None:
     """Another instance created the conversation between this request's load
     and its create, and the reload's copy finds it changed on both sides."""
-    session_service = _new_session_service()
     reads = 0
 
     class HeldOnReload:
@@ -7233,14 +6912,14 @@ async def test_a_first_turn_whose_reload_finds_the_conversation_held_answers_it_
     store = StudioStore(
         _engine(),
         adk=HeldOnReload(),
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
 
     async def created_elsewhere(principal: str, conversation_id: str) -> Any:
         raise ConversationExists(conversation_id)
 
     store.create = created_elsewhere
-    app = _app(_text("Hello."), session_service=session_service, store=store)
+    app = _app(_text("Hello."), store=store)
 
     async with _client(app) as client:
         response = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
@@ -7258,8 +6937,7 @@ async def test_a_composition_edit_on_one_instance_survives_a_concurrent_turns_re
     release finds the ledger has moved (B's pin) and replays A's own
     recorded append onto B's freshly pinned manifest instead of overwriting
     it with A's own stale copy -- B's edit survives."""
-    session_service = _database_session_service()
-    app_b = _app(session_service=session_service)
+    app_b = _app()
 
     async with _client(app_b) as client_b:
         executor = _PinsTheFirstCardFromB(client_b)
@@ -7268,7 +6946,6 @@ async def test_a_composition_edit_on_one_instance_survives_a_concurrent_turns_re
             *_card(),
             resolver=_search(2),
             executor=executor,
-            session_service=session_service,
         )
         async with _client(app_a) as client_a:
             executor.first_manifest = await _conversation_with_component(client_a)
@@ -7278,7 +6955,7 @@ async def test_a_composition_edit_on_one_instance_survives_a_concurrent_turns_re
     reloaded = await StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     blocks = reloaded.composition.blocks
@@ -7331,9 +7008,8 @@ async def test_ledger_at_turn_n_with_no_stream_running_lets_the_next_turn_succee
     per-turn session `#t{n}` still existing, is idle rather than mid-claim:
     the next `/turn` claims n+1 and succeeds, on a SECOND instance that
     never saw the first."""
-    session_service = _database_session_service()
-    app_a = _app(session_service=session_service)
-    app_b = _app(session_service=session_service)
+    app_a = _app()
+    app_b = _app()
 
     async with _client(app_a) as client_a:
         first = await _stream(client_a, "/api/studio/turn", _turn_body("first"))
@@ -7346,7 +7022,7 @@ async def test_ledger_at_turn_n_with_no_stream_running_lets_the_next_turn_succee
     state = await StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert state is not None
     assert state.turn_index == 2
@@ -7361,9 +7037,8 @@ async def test_a_turn_from_another_instance_while_a_streams_is_409_with_retry_af
     existing 409, carrying the segment's own remaining TTL as
     `retry_after_seconds`."""
     resolver = _HangingResolver()
-    session_service = _database_session_service()
-    app_a = _app(*_card(), resolver=resolver, session_service=session_service)
-    app_b = _app(session_service=session_service)
+    app_a = _app(*_card(), resolver=resolver)
+    app_b = _app()
 
     async with _client(app_a) as client_a, _client(app_b) as client_b:
         stream_task = asyncio.ensure_future(_stream(client_a, "/api/studio/turn", _turn_body()))
@@ -7395,13 +7070,11 @@ async def test_a_stalled_segments_expiry_lets_another_instance_take_over(
     `transient_unavailable` error rather than `done`. A's renewals stall
     until B's turn is done: a heartbeat that renews first would keep A's
     segment alive, which is not the stalled instance this test is about."""
-    monkeypatch.setattr(studio_module, "HEARTBEAT_INTERVAL_S", 0.05)
     clock = await StoreClock.start(_engine())
-    session_service = _database_session_service()
     store_a = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     stalled = asyncio.Event()
@@ -7415,13 +7088,12 @@ async def test_a_stalled_segments_expiry_lets_another_instance_take_over(
     store_b = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
     resolver = _HangingResolver()
-    app_a = _app(*_card(), resolver=resolver, session_service=session_service, store=store_a)
+    app_a = _app(*_card(), resolver=resolver, store=store_a, heartbeat_seconds=0.05)
     app_b = _app(
-        session_service=session_service,
         store=store_b,
     )
 
@@ -7451,17 +7123,15 @@ async def test_a_heartbeat_that_cannot_renew_ends_the_stream_once_its_clock_pass
     before 10 seconds short of a TTL past the load the claim's lease expiry
     was dated from. Moving that clock past the deadline, with no real time
     elapsed, is what ends the stream with a stream-fatal `segment_lost`
-    error. A claim whose session creation is slow (`claim_takes` seconds)
+    error. A claim whose turn takes `claim_takes` seconds to open
     starts its heartbeat later and keeps the same deadline, since the lease
     expires on the same date."""
-    monkeypatch.setattr(studio_module, "HEARTBEAT_INTERVAL_S", 0.05)
     clock = await StoreClock.start(_engine())
     loaded_at = clock.at
-    session_service = _database_session_service()
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
         **clock.store_kwargs,
     )
 
@@ -7470,14 +7140,15 @@ async def test_a_heartbeat_that_cannot_renew_ends_the_stream_once_its_clock_pass
 
     monkeypatch.setattr(store, "renew", _renew_always_fails)
     resolver = _HangingResolver()
-    app = _app(*_card(), resolver=resolver, session_service=session_service, store=store)
-    real_ensure_session = app.state.studio._ensure_session
+    app = _app(*_card(), resolver=resolver, store=store, heartbeat_seconds=0.05)
+    turns = app.state.studio.turns
+    real_open_turn = turns.open_turn
 
-    async def slow_ensure_session(**kwargs: Any) -> None:
+    async def slow_open_turn(*args: Any, **kwargs: Any) -> Any:
         await clock.advance(claim_takes)
-        await real_ensure_session(**kwargs)
+        return await real_open_turn(*args, **kwargs)
 
-    monkeypatch.setattr(app.state.studio, "_ensure_session", slow_ensure_session)
+    monkeypatch.setattr(turns, "open_turn", slow_open_turn)
 
     async with _client(app) as client:
         stream_task = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
@@ -7507,11 +7178,9 @@ async def test_cancel_from_another_instance_stops_the_live_stream_within_a_heart
     interval shrunk here so the test does not wait out the real one) picks
     the flag up and ends A's stream the same way a same-instance Stop
     does."""
-    monkeypatch.setattr(studio_module, "HEARTBEAT_INTERVAL_S", 0.05)
     resolver = _HangingResolver()
-    session_service = _database_session_service()
-    app_a = _app(*_card(), resolver=resolver, session_service=session_service)
-    app_b = _app(session_service=session_service)
+    app_a = _app(*_card(), resolver=resolver, heartbeat_seconds=0.05)
+    app_b = _app()
 
     async with _client(app_a) as client_a, _client(app_b) as client_b:
         stream_task = asyncio.ensure_future(_stream(client_a, "/api/studio/turn", _turn_body()))
@@ -7539,10 +7208,8 @@ async def test_composition_after_a_heartbeat_renewal_still_sees_a_remote_write(
     instance. A's own `/composition` call afterwards must still see B's write
     and build on it: `mutate_composition` always reads the stored canvas, so
     A's live one never stands in for what the store holds."""
-    monkeypatch.setattr(studio_module, "HEARTBEAT_INTERVAL_S", 0.05)
-    session_service = _database_session_service()
     resolver = _HangingResolver()
-    app_a = _app(*_card(), resolver=resolver, session_service=session_service)
+    app_a = _app(*_card(), resolver=resolver, heartbeat_seconds=0.05)
 
     async with _client(app_a) as client_a:
         stream_task = asyncio.ensure_future(_stream(client_a, "/api/studio/turn", _turn_body()))
@@ -7562,7 +7229,7 @@ async def test_composition_after_a_heartbeat_renewal_still_sees_a_remote_write(
         store_b = StudioStore(
             _engine(),
             adk=NO_ADK,
-            turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+            turn_specs=no_turn_specs,
         )
         await store_b.load(PRINCIPAL, CONVERSATION)
         block = CompositionBlock(
@@ -7603,7 +7270,7 @@ async def test_composition_after_a_heartbeat_renewal_still_sees_a_remote_write(
     reloaded = await StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded.composition.blocks[0].pinned is True
 
@@ -7611,7 +7278,7 @@ async def test_composition_after_a_heartbeat_renewal_still_sees_a_remote_write(
 async def test_a_request_cancelled_while_it_drops_its_claim_still_releases_the_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`/turn` claims, then its session cannot be created, and the request is
+    """`/turn` claims, then its turn cannot be opened, and the request is
     cancelled while it drops the lease it claimed. The drop runs to the end,
     and the conversation's lock is released, so the next request on this
     instance is not refused."""
@@ -7619,8 +7286,8 @@ async def test_a_request_cancelled_while_it_drops_its_claim_still_releases_the_l
     studio = app.state.studio
     store = studio.store
 
-    async def unavailable(**kwargs: Any) -> None:
-        raise RuntimeError("the session cannot be created")
+    async def unavailable(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the turn cannot be opened")
 
     started, proceed = asyncio.Event(), asyncio.Event()
     real_drop = store._drop_lease
@@ -7630,7 +7297,7 @@ async def test_a_request_cancelled_while_it_drops_its_claim_still_releases_the_l
         await proceed.wait()
         await real_drop(*args, **kwargs)
 
-    monkeypatch.setattr(studio, "_ensure_session", unavailable)
+    monkeypatch.setattr(studio.turns, "open_turn", unavailable)
     monkeypatch.setattr(store, "_drop_lease", slow_drop)
     router = create_studio_router(studio, settings=Settings())
     endpoint = next(
@@ -7672,7 +7339,9 @@ async def test_a_release_failure_does_not_strand_the_local_lock() -> None:
         yield MessageDelta(event="message.delta", seq=0, text="one")
 
     with pytest.raises(RuntimeError):
-        async for _ in studio._locked("u_a", CONVERSATION, conversation, segment_id, one_frame()):
+        async for _ in studio._locked(
+            "u_a", CONVERSATION, conversation, segment_id, one_frame(), renewing=True
+        ):
             pass
 
     assert not conversation.lock.locked()
@@ -7708,7 +7377,9 @@ async def test_a_heartbeat_exception_does_not_strand_the_local_lock() -> None:
         await started.wait()
 
     with pytest.raises(RuntimeError, match="heartbeat exploded"):
-        async for _ in studio._locked("u_a", CONVERSATION, conversation, segment_id, one_frame()):
+        async for _ in studio._locked(
+            "u_a", CONVERSATION, conversation, segment_id, one_frame(), renewing=True
+        ):
             pass
 
     assert not conversation.lock.locked()
@@ -7863,8 +7534,7 @@ async def test_a_remote_composition_write_during_a_stream_reaches_its_done_frame
     A's second turn finishes, is merged in by the checkpoint that runs
     before `done`: A's own Done frame carries it, not just a later reload
     from the ledger, pinned on the composition manifest specifically."""
-    session_service = _database_session_service()
-    app_b = _app(session_service=session_service)
+    app_b = _app()
 
     async with _client(app_b) as client_b:
         executor = _PinsTheFirstCardFromB(client_b)
@@ -7873,7 +7543,6 @@ async def test_a_remote_composition_write_during_a_stream_reaches_its_done_frame
             *_card(),
             resolver=_search(2),
             executor=executor,
-            session_service=session_service,
         )
         async with _client(app_a) as client_a:
             executor.first_manifest = await _conversation_with_component(client_a)
@@ -7891,7 +7560,7 @@ async def test_a_remote_composition_write_during_a_stream_reaches_its_done_frame
     reloaded = await StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     ).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert reloaded.composition is not None
@@ -8042,23 +7711,28 @@ def _member_paths(value: Any, path: str = "") -> set[str]:
     return {path}
 
 
+class _OpenedTurns:
+    """Records the inputs and opening state of each turn `app` opens."""
+
+    def __init__(self, app: FastAPI) -> None:
+        self.turns: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        turns = app.state.studio.turns
+        open_turn = turns.open_turn
+
+        async def recording(*args: Any, **kwargs: Any) -> Any:
+            self.turns.append((kwargs["inputs"], kwargs["state"]))
+            return await open_turn(*args, **kwargs)
+
+        turns.open_turn = recording
+
+
 async def test_a_seeded_turn_s_session_keeps_only_what_the_seed_node_reads_of_each_seed(
     definition_store: InMemoryDefinitionStore,
 ) -> None:
-    """The state a seeded turn's session is created with holds each seed's
-    spec_id, definition, StatVar dcids and operations, and for a seed the
-    harness cannot take, the refusal its step fails with at its own index."""
+    """The inputs a seeded turn opens with hold each seed's spec_id,
+    definition, StatVar dcids and operations, and for a seed the harness
+    cannot take, the refusal its step fails with at its own index."""
     del definition_store
-    session_service = _new_session_service()
-    created: list[dict[str, Any]] = []
-    create_session = session_service.create_session
-
-    async def recording_create_session(**kwargs: Any) -> Any:
-        if SEEDS_STATE_KEY in (kwargs.get("state") or {}):
-            created.append(kwargs["state"])
-        return await create_session(**kwargs)
-
-    session_service.create_session = recording_create_session  # type: ignore[method-assign]
     oversized = _seed_spec()
     oversized["trace"] = {"padding": "x" * MAX_SEED_SPEC_BYTES}
     body = {
@@ -8072,14 +7746,14 @@ async def test_a_seeded_turn_s_session_keeps_only_what_the_seed_node_reads_of_ea
         ],
     }
     app = _app(
-        session_service=session_service,
         served=[_KENYA_SPEC],
     )
+    opened = _OpenedTurns(app)
     async with _client(app) as client:
         frames = await _stream(client, "/api/studio/turn", body)
 
-    (state,) = created
-    kept, refused = json.loads(state[SEEDS_STATE_KEY])
+    ((inputs, _),) = opened.turns
+    kept, refused = inputs["seeds"]
     assert _member_paths(kept) == {
         "spec.spec_id",
         "spec.definition.schema_version",
@@ -8176,15 +7850,15 @@ async def test_a_request_past_the_body_cap_is_refused_before_it_is_parsed() -> N
 
 
 async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block() -> None:
-    """The planner is seeded with the earlier turns' readings, warnings and
-    the spec_ids it can pin from a stored block, without the block."""
-    session_service = _new_session_service()
+    """The turn opens with the earlier turns' readings, warnings and the
+    spec_ids it can pin from a stored block, without the block."""
     store = StudioStore(
         _engine(),
         adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        turn_specs=no_turn_specs,
     )
-    app = _app(session_service=session_service, store=store)
+    app = _app(store=store)
+    opened = _OpenedTurns(app)
     spec_id = "spec_" + "a" * 32
     reading = SearchReading(text="aid", status="definite", spec_id=spec_id).model_dump(mode="json")
     conversation = await store.create(PRINCIPAL, CONVERSATION)
@@ -8203,53 +7877,13 @@ async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block() -> 
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body())
 
-    session = await session_service.get_session(
-        app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t2"
-    )
-    assert session is not None
-    assert "stored block" not in json.dumps(session.state, default=str)
-    assert session.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) == {
+    ((inputs, state),) = opened.turns
+    assert "stored block" not in json.dumps([inputs, state], default=str)
+    assert state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) == {
         "readings": [reading],
         "warnings": {spec_id: []},
         "spec_ids": [spec_id],
     }
-
-
-async def test_a_referral_an_earlier_turn_left_pending_is_not_in_the_next_turns_session() -> None:
-    """Each turn opens a fresh session, so a plan and a pending referral the
-    user decides, left in turn one's session, are not in turn two's."""
-    session_service = _new_session_service()
-    store = StudioStore(
-        _engine(),
-        adk=NO_ADK,
-        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
-    )
-    app = _app(session_service=session_service, store=store)
-    conversation = await store.create(PRINCIPAL, CONVERSATION)
-    conversation.turn_index = 1
-    conversation.turn_recorded = True
-    conversation.turns = [{"user": "q1", "assistant": "a1"}]
-    await store.save(PRINCIPAL, CONVERSATION)
-    referral = Referral(kind=ReferralKind.REQUIREMENT_UNMEETABLE, reason="r", requirement_id="oda")
-    await session_service.create_session(
-        app_name=AGENT_NAME,
-        user_id=PRINCIPAL,
-        session_id=f"{CONVERSATION}#t1",
-        state={
-            PLAN_STATE_KEY: PlannerPlan(question="q1").model_dump_json(),
-            REFERRAL_STATE_KEY: referral.model_dump_json(),
-        },
-    )
-
-    async with _client(app) as client:
-        await _stream(client, "/api/studio/turn", _turn_body())
-
-    session = await session_service.get_session(
-        app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t2"
-    )
-    assert session is not None
-    assert session.state.get(REFERRAL_STATE_KEY) is None
-    assert session.state.get(PLAN_STATE_KEY) is None
 
 
 def test_the_turn_keeps_the_plan_records_readings_and_spec_blocks_its_events_write() -> None:
@@ -8260,9 +7894,7 @@ def test_the_turn_keeps_the_plan_records_readings_and_spec_blocks_its_events_wri
         ORCHESTRATOR_SPECS_KEY: {"spec_a": {"spec_id": "spec_a"}},
     }
 
-    _keep_turn_records(
-        conversation, Event(actions=EventActions(state_delta=delta)), unconnected_store()
-    )
+    keep_turn_records(conversation, delta)
 
     assert conversation.turn_plans == [{"plan": 1}]
     assert conversation.turn_readings == [{"reading": 1}]

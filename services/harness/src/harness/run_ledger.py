@@ -53,7 +53,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from harness.conversation import current_conversation_key
-from harness.studio_state import SegmentLost, _end_stream
+from harness.studio_state import SegmentLost, renew_lease_now
 from harness.studio_store import StudioStore
 from harness.tool_contracts import HarnessCode
 
@@ -112,8 +112,9 @@ class StudioRunLedger:
 
     @asynccontextmanager
     async def _fenced(self) -> AsyncIterator[tuple[AsyncConnection, int]]:
-        """`StudioStore.fenced` on the current segment. A `SegmentLost` ends
-        the conversation's stream (`_end_stream`) before it propagates:
+        """`StudioStore.fenced` on the current segment. A `SegmentLost` has
+        the conversation's stream renew its lease at once (`renew_lease_now`),
+        which ends the stream, before it propagates:
         `executor.ledger.store_faults` reports it to the graph as an
         unavailable ledger, which a tool hands back as data, so the turn
         would otherwise run on without the lease."""
@@ -124,7 +125,7 @@ class StudioRunLedger:
         except SegmentLost:
             conversation = self._store.current(*key) if key is not None else None
             if conversation is not None:
-                _end_stream(conversation, "segment_lost")
+                renew_lease_now(conversation)
             raise
 
     async def _column(self, column: str, run_id: str) -> Any:

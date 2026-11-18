@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import ipaddress
 import logging
 import re
@@ -26,11 +27,14 @@ from fastapi.responses import JSONResponse
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.utilities.lifespan import combine_lifespans
+from google import genai
 from google.adk.sessions import DatabaseSessionService
 from mcp import MCPError
 from mcp.shared._httpx_utils import McpHttpClientFactory
-from orchestrator.agent import create_orchestrator_agent
+from orchestrator.agent import orchestrator_agent
+from orchestrator.model import orchestrator_model
 from presentation_mcp.server import mcp as presentation_mcp
+from pydantic_ai.models.google import GoogleModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.routing import get_route_path
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -43,10 +47,12 @@ from harness.combined_mcp import build_combined_mcp, children_start_once, combin
 from harness.db.migrate import MigrationChecksumError, apply_pending
 from harness.early_mint import EarlyMints
 from harness.generative import GeminiEdit
-from harness.graph.workflow import create_root_workflow
+from harness.graph.events import GraphEvent
+from harness.graph.workflow import studio_graph
 from harness.live_refresh import build_live_refresh, create_live_refresh_router
 from harness.mcp_client import McpExecutor, McpResolver
 from harness.orchestrator_tools import build_orchestrator_tools
+from harness.planner_adapter import content_on_spans
 from harness.prefix_cache import PrefixCache
 from harness.provenance import ProvenanceStore
 from harness.run_ledger import StudioRunLedger
@@ -66,6 +72,9 @@ from harness.studio_state import (
     make_remove_cards,
 )
 from harness.studio_store import StudioStore
+from harness.turn.loop import Graph
+from harness.turn.store import TurnStore
+from harness.turn_budget import current_turn_budget
 from harness.wiring import build_planner, handing_back_planner_failures
 
 logger = logging.getLogger(__name__)
@@ -285,7 +294,6 @@ async def _apply_migrations_with_retries(
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
-    init_telemetry(service_name=SERVICE_NAME)
     # Runs at startup: an instance that can't reach its database fails its
     # startup probe (`DatabaseSessionService.prepare_tables`'s own docstring
     # recommends this for latency-sensitive services), since every studio
@@ -396,6 +404,10 @@ def create_app(
     ASGI-integration contract for sub-app mounting.
     """
     configure_logging()
+    # Before the agents are built: a backend coming up says whether their
+    # spans carry message content (`common.telemetry`), which the planner
+    # reads as it is built (`harness.planner_adapter.PlannerAdapter`).
+    init_telemetry(service_name=SERVICE_NAME)
     resolved_settings = settings or Settings()
 
     # Every mounted `FastMCP(...)` already carries a `BearerTokenVerifier`:
@@ -447,8 +459,8 @@ def create_app(
     live_refresh = build_live_refresh(settings=resolved_settings)
     app.state.live_refresh = live_refresh
 
-    # The studio stack: the orchestrator agent and its workflow behind the
-    # v1 wire contract (docs/studio-contract-v1.md). Resolver/executor speak
+    # The studio stack: the turn graph, its orchestrator agent and planner,
+    # behind the v1 wire contract (docs/studio-contract-v1.md). Resolver/executor speak
     # MCP to the mounts below over loopback; the agents build their genai
     # clients lazily, so construction here stays keyless. A missing
     # GOOGLE_API_KEY fails the first turn, visibly, as a stream-fatal error
@@ -506,7 +518,7 @@ def create_app(
         )
     else:
         logger.info("early mints: off (EARLY_MINT=false)")
-    # The store exists before the workflow because the recall function is
+    # The store exists before the graph because the recall function is
     # bound to it (conversation resolved per request via contextvar).
     engine = session_service_handle.engine
     if engine.dialect.name != "postgresql":
@@ -534,7 +546,21 @@ def create_app(
     prefix_cache = PrefixCache() if resolved_settings.studio_prefix_cache else None
     logger.info("orchestrator thinking level: %s", resolved_settings.orchestrator_thinking_level)
 
-    def create_workflow(recorder: Any, surface_recorder: Any) -> Any:
+    @functools.cache
+    def genai_client() -> genai.Client:
+        # Built at the first model call, so construction here stays keyless.
+        return genai.Client()
+
+    def model() -> GoogleModel:
+        # One per orchestrator run, on the turn's budget (`harness.turn_budget`).
+        return orchestrator_model(
+            resolved_settings.model_name,
+            client=genai_client(),
+            budget=current_turn_budget.get(),
+            prefix_cache=prefix_cache,
+        )
+
+    def create_graph(recorder: Any, surface_recorder: Any) -> Graph[GraphEvent]:
         # Runs are kept in the conversation's `runs` table, and a run
         # completes once its derived results are published with their
         # replay recipes.
@@ -542,23 +568,18 @@ def create_app(
         # The orchestrator's tools run through the same recorder and
         # recording surface as the `execute` node, so their steps and cards
         # reach the wire.
-        orchestrator = create_orchestrator_agent(
-            model_name=resolved_settings.model_name,
-            prefix_cache=prefix_cache,
-            thinking_level=resolved_settings.orchestrator_thinking_level,
-            tools=build_orchestrator_tools(
-                resolver=McpResolver(settings=resolved_settings),
-                executor=recorder,
-                surface=surface_recorder,
-                dfo_faq_surface=tool_surface,
-                definition_surface=tool_surface,
-                recall_part=make_recall_part(store),
-                canvas_series=make_canvas_series(store),
-                canvas_cards=make_canvas_cards(store),
-                remove_cards=make_remove_cards(store),
-            ),
+        tools = build_orchestrator_tools(
+            resolver=McpResolver(settings=resolved_settings),
+            executor=recorder,
+            surface=surface_recorder,
+            dfo_faq_surface=tool_surface,
+            definition_surface=tool_surface,
+            recall_part=make_recall_part(store),
+            canvas_series=make_canvas_series(store),
+            canvas_cards=make_canvas_cards(store),
+            remove_cards=make_remove_cards(store),
         )
-        return create_root_workflow(
+        return studio_graph(
             # A planner that cannot plan hands its reason back to the agent
             # and the turn goes on.
             planner=handing_back_planner_failures(
@@ -566,7 +587,15 @@ def create_app(
                     settings=resolved_settings, surface=tool_surface, prefix_cache=prefix_cache
                 )
             ),
-            orchestrator=orchestrator,
+            # Its spans carry the messages as the planner's do
+            # (`content_on_spans`).
+            orchestrator=orchestrator_agent(
+                tools,
+                thinking_level=resolved_settings.orchestrator_thinking_level,
+                include_content=content_on_spans(),
+            ),
+            model=model,
+            tools=tools,
             executor=recorder,
             # The recorded wrapper, not the bare `tool_surface` above: the
             # `execute` node must run against the same recorder that turns
@@ -586,10 +615,10 @@ def create_app(
         )
 
     studio = StudioRunner(
-        create_workflow=create_workflow,
+        create_graph=create_graph,
         executor=executor,
-        session_service=app.state.session_service,
         store=store,
+        turns=TurnStore(engine),
         edit_model=GeminiEdit(
             model_name=resolved_settings.model_name,
             timeout_s=resolved_settings.turn_model_time_s,

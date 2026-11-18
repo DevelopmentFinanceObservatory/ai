@@ -1,16 +1,11 @@
-"""Scripted stand-ins for driving the orchestrator topology in tests.
+"""Scripted stand-ins for driving the Studio routes on the turn loop in tests.
 
-`ScriptLlm` answers each orchestrator model call with the next part of a
-script; `call`, `search_call`, `fetch_call`, `make_charts_call` and
-`plan_call` build those parts. Two drivers run a script:
-
-- `orchestrator_runner` runs the root workflow under a bare ADK `Runner`,
-  with `open_session`, `run_turn` and `single_pause` to drive it and
-  `request_text` and `handed_back` to read what the model was sent.
-- `orchestrator_app` serves the studio routes on the orchestrator topology,
-  wired as `harness.server` wires it, and `stream` posts to a route and
-  reads its SSE frames back. `unconnected_store` is a conversation store
-  for a test that never reaches its database.
+`orchestrator_app` serves the studio routes on the turn graph, wired as
+`harness.server` wires it, its orchestrator answering from a script
+(`ScriptLlm`), and `stream` posts to a route and reads its SSE frames back.
+`call`, `search_call`, `fetch_call`, `make_charts_call` and `plan_call`
+build the script's parts; `request_text` and `handed_back` read what the
+model was sent.
 
 `CannedSearch` answers `search` from data-mcp search envelopes that
 `definite_envelope` builds, and `frame_for` names the frame a `fetch` of a
@@ -19,29 +14,22 @@ spec_id registers when `harness.scripted.ScriptedExecutor` answers it.
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import json
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx2
+from executor.ledger import InMemoryRunLedger
 from fastapi import FastAPI
-from google.adk.apps import App
-from google.adk.events import Event
-from google.adk.flows.llm_flows.context._fencing import (
-    OTHER_AGENT_CONTEXT_PREAMBLE,
-    QUOTED_CONTENT_BEGIN,
-)
-from google.adk.models.base_llm import BaseLlm
-from google.adk.models.llm_response import LlmResponse
-from google.adk.runners import Runner
-from google.adk.sessions import BaseSessionService, InMemorySessionService
-from google.adk.sessions.base_session_service import GetSessionConfig
 from google.genai import types
-from harness.graph.state import AGENT_NAME, ORCHESTRATOR_SPECS_KEY, frame_id_for
-from harness.graph.workflow import create_root_workflow
+from harness.conversation import current_conversation_id
+from harness.graph.state import frame_id_for
+from harness.graph.workflow import studio_graph
 from harness.orchestrator_tools import build_orchestrator_tools
-from harness.planner_adapter import PlannerAdapterError
+from harness.planner_adapter import PlannerAdapterError, content_on_spans
 from harness.scripted import (
     SCRIPTED_CV,
     SCRIPTED_SPEC,
@@ -54,39 +42,62 @@ from harness.settings import Settings
 from harness.studio import StudioRunner, create_studio_router
 from harness.studio_state import make_recall_part
 from harness.studio_store import StudioStore
-from harness.studio_translate import _node_name
 from harness.tool_contracts import ResolverError, resolver_digest
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.turn.store import TurnStore
+from harness.turn_budget import TurnBudget, current_turn_budget
 from harness.wire import STUDIO_FRAME_ADAPTER
 from harness.wiring import handing_back_planner_failures
-from orchestrator.agent import create_orchestrator_agent
+from orchestrator.agent import orchestrator_agent
+from orchestrator.model import orchestrator_model
 from planner.plan import AskBreakdown, load_ask_breakdowns, load_asks, load_asks_across_years
-from pydantic import Field
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from pydantic_ai.models.google import GoogleModel
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .data_mcp_definitions import DataMcpDefinitions
+from .scripted_genai import Reply, Request, ScriptedGenai, _stream
+from .turn_driver import MODEL, NO_ADK, no_turn_specs, unconnected_store
+
+__all__ = ["NO_ADK", "no_turn_specs", "unconnected_store"]
 
 AUTH = {"Authorization": "Bearer test-token"}
 CONVERSATION = "conv_01test0000"
 
+# A script entry: a part the model answers with, a whole reply, or a function
+# of the request that returns either, awaited when it returns an awaitable.
+type ScriptEntry = (
+    types.Part | Reply | Callable[[Request], types.Part | Reply | Awaitable[types.Part | Reply]]
+)
 
-class ScriptLlm(BaseLlm):
-    """Answers each model call with the next scripted part, recording requests.
 
-    Once the script runs out it answers "done" in plain text, so a turn
-    with no script is a plain-text answer.
-    """
+class ScriptLlm(ScriptedGenai):
+    """The orchestrator's model client, answering each call with the next
+    entry of `script` and recording the request (`requests`). A part is
+    answered as one chunk. Once the script runs out it answers "done" in
+    plain text, so a turn with no script is a plain-text answer.
+    `model` builds the orchestrator's model on it."""
 
-    model: str = "script-llm"
-    script: list[types.Part] = Field(default_factory=list)
-    requests: list[Any] = Field(default_factory=list)
+    def __init__(self, script: Sequence[ScriptEntry] = ()) -> None:
+        super().__init__([])
+        self.script: list[ScriptEntry] = list(script)
 
-    async def generate_content_async(
-        self, llm_request: Any, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse]:
-        self.requests.append(llm_request)
-        part = self.script.pop(0) if self.script else types.Part.from_text(text="done")
-        yield LlmResponse(content=types.Content(role="model", parts=[part]))
+    def model(self, *, budget: TurnBudget | None = None) -> GoogleModel:
+        """The orchestrator's model (`orchestrator.model.orchestrator_model`) on this client."""
+        return orchestrator_model(MODEL, client=self.client, budget=budget)
+
+    async def _open(self, *, model: str, contents: Any, config: Any = None) -> Any:
+        request = Request(
+            model=model, contents=copy.deepcopy(contents), config=copy.deepcopy(config)
+        )
+        self.requests.append(request)
+        entry: Any = self.script.pop(0) if self.script else types.Part.from_text(text="done")
+        if callable(entry):
+            entry = entry(request)
+            if asyncio.iscoroutine(entry) or isinstance(entry, Awaitable):
+                entry = await entry
+        reply = entry if isinstance(entry, Reply) else Reply(chunks=[[entry]])
+        if reply.open_error is not None:
+            raise reply.open_error
+        return _stream(reply)
 
 
 class FailingPlanner:
@@ -240,19 +251,10 @@ def approve_answer(revision: object, *, at: datetime | None = None) -> dict[str,
     return {"approved": revision, "at": (at or datetime.now(UTC)).isoformat()}
 
 
-def create_request_input_response(interrupt_id: str, response: dict[str, Any]) -> types.Part:
-    """The user's answer to a pause, as ADK's `adk_request_input` tool reads it."""
-    return types.Part(
-        function_response=types.FunctionResponse(
-            id=interrupt_id, name=REQUEST_INPUT_FUNCTION_CALL_NAME, response=response
-        )
-    )
-
-
-def request_text(request: Any) -> str:
+def request_text(request: Request) -> str:
     """Every text part of a model request, and every hand-back it shows as
     the result of a `plan` or `ask_user` call (`hand_back_text`), one per line."""
-    return "\n".join(_part_text(p) for c in request.contents for p in c.parts or [])
+    return "\n".join(_part_text(p) for c in request.content_list for p in c.parts or [])
 
 
 def _part_text(part: types.Part) -> str:
@@ -269,8 +271,7 @@ _HANDED_BACK_TO = frozenset({"plan", "ask_user"})
 def hand_back_text(result: dict[str, Any]) -> str:
     """A hand-back's result (`harness.graph.orchestrate.AgentHandBack.response`)
     as lines: its text, its structured fields as one JSON object, then its
-    plan record. Empty for `_pend`'s record of the hand-off, which holds no
-    hand-back."""
+    plan record. Empty for a result that holds no hand-back."""
     if "result" not in result:
         return ""
     fields = {key: value for key, value in result.items() if key not in ("result", "plan_record")}
@@ -282,175 +283,24 @@ def hand_back_text(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def quotes_another_agent(request: Any) -> bool:
-    """Whether ADK fenced any content of `request` as another agent's."""
-    text = request_text(request)
-    return QUOTED_CONTENT_BEGIN in text or OTHER_AGENT_CONTEXT_PREAMBLE in text
-
-
-def carries_an_interrupt(request: Any) -> bool:
-    """Whether `request` holds a pause's `adk_request_input` call, as a call or quoted."""
-    return REQUEST_INPUT_FUNCTION_CALL_NAME in "\n".join(
-        str(p) for c in request.contents for p in c.parts or []
-    )
-
-
 def handed_back(model: ScriptLlm) -> tuple[str, dict[str, Any]]:
     """The last request's text and the last `plan` result in it."""
     request = model.requests[-1]
     (result, *_) = [
         part.function_response.response or {}
-        for content in reversed(request.contents)
+        for content in reversed(request.content_list)
         for part in content.parts or []
         if part.function_response is not None and part.function_response.name == "plan"
     ]
     return request_text(request), result
 
 
-def orchestrator_runner(
-    *script: types.Part,
-    planner: Any = None,
-    tool_surface: Any = None,
-    executor: Any = None,
-    resolver: Any = None,
-    definition_surface: Any = None,
-    publisher: Any = scripted_publish_result,
-    run_ledger: Any = None,
-    early_mints: Any = None,
-) -> tuple[Runner, ScriptLlm]:
-    """The root workflow on the orchestrator topology under a bare ADK
-    `Runner` (app `t`), its model answering from `script`. The planner
-    refuses unless one is given; search and every executor call fail the
-    test unless a resolver or executor is given. `definition_surface`
-    resolves seeds, data-mcp over a Search API that serves nothing unless
-    one is given. `publisher` publishes a run's derived results, all of
-    them at once by default, `run_ledger` keeps its runs, the
-    workflow's in-memory ledger by default, and `early_mints` starts each
-    offered card's retrievals, none by default."""
-    model = ScriptLlm(script=list(script))
-    agent = create_orchestrator_agent(
-        model_name="unused",
-        tools=build_orchestrator_tools(
-            resolver=resolver or no_resolver, executor=executor or no_executor
-        ),
-    ).model_copy(update={"model": model})
-    workflow = create_root_workflow(
-        planner=planner or RefusingPlanner(),
-        orchestrator=agent,
-        executor=executor or no_executor,
-        tool_surface=tool_surface,
-        definition_surface=definition_surface or DataMcpDefinitions(),
-        publisher=publisher,
-        run_ledger=run_ledger,
-        fetch_series_stats=scripted_fetch_series_stats,
-        early_mints=early_mints,
-    )
-    runner = Runner(
-        app=App(name="t", root_agent=workflow), session_service=InMemorySessionService()
-    )
-    return runner, model
-
-
-async def open_session(runner: Runner, *, session_id: str = "s", **state: Any) -> None:
-    """Create an `orchestrator_runner` session on the studio surface, with
-    `state`: `session_id`, by default the one `run_turn` runs in."""
-    await runner.session_service.create_session(
-        app_name="t", user_id="u", session_id=session_id, state={"surface": "studio", **state}
-    )
-
-
-async def run_turn(runner: Runner, message: types.Content, *, session_id: str = "s") -> list[Event]:
-    """Run `message` through the `orchestrator_runner` session `session_id`;
-    every event it yields."""
-    return [
-        event
-        async for event in runner.run_async(user_id="u", session_id=session_id, new_message=message)
-    ]
-
-
-def single_pause(events: list[Event]) -> types.FunctionCall:
-    """The one `adk_request_input` call among `events`."""
-    calls = [
-        c
-        for e in events
-        for c in e.get_function_calls()
-        if c.name == REQUEST_INPUT_FUNCTION_CALL_NAME
-    ]
-    assert len(calls) == 1, [c.id for c in calls]
-    return calls[0]
-
-
-def visited_nodes(events: list[Event]) -> list[str]:
-    """The workflow node each node event came from, in order."""
-    return [_node_name(e) for e in events if e.node_info]
-
-
-async def no_turn_specs(principal: str, session_id: str) -> dict[str, Any]:
-    """A `StudioStore` `turn_specs` reader for a store whose turns hold no
-    spec blocks."""
-    del principal, session_id
-    return {}
-
-
-class _NoAdk:
-    """An `AdkBridge` for a store whose conversations ADK never held."""
-
-    async def reimport(self, principal: str, conversation_id: str) -> None:
-        del principal, conversation_id
-
-    async def moved(self, principal: str, conversation_id: str) -> bool:
-        del principal, conversation_id
-        return False
-
-    def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
-        del session_id
-        return specs
-
-
-NO_ADK = _NoAdk()
-
-
-def session_turn_specs(
-    service: BaseSessionService, *, app_name: str
-) -> Callable[[str, str], Awaitable[dict[str, Any]]]:
-    """A `StudioStore` `turn_specs` reader over `service`, for a test whose
-    turn sessions live in a session service rather than in ADK's tables:
-    the spec blocks turn session `session_id` holds, as stored."""
-
-    async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
-        session = await service.get_session(
-            app_name=app_name,
-            user_id=principal,
-            session_id=session_id,
-            config=GetSessionConfig(num_recent_events=0),
-        )
-        return dict((session.state.get(ORCHESTRATOR_SPECS_KEY) or {}) if session else {})
-
-    return turn_specs
-
-
-def unconnected_store() -> StudioStore:
-    """A `StudioStore` with no database behind its engine, for a test that
-    reads only the in-process state a store holds (`StudioStore.current`), as
-    the recorder does. Any read or write the test makes through it fails at
-    once: port 1 on the loopback refuses the connection, and a 1 s connect
-    timeout bounds the attempt where it does not."""
-    return StudioStore(
-        create_async_engine(
-            "postgresql+asyncpg://unconnected@127.0.0.1:1/none", connect_args={"timeout": 1}
-        ),
-        adk=NO_ADK,
-        turn_specs=no_turn_specs,
-    )
-
-
 def orchestrator_app(
-    *script: types.Part,
+    *script: ScriptEntry,
     resolver: Any = None,
     executor: Any = None,
     planner: Any = None,
     tool_surface: Any = None,
-    session_service: BaseSessionService | None = None,
     engine: AsyncEngine | None = None,
     store: StudioStore | None = None,
     settings: Settings | None = None,
@@ -460,8 +310,9 @@ def orchestrator_app(
     run_ledger: Any = None,
     definition_surface: Any = None,
     early_mints: Any = None,
+    heartbeat_seconds: float | None = None,
 ) -> tuple[FastAPI, ScriptLlm]:
-    """The studio routes on the orchestrator topology, and the agent's model.
+    """The studio routes on the turn graph, and the agent's model client.
 
     Wired as `harness.server` wires the studio: the agent's tools and the
     `execute` node run through the studio's recorder, the planner hands its
@@ -476,57 +327,58 @@ def orchestrator_app(
     the seeds or Spec blocks data-mcp's definition lookup answers with, and
     `definition_surface` replaces that lookup whole.
     `publisher` publishes a run's derived results, all at once by default,
-    and `run_ledger` keeps its runs, the workflow's in-memory ledger by
-    default. `early_mints` starts each offered card's retrievals, none by
-    default. Conversations are stored in `store`, or in a store built on
-    `engine` (the `pg_engine` fixture's) over `session_service`; one of the
-    two is required.
+    and `run_ledger` keeps its runs, an in-memory ledger that keeps each
+    conversation's runs apart by default. `early_mints` starts each offered
+    card's retrievals, none by default. Conversations and their turns are
+    stored in `store`, or in a store built on `engine` (the `pg_engine`
+    fixture's); one of the two is required. A stream renews its lease every
+    `heartbeat_seconds`, the server's interval by default.
     """
-    session_service = session_service or InMemorySessionService()
     if store is None:
         if engine is None:
             raise TypeError("orchestrator_app needs a store, or the engine to build one on")
-        store = StudioStore(
-            engine,
-            adk=NO_ADK,
-            turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
-        )
+        store = StudioStore(engine, adk=NO_ADK, turn_specs=no_turn_specs)
     resolved_settings = settings or Settings()
-    model = ScriptLlm(script=list(script))
+    model = ScriptLlm(script)
     resolver = resolver or no_resolver
     planner_model = handing_back_planner_failures(planner or ScriptedPlannerModel())
+    ledger = (
+        run_ledger
+        if run_ledger is not None
+        else InMemoryRunLedger(scope=current_conversation_id.get)
+    )
 
-    def create_workflow(recorder: Any, surface_recorder: Any) -> Any:
-        agent = create_orchestrator_agent(
-            model_name="unused",
-            tools=build_orchestrator_tools(
-                resolver=resolver,
-                executor=recorder,
-                surface=surface_recorder,
-                recall_part=make_recall_part(store),
-            ),
-        ).model_copy(update={"model": model})
-        return create_root_workflow(
+    def create_graph(recorder: Any, surface_recorder: Any) -> Any:
+        tools = build_orchestrator_tools(
+            resolver=resolver,
+            executor=recorder,
+            surface=surface_recorder,
+            recall_part=make_recall_part(store),
+        )
+        return studio_graph(
             planner=planner_model,
-            orchestrator=agent,
+            orchestrator=orchestrator_agent(tools, include_content=content_on_spans()),
+            model=lambda: model.model(budget=current_turn_budget.get()),
+            tools=tools,
             executor=recorder,
             tool_surface=surface_recorder,
             definition_surface=definition_surface or DataMcpDefinitions(served=served),
             publisher=publisher,
-            run_ledger=run_ledger,
+            run_ledger=ledger,
             max_concurrent_steps=resolved_settings.executor_max_concurrent_steps,
             fetch_series_stats=scripted_fetch_series_stats,
             early_mints=early_mints,
         )
 
     studio = StudioRunner(
-        create_workflow=create_workflow,
+        create_graph=create_graph,
         executor=executor or ScriptedExecutor(),
-        session_service=session_service,
-        tool_surface=tool_surface,
         store=store,
+        turns=TurnStore(store.engine),
+        tool_surface=tool_surface,
         edit_model=edit_model,
         early_mints=early_mints,
+        **({"heartbeat_seconds": heartbeat_seconds} if heartbeat_seconds is not None else {}),
     )
     app = FastAPI()
     app.state.studio = studio

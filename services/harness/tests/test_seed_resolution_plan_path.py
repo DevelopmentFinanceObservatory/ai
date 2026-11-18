@@ -1,12 +1,12 @@
 """A seed a later turn's planner reads, over the Studio routes.
 
-It runs two turns through the Studio routes, so it moves onto the turn loop
-with them. The other seeded turns are in `test_seed_resolution.py`.
+It runs two turns through the Studio routes. The other seeded turns are in
+`test_seed_resolution.py`.
 """
 
 from __future__ import annotations
 
-from data_mcp.definition_store import InMemoryDefinitionStore
+import pytest
 from google.genai import types
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -20,16 +20,21 @@ from .orchestrator_fakes import (
     studio_client,
     turn_body,
 )
-from .test_seed_resolution import _KENYA, _QUESTION, _seeds
+from .test_seed_resolution import (  # noqa: F401 -- `definition_store` is a fixture
+    _KENYA,
+    _QUESTION,
+    _seeds,
+    definition_store,
+)
 
 
+@pytest.mark.usefixtures("definition_store")
 async def test_a_seed_is_fetched_without_a_search_and_a_later_turns_planner_reads_it(
-    definition_store: InMemoryDefinitionStore, pg_engine: AsyncEngine
+    pg_engine: AsyncEngine,
 ) -> None:
     """Over the studio routes: the agent fetches the seed's spec_id with no search,
     and the next turn's planner reads the seed among the earlier readings, with the
     fetch it served."""
-    del definition_store
     search = CannedSearch()
     planner = RefusingPlanner()
     app, model = orchestrator_app(

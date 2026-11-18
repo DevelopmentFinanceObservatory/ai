@@ -177,9 +177,7 @@ _PROCESS_LOCAL_FIELDS = frozenset(
     {
         "conversation_id",
         "lock",
-        "cancel_event",
-        "cancel_reason",
-        "switch_stop",
+        "renew_now",
         "_telemetry_span",
         "_removal_unreported",
         "turn_specs",
@@ -743,7 +741,7 @@ class _RuntimeEntry:
     `claim_resumes` whether that claim resumes a turn rather than beginning
     one. `state` is the `ConversationState` this instance keeps live between
     requests; `load` refreshes its durable fields in place, so `lock`,
-    `cancel_event` and `_telemetry_span` keep their identity across a reload.
+    `renew_now` and `_telemetry_span` keep their identity across a reload.
     `baseline` is the last durable snapshot known stored, the reference a
     save diffs against. `composition_lock` serialises same-instance
     `/composition` calls on the shared `state` object, separate from `lock`
@@ -1602,9 +1600,8 @@ class StudioStore:
 
     async def request_cancel(self, principal: str, conversation_id: str) -> bool:
         """Set the cancel flag on `conversation_id`'s live segment, whoever
-        owns it, including this instance's own, which covers the gap between
-        a claim landing and the stream arming its local `cancel_event`. One
-        conditional update of the lease columns.
+        owns it, this instance included; the segment's heartbeat reads it at
+        its next renewal. One conditional update of the lease columns.
 
         Returns whether a live segment was found and signalled: `False`
         when there is none, or the one on record has already expired by the

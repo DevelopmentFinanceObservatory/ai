@@ -385,9 +385,9 @@ class PlannerAdapter:
         )
         # Built once and shared by every run, each of which names its own
         # model. Its spans carry the run's messages when the environment
-        # puts message content on spans (`_content_on_spans`), read here.
+        # puts message content on spans (`content_on_spans`), read here.
         self._planner = pydantic_planner(
-            self._specs, instruction=planner_instruction(), include_content=_content_on_spans()
+            self._specs, instruction=planner_instruction(), include_content=content_on_spans()
         )
 
     async def __call__(
@@ -1059,7 +1059,7 @@ def _ask_text(
 _CONTENT_CAPTURE = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
 
 
-def _content_on_spans() -> bool:
+def content_on_spans() -> bool:
     """Whether `_CONTENT_CAPTURE` puts message content on spans: `SPAN_ONLY` or
     `SPAN_AND_EVENT`. Any other value, or none, keeps it off them."""
     return os.environ.get(_CONTENT_CAPTURE, "").upper() in {"SPAN_ONLY", "SPAN_AND_EVENT"}

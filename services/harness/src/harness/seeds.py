@@ -6,7 +6,7 @@ current answer for its identity (`resolve_seed`, `answered_block`), and
 words the seeds a turn keeps and drops for the orchestrator's agent
 (`seeds_hand_back`). Nothing here touches the ADK `Context` or routing;
 `harness.graph` calls it from its nodes and `harness.studio` calls
-`seeds_slot` before the session exists.
+`seeds_slot` before the turn opens.
 """
 
 from __future__ import annotations
@@ -243,7 +243,7 @@ def _read_seed(index: int, item: object) -> Seed | _SeedRefusal:
 
 
 def seeds_slot(posted: Sequence[object]) -> list[dict[str, Any]]:
-    """The seeds slot (`SEEDS_STATE_KEY`) for a turn that posted `posted`, one entry per seed.
+    """The seeds slot (`harness.graph.state.TurnInput.seeds`) for a turn that posted `posted`, one entry per seed.
 
     Each seed is read as `take_seeds` reads it (`_read_seed`). One it can
     take is kept as its `harness.wire.Seed`: the spec_id, the definition
@@ -251,7 +251,7 @@ def seeds_slot(posted: Sequence[object]) -> list[dict[str, Any]]:
     take is kept as the refusal its step fails with,
     under `_SEED_REFUSED`. A seed's position is its index in the slot, so
     `seed` refuses each at the index it was posted at, and no posted block
-    enters session state.
+    enters the turn's inputs.
     """
     entries: list[dict[str, Any]] = []
     for index, item in enumerate(posted):

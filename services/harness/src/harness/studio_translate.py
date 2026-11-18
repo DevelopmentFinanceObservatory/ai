@@ -288,39 +288,74 @@ def _timeout_refusal(conversation: ConversationState, *, tool: str, key: str) ->
 
 
 def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame:
+    """The stream-fatal error frame for `exc`, the error a turn ended on
+    (`_fatal_frame`): the refusal it states, the MCP call whose pinned
+    timeout it hit (`timeout_tool`/`timeout_key`, set by
+    `mcp_client._call_tool`), and whether a later attempt may not meet it
+    (`compiler.surface.transient`)."""
+    timeout_tool = getattr(exc, "timeout_tool", None)
+    return _fatal_frame(
+        conversation,
+        refusal=getattr(exc, "refusal", None),
+        timeout_tool=timeout_tool,
+        timeout_key=getattr(exc, "timeout_key", None) or timeout_tool,
+        transient=transient(exc),
+    )
+
+
+def recorded_fatal(conversation: ConversationState, error: Mapping[str, Any]) -> ErrorFrame:
+    """The stream-fatal error frame for a turn that closed on the error its
+    cursor records (`harness.turn.loop.failure`), the frame `_stream_fatal`
+    gives the exception it was recorded from."""
+    timeout_tool = error.get("timeout_tool")
+    return _fatal_frame(
+        conversation,
+        refusal=error.get("refusal"),
+        timeout_tool=timeout_tool,
+        timeout_key=error.get("timeout_key") or timeout_tool,
+        transient=bool(error.get("transient")),
+    )
+
+
+def _fatal_frame(
+    conversation: ConversationState,
+    *,
+    refusal: Mapping[str, Any] | None,
+    timeout_tool: str | None,
+    timeout_key: str | None,
+    transient: bool,
+) -> ErrorFrame:
     """A stream-fatal error frame. A resolver refusal keeps its real code
     when the wire grammar knows it (e.g. `capability_unavailable` on an
-    identity-reproduction failure); a timed-out MCP call (`timeout_tool`/
-    `timeout_key`, set by `mcp_client._call_tool`) becomes its own synthetic
-    refusal so a repeat of the exact same call stops being told to wait, and
-    reaches the wire as `transient_unavailable` whatever its own code.
+    identity-reproduction failure); a timed-out MCP call (`timeout_tool`,
+    `timeout_key`) becomes its own synthetic refusal so a repeat of the
+    exact same call stops being told to wait, and reaches the wire as
+    `transient_unavailable` whatever its own code.
 
     A code the wire grammar has no member for, e.g.
     `executor.outcomes.RefusalKind.SURFACE_CHANGED`, which fires when a
     plan step's tool has changed since the plan was compiled, still
     honours the refusal's own `retry_mode` rather than defaulting to a
     transient one: `retry_after_delay` (or no `retry_mode` at all, for a
-    `transient`) becomes `transient_unavailable`, anything else
+    `transient` error) becomes `transient_unavailable`, anything else
     becomes `capability_unavailable`, the closest true member, so a
     do-not-retry refusal is never told to the user as a reason to retry.
 
-    An exception that states no refusal reads as `internal_error`, not to be
-    retried, unless `transient` holds for it, which reads as `raised` and
+    An error that states no refusal reads as `internal_error`, not to be
+    retried, unless it is `transient`, which reads as `raised` and
     `retry_after_delay`.
 
     The frame's `detail`, which Studio shows as the reply, is the sentence
     for the refusal's own code under the retry mode the frame states
     (`failure_detail`). The refusal's `fix.detail` and `message` are written
     for a model or an operator and stay in the log the caller writes, as the
-    turn's trace id does.
+    turn's trace id does. The turn closes on the frame's code.
     """
-    timeout_tool = getattr(exc, "timeout_tool", None)
     if timeout_tool is not None:
-        timeout_key = getattr(exc, "timeout_key", None) or timeout_tool
-        refusal = _timeout_refusal(conversation, tool=timeout_tool, key=timeout_key)
+        refusal = _timeout_refusal(conversation, tool=timeout_tool, key=timeout_key or timeout_tool)
         wire_code = ErrorCode.TRANSIENT_UNAVAILABLE.value
     else:
-        refusal = getattr(exc, "refusal", None) or ({} if transient(exc) else internal_fault())
+        refusal = refusal or ({} if transient else internal_fault())
         wire_code = refusal.get("code")
     try:
         error_code = ErrorCode(wire_code)
@@ -1438,8 +1473,9 @@ class _Translator:
         self._final_text = ""
         self.paused = False
         # Whether the planner's latest entry replans for a pick on the plan
-        # card (`PLANNER_STARTED_KEY`'s `"pick"`), so a question it asks
-        # resumes a stoppable replan.
+        # card (`PlannerStarted.pick`): its drafted plan keeps the planner
+        # decisions' labels (`_node_done`), and a question it asks is kept
+        # as one (`_PendingInterrupt.pick_replan`).
         self._pick_replan = False
         # The running status line.
         self._status: _StatusLine | None = None
@@ -1557,9 +1593,12 @@ class _Translator:
                 # whole run is over.
                 return [*self._close_starting(), self._running_step(event)]
             case TurnFailed(error=error):
-                # The calls the failed node made since the last event end
-                # with it, unshown.
-                return [_stream_fatal(self._conversation, error)]
+                # The calls the failed node finished since the last event,
+                # a plan step's among them, show before the turn's error.
+                return [
+                    *await self._record_frames(records),
+                    _stream_fatal(self._conversation, error),
+                ]
             case ToolsAnswered(answers=answers, state=state):
                 keep_turn_records(self._conversation, state)
                 return await self._agent_answers(self._answered(answers), records)

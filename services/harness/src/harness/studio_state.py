@@ -382,8 +382,7 @@ class _PendingInterrupt:
     # the same answer sends it only when the dead attempt did not.
     approved_sent: bool = False
     # Whether this elicitation is a question the planner asked while
-    # replanning for a pick on the plan card, so the stream answering it
-    # arms the switch's Stop (`harness.graph.switch.SWITCH_STOP`).
+    # replanning for a pick on the plan card.
     pick_replan: bool = False
 
 
@@ -453,20 +452,11 @@ class ConversationState:
     # cleared by `release`; a `checkpoint` writes whatever value it holds
     # like any other durable field.
     segment: Segment | None = None
-    # Armed while a segment streams; POST /api/studio/cancel and
-    # `StudioRunner._heartbeat` set it.
-    cancel_event: asyncio.Event | None = None
-    # Set alongside `cancel_event`, naming why it was armed: "cancelled" (a
-    # client's Stop, from this instance or another) or "segment_lost" (this
-    # stream's segment was taken over, or its own renewal could not keep it
-    # alive). `_sse_stream`'s cancel branch reads it once to pick the
-    # frame; reset to `None` alongside `cancel_event` when the stream ends.
-    cancel_reason: str | None = None
-    # Armed while a plan-card switch streams (`harness.graph.switch.
-    # SWITCH_STOP`): a Stop sets it, and the switch offers the plan
-    # unchanged and the stream ends on it. Reset to `None` when the
-    # stream ends.
-    switch_stop: asyncio.Event | None = None
+    # Set while a stream runs on this instance: setting it makes the
+    # stream's heartbeat renew the lease at once, so a Stop posted here
+    # (`POST /api/studio/cancel`) or a lease another instance took reaches
+    # the stream without waiting for the next beat (`renew_lease_now`).
+    renew_now: asyncio.Event | None = None
     # The current turn's auto-add preference (delta 11); reset per turn.
     auto_add: bool = True
     # Digest entries for every component this conversation streamed,
@@ -1138,14 +1128,12 @@ def make_canvas_cards(store: StudioStore) -> Any:
     return canvas_cards
 
 
-def _end_stream(conversation: ConversationState, reason: str) -> None:
-    """Arm `conversation.cancel_event` with `reason`, read back by
-    `harness.studio._sse_stream`'s cancel branch to pick the frame. A no-op
-    when no stream is currently armed to receive it (the segment ended some
-    other way in the gap between the caller's check and this call)."""
-    conversation.cancel_reason = reason
-    if conversation.cancel_event is not None:
-        conversation.cancel_event.set()
+def renew_lease_now(conversation: ConversationState) -> None:
+    """Have the stream running on `conversation` renew its lease at once
+    (`ConversationState.renew_now`), so the renewal reports a Stop or a lost
+    lease now. A no-op when no stream runs here."""
+    if conversation.renew_now is not None:
+        conversation.renew_now.set()
 
 
 def make_remove_cards(store: StudioStore) -> Any:
@@ -1154,9 +1142,10 @@ def make_remove_cards(store: StudioStore) -> Any:
     is written as it happens, on the canvas as stored
     (`StudioStore.change_canvas`).
 
-    A `SegmentLost` there ends the stream (`_end_stream`) before it
-    propagates: raised inside the tool, it would reach the model as a
-    failed call and the turn would run on without the lease."""
+    A `SegmentLost` there has the stream renew its lease at once
+    (`renew_lease_now`) before it propagates: raised inside the tool, it
+    reaches the model as a failed call, and the renewal that finds the lease
+    gone ends the turn's segment."""
 
     async def remove(*, component_ids: list[str], all_cards: bool) -> tuple[list[str], list[str]]:
         key = current_conversation_key.get()
@@ -1168,7 +1157,7 @@ def make_remove_cards(store: StudioStore) -> Any:
                 *key, lambda work: remove_cards(work, component_ids, all_cards=all_cards)
             )
         except SegmentLost:
-            _end_stream(conversation, "segment_lost")
+            renew_lease_now(conversation)
             raise
 
     return remove

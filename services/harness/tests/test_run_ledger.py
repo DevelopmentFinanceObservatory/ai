@@ -197,15 +197,15 @@ async def test_a_writer_fenced_out_by_a_takeover_cannot_record_publication(
     await clock.advance(studio_state.SEGMENT_TTL_S + 1)  # A's segment has expired
     await _streaming_store(service, clock)  # B takes the conversation over
     streaming = store_a.current(PRINCIPAL, CONVERSATION)
-    streaming.cancel_event = asyncio.Event()
+    streaming.renew_now = asyncio.Event()
 
     with pytest.raises(SegmentLost):
         await ledger_a.record(run.run_id, Published(DERIVED, "rpk_1"))
 
-    # A's stream ends as lost, since the graph reports the ledger's failure
-    # to the model as data and would otherwise run on.
-    assert streaming.cancel_event.is_set()
-    assert streaming.cancel_reason == "segment_lost"
+    # A's heartbeat renews at once, finds the lease lost and ends the stream,
+    # since the graph reports the ledger's failure to the model as data and
+    # would otherwise run on.
+    assert streaming.renew_now.is_set()
     recorded = await StudioRunLedger(_store(service)).get(run.run_id)
     assert recorded.status is RunStatus.PUBLISHING
     assert recorded.results[0].replay_key is None

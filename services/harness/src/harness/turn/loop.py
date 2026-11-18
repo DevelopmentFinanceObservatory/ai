@@ -33,10 +33,15 @@ cursor to the instance that holds the lease now. Either way the segment
 then reads the turn back, and reports a close or a pause that committed
 before the cut as the store holds it.
 
+The caller may hand `run_segment` an event that makes the heartbeat renew
+at once (`renew_now`): a Stop posted on the instance that runs the segment
+then reaches the node without waiting for the next beat.
+
 A turn no segment runs is closed without running its node: `stop_turn`
 closes it `cancelled` on a Stop that found no live segment (the turn
-paused, or left running by a segment whose lease lapsed), and `reject`
-closes a paused turn `done` on the user's reject of its open pause.
+paused, or left running by a segment whose lease lapsed), `reject` closes a
+paused turn `done` on the user's reject of its open pause, and `abandon`
+closes an open turn `abandoned` when the conversation's next turn opens.
 """
 
 from __future__ import annotations
@@ -51,7 +56,7 @@ from typing import Any
 
 from compiler.surface import transient
 
-from harness.studio_state import HEARTBEAT_INTERVAL_S, SEGMENT_TTL_S, SegmentLost, _wire_id
+from harness.studio_state import HEARTBEAT_INTERVAL_S, SegmentLost, _wire_id
 from harness.studio_store import StudioStore
 from harness.turn import transcript as entries
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
@@ -64,16 +69,14 @@ logger = logging.getLogger(__name__)
 # The edge target that ends the turn.
 END = "end"
 
-# A heartbeat whose renewals keep failing gives the lease up this long
-# before it would lapse, counted on the instance's own clock from the last
-# renewal that landed: an instance that deaf to its own renewal cannot be
-# trusted to still hold the lease.
-_RENEWAL_SLACK_S = 10
-
 
 class TurnExpired(Exception):  # noqa: N818 -- names the turn's state, as the cursor does
     """The cursor names a node the running graph lacks, or stands paused at
     a node with no `resume`."""
+
+
+class TurnAbandoned(Exception):  # noqa: N818 -- names the turn's state, as the cursor does
+    """The conversation's next turn opened while this one was still open."""
 
 
 class NoEdge(Exception):  # noqa: N818 -- names the missing edge
@@ -486,6 +489,38 @@ async def reject(store: TurnStore, cursor: Cursor, *, segment_id: str, answer: A
     )
 
 
+async def abandon(store: TurnStore, cursor: Cursor, *, segment_id: str) -> Cursor:
+    """Close the open turn at `cursor` `abandoned` without running its node,
+    writing under `segment_id`, the conversation lease the caller claimed to
+    open the conversation's next turn. Its error is a `TurnAbandoned` at the
+    node it stands at. A paused turn's pause is dropped.
+
+    Raises:
+        SegmentLost: `segment_id` no longer holds the conversation's lease.
+        CursorStale: another writer moved the cursor, or closed the turn.
+    """
+    left = TurnAbandoned(
+        f"turn {cursor.turn_index} was left {cursor.status.value} at {cursor.node!r} "
+        "when the next turn opened"
+    )
+    return await store.finish(
+        cursor,
+        segment_id=segment_id,
+        status=TurnStatus.ABANDONED,
+        error=failure(cursor.node, left),
+    )
+
+
+async def _next_beat(seconds: float, renew_now: asyncio.Event | None) -> None:
+    """Wait `seconds`, or until `renew_now` is set, which it clears."""
+    if renew_now is None:
+        await asyncio.sleep(seconds)
+        return
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(renew_now.wait(), seconds)
+    renew_now.clear()
+
+
 async def _settle(store: TurnStore, segment: Segment, *, cut_by: Outcome, segment_id: str) -> None:
     """Set `segment`'s cursor and outcome after the heartbeat cut its node
     off for a Stop or a lost lease. The node may have been inside a
@@ -516,18 +551,20 @@ async def run_segment[E](
     emit: Callable[[E | TurnEvent], None],
     answer: Answer | None = None,
     heartbeat_seconds: float = HEARTBEAT_INTERVAL_S,
+    renew_now: asyncio.Event | None = None,
 ) -> Segment:
     """`drive` the turn at `cursor` under `segment_id`, the conversation
-    lease the caller claimed, renewing it every `heartbeat_seconds`, and
-    return the segment once the turn pauses or ends, a Stop closes it, or
+    lease the caller claimed, renewing it every `heartbeat_seconds`, or at
+    once whenever `renew_now` is set, and return the segment once the turn pauses or ends, a Stop closes it, or
     the lease is lost.
 
     A renewal that reports a Stop while a node holds the turn's `StopScope`
     armed consumes the conversation's cancel flag and sets the scope's
     event; the node goes on. Any other Stop cancels the node, leaves no task
     of the segment running, and closes the turn `cancelled`. A renewal that
-    finds the lease taken, or that keeps failing until `_RENEWAL_SLACK_S`
-    before the lease would lapse, cancels the node and ends the segment
+    finds the lease taken, or that keeps failing until the lease's deadline
+    (`StudioStore.lease_deadline`, dated from the claim or the last renewal
+    that landed), cancels the node and ends the segment
     `lost` without writing the cursor. After either cut the turn is read
     back (`_settle`), so a close or pause that committed before the cut is
     reported as stored.
@@ -565,25 +602,22 @@ async def run_segment[E](
             ended.append(outcome)
 
     async def heartbeat() -> None:
-        renewed_at = lease.now()
         while True:
-            await asyncio.sleep(heartbeat_seconds)
+            await _next_beat(heartbeat_seconds, renew_now)
             scoped = stop.armed
-            attempted_at = lease.now()
             try:
                 result = await lease.renew(
                     principal, conversation_id, segment_id, consume_cancel=scoped
                 )
             except Exception:
                 logger.exception("turn %s: lease renewal failed", key)
-                if lease.now() < renewed_at + SEGMENT_TTL_S - _RENEWAL_SLACK_S:
+                if lease.now() < lease.lease_deadline(principal, conversation_id):
                     continue
                 end(Outcome.LOST)
                 return
             if result == "lost":
                 end(Outcome.LOST)
                 return
-            renewed_at = attempted_at
             # A consumed flag whose scope closed during the renewal still
             # asked for a Stop, so it ends the turn.
             if result == "cancelled" and not (scoped and stop.take()):

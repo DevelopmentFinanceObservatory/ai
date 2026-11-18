@@ -28,7 +28,6 @@ from typing import Any
 
 import pytest
 from compiler.sources import source_from_spec_block
-from google.adk.events import Event, EventActions
 from google.adk.sessions import DatabaseSessionService
 from harness import adk_import
 from harness.adk_import import (
@@ -49,7 +48,6 @@ from harness.conversation import current_conversation_key
 from harness.db.migrate import apply_pending
 from harness.graph.state import AGENT_NAME, ORCHESTRATOR_SPECS_KEY, store_search
 from harness.run_ledger import StudioRunLedger
-from harness.studio import _keep_turn_records
 from harness.studio_state import ConversationState, SegmentLost
 from harness.studio_store import ConversationHeld, StudioStore, _serialize_pending
 from harness.tool_contracts import resolver_digest
@@ -748,43 +746,6 @@ async def _put_open_turn_block(engine: AsyncEngine, block: dict[str, Any]) -> No
         )
 
 
-async def test_a_paused_turn_s_mapping_form_block_is_served_converted_through_its_close(
-    adk: AsyncEngine,
-) -> None:
-    """The store the server builds reads the open turn's block converted,
-    and a resumed stream, which carries the turn session's blocks as stored,
-    keeps them converted, so the turn closes with a block the loader reads."""
-    spec_id = next(iter(EXPECTED[FULL]["view"]["turn_specs"]))
-    await _put_open_turn_block(adk, {**_mapping_block(), "spec_id": spec_id})
-    assert (await import_conversations(adk, apply=True)).clean
-    assert (await verify(adk)).clean
-    store = _reimporting_store(adk)
-
-    state = await store.load(PRINCIPAL, FULL)
-    assert state is not None
-    source_from_spec_block(state.turn_specs[spec_id])
-    async with adk.connect() as conn:
-        stored = (
-            await conn.execute(
-                text("SELECT state -> :key FROM sessions WHERE app_name = :app AND id = :id"),
-                {"key": ORCHESTRATOR_SPECS_KEY, "app": AGENT_NAME, "id": f"{FULL}#t4"},
-            )
-        ).scalar_one()
-    resumed = Event(
-        author="orchestrator", actions=EventActions(state_delta={ORCHESTRATOR_SPECS_KEY: stored})
-    )
-    _keep_turn_records(state, resumed, store)
-    state.close_turn(final_text="Reading B.")
-    await store.save(PRINCIPAL, FULL)
-
-    closed = await _load(adk, FULL)
-    assert closed is not None and closed.turn_recorded
-    assert _rows(closed.turns[-1]["specs"][spec_id]) == [
-        ("g7", ("GroupOfSeven",)),
-        ("africa", ("DACAfrica",)),
-    ]
-
-
 async def test_close_open_turns_keeps_a_mapping_form_turn_block_as_rows(
     adk: AsyncEngine,
 ) -> None:
@@ -1156,9 +1117,8 @@ async def test_a_turn_the_previous_release_served_after_the_import_reaches_the_n
             ),
             {"app": AGENT_NAME, "principal": PRINCIPAL, "id": f"{TEXT_ONLY}#t3"},
         )
-    service = DatabaseSessionService(db_engine=adk)
     store = _reimporting_store(adk)
-    app, model = orchestrator_app(engine=adk, session_service=service, store=store)
+    app, model = orchestrator_app(engine=adk, store=store)
 
     async with studio_client(app) as client:
         frames = await stream(
@@ -1182,64 +1142,6 @@ async def test_a_conversation_never_imported_is_imported_when_first_read(
 
     assert state is not None and _view(state) == EXPECTED[PLAN_PAUSED]["view"]
     assert (await import_conversations(adk, apply=False)).unchanged == [_name(PLAN_PAUSED)]
-
-
-async def test_a_turn_racing_the_previous_release_holds_the_conversation_until_adk_is_preferred(
-    adk: AsyncEngine,
-) -> None:
-    """The previous release claims turn 3 and creates its turn session between
-    this release's load and its session create. The first `/turn` answers the
-    retryable 409 and leaves that session alone; its claim stays in the rows,
-    so the retry finds the conversation changed on both sides and holds it.
-    Once `--prefer-adk` takes ADK's copy and the previous release's lease
-    lapses, a `/turn` streams to `done`."""
-    await import_conversations(adk, apply=True)
-    service = DatabaseSessionService(db_engine=adk)
-    app, _ = orchestrator_app(engine=adk, session_service=service, store=_reimporting_store(adk))
-    studio = app.state.studio
-    ensure_session = studio._ensure_session
-    lease = {"id": "seg_old", "owner": "old", "expires_at": time.time() + 600, "cancel": False}
-
-    async def previous_release_claims_first(**kwargs: Any) -> None:
-        await _set_adk_state(
-            adk, TEXT_ONLY, {"studio:segment": lease, "studio:turn_index": 3, "studio:seq": 99}
-        )
-        async with adk.begin() as conn:
-            await conn.execute(
-                text(
-                    "INSERT INTO sessions (app_name, user_id, id, state, create_time, "
-                    "update_time) VALUES (:app, :principal, :id, '{}'::jsonb, now(), now())"
-                ),
-                {"app": AGENT_NAME, "principal": PRINCIPAL, "id": f"{TEXT_ONLY}#t3"},
-            )
-        studio._ensure_session = ensure_session
-        await ensure_session(**kwargs)
-
-    studio._ensure_session = previous_release_claims_first
-    body = turn_body("and a third?", conversation_id=TEXT_ONLY)
-
-    async with studio_client(app) as client:
-        first = await client.post("/api/studio/turn", json=body, headers=AUTH)
-        retry = await client.post("/api/studio/turn", json=body, headers=AUTH)
-
-        assert (first.status_code, first.json()["error"]) == (409, "transient_unavailable")
-        assert (retry.status_code, retry.json()["constraint_id"]) == (409, "conversation_diverged")
-        assert await _diverged_flags(adk) == [TEXT_ONLY]
-        kept = await service.get_session(
-            app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{TEXT_ONLY}#t3"
-        )
-        assert kept is not None
-
-        await _set_adk_state(
-            adk, TEXT_ONLY, {"studio:segment": {**lease, "expires_at": time.time() - 1}}
-        )
-        preferred = await import_conversations(
-            adk, apply=True, prefer_adk=frozenset({_name(TEXT_ONLY)})
-        )
-        assert preferred.reimported == [_name(TEXT_ONLY)]
-        frames = await stream(client, "/api/studio/turn", body)
-
-    assert frames[-1]["event"] == "done"
 
 
 async def _diverged_flags(engine: AsyncEngine) -> list[str]:
@@ -1331,8 +1233,7 @@ async def test_a_held_conversation_is_refused_on_the_wire_without_taking_a_lease
     adk: AsyncEngine, route: str
 ) -> None:
     await _diverge(adk, TEXT_ONLY)
-    service = DatabaseSessionService(db_engine=adk)
-    app, _ = orchestrator_app(engine=adk, session_service=service, store=_reimporting_store(adk))
+    app, _ = orchestrator_app(engine=adk, store=_reimporting_store(adk))
     path, body = f"/api/studio/{route}", _HELD_ROUTES[route]
 
     async with studio_client(app) as client:
@@ -1399,8 +1300,7 @@ async def test_a_turn_on_a_never_imported_conversation_whose_copy_fails_creates_
     """Created afresh, it would hide its ADK history behind a conflict."""
     await apply_pending(adk)
     _write_fails_once(monkeypatch)
-    service = DatabaseSessionService(db_engine=adk)
-    app, _ = orchestrator_app(engine=adk, session_service=service, store=_reimporting_store(adk))
+    app, _ = orchestrator_app(engine=adk, store=_reimporting_store(adk))
     body = turn_body("and a third?", conversation_id=TEXT_ONLY)
 
     async with studio_client(app) as client:
@@ -1475,9 +1375,8 @@ async def test_a_refused_conversation_the_tables_lack_starts_afresh_and_its_copy
     rows = _sessions(**{TEXT_ONLY: _add(**refusal)})
     await _write_adk(pg_empty_engine, rows)
     await apply_pending(pg_empty_engine)
-    service = DatabaseSessionService(db_engine=pg_empty_engine)
     store = _reimporting_store(pg_empty_engine)
-    app, _ = orchestrator_app(engine=pg_empty_engine, session_service=service, store=store)
+    app, _ = orchestrator_app(engine=pg_empty_engine, store=store)
 
     with caplog.at_level("ERROR", logger="harness.adk_import"):
         assert await store.load(PRINCIPAL, TEXT_ONLY) is None
@@ -1522,8 +1421,7 @@ async def test_a_conversation_another_instance_found_diverged_counts_as_moved(
     adk: AsyncEngine,
 ) -> None:
     """The conflict is recorded at ADK's latest `update_time`, so the
-    session's time no longer tells that ADK moved; the diverged flag does,
-    and `_ensure_session` leaves the previous release's turn session alone."""
+    session's time no longer tells that ADK moved; the diverged flag does."""
     await _diverge(adk, TEXT_ONLY)
     with pytest.raises(ConversationHeld):
         await reimport_on_access(adk).reimport(PRINCIPAL, TEXT_ONLY)

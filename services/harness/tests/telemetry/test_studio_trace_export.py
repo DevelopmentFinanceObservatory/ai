@@ -43,7 +43,7 @@ CONVERSATION = "conv_trace_export_01"
 AUTH = {"Authorization": "Bearer test"}
 QUESTION = "comprehensive overview of life expectancy in Kenya"
 ANSWER = "Life expectancy in Kenya rose."
-# The name of the stand-in for an ADK model call span in the tests that drive
+# The name of the stand-in for a model call span in the tests that drive
 # `_sse_stream` with a scripted segment.
 MODEL_CALL = "generate_content gemini-x"
 
@@ -193,7 +193,6 @@ async def test_a_response_torn_down_at_a_frame_still_exports_the_turn_once_and_c
     (call,) = [span for span in spans if span.name == MODEL_CALL]
     assert turn.end_time_unix_nano > 0
     assert call.parent_span_id == turn.span_id
-    assert conversation.cancel_event is None
     assert [r for r in caplog.records if r.name == "opentelemetry.context"] == []
 
 
@@ -259,8 +258,8 @@ async def _approve_a_planned_turn(engine: AsyncEngine) -> list[dict]:
 async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
     fake_langfuse: Any, pg_engine: AsyncEngine
 ) -> None:
-    """Both segments of a turn run ADK's real workflow. Each segment's
-    `invoke_workflow` span is a child of `turn`, and every span on the wire has
+    """Both segments of a turn run the orchestrator's agent. Each segment's
+    `invoke_agent` span is a child of `turn`, and every span on the wire has
     its parent on the wire too, except `turn`, whose parent is the synthetic one
     the SDK creates for a seeded trace id. Every exported span is the SDK's own
     or carries `gen_ai.*` attributes. `turn` carries the question and the
@@ -273,9 +272,9 @@ async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
     (turn,) = [span for span in spans if span.name == "turn"]
     assert turn.trace_id.hex() == Langfuse.create_trace_id(seed=second[-1]["trace_id"])
     assert {span.trace_id for span in spans} == {turn.trace_id}
-    workflows = [span for span in spans if span.name.startswith("invoke_workflow")]
-    assert len(workflows) == 2
-    assert {span.parent_span_id for span in workflows} == {turn.span_id}
+    runs = [span for span in spans if span.name.startswith("invoke_agent")]
+    assert len(runs) == 2
+    assert {span.parent_span_id for span in runs} == {turn.span_id}
     assert _spans_with_an_unexported_parent(spans) == [turn]
     # The turn's question and answer are the trace's overall input and output.
     assert _attribute(turn, "langfuse.observation.input") == QUESTION
@@ -289,7 +288,7 @@ async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
 async def test_a_model_call_exports_its_prompt_and_response(
     fake_langfuse: Any, pg_engine: AsyncEngine
 ) -> None:
-    """With no content setting in the environment, the `generate_content` span
+    """With no content setting in the environment, the `chat` span
     of the orchestrator's first call carries the user's question in its input
     messages and the `plan` call it made in its output messages, and the span
     of its last call carries the answer, so Langfuse shows each generation's
@@ -298,7 +297,7 @@ async def test_a_model_call_exports_its_prompt_and_response(
     await _approve_a_planned_turn(pg_engine)
 
     calls = sorted(
-        (span for span in fake_langfuse.spans() if span.name.startswith("generate_content")),
+        (span for span in fake_langfuse.spans() if span.name.startswith("chat")),
         key=lambda span: span.start_time_unix_nano,
     )
     assert len(calls) >= 2
@@ -403,9 +402,9 @@ async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_
     paused_once = False
     frames_of_segment = studio._frames
 
-    async def parked_after_the_plan(**kwargs: Any) -> AsyncGenerator[Any]:
+    async def parked_after_the_plan(*args: Any, **kwargs: Any) -> AsyncGenerator[Any]:
         nonlocal paused_once
-        async with aclosing(frames_of_segment(**kwargs)) as frames:
+        async with aclosing(frames_of_segment(*args, **kwargs)) as frames:
             async for frame in frames:
                 yield frame
                 if frame.event == "plan.proposed" and not paused_once:
@@ -427,7 +426,7 @@ async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_
         principal = "u_" + hashlib.sha256(b"test").hexdigest()[:16]
         conversation = studio.store.current(principal, CONVERSATION)
         assert conversation is not None
-        await _until(lambda: not conversation.lock.locked() and conversation.cancel_event is None)
+        await _until(lambda: not conversation.lock.locked() and conversation.renew_now is None)
         if how == "close":
             await _until(
                 lambda: any(
@@ -458,7 +457,9 @@ async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_
     assert turn.end_time_unix_nano > 0
     assert {span.trace_id for span in spans} == {turn.trace_id}
     assert turn.trace_id.hex() == Langfuse.create_trace_id(seed=resumed[-1]["trace_id"])
-    assert any(span.name.startswith("invoke_node execute") for span in spans)
+    # The orchestrator's run of each segment, the resumed one after the plan
+    # executed among them.
+    assert len([span for span in spans if span.name.startswith("invoke_agent")]) == 2
     (record,) = conversation.turns
     assert "error" not in record
 

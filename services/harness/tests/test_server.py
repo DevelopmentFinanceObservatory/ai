@@ -301,16 +301,16 @@ def test_the_execute_node_runs_against_the_recorded_surface(
     every plan step's `activity.step` frame goes missing on the served path
     and only compose's presentation calls show up. A test that only checked
     the constructor lambda's arity would pass while the feed stayed dark;
-    this asserts on the actual object `create_root_workflow` receives.
+    this asserts on the actual object `studio_graph` receives.
     """
     captured: dict[str, Any] = {}
-    real_create_root_workflow = server_module.create_root_workflow
+    real_studio_graph = server_module.studio_graph
 
     def _spy(**kwargs: Any) -> Any:
         captured.update(kwargs)
-        return real_create_root_workflow(**kwargs)
+        return real_studio_graph(**kwargs)
 
-    monkeypatch.setattr(server_module, "create_root_workflow", _spy)
+    monkeypatch.setattr(server_module, "studio_graph", _spy)
 
     app = create_app(settings=Settings(database_url=pg_database_url))
 
