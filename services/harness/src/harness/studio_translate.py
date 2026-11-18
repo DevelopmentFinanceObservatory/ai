@@ -423,17 +423,18 @@ def segment_lost_frame(conversation: ConversationState) -> ErrorFrame:
 
 
 def _checkpoint_failed_frame(conversation: ConversationState, exc: Exception) -> ErrorFrame:
-    """The stream-fatal frame a stream yields when its state cannot be
-    saved: `StudioRunner._checkpointed` when a checkpoint before a pause or
-    terminal frame, or a frame-number reservation, fails, in place of the
-    frame it would have carried, and when a card's canvas write
-    (`StudioStore.change_canvas`) in the turn or edit stream it relays
-    raises `SegmentLost` or `DatabaseUnavailable`. A
-    `SegmentLost` means another instance's claim has already outlived this
-    one's TTL and now owns the conversation, and `DatabaseUnavailable` that
-    the database stayed unreachable until the lease's deadline, so no close
-    could be saved: either way the turn is left as stored and the stream
-    ends as when the heartbeat's renewals fail (`segment_lost_frame`).
+    """The stream-fatal frame a stream yields when its state cannot be saved.
+    `StudioRunner._checkpointed` yields it, in place of the frame it would
+    have carried, when a checkpoint before a pause or terminal frame, or a
+    frame-number reservation, fails. It also ends a turn or edit stream when
+    a card's canvas write (`StudioStore.change_canvas`) raises `SegmentLost`
+    or `DatabaseUnavailable`.
+
+    `SegmentLost` means another instance's claim has outlived this one's TTL
+    and owns the conversation. `DatabaseUnavailable` means the database
+    stayed unreachable until the lease's deadline, so no close could be
+    saved. In both cases the turn is left as stored and the stream ends as
+    it does when the heartbeat's renewals fail (`segment_lost_frame`).
     Anything else (a database error) closes the turn, since nothing else
     will finish it. The turn's record names `state_not_saved`, and the
     frame, whose grammar has no such member, the transient code."""

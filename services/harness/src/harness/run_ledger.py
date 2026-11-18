@@ -21,7 +21,7 @@ failed on the connection of the transaction that closes the turn
 (`harness.turn.store.TurnStore.finish`).
 
 A stored run is read with `executor.ledger.stored_run`, so one another
-release wrote loads. A stored run this release still cannot read is recorded
+release wrote loads. A stored run this release cannot read is recorded
 failed (`run_record_unreadable`) where it is found unfinished or its key
 admits work again, its status and failure written over the stored record.
 

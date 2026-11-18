@@ -540,8 +540,8 @@ class ConversationState:
     turn_choice_baseline: dict[str, str] = field(default_factory=dict)
     turn_recorded: bool = False
     # This instance's telemetry span for the turn's current segment, on the
-    # turn's `trace_id`: opened by `begin_turn` or `open_segment_span`, and
-    # ended once when the segment ends on this instance (`end_segment_span`),
+    # turn's `trace_id`. `begin_turn` or `open_segment_span` opens it, and
+    # `end_segment_span` ends it once when the segment ends on this instance,
     # so no span outlives the segment. Streams make it current with
     # `in_turn_span`.
     # Excluded from repr so a log of the state doesn't dump SDK internals.
@@ -1070,8 +1070,8 @@ class ConversationState:
         and, once the turn is recorded, its reply as the span's input and
         output. `stored`, the turn as this instance last saved it
         (`harness.studio_store.StudioStore.stored_turn`), goes on the span as
-        `dfo.stored`. Returns whether a
-        span was open to end, for the caller to flush.
+        `dfo.stored`. Returns whether a span was open to end, for the caller
+        to flush.
         """
         span = self._telemetry_span
         if span is None:
@@ -1215,7 +1215,7 @@ def span_level(status: str) -> EventLevel:
     `_SPAN_STATUS_LEVELS` gives, and `ERROR` for any other status, which is
     a failure.
 
-    Every span on a turn's trace, with its status, level and `stored`
+    Every span on a turn's trace carries its status, level and `stored`
     (`ConversationState.end_segment_span`). A segment's status is the cause
     of the last ending frame its stream sent, in the turn record's
     vocabulary (`harness.studio.StudioRunner._locked`). `stored` is the turn
@@ -1371,9 +1371,9 @@ def make_remove_cards(store: StudioStore) -> Any:
 
     The store retries a write whose commit landed but whose acknowledgement
     was lost, and that retry reads a canvas the cards are already off. A
-    card an earlier attempt took off that the canvas no longer shows is
-    reported removed, and the removal unreported, so the model and the
-    stream learn what the commit did.
+    card an earlier attempt took off, which the canvas no longer shows, is
+    reported removed and marks the removal as unreported, so the model and
+    the stream learn what the commit did.
 
     A `SegmentLost` or `DatabaseUnavailable` there has the stream renew its
     lease at once (`renew_lease_now`) before it propagates: raised inside
@@ -1919,9 +1919,9 @@ def land_component(
     conversation digest reads it.
 
     A canvas that already holds the component's block gets no second one
-    and the return is still `"created"`: the store retries a write whose
-    commit landed but whose acknowledgement was lost, and the retry reads
-    the canvas that commit wrote.
+    and the return is `"created"`. The store retries a write whose commit
+    landed but whose acknowledgement was lost, and the retry reads the
+    canvas that commit wrote.
     """
     entry = _digest_entry(component)
     if intent is not None:
@@ -1960,8 +1960,8 @@ def remove_cards(
 ) -> tuple[list[str], list[str]]:
     """Take blocks off `conversation`'s canvas: the named ones, or every
     block when `all_cards`. Returns the ids removed, in canvas order, and the
-    named ids the conversation never held; a card already off the canvas is
-    neither. The stream is told a removal is unreported
+    named ids the conversation never held. A card already off the canvas is
+    neither. A removal marks the stream as owing a report
     (`ConversationState.take_unreported_removal`). `make_remove_cards` runs
     it inside the store's canvas write, on the canvas as stored."""
     previous = conversation.composition
@@ -1994,10 +1994,10 @@ def _replace_block(
     True iff the canvas shows `component` in the slot: a block was
     replaced, or a commit of the same swap already replaced it. A card that
     was never composed (auto_add=false, or removed since) has no block to
-    swap: the caller's component still streams as component.created, but
-    must not sneak onto the canvas here. The Edit Card route's recreate (`harness.studio_edit`)
-    names the existing component_id whose slot the new component takes
-    over, inside the store's canvas write.
+    swap. The caller's component still streams as component.created and is
+    not added to the canvas here. The Edit Card route's recreate
+    (`harness.studio_edit`) names the existing component_id whose slot the
+    new component takes over, inside the store's canvas write.
     """
     previous = conversation.composition
     index = _block_index(previous, old_component_id)

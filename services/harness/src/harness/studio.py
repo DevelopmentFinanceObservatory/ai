@@ -1031,9 +1031,8 @@ class StudioRunner:
         """Relay `frames`, each once its `seq` lies inside the segment's
         reserved frame numbers (`StudioStore.reserve_frames`), checkpointing
         durably before every actionable pause (`plan.proposed`,
-        `elicitation.request`) and before `done`.
-        The client never sees a frame that says "paused" or "done" before
-        the store agrees. `done`'s frame is rebuilt to carry the canvas
+        `elicitation.request`) and before `done`. The client never sees a
+        frame that says "paused" or "done" before the store agrees. `done`'s frame is rebuilt to carry the canvas
         the checkpoint read back from the store, so a `/composition` edit
         another instance made meanwhile reaches the client on it. A
         checkpoint that fails (the segment was taken over, or the write
@@ -1041,7 +1040,7 @@ class StudioRunner:
         pause or terminal frame it would have carried, and ends the stream
         there. Once a `plan.approved` frame is sent, the interrupt it answers
         records it (`ConversationState.mark_approved_sent`) and is
-        checkpointed: a lost segment, or a database unreachable until the
+        checkpointed. A lost segment, or a database unreachable until the
         lease's deadline, ends the stream the same way, and any other
         failure there is logged alone. A card's canvas write in `frames`
         that loses the segment, or cannot reach the database, ends `frames`
@@ -1175,10 +1174,10 @@ class StudioRunner:
         others.
 
         The segment's span ends here, after the last frame this sent
-        (`harness.studio_state.span_level`'s table). Its status is the
-        cause of the last ending frame the stream sent (`_StreamEnding`); a
-        stream that sent none ended because its frames ran out (`failed`) or
-        because it was closed or cancelled first (`disconnected`). Its
+        (`harness.studio_state.span_level`'s table). Its status is the cause
+        of the last ending frame the stream sent (`_StreamEnding`). A stream
+        that sent none ended because its frames ran out (`failed`) or because
+        it was closed or cancelled first (`disconnected`). Its
         `stored` is the turn as this instance last saved it
         (`StudioStore.stored_turn`), read after the release, which runs to
         the end even when this generator is cancelled while it waits.
@@ -1300,7 +1299,7 @@ class StudioRunner:
 
     def _stored_turn(self, principal: str, conversation_id: str) -> str | None:
         """`StudioStore.stored_turn`, or `None` (logged) when it fails, so
-        reading it never keeps the segment's span from ending."""
+        a failed read cannot keep the segment's span from ending."""
         try:
             return self.store.stored_turn(principal, conversation_id)
         except Exception:
@@ -1399,8 +1398,8 @@ def _streaming_conflict_response(detail: str, *, retry_after_seconds: int = 5) -
     a live segment lease held by any instance (`SegmentBusy`), or the store's
     compare-and-swap on the `/turn` claim (`ConversationStale`).
     `retry_after_seconds` defaults to a flat 5s for the process-local and
-    claim guards, which carry no TTL of their own to report; a `SegmentBusy`
-    conflict passes its own remaining TTL instead."""
+    claim guards, which carry no TTL of their own to report. A `SegmentBusy`
+    conflict passes its own remaining TTL."""
     return _tool_error_response(
         ToolError(
             error=ErrorCode.TRANSIENT_UNAVAILABLE,
@@ -1923,8 +1922,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     # Another instance's `/turn` created this same
                     # never-before-seen conversation between this request's
                     # own load and create. Load what it created and continue
-                    # to the claim below -- its compare-and-swap decides the
-                    # race; a lost claim is the existing `ConversationStale`
+                    # to the claim below. Its compare-and-swap decides the
+                    # race, and a lost claim is the `ConversationStale`
                     # 409, not a bare 500.
                     conversation = await studio.store.load(principal, body.conversation_id)
                     assert conversation is not None
@@ -1997,7 +1996,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # save below persists it, so the save's own compare-and-swap
             # covers both in one write. `SegmentBusy` means a live segment,
             # on this instance or another, already owns the conversation's
-            # stream; its own `retry_after_seconds` is the ceiling of that
+            # stream. Its own `retry_after_seconds` is the ceiling of that
             # segment's remaining TTL.
             try:
                 segment_id = studio.store.claim_segment(principal, body.conversation_id, work)
@@ -2052,7 +2051,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             assert conversation is not None
             if abandoned is not None:
                 # The unrecorded turn this one closed as `abandoned` ends its
-                # trace as its record now does; the stream's end exports the
+                # trace as its record does. The stream's end exports the
                 # span.
                 record_closed_turn_span(body.conversation_id, abandoned)
             _set_turn_context(principal, body.conversation_id, conversation, settings)
@@ -2146,8 +2145,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 media_type=SSE_MEDIA_TYPE,
             )
         except BaseException as exc:
-            # The stream wrapper normally releases the segment and the lock;
-            # a failure before the response starts streaming releases them
+            # The stream wrapper normally releases the segment and the lock.
+            # A failure before the response starts streaming releases them
             # here (`_release_claim`). Before the claim save commits, the
             # working copy is given up and the live state stays as loaded.
             # After it, the lease is dropped. The claim save already covers
@@ -2334,7 +2333,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 return refusal
             assert pending is not None  # narrowed by _interrupt_refusal
             # Every change up to the claim save is made on a working copy,
-            # which the save swaps into the live state once it commits; a
+            # which the save swaps into the live state once it commits. A
             # request that claims nothing leaves the live state as loaded.
             work = studio.store.draft(principal, body.conversation_id)
             pending = work.pending[body.interrupt_id]

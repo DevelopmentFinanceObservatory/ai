@@ -3,13 +3,13 @@
 The SQL files in `harness/db/migrations` run in filename order.
 `harness_schema_migrations` records each applied file with the SHA-256 of
 its bytes. A run refuses when an applied file changed, or when one is
-missing and its name sorts at or below the newest file this image holds: a
+missing and its name sorts at or below the newest file this image holds. A
 fix is a new file. An applied file newer than every file here was written by
 a later release, whose migrations add to this schema, so the run logs it and
 carries on, and a revision of this release can still start beside the later
 one or after a rollback.
 
-The bookkeeping table is created in a transaction of its own; the pending
+The bookkeeping table is created in a transaction of its own. The pending
 files then apply in one transaction, every one of them or none. Each
 transaction holds a transaction-level advisory lock, so two instances
 starting together apply each file once, and the lock ends with the
@@ -19,7 +19,7 @@ advisory lock and the locks a migration's own statements take, by
 `lock_timeout` (`MIGRATION_LOCK_TIMEOUT_S`). PostgreSQL applies
 `statement_timeout` to each statement of a multi-statement file
 separately, so this module puts no bound on a run as a whole. At startup
-Cloud Run's 240 s startup probe bounds it: past the probe the instance is
+Cloud Run's 240 s startup probe bounds it. Past the probe the instance is
 killed and the transaction rolls back, so a run that needs longer goes out
 of band.
 
@@ -44,7 +44,7 @@ MIGRATION_TIMEOUT_S = 60.0
 # for a table lock holds up every query on that table queued behind it, so
 # it gives up well before the statement bound and the run is retried.
 MIGRATION_LOCK_TIMEOUT_S = 10.0
-# Any fixed 64-bit number; names the lock in `pg_locks`.
+# A fixed 64-bit number that names the lock in `pg_locks`.
 _ADVISORY_LOCK_KEY = 0x6861726E657373  # "harness"
 _BOOKKEEPING = """
 CREATE TABLE IF NOT EXISTS harness_schema_migrations (
@@ -74,7 +74,7 @@ async def apply_pending(
     """Apply every file in `directory` not yet recorded, in filename order, in
     one transaction, and return their names. `timeout_s` bounds each
     statement (`statement_timeout`) and `lock_timeout_s` each wait for a
-    lock (`lock_timeout`). Nothing here bounds the run as a whole; at
+    lock (`lock_timeout`). Nothing here bounds the run as a whole. At
     startup Cloud Run's startup probe does (module docstring).
 
     Raises:
