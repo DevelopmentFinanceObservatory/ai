@@ -16,6 +16,13 @@ different groups never conflict:
   lease).
 - `checkpoint` and `release` write the turn state fenced on the segment
   (`SegmentLost` when another instance holds the lease).
+- `close_segment` is a stream's closing write: fenced on the segment, it
+  stores the turn state and clears the lease, and closes the turn
+  `cancelled`, record and cursor, when a Stop is live for it, in one
+  transaction.
+- `load` records `state_not_saved` a turn whose cursor closed while its
+  record stayed open, compare-and-swapped on `version` and only while no
+  lease is live.
 - `change_canvas` is a checkpoint with a card change applied: each card
   the turn lands, holds, swaps, revises or removes commits with its canvas
   block and every other changed durable field in one transaction, fenced
@@ -29,7 +36,8 @@ different groups never conflict:
   fenced on the segment and its lease being live.
 
 A Stop names a turn. The next write of the lease columns after
-`request_cancel` (a renewal, a claim save, a release, a dropped lease)
+`request_cancel` (a renewal, a claim save, a release, a closing write, a
+dropped lease)
 clears `lease_cancel` and records the Stop as a fresh `stop_id` naming the
 row's turn index as stored before that write (`stop_turn`), in the same
 statement. Whether a
@@ -70,9 +78,12 @@ from collections.abc import (
     Coroutine,
     Iterable,
     Iterator,
+    Mapping,
 )
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 from compiler.surface import transient
@@ -82,6 +93,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.approval import ApprovalRecord
+from harness.graph.state import (
+    ORCHESTRATOR_APPLIED_KEY,
+    ORCHESTRATOR_PLAN_RECORDS_KEY,
+    ORCHESTRATOR_SEARCHES_KEY,
+    ORCHESTRATOR_SPECS_KEY,
+)
 from harness.studio_state import (
     SEGMENT_TTL_S,
     ConversationState,
@@ -97,7 +114,9 @@ from harness.studio_state import (
     awaiting_answer,
     turn_status,
 )
-from harness.wire import CompositionManifest, PlanProposed
+from harness.tool_contracts import HarnessCode
+from harness.turn.store import CLOSED, Cursor, TurnStatus, cursor_at, finish_on
+from harness.wire import CompositionManifest, ErrorCode, PlanProposed
 
 logger = logging.getLogger(__name__)
 
@@ -177,8 +196,12 @@ _NO_BASELINE_VALUE = object()
 # lapses. `now()` is the transaction's start time.
 DATABASE_NOW = "CAST(extract(epoch FROM now()) AS double precision)"
 
-# Frame numbers a segment reserves at a time (`StudioStore.reserve_frames`).
-SEQ_BLOCK = 256
+# Frame numbers a segment's claim reserves (`StudioStore.claim_segment`),
+# more than any segment sends, so a stream numbers its frames with no write
+# of its own and a takeover starts past every number the stream it takes
+# over could have sent. A segment that died unsaved leaves a gap of up to
+# this many in `seq`, which no client reads.
+SEQ_BLOCK = 2**20
 # A segment reserves its next block once fewer numbers than this are left,
 # so the frames sent after the stream's last relayed one (the closing
 # `activity.step` and `error` frames `harness.studio._sse_stream` adds on a
@@ -551,6 +574,26 @@ class Renewal:
     stop_id: str | None
 
 
+class SegmentClose(StrEnum):
+    """How a segment's closing write (`StudioStore.close_segment`) ended.
+
+    - `SAVED`: the live state is stored and the lease cleared; the turn
+      stands as the live state holds it.
+    - `STOPPED`: as `SAVED`, and a Stop live for the open turn closed it
+      `cancelled`, record and cursor, in the same transaction.
+    - `LOST`: the stored lease is not the segment's, so nothing was
+      written; the turn stands as the lease's holder leaves it.
+    - `FAILED`: the write did not commit as far as this instance knows (a
+      database error, or the timeout); it may have committed with its
+      acknowledgement lost. The lease lapses by its TTL.
+    """
+
+    SAVED = "saved"
+    STOPPED = "stopped"
+    LOST = "lost"
+    FAILED = "failed"
+
+
 _OPEN_STATUSES = frozenset({"running", "paused"})
 
 
@@ -811,6 +854,22 @@ async def _run_delta_write(conn: AsyncConnection, pk: int, write: _DeltaWrite) -
     return version
 
 
+def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any]) -> None:
+    """Keep the plan records, search readings, spec blocks and applied chip
+    `state`, a turn's state, holds, for `ConversationState.close_turn` to
+    store with the turn. Each key holds the turn's whole value, so the latest
+    write replaces. The blocks stay in process (`turn_specs`) until the turn
+    closes."""
+    if ORCHESTRATOR_PLAN_RECORDS_KEY in state:
+        conversation.turn_plans = list(state[ORCHESTRATOR_PLAN_RECORDS_KEY] or [])
+    if ORCHESTRATOR_SEARCHES_KEY in state:
+        conversation.turn_readings = list(state[ORCHESTRATOR_SEARCHES_KEY] or [])
+    if ORCHESTRATOR_SPECS_KEY in state:
+        conversation.turn_specs = dict(state[ORCHESTRATOR_SPECS_KEY] or {})
+    if ORCHESTRATOR_APPLIED_KEY in state:
+        conversation.turn_applied_choice = dict(state[ORCHESTRATOR_APPLIED_KEY] or {})
+
+
 @dataclass
 class _RuntimeEntry:
     """The process-local anchor for one (principal, conversation_id).
@@ -1048,10 +1107,11 @@ class StudioStore:
 
     async def _read(
         self, principal: str, conversation_id: str
-    ) -> tuple[Any, dict[str, Any]] | None:
+    ) -> tuple[Any, dict[str, Any], Cursor | None] | None:
         """The conversation's row, with the database clock's reading as
-        `db_now`, and its flat durable keys, read in one snapshot. None when
-        no row holds it."""
+        `db_now`, its flat durable keys, and the cursor of its turn when that
+        turn's record is open and its cursor closed, read in one snapshot.
+        None when no row holds it."""
         async with self._engine.connect() as plain:
             conn = await plain.execution_options(isolation_level="REPEATABLE READ")
             async with conn.begin():
@@ -1067,24 +1127,45 @@ class StudioStore:
                 for prefix, items in _ITEM_TABLES.items():
                     for ident, value in await conn.execute(items.select(), {"pk": row.id}):
                         flat[f"{prefix}{ident}"] = value
-        return row, flat
+                closed = None
+                if row.turn_index and not flat.get(_KEY_TURN_RECORDED):
+                    cursor = await cursor_at(conn, row.id, row.turn_index)
+                    if cursor is not None and cursor.status in CLOSED:
+                        closed = cursor
+        return row, flat, closed
 
     async def load(self, principal: str, conversation_id: str) -> ConversationState | None:
         """Reload `conversation_id`'s durable fields. `None` when the store
         does not hold the conversation. An open turn's spec blocks are left
         empty: its cursor holds them (`harness.turn.store.TurnStore.specs`),
-        and whoever carries the turn on reads them there."""
+        and whoever carries the turn on reads them there.
+
+        The turn's cursor is the authority on whether the turn is closed. A
+        load that finds the cursor closed and the conversation's record of
+        the turn open, with no live lease on the row, records the turn
+        (`_record_unsaved`) before it returns. A stream sends its ending
+        frame only once its closing write (`close_segment`) commits, so that
+        state means the closing write failed and the client was told the
+        turn could not be saved, or the instance died and was told nothing;
+        without the repair the next turn would record the turn `abandoned`.
+        While a lease is live its holder records the turn."""
         entry = self._entry(principal, conversation_id)
         stamp = self._clock()
         stored = await self._read(principal, conversation_id)
         if stored is None:
             return None
-        row, flat = stored
-        entry.pk, entry.version, entry.read_at = row.id, row.version, row.db_now
-        entry.read_stamp = stamp
-        entry.seq_reserved, entry.claimed_reserved = row.seq_reserved, None
+        row, flat, closed = stored
         durable = ConversationState(conversation_id=conversation_id)
         _apply_delta(durable, flat)
+        version = row.version
+        lease = _row_segment(row)
+        if closed is not None and (lease is None or lease.expires_at <= row.db_now):
+            recorded = await self._record_unsaved(row.id, row.version, durable, closed)
+            if recorded is not None:
+                durable, version = recorded
+        entry.pk, entry.version, entry.read_at = row.id, version, row.db_now
+        entry.read_stamp = stamp
+        entry.seq_reserved, entry.claimed_reserved = row.seq_reserved, None
         if entry.state is None:
             durable.lock = entry.lock
             entry.state = durable
@@ -1100,6 +1181,41 @@ class StudioStore:
             entry.state.turn_specs = {}
         return entry.state
 
+    async def _record_unsaved(
+        self, pk: int, version: int, durable: ConversationState, cursor: Cursor
+    ) -> tuple[ConversationState, int] | None:
+        """Record the turn `cursor`, closed, as the client was told it ended:
+        on a copy of `durable`, the conversation as read at `version`, keep
+        the records the cursor's state holds (`keep_turn_records`) and close
+        the record with error `state_not_saved` and no reply, whatever the
+        cursor's status, then store the change. One transaction under the row
+        lock, compare-and-swapped on `version` and refused while a lease is
+        live, so a writer that moved the row since the read wins and this
+        records nothing. Returns the copy and the row's new version, `None`
+        when it recorded nothing."""
+        recorded = _shallow_copy(durable)
+        keep_turn_records(recorded, cursor.state)
+        recorded.close_turn(final_text="", error=HarnessCode.STATE_NOT_SAVED.value)
+        delta = _changed_since(_serialize_durable(recorded), _serialize_durable(durable))
+        async with self._transaction() as conn:
+            row = (await conn.execute(self._lock_conversation, {"pk": pk})).first()
+            lease = _row_segment(row) if row is not None else None
+            if (
+                row is None
+                or row.version != version
+                or (lease is not None and lease.expires_at > row.db_now)
+            ):
+                return None
+            stored = await self._write(conn, pk, delta)
+        logger.info(
+            "studio store: conversation %s's turn %s was closed %s with its record open; "
+            "recorded it state_not_saved",
+            durable.conversation_id,
+            cursor.turn_index,
+            cursor.status.value,
+        )
+        return recorded, stored
+
     def claim_segment(
         self, principal: str, conversation_id: str, state: ConversationState | None = None
     ) -> str:
@@ -1111,8 +1227,8 @@ class StudioStore:
         into that state, expiring `SEGMENT_TTL_S` after that reading, and
         returns its id.
 
-        The claim also takes the segment's first block of frame numbers and
-        starts the state's `seq` there. For a turn `begin_turn` just opened
+        The claim also reserves the segment's frame numbers, one block of
+        `SEQ_BLOCK`, and starts the state's `seq` there. For a turn `begin_turn` just opened
         the block runs from `0` to `SEQ_BLOCK`. Otherwise it starts after
         every number reserved before, so a stream resuming the turn never
         repeats a number an earlier segment sent.
@@ -1775,6 +1891,128 @@ class StudioStore:
             if not saved and entry.held == segment_id:
                 entry.held = None
         return False
+
+    async def close_segment(
+        self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0
+    ) -> SegmentClose:
+        """The closing write of the stream that holds `segment_id`: one
+        transaction, under the row lock and fenced on `segment_id`, that
+        stores this instance's changed durable fields (the turn's record,
+        the pending interrupts and `seq_next` among them) and clears the
+        lease. The canvas is read back from the row, as `checkpoint` reads
+        it, since every card commits as it lands.
+
+        When a Stop is live for the open turn as the locked row and its
+        cursor stand (`StopState.live`, with the lease this write clears
+        counted gone), the same transaction closes the turn `cancelled`: the
+        cursor through `harness.turn.store.finish_on`, which ends the
+        conversation's unfinished runs, and the record with the cursor's
+        records kept and the pending interrupts cleared, so no answer
+        reaches them. A Stop that commits after this transaction finds no
+        live lease, and `/cancel` takes it under the conversation lock.
+
+        Returns how the write ended (`SegmentClose`). It makes one attempt,
+        bounded by `timeout` with the wait for this instance's write lock
+        included, and raises nothing: a failure is logged and returned as
+        `FAILED`, and the lease then lapses by its TTL. The live state takes
+        what the write stored only once it commits, so after `LOST` or
+        `FAILED` it holds what was not stored, and the caller evicts it
+        (`evict`). Either way this instance stops counting `segment_id` as
+        held.
+        """
+        entry = self._runtime.get((principal, conversation_id))
+        if entry is None or entry.state is None or entry.pk is None:
+            logger.error(
+                "studio store: conversation %s is not loaded; segment %s closes unsaved",
+                conversation_id,
+                segment_id,
+            )
+            return SegmentClose.FAILED
+        try:
+            async with asyncio.timeout(timeout), entry.write_lock:
+                return await self._close_segment(entry, entry.state, conversation_id, segment_id)
+        except TimeoutError:
+            logger.warning(
+                "studio store: conversation %s segment %s's closing write did not complete "
+                "within %ss; the lease lapses by its TTL",
+                conversation_id,
+                segment_id,
+                timeout,
+            )
+        except Exception:
+            logger.exception(
+                "studio store: conversation %s segment %s's closing write failed; the lease "
+                "lapses by its TTL",
+                conversation_id,
+                segment_id,
+            )
+        finally:
+            if entry.held == segment_id:
+                entry.held = None
+        return SegmentClose.FAILED
+
+    async def _close_segment(
+        self,
+        entry: _RuntimeEntry,
+        state: ConversationState,
+        conversation_id: str,
+        segment_id: str,
+    ) -> SegmentClose:
+        """`close_segment`'s transaction. The caller holds the write lock."""
+        assert entry.pk is not None
+        async with self._transaction() as conn:
+            row = (await conn.execute(self._lock_conversation, {"pk": entry.pk})).first()
+            lease = _row_segment(row) if row is not None else None
+            if row is None or lease is None or lease.id != segment_id:
+                logger.warning(
+                    "studio store: conversation %s segment %s is not the lease; its closing "
+                    "write saved nothing",
+                    conversation_id,
+                    segment_id,
+                )
+                return SegmentClose.LOST
+            stopped = (await _stop_state(conn, row, lease_live=False)).live
+            base = _shallow_copy(state)
+            work = _shallow_copy(state)
+            work.composition = (
+                CompositionManifest.model_validate(row.composition) if row.composition else None
+            )
+            work.segment = None
+            if stopped:
+                # A live Stop with the lease counted gone names an open turn,
+                # so the turn at the row's index has an open cursor.
+                cursor = await cursor_at(conn, row.id, row.turn_index)
+                assert cursor is not None
+                await finish_on(
+                    conn,
+                    cursor,
+                    segment_id=segment_id,
+                    status=TurnStatus.CANCELLED,
+                    now=datetime.fromtimestamp(self._clock(), UTC),
+                )
+                if not work.turn_recorded:
+                    keep_turn_records(work, cursor.state)
+                work.pending = {}
+                work.close_turn(final_text=work.turn_final_text, error=ErrorCode.CANCELLED.value)
+            changed = _changed_since(_serialize_durable(work), entry.baseline)
+            version = await self._write(conn, entry.pk, changed) if changed else row.version
+        entry.version = version
+        entry.baseline.update(changed)
+        _assign_changed(state, work, base)
+        return SegmentClose.STOPPED if stopped else SegmentClose.SAVED
+
+    def evict(self, principal: str, conversation_id: str) -> None:
+        """Forget this instance's live state for the conversation, so the
+        next request loads the row (`load`). The owner of a stream whose
+        closing write ended `LOST` or `FAILED` calls it before it releases
+        the conversation's lock, since the live state then holds what the
+        row does not. The runtime entry, with its locks, stays."""
+        entry = self._runtime.get((principal, conversation_id))
+        if entry is None:
+            return
+        entry.state = None
+        entry.draft = None
+        entry.baseline = {}
 
     async def drop_lease(
         self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0

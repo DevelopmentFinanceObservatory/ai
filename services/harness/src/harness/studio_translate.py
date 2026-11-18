@@ -86,12 +86,8 @@ from harness.graph.interfaces import Executor
 from harness.graph.orchestrate import HAND_OFF_EDGES
 from harness.graph.state import (
     APPROVE_PAUSE,
-    ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
-    ORCHESTRATOR_PLAN_RECORDS_KEY,
-    ORCHESTRATOR_SEARCHES_KEY,
-    ORCHESTRATOR_SPECS_KEY,
 )
 from harness.graph.switch import APPLY_CHOICE_STEP_TOOL
 from harness.mcp_client import _manifest_summary
@@ -117,7 +113,7 @@ from harness.studio_state import (
 from harness.studio_state import (
     land_component as state_land_component,
 )
-from harness.studio_store import StudioStore
+from harness.studio_store import StudioStore, keep_turn_records
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
 from harness.turn_records import basis_line, chip_kept, loose_match_notes, scope_chips
@@ -1419,21 +1415,6 @@ class _StatusLine:
 
 # The events a turn segment emits: the loop's own and the graph's nodes'.
 type SegmentEvent = GraphEvent | TurnEvent
-
-
-def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any]) -> None:
-    """Keep the plan records, search readings, spec blocks and applied chip
-    `state` holds, for `ConversationState.close_turn` to store with the turn.
-    Each key holds the turn's whole value, so the latest write replaces. The
-    blocks stay in process (`turn_specs`) until the turn closes."""
-    if ORCHESTRATOR_PLAN_RECORDS_KEY in state:
-        conversation.turn_plans = list(state[ORCHESTRATOR_PLAN_RECORDS_KEY] or [])
-    if ORCHESTRATOR_SEARCHES_KEY in state:
-        conversation.turn_readings = list(state[ORCHESTRATOR_SEARCHES_KEY] or [])
-    if ORCHESTRATOR_SPECS_KEY in state:
-        conversation.turn_specs = dict(state[ORCHESTRATOR_SPECS_KEY] or {})
-    if ORCHESTRATOR_APPLIED_KEY in state:
-        conversation.turn_applied_choice = dict(state[ORCHESTRATOR_APPLIED_KEY] or {})
 
 
 class _Translator:

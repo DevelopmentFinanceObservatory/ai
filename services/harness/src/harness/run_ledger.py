@@ -38,7 +38,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from executor.classify import ExecutorCode
 from executor.ledger import (
@@ -60,8 +60,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from harness.conversation import current_conversation_key
 from harness.studio_state import SegmentLost, renew_lease_now
-from harness.studio_store import StudioStore
 from harness.tool_contracts import HarnessCode
+
+if TYPE_CHECKING:
+    from harness.studio_store import StudioStore
 
 logger = logging.getLogger(__name__)
 

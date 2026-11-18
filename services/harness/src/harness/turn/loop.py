@@ -60,12 +60,11 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from compiler.surface import transient
 
 from harness.studio_state import HEARTBEAT_INTERVAL_S, SegmentLost, _wire_id
-from harness.studio_store import StudioStore
 from harness.turn import transcript as entries
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
 from harness.turn.node import Next, Node, NodeCtx, Pause, StopScope, TurnKey
@@ -79,6 +78,9 @@ from harness.turn.store import (
     require_open_pause,
 )
 from harness.turn.transcript import Transcript
+
+if TYPE_CHECKING:
+    from harness.studio_store import StudioStore
 
 logger = logging.getLogger(__name__)
 

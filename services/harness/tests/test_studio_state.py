@@ -43,6 +43,7 @@ from fastapi.responses import JSONResponse
 from harness import studio_state, studio_store
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.conversation import current_conversation_key
+from harness.graph.state import ORCHESTRATOR_PLAN_RECORDS_KEY, ORCHESTRATOR_SEARCHES_KEY
 from harness.studio_edit import _refresh_block
 from harness.studio_state import (
     CANVAS_DIGEST_MAX_BYTES,
@@ -60,7 +61,14 @@ from harness.studio_state import (
     make_recall_part,
     remove_cards,
 )
-from harness.studio_store import SEQ_BLOCK, ConversationStale, Renewal, StopPending, StudioStore
+from harness.studio_store import (
+    SEQ_BLOCK,
+    ConversationStale,
+    Renewal,
+    SegmentClose,
+    StopPending,
+    StudioStore,
+)
 from harness.turn.store import TurnStatus, TurnStore
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
 from harness.wire import (
@@ -83,6 +91,7 @@ from . import drawn_cards
 from .resolved_revision import resolved_revision
 from .store_clock import StoreClock
 from .test_turn_records import _scoped_part, _top_donors
+from .test_turn_store import ADMITTED_RUN
 
 CONVERSATION = "conv_01test0000"
 
@@ -2152,6 +2161,29 @@ async def test_a_resuming_claim_starts_past_numbers_a_lapsed_stream_reserved_aft
     assert state_b.seq == 2 * SEQ_BLOCK - 10
 
 
+async def test_a_takeover_numbers_past_every_frame_a_segment_sent_without_reserving_more(
+    new_store, clock
+) -> None:
+    """The claim reserves more numbers than a segment sends, so a stream
+    that sent ten thousand frames, reserving none, and died leaves a
+    takeover starting past all of them."""
+    store_a = new_store(clock=clock)
+    state_a = await store_a.create("principal", CONVERSATION)
+    state_a.begin_turn()
+    store_a.claim_segment("principal", CONVERSATION)
+    await store_a.save("principal", CONVERSATION)
+    state_a.seq = 10_000
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+
+    store_b = new_store(clock=clock)
+    state_b = await store_b.load("principal", CONVERSATION)
+    assert state_b is not None
+    store_b.claim_segment("principal", CONVERSATION)
+    await store_b.save("principal", CONVERSATION)
+
+    assert state_b.seq > 10_000
+
+
 async def test_a_stream_whose_lease_lapsed_reserves_no_more_frame_numbers(new_store, clock) -> None:
     """Another instance may already have loaded the reserved end to claim the
     turn from, so a lapsed stream's reservation is refused and the stored end
@@ -2438,6 +2470,267 @@ async def test_a_release_keeps_the_lease_only_for_a_stop_live_on_an_open_turn(
     assert renewal.held is kept
     assert (renewal.stop_id is not None) is kept
     assert await new_store(clock=clock).stop_live("principal", CONVERSATION) is kept
+
+
+async def _admit_run(engine: AsyncEngine) -> None:
+    """An admitted run on the conversation, which a close `cancelled` ends."""
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO runs (conversation, run_id, record) "
+                "SELECT id, 'run_1', CAST(:record AS jsonb) FROM conversations"
+            ),
+            {"record": json.dumps(ADMITTED_RUN)},
+        )
+
+
+async def _computing_runs(engine: AsyncEngine) -> int:
+    async with engine.connect() as conn:
+        return (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM runs WHERE record ->> 'status' IN ('admitted', 'running')"
+                )
+            )
+        ).scalar_one()
+
+
+@pytest.mark.parametrize(
+    ("cursor", "closed"),
+    [
+        pytest.param("none", SegmentClose.SAVED, id="no-cursor"),
+        pytest.param("running", SegmentClose.STOPPED, id="running"),
+        pytest.param("paused", SegmentClose.STOPPED, id="paused"),
+        pytest.param("taken", SegmentClose.SAVED, id="paused-on-the-stop-its-scope-took"),
+        pytest.param("done", SegmentClose.SAVED, id="closed"),
+    ],
+)
+async def test_a_closing_write_saves_the_segment_and_closes_a_turn_a_stop_is_live_for(
+    new_store, clock, pg_engine, cursor: str, closed: SegmentClose
+) -> None:
+    """The closing write stores the live state and clears the lease in one
+    transaction. When a Stop is live for the open turn, that transaction
+    also closes the cursor and the record `cancelled`, clears the pending
+    interrupts and ends the conversation's runs. Either way no Stop is left
+    live and the live state equals the row."""
+    store, segment_id = await _streaming_turn(new_store, clock, pg_engine, cursor)
+    await _admit_run(pg_engine)
+    state = store.current("principal", CONVERSATION)
+    assert state is not None
+    state.pending["int_1"] = _pending()
+    state.turn_final_text = "the answer so far"
+    state.seq = 41
+    if cursor == "done":
+        # The stream's last frames record the turn its cursor closed.
+        state.close_turn(final_text=state.turn_final_text)
+
+    assert await store.close_segment("principal", CONVERSATION, segment_id) is closed
+
+    stopped = closed is SegmentClose.STOPPED
+    stored = await new_store(clock=clock).load("principal", CONVERSATION)
+    assert stored is not None
+    assert (stored.segment, stored.seq, stored.turn_final_text) == (None, 41, "the answer so far")
+    assert set(stored.pending) == (set() if stopped else {"int_1"})
+    assert stored.turn_recorded is (stopped or cursor == "done")
+    if stopped:
+        assert stored.turns[-1]["error"] == "cancelled"
+    assert (await TurnStore(pg_engine).open_cursor("principal", CONVERSATION) is None) is (
+        stopped or cursor in ("none", "done")
+    )
+    assert await _computing_runs(pg_engine) == (0 if stopped else 1)
+    assert not await new_store(clock=clock).stop_live("principal", CONVERSATION)
+    assert not (await store.renew("principal", CONVERSATION, segment_id)).held
+    assert studio_store._serialize_durable(state) == studio_store._serialize_durable(stored)
+
+
+@pytest.mark.parametrize(
+    ("fault", "closed"),
+    [
+        pytest.param("takeover", SegmentClose.LOST, id="takeover"),
+        pytest.param("database-error", SegmentClose.FAILED, id="database-error"),
+        pytest.param("cursor-close-fails", SegmentClose.FAILED, id="cursor-close-fails"),
+        pytest.param("timeout", SegmentClose.FAILED, id="timeout"),
+    ],
+)
+async def test_a_closing_write_that_does_not_commit_stores_nothing_and_holds_the_lease_no_longer(
+    new_store, clock, pg_engine, monkeypatch, fault: str, closed: SegmentClose
+) -> None:
+    """A closing write fenced out by a takeover, refused by the database,
+    failing to close the turn on a live Stop, or past its timeout raises
+    nothing and stores nothing: the cursor stays open, the record and the
+    live fields unsaved. The live state keeps what was not stored, and the
+    instance gives the lease up, so a later save that claims nothing is
+    fenced out."""
+    store, segment_id = await _streaming_turn(new_store, clock, pg_engine, "running")
+    state = store.current("principal", CONVERSATION)
+    assert state is not None
+    state.turn_final_text = "unsaved"
+    timeout = 5.0
+    match fault:
+        case "takeover":
+            await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+            other = new_store(clock=clock)
+            await other.load("principal", CONVERSATION)
+            other.claim_segment("principal", CONVERSATION)
+            await other.save("principal", CONVERSATION, stopping=True)
+        case "database-error":
+
+            async def refused(*args: Any, **kwargs: Any) -> int:
+                raise RuntimeError("the database refused the write")
+
+            monkeypatch.setattr(store, "_write", refused)
+        case "cursor-close-fails":
+
+            async def unended(*args: Any, **kwargs: Any) -> None:
+                raise RuntimeError("the runs could not be ended")
+
+            monkeypatch.setattr("harness.turn.store.end_unfinished", unended)
+        case "timeout":
+            real_transaction = store._transaction
+
+            @asynccontextmanager
+            async def stuck() -> Any:
+                async with real_transaction() as conn:
+                    await asyncio.Event().wait()  # a row lock never granted
+                    yield conn
+
+            monkeypatch.setattr(store, "_transaction", stuck)
+            timeout = 0.05
+
+    assert (
+        await store.close_segment("principal", CONVERSATION, segment_id, timeout=timeout) is closed
+    )
+
+    monkeypatch.undo()
+    stored = await new_store(clock=clock).load("principal", CONVERSATION)
+    assert stored is not None
+    assert (stored.turn_recorded, stored.turn_final_text) == (False, "")
+    assert stored.segment is not None
+    open_turn = await TurnStore(pg_engine).open_cursor("principal", CONVERSATION)
+    assert open_turn is not None and open_turn.status is TurnStatus.RUNNING
+    assert (state.turn_final_text, state.segment is not None) == ("unsaved", True)
+    reloaded = await store.load("principal", CONVERSATION)
+    assert reloaded is not None
+    reloaded.turn_final_text = "written without the lease"
+    with pytest.raises(ConversationStale):
+        await store.save("principal", CONVERSATION)
+
+
+async def test_an_evicted_conversation_is_read_afresh_by_the_next_load(new_store) -> None:
+    """An instance whose live state holds what its closing write did not
+    store forgets it. The next load reads the row into a fresh state that
+    keeps the conversation's lock."""
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    state.turn_final_text = "never stored"
+
+    store.evict("principal", CONVERSATION)
+
+    assert store.current("principal", CONVERSATION) is None
+    reloaded = await store.load("principal", CONVERSATION)
+    assert reloaded is not None and reloaded is not state
+    assert reloaded.turn_final_text == ""
+    assert reloaded.lock is store.lock_for("principal", CONVERSATION)
+
+
+_FAILED_AT_ORCHESTRATE = {
+    "node": "orchestrate",
+    "type": "ToolRefused",
+    "message": "the source is gone",
+    "transient": False,
+    "refusal": {"code": "capability_unavailable", "retry_mode": "do_not_retry"},
+}
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [
+        pytest.param(TurnStatus.DONE, None, id="done"),
+        pytest.param(TurnStatus.FAILED, _FAILED_AT_ORCHESTRATE, id="failed"),
+        pytest.param(TurnStatus.CANCELLED, None, id="cancelled"),
+    ],
+)
+@pytest.mark.parametrize("lease", ["lapsed", "live"])
+async def test_a_turn_closed_under_a_failed_closing_write_is_recorded_unsaved_by_the_next_load(
+    new_store,
+    clock,
+    pg_engine,
+    monkeypatch,
+    status: TurnStatus,
+    error: dict[str, Any] | None,
+    lease: str,
+) -> None:
+    """The turn's cursor closes, then the stream's closing write fails, so
+    the client was told the turn could not be saved and the record stays
+    open. Once the lease has lapsed, the next load records the turn
+    `state_not_saved` with no reply, whatever the cursor's status, keeping
+    the plans and readings the cursor's state holds, and the next turn
+    claims and opens. While the lease is live its holder records the turn,
+    so a load leaves the record open."""
+    store = new_store(clock=clock)
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn()
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    turns = TurnStore(pg_engine)
+    opened = await turns.open_turn(
+        "principal",
+        CONVERSATION,
+        segment_id=segment_id,
+        turn_index=1,
+        node="seed",
+        inputs={},
+        state={},
+    )
+    await turns.finish(
+        opened,
+        segment_id=segment_id,
+        status=status,
+        error=error,
+        state={
+            ORCHESTRATOR_PLAN_RECORDS_KEY: [_PLAN_JSON],
+            ORCHESTRATOR_SEARCHES_KEY: [{"part": "kenya gdp"}],
+        },
+    )
+    state.close_turn(final_text="the answer the client never got")
+
+    async def refused(*args: Any, **kwargs: Any) -> int:
+        raise RuntimeError("the database refused the write")
+
+    monkeypatch.setattr(store, "_write", refused)
+    assert await store.close_segment("principal", CONVERSATION, segment_id) is SegmentClose.FAILED
+    monkeypatch.undo()
+    store.evict("principal", CONVERSATION)
+    if lease == "lapsed":
+        await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+
+    other = new_store(clock=clock)
+    loaded = await other.load("principal", CONVERSATION)
+
+    assert loaded is not None
+    if lease == "live":
+        assert not loaded.turn_recorded
+        return
+    assert loaded.turn_recorded
+    record = loaded.turns[-1]
+    assert (record["error"], record["assistant"]) == ("state_not_saved", "")
+    assert record["plans"] == [_PLAN_JSON]
+    assert record["readings"][0] == {"part": "kenya gdp"}
+    stored = await new_store(clock=clock).load("principal", CONVERSATION)
+    assert stored is not None and stored.turns == loaded.turns
+    work = other.draft("principal", CONVERSATION)
+    assert work.begin_turn() is None
+    next_segment = other.claim_segment("principal", CONVERSATION, work)
+    await other.save("principal", CONVERSATION, work)
+    await turns.open_turn(
+        "principal",
+        CONVERSATION,
+        segment_id=next_segment,
+        turn_index=2,
+        node="seed",
+        inputs={},
+        state={},
+    )
 
 
 @pytest.mark.parametrize("claim", ["next-turn", "resume"])

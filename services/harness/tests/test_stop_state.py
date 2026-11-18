@@ -6,12 +6,15 @@ Each store write is one transaction that locks the conversation row before
 it reads any Stop state, so the store's behaviours are the serial orders of
 its writes. `test_every_sequence_of_stop_writes_keeps_the_invariants` runs
 every sequence of up to `DEPTH` operations from a turn that is streaming,
-and asserts four invariants at each step that could break one:
+and asserts five invariants at each step that could break one:
 
 - no claim that starts or resumes work commits while a Stop is live;
 - a close `cancelled` leaves no `admitted` or `running` run;
 - a close `cancelled` closes the turn the Stop names (`stop_turn`);
-- a release that cleared the lease leaves no live Stop.
+- a closing write that cleared the lease leaves no live Stop;
+- a closing write that saved, or closed the turn on a Stop, leaves the
+  conversation's record and the turn's cursor agreeing on whether the
+  turn is closed, and the lease clear.
 
 The search runs breadth first and merges sequences that end in the same
 state (`World.state`): the stored row, cursors and runs with their ids
@@ -29,8 +32,8 @@ from typing import Any
 import pytest
 from harness import studio_state
 from harness.studio_state import SegmentBusy, SegmentLost
-from harness.studio_store import ConversationStale, StopState, StudioStore
-from harness.turn.store import Cursor, CursorStale, TurnStatus, TurnStore
+from harness.studio_store import ConversationStale, SegmentClose, StopState, StudioStore
+from harness.turn.store import CLOSED, Cursor, CursorStale, TurnStatus, TurnStore
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -85,10 +88,9 @@ def test_a_stop_is_live_while_the_turn_it_names_is_open_and_its_scope_did_not_ta
 class World:
     """One conversation, the stores that stand for its instances, and what
     the instance streaming it holds: `holder`, the store that claimed the
-    lease `segment_id`; `acting`, set when that claim acts on a Stop or a
-    release kept the lease for one; `to_open`, set while the turn it
-    claimed has no cursor yet; and `reported`, the Stop its last renewal
-    reported live."""
+    lease `segment_id`; `acting`, set when that claim acts on a Stop;
+    `to_open`, set while the turn it claimed has no cursor yet; and
+    `reported`, the Stop its last renewal reported live."""
 
     def __init__(self, engine: AsyncEngine, clock: StoreClock) -> None:
         self.engine = engine
@@ -133,14 +135,28 @@ class World:
     async def _open_cursor(self) -> Cursor | None:
         return await self.turns.open_cursor(PRINCIPAL, CONVERSATION)
 
+    async def _turn(self, turn_index: int) -> Cursor | None:
+        cursor = await self._open_cursor()
+        if cursor is not None and cursor.turn_index == turn_index:
+            return cursor
+        async with self.engine.connect() as conn:
+            turn_id = (
+                await conn.execute(
+                    text("SELECT id FROM turn_cursors WHERE turn_index = :turn_index"),
+                    {"turn_index": turn_index},
+                )
+            ).scalar_one_or_none()
+        return None if turn_id is None else await self.turns.turn(turn_id)
+
     async def _row(self) -> Any:
         async with self.engine.connect() as conn:
             return (
                 await conn.execute(
                     text(
                         "SELECT id, (turn_state ->> 'turn_index')::int AS turn_index, "
-                        "lease_segment_id, lease_expires_at, lease_cancel, stop_id, stop_turn "
-                        "FROM conversations"
+                        "COALESCE((turn_state ->> 'turn_recorded')::boolean, false) "
+                        "AS turn_recorded, lease_segment_id, lease_expires_at, lease_cancel, "
+                        "stop_id, stop_turn FROM conversations"
                     )
                 )
             ).one()
@@ -215,7 +231,7 @@ class World:
 
     async def cancelled(self) -> None:
         """The holder closes the turn `cancelled` on the Stop its renewal
-        reported, or that its claim or release kept the lease for."""
+        reported, or that its claim acts on."""
         cursor = await self._open_cursor()
         if self.holder is None or self.to_open or not (self.acting or self.reported):
             return
@@ -231,16 +247,38 @@ class World:
         assert cursor.turn_index == stop_turn, "a turn the Stop does not name closed cancelled"
         assert await self._computing_runs() == 0, "a cancelled turn left a run computing"
 
-    async def release(self) -> None:
-        if self.holder is None or self.segment_id is None:
+    async def close(self) -> None:
+        """The holder's closing write, as the stream's owner makes it: the
+        record of a turn its cursor closed is closed on the live state
+        first, as the stream's last frames close it, then `close_segment`
+        saves it and clears the lease, closing the turn on a live Stop."""
+        if self.holder is None or self.to_open or self.segment_id is None:
             return
-        kept = await self.holder.release(PRINCIPAL, CONVERSATION, self.segment_id)
-        if kept:
-            self.acting = True
-            return
+        row = await self._row()
+        state = self.holder.current(PRINCIPAL, CONVERSATION)
+        assert state is not None
+        cursor = await self._turn(row.turn_index)
+        if cursor is not None and cursor.status in CLOSED and not state.turn_recorded:
+            state.close_turn(
+                final_text="",
+                error=None if cursor.status is TurnStatus.DONE else cursor.status.value,
+            )
+        closed = await self.holder.close_segment(PRINCIPAL, CONVERSATION, self.segment_id)
         self.holder = None
-        if (await self._row()).lease_segment_id is None:
-            assert not await self.stop_live(), "a release cleared the lease under a live Stop"
+        if closed is SegmentClose.LOST:
+            return
+        assert closed is not SegmentClose.FAILED, "a closing write failed with no fault"
+        row = await self._row()
+        assert row.lease_segment_id is None, "a closing write left the lease"
+        assert not await self.stop_live(), "a closing write cleared the lease under a live Stop"
+        cursor = await self._turn(row.turn_index)
+        if cursor is not None:
+            assert row.turn_recorded is (cursor.status in CLOSED), (
+                "a closing write left the record and the cursor disagreeing"
+            )
+        if closed is SegmentClose.STOPPED:
+            assert cursor is not None and cursor.status is TurnStatus.CANCELLED
+            assert await self._computing_runs() == 0, "a cancelled turn left a run computing"
 
     async def _working_claim(self, *, begin: bool) -> None:
         store = self.instance()
@@ -378,7 +416,7 @@ _OPERATIONS: dict[str, Callable[[World], Awaitable[None]]] = {
         "pause_taken",
         "done",
         "cancelled",
-        "release",
+        "close",
         "claim",
         "resume",
         "act",
