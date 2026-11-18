@@ -1072,24 +1072,8 @@ class StudioRunner:
         async for frame in frames:
             try:
                 await self.store.reserve_frames(principal, conversation_id, segment_id)
-            except (SegmentLost, DatabaseUnavailable) as exc:
-                logger.warning(
-                    "studio frame reservation ended the stream: "
-                    "conversation %s segment %s (trace_id=%s): %s",
-                    conversation_id,
-                    segment_id,
-                    conversation.trace_id,
-                    exc,
-                )
-                yield _checkpoint_failed_frame(conversation, exc)
-                return
             except Exception as exc:
-                logger.exception(
-                    "studio frame reservation failed: conversation %s segment %s (trace_id=%s)",
-                    conversation_id,
-                    segment_id,
-                    conversation.trace_id,
-                )
+                _log_save_failure("frame reservation", conversation, segment_id, exc)
                 yield _checkpoint_failed_frame(conversation, exc)
                 return
             event = getattr(frame, "event", None)
@@ -1098,24 +1082,8 @@ class StudioRunner:
                 conversation.drop_resuming(segment_id)
                 try:
                     await self.store.checkpoint(principal, conversation_id, segment_id)
-                except (SegmentLost, DatabaseUnavailable) as exc:
-                    logger.warning(
-                        "studio checkpoint ended the stream: "
-                        "conversation %s segment %s (trace_id=%s): %s",
-                        conversation_id,
-                        segment_id,
-                        conversation.trace_id,
-                        exc,
-                    )
-                    yield _checkpoint_failed_frame(conversation, exc)
-                    return
                 except Exception as exc:
-                    logger.exception(
-                        "studio checkpoint failed: conversation %s segment %s (trace_id=%s)",
-                        conversation_id,
-                        segment_id,
-                        conversation.trace_id,
-                    )
+                    _log_save_failure("checkpoint", conversation, segment_id, exc)
                     yield _checkpoint_failed_frame(conversation, exc)
                     return
                 if event == "done":
@@ -1128,23 +1096,13 @@ class StudioRunner:
                 conversation.mark_approved_sent(segment_id)
                 try:
                     await self.store.checkpoint(principal, conversation_id, segment_id)
-                except (SegmentLost, DatabaseUnavailable) as exc:
-                    logger.warning(
-                        "studio checkpoint after plan.approved ended the stream: "
-                        "conversation %s segment %s: %s",
-                        conversation_id,
-                        segment_id,
-                        exc,
+                except Exception as exc:
+                    _log_save_failure(
+                        "checkpoint after plan.approved", conversation, segment_id, exc
                     )
-                    yield _checkpoint_failed_frame(conversation, exc)
-                    return
-                except Exception:
-                    logger.warning(
-                        "studio checkpoint after plan.approved failed: conversation %s segment %s",
-                        conversation_id,
-                        segment_id,
-                        exc_info=True,
-                    )
+                    if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
+                        yield _checkpoint_failed_frame(conversation, exc)
+                        return
 
     async def _locked(
         self,
@@ -1191,6 +1149,32 @@ class StudioRunner:
                     await self.store.release(principal, conversation_id, segment_id)
                 finally:
                     conversation.lock.release()
+
+
+def _log_save_failure(
+    what: str, conversation: ConversationState, segment_id: str, exc: Exception
+) -> None:
+    """Log a save `_checkpointed` made that failed: a lost segment or a
+    database unreachable until the lease's deadline as a warning, which
+    ends the stream as the heartbeat does, and anything else as an internal
+    fault, with its traceback."""
+    if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
+        logger.warning(
+            "studio %s ended the stream: conversation %s segment %s (trace_id=%s): %s",
+            what,
+            conversation.conversation_id,
+            segment_id,
+            conversation.trace_id,
+            exc,
+        )
+    else:
+        logger.exception(
+            "studio %s failed: conversation %s segment %s (trace_id=%s)",
+            what,
+            conversation.conversation_id,
+            segment_id,
+            conversation.trace_id,
+        )
 
 
 def _streaming_conflict_response(detail: str, *, retry_after_seconds: int = 5) -> JSONResponse:
@@ -1532,8 +1516,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     # An instance still running on ADK sessions opened this
                     # turn since the load. Nothing is claimed, so the retry's
                     # load re-imports what it wrote and meets its lease. The
-                    # turn begun above was never saved, so this instance
-                    # forgets it.
+                    # turn begun above was never saved, so this instance drops
+                    # it from its live state.
                     studio.store.discard_unsaved(principal, body.conversation_id)
                     lock.release()
                     return _streaming_conflict_response(
@@ -1613,8 +1597,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         except BaseException:
             # The stream wrapper normally releases the segment and the lock;
             # a failure before the response starts streaming drops the lease,
-            # forgets the live state, whose later changes no save stored, and
-            # releases the lock here. The claim save already covers
+            # drops the live state's changes no save stored, and releases the
+            # lock here. The claim save already covers
             # `begin_turn`'s effects, so the turn stays open and the next
             # `/turn` closes it as `begin_turn` closes any open turn. A path
             # above that let go of the lock itself cleared `claimed` first.
@@ -1858,7 +1842,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         # pending entry stays resuming under the dropped segment with the
         # answer recorded, so a retry of the same answer claims at once and
         # resumes. The turn lines added below were never saved, so this
-        # instance forgets its live state, and the retry's load reads the row.
+        # instance drops them from its live state.
         try:
             # The instance that resumes a paused turn may not be the one that
             # opened it: its telemetry span is process-local and never persisted,

@@ -578,18 +578,12 @@ class _TurnSpecs:
     size: int
 
 
-async def _turn_session_specs(
-    engine: AsyncEngine, principal: str, session_id: str
-) -> _TurnSpecs | None:
-    """The spec blocks a turn's own ADK session holds, converted, empty when
-    it holds none. None when the session does not exist."""
-    return _converted_turn(session_id, await _turn_session_row(engine, principal, session_id))
-
-
 async def _read_turn_session(
     conn: AsyncConnection, principal: str, session_id: str
 ) -> _TurnSpecs | None:
-    """`_turn_session_specs` on `conn`."""
+    """The spec blocks the turn session `session_id` holds, read on `conn`
+    and converted, empty when it holds none. None when the session does not
+    exist."""
     return _converted_turn(session_id, await _stored_turn_specs(conn, principal, session_id))
 
 
@@ -1324,8 +1318,12 @@ def _diverged(principal: str, conversation_id: str) -> ConversationHeld:
     return ConversationHeld(conversation_id)
 
 
+@dataclass
 class _NoAdk:
-    """The job's stores read the tables as they stand and serve no turn."""
+    """The job's stores read the tables as they stand and serve no turn.
+    `blocks` gathers what `convert_specs` converted and what it could not."""
+
+    blocks: Blocks = field(default_factory=Blocks)
 
     async def reimport(self, principal: str, conversation_id: str) -> None:
         del principal, conversation_id
@@ -1335,7 +1333,7 @@ class _NoAdk:
         return False
 
     def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
-        return _converted_specs(session_id, specs, Blocks())
+        return _converted_specs(session_id, specs, self.blocks)
 
 
 def _store(engine: AsyncEngine) -> StudioStore:
@@ -1648,8 +1646,20 @@ async def _close_one(
     report: CloseReport,
 ) -> None:
     """Close one conversation's open ADK turn, if it has one, and note what
-    became of it in `report`."""
-    store = _store(engine)
+    became of it in `report`. The open turn's spec blocks are the ones the
+    store's `load` read and converted, through the server's reader of the
+    turn session's row (`_turn_session_row`)."""
+    sessions: set[str] = set()
+
+    async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
+        stored = await _turn_session_row(engine, principal, session_id)
+        if stored is None:
+            return {}
+        sessions.add(session_id)
+        return stored[0]
+
+    bridge = _NoAdk()
+    store = StudioStore(engine, turn_specs=turn_specs, adk=bridge)
     state = await store.load(principal, conversation_id)
     if state is None or not state.turn_index or state.turn_recorded:
         return
@@ -1657,17 +1667,15 @@ async def _close_one(
     if leased:
         report.live.append(name)
         return
-    turn = await _turn_session_specs(engine, principal, state.session_id)
-    if turn is None:
+    if state.session_id not in sessions:
         report.not_on_adk.append(name)
         return
     # A block that does not convert is kept as stored, as `import` keeps one.
-    if turn.blocks.unconvertible:
-        report.findings[name] = turn.blocks.unconvertible
+    if bridge.blocks.unconvertible:
+        report.findings[name] = bridge.blocks.unconvertible
     if not apply:
         report.closed.append(name)
         return
-    state.turn_specs = turn.specs
     state.close_turn(final_text=state.turn_final_text, error="abandoned")
     state.pending.clear()
     # No stream holds the lease, so any lease on record has lapsed. Clearing

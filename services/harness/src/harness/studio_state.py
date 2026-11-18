@@ -1073,16 +1073,19 @@ class ConversationState:
         self.turn_recorded = False
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
-    def abandon_turn_span(self) -> None:
-        """End the turn's telemetry span, when this instance holds one, as
-        `close_turn` ends it for an abandoned turn, without recording the
-        turn: the state holding it is about to be dropped
-        (`StudioStore.discard_unsaved`), and no later close could end it."""
+    def lose_turn_span(self) -> None:
+        """End the turn's telemetry span, when this instance holds one, with
+        status `segment_lost` at level `WARNING`, without recording the
+        turn: the stream ended because its segment was lost or the database
+        stayed unreachable, nothing of the turn was saved, and whichever
+        instance goes on with it opens a span of its own
+        (`ensure_turn_span`)."""
         end_turn_span(
             self._telemetry_span,
             request=self.turn_user_message,
             response=self.turn_final_text,
-            error="abandoned",
+            error="segment_lost",
+            level="WARNING",
         )
         self._telemetry_span = None
 
