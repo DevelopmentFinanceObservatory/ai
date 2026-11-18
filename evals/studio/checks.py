@@ -54,7 +54,6 @@ from harness.reply_figures import (
     point_figure,
     series_ends,
 )
-from harness.turn_events import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.wire import STUDIO_FRAME_ADAPTER
 from pydantic import ValidationError
 
@@ -1338,15 +1337,15 @@ def check_transcript(
 # Case checks: properties a case names in its `checks` list
 # ---------------------------------------------------------------------------
 
-# ADK's fence around another agent's quoted turn
-# (`google.adk.flows.llm_flows.context._fencing.QUOTED_CONTENT_BEGIN`), spelled out so a
-# change to the marker shows here instead of passing unnoticed.
+# The fence google-adk put around another agent's quoted turn. No request may
+# show one: each agent reads its own hand-backs and answers.
 RELAY_MARKER = "<<<BEGIN_QUOTED_AGENT_CONTENT>>>"
-# The function name ADK gives a pause for the user's input.
-REQUEST_INPUT_NAME = REQUEST_INPUT_FUNCTION_CALL_NAME
+# The function call google-adk paused a turn on for the user's input. No
+# request may show one: a pause and its answer reach the browser alone.
+REQUEST_INPUT_NAME = "adk_request_input"
 
-# ADK opens each relayed payload with the relaying agent's name in brackets; its
-# own framing sentence carries the marker with no name.
+# A fenced payload opens with the relaying agent's name in brackets; the
+# framing sentence around it carries the marker with no name.
 _AUTHOR_TAG = re.compile(r"^\[([^\]\n]+)\]")
 
 
@@ -1418,7 +1417,7 @@ def approval_payload_absent_after_approval(evidence: Evidence) -> list[str]:
 
 def _fenced_authors(request: dict[str, Any]) -> list[str]:
     """The author named on each fenced block in `request`'s contents, `untagged`
-    for ADK's own framing sentence, which names none."""
+    for the framing sentence, which names none."""
     authors = []
     for content in request["contents"]:
         for part in content.get("parts", []):
@@ -1442,16 +1441,16 @@ def _relay_marker_violations(evidence: Evidence, *, check: str, agent: str | Non
 
 
 def no_relay_marker(evidence: Evidence) -> list[str]:
-    """No model request holds ADK's fence around another agent's quoted turn.
-    The orchestrator and the planner read their own hand-backs and answers;
-    a fenced block is the framework presenting a graph node's output as another
-    agent's speech."""
+    """No model request holds a fence around another agent's quoted turn
+    (`RELAY_MARKER`). The orchestrator and the planner read their own
+    hand-backs and answers; a fenced block presents a graph node's output as
+    another agent's speech."""
     return _relay_marker_violations(evidence, check="no_relay_marker", agent=None)
 
 
 def planner_sees_no_relay_marker(evidence: Evidence) -> list[str]:
     """`no_relay_marker` over the planner's requests alone: a planner entered a
-    second time in a turn reads the turn's session, and the orchestrator's
+    second time in a turn reads the turn's transcript, and the orchestrator's
     hand-back from the first plan is in it."""
     return _relay_marker_violations(evidence, check="planner_sees_no_relay_marker", agent="planner")
 
@@ -1541,8 +1540,8 @@ def previous_final_message_in_view(evidence: Evidence) -> list[str]:
 def earlier_plan_in_view(evidence: Evidence) -> list[str]:
     """Each turn's first orchestrator request names, by spec_id, every source a
     plan step retrieved in an earlier turn. A question about a plan ("why does
-    the data stop in 2023?") comes a turn after the plan ran, in a session that
-    holds none of that turn's events."""
+    the data stop in 2023?") comes a turn after the plan ran, in a turn whose
+    transcript holds none of that turn's records."""
     if missing := _need_log(evidence, "earlier_plan_in_view"):
         return missing
     turns: list[tuple[list[dict[str, Any]], list[str]]] = []

@@ -692,10 +692,9 @@ logging.getLogger("harness.planner_adapter").addFilter(_DropPlanRecorded())
 
 
 def quiet_logs() -> None:
-    """Silence what a run's record already holds: ADK's traceback for a failed node and
-    the wiring's line for an entry the adapter gave up on."""
-    for name in ("google_adk", "harness.wiring"):
-        logging.getLogger(name).setLevel(logging.CRITICAL)
+    """Silence what a run's record already holds: the wiring's line for an entry the
+    adapter gave up on."""
+    logging.getLogger("harness.wiring").setLevel(logging.CRITICAL)
 
 
 # The stop reason of an entry the adapter gave up on (`PlannerAdapterError`): the planner
@@ -758,7 +757,7 @@ _UNFINISHED_CALL: dict[str, Any] = {
 
 @dataclass
 class Probe:
-    """What one entry did that its session's events do not carry: the plan the first
+    """What one entry did that its transcript does not carry: the plan the first
     accepted proposal recorded and the id of the `propose_plan` call that recorded it,
     the code of the refusal an entry with no plan ended on, each request the planner's
     model client was sent, each model call, with its tokens and latency once the whole
@@ -944,7 +943,7 @@ class _ProbedAsyncClient:
 class _ProbedClient(Client):
     """`client` with `_ProbedAsyncClient` as its `aio`.
 
-    A `Client`, since ADK's `Gemini` takes nothing else, built without
+    A `Client`, as `PlannerAdapter` types its `client`, built without
     `Client.__init__`. Every other attribute is `client`'s own, and the wrapped client
     stays open when this one is collected.
     """
@@ -1031,7 +1030,7 @@ async def run_entry(
     answers: Sequence[Mapping[str, Any]] = (),
     translation: TranslationCalls | None = None,
 ) -> EntryRun:
-    """Run `task`'s planner entry once on a fresh session.
+    """Run `task`'s planner entry once on a fresh turn.
 
     The planner's model calls go through `client`, a live client (`live_client`) when
     None. `edits` change each request it is sent (`RequestEdit`), and the probe notes

@@ -17,9 +17,9 @@ The eval set for the studio surface. It scores two things at once:
   (`test_config.json` sets the judge model, samples, and threshold).
 
 This suite has its own runner. The behaviors under test live in the HTTP
-surface, which `adk eval` cannot reach: the translator, the Edit Card
-route, interrupt resumes, composition mutations, the canvas digest. The
-runner drives the real routes instead and shares the repo's two-lane rule
+surface: the translator, the Edit Card route, interrupt resumes, composition
+mutations, the canvas digest. The runner drives the real routes and shares
+the repo's two-lane rule
 (`evals/README.md`): the deterministic layer runs in CI, the model-judged
 layer never does.
 
@@ -48,9 +48,9 @@ its violations and rubric scores.
 ## Scripted mode
 
 Scripted mode (`orchestrator_scripted.py`) serves the studio routes over the real
-workflow, the real orchestrator tools and the real `PlannerAdapter`, and scripts what a
-model or an upstream would answer. The planner's model calls are answered by a
-scripted google-genai client (`harness.scripted.scripted_client`). CI runs the same
+turn graph, the real orchestrator agent and tools and the real `PlannerAdapter`, and
+scripts what a model or an upstream would answer. Both agents' model calls are answered
+by scripted google-genai clients (`harness.scripted.scripted_client`). CI runs the same
 battery via `services/harness/tests/test_studio_orchestrator_eval.py`. A case's `scenario`
 (inline, or the name of an entry in the file's `scenarios`) holds:
 
@@ -79,8 +79,8 @@ case's `checks` list names properties from `checks.py`'s `CASE_CHECKS` that read
 - `approval_payload_absent_after_approval`: no request made after the plan's first
   step ran holds the approval pause (the plan and the user's answer).
 - `no_relay_marker`, `planner_sees_no_relay_marker`: no request, or no planner
-  request, holds ADK's fence around another agent's quoted turn, which is how a
-  workflow node's output reaches a model when it is authored by the node.
+  request, holds a fence around another agent's quoted turn (`checks.RELAY_MARKER`),
+  which would present a graph node's output to a model as another agent's speech.
 - `planner_first_message_carries_search_evidence`: the planner's first request names
   every spec id, warning code and window year the turn's searches returned.
 - `previous_final_message_in_view`: each turn's first orchestrator request shows the

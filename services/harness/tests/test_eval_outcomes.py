@@ -1,22 +1,19 @@
 """Proves each eval case's expected outcome is reachable, with no model.
 
-`evals/agents/harness_translator_v1/outcome_metric.py`'s `workflow_outcome`
-metric asserts a case's expected tool response against a real run's, but
-nothing there checks that the expectation itself is one the real tools can
-produce against the canned discovery stub -- an author could type a spec_id
-that discovery never returns, or a `group_by` the requirement doesn't state.
-The translation cases run no model at all, so this module is the only thing
-that checks them.
+A case states the tool response it expects, and nothing else checks that the
+expectation is one the real tools can produce against the canned discovery
+stub -- an author could type a spec_id that discovery never returns, or a
+`group_by` the requirement doesn't state. The translation cases run no model
+at all, so this module is the only thing that checks them.
 
-This module closes that gap. For every case in `harness-translator-v1.
-evalset.json`, it loads the seeded plan and drives the real `discover_source`
-and `propose_operations`/`return_to_planner` functions
+For every case in `harness-translator-v1.evalset.json`, it loads the seeded
+plan and drives the real `discover_source` and
+`propose_operations`/`return_to_planner` functions
 (`translator.tool.build_translator_core`, the same three translation drives
-directly, in Python) against `harness_translator_v1.discovery_stub.EvalSurface` on a fake
-`ToolContext`, and asserts the result against the case's own expected
-`tool_responses` entry with `matches_subset` -- the same subset matcher
-`workflow_outcome` uses, imported rather than restated, so the two can never
-silently disagree about what "matches" means.
+directly, in Python) against `harness_translator_v1.discovery_stub.EvalSurface`
+on a fake call context (`FakeToolContext`), and asserts the result against the
+case's own expected `tool_responses` entry with
+`harness_translator_v1.outcome_metric.matches_subset`.
 
 A mapping case's translation is built by `mirror`: one `retrieve` per dataset
 requirement, naming the spec_id discovery found for it, and one operation of

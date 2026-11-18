@@ -1,10 +1,10 @@
 """CI's share of the studio eval set (`evals/studio`, `--mode scripted`).
 
-The cases run the real workflow and planner adapter under a real ADK runner, with
-every model scripted, and check what each model was shown. Three things are
-held here: the cases report as marked (a pass, or an expected failure that
-still fails), each check and each stream invariant fails when the property it
-states is broken, and the case file can fail.
+The cases run the real turn graph, orchestrator agent and planner adapter on
+the turn loop, with every model scripted, and check what each model was shown.
+Three things are held here: the cases report as marked (a pass, or an expected
+failure that still fails), each check and each stream invariant fails when the
+property it states is broken, and the case file can fail.
 
 `evals/` sits outside the workspace, so its modules are loaded by file path.
 """
@@ -23,12 +23,12 @@ from types import ModuleType
 from typing import Any
 
 import pytest
-from google.adk.events import Event
 from google.genai import types
 from harness.planner_run import failed_tool_answer
 from harness.reply_figures import card_result
 from harness.studio_state import ConversationState
 from harness.studio_translate import _RecordingExecutor, _Translator
+from orchestrator.run import ModelResponded, ToolsAnswered
 from planner.skills import GET_SKILL
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -911,10 +911,11 @@ async def test_a_count_explain_dfo_read_grounds_the_reply_that_quotes_it() -> No
     )
     frames = [
         frame.model_dump(mode="json")
-        for part in (types.Part(function_call=call), types.Part(function_response=read))
-        for frame in await translator.translate(
-            Event(author="dfo_orchestrator", content=types.Content(parts=[part]))
+        for event in (
+            ModelResponded(parts=(types.Part(function_call=call),)),
+            ToolsAnswered(answers=(read,), state={}),
         )
+        for frame in await translator.translate(event)
     ]
 
     assert _ungrounded(frames, "DFO holds 108,905 indicators in 92 datasets.") == []
