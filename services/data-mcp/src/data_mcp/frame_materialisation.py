@@ -30,7 +30,7 @@ import hashlib
 import io
 import json
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, tzinfo
 from functools import partial
@@ -67,6 +67,7 @@ from common.place_type import (
     TYPED_ROLES,
     UNTYPED,
     enrichment_role,
+    kind_column,
     type_column,
 )
 from common.row_budget import RowBudgetExhausted, RowClaim, row_budget
@@ -96,7 +97,7 @@ from fastmcp.exceptions import ResourceError
 from pydantic import ValidationError
 
 from data_mcp.client_holder import get_client
-from data_mcp.deadline import CallDeadline
+from data_mcp.deadline import DEADLINE_RETRY_AFTER_S, CallDeadline
 from data_mcp.manifest import ArtifactEntry, Manifest
 from data_mcp.settings import Settings
 from data_mcp.tool_errors import ToolRefusal
@@ -179,22 +180,26 @@ FLOW_ENRICHMENT_COLUMNS: tuple[str, ...] = (
     *KIND_COLUMNS,
 )
 
+# Every role column apis reads as a party of a flow and gives a `{role}_party_kind` column
+# when asked for the kinds: the flow-axis labels and each graph role placed on one (dfo-apis
+# `materialise.enrichment.is_party_role` over `dfo_platform.roles.ROLE_AXES`). The tables
+# data-mcp serves today spell their sides `PARTY_ROLES`, a subset of these.
+FLOW_PARTY_ROLE_COLUMNS: frozenset[str] = frozenset(
+    {
+        *FLOW_ROLE_COLUMNS,
+        *PARTY_ROLES,
+        "provider",
+        "creditor",
+        "source",
+        "recipient",
+        "debtor",
+        "target",
+    }
+)
+
 # The earlier token for a flow party kind that old recorded selections carry. Replays translate
 # it to the door's current `KIND_COLUMNS` while preserving the rest of the selection.
 _LEGACY_KIND_COLUMN = "kind"
-
-# The coverage dimension apis counts a frame's years under, beside one per role column.
-_YEARS_DIMENSION = "years"
-
-
-def coverage_roles(manifest: Manifest) -> tuple[str, ...]:
-    """The role columns of the frame `manifest` names: its coverage dimensions, one per
-    role the frame declares, less the years."""
-    return tuple(
-        dimension.label
-        for dimension in manifest.coverage.dimensions
-        if dimension.label != _YEARS_DIMENSION
-    )
 
 
 def resolved_options(options: Mapping[str, Any], *, manifest: Manifest) -> Mapping[str, Any]:
@@ -224,8 +229,8 @@ def resolved_options(options: Mapping[str, Any], *, manifest: Manifest) -> Mappi
 
 def names_flow_role(identity: Mapping[str, Any] | None) -> bool:
     """Whether `identity` names a flow axis, as an entity or an open role, by its role word
-    (`origin`) or its column (`financingRecipient`). `without_party_totals` cuts the group
-    totals from the open party roles of such a spec."""
+    (`origin`) or its column (`financingRecipient`). Its one use is `replayed_mint_options`,
+    which gives a replayed root of such an identity the flow enrichment."""
     roles = {*((identity or {}).get("entities") or {}), *((identity or {}).get("open_roles") or ())}
     return bool(roles & (FLOW_ROLE_COLUMNS.keys() | PARTY_ROLES))
 
@@ -322,6 +327,7 @@ async def materialise_and_register(
     scope: Mapping[str, Any] | None = None,
     transport: httpx2.AsyncBaseTransport | None = None,
     deadline: CallDeadline | None = None,
+    kinds_asked: bool = False,
 ) -> MaterialisationOutcome:
     """Fetch, parse, and register the frame `manifest` names, or report why it couldn't.
 
@@ -356,11 +362,21 @@ async def materialise_and_register(
     (before any row is parsed), parses it into a `Frame`, and registers it under
     its frame reference.
 
-    Returns a `"degraded"` outcome (never a refusal) when the artifact bytes could not be
-    fetched within budget: the mint itself succeeded and named a real, durable result, and
-    throwing that away would waste a call that can already run up to 125 seconds. A
-    genuinely unusable manifest or artifact refuses instead -- see each refusal branch
-    below for which.
+    A call that asks for the party kinds, by `kinds_asked` or a kind token in
+    `options.columns`, needs `{role}_party_kind` beside every flow party role column
+    the frame holds (`FLOW_PARTY_ROLE_COLUMNS`, `_kind_columns_refusal`), or it refuses
+    `upstream_response_unusable`. A fetched artifact is checked on its footer's columns,
+    after the row ceiling and before any row is claimed, stored or recorded. A held pair is
+    checked on the columns read back, whoever wrote it. This check covers `get_data` and
+    `mint_recorded_root`'s replays alike. A frame with no flow party role column passes.
+
+    Returns a `"degraded"` outcome when the artifact bytes could not be fetched within
+    budget: the mint itself succeeded and named a real, durable result, and throwing that
+    away would waste a call that can already run up to 125 seconds. A call that asks for
+    the kinds refuses `service_unavailable` with a wait instead whenever the frame's
+    columns were never read, a `"fetch"` or `"store_unchecked"` degrade, since the frame
+    its reference names could not be checked. A genuinely unusable manifest or artifact
+    refuses -- see each refusal branch below for which.
 
     `deadline` bounds each step. The store read must end with `_MIN_FETCH_BUDGET_S`
     plus `_STORE_WRITE_RESERVE_S` left, and one that runs out is followed by a fetch
@@ -375,6 +391,7 @@ async def materialise_and_register(
     ref = _ref_or_refusal(manifest, options=options, stamp=stamp)
     if isinstance(ref, MaterialisationOutcome):
         return ref
+    kinds_asked = kinds_asked or requests_kinds(options.get("columns") or ())
     outcome = await _register(
         ref,
         manifest=manifest,
@@ -384,9 +401,22 @@ async def materialise_and_register(
         writer=writer,
         transport=transport,
         deadline=deadline,
+        kinds_asked=kinds_asked,
     )
     if outcome.status == "refused":
         return outcome
+    if kinds_asked and outcome.status == "degraded" and outcome.role_keys is None:
+        return MaterialisationOutcome(
+            status="refused",
+            attempts=outcome.attempts,
+            refusal=ToolRefusal.service_unavailable(
+                service="the frame store",
+                detail=f"the frame of {ref.spec_id} could not be read inside this call's "
+                f"deadline ({outcome.degraded_reason}), so its party kind columns could not "
+                "be checked",
+                retry_after_s=DEADLINE_RETRY_AFTER_S,
+            ),
+        )
     if outcome.stat_var_count is not None:
         await _write_mint_record(
             MintRecord(
@@ -449,6 +479,7 @@ async def _register(
     writer: str,
     transport: httpx2.AsyncBaseTransport | None,
     deadline: CallDeadline | None,
+    kinds_asked: bool,
 ) -> MaterialisationOutcome:
     """`materialise_and_register` for the frame held under `ref`, named under `stamp`
     (`_named_stamp`)."""
@@ -457,7 +488,7 @@ async def _register(
         store, ref, max_frame_rows=settings.max_frame_rows, deadline=deadline
     )
     if isinstance(checked, MaterialisationOutcome):
-        return checked
+        return _held_kinds_checked(checked, spec_id=ref.spec_id, kinds_asked=kinds_asked)
     fetch_failure_reason = checked
 
     # `frame_ref_for` keeps the mint's own pair exactly for the version's canonical
@@ -524,8 +555,25 @@ async def _register(
         settings=settings,
         writer=writer,
         store=store,
+        kinds_asked=kinds_asked,
         write_deadline=deadline.reserving(_AFTER_WRITE_RESERVE_S) if deadline is not None else None,
     )
+
+
+def _held_kinds_checked(
+    checked: MaterialisationOutcome, *, spec_id: str, kinds_asked: bool
+) -> MaterialisationOutcome:
+    """`checked`, the outcome the store read settled on, or the refusal of a held frame of
+    `spec_id` that lacks a flow party role's kind column when the call asked for the kinds
+    (`_kind_columns_refusal`), read off the columns the frame was read back with."""
+    if not kinds_asked or checked.role_keys is None:
+        return checked
+    refusal = _kind_columns_refusal(
+        checked.role_keys, frame=f"the frame this service holds for {spec_id}"
+    )
+    if refusal is None:
+        return checked
+    return MaterialisationOutcome(status="refused", attempts=0, refusal=refusal)
 
 
 def _no_artifact_refusal(*, listed_by: str, rendering: Mapping[str, Any]) -> MaterialisationOutcome:
@@ -693,6 +741,7 @@ async def _verify_parse_and_register(
     settings: Settings,
     writer: str,
     store: MaterialisationStore,
+    kinds_asked: bool,
     write_deadline: CallDeadline | None,
 ) -> MaterialisationOutcome:
     """Verify `fetched` against `artifact_digest`, bound and parse it into a
@@ -703,7 +752,9 @@ async def _verify_parse_and_register(
     The artifact's rows are claimed from the process's frame row budget
     (`common.row_budget`) once its footer gives their count, and held through the parse
     and until the store write ends; a claim that does not fit refuses
-    `service_unavailable`.
+    `service_unavailable`. Before the claim, a call that asks for the party kinds
+    (`kinds_asked`) refuses when the footer's columns hold a flow party role without that
+    role's kind column (`_kind_columns_refusal`), so no such frame is stored or recorded.
     """
     computed_digest = f"sha256:{hashlib.sha256(fetched).hexdigest()}"
     if computed_digest != artifact_digest:
@@ -726,7 +777,7 @@ async def _verify_parse_and_register(
         )
 
     try:
-        row_count = _parquet_row_count(fetched)
+        row_count, columns = _parquet_footer(fetched)
     except pa.ArrowException as exc:
         return _unparseable(exc)
     if row_count > settings.max_frame_rows:
@@ -738,6 +789,10 @@ async def _verify_parse_and_register(
                 f"service's {settings.max_frame_rows}-row ceiling"
             ),
         )
+    if kinds_asked and (
+        refusal := _kind_columns_refusal(columns, frame=f"the frame apis served for {ref.spec_id}")
+    ):
+        return MaterialisationOutcome(status="refused", attempts=1, refusal=refusal)
     try:
         claim = row_budget().claim(row_count)
     except RowBudgetExhausted as exc:
@@ -1117,13 +1172,32 @@ async def _fetch_artifact_bytes_uncapped(
     return None
 
 
-def _parquet_row_count(data: bytes) -> int:
-    """The artifact's row count, read from its own Parquet footer metadata only --
+def _parquet_footer(data: bytes) -> tuple[int, tuple[str, ...]]:
+    """The artifact's row count and column names, read from its own Parquet footer only --
     never materialising row data, so an oversized artifact is bounded before any row is
     actually parsed. Raises `pyarrow.ArrowException` for bytes that aren't a valid or
     complete Parquet file; the caller (`materialise_and_register`) maps that to a refusal
     rather than letting it escape."""
-    return pq.ParquetFile(io.BytesIO(data)).metadata.num_rows
+    parquet = pq.ParquetFile(io.BytesIO(data))
+    return parquet.metadata.num_rows, tuple(parquet.schema_arrow.names)
+
+
+def _kind_columns_refusal(columns: Sequence[str], *, frame: str) -> ToolRefusal | None:
+    """The `upstream_response_unusable` of `frame`, which names where the frame came from,
+    when its `columns` hold a flow party role (`FLOW_PARTY_ROLE_COLUMNS`) without its
+    `{role}_party_kind` column: a frame that would serve every group total beside its
+    parties. `None` when every flow party role column has its kinds."""
+    held = set(columns)
+    lacking = sorted(
+        role for role in FLOW_PARTY_ROLE_COLUMNS & held if kind_column(role) not in held
+    )
+    if not lacking:
+        return None
+    return ToolRefusal.upstream_response_unusable(
+        detail=f"{frame} lacks the party kind "
+        f"columns for {' and '.join(lacking)}, so it would serve every group total beside its "
+        "parties"
+    )
 
 
 _UTC_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
