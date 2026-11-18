@@ -148,7 +148,7 @@ class TurnDriver:
     lease and its Stop flag, and `turns` its `TurnStore`. `store_kwargs`
     reach the `StudioStore`, such as a `tests.store_clock.StoreClock`'s.
     `observe`, when set, hears each event as the segment emits it, as
-    Studio's translator does (`harness.studio_translate._Translator.emit`).
+    Studio's segment work does (`harness.studio._SegmentWork.drive`).
     """
 
     def __init__(

@@ -42,7 +42,7 @@ from contextlib import (
     suppress,
 )
 from datetime import UTC, datetime
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from common.telemetry import flush_telemetry
 from compiler.surface import ToolSurface
@@ -103,17 +103,18 @@ from harness.studio_store import (
 )
 from harness.studio_stream import Emit, LiveOwners, open_stream
 from harness.studio_translate import (
+    RecordMarks,
     SegmentEvent,
-    _ExecutorRecord,
+    _EventRecords,
     _RecordingExecutor,
     _RecordingSurface,
     _stream_fatal,
     _Translator,
+    closed_on_reply,
     held_labels,
     keep_turn_records,
     recorded_fatal,
 )
-from harness.tool_contracts import HarnessCode
 from harness.turn import transcript as entries
 from harness.turn.events import TurnEvent, TurnFailed
 from harness.turn.loop import (
@@ -138,13 +139,11 @@ from harness.wire import (
     CompositionActor,
     CompositionManifest,
     CompositionMutation,
-    Done,
     ElicitationAnswer,
     ErrorCode,
     ErrorFrame,
     InterruptDecision,
     InterruptResponse,
-    MessageComplete,
     OptionAnswer,
     PlanProposed,
     PlanRevisionStaleError,
@@ -596,6 +595,17 @@ class StudioRunner:
                 return Outcome.CANCELLED
 
 
+# An event of a segment's drive, marked with the calls recorded before it.
+type _MarkedEvent = tuple[SegmentEvent, RecordMarks]
+
+
+def event_key(event: SegmentEvent) -> tuple[str, str] | None:
+    """The key a segment's event waits for its owner under (`Emit`): a plan
+    step's progress report replaces a waiting report of the same step, so a
+    stream that falls behind the run shows where each step is now."""
+    return ("progress", event.step_id) if isinstance(event, StepProgress) else None
+
+
 class _SegmentWork:
     """The work of a claimed segment that runs the turn loop, for its owner
     (`harness.studio_stream.Work`): one segment of the turn at `cursor`
@@ -647,6 +657,9 @@ class _SegmentWork:
             surface_recorder=runner.surface_recorder,
             approving=approving,
         )
+        # The drive's half of the translation: it marks each event with the
+        # calls recorded before it, and reads nothing else.
+        self._marks = _EventRecords(runner.recorder, runner.surface_recorder)
         self._renew_now = asyncio.Event()
         # Whether a `TurnFailed` event was translated.
         self._failed = False
@@ -658,15 +671,14 @@ class _SegmentWork:
         self._conversation.renew_now = self._renew_now
         keep_turn_records(self._conversation, self._cursor.state)
 
-    async def drive(self, emit: Emit) -> Segment:
-        """Run the segment, emitting each event with the calls recorded
-        before it (`_Translator.recorded`); a plan step's progress report
+    async def drive(self, emit: Emit[_MarkedEvent]) -> Segment:
+        """Run the segment, emitting each event marked with the calls
+        recorded before it (`_EventRecords`); a plan step's progress report
         replaces one of the same step that still waits."""
-        runner, translator = self._runner, self._translator
+        runner, marks = self._runner, self._marks
 
         def recorded(event: GraphEvent | TurnEvent) -> None:
-            key = ("progress", event.step_id) if isinstance(event, StepProgress) else None
-            emit(translator.recorded(event), key=key)
+            emit(marks.recorded(event), key=event_key(event))
 
         return await run_segment(
             runner.turns,
@@ -682,15 +694,15 @@ class _SegmentWork:
             renew_now=self._renew_now,
         )
 
-    async def frames(self, event: object) -> list[BaseModel]:
+    async def frames(self, event: _MarkedEvent) -> list[BaseModel]:
         """The frames of one event `drive` emitted."""
-        taken, records = cast(tuple[SegmentEvent, list[_ExecutorRecord]], event)
+        taken, marks = event
         self._failed = self._failed or isinstance(taken, TurnFailed)
-        return await self._translator.translate_recorded(taken, records)
+        return await self._translator.translate_recorded(taken, marks)
 
-    async def end(self, result: object) -> tuple[Outcome, list[BaseModel]]:
+    async def end(self, result: Segment) -> tuple[Outcome, list[BaseModel]]:
         """How the segment `drive` returned ended, and its closing frames."""
-        segment = cast(Segment, result)
+        segment = result
         conversation = self._conversation
         keep_turn_records(conversation, segment.cursor.state)
         outcome = segment.outcome
@@ -722,37 +734,31 @@ class _SegmentWork:
 class _RejectWork:
     """The work of an `/interrupt` that declines the plan, for its owner
     (`harness.studio_stream.Work`). The route closed the turn's cursor
-    before the stream (`harness.turn.loop.reject`); this records the turn
-    closed on its reply, then sends that reply and `done`. Nothing was
-    computed, so its drive runs nothing."""
+    before the stream (`harness.turn.loop.reject`); `begin`, which the owner
+    runs before anything else, records the turn closed on its reply, so a
+    client that leaves before the first frame still leaves it recorded.
+    The stream then sends that reply and `done`. Nothing was computed, so
+    its drive runs nothing."""
 
     REPLY = "Plan rejected."
 
     def __init__(self, conversation: ConversationState) -> None:
         self._conversation = conversation
+        self._frames: list[BaseModel] = []
 
     def begin(self) -> None:
+        """Record the turn closed on its reply."""
+        self._frames = [*closed_on_reply(self._conversation, self.REPLY, suggestions=False)]
+
+    async def drive(self, emit: Emit[None]) -> None:
         return None
 
-    async def drive(self, emit: Emit) -> None:
-        return None
+    async def frames(self, event: None) -> list[BaseModel]:
+        raise AssertionError("the rejection emits no events")
 
-    async def frames(self, event: object) -> list[BaseModel]:
-        raise AssertionError(f"the rejection emits no events: {event!r}")
-
-    async def end(self, result: object) -> tuple[Outcome, list[BaseModel]]:
-        """Record the turn, and return `done` with its two frames."""
-        conversation = self._conversation
-        conversation.close_turn(final_text=self.REPLY)
-        return Outcome.DONE, [
-            MessageComplete(event="message.complete", seq=conversation.next_seq(), text=self.REPLY),
-            Done(
-                event="done",
-                seq=conversation.next_seq(),
-                trace_id=conversation.trace_id,
-                composition=conversation.composition,
-            ),
-        ]
+    async def end(self, result: None) -> tuple[Outcome, list[BaseModel]]:
+        """`done`, with the reply's frames."""
+        return Outcome.DONE, self._frames
 
     def fatal(self, error: BaseException) -> ErrorFrame:
         """The stream-fatal frame for `error` (`_stream_fatal`)."""
@@ -805,7 +811,7 @@ class _EditWork:
         """Make the heartbeat's `renew_now` the conversation's."""
         self._conversation.renew_now = self._renew_now
 
-    async def drive(self, emit: Emit) -> Outcome:
+    async def drive(self, emit: Emit[EditEvent]) -> Outcome:
         """Run the edit's calls, emitting each event, beside the heartbeat,
         and return how the edit ended."""
         runner, conversation = self._runner, self._conversation
@@ -846,15 +852,15 @@ class _EditWork:
             heartbeat.cancel()
             await asyncio.wait({editing, heartbeat})
 
-    async def frames(self, event: object) -> list[BaseModel]:
+    async def frames(self, event: EditEvent) -> list[BaseModel]:
         """The frames of one event the edit emitted."""
         return await edit_event_frames(
-            cast(EditEvent, event), conversation=self._conversation, store=self._runner.store
+            event, conversation=self._conversation, store=self._runner.store
         )
 
-    async def end(self, result: object) -> tuple[Outcome, list[BaseModel]]:
+    async def end(self, result: Outcome) -> tuple[Outcome, list[BaseModel]]:
         """How the edit ended; its frames are the events' own."""
-        return cast(Outcome, result), []
+        return result, []
 
     def fatal(self, error: BaseException) -> ErrorFrame:
         """The stream-fatal frame for `error` (`_stream_fatal`), which
@@ -1467,16 +1473,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             abandoned = work.begin_turn()
             begun = work
             work.auto_add = body.auto_add
-            edit = (
-                body.component_ref is not None
-                and body.component_ref.intent is ComponentRefIntent.EDIT
-            )
-            if edit:
-                # An Edit Card turn opens no cursor, so a load cannot read how
-                # it ended. A closing write that fails leaves its record open
-                # after its stream said the state was not saved, and the next
-                # turn records it so.
-                work.turn_open_error = HarnessCode.STATE_NOT_SAVED.value
             if pick is None:
                 work.turn_user_message = body.message
                 work.turn_user_words = body.message
@@ -1557,7 +1553,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             _set_turn_context(principal, body.conversation_id, conversation, settings)
             if left_open is not None:
                 await abandon(studio.turns, left_open, segment_id=segment_id)
-            if edit:
+            if (
+                body.component_ref is not None
+                and body.component_ref.intent is ComponentRefIntent.EDIT
+            ):
                 # The Edit Card route bypasses the graph entirely: no
                 # resolve, no plan, no turn on the loop, just the card, the
                 # model's patch-or-recreate decision, and the platform write.
@@ -1707,7 +1706,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         | Lease live, the segment returned paused, before the closing write | the closing write | `cancelled`, pending cleared | `cancelled` frame in place of the pause frame |
         | Lease live, turn closed, before the closing write | nobody: the close ended the Stop | unchanged | nothing more |
         | `/turn` claimed, before it abandons the turn left open | the new turn's heartbeat | the old turn `abandoned`, the new `cancelled` | `cancelled` frame |
-        | Lease live, an Edit Card stream | its heartbeat | no turn is open | `cancelled` frame |
+        | Lease live, an Edit Card stream | its heartbeat | the turn's record `cancelled` | `cancelled` frame |
+        | The same, the client gone before the heartbeat reads it | the closing write | the turn's record `cancelled` | nothing more |
         | The closing write failed or timed out, such as when ending the turn's runs fails | the next claimant, once the lease lapses (up to the lease's 45 s expiry; a request before then answers a retryable 409) | `cancelled` | `cancelled` frame when the work ended on the Stop, `transient_unavailable` when it had paused; the next `/turn` streams, an `/interrupt` answers 404 |
         | The same, and the next `/turn`'s close of the turn is refused | the `/turn` retried after its 409 | `cancelled` | nothing more; that `/turn` answers a retryable 409 and starts nothing, and its retry streams |
         | A lapsed lease, after the next claimant's check and before its claim save | that claimant, whose save refuses | `cancelled` | nothing more; that `/turn` answers a retryable 409 and its retry streams, an `/interrupt` answers 404 |

@@ -98,6 +98,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
 )
+from harness.run_ledger import end_unfinished
 from harness.studio_state import (
     SEGMENT_TTL_S,
     ConversationState,
@@ -142,7 +143,6 @@ _KEY_TURN_PLANS = "turn_plans"
 _KEY_TURN_READINGS = "turn_readings"
 _KEY_TURN_APPLIED_CHOICE = "turn_applied_choice"
 _KEY_TURN_CHOICE_BASELINE = "turn_choice_baseline"
-_KEY_TURN_OPEN_ERROR = "turn_open_error"
 _SCALAR_KEYS = frozenset(
     {
         _KEY_TURN_INDEX,
@@ -161,7 +161,6 @@ _SCALAR_KEYS = frozenset(
         _KEY_TURN_READINGS,
         _KEY_TURN_APPLIED_CHOICE,
         _KEY_TURN_CHOICE_BASELINE,
-        _KEY_TURN_OPEN_ERROR,
     }
 )
 _KEY_COMPOSITION = "composition"
@@ -413,10 +412,6 @@ def _deserialize_pending(data: dict[str, Any]) -> dict[str, _PendingInterrupt]:
 # `StudioStore.snapshot` hands out and `StudioStore.checkpoint` writes.
 type Snapshot = dict[str, Any]
 
-# The fields the save after `plan.approved` writes: the pending interrupts,
-# whose `approved_sent` it exists to store.
-_CHECKPOINT_KEYS = frozenset({_KEY_PENDING})
-
 
 def _serialize_durable(state: ConversationState) -> Snapshot:
     """Every durable field of `state` as the flat map the tables store,
@@ -445,7 +440,6 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_TURN_READINGS: state.turn_readings,
         _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
         _KEY_TURN_CHOICE_BASELINE: state.turn_choice_baseline,
-        _KEY_TURN_OPEN_ERROR: state.turn_open_error,
     }
     for index, turn in enumerate(state.turns):
         data[f"{_TURN_ITEM_PREFIX}{index}"] = turn
@@ -514,8 +508,6 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_applied_choice = dict(value) if value else None
         elif key == _KEY_TURN_CHOICE_BASELINE:
             state.turn_choice_baseline = dict(value or {})
-        elif key == _KEY_TURN_OPEN_ERROR:
-            state.turn_open_error = value
         elif key.startswith(_TURN_ITEM_PREFIX):
             _set_list_item(state.turns, int(key.removeprefix(_TURN_ITEM_PREFIX)), value)
         elif key.startswith(_COMPONENT_ITEM_PREFIX):
@@ -1423,9 +1415,11 @@ class StudioStore:
         holds, swaps, revises or removes. A checkpoint of the whole
         conversation, fenced on the segment the live state holds, with
         `change` applied: the canvas `change` produces and every durable
-        field that differs from the last stored snapshot commit in one
-        transaction (`_fenced_save`), so a stored card always has its digest
-        entry, write token and turn line beside it.
+        field `change` changed commit in one transaction (`_fenced_save`),
+        so a stored card always has its digest entry, write token and turn
+        line beside it. No other field is written, so a write the turn's
+        drive makes (`harness.studio_state.make_remove_cards`) commits
+        nothing the stream's owner has changed.
 
         Raises `SegmentLost` and writes nothing when the stored lease is not
         that segment, so a stream another instance took over lands no card.
@@ -1499,18 +1493,18 @@ class StudioStore:
         """`checkpoint` and `change_canvas`'s one write. Under the row lock
         and fenced on `segment_id`, run `change` on a one-level copy of the live
         state holding the canvas as stored, then write the copy's canvas when
-        `change` replaced it, and every durable key whose value differs from
-        `entry.baseline`, in one transaction. Once it commits, record the
+        `change` replaced it, and the durable keys below whose value differs
+        from `entry.baseline`, in one transaction. Once it commits, record the
         written keys in the baseline and the version, and assign the canvas
         read back and each field `change` changed to the live state.
 
-        Without `snapshot` the durable keys are the copy's, taken under the
-        row lock with no await between it and the write, so the write holds
-        the live state as it then stood. With `snapshot` (`checkpoint`'s)
-        they are what it gives under the row lock, and the lease: the lease
-        is the copy's, since a renewal since the snapshot moved it. Either way a field the
-        live stream changes during the write keeps its new value, which
-        differs from the baseline and goes out with the next write."""
+        Without `snapshot` (`change_canvas`'s) the durable keys are those
+        `change` changed on the copy, and no other: a field the stream's
+        owner changed since the last write waits for the owner's own write,
+        whichever task makes this one. With `snapshot` (`checkpoint`'s) they
+        are what it gives under the row lock. Either way a field the live
+        stream changes during the write keeps its new value, which differs
+        from the baseline and goes out with a later write."""
         state = entry.state
         assert entry.pk is not None and state is not None
         async with entry.write_lock:
@@ -1530,9 +1524,10 @@ class StudioStore:
                 work = _shallow_copy(state)
                 work.composition = stored
                 result = change(work)
-                durable = _serialize_durable(work)
                 if snapshot is not None:
-                    durable = {**snapshot(), _KEY_SEGMENT: durable[_KEY_SEGMENT]}
+                    durable = snapshot()
+                else:
+                    durable = _changed_since(_serialize_durable(work), _serialize_durable(base))
                 changed = _changed_since(durable, entry.baseline)
                 if work.composition is not stored:
                     await self._write_composition(
@@ -1631,12 +1626,12 @@ class StudioStore:
             live.segment = segment
 
     def snapshot(self, principal: str, conversation_id: str) -> Snapshot:
-        """The fields `checkpoint` writes (`_CHECKPOINT_KEYS`) of this
-        instance's live state of `conversation_id`, serialised now."""
+        """The field `checkpoint` writes of this instance's live state of
+        `conversation_id`, serialised now: the pending interrupts, whose
+        `approved_sent` the save after `plan.approved` exists to store."""
         entry = self._runtime[(principal, conversation_id)]
         assert entry.state is not None
-        durable = _serialize_durable(entry.state)
-        return {key: durable[key] for key in _CHECKPOINT_KEYS}
+        return {_KEY_PENDING: _json_safe(_serialize_pending(entry.state.pending))}
 
     async def checkpoint(
         self,
@@ -1694,12 +1689,14 @@ class StudioStore:
         it, since every card commits as it lands.
 
         When a Stop is live for the open turn as the locked row and its
-        cursor stand (`StopState.live`, with the lease this write clears
-        counted gone), the same transaction closes the turn `cancelled`: the
+        cursor stand (`StopState.live`, with this segment's own lease
+        counted live), the same transaction closes the turn `cancelled`: the
         cursor through `harness.turn.store.finish_on`, which ends the
         conversation's unfinished runs, and the record with the cursor's
         records kept and the pending interrupts cleared, so no answer
-        reaches them. A record the stream's own close already wrote on a
+        reaches them. A turn with no cursor, an Edit Card's, is open while
+        its record is, and a Stop on the lease closes its record the same
+        way. A record the stream's own close already wrote on a
         failure, its cursor still open, is recorded `cancelled` in its place,
         so record, cursor and stream agree. A Stop that commits after this transaction finds no
         live lease, and `/cancel` takes it under the conversation lock.
@@ -1764,7 +1761,11 @@ class StudioStore:
                     segment_id,
                 )
                 return SegmentClose.LOST
-            stopped = (await _stop_state(conn, row, lease_live=False)).live
+            stop = await _stop_state(conn, row, lease_live=True)
+            # A Stop on this segment's own lease is live for it whatever
+            # the cursor: a turn with no cursor (an Edit Card's) is open
+            # until its record closes.
+            stopped = stop.live and (stop.cursor_status is not None or not state.turn_recorded)
             base = _shallow_copy(state)
             work = _shallow_copy(state)
             work.composition = (
@@ -1772,17 +1773,14 @@ class StudioStore:
             )
             work.segment = None
             if stopped:
-                # A live Stop with the lease counted gone names an open turn,
-                # so the turn at the row's index has an open cursor.
                 cursor = await cursor_at(conn, row.id, row.turn_index)
-                assert cursor is not None
-                await finish_on(
-                    conn,
-                    cursor,
-                    segment_id=segment_id,
-                    status=TurnStatus.CANCELLED,
-                    now=datetime.fromtimestamp(self._clock(), UTC),
-                )
+                now = datetime.fromtimestamp(self._clock(), UTC)
+                if cursor is not None:
+                    await finish_on(
+                        conn, cursor, segment_id=segment_id, status=TurnStatus.CANCELLED, now=now
+                    )
+                else:
+                    await end_unfinished(conn, row.id, now=now)
                 work.pending = {}
                 if work.turn_recorded:
                     # The work's own close recorded the turn on its failure
@@ -1793,7 +1791,8 @@ class StudioStore:
                         {**work.turns[-1], "error": ErrorCode.CANCELLED.value},
                     ]
                 else:
-                    keep_turn_records(work, cursor.state)
+                    if cursor is not None:
+                        keep_turn_records(work, cursor.state)
                     work.close_turn(
                         final_text=work.turn_final_text, error=ErrorCode.CANCELLED.value
                     )

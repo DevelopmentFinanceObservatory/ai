@@ -146,6 +146,7 @@ from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
+from starlette.requests import ClientDisconnect
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .failure_text import classed_sentence, is_user_sentence
@@ -2259,10 +2260,7 @@ async def test_every_ending_this_route_reaches_holds_on_the_real_store(
     ends on the status `ending` gives that cell with `dfo.saved` saying
     whether the write committed, and a fresh instance reads the turn's
     cursor as `cursor`, the record closed on `recorded` (open for `None`),
-    and the lease cleared exactly when the write committed. An Edit Card
-    turn has no cursor for the load to read, so one left open after its
-    stream sent the transient frame is recorded `state_not_saved`, the code
-    that frame states, when the next turn begins."""
+    and the lease cleared exactly when the write committed."""
     drive, script, hangs, surface, after = _WORK_ENDS[route, finish]
     resolver = _HangingResolver() if hangs else None
     kwargs: dict[str, Any] = {
@@ -2295,9 +2293,76 @@ async def test_every_ending_this_route_reaches_holds_on_the_real_store(
     assert stored.turn_recorded is (recorded is not None)
     if recorded is not None:
         assert stored.turns[-1].get("error", "done") == recorded
-    if route == "edit" and wire == _TRANSIENT:
-        stored.begin_turn()
-        assert stored.turns[-1]["error"] == HarnessCode.STATE_NOT_SAVED.value
+
+
+async def test_a_declined_plan_whose_client_left_before_the_first_chunk_is_recorded() -> None:
+    """The client of an `/interrupt` that declines the plan is gone before
+    the response's first chunk: the server's send raises at once, so the
+    response sets the client-gone flag before the owner first runs. The
+    owner records the rejection before anything else, so the turn its
+    cursor closed is recorded on its reply and the lease is cleared."""
+    app = _app(*_plan(), tool_surface=ScriptedSurface())
+    studio = app.state.studio
+    async with _client(app) as client:
+        plan = await _paused_plan(client)
+    response = await _interrupt_endpoint(studio)(
+        InterruptResponse.model_validate(_interrupt_body(plan["interrupt_id"], "reject")),
+        authorization=AUTH["Authorization"],
+    )
+
+    async def receive() -> dict[str, Any]:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def send(message: dict[str, Any]) -> None:
+        raise OSError("the client is gone")
+
+    scope = {"type": "http", "asgi": {"spec_version": "2.4"}, "method": "POST", "headers": []}
+    with pytest.raises(ClientDisconnect):
+        await asyncio.wait_for(response(scope, receive, send), timeout=10)
+
+    stored = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert stored is not None
+    assert stored.turn_recorded
+    assert "error" not in stored.turns[-1]
+    assert stored.segment is None
+
+
+async def test_an_edit_card_stopped_and_left_before_its_next_renewal_is_recorded_cancelled() -> (
+    None
+):
+    """A Stop from another instance lands on an Edit Card stream's lease,
+    and the client leaves before the stream's heartbeat next renews. The
+    owner cuts the edit off as left, and its closing write acts on the Stop
+    its own lease carries: the turn, which has no cursor, is recorded
+    `cancelled`, the lease is cleared and no Stop stays live."""
+    app = _app(*_card(), **_edit_app(Finish.LEFT))
+    studio = app.state.studio
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+    response = await _turn_endpoint(studio)(
+        TurnRequest.model_validate(_edit_body("rename it")), authorization=AUTH["Authorization"]
+    )
+    stopped = asyncio.Event()
+
+    async def stop_elsewhere() -> None:
+        await studio.edit_model.entered.wait()
+        app_b = _app(tool_surface=ScriptedSurface(), store=StudioStore(_engine()))
+        async with _client(app_b) as client_b:
+            assert (await _post_stop(client_b)).status_code == 204
+        stopped.set()
+
+    stopping = asyncio.create_task(stop_elsewhere())
+    frames = await _leave(response, lambda frames: False, stopped)
+    await stopping
+
+    assert _ending_frame(frames) is None
+    stored = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert stored is not None
+    assert stored.turn_recorded
+    assert stored.turns[-1]["error"] == "cancelled"
+    assert stored.segment is None
+    assert not await StudioStore(_engine()).stop_live(PRINCIPAL, CONVERSATION)
 
 
 async def _close_claim_refused_before_its_save(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5348,8 +5413,10 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
     records: list[Any] = []
     drain = _RecordingExecutor.drain
 
-    def _drain_and_keep(self: _RecordingExecutor, conversation: str) -> list[Any]:
-        drained = drain(self, conversation)
+    def _drain_and_keep(
+        self: _RecordingExecutor, conversation: str, upto: int | None = None
+    ) -> list[Any]:
+        drained = drain(self, conversation, upto)
         records.extend(drained)
         return drained
 

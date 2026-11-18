@@ -41,7 +41,7 @@ from typing import Any
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 from pydantic import BaseModel
 
-from harness.conversation import current_conversation_id, current_conversation_key
+from harness.conversation import current_conversation_key
 from harness.studio_state import (
     ConversationState,
     _block_title,
@@ -55,6 +55,7 @@ from harness.studio_store import StudioStore
 from harness.studio_translate import (
     _RecordingExecutor,
     _stream_fatal,
+    closed_on_reply,
     failure_detail,
 )
 from harness.tool_contracts import HarnessCode, harness_refusal
@@ -62,11 +63,8 @@ from harness.wire import (
     ActivityStep,
     CompositionActor,
     CompositionUpdated,
-    Done,
-    MessageComplete,
     StepProduced,
     StepStatus,
-    Suggestions,
     component_created,
     component_revised,
 )
@@ -164,15 +162,7 @@ async def edit_event_frames(
     c = conversation
     match event:
         case EditClosed(text=text):
-            c.turn_final_text = text
-            c.close_turn(final_text=text)
-            return [
-                MessageComplete(event="message.complete", seq=c.next_seq(), text=text),
-                Suggestions(event="suggestions", seq=c.next_seq(), items=[]),
-                Done(
-                    event="done", seq=c.next_seq(), trace_id=c.trace_id, composition=c.composition
-                ),
-            ]
+            return [*closed_on_reply(c, text, suggestions=True)]
         case EditFailed(error=error):
             return [_stream_fatal(c, error)]
         case CanvasChange(change=change):
@@ -242,7 +232,6 @@ async def _edit_flow(
         ]
 
     described = await recorder(tool="describe_component", args={"component_id": component_id})
-    recorder.drain(current_conversation_id.get())
     if described.get("outcome") != "ok":
         for frame in _refused("e1", "Read the card", "I couldn't open that card.", described):
             yield frame
@@ -255,7 +244,6 @@ async def _edit_flow(
     frame_view: dict[str, Any] = {}
     if stored.get("frame_ref"):
         viewed = await recorder(tool="describe_frame", args={"frame_ref": stored["frame_ref"]})
-        recorder.drain(current_conversation_id.get())
         if viewed.get("outcome") == "ok":
             frame_view = viewed.get("view") or {}
 
@@ -285,7 +273,6 @@ async def _edit_flow(
             tool="write_component",
             args={"intent": patch, "component_id": component_id, WRITE_TOKEN_KEY: write_token},
         )
-        recorder.drain(current_conversation_id.get())
         moved = (written.get("refusal") or {}).get(
             "code"
         ) == HarnessCode.ROLLING_SELECT_NEEDS_NEW_FRAME
@@ -305,6 +292,7 @@ async def _edit_flow(
             frames = _close("The card already looks like that; nothing changed.")
         else:
             component = written["component"]
+            token = recorder.write_token(component)
             revised = component_revised(component, component_id, patch)
             yield _step(
                 "e2",
@@ -323,6 +311,8 @@ async def _edit_flow(
 
             def revise(work: ConversationState) -> bool:
                 nonlocal refreshed
+                if token:
+                    work.write_tokens = {**work.write_tokens, component_id: token}
                 _record_revision(
                     work,
                     component_id=component_id,
@@ -367,7 +357,6 @@ async def _edit_flow(
         step_label = "Rebuild the card"
         closing = text or "Done -- the card was rebuilt with your change."
     written = await recorder(tool="write_component", args={"intent": intent})
-    recorder.drain(current_conversation_id.get())
     if written.get("outcome") != "ok" or not written.get("component"):
         lead = _refused_lead(written, unreadable=_UNREADABLE_LEAD)
         for frame in _refused("e2", step_label, lead, written):
@@ -375,6 +364,7 @@ async def _edit_flow(
         return
     created = component_created(written["component"], step_id="e2")
     component = written["component"]
+    token = recorder.write_token(component)
     # The step frame is yielded first: frames are numbered in the order they
     # are yielded, and the step precedes the card it produced on the wire.
     yield _step(
@@ -385,6 +375,8 @@ async def _edit_flow(
     yield created
 
     def recreate(work: ConversationState) -> bool:
+        if token:
+            work.write_tokens = {**work.write_tokens, created.component_id: token}
         entry = _digest_entry(component)
         work.components[created.component_id] = entry
         work.turn_components.append(

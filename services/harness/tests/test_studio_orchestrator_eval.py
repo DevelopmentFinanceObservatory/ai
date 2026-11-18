@@ -41,6 +41,7 @@ from .scripted_tools import (
     search_call,
 )
 from .studio_routes import frame_for, orchestrator_app, stream, studio_client, turn_body
+from .translating import translated
 from .turn_driver import unconnected_store
 
 STUDIO_EVAL_DIR = Path(__file__).resolve().parents[3] / "evals" / "studio"
@@ -944,7 +945,7 @@ async def test_a_count_explain_dfo_read_grounds_the_reply_that_quotes_it() -> No
             ModelResponded(parts=(types.Part(function_call=call),)),
             ToolsAnswered(answers=(read,), state={}),
         )
-        for frame in await translator.translate(event)
+        for frame in await translated(translator, event)
     ]
 
     assert _ungrounded(frames, "DFO holds 108,905 indicators in 92 datasets.") == []

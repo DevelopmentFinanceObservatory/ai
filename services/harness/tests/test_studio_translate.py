@@ -136,6 +136,7 @@ from .test_turn_records import (
     _served_identity,
     _switchable_scope,
 )
+from .translating import Relay, translated
 from .turn_driver import TurnDriver, scripted_models, unconnected_store
 
 
@@ -1209,14 +1210,14 @@ async def test_a_step_keeps_one_wire_id_from_its_first_report_to_its_final_frame
     line of its own."""
     translator, surface_recorder = _progress_translator()
 
-    (first,) = await translator.translate(
-        _progress_event("debt", "Preparing the dataset (queued, 3s)")
+    (first,) = await translated(
+        translator, _progress_event("debt", "Preparing the dataset (queued, 3s)")
     )
-    (other,) = await translator.translate(
-        _progress_event("pop", "Preparing the dataset (queued, 1s)")
+    (other,) = await translated(
+        translator, _progress_event("pop", "Preparing the dataset (queued, 1s)")
     )
-    (later,) = await translator.translate(
-        _progress_event("debt", "Retrying in 7s (attempt 2 of 3)")
+    (later,) = await translated(
+        translator, _progress_event("debt", "Retrying in 7s (attempt 2 of 3)")
     )
     surface_recorder._records.append(
         _surface_record(
@@ -1251,8 +1252,8 @@ async def test_a_replan_run_in_the_same_segment_opens_new_lines_for_its_steps() 
     steps open lines of their own."""
     translator, surface_recorder = _progress_translator()
 
-    (first,) = await translator.translate(
-        _progress_event("s2", "Preparing the dataset (queued, 3s)")
+    (first,) = await translated(
+        translator, _progress_event("s2", "Preparing the dataset (queued, 3s)")
     )
     surface_recorder._records.append(
         _surface_record(
@@ -1260,11 +1261,11 @@ async def test_a_replan_run_in_the_same_segment_opens_new_lines_for_its_steps() 
             {"outcome": "refusal", "refusal": {"code": "service_unavailable", "message": "busy"}},
         )
     )
-    handed_back = await translator.translate(
-        NodeDone("execute", "replan", {"refusal": {}, "plan_version": 1})
+    handed_back = await translated(
+        translator, NodeDone("execute", "replan", {"refusal": {}, "plan_version": 1})
     )
-    (second,) = await translator.translate(
-        _progress_event("s2", "Preparing the dataset (queued, 1s)")
+    (second,) = await translated(
+        translator, _progress_event("s2", "Preparing the dataset (queued, 1s)")
     )
 
     assert [(f.step_id, f.status) for f in handed_back] == [(first.step_id, StepStatus.FAILED)]
@@ -1291,15 +1292,15 @@ async def test_a_started_step_with_no_record_closes_as_failed_at_the_runs_hand_b
     the execute node hands back, worded by the code the hand-back states. A
     step its record closed gets no second frame."""
     translator, surface_recorder = _progress_translator()
-    (done,) = await translator.translate(
-        _progress_event("debt", "Preparing the dataset (queued, 3s)")
+    (done,) = await translated(
+        translator, _progress_event("debt", "Preparing the dataset (queued, 3s)")
     )
-    (lost,) = await translator.translate(
-        _progress_event("pop", "Preparing the dataset (queued, 1s)")
+    (lost,) = await translated(
+        translator, _progress_event("pop", "Preparing the dataset (queued, 1s)")
     )
     surface_recorder._records.append(_surface_record("debt", {"outcome": "ok", "summary": "done"}))
 
-    frames = await translator.translate(NodeDone("execute", "ok", output))
+    frames = await translated(translator, NodeDone("execute", "ok", output))
 
     steps = [f for f in frames if f.tool is not None]
     assert [(f.step_id, f.status, f.detail) for f in steps] == [
@@ -1424,7 +1425,7 @@ async def test_a_plan_step_running_line_leads_with_its_place_and_then_says_what_
     message that says only that the call returned."""
     translator, _ = _progress_translator()
 
-    (frame,) = await translator.translate(_progress("debt", message=message, **place))
+    (frame,) = await translated(translator, _progress("debt", message=message, **place))
 
     assert frame.status is StepStatus.RUNNING
     assert frame.detail == detail
@@ -1490,19 +1491,20 @@ async def test_reading_the_plans_results_names_the_step_that_gives_the_answer(
     translator, surface_recorder = _progress_translator()
     surface_recorder.set_step_order("c1", ["debt", "rank"], labels)
     for step_id in ("debt", "rank"):
-        await translator.translate(
+        await translated(
+            translator,
             _progress(
                 step_id,
                 tool="get_data" if step_id == "debt" else "rank",
                 gives_answer=answering.get(step_id, False),
-            )
+            ),
         )
     surface_recorder._records.append(
         _surface_record("debt", {"outcome": "ok", "summary": "14 observations"})
     )
     surface_recorder._records.append(_analysis_record("rank", ranked))
 
-    frames = await translator.translate(NodeDone("execute", "ok", {"frame_refs": []}))
+    frames = await translated(translator, NodeDone("execute", "ok", {"frame_refs": []}))
 
     (line,) = [f for f in frames if f.tool is None]
     assert (line.label, line.status, line.detail) == (
@@ -1529,7 +1531,7 @@ async def test_the_answer_steps_latest_record_decides_the_reading_lines_detail(
     after a recovered retry and stays off a step the run failed."""
     translator, surface_recorder = _progress_translator()
     surface_recorder.set_step_order("c1", ["rank"], _LABELS)
-    await translator.translate(_progress("rank", tool="rank", gives_answer=True))
+    await translated(translator, _progress("rank", tool="rank", gives_answer=True))
     refused = {"outcome": "refusal", "refusal": {"code": "service_unavailable", "message": "m"}}
     first = {"outcome": "ok", "summary": "anchor"} if amended else refused
     surface_recorder._records.append(_analysis_record("rank", first))
@@ -1539,7 +1541,7 @@ async def test_the_answer_steps_latest_record_decides_the_reading_lines_detail(
             step_id="rank", tool="rank", code="source_drift", detail="drifted"
         )
 
-    frames = await translator.translate(NodeDone("execute", "ok", {"frame_refs": []}))
+    frames = await translated(translator, NodeDone("execute", "ok", {"frame_refs": []}))
 
     steps = [f for f in frames if f.tool is not None]
     (line,) = [f for f in frames if f.tool is None]
@@ -1552,17 +1554,18 @@ async def test_a_stream_behind_the_run_shows_each_steps_latest_report_once() -> 
     the stream gives way to a later one of the same step, so the stream
     shows where each step is now, and a step's line keeps its place."""
     translator, _ = _progress_translator()
+    relay = Relay(translator)
     for step_id, message in (
         ("debt", "Preparing the dataset (queued, 1s)"),
         ("pop", "Preparing the dataset (queued, 1s)"),
         ("debt", "Preparing the dataset (queued, 2s)"),
         ("debt", "Retrying in 7s (attempt 2 of 3)"),
     ):
-        translator.emit(_progress_event(step_id, message))
+        relay.emit(_progress_event(step_id, message))
     segment = asyncio.get_running_loop().create_future()
     segment.set_result(None)
 
-    frames = [frame async for frame in translator.frames(segment)]
+    frames = [frame async for frame in relay.frames(segment)]
 
     assert [(f.status, f.detail) for f in frames] == [
         (StepStatus.RUNNING, "Retrying in 7s (attempt 2 of 3)"),
@@ -1575,12 +1578,13 @@ async def test_relay_collapses_many_reports_from_one_step_while_blocked() -> Non
     leaves only its latest report waiting, so a fast run never grows the
     stream's queue past one report per step."""
     translator, _ = _progress_translator()
+    relay = Relay(translator)
     for tick in range(50):
-        translator.emit(_progress_event("only-step", f"tick {tick}"))
+        relay.emit(_progress_event("only-step", f"tick {tick}"))
     segment = asyncio.get_running_loop().create_future()
     segment.set_result(None)
 
-    frames = [frame async for frame in translator.frames(segment)]
+    frames = [frame async for frame in relay.frames(segment)]
 
     assert [(f.status, f.detail) for f in frames] == [(StepStatus.RUNNING, "tick 49")]
 
@@ -1629,12 +1633,13 @@ async def test_a_plan_step_opens_its_running_line_before_its_call_answers(
         conversation=ConversationState(conversation_id="s"),
         recorder=_RecordingExecutor(_dummy_executor, store=unconnected_store()),
     )
-    driver.observe = translator.emit
+    relay = Relay(translator)
+    driver.observe = relay.emit
     held: list[Any] = []
 
     run = asyncio.create_task(driver.answer(approve_answer(card.payload["revision"]), to=card))
     async with asyncio.timeout(10):
-        async for frame in translator.frames(run):
+        async for frame in relay.frames(run):
             if frame.event == "activity.step" and frame.tool and not surface.release.is_set():
                 held.append(frame)
                 surface.release.set()
@@ -1654,14 +1659,15 @@ async def test_a_stream_behind_the_run_shows_each_call_where_it_happened() -> No
     it, so a call recorded after an event is shown after that event's own
     frames, however far the stream falls behind."""
     translator, surface_recorder = _progress_translator()
+    relay = Relay(translator)
     surface_recorder._records.append(_surface_record("debt", {"outcome": "ok", "summary": "done"}))
-    translator.emit(NodeDone("approve", "approved", {"v": 1}))
+    relay.emit(NodeDone("approve", "approved", {"v": 1}))
     surface_recorder._records.append(_surface_record("pop", {"outcome": "ok", "summary": "done"}))
-    translator.emit(NodeDone("execute", "ok", {"frame_refs": []}))
+    relay.emit(NodeDone("execute", "ok", {"frame_refs": []}))
     segment = asyncio.get_running_loop().create_future()
     segment.set_result(None)
 
-    frames = [frame async for frame in translator.frames(segment)]
+    frames = [frame async for frame in relay.frames(segment)]
 
     assert [(f.label, f.status) for f in frames] == [
         ("Fetching data", StepStatus.COMPLETE),
@@ -1673,18 +1679,20 @@ async def test_a_stream_behind_the_run_shows_each_call_where_it_happened() -> No
 
 
 async def test_the_stream_sends_each_event_as_the_segment_emits_it() -> None:
-    """`frames` sends an event's frames while the segment still runs, and
-    ends once the segment is done and every event it emitted is sent."""
+    """An event's frames go out while the segment still runs, and the
+    stream ends once the segment is done and every event it emitted is
+    sent."""
     translator, _ = _progress_translator()
+    relay = Relay(translator)
     release = asyncio.Event()
 
     async def segment() -> None:
-        translator.emit(_progress_event("debt", "Preparing the dataset (queued, 1s)"))
+        relay.emit(_progress_event("debt", "Preparing the dataset (queued, 1s)"))
         await release.wait()
-        translator.emit(_progress_event("pop", "Preparing the dataset (queued, 1s)"))
+        relay.emit(_progress_event("pop", "Preparing the dataset (queued, 1s)"))
 
     task = asyncio.create_task(segment())
-    stream = translator.frames(task)
+    stream = relay.frames(task)
 
     first = await asyncio.wait_for(anext(stream), timeout=5)
     release.set()
@@ -1704,7 +1712,7 @@ async def test_a_failed_turn_ends_on_the_sentence_of_its_fault() -> None:
     translator = _translator()
     fault = ResolverError("search refused", refusal={"code": "rate_limited"})
 
-    (frame,) = await translator.translate(TurnFailed(node="orchestrate", error=fault))
+    (frame,) = await translated(translator, TurnFailed(node="orchestrate", error=fault))
 
     expected = _stream_fatal(ConversationState(conversation_id="c1"), fault)
     assert frame.event == "error"
@@ -1720,8 +1728,8 @@ async def test_a_mid_run_report_leaves_a_finished_steps_record_for_the_run_to_am
     translator, surface_recorder = _progress_translator()
     surface_recorder._records.append(_surface_record("debt", {"outcome": "ok", "summary": "done"}))
 
-    (running,) = await translator.translate(
-        _progress_event("pop", "Preparing the dataset (queued, 1s)")
+    (running,) = await translated(
+        translator, _progress_event("pop", "Preparing the dataset (queued, 1s)")
     )
     surface_recorder.mark_step_failed(
         step_id="debt", tool="get_data", code="source_drift", detail="drifted"
@@ -1773,8 +1781,8 @@ async def test_a_step_cut_off_mid_call_closes_its_line_as_failed() -> None:
     translator, surface_recorder = _progress_translator()
     surface_recorder._surface = _HangingSurface()
 
-    (running,) = await translator.translate(
-        _progress_event("debt", "Preparing the dataset (queued, 3s)")
+    (running,) = await translated(
+        translator, _progress_event("debt", "Preparing the dataset (queued, 3s)")
     )
     await _cancel_mid_call(surface_recorder, step_id="debt")
     surface_recorder.mark_step_failed(
@@ -1910,11 +1918,18 @@ def _written_component(
 
 
 async def _component_frames_of(
-    translator: _Translator, component: dict[str, Any], *, land: bool
+    translator: _Translator,
+    component: dict[str, Any],
+    *,
+    land: bool,
+    write_token: str | None = None,
 ) -> list[Any]:
     """`translator._component_frames` for a component that passed the wire contract."""
     return await translator._component_frames(
-        component, land=land, created=component_created(component, step_id="s1")
+        component,
+        land=land,
+        created=component_created(component, step_id="s1"),
+        write_token=write_token,
     )
 
 
@@ -1975,22 +1990,24 @@ async def test_a_step_that_removes_a_card_and_draws_one_streams_each_write_s_own
     await recorder(tool="write_component", args={})
     recorder.land_component(drawn)
     frames = [
-        *await translator.translate(
+        *await translated(
+            translator,
             ModelResponded(
                 parts=tuple(
                     types.Part(function_call=types.FunctionCall(id=name, name=name, args={}))
                     for name in calls
                 )
-            )
+            ),
         ),
-        *await translator.translate(
+        *await translated(
+            translator,
             ToolsAnswered(
                 answers=tuple(
                     types.FunctionResponse(id=name, name=name, response=answer)
                     for name, answer in calls.items()
                 ),
                 state={},
-            )
+            ),
         ),
     ]
 
@@ -2031,9 +2048,10 @@ async def test_component_frames_land_true_holds_when_auto_add_is_off(
         conversation=conversation, recorder=_RecordingExecutor(_dummy_executor, store=store)
     )
     conversation.auto_add = False
-    conversation.write_tokens["cmp_two"] = "token-two"
 
-    frames = await _component_frames_of(translator, _written_component("cmp_two"), land=True)
+    frames = await _component_frames_of(
+        translator, _written_component("cmp_two"), land=True, write_token="token-two"
+    )
 
     events = [getattr(f, "event", None) for f in frames]
     assert events == ["component.created"]
@@ -2082,7 +2100,7 @@ def test_land_component_stamps_land_on_the_matching_record() -> None:
 
     recorder.land_component(component)
 
-    assert recorder._records[0].land is True
+    assert recorder._records.items[0].land is True
 
 
 def test_land_component_is_a_silent_no_op_with_no_matching_record() -> None:
@@ -2236,16 +2254,17 @@ async def test_each_planner_call_becomes_a_status_line_as_it_happens() -> None:
         evidence_requirements=(dataset, second),
     )
 
-    working = await translator.translate(PlannerStarted(revising=False))
-    checking = await translator.translate(_planner_call("propose_plan", question="q"))
-    checked = await translator.translate(
+    working = await translated(translator, PlannerStarted(revising=False))
+    checking = await translated(translator, _planner_call("propose_plan", question="q"))
+    checked = await translated(
+        translator,
         _planner_answer(
             "propose_plan",
             {"outcome": "ok", "translation": {"outcome": "ok"}},
             **{PLAN_STATE_KEY: plan.model_dump_json()},
-        )
+        ),
     )
-    done = await translator.translate(NodeDone("planner", "ok", {"version": 1}))
+    done = await translated(translator, NodeDone("planner", "ok", {"version": 1}))
 
     assert _status_lines(working) == [("s0", "Working on a plan", StepStatus.RUNNING)]
     assert _status_lines(checking) == [
@@ -2270,12 +2289,12 @@ async def test_the_checking_line_is_open_before_the_proposal_is_answered() -> No
     line opened on the response would cover none of the translation."""
     translator = _translator()
 
-    opened = await translator.translate(_planner_call("propose_plan", question="q"))
+    opened = await translated(translator, _planner_call("propose_plan", question="q"))
 
     assert _status_lines(opened) == [
         ("s0", "Checking the plan against the data", StepStatus.RUNNING)
     ]
-    assert await translator.translate(_planner_call("propose_plan", amends_version=1)) == []
+    assert await translated(translator, _planner_call("propose_plan", amends_version=1)) == []
 
 
 @pytest.mark.parametrize("recorded", ["none", "no_datasets"])
@@ -2289,9 +2308,11 @@ async def test_an_accepted_proposal_without_a_translation_still_closes_its_line(
         {PLAN_STATE_KEY: Plan(question="q").model_dump_json()} if recorded == "no_datasets" else {}
     )
     translator = _translator()
-    await translator.translate(_planner_call("propose_plan", question="q"))
+    await translated(translator, _planner_call("propose_plan", question="q"))
 
-    frames = await translator.translate(_planner_answer("propose_plan", {"outcome": "ok"}, **state))
+    frames = await translated(
+        translator, _planner_answer("propose_plan", {"outcome": "ok"}, **state)
+    )
 
     assert _status_lines(frames) == [
         ("s0", "Checking the plan against the data", StepStatus.COMPLETE)
@@ -2302,8 +2323,8 @@ async def test_an_accepted_proposal_without_a_translation_still_closes_its_line(
 async def test_a_planner_call_other_than_a_proposing_one_adds_no_line() -> None:
     translator = _translator()
 
-    assert await translator.translate(_planner_call("reject_plan")) == []
-    assert await translator.translate(_planner_call("get_skill", skill_id="oda-measures")) == []
+    assert await translated(translator, _planner_call("reject_plan")) == []
+    assert await translated(translator, _planner_call("get_skill", skill_id="oda-measures")) == []
 
 
 def _orchestrator_call(call_id: str, name: str, **args: Any) -> ModelResponded:
@@ -2334,10 +2355,10 @@ async def _skill_read(
     translator: _Translator, call_id: str, args: dict[str, Any], answer: Any
 ) -> list:
     """The frames a `get_skill` call and its answer make."""
-    frames = await translator.translate(_orchestrator_call(call_id, "get_skill", **args))
+    frames = await translated(translator, _orchestrator_call(call_id, "get_skill", **args))
     return [
         *frames,
-        *await translator.translate(_orchestrator_answer(call_id, "get_skill", answer)),
+        *await translated(translator, _orchestrator_answer(call_id, "get_skill", answer)),
     ]
 
 
@@ -2399,7 +2420,7 @@ async def test_a_refused_skill_read_is_settled_only_by_a_read_of_its_own_kind(
 
 async def test_a_replan_shows_revising_the_plan() -> None:
     """The planner node starts a revising draft on an amendment or a replan."""
-    frames = await _translator().translate(PlannerStarted(revising=True))
+    frames = await translated(_translator(), PlannerStarted(revising=True))
 
     assert _status_lines(frames) == [("s0", "Revising the plan", StepStatus.RUNNING)]
 
@@ -2413,7 +2434,7 @@ async def test_a_planner_draft_drops_the_labels_the_turns_switches_kept(revising
     translator = _translator()
     translator._conversation.turn_choice_baseline = {"aid:sector": "health (CRS 120)"}
 
-    await translator.translate(PlannerStarted(revising=revising))
+    await translated(translator, PlannerStarted(revising=revising))
 
     assert translator._conversation.turn_choice_baseline == {}
 
@@ -2441,9 +2462,9 @@ async def test_a_pick_replan_drops_the_scope_labels_the_turns_switches_kept_only
     baseline = {"aid:sector": "health (CRS 120)", _PICKED_ROW: "the DAC total"}
     translator._conversation.turn_choice_baseline = dict(baseline)
 
-    await translator.translate(PlannerStarted(revising=True, pick=True))
+    await translated(translator, PlannerStarted(revising=True, pick=True))
     if ending is not None:
-        await translator.translate(NodeDone("planner", ending, {"version": 2}))
+        await translated(translator, NodeDone("planner", ending, {"version": 2}))
 
     assert translator._conversation.turn_choice_baseline == {
         choice_id: label for choice_id, label in baseline.items() if choice_id in kept
@@ -2458,8 +2479,8 @@ async def test_an_approved_plan_a_pick_replan_drafted_names_the_label_the_pick_w
     held before."""
     translator = _translator()
     translator._conversation.turn_choice_baseline = {_PICKED_ROW: "the DAC total"}
-    await translator.translate(PlannerStarted(revising=True, pick=True))
-    await translator.translate(NodeDone("planner", "ok", {"version": 2}))
+    await translated(translator, PlannerStarted(revising=True, pick=True))
+    await translated(translator, NodeDone("planner", "ok", {"version": 2}))
     labels = ("the DAC total", "the top 10 donors")
     card = PlanProposed(
         event="plan.proposed",
@@ -2499,17 +2520,17 @@ async def test_an_approved_plan_a_pick_replan_drafted_names_the_label_the_pick_w
 async def test_the_planner_starting_a_first_draft_opens_working_on_a_plan() -> None:
     """Whatever routes the turn to the planner, the line opens as the
     planner node starts its draft."""
-    frames = await _translator().translate(PlannerStarted(revising=False))
+    frames = await translated(_translator(), PlannerStarted(revising=False))
 
     assert _status_lines(frames) == [("s0", "Working on a plan", StepStatus.RUNNING)]
 
 
 async def test_a_pause_completes_the_running_line_before_its_card() -> None:
     translator = _translator()
-    await translator.translate(_planner_call("propose_plan", question="q"))
+    await translated(translator, _planner_call("propose_plan", question="q"))
     ask = _planner_ask({"message": "Which source?", "candidates": []})
 
-    frames = await translator.translate(ask)
+    frames = await translated(translator, ask)
 
     assert [f.event for f in frames] == ["activity.step", "elicitation.request"]
     assert frames[0].status is StepStatus.COMPLETE
@@ -2525,16 +2546,16 @@ def _planner_ask(args: dict[str, Any]) -> Paused:
 
 async def test_a_question_after_a_draft_that_named_no_drop_is_asked_as_is() -> None:
     translator = _translator()
-    await translator.translate(PlannerStarted(revising=False))
+    await translated(translator, PlannerStarted(revising=False))
 
-    (*_, asked) = await translator.translate(_planner_ask({"message": "Which donors?"}))
+    (*_, asked) = await translated(translator, _planner_ask({"message": "Which donors?"}))
 
     assert asked.questions[0].question == "Which donors?"
 
 
 async def test_the_segment_end_completes_a_line_still_running() -> None:
     translator = _translator()
-    await translator.translate(_planner_call("propose_plan", question="q"))
+    await translated(translator, _planner_call("propose_plan", question="q"))
 
     frames = await translator.finish()
 
@@ -2565,7 +2586,7 @@ async def test_a_planner_call_becomes_its_line_while_the_draft_is_still_running(
     await asyncio.wait_for(paused.wait(), timeout=10)
     translator = _translator()
     frames = [
-        frame for event in list(harness.emitted) for frame in await translator.translate(event)
+        frame for event in list(harness.emitted) for frame in await translated(translator, event)
     ]
     mid_draft = _status_lines(frames)
     release.set()
@@ -2689,7 +2710,7 @@ async def _asked_through_the_adapter(
                 returned.append(result)
             events.append(NodeDone("planner", "ok" if "plan" in result else "refused", result))
         for event in events:
-            frames.extend(await translator.translate(event))
+            frames.extend(await translated(translator, event))
         frames.extend(await translator.finish())
         if answer is None or not translator.paused:
             break
@@ -3266,12 +3287,13 @@ async def test_a_refused_proposal_reads_reworking_the_draft_until_the_next_call(
     redrafts. The refusal's code shows in plain words and its message, which
     names plan fields, never reaches the wire."""
     translator = _translator()
-    await translator.translate(_planner_call("propose_plan", question="q"))
+    await translated(translator, _planner_call("propose_plan", question="q"))
 
-    refused = await translator.translate(_planner_answer("propose_plan", _REFUSED_DRAFT))
-    retry = await translator.translate(_planner_call("propose_plan", question="q"))
-    accepted = await translator.translate(
-        _planner_answer("propose_plan", {"outcome": "ok", "translation": {"outcome": "ok"}})
+    refused = await translated(translator, _planner_answer("propose_plan", _REFUSED_DRAFT))
+    retry = await translated(translator, _planner_call("propose_plan", question="q"))
+    accepted = await translated(
+        translator,
+        _planner_answer("propose_plan", {"outcome": "ok", "translation": {"outcome": "ok"}}),
     )
 
     assert _status_lines(refused) == [
@@ -3311,11 +3333,11 @@ async def test_a_planner_skill_read_notes_itself_on_the_planners_line(
     says it reads a method note until the read is answered, then shows its own
     detail. The skill's id stays off the wire."""
     translator = _translator()
-    opened = [frame for event in opening for frame in await translator.translate(event)]
+    opened = [frame for event in opening for frame in await translated(translator, event)]
     line = opened[-1]
 
-    reading = await translator.translate(_planner_call("get_skill", skill_id="oda-measures"))
-    answered = await translator.translate(_planner_answer("get_skill", {"text": "notes"}))
+    reading = await translated(translator, _planner_call("get_skill", skill_id="oda-measures"))
+    answered = await translated(translator, _planner_answer("get_skill", {"text": "notes"}))
 
     assert (line.status, line.detail) == (StepStatus.RUNNING, detail)
     assert [(f.step_id, f.label, f.status, f.detail) for f in reading + answered] == [
@@ -3372,7 +3394,7 @@ async def test_a_proposal_refused_beside_an_earlier_plan_write_opens_no_line(
         ),
     )
 
-    frames = await translator.translate(calls) + await translator.translate(answers)
+    frames = await translated(translator, calls) + await translated(translator, answers)
 
     assert _status_lines(frames) == lines
 
@@ -3380,8 +3402,8 @@ async def test_a_proposal_refused_beside_an_earlier_plan_write_opens_no_line(
 async def test_a_refusal_with_an_unlisted_code_reworks_the_draft_without_a_reason() -> None:
     translator = _translator()
 
-    frames = await translator.translate(
-        _planner_answer("propose_plan", {"outcome": "refused", "code": "x"})
+    frames = await translated(
+        translator, _planner_answer("propose_plan", {"outcome": "refused", "code": "x"})
     )
 
     assert _status_lines(frames) == [("s0", "Reworking the draft", StepStatus.RUNNING)]
@@ -3393,8 +3415,8 @@ async def test_an_approved_plan_shows_starting_the_plan_until_its_first_step() -
     covers that, and completes before the first step's frame takes its seq."""
     translator = _translator()
 
-    approved = await translator.translate(NodeDone("approve", "approved", {"v": 1}))
-    first_step = await translator.translate(_progress_event("fetch_1", "Reading the data"))
+    approved = await translated(translator, NodeDone("approve", "approved", {"v": 1}))
+    first_step = await translated(translator, _progress_event("fetch_1", "Reading the data"))
 
     assert _status_lines(approved) == [("s0", "Starting the plan", StepStatus.RUNNING)]
     assert [(f.step_id, f.label, f.status) for f in first_step] == [
@@ -3406,10 +3428,10 @@ async def test_an_approved_plan_shows_starting_the_plan_until_its_first_step() -
 
 async def test_starting_the_plan_completes_before_a_step_that_reported_no_progress() -> None:
     translator, surface_recorder = _progress_translator()
-    await translator.translate(NodeDone("approve", "approved", {"v": 1}))
+    await translated(translator, NodeDone("approve", "approved", {"v": 1}))
     surface_recorder._records.append(_surface_record("fetch_1", {"outcome": "ok"}))
 
-    frames = await translator.translate(NodeDone("execute", "ok", {"frame_refs": []}))
+    frames = await translated(translator, NodeDone("execute", "ok", {"frame_refs": []}))
 
     assert [(f.label, f.status) for f in frames][:2] == [
         ("Starting the plan", StepStatus.COMPLETE),
@@ -3418,7 +3440,7 @@ async def test_starting_the_plan_completes_before_a_step_that_reported_no_progre
 
 
 async def test_an_amendment_does_not_start_the_plan() -> None:
-    frames = await _translator().translate(NodeDone("approve", "amend", {"plan": {}}))
+    frames = await translated(_translator(), NodeDone("approve", "amend", {"plan": {}}))
 
     assert frames == []
 
@@ -3427,9 +3449,9 @@ async def test_a_new_planner_run_after_a_refused_one_starts_its_own_line() -> No
     """A planner run that ended on a refusal leaves "Reworking the draft"
     to the next run of the same segment, whose start opens its own line."""
     translator = _translator()
-    await translator.translate(_planner_answer("propose_plan", _REFUSED_DRAFT))
+    await translated(translator, _planner_answer("propose_plan", _REFUSED_DRAFT))
 
-    frames = await translator.translate(PlannerStarted(revising=False))
+    frames = await translated(translator, PlannerStarted(revising=False))
 
     assert [(f.label, f.status) for f in frames] == [
         ("Reworking the draft", StepStatus.COMPLETE),

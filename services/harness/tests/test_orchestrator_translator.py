@@ -62,6 +62,7 @@ from planner.workflow import ToolId
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .failure_text import classed_sentence, is_user_sentence
+from .translating import translated
 from .turn_driver import unconnected_store
 
 
@@ -120,7 +121,7 @@ async def _frames(translator: _Translator, *events: Any) -> list:
         frame
         for event in events
         if event is not None
-        for frame in await translator.translate(event)
+        for frame in await translated(translator, event)
     ]
 
 
@@ -1573,7 +1574,7 @@ async def test_a_chart_line_names_the_first_chart_it_draws_and_the_reading_line_
     call_id = "c2" if len(events()) > 1 else "c1"
     answer = _response(call_id, "make_charts", _CHARTS)
 
-    read = await translator.translate(answer)
+    read = await translated(translator, answer)
 
     running = [f for f in frames if f.tool == "make_charts" and f.status is StepStatus.RUNNING]
     assert running[-1].detail == detail
@@ -1601,7 +1602,7 @@ async def test_the_charts_reading_line_names_only_charts_a_call_drew(answers, de
         _calls(("c1", "make_charts", _NAMED_CHARTS), ("c2", "make_charts", _OTHER_CHARTS)),
     )
 
-    read = await translator.translate(_responses(*answers))
+    read = await translated(translator, _responses(*answers))
 
     assert _reading_lines(read) == [("Going over the charts", StepStatus.RUNNING, detail)]
 
@@ -2075,10 +2076,10 @@ async def test_one_fetch_names_its_measure_and_the_years_its_retrieval_covers(wi
     )
     called, responded = _batch(("fetch", {"spec_id": "spec_le"}, {"summary": summary}))
 
-    frames = await translator.translate(called)
+    frames = await translated(translator, called)
     # The fetch tool's own retrieval, recorded before its response arrives.
     await recorder(tool="get_data", args={"spec_id": "spec_le"})
-    frames += await translator.translate(responded)
+    frames += await translated(translator, responded)
 
     assert _reading_lines(frames) == [(label, StepStatus.RUNNING, summary)]
 
@@ -2154,7 +2155,7 @@ async def test_a_reading_line_closes_when_anything_else_happens(next_event):
     translator = _translator()
     await _frames(translator, *_batch(("search", {"parts": [{"variable": "q"}]}, {"parts": []})))
 
-    closing = await translator.translate(next_event)
+    closing = await translated(translator, next_event)
 
     line = next(f for f in closing if f.event == "activity.step" and f.tool is None)
     assert (line.label, line.status) == ("Reading what the search found", StepStatus.COMPLETE)

@@ -34,10 +34,11 @@ at ASGI spec 2.3.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import itertools
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, cast
@@ -267,6 +268,7 @@ class Script(StrEnum):
     APPROVED = "approved"
     EDIT = "edit"
     RAISES = "raises"
+    CARD = "card"
 
 
 class Point(StrEnum):
@@ -414,6 +416,12 @@ class Run:
     approved_stored: Pending | None = None
     emitted: int = 0
     emitted_during_save: bool = False
+    # Whether a card write in the owner's translation found the lease lost,
+    # and whether the owner translated a card after the drive had stopped.
+    card_lost: bool = False
+    card_after_stop: bool = False
+    translated: int = 0
+    left: Callable[[], None] | None = None
 
     async def land(self, point: Point) -> None:
         """Apply the case's inputs that land at `point`."""
@@ -444,10 +452,14 @@ class Run:
         await asyncio.Future()
 
     async def _leave(self) -> None:
-        """The client closes, and the response sets the gone flag."""
+        """The client closes, and the response sets the gone flag. A drive
+        that emits as the flag is set (`left`) emits then, with no await
+        between, so its event waits for the owner past the flag."""
         self.disconnect.set()
         for _ in range(1000):
             if self.gone.is_set():
+                if self.left is not None and not (self.work_task and self.work_task.done()):
+                    self.left()
                 return
             await asyncio.sleep(0)
         raise AssertionError("the response never set the client-gone flag")
@@ -456,6 +468,7 @@ class Run:
 # An event of a fake drive: what the owner's translation of it sends and
 # changes, run in the owner's task.
 type Make = Callable[[], list[BaseModel]]
+type AsyncMake = Callable[[], Awaitable[list[BaseModel]]]
 
 
 class FakeWork:
@@ -475,6 +488,31 @@ class FakeWork:
         assert self._emit is not None
         self._run.emitted += 1
         self._emit(make)
+
+    def _card(self) -> AsyncMake:
+        """A card: its translation awaits the card's write, fenced on the
+        lease, as `_Translator._land` does."""
+
+        async def land() -> list[BaseModel]:
+            run = self._run
+            if run.work_task is not None and run.work_task.cancelled():
+                run.card_after_stop = True
+            await asyncio.sleep(0)
+            if self._w.lease != SEGMENT:
+                run.card_lost = True
+                raise SegmentLost(CONVERSATION)
+            return [
+                ActivityStep(
+                    event="activity.step",
+                    seq=self._c.next_seq(),
+                    step_id="card",
+                    label="card",
+                    status=StepStatus.COMPLETE,
+                    duration_ms=5,
+                )
+            ]
+
+        return land
 
     def _step(self, step_id: str, status: StepStatus, *, done: bool = False) -> Make:
         return lambda: [
@@ -526,8 +564,10 @@ class FakeWork:
         self._run.finish = Finish(outcome.value)
         return outcome
 
-    async def frames(self, event: object) -> list[BaseModel]:
-        return cast(Make, event)()
+    async def frames(self, event: Make | AsyncMake) -> list[BaseModel]:
+        self._run.translated += 1
+        made = event()
+        return await made if inspect.isawaitable(made) else made
 
     async def end(self, result: object) -> tuple[Outcome, list[BaseModel]]:
         return cast(Outcome, result), []
@@ -550,6 +590,10 @@ class FakeWork:
                 ]
             )
         self._send(self._step("s1", StepStatus.RUNNING))
+        if script is Script.CARD:
+            self._send(self._card())
+            # Another card, emitted as the client leaves.
+            self._run.left = lambda: self._send(self._card())
         if script is Script.APPROVED:
             # The rest of the turn runs while the save after `plan.approved`
             # waits for the database.
@@ -841,6 +885,10 @@ def _broken(run: Run, owner: asyncio.Task[None], spans: Spans, wire: str) -> lis
     if world.committed_close and seqs and max(seqs) >= world.stored[3]:
         broken.append(f"I3: sent {max(seqs)} with seq_next stored at {world.stored[3]}")
 
+    # A save after `plan.approved` or a card write that finds the lease lost
+    # ends the work `lost`, however its drive ended.
+    finish = Finish.LOST if run.approved_lost or run.card_lost else run.finish
+
     # I4
     if run.close in (SegmentClose.SAVED, SegmentClose.STOPPED) and world.lease == SEGMENT:
         broken.append("I4: a committed close left the lease held")
@@ -851,9 +899,6 @@ def _broken(run: Run, owner: asyncio.Task[None], spans: Spans, wire: str) -> lis
     if not owner.done() or owner.cancelled():
         broken.append("I4: the owner did not finish uncancelled")
     else:
-        # A save after `plan.approved` that finds the lease lost ends the
-        # work `lost`, however its drive ended.
-        finish = Finish.LOST if run.approved_lost else run.finish
         assert finish is not None
         _, want = TABLE[finish, run.close]
         statuses = [status for status, _ in spans.ended]
@@ -892,6 +937,11 @@ def _broken(run: Run, owner: asyncio.Task[None], spans: Spans, wire: str) -> lis
     if not world.evicted and _durable(conversation) != world.stored:
         broken.append(f"I8: live {_durable(conversation)} stored {world.stored}")
 
+    # I10: every event the drive emitted is translated, unless the lease was
+    # lost.
+    if finish is not Finish.LOST and run.translated != run.emitted:
+        broken.append(f"I10: translated {run.translated} of {run.emitted} events")
+
     # I9
     if run.approved_stored is not None and run.approved_stored != run.boundary:
         broken.append(f"I9: saved {run.approved_stored} at plan.approved {run.boundary}")
@@ -901,15 +951,23 @@ def _broken(run: Run, owner: asyncio.Task[None], spans: Spans, wire: str) -> lis
 async def test_every_run_of_the_owner_keeps_the_invariants(spans: Spans) -> None:
     cases = _cases()
     failures: dict[str, list[str]] = {}
-    moved = 0
+    moved = lost = after_stop = 0
     for case in cases:
         broken, run = await _run_case(case, spans)
         moved += run.emitted_during_save
+        lost += run.card_lost
+        after_stop += run.card_after_stop
         if broken:
             failures[str(case)] = broken
-    print(f"{len(cases)} runs of the owner, {moved} with the drive emitting during a save")
+    print(
+        f"{len(cases)} runs of the owner, {moved} with the drive emitting during a save, "
+        f"{lost} with a card write finding the lease lost, {after_stop} translating a card "
+        "after the drive stopped"
+    )
     assert cases
     assert moved
+    assert lost
+    assert after_stop
     assert not failures, (
         "\n".join(f"{case}: {'; '.join(broken)}" for case, broken in list(failures.items())[:40])
         + f"\n({len(failures)} of {len(cases)} runs broke an invariant)"

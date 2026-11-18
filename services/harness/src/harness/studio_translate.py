@@ -45,8 +45,7 @@ import functools
 import json
 import logging
 import time
-from collections import deque
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -304,6 +303,31 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
     )
 
 
+def closed_on_reply(
+    conversation: ConversationState, text: str, *, suggestions: bool
+) -> list[MessageComplete | Suggestions | Done]:
+    """Record the turn closed on `text`, its reply, and return the frames
+    that close its stream, numbered: `message.complete`, an empty
+    `suggestions` when `suggestions`, and `done`. For a turn that runs no
+    agent, such as an Edit Card or a declined plan."""
+    conversation.turn_final_text = text
+    conversation.close_turn(final_text=text)
+    frames: list[MessageComplete | Suggestions | Done] = [
+        MessageComplete(event="message.complete", seq=conversation.next_seq(), text=text)
+    ]
+    if suggestions:
+        frames.append(Suggestions(event="suggestions", seq=conversation.next_seq(), items=[]))
+    frames.append(
+        Done(
+            event="done",
+            seq=conversation.next_seq(),
+            trace_id=conversation.trace_id,
+            composition=conversation.composition,
+        )
+    )
+    return frames
+
+
 def recorded_fatal(conversation: ConversationState, error: Mapping[str, Any]) -> ErrorFrame:
     """The stream-fatal error frame for a turn that closed on the error its
     cursor records (`harness.turn.loop.failure`), the frame `_stream_fatal`
@@ -412,6 +436,53 @@ class _ExecutorRecord:
     # that never became a `land_component` call: a plan-step surface record,
     # or a write whose component failed validation.
     land: bool = False
+    # The write token a create returned, taken off its result before anyone
+    # reads it (`_RecordingExecutor._take_write_token`), for the stream's
+    # owner to keep in the conversation with the card.
+    write_token: str | None = None
+
+
+class _Records:
+    """Records by conversation, in the order their calls finished: an
+    append-only queue that the task running a segment fills and that the
+    segment's stream owner alone drains (`take`). `count` is how many records a
+    conversation has had appended, which an event carries
+    (`_EventRecords`), so that the owner takes exactly the records made
+    before it."""
+
+    def __init__(self) -> None:
+        self.items: list[_ExecutorRecord] = []
+        self._appended: dict[str, int] = {}
+        self._taken: dict[str, int] = {}
+
+    def append(self, record: _ExecutorRecord) -> None:
+        self.items.append(record)
+        conversation = record.conversation
+        self._appended[conversation] = self._appended.get(conversation, 0) + 1
+
+    def count(self, conversation: str) -> int:
+        return self._appended.get(conversation, 0)
+
+    def take(self, conversation: str, upto: int | None = None) -> list[_ExecutorRecord]:
+        """This conversation's records, preserving order: every one, or the
+        ones appended before its `upto`th."""
+        mine = [record for record in self.items if record.conversation == conversation]
+        taken = self._taken.get(conversation, 0)
+        count = len(mine) if upto is None else max(0, min(len(mine), upto - taken))
+        took = mine[:count]
+        kept = {id(record) for record in mine[count:]}
+        self.items = [
+            record
+            for record in self.items
+            if record.conversation != conversation or id(record) in kept
+        ]
+        if kept:
+            self._taken[conversation] = taken + count
+        else:
+            # Nothing of the conversation waits: its counts start afresh.
+            self._appended.pop(conversation, None)
+            self._taken.pop(conversation, None)
+        return took
 
 
 def _raised_refusal(exc: BaseException) -> dict[str, Any]:
@@ -444,14 +515,13 @@ class _RecordingExecutor:
     conversation the lock serialises turns and the graph runs nodes
     sequentially.
 
-    `store` is where `_keep_write_token` finds the current conversation and
-    where the translator writes the cards a drain lands.
+    `store` is where the translator writes the cards a drain lands.
     """
 
     def __init__(self, executor: Executor, *, store: StudioStore) -> None:
         self._executor = executor
         self._store = store
-        self._records: list[_ExecutorRecord] = []
+        self._records = _Records()
 
     @property
     def store(self) -> StudioStore:
@@ -466,7 +536,7 @@ class _RecordingExecutor:
         Never touches the conversation itself; a component with no matching
         record (this capability called directly, not through `__call__`
         first) leaves nothing to stamp and is silently a no-op."""
-        for record in reversed(self._records):
+        for record in reversed(self._records.items):
             if record.result.get("component") is component:
                 record.land = True
                 break
@@ -487,8 +557,8 @@ class _RecordingExecutor:
                 tool, args, {"outcome": "refusal", "refusal": _raised_refusal(exc)}, started=started
             )
             raise
-        self._keep_write_token(tool=tool, args=args, result=result)
-        self._record(tool, args, result, started=started)
+        token = self._take_write_token(tool=tool, args=args, result=result)
+        self._record(tool, args, result, started=started, write_token=token)
         return result
 
     def record_step(
@@ -511,6 +581,7 @@ class _RecordingExecutor:
         *,
         started: float,
         step_id: str | None = None,
+        write_token: str | None = None,
     ) -> None:
         """Record one call; its step is `step_id`, or the current step when that is `None`."""
         self._records.append(
@@ -521,25 +592,24 @@ class _RecordingExecutor:
                 duration_ms=int((time.monotonic() - started) * 1000),
                 conversation=current_conversation_id.get(),
                 step_id=step_id if step_id is not None else current_step_id.get(),
+                write_token=write_token,
             )
         )
 
-    def _keep_write_token(self, *, tool: str, args: dict[str, Any], result: dict[str, Any]) -> None:
-        """Move a create's write token off `result` into the current
-        conversation's `write_tokens`, before the record, the graph or the
-        Edit Card route can read the result. The token is the grant
-        `harness.studio_edit` needs to revise that component; a token with
-        no conversation to hold it is dropped, and that component's later
-        edits recreate it instead. A successful create that returns no
-        token is logged at error level, since that card is rebuilt as a
-        new card on its next edit. The token is set on the live state, so
-        the card's own write (`StudioStore.change_canvas`, which commits
-        every durable field the live state changed) stores it with the
-        card."""
+    def _take_write_token(
+        self, *, tool: str, args: dict[str, Any], result: dict[str, Any]
+    ) -> str | None:
+        """Move a create's write token off `result`, before the record, the
+        graph or the Edit Card route can read the result, into the call's
+        record (`_ExecutorRecord.write_token`). The token is the grant
+        `harness.studio_edit` needs to revise that component; the stream's
+        owner keeps it in the conversation with the card. A successful
+        create that returns no token is logged at error level, since that
+        card is rebuilt as a new card on its next edit."""
         token = result.pop(WRITE_TOKEN_KEY, None)
         component = result.get("component")
         if not isinstance(component, dict):
-            return
+            return None
         if not token:
             if tool == "write_component" and "component_id" not in args:
                 logger.error(
@@ -548,23 +618,26 @@ class _RecordingExecutor:
                     component.get("component_id"),
                     current_conversation_id.get(),
                 )
-            return
-        key = current_conversation_key.get()
-        conversation = self._store.current(*key) if key is not None else None
-        if conversation is None:
-            logger.warning(
-                "dropping the write token for component_id=%r: no conversation is loaded "
-                "to hold it",
-                component.get("component_id"),
-            )
-            return
-        conversation.write_tokens[str(component["component_id"])] = str(token)
+            return None
+        return str(token)
 
-    def drain(self, conversation: str) -> list[_ExecutorRecord]:
-        """Take (only) this conversation's records, preserving order."""
-        mine = [record for record in self._records if record.conversation == conversation]
-        self._records = [record for record in self._records if record.conversation != conversation]
-        return mine
+    def write_token(self, component: dict[str, Any]) -> str | None:
+        """The write token of the recorded write that returned `component`
+        (matched by identity, as `land_component` matches), read without
+        taking the record."""
+        for record in reversed(self._records.items):
+            if record.result.get("component") is component:
+                return record.write_token
+        return None
+
+    def count(self, conversation: str) -> int:
+        """How many records this conversation has had appended (`_Records`)."""
+        return self._records.count(conversation)
+
+    def drain(self, conversation: str, upto: int | None = None) -> list[_ExecutorRecord]:
+        """Take (only) this conversation's records, preserving order: every
+        one, or those appended before its `upto`th (`_Records.take`)."""
+        return self._records.take(conversation, upto)
 
     async def aclose(self) -> None:
         """Release the wrapped executor's resources, if it holds any.
@@ -665,7 +738,7 @@ class _RecordingSurface:
     def __init__(self, surface: ToolSurface, *, provenance: ProvenanceStore | None = None) -> None:
         self._surface = surface
         self._provenance = provenance
-        self._records: list[_ExecutorRecord] = []
+        self._records = _Records()
         # The latest approved plan's workflow step order, by conversation
         # (this wrapper is per-runner and shared across conversations, the
         # same reason `_records` is conversation-tagged). Read by
@@ -812,7 +885,7 @@ class _RecordingSurface:
         }
         records = [
             record
-            for record in self._records
+            for record in self._records.items
             if record.conversation == conversation and record.step_id == step_id
         ]
         # The latest complete record is the step's own call; an earlier one
@@ -911,15 +984,20 @@ class _RecordingSurface:
         )
         return lineage[0].manifest if lineage is not None else None
 
-    def drain(self, conversation: str) -> list[_ExecutorRecord]:
-        """Take (only) this conversation's records, preserving order, and
-        forget its calls still in flight, whose run has ended."""
-        mine = [record for record in self._records if record.conversation == conversation]
-        self._records = [record for record in self._records if record.conversation != conversation]
-        self._in_flight = {
-            key: started for key, started in self._in_flight.items() if key[0] != conversation
-        }
-        return mine
+    def drain(self, conversation: str, upto: int | None = None) -> list[_ExecutorRecord]:
+        """Take (only) this conversation's records, preserving order: every
+        one, or those appended before its `upto`th (`_Records.take`). Taking
+        every one also forgets its calls still in flight, whose run has
+        ended."""
+        if upto is None:
+            self._in_flight = {
+                key: started for key, started in self._in_flight.items() if key[0] != conversation
+            }
+        return self._records.take(conversation, upto)
+
+    def count(self, conversation: str) -> int:
+        """How many records this conversation has had appended (`_Records`)."""
+        return self._records.count(conversation)
 
     def set_step_order(
         self,
@@ -1346,6 +1424,37 @@ class _StatusLine:
 # The events a turn segment emits: the loop's own and the graph's nodes'.
 type SegmentEvent = GraphEvent | TurnEvent
 
+# How many records each recorder held for the conversation when an event was
+# emitted, the executor's and the surface's (`None` with no surface), or
+# `None` for an event that takes no records.
+type RecordMarks = tuple[int, int | None] | None
+
+
+class _EventRecords:
+    """The half of a segment's translation that runs in the task running
+    the segment: it marks each event with how many calls the recorders
+    held for the conversation as it was emitted (`RecordMarks`), and reads
+    nothing else. The stream's owner takes those calls when it translates
+    the event (`_Translator.translate_recorded`)."""
+
+    def __init__(
+        self, recorder: _RecordingExecutor, surface_recorder: _RecordingSurface | None = None
+    ) -> None:
+        self._recorder = recorder
+        self._surface_recorder = surface_recorder
+
+    def recorded(self, event: SegmentEvent) -> tuple[SegmentEvent, RecordMarks]:
+        """`event` with its marks: none for a plan step's progress report,
+        which takes no calls (`_Translator._translate`)."""
+        if isinstance(event, StepProgress):
+            return event, None
+        conversation = current_conversation_id.get()
+        surface = self._surface_recorder
+        return event, (
+            self._recorder.count(conversation),
+            surface.count(conversation) if surface is not None else None,
+        )
+
 
 class _Translator:
     """One turn segment's translation of its events into wire frames.
@@ -1354,11 +1463,10 @@ class _Translator:
     (plan.proposed / elicitation.request) is emitted, which tells the route
     the stream must end without `done` (contract delta 1).
 
-    The segment's event, with the calls recorded before it (`recorded`), is
-    taken as it happens, in the task that runs the segment, and translated
-    later, in order, in the stream owner's task (`translate_recorded`).
-    `emit` and `frames` run both halves for a caller that drives the segment
-    itself. The agent's tool calls run through the
+    It runs in the stream owner's task. Each event the segment emits
+    arrives marked with how many calls the recorders held as it was emitted
+    (`_EventRecords`), and the translator takes those calls and translates
+    them, then the event, in order (`translate_recorded`). The agent's tool calls run through the
     recording executor and surface, so their steps and cards arrive as the
     records each event took (`_record_frames`); the plan path's events (the
     planner's status lines, the executor's step progress, the approval and
@@ -1478,70 +1586,12 @@ class _Translator:
         self._unanswered: list[tuple[str, str]] = []
         # The highest composition revision this stream has sent.
         self._sent_revision = 0
-        # The events emitted and not yet translated, each with the calls
-        # recorded before it (`emit`), and whether one waits.
-        self._waiting: deque[tuple[SegmentEvent, list[_ExecutorRecord]]] = deque()
-        self._ready = asyncio.Event()
 
-    def emit(self, event: SegmentEvent) -> None:
-        """Take `event` as the segment emits it (`harness.turn.loop.run_segment`'s
-        `emit`), with every call recorded since the event before it, for
-        `frames` to translate.
-
-        A plan step's progress report takes no calls (`_translate`), and
-        replaces a report of the same step that still waits, so a stream that
-        falls behind the run shows where each step is now."""
-        if isinstance(event, StepProgress):
-            for place, (waiting, _) in enumerate(self._waiting):
-                if isinstance(waiting, StepProgress) and waiting.step_id == event.step_id:
-                    self._waiting[place] = (event, [])
-                    return
-        self._waiting.append(self.recorded(event))
-        self._ready.set()
-
-    def recorded(self, event: SegmentEvent) -> tuple[SegmentEvent, list[_ExecutorRecord]]:
-        """`event` with every call recorded since the event before it, taken
-        as the segment emits it: none for a plan step's progress report
-        (`_translate`). It reads only the recorders, which the segment's
-        calls write, so it runs in the segment's task."""
-        if isinstance(event, StepProgress):
-            return event, []
-        return event, self._take_records()
-
-    async def translate_recorded(
-        self, event: SegmentEvent, records: list[_ExecutorRecord]
-    ) -> list[Any]:
-        """The frames of `event`, taken with `records` (`recorded`)."""
+    async def translate_recorded(self, event: SegmentEvent, marks: RecordMarks) -> list[Any]:
+        """The frames of `event`, emitted with `marks` (`_EventRecords`):
+        those of the calls recorded before it, then its own."""
+        records = [] if marks is None else self._take_records(marks)
         return await self._translate(event, records)
-
-    async def frames(self, segment: asyncio.Future[Any]) -> AsyncIterator[Any]:
-        """The frames of each event `emit` takes, in order, as the events
-        come, until `segment`, the task running the segment, is done and
-        every event it emitted is translated. The caller reads the
-        segment's outcome from `segment`."""
-        while True:
-            while self._waiting:
-                event, records = self._waiting.popleft()
-                for frame in await self._translate(event, records):
-                    yield frame
-            if segment.done():
-                return
-            self._ready.clear()
-            ready = asyncio.ensure_future(self._ready.wait())
-            try:
-                await asyncio.wait((ready, segment), return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                ready.cancel()
-
-    async def translate(self, event: SegmentEvent) -> list[Any]:
-        """The frames of `event`, taken (`emit`) and translated at once,
-        after those of any event still waiting."""
-        self.emit(event)
-        frames: list[Any] = []
-        while self._waiting:
-            waiting, records = self._waiting.popleft()
-            frames.extend(await self._translate(waiting, records))
-        return frames
 
     async def _translate(self, event: SegmentEvent, records: list[_ExecutorRecord]) -> list[Any]:
         """The frames of `event`: those of `records`, the calls recorded
@@ -1871,10 +1921,12 @@ class _Translator:
         """Frames for every call recorded since the last drain."""
         return await self._record_frames(self._take_records())
 
-    def _take_records(self) -> list[_ExecutorRecord]:
-        """Every call recorded since the last drain, plan steps first."""
+    def _take_records(self, marks: tuple[int, int | None] | None = None) -> list[_ExecutorRecord]:
+        """The calls recorded since the last drain, plan steps first: every
+        one, or those recorded before `marks` (`_EventRecords`)."""
         conversation = current_conversation_id.get()
-        records = list(self._recorder.drain(conversation))
+        executor_mark, surface_mark = marks if marks is not None else (None, None)
+        records = list(self._recorder.drain(conversation, executor_mark))
         if self._surface_recorder is not None:
             # Plan steps (the surface) precede the executor's own calls
             # within any one segment, so this ordering matches
@@ -1886,7 +1938,7 @@ class _Translator:
             # stable-sorted into the latest plan's step order before
             # numbering; a record whose `step_id` that order does not name
             # sorts after every named one, in the order it was recorded.
-            surface_records = self._surface_recorder.drain(conversation)
+            surface_records = self._surface_recorder.drain(conversation, surface_mark)
             order = self._surface_recorder.step_order(conversation)
             position = {step_id: index for index, step_id in enumerate(order)}
             surface_records = sorted(
@@ -1970,6 +2022,7 @@ class _Translator:
                         land=record.land,
                         intent=record.args.get("intent"),
                         created=created,
+                        write_token=record.write_token,
                     )
                 )
         return frames
@@ -1981,6 +2034,7 @@ class _Translator:
         land: bool,
         created: ComponentCreated,
         intent: dict[str, Any] | None = None,
+        write_token: str | None = None,
     ) -> list[Any]:
         """Frames for `component`, which passed the `component.created` wire
         contract (`created` is the frame `_record_frames` built from it).
@@ -1995,17 +2049,21 @@ class _Translator:
         goes out. `land=True` against an `auto_add=False` conversation
         resolves to `"held"` inside `harness.studio_state.land_component`
         itself, also only `component.created`, and writes the card's entry
-        with no block."""
+        with no block. The card's `write_token` is kept with it, in its
+        write, or in the conversation for the closing write when nothing
+        lands."""
         created.seq = self._conversation.next_seq()
         if not land:
+            if write_token:
+                self._conversation.write_tokens[created.component_id] = write_token
             return [created]
-        if await self._land(component, intent=intent) != "created":
+        if await self._land(component, intent=intent, write_token=write_token) != "created":
             return [created]
         # Read with no await since the landing, so this is the manifest it wrote.
         return [created, *self._composition_update()]
 
     async def _land(
-        self, component: dict[str, Any], *, intent: dict[str, Any] | None
+        self, component: dict[str, Any], *, intent: dict[str, Any] | None, write_token: str | None
     ) -> Literal["created", "held"]:
         """`harness.studio_state.land_component` on the current
         conversation, inside the store's card write
@@ -2015,9 +2073,16 @@ class _Translator:
         line and token commit the same way."""
         key = current_conversation_key.get()
         assert key is not None, "a card lands only inside a conversation's stream"
-        return await self._recorder.store.change_canvas(
-            *key, lambda work: state_land_component(work, component, intent=intent)
-        )
+
+        def land(work: ConversationState) -> Literal["created", "held"]:
+            if write_token:
+                work.write_tokens = {
+                    **work.write_tokens,
+                    str(component["component_id"]): write_token,
+                }
+            return state_land_component(work, component, intent=intent)
+
+        return await self._recorder.store.change_canvas(*key, land)
 
     def _composition_update(self) -> list[CompositionUpdated]:
         """The `composition.updated` frame for the conversation's stored

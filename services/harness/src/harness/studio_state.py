@@ -533,11 +533,6 @@ class ConversationState:
     # as `changed_from` for a choice that holds another label now.
     turn_choice_baseline: dict[str, str] = field(default_factory=dict)
     turn_recorded: bool = False
-    # The error the turn's record closes on when the next turn finds it open
-    # with no cursor to read (`begin_turn`): `state_not_saved` for an Edit
-    # Card turn, set at its claim, since its stream says so when its closing
-    # write fails. `None` closes it `abandoned`.
-    turn_open_error: str | None = None
     # Whether a `remove_cards` of this turn changed the canvas since the
     # stream last reported one (`take_unreported_removal`). Not durable.
     # Reset by `begin_turn`.
@@ -1022,7 +1017,14 @@ class ConversationState:
         was left in, for the caller to record its closing span once the new
         turn's claim commits (`record_closed_turn_span`). It opens no span:
         the owner of the segment the claim starts opens that segment's
-        (`harness.studio_stream`)."""
+        (`harness.studio_stream`).
+
+        A turn with a cursor whose stream's closing write failed is recorded
+        before this, by the load that finds its cursor closed
+        (`harness.studio_store.StudioStore.load`). An Edit Card turn has no
+        cursor, so one whose stream sent its ending frame and whose closing
+        write then failed is recorded `abandoned` here, where its stream
+        said otherwise. That one-fault case is a known gap."""
         previous = ClosedTurn(self.trace_id, self.turn_user_message, "abandoned")
         abandoned = None
         self.turn_index += 1
@@ -1033,12 +1035,9 @@ class ConversationState:
         self._removal_unreported = False
         if self.turn_index > 1 and not self.turn_recorded:
             # The previous turn never reached a terminal frame (an abandoned
-            # pause, or a death no code path recorded), or its closing write
-            # failed. Its record keeps what was asked, with the error marked
-            # as abandoned, or as the error its claim named.
-            self.close_turn(
-                final_text=self.turn_final_text, error=self.turn_open_error or "abandoned"
-            )
+            # pause, or a death no code path recorded). Its record keeps
+            # what was asked, with the error marked as abandoned.
+            self.close_turn(final_text=self.turn_final_text, error="abandoned")
             abandoned = previous
         self.turn_user_message = ""
         self.turn_user_words = ""
@@ -1049,7 +1048,6 @@ class ConversationState:
         self.turn_specs = {}
         self.turn_applied_choice = None
         self.turn_recorded = False
-        self.turn_open_error = None
         return abandoned
 
     def next_seq(self) -> int:

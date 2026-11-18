@@ -2360,7 +2360,7 @@ async def _computing_runs(engine: AsyncEngine) -> int:
 @pytest.mark.parametrize(
     ("cursor", "closed"),
     [
-        pytest.param("none", SegmentClose.SAVED, id="no-cursor"),
+        pytest.param("none", SegmentClose.STOPPED, id="no-cursor"),
         pytest.param("running", SegmentClose.STOPPED, id="running"),
         pytest.param("paused", SegmentClose.STOPPED, id="paused"),
         pytest.param("taken", SegmentClose.SAVED, id="paused-on-the-stop-its-scope-took"),
@@ -2837,13 +2837,12 @@ async def test_a_card_the_turn_lands_is_written_onto_the_canvas_as_stored(new_st
 
     await store_b.mutate_composition("principal", CONVERSATION, pin)
 
-    # The create's write token reaches the live state before the card lands
-    # (`_RecordingExecutor._keep_write_token`).
-    state_a.write_tokens["cmp_two"] = "token-two"
+    def land(work: ConversationState) -> str:
+        # The create's write token lands with its card (`_Translator._land`).
+        work.write_tokens = {**work.write_tokens, "cmp_two": "token-two"}
+        return land_component(work, _CARD)
 
-    landed = await store_a.change_canvas(
-        "principal", CONVERSATION, lambda work: land_component(work, _CARD)
-    )
+    landed = await store_a.change_canvas("principal", CONVERSATION, land)
 
     assert landed == "created"
     reloaded = await new_store().load("principal", CONVERSATION)
@@ -2855,6 +2854,30 @@ async def test_a_card_the_turn_lands_is_written_onto_the_canvas_as_stored(new_st
     assert reloaded.components == state_a.components
     assert reloaded.write_tokens == {"cmp_two": "token-two"}
     assert reloaded.turn_components == state_a.turn_components
+
+
+async def test_a_card_write_commits_only_the_fields_its_change_made(new_store) -> None:
+    """The turn's drive removes a card (`remove_cards`) while the stream's
+    owner holds a pending interrupt it has not saved. The removal commits
+    the canvas and the fields its change made, and leaves the pending
+    interrupt for the owner's own write."""
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await store.change_canvas("principal", CONVERSATION, lambda work: land_component(work, _CARD))
+    state.pending["int_1"] = _pending()
+    remove = studio_state.make_remove_cards(store)
+    token = current_conversation_key.set(("principal", CONVERSATION))
+    try:
+        assert await remove(component_ids=["cmp_two"], all_cards=False) == (["cmp_two"], [])
+    finally:
+        current_conversation_key.reset(token)
+
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert reloaded.composition is not None and reloaded.composition.blocks == []
+    assert reloaded.pending == {}
+    assert list(state.pending) == ["int_1"]
 
 
 async def test_a_stream_whose_segment_was_taken_over_lands_no_card(new_store, clock) -> None:

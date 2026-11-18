@@ -53,15 +53,17 @@ past every number they can take. A later segment numbers from the block its
 claim reserves (`harness.studio_store.SEQ_BLOCK`). After the closing write
 the owner changes no conversation state.
 
-The drive's tool calls still reach the conversation in three ways, each in
-the task that runs the call. A tool reads the live canvas and digest
-(`harness.studio_state.make_canvas_cards` and its siblings). The recording
-executor sets a created card's write token (`_RecordingExecutor`), one
-dictionary key, for a card whose record the owner has yet to translate. The
-`remove_cards` tool writes the canvas through `StudioStore.change_canvas`,
-whose store write lock orders it with the owner's writes and whose copy
-reaches the live state only once it commits. The model reads that tool's
-result in the same model call, so its write cannot wait for the owner.
+The drive's tool calls still meet the conversation in two ways. A tool
+reads the live canvas and digest (`harness.studio_state.make_canvas_cards`
+and its siblings). The `remove_cards` tool writes the canvas through
+`StudioStore.change_canvas`, since the model reads its result in the same
+model call: the store's write lock orders that write with the owner's, it
+commits only the fields its change made, and those reach the live state
+only once it commits. The recorders the drive's calls write
+(`harness.studio_translate._RecordingExecutor` and `_RecordingSurface`)
+are append-only queues: the drive marks each event with how many records
+they held as it was emitted (`harness.studio_translate._EventRecords`), and
+the owner alone takes them, a write token among them.
 
 Past a graceful-shutdown timeout the server stops waiting for responses, and
 the event loop's teardown would cancel an owner still in its closing write.
@@ -76,7 +78,7 @@ import asyncio
 import itertools
 import logging
 import time
-from collections import deque
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine, Hashable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
@@ -336,21 +338,22 @@ def ending(work: WorkEnd, close: SegmentClose | None) -> Ending:
     return Ending(built, status, saved=close in (SegmentClose.SAVED, SegmentClose.STOPPED))
 
 
-class Emit(Protocol):
+class Emit[E](Protocol):
     """How a drive hands the owner an event. An event emitted with a `key`
     replaces one with the same key that still waits, so a stream that falls
     behind its drive translates only the latest of them."""
 
-    def __call__(self, event: object, /, *, key: Hashable | None = None) -> None: ...
+    def __call__(self, event: E, /, *, key: Hashable | None = None) -> None: ...
 
 
-class Work(Protocol):
+class Work[E, R](Protocol):
     """A segment's work, as the route that claimed the segment builds it, in
     two halves.
 
     `drive` runs in a task of its own: the turn loop's segment, or the Edit
     Card's calls, which hands each event it makes to `emit` and writes no
-    conversation state of its own. The owner's task runs the rest: it
+    conversation state of its own beyond a card write whose result its
+    model reads (module docstring). The owner's task runs the rest: it
     starts the work (`begin`) before the drive runs, translates each event
     into wire frames (`frames`), in order, and once the drive has returned,
     and every event it emitted is translated, reads how the work ended and
@@ -361,18 +364,18 @@ class Work(Protocol):
         runs."""
         ...
 
-    async def drive(self, emit: Emit) -> object:
+    async def drive(self, emit: Emit[E]) -> R:
         """Run the segment's calls, `emit` each event, and return what `end`
         reads. Cancelling the task that runs it stops the segment with the
         turn's `StopScope` unmarked."""
         ...
 
-    async def frames(self, event: object) -> list[BaseModel]:
+    async def frames(self, event: E) -> list[BaseModel]:
         """The wire frames of `event`, numbered, with the conversation state
         it changes written."""
         ...
 
-    async def end(self, result: object) -> tuple[Outcome, list[BaseModel]]:
+    async def end(self, result: R) -> tuple[Outcome, list[BaseModel]]:
         """How the segment ended, from `result`, what `drive` returned, and
         the frames that close it. A turn that pauses, ends, or fails sends its
         ending frame (a pause frame, `done`, or a stream-fatal `error`), in
@@ -451,29 +454,26 @@ class _OpenLines:
         ]
 
 
-class _Events:
+class _Events[E]:
     """The one queue from a drive to its owner: the events the drive
-    emitted and the owner has not taken, each with its key (`Emit`)."""
+    emitted and the owner has not taken, in order, by key (`Emit`). An
+    event emitted with no key takes a key of its own."""
 
     def __init__(self) -> None:
-        self._waiting: deque[tuple[Hashable | None, object]] = deque()
+        self._waiting: OrderedDict[Hashable, E] = OrderedDict()
         self._arrived = asyncio.Event()
 
     def __bool__(self) -> bool:
         return bool(self._waiting)
 
-    def put(self, event: object, /, *, key: Hashable | None = None) -> None:
-        if key is not None:
-            for place, (waiting, _) in enumerate(self._waiting):
-                if waiting == key:
-                    self._waiting[place] = (key, event)
-                    return
-        self._waiting.append((key, event))
+    def put(self, event: E, /, *, key: Hashable | None = None) -> None:
+        # A waiting event under `key` is replaced in its place.
+        self._waiting[object() if key is None else key] = event
         self._arrived.set()
 
-    def take(self) -> object:
+    def take(self) -> E:
         """The oldest event waiting; there must be one."""
-        return self._waiting.popleft()[1]
+        return self._waiting.popitem(last=False)[1]
 
     def arrived(self) -> Coroutine[Any, Any, bool]:
         """Wait until an event arrives after the last `take` that emptied
@@ -495,12 +495,12 @@ _GONE: Final = _Gone()
 _ENDED: Final = _Ended()
 
 
-class _Owner:
+class _Owner[E, R]:
     """`own_segment`'s state for one segment."""
 
     def __init__(
         self,
-        work: Work,
+        work: Work[E, R],
         *,
         store: SegmentStore,
         conversation: ConversationState,
@@ -518,8 +518,8 @@ class _Owner:
         self._segment_id = segment_id
         self._channel = channel
         self._gone = gone
-        self._events = _Events()
-        self._task: asyncio.Task[object] | None = None
+        self._events: _Events[E] = _Events()
+        self._task: asyncio.Task[R] | None = None
         self._held: EndingFrame | None = None
         # Whether nothing went on the channel since the work sent the held
         # frame, so the number the work gave it is still unsent.
@@ -596,11 +596,11 @@ class _Owner:
             return self._failed(error)
 
     @staticmethod
-    async def _stop(task: asyncio.Task[object]) -> None:
+    async def _stop(task: asyncio.Task[Any]) -> None:
         task.cancel()
         await asyncio.wait({task})
 
-    async def _next(self) -> object:
+    async def _next(self) -> E | _Gone | _Ended:
         """The drive's next event, `_GONE` once the client has left while
         the drive runs, or `_ENDED` once the drive has ended and every event
         it emitted is taken. The one place the owner reads the client-gone
@@ -688,7 +688,7 @@ class _Owner:
             )
         return False
 
-    async def _ended(self, task: asyncio.Task[object]) -> Finish:
+    async def _ended(self, task: asyncio.Task[R]) -> Finish:
         """How the work ended, once the drive has ended on its own and every
         event it emitted is taken: the work's outcome, with the frames that
         close it taken. A drive that raised, a cancellation of its own
@@ -769,8 +769,8 @@ class _Owner:
         return [*lines, frame.model_copy(update=update)]
 
 
-async def own_segment(
-    work: Work,
+async def own_segment[E, R](
+    work: Work[E, R],
     *,
     store: SegmentStore,
     conversation: ConversationState,
@@ -874,8 +874,8 @@ class LiveOwners:
             )
 
 
-def open_stream(
-    work: Work,
+def open_stream[E, R](
+    work: Work[E, R],
     *,
     owners: LiveOwners,
     store: SegmentStore,
