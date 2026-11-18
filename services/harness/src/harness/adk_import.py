@@ -71,8 +71,8 @@ Verbs:
   whose ADK state moved since the job imported it while its rows did not
   (the previous release still serving), and one whose rows moved since,
   written by the release that reads the tables (one written while verify
-  compares it included), are each listed and not compared; one where both moved is a conflict, listed, not compared, and
-  fails the verify.
+  compares it included), are each listed and not compared; one where both
+  moved is a conflict, listed, not compared, and fails the verify.
 - `close-open-turns`: closes, in the tables, every open turn that holds no
   live lease and ran on ADK (its turn session `{conversation_id}#t{n}`
   under app `dfo_analyst_graph` exists), as `ConversationState.begin_turn`
@@ -619,15 +619,32 @@ def open_turn_specs(engine: AsyncEngine) -> TurnSpecs:
 
     async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
         turn = await _turn_session_specs(engine, principal, session_id)
-        return turn.specs if turn is not None else {}
+        if turn is None:
+            return {}
+        _log_unconvertible(turn.blocks)
+        return turn.specs
 
     return turn_specs
 
 
 def _converted_specs(session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
     """`specs`, the spec blocks turn session `session_id` holds, converted
-    (`_convert_blocks`); a block that does not convert is kept as it is."""
-    return dict(_convert_blocks(specs, session_id, Blocks()))
+    (`_convert_blocks`), and `specs` itself when no block needed converting.
+    A block that does not convert is kept as it is and logged
+    (`_log_unconvertible`)."""
+    blocks = Blocks()
+    converted = _convert_blocks(specs, session_id, blocks)
+    _log_unconvertible(blocks)
+    return specs if converted is specs else dict(converted)
+
+
+def _log_unconvertible(blocks: Blocks) -> None:
+    """Log each spec block the serving release keeps as stored, since it
+    does not convert: the turn session (conversation and turn) holding it,
+    its spec id and why. A turn that closes with it loses its entity refs,
+    since the reader refuses the mapping form."""
+    for reason in blocks.unconvertible:
+        logger.warning("adk import: a spec block is served as stored: %s", reason)
 
 
 async def _find_row(conn: AsyncConnection, names: dict[str, str], *, lock: bool) -> int | None:

@@ -38,14 +38,16 @@ import pytest
 from compiler.sources import source_from_spec_block
 from fastapi.responses import JSONResponse
 from google.adk.sessions import InMemorySessionService
-from harness import studio_state, studio_store
+from harness import adk_import, studio_state, studio_store
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.conversation import current_conversation_key
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY
+from harness.studio_edit import _refresh_block
 from harness.studio_state import (
     CANVAS_DIGEST_MAX_BYTES,
     CONVERSATION_DIGEST_MAX_BYTES,
     ConversationState,
+    DatabaseUnavailable,
     Segment,
     SegmentBusy,
     SegmentLost,
@@ -71,7 +73,8 @@ from harness.wire import (
 from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
 from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from . import drawn_cards
@@ -2586,12 +2589,14 @@ async def test_a_frame_reservation_that_meets_a_dropped_connection_is_retried(
     assert reserved == 2 * SEQ_BLOCK - 10
 
 
-async def test_a_card_write_failing_past_the_lease_deadline_reports_the_segment_lost(
+async def test_a_card_write_failing_past_the_lease_deadline_reports_the_database_unavailable(
     new_store, clock
 ) -> None:
     """A write that keeps failing stops retrying at the lease's deadline, ten
     seconds before the lease dated from the claim's load would lapse: past
-    it, another instance may claim the conversation."""
+    it, another instance may claim the conversation. No instance has, so
+    the write reports the database unavailable, raised from the last fault,
+    in place of a takeover."""
     store = new_store(clock=clock)
     state = await store.create("principal", CONVERSATION)
     store.claim_segment("principal", CONVERSATION)
@@ -2605,13 +2610,293 @@ async def test_a_card_write_failing_past_the_lease_deadline_reports_the_segment_
 
     store._write_composition = dropped
 
-    with pytest.raises(SegmentLost):
+    with pytest.raises(DatabaseUnavailable) as raised:
         await store.change_canvas(
             "principal", CONVERSATION, lambda work: land_component(work, _CARD)
         )
 
+    assert isinstance(raised.value.__cause__, OperationalError)
     assert state.components == {}
     assert state.composition is None
+
+
+@pytest.mark.parametrize(
+    ("fault", "retried"),
+    [
+        pytest.param(ConnectionResetError("connection reset"), True, id="reset-socket"),
+        pytest.param(
+            OperationalError("UPDATE", {}, ConnectionRefusedError("refused")),
+            True,
+            id="refused-socket",
+        ),
+        pytest.param(
+            OperationalError("UPDATE", {}, Exception("closed"), connection_invalidated=True),
+            True,
+            id="invalidated",
+        ),
+        pytest.param(SQLAlchemyTimeoutError("QueuePool limit reached"), True, id="pool-timeout"),
+        pytest.param(
+            OperationalError("UPDATE", {}, Exception("canceling statement due to lock timeout")),
+            False,
+            id="lock-timeout",
+        ),
+        pytest.param(
+            InterfaceError("UPDATE", {}, Exception("another operation is in progress")),
+            False,
+            id="connection-misuse",
+        ),
+    ],
+)
+async def test_a_card_write_retries_a_lost_connection_alone(
+    new_store, monkeypatch, fault: Exception, retried: bool
+) -> None:
+    """A retry outlasts the connection failing. A statement or lock timeout,
+    or a misuse of the connection, no retry mends, so it raises at once."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store = new_store()
+    await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    real_write = store._write_composition
+    faults: list[Exception] = []
+
+    async def failing_once(*args: Any, **kwargs: Any) -> None:
+        if not faults:
+            faults.append(fault)
+            raise fault
+        await real_write(*args, **kwargs)
+
+    store._write_composition = failing_once
+
+    if retried:
+        await store.change_canvas(
+            "principal", CONVERSATION, lambda work: land_component(work, _CARD)
+        )
+    else:
+        with pytest.raises(type(fault)):
+            await store.change_canvas(
+                "principal", CONVERSATION, lambda work: land_component(work, _CARD)
+            )
+
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert (reloaded.composition is not None) == retried
+
+
+async def test_a_release_that_cannot_reach_the_database_logs_it_saved_nothing(
+    new_store, clock, caplog
+) -> None:
+    """The release names the database, not a takeover, as why nothing was
+    saved."""
+    store = new_store(clock=clock)
+    await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await clock.set(store.lease_deadline("principal", CONVERSATION))
+
+    async def dropped(*args: Any, **kwargs: Any) -> None:
+        raise OperationalError("UPDATE", {}, ConnectionResetError("connection reset"))
+
+    store._write = dropped
+
+    with caplog.at_level(logging.WARNING, logger=studio_store.__name__):
+        await store.release("principal", CONVERSATION, segment_id)
+
+    (record,) = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert record.levelno == logging.ERROR
+    assert "could not reach the database" in record.getMessage()
+
+
+async def test_a_release_retried_after_another_instance_claimed_and_released_is_fenced_out(
+    new_store, monkeypatch, caplog
+) -> None:
+    """A's release commits and its acknowledgement is lost. Before the retry,
+    B claims and releases. The row holds no lease, but at B's version, so the
+    retry knows its own commit is not the last one and records nothing."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store_a = new_store()
+    state_a = await store_a.create("principal", CONVERSATION)
+    state_a.begin_turn()
+    segment_id = store_a.claim_segment("principal", CONVERSATION)
+    await store_a.save("principal", CONVERSATION)
+    state_a.turn_final_text = "A's last words"
+    store_b = new_store()
+    real_transaction = store_a._transaction
+    faults: list[int] = []
+
+    @asynccontextmanager
+    async def losing_the_ack() -> Any:
+        async with real_transaction() as conn:
+            yield conn
+        if not faults:
+            faults.append(1)
+            state_b = await store_b.load("principal", CONVERSATION)
+            state_b.turn_final_text = "B's words"
+            b_segment = store_b.claim_segment("principal", CONVERSATION)
+            await store_b.save("principal", CONVERSATION)
+            await store_b.release("principal", CONVERSATION, b_segment)
+            raise OperationalError("COMMIT", {}, ConnectionResetError("connection reset"))
+
+    store_a._transaction = losing_the_ack
+    version_before = store_a._runtime[("principal", CONVERSATION)].version
+
+    with caplog.at_level(logging.WARNING, logger=studio_store.__name__):
+        await store_a.release("principal", CONVERSATION, segment_id)
+
+    assert faults == [1]
+    assert any("taken over" in r.getMessage() for r in caplog.records)
+    assert store_a._runtime[("principal", CONVERSATION)].version == version_before
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert reloaded.turn_final_text == "B's words"
+
+
+async def test_a_removal_whose_commit_lost_its_acknowledgement_reports_the_cards_it_removed(
+    new_store, monkeypatch
+) -> None:
+    """The retry reads a canvas the card is already off. It still reports the
+    card removed, and the stream still owes its `composition.updated`."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await store.change_canvas("principal", CONVERSATION, lambda work: land_component(work, _CARD))
+    faults = _dropping_connection(store, acknowledged=True)
+    remove = studio_state.make_remove_cards(store)
+    token = current_conversation_key.set(("principal", CONVERSATION))
+    try:
+        result = await remove(component_ids=["cmp_two"], all_cards=False)
+    finally:
+        current_conversation_key.reset(token)
+
+    assert faults == [1]
+    assert result == (["cmp_two"], [])
+    assert state.take_unreported_removal() is True
+    assert state.composition is not None and state.composition.blocks == []
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert reloaded.composition == state.composition
+
+
+async def test_a_block_refresh_whose_commit_lost_its_acknowledgement_mints_one_revision(
+    new_store, monkeypatch
+) -> None:
+    """The retry finds the block already at the revision and title, and
+    leaves the canvas as the lost commit wrote it."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await store.change_canvas("principal", CONVERSATION, lambda work: land_component(work, _CARD))
+    assert state.composition is not None
+    landed = state.composition.revision
+    faults = _dropping_connection(store, acknowledged=True)
+
+    await store.change_canvas(
+        "principal",
+        CONVERSATION,
+        lambda work: _refresh_block(work, component_id="cmp_two", revision=2, title="Renamed"),
+    )
+
+    assert faults == [1]
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert reloaded.composition.revision == landed + 1
+    assert (reloaded.composition.blocks[0].revision, reloaded.composition.blocks[0].title) == (
+        2,
+        "Renamed",
+    )
+
+
+async def _row_digest(store: StudioStore) -> tuple[int, str]:
+    """The conversation row's version and the digest of every row the
+    tables hold for it, as the import compares them."""
+    async with store.engine.connect() as conn:
+        pk, version = (await conn.execute(text("SELECT id, version FROM conversations"))).one()
+        return version, await adk_import._stored_digest(conn, pk)
+
+
+async def _with_an_open_turn(new_store) -> StudioStore:
+    """A conversation whose first turn was left open, and a store that has
+    loaded it."""
+    first = new_store()
+    state = await first.create("principal", CONVERSATION)
+    state.begin_turn()
+    state.turn_user_message = "the first question"
+    segment_id = first.claim_segment("principal", CONVERSATION)
+    await first.save("principal", CONVERSATION)
+    await first.release("principal", CONVERSATION, segment_id)
+    store = new_store()
+    await store.load("principal", CONVERSATION)
+    return store
+
+
+async def test_an_undone_claim_leaves_the_rows_as_they_stood(new_store) -> None:
+    """The claim closes the open turn into a new turn row, opens the next
+    turn and takes the lease. Undoing it writes every row back, version
+    included, so the rows digest as before, and the live state is the one
+    read."""
+    store = await _with_an_open_turn(new_store)
+    before = await _row_digest(store)
+    state = store.current("principal", CONVERSATION)
+    state.begin_turn()
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    assert (await _row_digest(store)) != before
+
+    await store.undo_claim("principal", CONVERSATION, segment_id)
+
+    assert (await _row_digest(store)) == before
+    assert (state.turn_index, state.segment, state.turns) == (1, None, [])
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert reloaded.turn_user_message == "the first question"
+    # The store's own next claim saves against the row as read.
+    state.begin_turn()
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+
+
+async def test_a_claim_whose_turn_state_moved_is_left_and_its_lease_dropped(new_store) -> None:
+    store = await _with_an_open_turn(new_store)
+    state = store.current("principal", CONVERSATION)
+    state.begin_turn()
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    async with store.engine.begin() as conn:
+        await conn.execute(text("UPDATE conversations SET version = version + 1"))
+
+    await store.undo_claim("principal", CONVERSATION, segment_id)
+
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert (reloaded.turn_index, reloaded.segment) == (2, None)
+    assert [turn["error"] for turn in reloaded.turns] == ["abandoned"]
+
+
+async def test_a_removal_that_cannot_reach_the_database_ends_the_stream_unsaved(
+    new_store, clock
+) -> None:
+    """No instance took the conversation over, so the stream ends as
+    `state_not_saved`, which closes the turn."""
+    store = new_store(clock=clock)
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await store.change_canvas("principal", CONVERSATION, lambda work: land_component(work, _CARD))
+    await clock.set(store.lease_deadline("principal", CONVERSATION))
+
+    async def dropped(*args: Any, **kwargs: Any) -> None:
+        raise OperationalError("UPDATE", {}, ConnectionResetError("connection reset"))
+
+    store._write_composition = dropped
+    state.cancel_event = asyncio.Event()
+    remove = studio_state.make_remove_cards(store)
+    token = current_conversation_key.set(("principal", CONVERSATION))
+    try:
+        with pytest.raises(DatabaseUnavailable):
+            await remove(component_ids=["cmp_two"], all_cards=False)
+    finally:
+        current_conversation_key.reset(token)
+
+    assert state.cancel_event.is_set()
+    assert state.cancel_reason == "state_not_saved"
 
 
 async def test_a_removal_fenced_out_by_a_takeover_ends_the_stream(new_store, clock) -> None:
@@ -2639,6 +2924,33 @@ async def test_a_removal_fenced_out_by_a_takeover_ends_the_stream(new_store, clo
 
     assert state_a.cancel_event.is_set()
     assert state_a.cancel_reason == "segment_lost"
+
+
+async def test_a_composition_edit_reads_the_digest_entries_its_adds_name_alone(new_store) -> None:
+    """A pin, move or remove reads no digest entry under the row lock, and an
+    add reads the entries of the cards it names."""
+    store = new_store()
+    await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    for component_id in ("cmp_two", "cmp_three"):
+        card = {**_CARD, "component_id": component_id}
+        await store.change_canvas(
+            "principal", CONVERSATION, lambda work, card=card: land_component(work, card)
+        )
+    read: list[dict[str, Any]] = []
+
+    def mutate(manifest: CompositionManifest | None, components: Any) -> CompositionManifest:
+        read.append(dict(components))
+        assert manifest is not None
+        return manifest
+
+    await store.mutate_composition("principal", CONVERSATION, mutate)
+    await store.mutate_composition(
+        "principal", CONVERSATION, mutate, component_ids={"cmp_three", "cmp_gone"}
+    )
+
+    assert [sorted(components) for components in read] == [[], ["cmp_three"]]
 
 
 async def test_mutate_composition_no_op_returns_the_same_manifest_without_appending(

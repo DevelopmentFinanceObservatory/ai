@@ -83,6 +83,7 @@ from harness.studio_edit import edit_frames
 from harness.studio_state import (
     HEARTBEAT_INTERVAL_S,
     ConversationState,
+    DatabaseUnavailable,
     SegmentBusy,
     SegmentLost,
     _apply_operations,
@@ -100,6 +101,7 @@ from harness.studio_store import (
 )
 from harness.studio_translate import (
     _checkpoint_failed_frame,
+    _close_unsaved_turn,
     _RecordingExecutor,
     _RecordingSurface,
     _stream_fatal,
@@ -556,8 +558,11 @@ async def _sse_stream(
     `"segment_lost"` (this stream's segment lease was taken over, or this
     instance's own renewal could not keep it alive) yields a stream-fatal
     `transient_unavailable` frame without closing the turn. Another
-    instance now owns the segment and may still complete it. Either way the
-    segment generator is closed, unwinding the ADK run.
+    instance now owns the segment and may still complete it.
+    `"state_not_saved"` (a write could not reach the database before the
+    lease's deadline) closes the turn as `state_not_saved` first, since no
+    other instance will, and yields the same frame. Either way the segment
+    generator is closed, unwinding the ADK run.
 
     A Stop, a `segment_lost` transient-unavailable frame, or a stream-fatal
     `error` frame from `frames`, first closes every Activity line the
@@ -656,6 +661,20 @@ async def _sse_stream(
                                         ErrorCode.TRANSIENT_UNAVAILABLE,
                                         RetryMode.RETRY_AFTER_DELAY,
                                     )
+                                elif conversation.cancel_reason == "state_not_saved":
+                                    # A write could not reach the database
+                                    # before the lease's deadline, and no
+                                    # other instance will finish the turn.
+                                    lost = _close_unsaved_turn(
+                                        conversation,
+                                        DatabaseUnavailable(
+                                            "the database was unreachable until the lease's "
+                                            "deadline"
+                                        ),
+                                    )
+                                else:
+                                    lost = None
+                                if lost is not None:
                                     for closing in open_steps.close(conversation, detail=lost):
                                         yield _sse_data(closing)
                                     yield _sse_data(
@@ -742,16 +761,22 @@ def _keep_turn_records(conversation: ConversationState, event: Event, store: Stu
     with the turn. Each key holds the turn's whole value, so the latest
     write replaces. The blocks stay in process (`turn_specs`) until the turn
     closes, converted as `load` reads them (`StudioStore.adk_convert_specs`):
-    a turn the previous release opened holds blocks in the form it stored."""
+    a turn the previous release opened holds blocks in the form it stored.
+    They are converted until a conversion changes nothing
+    (`turn_specs_settled`), so a turn this release opened, whose graph
+    writes the current form, is never walked."""
     delta = event.actions.state_delta
     if ORCHESTRATOR_PLAN_RECORDS_KEY in delta:
         conversation.turn_plans = list(delta[ORCHESTRATOR_PLAN_RECORDS_KEY])
     if ORCHESTRATOR_SEARCHES_KEY in delta:
         conversation.turn_readings = list(delta[ORCHESTRATOR_SEARCHES_KEY])
     if ORCHESTRATOR_SPECS_KEY in delta:
-        conversation.turn_specs = store.adk_convert_specs(
-            conversation.session_id, dict(delta[ORCHESTRATOR_SPECS_KEY])
-        )
+        specs = dict(delta[ORCHESTRATOR_SPECS_KEY])
+        if not conversation.turn_specs_settled:
+            converted = store.adk_convert_specs(conversation.session_id, specs)
+            conversation.turn_specs_settled = converted is specs
+            specs = converted
+        conversation.turn_specs = specs
     if ORCHESTRATOR_APPLIED_KEY in delta:
         conversation.turn_applied_choice = dict(delta[ORCHESTRATOR_APPLIED_KEY])
 
@@ -869,11 +894,11 @@ class StudioRunner:
         because the claim is a compare-and-swap. An instance still running on
         ADK sessions can: if ADK's ledger session moved since the load, the
         session may be its live one, so nothing is deleted and
-        `ConversationStale` asks the caller to let go of its claim and answer
-        a retryable 409. Both revisions then hold a claim on the conversation:
-        the retry's load finds it changed on both sides and refuses it as
-        diverged (`harness.adk_import.reimport_on_access`) until an operator
-        takes ADK's copy."""
+        `ConversationStale` asks the caller to take its claim back
+        (`StudioStore.undo_claim`) and answer a retryable 409. The rows are
+        then as they were imported, so the retry's load re-imports what that
+        instance wrote (`harness.adk_import.reimport_on_access`) and meets
+        its live lease as a stream busy on the conversation."""
         session_service = self.runner.session_service
         try:
             await session_service.create_session(
@@ -941,14 +966,11 @@ class StudioRunner:
                         yield frame
             for frame in await translator.finish():
                 yield frame
-        except SegmentLost as exc:
-            # A card landing after another instance took the conversation
-            # over (`StudioStore.change_canvas`): that instance finishes it.
-            logger.warning(
-                "studio segment lost while landing a card (trace_id=%s): %s",
-                conversation.trace_id,
-                exc,
-            )
+        except (SegmentLost, DatabaseUnavailable) as exc:
+            # A card's write fenced out by another instance's takeover, which
+            # finishes the turn, or one that could not reach the database
+            # before the lease's deadline (`StudioStore.change_canvas`).
+            logger.warning("studio card write failed (trace_id=%s): %s", conversation.trace_id, exc)
             yield _checkpoint_failed_frame(conversation, exc)
         except Exception as exc:
             logger.exception("studio turn failed (trace_id=%s)", conversation.trace_id)
@@ -1058,7 +1080,8 @@ class StudioRunner:
         would have carried, and ends the stream there. Once a `plan.approved`
         frame is sent, the interrupt it answers records it
         (`ConversationState.mark_approved_sent`) and is checkpointed: a lost
-        segment ends the stream the same way, and any other failure there is
+        segment, or a database unreachable until the lease's deadline, ends
+        the stream the same way, and any other failure there is
         logged alone. This is the one
         interception point for every route this runs under (`/turn`, its
         edit-card branch, and `/interrupt`)."""
@@ -1099,11 +1122,13 @@ class StudioRunner:
                 conversation.mark_approved_sent(segment_id)
                 try:
                     await self.store.checkpoint(principal, conversation_id, segment_id)
-                except SegmentLost as exc:
+                except (SegmentLost, DatabaseUnavailable) as exc:
                     logger.warning(
-                        "studio segment lost after plan.approved: conversation %s segment %s",
+                        "studio checkpoint after plan.approved ended the stream: "
+                        "conversation %s segment %s: %s",
                         conversation_id,
                         segment_id,
+                        exc,
                     )
                     yield _checkpoint_failed_frame(conversation, exc)
                     return
@@ -1325,13 +1350,18 @@ async def _abandon_claim(
     conversation_id: str,
     segment_id: str | None,
     lock: asyncio.Lock,
+    *,
+    undo: bool = False,
 ) -> None:
     """Let go of a claim whose stream never started: drop `segment_id`'s
-    lease when there is one (`StudioStore.drop_lease`, which runs to the end
-    under cancellation), then release `lock` whatever the drop raised, a
+    lease when there is one (`StudioStore.drop_lease`), or with `undo` take
+    the claim save back whole (`StudioStore.undo_claim`), each running to
+    the end under cancellation, then release `lock` whatever that raised, a
     cancellation of the request included."""
     try:
-        if segment_id is not None:
+        if segment_id is not None and undo:
+            await store.undo_claim(principal, conversation_id, segment_id)
+        elif segment_id is not None:
             await store.drop_lease(principal, conversation_id, segment_id)
     finally:
         lock.release()
@@ -1526,13 +1556,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 )
             except ConversationStale:
                 # An instance still running on ADK sessions moved the
-                # conversation since the load. This request's claim stays in
-                # the rows with nothing streamed, so the retry's load finds
-                # the conversation changed on both sides and holds it
+                # conversation since the load. Nothing has streamed, so the
+                # claim save is taken back whole, and the retry's load
+                # re-imports what that instance wrote and meets its lease
                 # (`_ensure_session`).
                 claimed = None
                 await _abandon_claim(
-                    studio.store, principal, body.conversation_id, segment_id, lock
+                    studio.store, principal, body.conversation_id, segment_id, lock, undo=True
                 )
                 return _streaming_conflict_response(
                     "another request is streaming on this conversation"
@@ -1974,7 +2004,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     manifest, blocks, actor=CompositionActor.USER, layout_hints=layout_hints
                 )
 
-            result = await studio.store.mutate_composition(principal, body.conversation_id, mutate)
+            result = await studio.store.mutate_composition(
+                principal,
+                body.conversation_id,
+                mutate,
+                component_ids={op.component_id for op in body.operations if isinstance(op, AddOp)},
+            )
             if result is None:
                 return _unknown_conversation_response(body.conversation_id)
             if isinstance(result, JSONResponse):

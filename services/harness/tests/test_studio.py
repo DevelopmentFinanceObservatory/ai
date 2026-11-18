@@ -37,6 +37,7 @@ import harness.graph.planning as planning_module
 import harness.graph.switch as switch_module
 import harness.studio as studio_module
 import harness.studio_state as studio_state_module
+import harness.studio_store as studio_store_module
 import httpx2
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
@@ -95,6 +96,7 @@ from harness.studio import (
 from harness.studio_edit import _canvas_is_behind
 from harness.studio_state import (
     ConversationState,
+    DatabaseUnavailable,
     SegmentLost,
     _PendingChoice,
     _PendingInterrupt,
@@ -152,6 +154,7 @@ from planner.plan import (
 from planner.plan import Plan as PlannerPlan
 from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from translator.referral import REFERRAL_STATE_KEY, Referral, ReferralKind
 
@@ -1656,6 +1659,36 @@ async def test_a_segment_lost_closes_the_activity_lines_its_stream_left_running(
     assert frames[2]["error"]["error"] == "transient_unavailable"
     assert [f["seq"] for f in frames] == sorted({f["seq"] for f in frames})
     assert conversation.turn_recorded is False  # the turn stays open for the takeover to finish
+
+
+async def test_a_stream_ended_unsaved_closes_its_turn_as_state_not_saved() -> None:
+    """A removal that could not reach the database before the lease's
+    deadline ends the stream as `state_not_saved`. No other instance owns
+    the turn, so the stream closes it before the transient frame."""
+
+    async def segment():
+        yield _running_line(0)
+        await asyncio.Event().wait()
+
+    conversation = ConversationState(conversation_id=CONVERSATION)
+    conversation.begin_turn()
+    conversation.seq = 1
+    stream = _sse_stream(segment(), conversation=conversation, heartbeat_seconds=0.02)
+    sent = [await anext(stream)]
+    _end_stream(conversation, "state_not_saved")
+    frames = _data_frames(sent + [chunk async for chunk in stream])
+
+    assert [(f["event"], f.get("status")) for f in frames] == [
+        ("activity.step", "running"),
+        ("activity.step", "failed"),
+        ("error", None),
+    ]
+    assert frames[2]["error"]["error"] == "transient_unavailable"
+    assert frames[2]["error"]["detail"] == classed_sentence(
+        HarnessCode.STATE_NOT_SAVED, "retry_after_delay"
+    )
+    assert conversation.turn_recorded is True
+    assert conversation.turns[-1]["error"] == "state_not_saved"
 
 
 async def test_an_approval_the_approve_node_refuses_sends_no_approved_plan(
@@ -4779,6 +4812,64 @@ async def test_a_no_op_revise_over_a_readable_head_above_the_canvas_catches_the_
     assert entry["title"] == block["title"]
 
 
+async def test_a_revise_whose_card_write_lost_its_acknowledgement_reports_one_canvas_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The card's write commits and its acknowledgement is lost. The retry
+    finds the block already revised and mints no second manifest revision,
+    and the stream still sends the `composition.updated` the commit made."""
+    monkeypatch.setattr(studio_store_module, "_RETRY_FIRST_DELAY_S", 0)
+    revised_component = {
+        **COMPONENT,
+        "revision": 2,
+        "fact_summary": {**COMPONENT["fact_summary"], "revision": 2},
+    }
+    executor = ScriptedExecutor(
+        [
+            *_card_results(write_token=WRITE_TOKEN),
+            _described(),
+            _VIEW,
+            {"outcome": "ok", "frame_refs": [], "component": revised_component},
+        ],
+        strict=True,
+    )
+    edit_model = ScriptedEditModel(
+        {"text": "Renamed the card.", "patch": {"title": "Aid to Kenya"}, "recreate": None}
+    )
+    app = _app(*_card(), resolver=_search(), executor=executor, edit_model=edit_model)
+    store = app.state.studio.store
+    async with _client(app) as client:
+        landed = await _conversation_with_component(client)
+        real_transaction, real_write = store._transaction, store._write_composition
+        faults: list[int] = []
+        armed: list[int] = []
+
+        async def arming_write(*args: Any, **kwargs: Any) -> None:
+            armed.append(1)
+            await real_write(*args, **kwargs)
+
+        @asynccontextmanager
+        async def losing_the_ack() -> Any:
+            async with real_transaction() as conn:
+                yield conn
+            if armed and not faults:
+                faults.append(1)
+                raise OperationalError("COMMIT", {}, ConnectionResetError("connection reset"))
+
+        monkeypatch.setattr(store, "_write_composition", arming_write)
+        monkeypatch.setattr(store, "_transaction", losing_the_ack)
+        frames = await _stream(client, "/api/studio/turn", _edit_body("rename it"))
+
+    assert faults == [1]
+    (updated,) = [f for f in frames if f["event"] == "composition.updated"]
+    reloaded = await StudioStore(_engine(), adk=NO_ADK, turn_specs=no_turn_specs).load(
+        PRINCIPAL, CONVERSATION
+    )
+    assert reloaded.composition.revision == landed["revision"] + 1
+    assert updated["manifest"]["revision"] == reloaded.composition.revision
+    assert reloaded.composition.blocks[0].revision == 2
+
+
 async def test_an_edit_whose_canvas_write_failed_lands_when_repeated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7743,6 +7834,11 @@ async def test_a_pause_frame_is_not_sent_when_its_checkpoint_fails() -> None:
     [
         pytest.param(SegmentLost("taken over"), ["plan.approved", "error"], id="segment-lost"),
         pytest.param(
+            DatabaseUnavailable("unreachable"),
+            ["plan.approved", "error"],
+            id="database-unavailable",
+        ),
+        pytest.param(
             RuntimeError("db is down"),
             ["plan.approved", "message.delta"],
             id="other-failure",
@@ -7787,18 +7883,32 @@ async def test_a_lost_segment_after_plan_approved_ends_the_stream(
     assert sent == relayed
 
 
+@pytest.mark.parametrize(
+    ("failure", "closed_as"),
+    [
+        pytest.param(SegmentLost("taken over"), None, id="taken-over"),
+        pytest.param(
+            DatabaseUnavailable("unreachable until the lease's deadline"),
+            "state_not_saved",
+            id="database-unavailable",
+        ),
+    ],
+)
 async def test_a_card_fenced_out_by_a_takeover_ends_the_turn_as_transient(
-    caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture, failure: Exception, closed_as: str | None
 ) -> None:
     """Another instance took the conversation over while this stream drew a
     card, so the card's canvas write is fenced out. The stream ends as at a
     fenced-out checkpoint: a transient error, the turn left open for the
-    instance that owns it, and no internal fault in the log."""
+    instance that owns it, and no internal fault in the log. A write that
+    could not reach the database before the lease's deadline ends it the
+    same way, and closes the turn as `state_not_saved`, since no other
+    instance owns it."""
     app = _app(*_card(), resolver=_search())
     store = app.state.studio.store
 
     async def taken_over(*args: Any, **kwargs: Any) -> Any:
-        raise SegmentLost("taken over")
+        raise failure
 
     store.change_canvas = taken_over  # type: ignore[method-assign]
 
@@ -7812,7 +7922,10 @@ async def test_a_card_fenced_out_by_a_takeover_ends_the_turn_as_transient(
         "retry_after_delay",
         30,
     )
-    assert not store.current(PRINCIPAL, CONVERSATION).turn_recorded
+    state = store.current(PRINCIPAL, CONVERSATION)
+    assert state.turn_recorded is (closed_as is not None)
+    if closed_as is not None:
+        assert state.turns[-1]["error"] == closed_as
     assert not [r for r in caplog.records if "studio turn failed" in r.getMessage()]
 
 
@@ -8250,6 +8363,33 @@ async def test_a_referral_an_earlier_turn_left_pending_is_not_in_the_next_turns_
     assert session is not None
     assert session.state.get(REFERRAL_STATE_KEY) is None
     assert session.state.get(PLAN_STATE_KEY) is None
+
+
+def test_spec_blocks_are_converted_until_a_conversion_changes_nothing() -> None:
+    """A turn this release opened writes blocks in the current form and is
+    never converted. A turn read back by a load is converted until a
+    conversion changes nothing."""
+    store = unconnected_store()
+    converted: list[str] = []
+
+    def convert(session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
+        converted.append(session_id)
+        return specs
+
+    store.adk_convert_specs = convert  # type: ignore[method-assign]
+    event = Event(
+        actions=EventActions(state_delta={ORCHESTRATOR_SPECS_KEY: {"spec_a": {"spec_id": "a"}}})
+    )
+    opened = ConversationState(conversation_id="conv_opened")
+    opened.begin_turn()
+    loaded = ConversationState(conversation_id="conv_loaded", turn_index=2)
+
+    for _ in range(2):
+        _keep_turn_records(opened, event, store)
+        _keep_turn_records(loaded, event, store)
+
+    assert converted == [loaded.session_id]
+    assert opened.turn_specs == loaded.turn_specs == {"spec_a": {"spec_id": "a"}}
 
 
 def test_the_turn_keeps_the_plan_records_readings_and_spec_blocks_its_events_write() -> None:

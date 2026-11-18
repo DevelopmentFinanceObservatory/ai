@@ -785,6 +785,33 @@ async def test_a_paused_turn_s_mapping_form_block_is_served_converted_through_it
     ]
 
 
+async def test_a_served_block_that_does_not_convert_is_logged_with_its_turn_and_reason(
+    adk: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The load of the open turn and a resumed stream's first spec write each
+    name the block they keep as stored: its turn session, spec id and why."""
+    spec_id = next(iter(EXPECTED[FULL]["view"]["turn_specs"]))
+    block = {**_mapping_block(), "spec_id": spec_id, "_bound_refs": "g7"}
+    await _put_open_turn_block(adk, block)
+    await import_conversations(adk, apply=True)
+    store = _reimporting_store(adk)
+
+    with caplog.at_level("WARNING", logger="harness.adk_import"):
+        state = await store.load(PRINCIPAL, FULL)
+        assert state is not None
+        resumed = Event(
+            author="orchestrator",
+            actions=EventActions(state_delta={ORCHESTRATOR_SPECS_KEY: {spec_id: block}}),
+        )
+        _keep_turn_records(state, resumed, store)
+
+    logged = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(logged) == 2
+    for message in logged:
+        assert f"{FULL}#t4: the _bound_refs of spec block {spec_id} does not convert" in message
+        assert message.endswith("TypeError: _bound_refs is of type str")
+
+
 async def test_close_open_turns_keeps_a_mapping_form_turn_block_as_rows(
     adk: AsyncEngine,
 ) -> None:
@@ -1184,15 +1211,15 @@ async def test_a_conversation_never_imported_is_imported_when_first_read(
     assert (await import_conversations(adk, apply=False)).unchanged == [_name(PLAN_PAUSED)]
 
 
-async def test_a_turn_racing_the_previous_release_holds_the_conversation_until_adk_is_preferred(
+async def test_a_turn_racing_the_previous_release_takes_its_claim_back_and_meets_its_lease(
     adk: AsyncEngine,
 ) -> None:
     """The previous release claims turn 3 and creates its turn session between
-    this release's load and its session create. The first `/turn` answers the
-    retryable 409 and leaves that session alone; its claim stays in the rows,
-    so the retry finds the conversation changed on both sides and holds it.
-    Once `--prefer-adk` takes ADK's copy and the previous release's lease
-    lapses, a `/turn` streams to `done`."""
+    this release's load and its session create. The first `/turn` takes its
+    claim back and answers the retryable 409, leaving that session alone. The
+    rows are as imported, so the retry re-imports the previous release's turn
+    and meets its live lease as a busy stream, with no conflict recorded.
+    Once that lease lapses, a `/turn` streams to `done`."""
     await import_conversations(adk, apply=True)
     service = DatabaseSessionService(db_engine=adk)
     app, _ = orchestrator_app(engine=adk, session_service=service, store=_reimporting_store(adk))
@@ -1223,23 +1250,24 @@ async def test_a_turn_racing_the_previous_release_holds_the_conversation_until_a
         retry = await client.post("/api/studio/turn", json=body, headers=AUTH)
 
         assert (first.status_code, first.json()["error"]) == (409, "transient_unavailable")
-        assert (retry.status_code, retry.json()["constraint_id"]) == (409, "conversation_diverged")
-        assert await _diverged_flags(adk) == [TEXT_ONLY]
+        assert (retry.status_code, retry.json()["error"]) == (409, "transient_unavailable")
+        assert retry.json()["retry_after_seconds"] > 0
+        assert await _diverged_flags(adk) == []
         kept = await service.get_session(
             app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{TEXT_ONLY}#t3"
         )
         assert kept is not None
+        reimported = await _load(adk, TEXT_ONLY)
+        assert reimported is not None and reimported.segment is not None
+        assert (reimported.turn_index, reimported.segment.id) == (3, "seg_old")
 
         await _set_adk_state(
             adk, TEXT_ONLY, {"studio:segment": {**lease, "expires_at": time.time() - 1}}
         )
-        preferred = await import_conversations(
-            adk, apply=True, prefer_adk=frozenset({_name(TEXT_ONLY)})
-        )
-        assert preferred.reimported == [_name(TEXT_ONLY)]
         frames = await stream(client, "/api/studio/turn", body)
 
     assert frames[-1]["event"] == "done"
+    assert await _diverged_flags(adk) == []
 
 
 async def _diverged_flags(engine: AsyncEngine) -> list[str]:
