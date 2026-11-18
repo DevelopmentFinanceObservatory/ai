@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+from executor.ledger import PlanApproval, SourcePolicy, new_run
 from harness.db.migrate import MIGRATIONS_DIR, apply_pending
 from harness.studio_state import SegmentLost
+from harness.turn import store as turn_store
 from harness.turn.store import (
     SPECS_KEY,
     AgentRecord,
@@ -340,50 +343,118 @@ async def test_a_turn_closes_with_an_error_exactly_when_it_failed_or_was_abandon
         await store.finish(closed, segment_id=SEGMENT, status=status, error=error)
 
 
+# A run record as admitted.
+ADMITTED_RUN = new_run(
+    idempotency_key="key",
+    submission_digest="d" * 64,
+    authorisation=PlanApproval(
+        source_policy=SourcePolicy(sources=("spec_" + "a" * 32,)),
+        expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+        plan_version=1,
+        approved_revision="r" * 64,
+        approver=PRINCIPAL,
+        at=datetime(2026, 1, 1, tzinfo=UTC),
+    ),
+    now=datetime(2026, 1, 1, tzinfo=UTC),
+).model_dump(mode="json")
+# One run of each kind a close meets, by run id: computing (`admitted`,
+# `running`), finished with its publication pending (`completed`), and one
+# this release cannot read.
+_RUNS = {
+    "run_admitted": ADMITTED_RUN,
+    "run_running": {**ADMITTED_RUN, "status": "running"},
+    "run_completed": {**ADMITTED_RUN, "status": "completed"},
+    "run_unreadable": {"status": "running", "shape": "from another release"},
+}
+
+
+async def _store_runs(engine: AsyncEngine, conversation: int) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO runs (conversation, run_id, record) "
+                "VALUES (:pk, :run_id, CAST(:record AS jsonb))"
+            ),
+            [
+                {"pk": conversation, "run_id": run_id, "record": json.dumps(record)}
+                for run_id, record in _RUNS.items()
+            ],
+        )
+
+
+async def _run_outcomes(engine: AsyncEngine) -> dict[str, tuple[str, str | None]]:
+    """Each stored run's status and failure code, by run id."""
+    async with engine.connect() as conn:
+        rows = await conn.execute(
+            text(
+                "SELECT run_id, record ->> 'status' AS status, "
+                "record -> 'failure' ->> 'code' AS code FROM runs"
+            )
+        )
+        return {row.run_id: (row.status, row.code) for row in rows}
+
+
 @pytest.mark.parametrize(
-    ("status", "error", "read"),
+    ("status", "error"),
     [
-        (TurnStatus.CANCELLED, None, True),
-        (TurnStatus.DONE, None, False),
-        (TurnStatus.FAILED, {"type": "x", "message": "y"}, False),
+        (TurnStatus.CANCELLED, None),
+        (TurnStatus.DONE, None),
+        (TurnStatus.FAILED, {"type": "x", "message": "y"}),
+        (TurnStatus.ABANDONED, {"type": "abandoned", "message": "a new turn began"}),
     ],
 )
-@pytest.mark.parametrize(
-    "stops",
-    [
-        "lease_cancel = true",
-        "lease_stop_id = 'stop_1'",
-        "lease_stop_id = 'stop_1', lease_cancel = true",
-    ],
-)
-async def test_only_a_cancelled_close_records_every_stop_acted_on(
-    pg_engine: AsyncEngine,
-    status: TurnStatus,
-    error: dict[str, str] | None,
-    read: bool,
-    stops: str,
+async def test_only_a_cancelled_close_ends_the_runs_left_computing_and_no_close_reads_a_stop(
+    pg_engine: AsyncEngine, status: TurnStatus, error: dict[str, str] | None
 ) -> None:
-    """A close `cancelled` records every Stop on the conversation acted on,
-    in its own transaction: a flagged one gets an id. Any other close leaves
-    them unread."""
-    await _conversation(pg_engine)
+    """A close `cancelled` records failed `cancelled` every run of the
+    conversation still computing, in its own transaction, and leaves a run
+    whose publication is pending for the next turn. Every other close leaves
+    the runs as stored. No close reads or writes the Stop columns, so a turn
+    abandoned with a Stop requested still closes `abandoned`."""
+    conversation = await _conversation(pg_engine)
+    await _store_runs(pg_engine, conversation)
     store = TurnStore(pg_engine)
     opened = await _open(store)
+    stops = "lease_cancel = true, stop_id = 'stop_1', stop_turn = 0"
     async with pg_engine.begin() as conn:
         await conn.execute(text(f"UPDATE conversations SET {stops}"))
 
-    await store.finish(opened, segment_id=SEGMENT, status=status, error=error)
+    closed = await store.finish(opened, segment_id=SEGMENT, status=status, error=error)
 
+    assert closed.status is status
+    ends = status is TurnStatus.CANCELLED
+    assert await _run_outcomes(pg_engine) == {
+        "run_admitted": ("failed", "cancelled") if ends else ("admitted", None),
+        "run_running": ("failed", "cancelled") if ends else ("running", None),
+        "run_completed": ("completed", None),
+        "run_unreadable": ("failed", "run_record_unreadable") if ends else ("running", None),
+    }
     async with pg_engine.connect() as conn:
         row = (
-            await conn.execute(
-                text("SELECT lease_stop_id, stop_acted_id, lease_cancel FROM conversations")
-            )
+            await conn.execute(text("SELECT lease_cancel, stop_id, stop_turn FROM conversations"))
         ).one()
-    unread = row.lease_cancel or row.lease_stop_id != row.stop_acted_id
-    assert unread is not read
-    if read:
-        assert row.stop_acted_id is not None
+    assert tuple(row) == (True, "stop_1", 0)
+
+
+async def test_a_cancelled_close_whose_runs_cannot_be_ended_leaves_the_turn_open(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A close `cancelled` and the end of its runs commit together: when the
+    runs cannot be recorded, the turn stays open as stored."""
+    conversation = await _conversation(pg_engine)
+    await _store_runs(pg_engine, conversation)
+    store = TurnStore(pg_engine)
+    opened = await _open(store)
+
+    async def unreachable(*_args: Any, **_kwargs: Any) -> None:
+        raise ConnectionError("the run ledger is unreachable")
+
+    monkeypatch.setattr(turn_store, "end_unfinished", unreachable)
+    with pytest.raises(ConnectionError):
+        await store.finish(opened, segment_id=SEGMENT, status=TurnStatus.CANCELLED)
+
+    assert await store.open_cursor(PRINCIPAL, CONVERSATION) == opened
+    assert (await _run_outcomes(pg_engine))["run_admitted"] == ("admitted", None)
 
 
 async def _spec_rows(engine: AsyncEngine) -> dict[str, tuple[int, int]]:

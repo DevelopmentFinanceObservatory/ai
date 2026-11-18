@@ -430,7 +430,7 @@ class Segment:
     `owner`. `owner` is the claiming instance's id, carried for logs only.
     `expires_at` is a wall-clock epoch second past which the claim is dead
     and takeable. The Stop requests made of the conversation live in columns
-    of their own (`harness.studio_store.StopRead`)."""
+    of their own (`harness.studio_store.StopState`)."""
 
     id: str
     owner: str

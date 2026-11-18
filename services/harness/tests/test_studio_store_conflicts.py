@@ -130,7 +130,7 @@ async def test_heartbeat_checkpoint_canvas_cancel_and_runs_commit_side_by_side(
     assert reloaded.turn_final_text == f"answer {ROUNDS - 1}"
     assert reloaded.segment is not None and reloaded.segment.id == segment_id
     async with engines[0].connect() as conn:
-        stop_id = (await conn.execute(text("SELECT lease_stop_id FROM conversations"))).scalar_one()
+        stop_id = (await conn.execute(text("SELECT stop_id FROM conversations"))).scalar_one()
     assert stop_id is not None
     token = current_conversation_key.set((PRINCIPAL, CONVERSATION))
     try:

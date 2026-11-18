@@ -40,6 +40,12 @@ returns each block decoded from the JSON it stored, or the cursor's own
 decoded block where the digest did not change, so every `Cursor.state`
 holds the state as stored, whether the next node runs live or reruns.
 
+A close `cancelled` ends the conversation's unfinished runs in its own
+transaction (`harness.run_ledger.end_unfinished`), so a cancelled turn
+leaves no run computing. A close reads no Stop: closing the turn a Stop
+names ends that Stop (`harness.studio_store.StopState`). A pause write
+records the Stop the turn's `StopScope` answered (`stop_taken_id`).
+
 The lease itself, the Stop request and the frame numbering live on
 `conversations` and are written by `harness.studio_store.StudioStore`.
 """
@@ -48,15 +54,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from harness.studio_state import SegmentLost, _wire_id
+from harness.run_ledger import end_unfinished
+from harness.studio_state import SegmentLost
 
 # The state key whose mapping, spec blocks by spec id, the store keeps as
 # `turn_specs` rows rather than in the stored state.
@@ -237,20 +246,6 @@ def _cursor(row: Any, record_count: int, specs: _StoredSpecs) -> Cursor:
     )
 
 
-# Record every Stop recorded on the conversation as acted on, giving a
-# flagged one (`lease_cancel`) an id (`harness.studio_store.StopRead`).
-_READ_STOPS = text(
-    "UPDATE conversations SET "
-    "stop_acted_id = CASE WHEN lease_cancel THEN :minted ELSE lease_stop_id END, "
-    "lease_stop_id = CASE WHEN lease_cancel THEN :minted ELSE lease_stop_id END, "
-    "lease_cancel = false WHERE id = :conversation"
-)
-# Whether the conversation holds a Stop no party acted on
-# (`harness.studio_store.StopRead.unread`), its row locked for the close.
-_STOP_UNREAD = text(
-    "SELECT lease_cancel OR lease_stop_id IS DISTINCT FROM stop_acted_id "
-    "FROM conversations WHERE id = :conversation FOR UPDATE"
-)
 _FENCE = text(
     "SELECT id FROM conversations WHERE id = :conversation "
     "AND lease_segment_id = :segment_id FOR SHARE"
@@ -389,10 +384,13 @@ async def _records(conn: AsyncConnection, turn: int) -> list[AgentRecord]:
 class TurnStore:
     """The turn cursor API over `engine` (module docstring). Every write
     takes the writer's `segment_id`, the conversation lease it holds, and the
-    `Cursor` it last read or wrote, and returns the cursor as written."""
+    `Cursor` it last read or wrote, and returns the cursor as written.
+    `clock` is the `time.time`-shaped clock the runs a close `cancelled`
+    ends are stamped with."""
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, *, clock: Callable[[], float] = time.time) -> None:
         self._engine = engine
+        self._clock = clock
 
     async def _fence(self, conn: AsyncConnection, conversation: int, segment_id: str) -> None:
         held = await conn.execute(_FENCE, {"conversation": conversation, "segment_id": segment_id})
@@ -611,11 +609,15 @@ class TurnStore:
         payload: dict[str, Any],
         state: dict[str, Any],
         records: Sequence[AgentRecord] = (),
+        stop_taken_id: str | None = None,
     ) -> Cursor:
         """Pause the running turn at `node` on a question of `kind` under the
         wire id `interrupt_id`, as the turn's next round, writing `state`,
         its spec blocks included, and appending `records`, with it. The
         returned cursor's `pause.round` is the round an answer names.
+        `stop_taken_id`, when given, is the Stop the turn's `StopScope`
+        answered, recorded in the same update; a pause without one keeps
+        the Stop recorded before.
 
         Raises:
             SegmentLost: `segment_id` does not hold the conversation's lease.
@@ -630,8 +632,10 @@ class TurnStore:
                 sets="status = 'paused', round = round + 1, node = :node, "
                 "node_input = CAST(:node_input AS json), pause_kind = :kind, "
                 "interrupt_id = :interrupt_id, pause_payload = CAST(:payload AS json), "
-                "owed_interrupt_id = NULL",
+                "owed_interrupt_id = NULL, "
+                "stop_taken_id = COALESCE(CAST(:stop_taken_id AS text), stop_taken_id)",
                 params={
+                    "stop_taken_id": stop_taken_id,
                     "node": node,
                     "node_input": _json(node_input),
                     "kind": kind,
@@ -703,13 +707,9 @@ class TurnStore:
         `records`. `FAILED` and `ABANDONED` take an `error` and the others
         none. `state`, its spec blocks included, replaces the stored state
         when given. A paused turn's pause is dropped, so no answer can reach
-        it. A close `CANCELLED` acts on every Stop recorded on the
-        conversation so far, and records that in the same transaction
-        (`_READ_STOPS`), so a Stop stays unread until its turn's close
-        commits. A close `ABANDONED` of a turn whose conversation holds an
-        unread Stop closes it `CANCELLED` in its place: the claim that
-        abandons the turn acts on the Stop, so the next turn's renewals do
-        not read it.
+        it. A close `CANCELLED` records failed every unfinished run of the
+        conversation in the same transaction (`end_unfinished`), so when
+        that fails the turn stays open as stored. A close reads no Stop.
 
         Raises:
             ValueError: `status` is not a closing status, or `error` is
@@ -723,13 +723,6 @@ class TurnStore:
             raise ValueError(f"a turn closed {status.value} takes an error only when it failed")
         async with self._engine.begin() as conn:
             await self._fence(conn, cursor.conversation, segment_id)
-            if (
-                status is TurnStatus.ABANDONED
-                and (
-                    await conn.execute(_STOP_UNREAD, {"conversation": cursor.conversation})
-                ).scalar_one()
-            ):
-                status, error = TurnStatus.CANCELLED, None
             closed = await self._swap(
                 conn,
                 cursor,
@@ -741,7 +734,7 @@ class TurnStore:
                 records=records,
             )
             if status is TurnStatus.CANCELLED:
-                await conn.execute(
-                    _READ_STOPS, {"conversation": cursor.conversation, "minted": _wire_id("stop")}
+                await end_unfinished(
+                    conn, cursor.conversation, now=datetime.fromtimestamp(self._clock(), UTC)
                 )
             return closed

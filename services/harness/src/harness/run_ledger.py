@@ -16,6 +16,10 @@ commit. Two admissions of one key settle on the `run_keys` primary key: the
 second waits for the first to commit and then decides against its run. A
 record change locks its run row. Nothing retries.
 
+A Stop ends the runs of the turn it closes: `end_unfinished` records them
+failed on the connection of the transaction that closes the turn
+(`harness.turn.store.TurnStore.finish`).
+
 A stored run is read with `executor.ledger.stored_run`, so one another
 release wrote loads. A stored run this release still cannot read is recorded
 failed (`run_record_unreadable`) where it is found unfinished or its key
@@ -36,9 +40,11 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
+from executor.classify import ExecutorCode
 from executor.ledger import (
     TERMINAL_STATUSES,
     Admission,
+    Fail,
     RunChange,
     RunNotFoundError,
     RunRecord,
@@ -90,6 +96,41 @@ async def _put_record(conn: AsyncConnection, pk: int, run_id: str, record: Any) 
         ),
         {"pk": pk, "run_id": run_id, "record": json.dumps(record)},
     )
+
+
+async def end_unfinished(conn: AsyncConnection, conversation: int, *, now: datetime) -> None:
+    """Record failed `cancelled`, on `conn` and in its transaction, every run
+    of the conversation row `conversation` whose computation is unfinished
+    (`admitted` or `running`), each run row locked. A run whose computation
+    finished and whose publication is pending is left for the next turn. A
+    stored run this release cannot read is recorded failed as unreadable.
+    Raises what the database raises, which leaves the caller's transaction
+    to roll back."""
+    rows = (
+        await conn.execute(
+            text(
+                "SELECT run_id, record FROM runs WHERE conversation = :pk "
+                "AND record ->> 'status' = ANY(:statuses) ORDER BY run_id FOR UPDATE"
+            ),
+            {
+                "pk": conversation,
+                "statuses": [RunStatus.ADMITTED.value, RunStatus.RUNNING.value],
+            },
+        )
+    ).all()
+    for run_id, raw in rows:
+        try:
+            run = stored_run(raw)
+        except ValidationError as exc:
+            logger.error("run ledger: stored run %s is unreadable: %s", run_id, exc)
+            await _put_record(
+                conn, conversation, run_id, _unreadable(raw, f"the stored run is unreadable: {exc}")
+            )
+            continue
+        ended = advance(
+            run, Fail(ExecutorCode.CANCELLED, "the turn running it was stopped"), now=now
+        )
+        await _put_record(conn, conversation, run_id, ended.model_dump(mode="json"))
 
 
 class StudioRunLedger:

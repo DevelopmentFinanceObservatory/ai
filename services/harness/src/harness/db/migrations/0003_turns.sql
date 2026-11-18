@@ -6,15 +6,13 @@
 -- the same transaction (`harness.turn.store.TurnStore`). The lease, the Stop
 -- request and the frame numbering stay on `conversations`.
 
--- The id of the latest Stop request on the conversation, as a renewal or a
--- claim recorded it (`StudioStore.renew`), or NULL when it has none.
-ALTER TABLE conversations ADD COLUMN lease_stop_id text;
-
--- The id of the latest Stop request a party acted on, written in the same
--- statement that acts (`harness.studio_store.StopRead`), or NULL when none
--- has been. A Stop is unread while `lease_cancel` is set or this differs
--- from `lease_stop_id`.
-ALTER TABLE conversations ADD COLUMN stop_acted_id text;
+-- The latest Stop on the conversation (`stop_id`) and the turn index it
+-- names (`stop_turn`), recorded from `lease_cancel` by the next write of the
+-- lease columns, which stamps the row's turn index as stored before that
+-- write (`harness.studio_store.StopState`). A Stop ends when the turn it
+-- names closes, whatever the status; no write marks it read.
+ALTER TABLE conversations ADD COLUMN stop_id text;
+ALTER TABLE conversations ADD COLUMN stop_turn integer;
 
 -- Every value column is `json`, which keeps the text as written: a node's
 -- input, the state and the transcript hold values a model reads verbatim,
@@ -31,6 +29,9 @@ ALTER TABLE conversations ADD COLUMN stop_acted_id text;
 -- `resume`: set by the write that accepts the answer and moves the turn from
 -- paused to running, cleared by the next write, so it is set only on a
 -- running turn whose cursor has not moved since its answer.
+-- `stop_taken_id` is the Stop the turn's `StopScope` answered, set by the
+-- pause write that ended the scope's work; that Stop no longer stops the
+-- turn.
 CREATE TABLE turn_cursors (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     conversation bigint NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
@@ -45,6 +46,7 @@ CREATE TABLE turn_cursors (
     interrupt_id text,
     pause_payload json,
     owed_interrupt_id text,
+    stop_taken_id text,
     inputs json NOT NULL,
     state json NOT NULL,
     error json,

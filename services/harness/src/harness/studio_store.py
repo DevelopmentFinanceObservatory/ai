@@ -26,21 +26,19 @@ different groups never conflict:
 - `renew` and `request_cancel` each update the lease columns in one
   conditional statement and leave `version` alone. `request_cancel` sets
   the boolean `lease_cancel`, as does any writer that knows only that flag.
-  A renewal that finds it set clears it and records the Stop as a fresh id
-  (`lease_stop_id`) in the same update.
 - `reserve_frames` extends the frame numbers the live segment may send,
   fenced on the segment and its lease being live.
 
-A Stop stays unread (`StopRead.unread`) until a party acts on it and
-records the id it acted on (`stop_acted_id`) in the write that acts: the
-close of the turn `cancelled` (`harness.turn.store.TurnStore.finish`,
-which closes `cancelled` a turn a claim abandons while such a Stop is
-unread), a `StopScope` taking it (`acknowledge_stop`; `hand_back_stop` marks
-it unread again when the scope had closed first), or a claim or release that
-finds no open turn, which leaves nothing to stop (`_delta_write`). Nothing
-else clears the Stop columns, so a write that fails, a lease that lapses, or
-a claim that is abandoned leaves the Stop for whoever claims the open turn
-next.
+A Stop names a turn. The next write of the lease columns after
+`request_cancel` (a renewal, a claim save, a release) clears `lease_cancel`
+and records the Stop as a fresh `stop_id` naming the row's turn index as
+stored before that write (`stop_turn`), in the same statement. Whether a
+Stop is live for the row's turn is one predicate (`StopState.live`); every
+reader locks the row first and reads the turn's cursor in a later
+statement, so it sees every write committed before its lock. Closing the
+turn ends its Stop, whatever the status, and no write marks a Stop read. A
+claim save that starts or resumes work refuses while a Stop is live
+(`StopPending`), so the turn index never moves past one.
 
 Every canvas writer holds the row lock, so each applies its change to the
 canvas as stored. Lease expiry is compared against the database's clock in
@@ -492,6 +490,13 @@ class ConversationStale(Exception):  # noqa: N818 -- named for the wire 409
     `/interrupt` answer 409."""
 
 
+class StopPending(ConversationStale):
+    """`StudioStore.save` refused a claim that starts or resumes work while a
+    Stop is live for the conversation's open turn (`StopState.live`). The
+    turn is closed `cancelled` under a claim that acts on the Stop first
+    (`save(stopping=True)`)."""
+
+
 class ConversationExists(Exception):  # noqa: N818 -- named for the race it reports
     """`StudioStore.create` lost the race to create the conversation."""
 
@@ -504,40 +509,82 @@ class ConversationExists(Exception):  # noqa: N818 -- named for the race it repo
 @dataclass(frozen=True)
 class Renewal:
     """What a lease renewal found: whether the segment still `held` the
-    lease, and the latest Stop request on the conversation while no party
-    has acted on it (`stop_id`, `StopRead.unread`), else `None`."""
+    lease, and the id of the Stop live for the lease's turn
+    (`StopState.live`), else `None`."""
 
     held: bool
     stop_id: str | None
 
 
+_OPEN_STATUSES = frozenset({"running", "paused"})
+
+
 @dataclass(frozen=True)
-class StopRead:
-    """A conversation row's Stop columns: the latest Stop request's id
-    (`lease_stop_id`), the id of the last one acted on (`stop_acted_id`),
-    and whether `lease_cancel` is set, a request no renewal has given an id
-    yet. A Stop is unread until a party acts on it and records that in the
-    same write (module docstring)."""
+class StopState:
+    """A conversation row's Stop columns and the turn its index names, read
+    after the row lock. `turn_index` is the row's turn index; `flagged`
+    whether `lease_cancel` is set, a Stop no lease write has stamped yet;
+    `stop_id` and `stop_turn` the latest Stop and the turn index it names;
+    `cursor_status` the status of the turn's cursor, `None` when the turn
+    has none yet; `taken_id` the Stop that cursor's `StopScope` answered;
+    and `lease_live` whether a lease on the row is live after the read."""
 
-    stop_id: str | None
-    acted_id: str | None
+    turn_index: int
     flagged: bool
-
-    @classmethod
-    def from_row(cls, row: Any) -> StopRead:
-        return cls(stop_id=row.lease_stop_id, acted_id=row.stop_acted_id, flagged=row.lease_cancel)
+    stop_id: str | None
+    stop_turn: int | None
+    cursor_status: str | None
+    taken_id: str | None
+    lease_live: bool
 
     @property
-    def unread(self) -> bool:
-        """Whether a Stop is recorded that no party has acted on."""
-        return self.flagged or (self.stop_id is not None and self.stop_id != self.acted_id)
+    def live(self) -> bool:
+        """Whether a Stop is live for turn `turn_index`: the turn is open, or
+        claimed and awaiting its cursor (a live lease and no cursor yet), and
+        either `lease_cancel` is set or the latest Stop names the turn and is
+        not the one its scope answered."""
+        if self.cursor_status is None:
+            if not self.lease_live:
+                return False
+        elif self.cursor_status not in _OPEN_STATUSES:
+            return False
+        return self.flagged or (
+            self.stop_turn == self.turn_index
+            and self.stop_id is not None
+            and self.stop_id != self.taken_id
+        )
 
 
-# Whether the conversation (the row being read) has an open turn.
-_OPEN_TURN_SQL = (
-    "EXISTS (SELECT 1 FROM turn_cursors t WHERE t.conversation = conversations.id "
-    "AND t.status IN ('running', 'paused'))"
+# The row's turn index, as stored in its turn state.
+_TURN_INDEX_SQL = f"COALESCE((turn_state ->> '{_KEY_TURN_INDEX}')::int, 0)"
+# Turns a set `lease_cancel` into a fresh Stop id naming the row's turn index
+# as stored before the write, and clears the flag, in the statement that
+# writes the lease columns.
+_STAMP_STOP = (
+    "stop_id = CASE WHEN lease_cancel THEN :minted ELSE stop_id END, "
+    f"stop_turn = CASE WHEN lease_cancel THEN {_TURN_INDEX_SQL} ELSE stop_turn END, "
+    "lease_cancel = false"
 )
+_TURN_AT = text(
+    "SELECT status, stop_taken_id FROM turn_cursors "
+    "WHERE conversation = :pk AND turn_index = :turn_index"
+)
+
+
+async def _stop_state(conn: AsyncConnection, row: Any, *, lease_live: bool) -> StopState:
+    """The Stop state of `row`, a `conversations` row the caller locked,
+    with the cursor of its turn read in this later statement so that it
+    sees every cursor write committed before the lock."""
+    cursor = (await conn.execute(_TURN_AT, {"pk": row.id, "turn_index": row.turn_index})).first()
+    return StopState(
+        turn_index=row.turn_index,
+        flagged=row.lease_cancel,
+        stop_id=row.stop_id,
+        stop_turn=row.stop_turn,
+        cursor_status=cursor.status if cursor is not None else None,
+        taken_id=cursor.stop_taken_id if cursor is not None else None,
+        lease_live=lease_live,
+    )
 
 
 def _jsonb(value: Any) -> str | None:
@@ -547,7 +594,8 @@ def _jsonb(value: Any) -> str | None:
 
 _CONVERSATION_COLUMNS = (
     "id, version, turn_state, composition, lease_segment_id, lease_owner, "
-    "lease_expires_at, lease_stop_id, stop_acted_id, lease_cancel, seq_next, seq_reserved"
+    "lease_expires_at, stop_id, stop_turn, lease_cancel, seq_next, seq_reserved, "
+    f"{_TURN_INDEX_SQL} AS turn_index"
 )
 
 
@@ -650,9 +698,9 @@ def _check_column(key: str, value: Any, kind: type | tuple[type, ...]) -> None:
         raise TypeError(f"{key} is of type {type(value).__name__}")
 
 
-def _delta_write(delta: dict[str, Any], *, open_turn: bool) -> _DeltaWrite:
-    """The statements that write `delta`'s flat keys, on a conversation
-    that has an open turn when `open_turn`, as its locked row read. Raises on a value the
+def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
+    """The statements that write `delta`'s flat keys. A write of the lease
+    columns stamps a pending Stop (`_STAMP_STOP`). Raises on a value the
     columns cannot hold (a `seq` that is not an integer, a segment without
     an id or whose id, owner or expiry is of another type, a position that
     is not a number, a write token that is not a string, a value
@@ -676,20 +724,11 @@ def _delta_write(delta: dict[str, Any], *, open_turn: bool) -> _DeltaWrite:
             _check_column("segment owner", segment.owner, str)
             _check_column("segment expiry", segment.expires_at, (int, float))
         sets.append(
-            "lease_segment_id = :segment_id, lease_owner = :owner, lease_expires_at = :expires_at"
+            "lease_segment_id = :segment_id, lease_owner = :owner, "
+            f"lease_expires_at = :expires_at, {_STAMP_STOP}"
         )
-        if not open_turn:
-            # A claim or a release reads every Stop recorded so far when the
-            # conversation has no open turn, which leaves nothing to stop,
-            # and leaves an unread one in place for the open turn's next
-            # claimant.
-            sets.append(
-                "stop_acted_id = CASE WHEN lease_cancel THEN :minted ELSE lease_stop_id END, "
-                "lease_stop_id = CASE WHEN lease_cancel THEN :minted ELSE lease_stop_id END, "
-                "lease_cancel = false"
-            )
-            params["minted"] = _wire_id("stop")
         params |= {
+            "minted": _wire_id("stop"),
             "segment_id": segment.id if segment else None,
             "owner": segment.owner if segment else None,
             "expires_at": segment.expires_at if segment else None,
@@ -714,14 +753,11 @@ def _delta_write(delta: dict[str, Any], *, open_turn: bool) -> _DeltaWrite:
     return _DeltaWrite(sets=tuple(sets), params=params, rows=rows)
 
 
-async def _write_delta(
-    conn: AsyncConnection, pk: int, delta: dict[str, Any], *, open_turn: bool
-) -> int:
+async def _write_delta(conn: AsyncConnection, pk: int, delta: dict[str, Any]) -> int:
     """Write `delta`'s flat keys to their columns and rows, bump the turn
     state's version, and return the new version. The caller holds the row
-    lock, read whether the conversation has an open turn (`open_turn`), and
-    decided the write is allowed."""
-    return await _run_delta_write(conn, pk, _delta_write(delta, open_turn=open_turn))
+    lock and decided the write is allowed."""
+    return await _run_delta_write(conn, pk, _delta_write(delta))
 
 
 async def _run_delta_write(conn: AsyncConnection, pk: int, write: _DeltaWrite) -> int:
@@ -788,7 +824,8 @@ class _RuntimeEntry:
     state: ConversationState | None = None
     baseline: dict[str, Any] = field(default_factory=dict)
     draft: tuple[ConversationState, ConversationState] | None = None
-    stop: StopRead = field(default_factory=lambda: StopRead(None, None, False))
+    # SHIM(stop-loop): read by `stop_unread` alone.
+    stop_hint: bool = False
     claimed: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -826,8 +863,7 @@ class StudioStore:
             "WHERE principal = :principal AND conversation_id = :conversation_id"
         )
         self._lock_conversation = text(
-            f"SELECT {_CONVERSATION_COLUMNS}, {time_sql} AS db_now, "
-            f"{_OPEN_TURN_SQL} AS open_turn FROM conversations "
+            f"SELECT {_CONVERSATION_COLUMNS}, {time_sql} AS db_now FROM conversations "
             "WHERE id = :pk FOR UPDATE"
         )
 
@@ -922,13 +958,12 @@ class StudioStore:
         pk: int,
         delta: dict[str, Any],
         *,
-        open_turn: bool,
         seq_reserved: int | None = None,
     ) -> int:
         """Write `delta` to the turn state, the canvas, the lease and the item
         rows, and `seq_reserved` when given, and return the row's new version
         (`_write_delta`)."""
-        version = await _write_delta(conn, pk, delta, open_turn=open_turn)
+        version = await _write_delta(conn, pk, delta)
         if seq_reserved is not None:
             await conn.execute(
                 text("UPDATE conversations SET seq_reserved = :reserved WHERE id = :pk"),
@@ -1014,7 +1049,9 @@ class StudioStore:
         row, flat = stored
         entry.pk, entry.version, entry.read_at = row.id, row.version, row.db_now
         entry.read_stamp = stamp
-        entry.stop = StopRead.from_row(row)
+        entry.stop_hint = row.lease_cancel or (
+            row.stop_id is not None and row.stop_turn == row.turn_index
+        )
         entry.seq_reserved, entry.claimed_reserved = row.seq_reserved, None
         durable = ConversationState(conversation_id=conversation_id)
         _apply_delta(durable, flat)
@@ -1070,7 +1107,12 @@ class StudioStore:
         return segment.id
 
     async def save(
-        self, principal: str, conversation_id: str, state: ConversationState | None = None
+        self,
+        principal: str,
+        conversation_id: str,
+        state: ConversationState | None = None,
+        *,
+        stopping: bool = False,
     ) -> None:
         """Write this instance's changed durable fields, compare-and-swapped
         on the turn state's version. Given `state`, the working copy `draft`
@@ -1093,6 +1135,11 @@ class StudioStore:
         turn starts past the stored reserved end when that moved since the
         load: the lapsed stream the claim takes over reserved more numbers
         before its lease lapsed, and may have sent them.
+
+        Raises `StopPending` when the save persists a claim and a Stop is live
+        for the conversation's turn as the locked row and its cursor stand
+        (`StopState.live`), unless `stopping`: the claim then acts on the
+        Stop, closing the turn `cancelled`.
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
@@ -1115,13 +1162,15 @@ class StudioStore:
                     and stored_lease.id not in {entry.held, claimed.id if claimed else None}
                 ):
                     raise ConversationStale(conversation_id)
+                if claimed is not None and not stopping:
+                    lease_live = stored_lease is not None and stored_lease.expires_at > row.db_now
+                    if (await _stop_state(conn, row, lease_live=lease_live)).live:
+                        raise StopPending(conversation_id)
                 if claimed is not None and entry.claim_resumes and row.seq_reserved > target.seq:
                     target.seq = row.seq_reserved
                     reserved = row.seq_reserved + SEQ_BLOCK
                     delta = _changed_since(_serialize_durable(target), entry.baseline)
-                version = await self._write(
-                    conn, entry.pk, delta, open_turn=row.open_turn, seq_reserved=reserved
-                )
+                version = await self._write(conn, entry.pk, delta, seq_reserved=reserved)
             entry.version = version
             entry.baseline.update(delta)
             self._take_draft(entry, target)
@@ -1364,7 +1413,7 @@ class StudioStore:
         change: Callable[[ConversationState], T],
         *,
         retried: bool = False,
-        keep: Callable[[Any], bool] | None = None,
+        keep_for_stop: bool = False,
     ) -> T:
         """`checkpoint` and `change_canvas`'s one write. Under the row lock,
         fenced on `segment_id`: run `change` on a one-level copy of the live
@@ -1386,9 +1435,10 @@ class StudioStore:
         write as made. Any other row, another instance's claim and release
         since included, fences the write out.
 
-        `keep`, when given, is asked of the locked row whether the write
-        keeps the lease `change` clears; when it says so, the copy holds the
-        stored lease again before the diff is taken."""
+        With `keep_for_stop`, a write that clears the lease keeps it while a
+        Stop is live for the conversation's open turn with the lease cleared
+        (`StopState.live`, its cursor read after the lock): the copy holds the
+        stored lease again before the diff is taken, and the write rewrites it."""
         state = entry.state
         assert entry.pk is not None and state is not None
         async with entry.write_lock:
@@ -1407,6 +1457,11 @@ class StudioStore:
                     raise SegmentLost(
                         f"conversation {conversation_id!r} segment {segment_id!r} is not the lease"
                     )
+                stop_live = (
+                    keep_for_stop
+                    and not landed
+                    and (await _stop_state(conn, row, lease_live=False)).live
+                )
                 stored = (
                     CompositionManifest.model_validate(row.composition) if row.composition else None
                 )
@@ -1414,9 +1469,14 @@ class StudioStore:
                 work = _shallow_copy(state)
                 work.composition = stored
                 result = change(work)
-                if keep is not None and not landed and keep(row):
-                    work.segment = fenced
+                kept = fenced if stop_live and work.segment is None else None
+                if kept is not None:
+                    work.segment = kept
                 changed = _changed_since(_serialize_durable(work), entry.baseline)
+                if kept is not None:
+                    # The kept lease is written again, which stamps a pending
+                    # Stop as every lease write does.
+                    changed[_KEY_SEGMENT] = _serialize_segment(kept)
                 if landed:
                     logger.info(
                         "studio store: conversation %s segment %s was saved by an attempt "
@@ -1434,11 +1494,7 @@ class StudioStore:
                             if work.composition is not None
                             else None,
                         )
-                    version = (
-                        await self._write(conn, entry.pk, changed, open_turn=row.open_turn)
-                        if changed
-                        else row.version
-                    )
+                    version = await self._write(conn, entry.pk, changed) if changed else row.version
             entry.version = version
             entry.baseline.update(changed)
             if work.segment is None:
@@ -1467,11 +1523,11 @@ class StudioStore:
         `Renewal.held` is `False` when the stored segment is no longer
         `segment_id` (another instance took over after this one's TTL
         lapsed); the caller ends the stream fatally. Otherwise
-        `Renewal.stop_id` is the latest Stop request (`request_cancel`)
-        while it is unread, and `None` once a party has acted on it: a set
-        `lease_cancel` is cleared and recorded as a fresh id in the same
-        update. The renewal marks nothing read, so a renewal whose
-        acknowledgement is lost reports the same request again, and the
+        `Renewal.stop_id` is the Stop live for the lease's turn
+        (`StopState.live`), read after the update locked the row: a set
+        `lease_cancel` is recorded as a fresh id naming the row's turn index
+        in the same update (`_STAMP_STOP`). The renewal marks nothing read,
+        so later renewals report the same Stop until its turn closes, and the
         caller acts once on each id it has not acted on. A
         database error propagates, as does a `TimeoutError` when the renewal
         takes longer than `timeout`; the caller's own heartbeat decides how
@@ -1498,15 +1554,12 @@ class StudioStore:
                         await conn.execute(
                             text(
                                 "UPDATE conversations"
-                                f" SET lease_expires_at = {self._time_sql} + :ttl,"
-                                " lease_stop_id = CASE WHEN lease_cancel THEN :minted"
-                                " ELSE lease_stop_id END,"
-                                " lease_cancel = false"
+                                f" SET lease_expires_at = {self._time_sql} + :ttl, {_STAMP_STOP}"
                                 " WHERE principal = :principal"
                                 " AND conversation_id = :conversation_id"
                                 " AND lease_segment_id = :segment_id"
-                                " RETURNING lease_owner, lease_stop_id, stop_acted_id,"
-                                " lease_expires_at"
+                                " RETURNING id, lease_owner, lease_expires_at, lease_cancel,"
+                                f" stop_id, stop_turn, {_TURN_INDEX_SQL} AS turn_index"
                             ),
                             {
                                 "principal": principal,
@@ -1517,15 +1570,15 @@ class StudioStore:
                             },
                         )
                     ).first()
-                if row is None:
-                    return Renewal(held=False, stop_id=None)
+                    if row is None:
+                        return Renewal(held=False, stop_id=None)
+                    stop = await _stop_state(conn, row, lease_live=True)
                 entry.lease_stamp = max(entry.lease_stamp, stamp)
                 self._note_segment(
                     entry,
                     Segment(id=segment_id, owner=row.lease_owner, expires_at=row.lease_expires_at),
                 )
-                unread = row.lease_stop_id != row.stop_acted_id
-                return Renewal(held=True, stop_id=row.lease_stop_id if unread else None)
+                return Renewal(held=True, stop_id=stop.stop_id if stop.live else None)
 
     def _note_segment(self, entry: _RuntimeEntry, segment: Segment) -> None:
         """Record a lease write in this instance's baseline, and in its live
@@ -1541,7 +1594,7 @@ class StudioStore:
         conversation_id: str,
         segment_id: str,
         *,
-        keep: Callable[[Any], bool] | None = None,
+        keep_for_stop: bool = False,
     ) -> None:
         """The save of a streaming segment: this instance's changed keys,
         fenced on `segment_id`. Runs before every actionable pause frame and
@@ -1558,8 +1611,8 @@ class StudioStore:
         a `/composition` edit another instance made since this one last
         wrote the canvas reaches the stream's next frame. A transient
         database fault is retried until the lease's deadline (`_retrying`).
-        `keep` decides from each attempt's locked row whether a write that
-        clears the lease keeps it (`_fenced_save`).
+        `keep_for_stop` keeps a lease the write clears while a Stop is live
+        for the open turn, decided afresh by each attempt (`_fenced_save`).
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
@@ -1567,7 +1620,12 @@ class StudioStore:
             entry,
             conversation_id,
             lambda retried: self._fenced_save(
-                entry, conversation_id, segment_id, lambda _work: None, retried=retried, keep=keep
+                entry,
+                conversation_id,
+                segment_id,
+                lambda _work: None,
+                retried=retried,
+                keep_for_stop=keep_for_stop,
             ),
         )
 
@@ -1595,15 +1653,14 @@ class StudioStore:
         here.
 
         Returns whether the lease was kept for a Stop. Under the row lock, in
-        the transaction that would clear the lease, an unread Stop
-        (`StopRead.unread`) on an open turn keeps it: the caller acts on the
-        Stop under the lease and then releases again, and when acting fails
-        the lease lapses with the Stop still unread, for the next claimant.
-        With no open turn, the write that clears the lease reads every Stop
-        recorded so far (`_delta_write`). A Stop that commits after this
+        the transaction that would clear the lease, a Stop live for the
+        conversation's open turn with the lease cleared (`StopState.live`)
+        keeps it: the caller acts on the Stop under the lease and then
+        releases again, and when acting fails the lease lapses with the Stop
+        live, for the next claimant. A Stop that commits after this
         transaction finds no live lease, and `/cancel` takes it under the
         conversation lock. `False` too when nothing was saved, which leaves
-        the lease to lapse and an unread Stop in place.
+        the lease to lapse and a live Stop in place.
         """
         entry = self._runtime.get((principal, conversation_id))
         if entry is None or entry.state is None:
@@ -1622,12 +1679,6 @@ class StudioStore:
         timeout: float,
     ) -> bool:
         """`release`'s save, run as its own task."""
-        kept: list[bool] = []
-
-        def keep(row: Any) -> bool:
-            kept.append(StopRead.from_row(row).unread and row.open_turn)
-            return kept[-1]
-
         try:
             async with asyncio.timeout(timeout):
                 if state.unfinished_segment != segment_id:
@@ -1635,8 +1686,10 @@ class StudioStore:
                 if state.segment is not None and state.segment.id == segment_id:
                     state.segment = None
                 try:
-                    await self.checkpoint(principal, conversation_id, segment_id, keep=keep)
-                    return bool(kept) and kept[-1]
+                    await self.checkpoint(
+                        principal, conversation_id, segment_id, keep_for_stop=True
+                    )
+                    return state.segment is not None and state.segment.id == segment_id
                 except SegmentLost:
                     logger.warning(
                         "studio store release: conversation %s segment %s was already "
@@ -1779,68 +1832,43 @@ class StudioStore:
             )
             return True
 
-    async def acknowledge_stop(
-        self, principal: str, conversation_id: str, segment_id: str, stop_id: str
-    ) -> bool:
-        """Record that `segment_id`'s turn acted on the Stop `stop_id` without
-        closing (a `harness.turn.node.StopScope` took it), fenced on the
-        segment and on `stop_id` still being the latest Stop. Returns
-        whether it was recorded. One conditional update of the Stop columns,
-        which leaves `version` alone."""
-        entry = self._entry(principal, conversation_id)
-        async with entry.write_lock, self._transaction() as conn:
+    async def stop_live(self, principal: str, conversation_id: str) -> bool:
+        """Whether a Stop is live for `conversation_id`'s turn
+        (`StopState.live`): the row is locked `FOR SHARE` first, so a lease
+        write in flight commits before the read, and the turn's cursor is
+        read in a later statement. `False` when the store does not hold the
+        conversation."""
+        async with self._transaction() as conn:
             row = (
                 await conn.execute(
                     text(
-                        "UPDATE conversations SET stop_acted_id = :stop_id "
-                        "WHERE principal = :principal AND conversation_id = :conversation_id "
-                        "AND lease_segment_id = :segment_id AND lease_stop_id = :stop_id "
-                        "RETURNING id"
+                        f"SELECT {_CONVERSATION_COLUMNS}, {self._time_sql} AS db_now "
+                        "FROM conversations WHERE principal = :principal "
+                        "AND conversation_id = :conversation_id FOR SHARE"
                     ),
-                    {
-                        "principal": principal,
-                        "conversation_id": conversation_id,
-                        "segment_id": segment_id,
-                        "stop_id": stop_id,
-                    },
+                    {"principal": principal, "conversation_id": conversation_id},
                 )
             ).first()
-        return row is not None
+            if row is None:
+                return False
+            lease = _row_segment(row)
+            live_lease = lease is not None and lease.expires_at > row.db_now
+            return (await _stop_state(conn, row, lease_live=live_lease)).live
+
+    # SHIM(stop-loop): `harness.turn.loop` and `harness.studio` still call
+    # these three; they go once the loop and the routes read `stop_live`.
+    async def acknowledge_stop(
+        self, principal: str, conversation_id: str, segment_id: str, stop_id: str
+    ) -> bool:
+        return True
 
     async def hand_back_stop(
         self, principal: str, conversation_id: str, segment_id: str, stop_id: str
     ) -> bool:
-        """Mark the Stop `stop_id` unread again, when `segment_id` recorded
-        it acted on (`acknowledge_stop`) and nothing acted on it: the scope
-        it was recorded for had closed. Fenced as `acknowledge_stop` is.
-        Returns whether it was marked."""
-        entry = self._entry(principal, conversation_id)
-        async with entry.write_lock, self._transaction() as conn:
-            row = (
-                await conn.execute(
-                    text(
-                        "UPDATE conversations SET stop_acted_id = NULL "
-                        "WHERE principal = :principal AND conversation_id = :conversation_id "
-                        "AND lease_segment_id = :segment_id AND lease_stop_id = :stop_id "
-                        "AND stop_acted_id = :stop_id RETURNING id"
-                    ),
-                    {
-                        "principal": principal,
-                        "conversation_id": conversation_id,
-                        "segment_id": segment_id,
-                        "stop_id": stop_id,
-                    },
-                )
-            ).first()
-        return row is not None
+        return True
 
     def stop_unread(self, principal: str, conversation_id: str) -> bool:
-        """Whether the row as last loaded on this instance held an unread
-        Stop (`StopRead.unread`). With no live lease, as when a route that
-        holds the conversation lock is about to claim, nothing changes the
-        Stop columns until a claim commits, and a claim moves the version
-        `save` compares."""
-        return self._runtime[(principal, conversation_id)].stop.unread
+        return self._runtime[(principal, conversation_id)].stop_hint
 
     def claimed_event(self, principal: str, conversation_id: str) -> asyncio.Event:
         """An event set when the next claim save on this instance commits

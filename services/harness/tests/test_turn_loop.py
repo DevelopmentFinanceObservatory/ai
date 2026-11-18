@@ -540,7 +540,7 @@ async def test_a_reject_closes_the_paused_turn_done_without_resuming_its_node(
 
 async def _stop_request(engine: AsyncEngine) -> str | None:
     async with engine.connect() as conn:
-        return (await conn.execute(text("SELECT lease_stop_id FROM conversations"))).scalar_one()
+        return (await conn.execute(text("SELECT stop_id FROM conversations"))).scalar_one()
 
 
 async def test_the_first_stop_ends_only_the_scoped_work_and_the_second_ends_the_turn(

@@ -60,8 +60,8 @@ from harness.studio_state import (
     make_recall_part,
     remove_cards,
 )
-from harness.studio_store import SEQ_BLOCK, ConversationStale, Renewal, StudioStore
-from harness.turn.store import TurnStore
+from harness.studio_store import SEQ_BLOCK, ConversationStale, Renewal, StopPending, StudioStore
+from harness.turn.store import TurnStatus, TurnStore
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
 from harness.wire import (
     AddOp,
@@ -2302,14 +2302,11 @@ async def _stop_columns(engine: AsyncEngine) -> tuple[bool, str | None]:
     async with engine.connect() as conn:
         row = (
             await conn.execute(
-                text(
-                    "SELECT lease_cancel, lease_stop_id FROM conversations "
-                    "WHERE conversation_id = :c"
-                ),
+                text("SELECT lease_cancel, stop_id FROM conversations WHERE conversation_id = :c"),
                 {"c": CONVERSATION},
             )
         ).one()
-    return row.lease_cancel, row.lease_stop_id
+    return row.lease_cancel, row.stop_id
 
 
 async def test_a_stop_set_only_as_the_flag_reaches_a_renewal(new_store, clock, pg_engine) -> None:
@@ -2350,66 +2347,142 @@ async def test_a_stop_request_sets_only_the_flag_and_the_renewal_records_its_id(
     assert await _stop_columns(pg_engine) == (False, renewed.stop_id)
 
 
-@pytest.mark.parametrize(
-    ("act", "turn_open", "read"),
-    [
-        pytest.param("drop_lease", False, False, id="drop-lease"),
-        pytest.param("release", False, True, id="release-no-open-turn"),
-        pytest.param("release", True, False, id="release-open-turn-keeps-the-lease"),
-        pytest.param("claim", False, True, id="claim-no-open-turn"),
-        pytest.param("claim", True, False, id="claim-open-turn"),
-        pytest.param("acknowledge", True, True, id="acknowledge-own-segment"),
-        pytest.param("acknowledge-other", True, False, id="acknowledge-other-segment"),
-    ],
-)
-async def test_a_stop_stays_unread_until_a_party_acts_on_it(
-    new_store, clock, pg_engine, act: str, turn_open: bool, read: bool
-) -> None:
-    """A Stop (`StopRead.unread`) is recorded read only by a write that
-    acts on it: a claim or release with no open turn to stop, or the
-    segment's own record that its scope took it. A release that finds one
-    on an open turn keeps the lease for its holder to act under, and
-    dropping a lease leaves the Stop for whoever claims next."""
+async def _stop_row(engine: AsyncEngine) -> tuple[bool, str | None, int | None]:
+    """The conversation's `lease_cancel`, `stop_id` and `stop_turn`."""
+    async with engine.connect() as conn:
+        row = (
+            await conn.execute(text("SELECT lease_cancel, stop_id, stop_turn FROM conversations"))
+        ).one()
+    return row.lease_cancel, row.stop_id, row.stop_turn
+
+
+async def _streaming_turn(
+    new_store: Callable[..., StudioStore], clock: StoreClock, pg_engine: AsyncEngine, cursor: str
+) -> tuple[StudioStore, str]:
+    """A store streaming turn 1 under a claimed lease, with a Stop requested
+    and not yet stamped. `cursor` is the turn's cursor: `none` before it
+    opens, else `running`, `paused`, `taken` (paused by a pause write that
+    answered a Stop) or `done`."""
     store = new_store(clock=clock)
-    await store.create("principal", CONVERSATION)
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn()
     segment_id = store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
-    if turn_open:
-        await TurnStore(pg_engine).open_turn(
+    turns = TurnStore(pg_engine)
+    if cursor != "none":
+        opened = await turns.open_turn(
             "principal",
             CONVERSATION,
             segment_id=segment_id,
-            turn_index=0,
+            turn_index=1,
             node="seed",
             inputs={"message": "q"},
             state={},
         )
     assert await new_store(clock=clock).request_cancel("principal", CONVERSATION) is True
-    stop_id = (await store.renew("principal", CONVERSATION, segment_id)).stop_id
-    assert stop_id is not None
+    if cursor in ("paused", "taken"):
+        taken = None
+        if cursor == "taken":
+            taken = (await store.renew("principal", CONVERSATION, segment_id)).stop_id
+            assert taken is not None
+        await turns.pause(
+            opened,
+            segment_id=segment_id,
+            node="ask",
+            node_input=None,
+            kind="ask",
+            interrupt_id="int_1",
+            payload={},
+            state={},
+            stop_taken_id=taken,
+        )
+    elif cursor == "done":
+        await turns.finish(opened, segment_id=segment_id, status=TurnStatus.DONE)
+    return store, segment_id
 
-    match act:
-        case "drop_lease":
-            await store.drop_lease("principal", CONVERSATION, segment_id)
+
+@pytest.mark.parametrize("write", ["renew", "release", "claim-resume", "claim-next-turn"])
+async def test_the_next_lease_write_stamps_a_stop_with_the_turn_index_it_found(
+    new_store, clock, pg_engine, write: str
+) -> None:
+    """A Stop is a flag until the next write of the lease columns, which
+    records it as a fresh id naming the row's turn index as stored before
+    that write, and clears the flag. A claim that begins the next turn
+    stamps the turn it moves past."""
+    store, segment_id = await _streaming_turn(new_store, clock, pg_engine, "none")
+    assert await _stop_row(pg_engine) == (True, None, None)
+
+    match write:
+        case "renew":
+            assert (await store.renew("principal", CONVERSATION, segment_id)).stop_id is not None
         case "release":
-            kept = await store.release("principal", CONVERSATION, segment_id)
-            assert kept is turn_open
-            renewed = await store.renew("principal", CONVERSATION, segment_id)
-            assert renewed.held is turn_open
-        case "claim":
+            await store.release("principal", CONVERSATION, segment_id)
+        case _:
             await clock.advance(studio_state.SEGMENT_TTL_S + 1)
             other = new_store(clock=clock)
             await other.load("principal", CONVERSATION)
-            other.claim_segment("principal", CONVERSATION)
-            await other.save("principal", CONVERSATION)
-        case "acknowledge":
-            assert await store.acknowledge_stop("principal", CONVERSATION, segment_id, stop_id)
-        case "acknowledge-other":
-            assert not await store.acknowledge_stop("principal", CONVERSATION, "seg_other", stop_id)
+            work = other.draft("principal", CONVERSATION)
+            if write == "claim-next-turn":
+                work.begin_turn()
+            other.claim_segment("principal", CONVERSATION, work)
+            await other.save("principal", CONVERSATION, work)
 
-    reader = new_store(clock=clock)
-    await reader.load("principal", CONVERSATION)
-    assert reader.stop_unread("principal", CONVERSATION) is not read
+    flagged, stop_id, stop_turn = await _stop_row(pg_engine)
+    assert (flagged, stop_id is not None, stop_turn) == (False, True, 1)
+
+
+@pytest.mark.parametrize(
+    ("cursor", "kept"),
+    [
+        pytest.param("none", False, id="no-cursor"),
+        pytest.param("running", True, id="running"),
+        pytest.param("paused", True, id="paused"),
+        pytest.param("taken", False, id="paused-on-the-stop-its-scope-took"),
+        pytest.param("done", False, id="closed"),
+    ],
+)
+async def test_a_release_keeps_the_lease_only_for_a_stop_live_on_an_open_turn(
+    new_store, clock, pg_engine, cursor: str, kept: bool
+) -> None:
+    """A release keeps the lease for its holder to act on a Stop live for an
+    open turn. A turn with no cursor, a Stop the turn's scope answered and a
+    closed turn leave nothing to act on, so the lease is cleared and a
+    renewal under it finds it gone."""
+    store, segment_id = await _streaming_turn(new_store, clock, pg_engine, cursor)
+
+    assert await store.release("principal", CONVERSATION, segment_id) is kept
+    renewal = await store.renew("principal", CONVERSATION, segment_id)
+    assert renewal.held is kept
+    assert (renewal.stop_id is not None) is kept
+    assert await new_store(clock=clock).stop_live("principal", CONVERSATION) is kept
+
+
+@pytest.mark.parametrize("claim", ["next-turn", "resume"])
+async def test_a_claim_that_starts_work_refuses_a_live_stop_and_one_that_acts_on_it_lands(
+    new_store, clock, pg_engine, claim: str
+) -> None:
+    """With a Stop live for the open turn whose lease lapsed, a claim that
+    begins the next turn or resumes this one refuses, and leaves the row as
+    it was. A claim that acts on the Stop lands and names the open turn."""
+    await _streaming_turn(new_store, clock, pg_engine, "running")
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+    other = new_store(clock=clock)
+    await other.load("principal", CONVERSATION)
+
+    work = other.draft("principal", CONVERSATION)
+    if claim == "next-turn":
+        work.begin_turn()
+    other.claim_segment("principal", CONVERSATION, work)
+    with pytest.raises(StopPending):
+        await other.save("principal", CONVERSATION, work)
+    other.drop_draft("principal", CONVERSATION)
+    assert await _stop_row(pg_engine) == (True, None, None)
+
+    other.claim_segment("principal", CONVERSATION)
+    await other.save("principal", CONVERSATION, stopping=True)
+    flagged, stop_id, stop_turn = await _stop_row(pg_engine)
+    assert (flagged, stop_id is not None, stop_turn) == (False, True, 1)
+    assert await other.stop_live("principal", CONVERSATION)
 
 
 async def test_request_cancel_returns_false_with_no_live_segment(new_store) -> None:
