@@ -17,8 +17,8 @@ second waits for the first to commit and then decides against its run. A
 record change locks its run row. Nothing retries.
 
 A plan's approval admits its run in the save that records the approval
-(`approval_admission`, which `harness.studio`'s interrupt route hands the
-save): a savepoint of the transaction that holds the conversation's row
+(`admit_with_approval`, which `harness.studio`'s interrupt route runs in
+the save): a savepoint of the transaction that holds the conversation's row
 `FOR UPDATE` under the lease the route claimed, so an approval on record has
 its run whenever the client leaves. An admission refused or faulted there
 leaves the approval without a run, and `execute` admits it.
@@ -50,8 +50,8 @@ from typing import TYPE_CHECKING, Any
 from executor.classify import ExecutorCode
 from executor.ledger import (
     TERMINAL_STATUSES,
+    UNFINISHED_STATUSES,
     Admission,
-    ApprovalAdmission,
     Fail,
     LedgerUnavailableError,
     RunChange,
@@ -127,7 +127,7 @@ async def end_unfinished(conn: AsyncConnection, conversation: int, *, now: datet
             ),
             {
                 "pk": conversation,
-                "statuses": [RunStatus.ADMITTED.value, RunStatus.RUNNING.value],
+                "statuses": sorted(status.value for status in UNFINISHED_STATUSES),
             },
         )
     ).all()
@@ -158,7 +158,7 @@ async def admit_on(
     transaction, with `submission` stored beside a new run and `now` the
     time its authorisation is checked against: the run its key already
     names, or `candidate` (`admit_against`). `StudioRunLedger.admit` runs it
-    fenced on the live segment, and `StudioRunLedger.approval_admission` in
+    fenced on the live segment, and `StudioRunLedger.admit_with_approval` in
     the save that records a plan's approval.
 
     Raises what `admit_against` raises, and what the database raises; either
@@ -297,40 +297,37 @@ class StudioRunLedger:
         async with self._fenced() as (conn, pk):
             return await admit_on(conn, pk, candidate, submission=submission, now=self._now())
 
-    def approval_admission(
+    async def admit_with_approval(
         self,
-        store: object,
+        conn: AsyncConnection,
+        pk: int,
         *,
         candidate: Callable[[datetime], RunRecord],
         submission: JsonValue,
         revision: str,
         plan: JsonValue,
-    ) -> ApprovalAdmission | None:
-        """The approval's admission over this ledger's own `StudioStore`, and
-        None for any other `store`. The write stores the plan and admits the
-        run (`store_plan_on`, `admit_on`) in a savepoint of the save's
-        transaction. A refusal (`RunLedgerError`: a key naming other work,
-        an approval already expired) or a store fault in it
-        (`store_faults`, a `run_keys` row with no `runs` row among them)
-        rolls the savepoint back, is logged, and answers None, and the save
-        commits the approval without a run for `execute` to admit. A fault
-        the savepoint cannot roll back raises and fails the save."""
-        if store is not self._store:
+    ) -> Admission | None:
+        """Store `plan` under `revision` and admit `candidate`, minted at this
+        ledger's clock, with `submission` beside it (`store_plan_on`,
+        `admit_on`), for the conversation row `pk`, on `conn`, the connection
+        of the `StudioStore.save` that records the plan's approval, in a
+        savepoint of its transaction. Returns the `Admission`. A refusal
+        (`RunLedgerError`: a key naming other work, an approval already
+        expired) or a store fault in it (`store_faults`, a `run_keys` row
+        with no `runs` row among them) rolls the savepoint back, is logged,
+        and returns None, and the save commits the approval without a run
+        for `execute` to admit. A fault the savepoint cannot roll back raises
+        and fails the save."""
+        now = self._now()
+        try:
+            async with conn.begin_nested(), store_faults(None):
+                await store_plan_on(conn, pk, revision, plan)
+                return await admit_on(conn, pk, candidate(now), submission=submission, now=now)
+        except (RunLedgerError, LedgerUnavailableError) as exc:
+            logger.warning(
+                "run ledger: the approval of revision %s admits no run: %s", revision, exc
+            )
             return None
-
-        async def admit(conn: AsyncConnection, pk: int) -> Admission | None:
-            now = self._now()
-            try:
-                async with conn.begin_nested(), store_faults(None):
-                    await store_plan_on(conn, pk, revision, plan)
-                    return await admit_on(conn, pk, candidate(now), submission=submission, now=now)
-            except (RunLedgerError, LedgerUnavailableError) as exc:
-                logger.warning(
-                    "run ledger: the approval of revision %s admits no run: %s", revision, exc
-                )
-                return None
-
-        return admit
 
     async def get(self, run_id: str) -> RunRecord | None:
         raw = await self._column("record", run_id)

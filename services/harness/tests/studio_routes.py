@@ -27,6 +27,7 @@ from harness.graph.state import frame_id_for
 from harness.graph.workflow import studio_graph
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.planner_adapter import content_on_spans
+from harness.run_ledger import StudioRunLedger
 from harness.scripted import (
     SCRIPTED_CV,
     SCRIPTED_SPEC,
@@ -182,7 +183,7 @@ def orchestrator_app(
         tool_surface=tool_surface,
         edit_model=edit_model,
         early_mints=early_mints,
-        run_ledger=ledger,
+        run_ledger=ledger if isinstance(ledger, StudioRunLedger) else None,
         **({"heartbeat_seconds": heartbeat_seconds} if heartbeat_seconds is not None else {}),
     )
     app = FastAPI()

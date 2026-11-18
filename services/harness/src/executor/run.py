@@ -285,6 +285,7 @@ from executor.classify import (
 from executor.completion import ResultPublisher, publish_results
 from executor.ledger import (
     TERMINAL_STATUSES,
+    UNFINISHED_STATUSES,
     Attempt,
     AuthorisationExpiredError,
     Fail,
@@ -1144,7 +1145,7 @@ async def _abandoned(run_id: str, code: str, reason: str, *, ledger: RunLedger) 
     fails here is logged, so the caller's exception still propagates."""
     try:
         run = await ledger.get(run_id)
-        if run is not None and run.status in (RunStatus.ADMITTED, RunStatus.RUNNING):
+        if run is not None and run.status in UNFINISHED_STATUSES:
             await ledger.record(run_id, Fail(code, reason))
     except Exception:
         logger.exception("executor: could not record run %s as %s", run_id, code)
@@ -1195,7 +1196,8 @@ def approved_work(
 ) -> ApprovedWork | UnrunnablePlan:
     """The work approved `plan` runs as under `execute_approved_plan`'s rules,
     or the `UnrunnablePlan` it cannot run as: `NOT_APPROVED` for a plan that
-    is not `APPROVED` or carries no workflow, `STALE_REVISION` for one whose
+    is not `APPROVED`, carries no workflow, or whose approval cannot be
+    stated (a workflow that retrieves no source), `STALE_REVISION` for one whose
     content no longer hashes to its approved revision, and
     `AUTHORISATION_EXPIRED`, the plan failed, for one with no approval time.
     Its authorisation is a `PlanApproval` of the approved revision by
@@ -1253,17 +1255,30 @@ def approved_work(
             r for r in running.evidence_requirements if isinstance(r, DatasetRequirement)
         ),
     )
-    return ApprovedWork(
-        running=running,
-        submission=submission,
-        authorisation=PlanApproval(
+    try:
+        authorisation = PlanApproval(
             source_policy=submission.source_policy(),
             expires_at=running.approved_at + PLAN_APPROVAL_TTL,
             plan_version=running.version,
             approved_revision=running.approved_revision,
             approver=approver,
             at=running.approved_at,
-        ),
+        )
+    except ValidationError as exc:
+        # A workflow that retrieves no source has no source policy to
+        # authorise, and an approval that cannot be stated runs nothing.
+        return UnrunnablePlan(
+            plan=plan,
+            refused=Refused(
+                revision=plan_revision(plan),
+                refusal=RefusalKind.NOT_APPROVED,
+                detail=f"this plan's approval cannot be authorised: {exc}",
+            ),
+        )
+    return ApprovedWork(
+        running=running,
+        submission=submission,
+        authorisation=authorisation,
         idempotency_key=idempotency_key(
             caller=approver,
             conversation_id=conversation_id,

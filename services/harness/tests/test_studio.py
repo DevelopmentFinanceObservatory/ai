@@ -4359,7 +4359,7 @@ async def test_a_retried_approval_is_dated_by_its_first_answer(
             client_b, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
         )
 
-    assert approved_at == [answered, answered]
+    assert approved_at == [answered]
     assert surface.calls == []
     reloaded = await StudioStore(
         _engine(),

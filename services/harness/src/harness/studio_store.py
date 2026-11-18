@@ -1295,7 +1295,7 @@ class StudioStore:
         pending interrupts, and answers whether it did; the save then
         serialises them again and writes them. It runs even when no field
         changed. The interrupt route admits an approved plan's run through it
-        (`executor.ledger.RunLedger.approval_admission`) and names the run on
+        (`harness.run_ledger.StudioRunLedger.admit_with_approval`) and names the run on
         the pending interrupt.
         """
         entry = self._runtime[(principal, conversation_id)]

@@ -15,8 +15,8 @@ from datetime import datetime
 from typing import Any, cast
 
 from common.telemetry import record_span
-from planner.plan import Plan as PlannerPlan
 from planner.plan import (
+    Plan,
     PlanStatus,
     SessionState,
     alignments,
@@ -168,14 +168,12 @@ def decide(
     return Next("approved", approved.model_dump(mode="json"))
 
 
-def approval_time(plan: PlannerPlan, answer: Mapping[str, Any]) -> datetime | None:
+def approval_time(plan: Plan, answer: Mapping[str, Any]) -> datetime | None:
     """When `answer`, one that switches nothing, approves `plan` by
     `decide`'s rule: it names `plan`'s revision and says under `at`, as an
     ISO 8601 time with its offset, when the user gave it. `None` for an
     answer that approves nothing. Whether `plan` can still be approved is
-    `Plan.approve`'s to say. The studio's interrupt route applies the same
-    rule to admit the approved plan's run in the save that records the
-    approval (`harness.studio`)."""
+    `Plan.approve`'s to say."""
     approved_at = _answered_at(answer)
     if answer.get("approved") != plan_revision(plan) or approved_at is None:
         return None

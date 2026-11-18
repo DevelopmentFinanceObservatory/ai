@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
+import executor.run as run_module
 import harness.run_ledger as run_ledger_module
 import harness.studio as studio_module
 import harness.turn.store as turn_store_module
@@ -23,6 +24,7 @@ from executor.ledger import (
     IdempotencyConflictError,
     RunRecord,
     RunStatus,
+    SourcePolicy,
     idempotency_key,
 )
 from fastapi import FastAPI
@@ -918,3 +920,27 @@ async def test_an_answer_the_approval_rule_refuses_admits_nothing_at_the_route(
     assert "component.created" in [frame["event"] for frame in frames]
     (run,) = await _runs(pg_engine, ledger)
     assert run.status is RunStatus.COMPLETED
+
+
+async def test_an_approval_whose_sources_cannot_be_authorised_admits_nothing_and_fails_the_turn(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workflow that retrieves no source has no source policy an approval
+    could authorise: `SourcePolicy` refuses an empty `sources`. The plan's
+    `Submission.source_policy` answers that empty policy here, as such a
+    workflow's would. The route answers the approval with a 200 stream and
+    admits no run, and `execute` raises on the plan it cannot run, so the
+    turn ends in an error."""
+    store = StudioStore(pg_engine)
+    app, _, ledger = _studio_app(store)
+    monkeypatch.setattr(
+        run_module.Submission, "source_policy", lambda self: SourcePolicy(sources=())
+    )
+    async with studio_client(app) as client:
+        first = await stream(client, "/api/studio/turn", turn_body("Kenya's debt service?"))
+        interrupt_id = _frame(first, "plan.proposed")["interrupt_id"]
+        frames = await stream(client, "/api/studio/interrupt", _approve_body(interrupt_id))
+
+    assert frames[-1]["event"] == "error"
+    assert await _approvals(pg_engine) == [interrupt_id]
+    assert await _runs(pg_engine, ledger) == []

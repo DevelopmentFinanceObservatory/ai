@@ -46,7 +46,7 @@ from typing import Any, Literal
 
 from common.telemetry import flush_telemetry
 from compiler.surface import ToolSurface
-from executor.ledger import RunLedger, RunStatus, submission_content
+from executor.ledger import UNFINISHED_STATUSES, submission_content
 from executor.run import UnrunnablePlan, approved_work, run_candidate
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
@@ -70,7 +70,6 @@ from harness.conversation import (
 )
 from harness.decision_pick import is_decision_choice
 from harness.early_mint import EarlyMints
-from harness.graph.approve import approval_time
 from harness.graph.events import GraphEvent, StepProgress
 from harness.graph.execute import ledger_conversation_id
 from harness.graph.interfaces import Executor
@@ -80,6 +79,7 @@ from harness.graph.state import (
     TurnInput,
 )
 from harness.provenance import ProvenanceStore
+from harness.run_ledger import StudioRunLedger
 from harness.seeds import seeds_slot
 from harness.settings import Settings
 from harness.studio_edit import (
@@ -525,7 +525,7 @@ class StudioRunner:
     shutdown waits for before it closes the database. `run_ledger` is the
     graph's ledger, through which `/interrupt` admits an approved plan's run
     in the save that records the approval
-    (`executor.ledger.RunLedger.approval_admission`); with none, `execute`
+    (`harness.run_ledger.StudioRunLedger.admit_with_approval`); with none, `execute`
     admits every run.
     """
 
@@ -541,7 +541,7 @@ class StudioRunner:
         provenance: ProvenanceStore | None = None,
         early_mints: EarlyMints | None = None,
         heartbeat_seconds: float = HEARTBEAT_INTERVAL_S,
-        run_ledger: RunLedger | None = None,
+        run_ledger: StudioRunLedger | None = None,
     ) -> None:
         self.edit_model = edit_model
         self.run_ledger = run_ledger
@@ -1326,36 +1326,38 @@ def _approval_admission(
     conversation_id: str,
 ) -> Callable[[AsyncConnection, int], Awaitable[bool]] | None:
     """The write that admits the run of the plan the turn's `state` holds,
-    approved through plan interrupt `pending` at `at`, for `StudioStore.save`
+    approved at `at` through plan interrupt `pending`, for `StudioStore.save`
     to make in the transaction that records the approval (`alongside`).
 
     The plan is the one `approve.decide` reads from the same cursor, approved
-    by the same rule (`approval_time`); its run is the candidate
-    `execute_approved_plan` builds (`approved_work`, `run_candidate`), and
-    `studio.run_ledger` stores it with its plan and admits it by
-    `execute`'s rule (`RunLedger.approval_admission`). So `execute` finds the
-    run its key names and carries it on, and a turn that ends before
-    `execute` leaves the run for the next turn's `seed`. When the admission
-    leaves that run unfinished, the write names it on `pending`
-    (`admitted_run`), which the same save stores, so the answer to `approve`
-    names it on this attempt and on every retry resuming it; it answers
-    whether it did.
+    when it awaits approval as the revision `pending` is keyed on, as
+    `decide` approves it; its run is the candidate `execute_approved_plan`
+    builds (`approved_work`, `run_candidate`), which `studio.run_ledger`
+    stores with its plan and admits by `execute`'s rule
+    (`StudioRunLedger.admit_with_approval`). So `execute` finds the run its
+    key names and carries it on, and a turn that ends before `execute`
+    leaves the run for the next turn's `seed`. When the admission leaves
+    that run unfinished, the write names it on `pending` (`admitted_run`),
+    which the same save stores, so the answer to `approve` names it on this
+    attempt and on every retry resuming it; it answers whether it did.
 
-    None when there is nothing to admit: no ledger that admits with the
-    approval, no plan the state holds that this release reads, an answer the
-    rule does not approve (`decide` amends), a plan that no longer awaits
-    approval (`decide` raises in the turn), or one `approved_work` finds
-    nothing to run for. It raises nothing."""
-    if studio.run_ledger is None:
+    None when there is nothing to admit: no Studio ledger, no plan the state
+    holds that this release reads, a plan keyed on another revision
+    (`decide` amends), a plan that no longer awaits approval (`decide`
+    raises in the turn), or one `approved_work` finds nothing to run for
+    (`execute` raises in the turn). It raises nothing."""
+    ledger = studio.run_ledger
+    if ledger is None:
         return None
     raw = state.get("plan")
     plan = stored_plan(raw if isinstance(raw, str) else None, state_key="plan")
-    if plan is None or plan.status is not PlanStatus.PENDING_APPROVAL:
+    if (
+        plan is None
+        or plan.status is not PlanStatus.PENDING_APPROVAL
+        or plan_revision(plan) != pending.plan_revision
+    ):
         return None
-    approved_at = approval_time(plan, {"approved": pending.plan_revision, "at": at.isoformat()})
-    if approved_at is None:
-        return None
-    approved = plan.approve(at=approved_at)
+    approved = plan.approve(at=at)
     work = approved_work(
         approved,
         approver=principal,
@@ -1363,33 +1365,27 @@ def _approval_admission(
     )
     if isinstance(work, UnrunnablePlan):
         return None
-    admit = studio.run_ledger.approval_admission(
-        studio.store,
-        candidate=lambda now: run_candidate(
-            work.submission,
-            authorisation=work.authorisation,
-            idempotency_key=work.idempotency_key,
-            now=now,
-        ),
-        submission=submission_content(work.submission),
-        revision=plan_revision(approved),
-        plan=approved.model_dump_json(),
-    )
-    if admit is None:
-        return None
 
-    async def admit_and_name(conn: AsyncConnection, pk: int) -> bool:
-        admitted = await admit(conn, pk)
-        if admitted is None or admitted.run.status not in _UNFINISHED_RUN:
+    async def admit(conn: AsyncConnection, pk: int) -> bool:
+        admitted = await ledger.admit_with_approval(
+            conn,
+            pk,
+            candidate=lambda now: run_candidate(
+                work.submission,
+                authorisation=work.authorisation,
+                idempotency_key=work.idempotency_key,
+                now=now,
+            ),
+            submission=submission_content(work.submission),
+            revision=plan_revision(approved),
+            plan=approved.model_dump_json(),
+        )
+        if admitted is None or admitted.run.status not in UNFINISHED_STATUSES:
             return False
         pending.admitted_run = admitted.run.run_id
         return True
 
-    return admit_and_name
-
-
-# The runs an admission leaves for `execute` to compute.
-_UNFINISHED_RUN = frozenset({RunStatus.ADMITTED, RunStatus.RUNNING})
+    return admit
 
 
 async def _unclaimed(
