@@ -27,16 +27,17 @@ splits the mapping out of the state it is given, compares each block's
 digest with the digests its `Cursor` holds, and in the same transaction
 upserts the blocks that are new or changed, deletes the spec ids that are
 gone and moves the blocks whose position changed, so a checkpoint costs what
-changed rather than what the turn holds. A block the cursor read or wrote
-that is still the same object is not serialised again, since a block is
-never changed in place (`harness.graph.state.stored_mapping`). The rows are
+changed rather than what the turn holds. Every block is serialised at
+every write, so a block changed in place is written like any other. The
+rows are
 updated as well as inserted because the mapping is not append-only: a later
 search reading of a held spec id rewrites its block
 (`planner.plan.with_blocks`), and a switch that fails or is stopped puts the
 mapping back as it was before the switch (`harness.graph.switch`). A read
 merges the blocks back into the state under `SPECS_KEY`, in their stored
-order and with their keys in the order the turn built them, so every
-`Cursor.state` is the state as the turn's nodes see it.
+order and with their keys in the order the turn built them, and a write
+returns the blocks decoded from the JSON it stored, so every `Cursor.state`
+holds the state as stored, whether the next node runs live or reruns.
 
 The lease itself, the Stop request and the frame numbering live on
 `conversations` and are written by `harness.studio_store.StudioStore`.
@@ -47,7 +48,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -140,9 +141,8 @@ class Cursor:
     """One turn as last read or written. `id` keys the turn's answers and
     records; `conversation` is the `conversations` row's id; `record_count`
     is the number of transcript entries stored. `state` holds the turn's
-    spec blocks under `SPECS_KEY`; `spec_digests` is the digest of each
-    stored block, by spec id in stored order, and `spec_blocks` the block
-    objects those digests were taken from. `owed` is set on a running turn
+    spec blocks under `SPECS_KEY`, as stored; `spec_digests` is the digest
+    of each stored block, by spec id in stored order. `owed` is set on a running turn
     whose node still owes an accepted answer to its `resume`, and `None`
     otherwise."""
 
@@ -161,9 +161,6 @@ class Cursor:
     version: int
     record_count: int
     spec_digests: dict[str, str]
-    spec_blocks: Mapping[str, Mapping[str, Any]] = field(
-        default_factory=dict, compare=False, repr=False
-    )
 
 
 def _json(value: Any) -> str | None:
@@ -188,7 +185,7 @@ class _StoredSpecs:
     """The spec blocks a write stored or a read found: each block, by spec
     id in stored order, and its digest."""
 
-    blocks: Specs
+    blocks: dict[str, dict[str, Any]]
     digests: dict[str, str]
 
 
@@ -232,7 +229,6 @@ def _cursor(row: Any, record_count: int, specs: _StoredSpecs) -> Cursor:
         version=row.version,
         record_count=record_count,
         spec_digests=specs.digests,
-        spec_blocks=specs.blocks,
     )
 
 
@@ -290,34 +286,32 @@ async def _write_specs(conn: AsyncConnection, cursor: Cursor, specs: Specs) -> _
     """Make the turn's stored spec blocks equal `specs`, in its order.
 
     Each row's `seq` is its block's position in `specs`, so stored order is
-    the order the turn's state held the blocks in. A block that is the same
-    object `cursor` read or wrote is taken as unchanged without serialising
-    it; any other is written when its JSON's digest differs from the stored
-    one. A block whose position changed but whose content did not has only
-    its `seq` rewritten, and the spec ids `specs` lacks are deleted.
+    the order the turn's state held the blocks in. A block is written when
+    its JSON's digest differs from the stored one. A block whose position
+    changed but whose content did not has only its `seq` rewritten, and the
+    spec ids `specs` lacks are deleted. Returns the blocks decoded from
+    their JSON, the form a read of the rows gives.
     """
     stored_at = {spec_id: position for position, spec_id in enumerate(cursor.spec_digests)}
+    blocks: dict[str, dict[str, Any]] = {}
     digests: dict[str, str] = {}
     changed: list[dict[str, Any]] = []
     moved: list[dict[str, Any]] = []
     for position, (spec_id, block) in enumerate(specs.items()):
-        if cursor.spec_blocks.get(spec_id) is block:
-            digests[spec_id] = cursor.spec_digests[spec_id]
-        else:
-            body = json.dumps(block, allow_nan=False)
-            digests[spec_id] = digest = _spec_digest(body)
-            if cursor.spec_digests.get(spec_id) != digest:
-                changed.append(
-                    {
-                        "turn": cursor.id,
-                        "spec_id": spec_id,
-                        "seq": position,
-                        "block": body,
-                        "digest": digest,
-                    }
-                )
-                continue
-        if stored_at.get(spec_id) != position:
+        body = json.dumps(block, allow_nan=False)
+        blocks[spec_id] = json.loads(body)
+        digests[spec_id] = digest = _spec_digest(body)
+        if cursor.spec_digests.get(spec_id) != digest:
+            changed.append(
+                {
+                    "turn": cursor.id,
+                    "spec_id": spec_id,
+                    "seq": position,
+                    "block": body,
+                    "digest": digest,
+                }
+            )
+        elif stored_at.get(spec_id) != position:
             moved.append({"turn": cursor.id, "spec_id": spec_id, "seq": position})
     if gone := [spec_id for spec_id in cursor.spec_digests if spec_id not in digests]:
         await conn.execute(
@@ -328,7 +322,7 @@ async def _write_specs(conn: AsyncConnection, cursor: Cursor, specs: Specs) -> _
         await conn.execute(_UPSERT_SPEC, changed)
     if moved:
         await conn.execute(_MOVE_SPEC, moved)
-    return _StoredSpecs(blocks=dict(specs), digests=digests)
+    return _StoredSpecs(blocks=blocks, digests=digests)
 
 
 async def _read_cursor(conn: AsyncConnection, where: str, params: dict[str, Any]) -> Cursor | None:
@@ -395,8 +389,8 @@ class TurnStore:
     ) -> Cursor:
         """Apply `sets` and bump the version where the row still holds the
         version `cursor` read and one of `statuses`; when `state` is given,
-        store it, its spec blocks as rows (`_write_specs`); and append
-        `records`."""
+        store it, its spec blocks as rows (`_write_specs`), and otherwise
+        read the stored blocks back; and append `records`."""
         if state is not None:
             rest, specs = _split(state)
             sets += ", state = CAST(:state AS json)"
@@ -421,7 +415,7 @@ class TurnStore:
         stored = (
             await _write_specs(conn, cursor, specs)
             if state is not None
-            else _StoredSpecs(blocks=cursor.spec_blocks, digests=cursor.spec_digests)
+            else await _stored_specs(conn, cursor.id)
         )
         await _append(conn, cursor, records)
         return _cursor(row, cursor.record_count + len(records), stored)
@@ -529,11 +523,7 @@ class TurnStore:
         """The turn's spec blocks by spec id, in the order the turn's state
         held them at the last write."""
         async with self._engine.connect() as conn:
-            rows = await conn.execute(
-                text("SELECT spec_id, block FROM turn_specs WHERE turn = :turn ORDER BY seq"),
-                {"turn": cursor.id},
-            )
-            return dict(rows.tuples().all())
+            return (await _stored_specs(conn, cursor.id)).blocks
 
     async def records(self, cursor: Cursor) -> list[AgentRecord]:
         """The turn's transcript, in the order it was appended."""

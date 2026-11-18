@@ -8,7 +8,6 @@ from typing import Any
 import pytest
 from harness.db.migrate import MIGRATIONS_DIR, apply_pending
 from harness.studio_state import SegmentLost
-from harness.turn import store as store_module
 from harness.turn.store import (
     SPECS_KEY,
     AgentRecord,
@@ -441,9 +440,12 @@ async def test_spec_blocks_read_back_in_the_order_the_turn_last_held_them(
     assert appended == ["spec_a", "spec_c"]
 
 
-async def test_a_checkpoint_does_not_serialise_a_block_it_wrote_or_read_again(
-    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+async def test_the_cursor_holds_spec_blocks_as_stored_and_a_block_changed_in_place_is_written(
+    pg_engine: AsyncEngine,
 ) -> None:
+    """A written cursor holds each block as its JSON decodes, the form a
+    rerun reads, and a block a node then changes in place is written at the
+    next checkpoint."""
     await _conversation(pg_engine)
     store = TurnStore(pg_engine)
     first = await store.advance(
@@ -451,23 +453,17 @@ async def test_a_checkpoint_does_not_serialise_a_block_it_wrote_or_read_again(
         segment_id=SEGMENT,
         node="planner",
         node_input=None,
-        state={SPECS_KEY: {"spec_a": {"v": 1}, "spec_b": {"v": 1}}},
+        state={SPECS_KEY: {"spec_a": {"v": 1, "pair": (1, 2), "by": {7: "x"}}}},
     )
-    digested: list[str] = []
-    real = store_module._spec_digest
-    monkeypatch.setattr(
-        store_module, "_spec_digest", lambda body: digested.append(body) or real(body)
+    stored = {"spec_a": {"v": 1, "pair": [1, 2], "by": {"7": "x"}}}
+    assert first.state[SPECS_KEY] == stored
+
+    first.state[SPECS_KEY]["spec_a"]["v"] = 2
+    second = await store.advance(
+        first, segment_id=SEGMENT, node="approve", node_input=None, state=first.state
     )
 
-    await store.advance(
-        first,
-        segment_id=SEGMENT,
-        node="approve",
-        node_input=None,
-        state={SPECS_KEY: {**first.state[SPECS_KEY], "spec_b": {"v": 2}}},
-    )
-
-    assert digested == ['{"v": 2}']
+    assert await store.specs(second) == {"spec_a": {**stored["spec_a"], "v": 2}}
 
 
 async def test_a_pause_round_takes_one_answer(pg_engine: AsyncEngine) -> None:

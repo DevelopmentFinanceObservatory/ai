@@ -294,12 +294,15 @@ def _timeout_refusal(conversation: ConversationState, *, tool: str, key: str) ->
 STREAM_RETRY_AFTER_S = 30
 
 
-def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame:
+def _stream_fatal(
+    conversation: ConversationState, exc: Exception, *, closes: bool = True
+) -> ErrorFrame:
     """The stream-fatal error frame for `exc`, the error a turn ended on
     (`_fatal_frame`): the refusal it states, the MCP call whose pinned
     timeout it hit (`timeout_tool`/`timeout_key`, set by
     `mcp_client._call_tool`), and whether a later attempt may not meet it
-    (`compiler.surface.transient`)."""
+    (`compiler.surface.transient`). `closes` is false for a turn whose close
+    could not be written (`harness.turn.events.TurnFailed.closed`)."""
     timeout_tool = getattr(exc, "timeout_tool", None)
     return _fatal_frame(
         conversation,
@@ -307,6 +310,7 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
         timeout_tool=timeout_tool,
         timeout_key=getattr(exc, "timeout_key", None) or timeout_tool,
         transient=transient(exc),
+        closes=closes,
     )
 
 
@@ -331,6 +335,7 @@ def _fatal_frame(
     timeout_tool: str | None,
     timeout_key: str | None,
     transient: bool,
+    closes: bool = True,
 ) -> ErrorFrame:
     """A stream-fatal error frame. A resolver refusal keeps its real code
     when the wire grammar knows it (e.g. `capability_unavailable` on an
@@ -356,7 +361,9 @@ def _fatal_frame(
     for the refusal's own code under the retry mode the frame states
     (`failure_detail`). The refusal's `fix.detail` and `message` are written
     for a model or an operator and stay in the log the caller writes, as the
-    turn's trace id does. The turn closes on the frame's code.
+    turn's trace id does. The turn closes on the frame's code, unless
+    `closes` is false: the turn's stored close failed, so its record stays
+    open for whatever closes the turn next, and only its span ends here.
     """
     if timeout_tool is not None:
         refusal = _timeout_refusal(conversation, tool=timeout_tool, key=timeout_key or timeout_tool)
@@ -379,9 +386,12 @@ def _fatal_frame(
         )
     stated = refusal if refusal.get("code") else {**refusal, "code": HarnessCode.RAISED.value}
     detail = failure_detail({**stated, "retry_mode": retry.value})
-    conversation.close_turn(
-        final_text=conversation.turn_final_text or detail, error=error_code.value
-    )
+    if closes:
+        conversation.close_turn(
+            final_text=conversation.turn_final_text or detail, error=error_code.value
+        )
+    else:
+        conversation.end_turn_span_unrecorded("unclosed", level="ERROR")
     return ErrorFrame(
         event="error",
         seq=conversation.next_seq(),
@@ -1627,12 +1637,12 @@ class _Translator:
                 # record (`_RecordingSurface.mark_step_failed`) once the
                 # whole run is over.
                 return [*self._close_starting(), self._running_step(event)]
-            case TurnFailed(error=error):
+            case TurnFailed(error=error, closed=closed):
                 # The calls the failed node finished since the last event,
                 # a plan step's among them, show before the turn's error.
                 return [
                     *await self._record_frames(records),
-                    _stream_fatal(self._conversation, error),
+                    _stream_fatal(self._conversation, error, closes=closed),
                 ]
             case ToolsAnswered(answers=answers, state=state):
                 keep_turn_records(self._conversation, state)

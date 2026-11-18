@@ -888,11 +888,12 @@ class _HeldAfterPausing(TurnStore):
 
 
 @pytest.mark.parametrize("cut_by", ["stop", "lost-lease"])
-async def test_a_segment_cut_off_after_its_pause_committed_reports_the_pause(
+async def test_a_segment_cut_off_after_its_pause_committed_settles_on_the_cut(
     pg_engine: AsyncEngine, clock: StoreClock, cut_by: str
 ) -> None:
-    """The client gets the question the store holds, whichever cut came
-    after the pause's write, and the turn stays paused for the answer."""
+    """A Stop after the pause's write closes the turn `cancelled` with no
+    question shown: the user stopped it. After a lost lease the client gets
+    the question the store holds, and the turn stays paused for the answer."""
     store = _HeldAfterPausing(pg_engine)
     lease_a, lease_b = await _instance(pg_engine, clock), await _instance(pg_engine, clock)
     segment_id = await _claim(lease_a)
@@ -909,6 +910,11 @@ async def test_a_segment_cut_off_after_its_pause_committed_reports_the_pause(
             await conn.execute(text("UPDATE conversations SET lease_segment_id = 'segment-b'"))
     segment = await asyncio.wait_for(running, 5)
 
+    if cut_by == "stop":
+        assert events == []
+        assert segment.outcome is Outcome.CANCELLED
+        assert (await store.turn(segment.cursor.id)).status is TurnStatus.CANCELLED
+        return
     stored = await _open_cursor(store)
     [paused] = events
     assert isinstance(paused, Paused)
@@ -928,8 +934,9 @@ class _ClosesNothing(TurnStore):
 async def test_a_close_that_cannot_be_written_still_reports_the_nodes_error(
     pg_engine: AsyncEngine, clock: StoreClock
 ) -> None:
-    """The node's exception reaches the client; the turn stays open, as
-    last written, for the conversation's next turn to abandon."""
+    """The node's exception reaches the client as not closing the turn, and
+    the segment ends `running`: the turn stays open, as last written, for a
+    Stop or the conversation's next turn to close."""
     store, lease = _ClosesNothing(pg_engine), await _instance(pg_engine, clock)
     segment_id = await _claim(lease)
     refused = RuntimeError("plan_start broke")
@@ -943,8 +950,8 @@ async def test_a_close_that_cannot_be_written_still_reports_the_nodes_error(
         store, lease, await _open(store, segment_id, graph), segment_id, graph, events
     )
 
-    assert events == [TurnFailed(node="plan_start", error=refused)]
-    assert segment.outcome is Outcome.FAILED
+    assert events == [TurnFailed(node="plan_start", error=refused, closed=False)]
+    assert segment.outcome is Outcome.RUNNING
     assert (await _open_cursor(store)).status is TurnStatus.RUNNING
 
 

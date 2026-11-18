@@ -817,7 +817,6 @@ class StudioRunner:
             # The turn's records so far, for a segment that resumes a turn
             # another instance began.
             keep_turn_records(conversation, cursor.state)
-            conversation.turn_specs = await self.turns.specs(cursor)
             segment_task = asyncio.ensure_future(
                 run_segment(
                     self.turns,
@@ -848,11 +847,12 @@ class StudioRunner:
                     yield _Stopped("segment_lost")
                 case Outcome.FAILED if not failed:
                     yield recorded_fatal(conversation, segment.cursor.error or {})
-                case Outcome.FAILED | Outcome.ABANDONED:
-                    # The translator sent the `TurnFailed` event's error frame.
+                case Outcome.FAILED | Outcome.ABANDONED | Outcome.RUNNING:
+                    # The translator sent the `TurnFailed` event's error
+                    # frame; a `running` turn's close could not be written,
+                    # and it stays open for a Stop or the next turn.
                     pass
                 case _:
-                    conversation.turn_specs = await self.turns.specs(segment.cursor)
                     for frame in await translator.finish():
                         yield frame
         except (SegmentLost, DatabaseUnavailable) as exc:
@@ -1324,14 +1324,14 @@ async def _close_open_turn(
     studio: StudioRunner, conversation: ConversationState, open_turn: Cursor | None
 ) -> None:
     """Close `conversation`'s turn `cancelled` when it is open, keeping the
-    records `open_turn`, its cursor, holds (`_open_turn_records`), and clear
+    records `open_turn`, its cursor, holds (`keep_turn_records`), and clear
     its pending interrupts, so an answer to one is refused. The turn span the
     close ends is exported here, since no stream is left to export it."""
     conversation.pending.clear()
     if not conversation.turn_index or conversation.turn_recorded:
         return
     if open_turn is not None:
-        await _open_turn_records(studio, conversation, open_turn)
+        keep_turn_records(conversation, open_turn.state)
     conversation.close_turn(
         final_text=conversation.turn_final_text, error=ErrorCode.CANCELLED.value
     )
@@ -1373,14 +1373,13 @@ def _set_turn_context(
     start_turn_budget(settings)
 
 
-async def _open_turn_records(
-    studio: StudioRunner, conversation: ConversationState, open_turn: Cursor
-) -> None:
-    """Take the records the conversation's open turn `open_turn` holds, its
-    spec blocks among them, into `conversation`, so the record its close
-    keeps (`ConversationState.close_turn`) holds them."""
-    keep_turn_records(conversation, open_turn.state)
-    conversation.turn_specs = await studio.turns.specs(open_turn)
+def _same_open_pause(before: Cursor | None, after: Cursor | None) -> bool:
+    """Whether `after`, the turn read after a claim, is where `before`, the
+    turn read before it, stood: both closed, or both open with the same
+    status and pause. A running turn may have moved on to a later node."""
+    if before is None or after is None:
+        return before is after
+    return after.status is before.status and after.pause == before.pause
 
 
 async def _unclaimed(
@@ -1471,7 +1470,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             work = studio.store.draft(principal, body.conversation_id)
             left_open = await studio.turns.open_cursor(principal, body.conversation_id)
             if left_open is not None and not work.turn_recorded:
-                await _open_turn_records(studio, work, left_open)
+                keep_turn_records(work, left_open.state)
             work.begin_turn()
             work.auto_add = body.auto_add
             if pick is None:
@@ -1890,6 +1889,17 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         # resumes. The turn lines added below stay unsaved, and the retry's
         # load reads the row afresh.
         try:
+            # The read above only gated the claim. A segment whose lease
+            # lapsed can still write the turn until the claim commits, so
+            # the answer runs on the cursor read after it, and is refused
+            # when that cursor no longer holds the same open pause.
+            claimed = await studio.turns.open_cursor(principal, body.conversation_id)
+            if not _same_open_pause(cursor, claimed):
+                await _abandon_claim(
+                    studio.store, principal, body.conversation_id, segment_id, lock
+                )
+                return _streaming_conflict_response("the turn moved while this answer was claimed")
+            cursor = claimed
             # The instance that resumes a paused turn may not be the one that
             # opened it: its telemetry span is process-local and never persisted,
             # and a workflow's own steps run as concurrent waves whose recording

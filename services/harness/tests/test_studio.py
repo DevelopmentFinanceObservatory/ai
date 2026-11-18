@@ -109,6 +109,7 @@ from harness.studio_translate import (
     keep_turn_records,
 )
 from harness.tool_contracts import HarnessCode, ResolverError, harness_refusal
+from harness.turn.store import TurnStatus
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from harness.wire import (
@@ -2722,6 +2723,49 @@ async def _approve_plan_then_hang(
     crashed = await asyncio.wait_for(interrupt_task, timeout=5)
     assert _events(crashed)[-1] == "error"
     return hanging
+
+
+@pytest.mark.parametrize(
+    ("moved", "streams"),
+    [
+        pytest.param("version = version + 1", True, id="same-pause"),
+        pytest.param("interrupt_id = 'int_elsewhere'", False, id="pause-gone"),
+    ],
+)
+async def test_an_answer_runs_on_the_cursor_read_after_its_claim(moved: str, streams: bool) -> None:
+    """A write lands on the turn between `/interrupt`'s first read of the
+    cursor and its claim save. When the turn still holds the same open
+    pause, the answer resumes it from the cursor read after the claim;
+    when it does not, the answer is refused with a retryable 409 and the
+    claim is dropped."""
+    app = _app(*_plan(), tool_surface=ScriptedSurface())
+    store = app.state.studio.store
+    real_save = store.save
+    moved_once = False
+
+    async def save_after_a_write(*args: Any, **kwargs: Any) -> Any:
+        nonlocal moved_once
+        if not moved_once:
+            moved_once = True
+            async with _engine().begin() as conn:
+                await conn.execute(text(f"UPDATE turn_cursors SET {moved}"))
+        return await real_save(*args, **kwargs)
+
+    async with _client(app) as client:
+        plan = _frame(
+            await _stream(client, "/api/studio/turn", _turn_body("q with forks")), "plan.proposed"
+        )
+        store.save = save_after_a_write
+        body = _interrupt_body(plan["interrupt_id"], "approve")
+        if streams:
+            assert _events(await _stream(client, "/api/studio/interrupt", body))[-1] == "done"
+            return
+        refused = await client.post("/api/studio/interrupt", json=body, headers=AUTH)
+
+    assert refused.status_code == 409
+    assert refused.json()["retry"] == "retry_after_delay"
+    stored = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert stored is not None and stored.segment is None
 
 
 async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable_answer() -> None:
@@ -6467,6 +6511,65 @@ async def test_a_failed_turn_is_recorded_with_its_error() -> None:
     assert record["user"] == "q that dies"
     # A surface that raises is a defect, which the same turn meets again.
     assert record["error"] == "capability_unavailable"
+
+
+@pytest.mark.parametrize(("then", "closed_as"), [("cancel", "cancelled"), ("turn", "abandoned")])
+async def test_a_failed_turn_whose_close_was_not_written_is_closed_by_what_comes_next(
+    then: str, closed_as: str
+) -> None:
+    """A node fails and its close cannot be written: the client gets the
+    node's error frame, the turn stays running and its record open, and a
+    later Stop or turn closes both the same way."""
+
+    class BrokenSurface(ScriptedSurface):
+        async def call_tool(self, **kwargs: Any) -> ToolCallResult:
+            raise RuntimeError("analysis mount went away")
+
+    store = StudioStore(_engine())
+    app = _app(*_plan(), _text("Hello."), tool_surface=BrokenSurface(), store=store)
+    turns = app.state.studio.turns
+    real_finish = turns.finish
+
+    async def finish_unwritten(cursor: Any, **kwargs: Any) -> Any:
+        if kwargs.get("status") is TurnStatus.FAILED:
+            raise ConnectionError("the database is unreachable")
+        return await real_finish(cursor, **kwargs)
+
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q that dies"))
+        plan = _frame(first, "plan.proposed")
+        turns.finish = finish_unwritten
+        frames = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+        assert frames[-1]["event"] == "error"
+        assert frames[-1]["error"]["error"] == "capability_unavailable"
+        assert store.current(PRINCIPAL, CONVERSATION).turns == []
+        left = await turns.open_cursor(PRINCIPAL, CONVERSATION)
+        assert left is not None and left.status is TurnStatus.RUNNING
+
+        if then == "cancel":
+            cancel = await client.post(
+                "/api/studio/cancel",
+                json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
+                headers=AUTH,
+            )
+            assert cancel.status_code == 204
+        else:
+            assert (
+                _events(await _stream(client, "/api/studio/turn", _turn_body("hi")))[-1] == "done"
+            )
+
+    (record, *_) = (await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)).turns
+    assert record["user"] == "q that dies"
+    assert record["error"] == closed_as
+    async with _engine().connect() as conn:
+        status = (
+            await conn.execute(
+                text("SELECT status FROM turn_cursors WHERE id = :id"), {"id": left.id}
+            )
+        ).scalar_one()
+    assert status == closed_as
 
 
 def test_the_conversation_digest_is_bounded() -> None:

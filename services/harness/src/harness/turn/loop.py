@@ -17,8 +17,9 @@ exception as its error. A cursor naming a node the running `Graph` lacks, or
 paused at a node that can no longer resume, closes the turn `abandoned` with
 a `TurnExpired` error, before any answer to it is accepted: no turn is
 carried across a graph change. A close that cannot be written is logged and
-leaves the turn open, for the conversation's next turn to abandon; the
-segment still reports the error it closed on (`TurnFailed`).
+leaves the turn running as last written, for a Stop or the conversation's
+next turn to close; the segment ends `running` and still reports the error
+(`TurnFailed`, with `closed` false).
 
 A segment runs a node only on a cursor that is current (`TurnStore.load`).
 A crash leaves the cursor as last written. The segment that takes the turn
@@ -115,10 +116,12 @@ class Graph[E]:
 
 
 class Outcome(StrEnum):
-    """How a segment ended: the turn's closing status, `paused`, or `lost`
-    when another instance took the conversation's lease."""
+    """How a segment ended: the turn's closing status, `paused`, `lost`
+    when another instance took the conversation's lease, or `running` when
+    a node failed and the turn's close could not be written."""
 
     PAUSED = "paused"
+    RUNNING = TurnStatus.RUNNING.value
     DONE = TurnStatus.DONE.value
     FAILED = TurnStatus.FAILED.value
     ABANDONED = TurnStatus.ABANDONED.value
@@ -190,8 +193,9 @@ async def _close_on_error(
 ) -> Segment:
     """Close the turn `status` on `error` at `node` and report `error`. A
     close the store refuses for any reason but those `_NOT_THE_TURNS` names
-    is logged and leaves the turn open, for the conversation's next turn to
-    abandon, and `error` is still the one reported."""
+    is logged and leaves the turn running as last written, for a Stop or
+    the conversation's next turn to close: the segment ends `running`, and
+    `error` is still reported, as not closing the turn."""
     try:
         segment.cursor = await store.finish(
             segment.cursor, segment_id=segment_id, status=status, error=failure(node, error)
@@ -200,6 +204,9 @@ async def _close_on_error(
         raise
     except Exception:
         logger.exception("turn %s: closing the turn %s at node %s failed", key, status, node)
+        segment.outcome = Outcome.RUNNING
+        emit(TurnFailed(node=node, error=error, closed=False))
+        return segment
     segment.outcome = Outcome(status.value)
     emit(TurnFailed(node=node, error=error))
     return segment
@@ -571,24 +578,27 @@ async def _settle(
     """Set `segment`'s cursor and outcome after the heartbeat cut its node
     off for a Stop or a lost lease. The node may have been inside a
     boundary's write, which may have committed, so the turn is read again
-    as stored. A pause the segment was writing that committed keeps the
-    turn paused, and its `Paused` is emitted here when the cut came before
-    `drive` emitted it, so the client gets the question the store holds.
-    Otherwise a turn the store closed or paused keeps that outcome; a Stop
-    closes one still open `cancelled`; a lost lease leaves it to the
-    instance that holds the lease now."""
+    as stored. A turn the store closed keeps that outcome. A Stop closes
+    any other `cancelled`, a pause the segment wrote included: the user
+    stopped the turn, and the work after the pause's write was cut off as
+    a Stop. After a lost lease a pause the segment was writing that
+    committed keeps the turn paused, and its `Paused` is emitted here when
+    the cut came before `drive` emitted it, so the client gets the
+    question the store holds; a turn still running is left to the instance
+    that holds the lease now."""
     stored = await store.turn(segment.cursor.id)
     pausing, segment.pausing = segment.pausing, None
-    if (
-        pausing is not None
-        and stored.pause is not None
-        and stored.pause.interrupt_id == pausing.interrupt_id
-    ):
-        segment.cursor, segment.outcome = stored, Outcome.PAUSED
-        emit(pausing)
-        return
-    if stored.status in CLOSED or (stored.status is TurnStatus.PAUSED and cut_by is Outcome.LOST):
+    if stored.status in CLOSED:
         segment.cursor, segment.outcome = stored, Outcome(stored.status.value)
+        return
+    if cut_by is Outcome.LOST and stored.status is TurnStatus.PAUSED:
+        segment.cursor, segment.outcome = stored, Outcome.PAUSED
+        if (
+            pausing is not None
+            and stored.pause is not None
+            and stored.pause.interrupt_id == pausing.interrupt_id
+        ):
+            emit(pausing)
         return
     segment.cursor, segment.outcome = stored, cut_by
     if cut_by is Outcome.CANCELLED:
