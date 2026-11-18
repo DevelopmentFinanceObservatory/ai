@@ -151,16 +151,19 @@ class CardLineage:
     card's write commits it with the card.
 
     `frame` is the frame the platform's resolved revision names
-    (`provenance.inputs[0]`), the one frame the lineage is restored under.
-    `lineage` holds every member whole, manifest included, and
-    `stat_var_count` the count `ProvenanceStore.alias` stored, `None` when it
-    stored none.
+    (`provenance.inputs[0]`), and `requested` the frame the write named when
+    that is another pair: a rolling card written on a replayed frame
+    (`harness.rolling_cards`), or a retrieval named by its `frame_ref` and
+    served under another pair (`retrieval_frame_ref`). `lineage` holds every member whole, manifest
+    included, and `stat_var_count` the count `ProvenanceStore.alias` stored,
+    `None` when it stored none.
     """
 
     component_id: str
     frame: _FrameKey
     lineage: Lineage
     stat_var_count: int | None = None
+    requested: _FrameKey | None = None
 
     def members_json(self) -> list[dict[str, Any]]:
         """`lineage` as the JSON list the card's lineage row stores."""
@@ -209,7 +212,8 @@ class CardLineages(Protocol):
         frame: _FrameKey | None = None,
     ) -> CardLineage | None:
         """The stored lineage of card `component_id`, else of a card drawn
-        from `frame`; `None` when none is stored or none decodes."""
+        from `frame`, else of a card whose write named `frame`; `None` when
+        none is stored or none decodes."""
         ...
 
 
@@ -330,14 +334,12 @@ class ProvenanceStore:
         return True
 
     def restore(self, *, conversation: str, card: CardLineage) -> None:
-        """Put a stored card's lineage back under the frame it was drawn
-        from, when the store holds none there."""
-        if self._entry(conversation, card.frame) is None:
-            self._store(
-                conversation=conversation,
-                key=card.frame,
-                entry=_Entry(card.lineage, card.stat_var_count),
-            )
+        """Put a stored card's lineage back under its frame, and under the
+        frame its write named, wherever the store holds none."""
+        entry = _Entry(card.lineage, card.stat_var_count)
+        for key in dict.fromkeys(key for key in (card.frame, card.requested) if key is not None):
+            if self._entry(conversation, key) is None:
+                self._store(conversation=conversation, key=key, entry=entry)
 
     def _store(self, *, conversation: str, key: _FrameKey, entry: _Entry) -> None:
         bucket = self._by_conversation.get(conversation)

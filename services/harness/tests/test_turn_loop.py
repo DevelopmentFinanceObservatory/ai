@@ -1352,18 +1352,26 @@ async def test_a_cut_settles_the_turn_when_its_node_absorbs_the_cancellation(
 class _CutAfterCommit(TurnStore):
     """A `TurnStore` whose first `advance`, or first close `done`, commits
     and then cuts the segment through `cut` before it returns, so the cut
-    lands while the write's acknowledgement is awaited."""
+    lands while the write's acknowledgement is awaited. With `absorb` the
+    write catches the cancellation and returns, leaving the cut pending."""
 
-    def __init__(self, engine: AsyncEngine, *, cut: Callable[[], Awaitable[None]]) -> None:
+    def __init__(
+        self, engine: AsyncEngine, *, cut: Callable[[], Awaitable[None]], absorb: bool = False
+    ) -> None:
         super().__init__(engine)
         self._cut = cut
         self._cuts = 1
+        self._absorb = absorb
 
     async def _cut_once(self) -> None:
         if self._cuts:
             self._cuts -= 1
             await self._cut()
-            await asyncio.sleep(3600)
+            if self._absorb:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.sleep(3600)
+            else:
+                await asyncio.sleep(3600)
 
     async def advance(self, *args: Any, **kwargs: Any) -> Cursor:
         written = await super().advance(*args, **kwargs)
@@ -1378,7 +1386,9 @@ class _CutAfterCommit(TurnStore):
 
 
 @pytest.mark.parametrize("ends", [True, False], ids=["final-node", "middle-node"])
-@pytest.mark.parametrize("cut_at", ["acknowledgement", "after_commit", "after_after_commit"])
+@pytest.mark.parametrize(
+    "cut_at", ["acknowledgement", "absorbed_acknowledgement", "after_commit", "after_after_commit"]
+)
 async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
     pg_engine: AsyncEngine, clock: StoreClock, cut_at: str, ends: bool
 ) -> None:
@@ -1387,7 +1397,9 @@ async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
     after the commit, or once that work caught the cancellation and
     returned. `work`'s `NodeDone` is reported once, before the segment
     settles on the turn as stored: `done` for the final node, the move to
-    `later` for a middle one, with `later` never run."""
+    `later` for a middle one, with `later` never run. A write that caught
+    the cut and returned still has its work after the commit run (an
+    acknowledgement recorded) before the segment settles on the cut."""
     lease_a = _RenewalsFail(pg_engine, **clock.store_kwargs)
     lease_b = await _instance(pg_engine, clock)
 
@@ -1395,10 +1407,17 @@ async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
         await _make_cut(lease_a, lease_b, "lost")
 
     store: TurnStore = (
-        _CutAfterCommit(pg_engine, cut=cut) if cut_at == "acknowledgement" else TurnStore(pg_engine)
+        _CutAfterCommit(pg_engine, cut=cut, absorb=cut_at == "absorbed_acknowledgement")
+        if cut_at in ("acknowledgement", "absorbed_acknowledgement")
+        else TurnStore(pg_engine)
     )
     segment_id = await _claim(lease_a)
     ran: list[str] = []
+    acknowledged: list[str] = []
+
+    async def acknowledge() -> None:
+        acknowledged.append("work")
+
     label = "done" if ends else "next"
 
     async def escaping() -> None:
@@ -1415,6 +1434,8 @@ async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
             ctx.after_commit(escaping)
         elif cut_at == "after_after_commit":
             ctx.after_commit(absorbing)
+        elif cut_at == "absorbed_acknowledgement":
+            ctx.after_commit(acknowledge)
         return Next(label)
 
     async def later(ctx: NodeCtx, node_input: Any) -> Next:
@@ -1432,6 +1453,7 @@ async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
 
     assert events == [NodeDone(node="work", label=label, output=None)]
     assert ran == []
+    assert acknowledged == (["work"] if cut_at == "absorbed_acknowledgement" else [])
     stored = await TurnStore(pg_engine).turn(opened.id)
     if ends:
         assert (segment.outcome, stored.status) == (Outcome.DONE, TurnStatus.DONE)
@@ -1536,40 +1558,6 @@ async def test_a_close_that_fails_under_a_cut_settles_on_the_cut(
     assert not [event for event in events if isinstance(event, TurnFailed)]
     stored = await store.turn(opened.id)
     assert (stored.status, stored.version) == (TurnStatus.RUNNING, opened.version)
-
-
-async def test_a_stop_that_closes_a_turn_whose_pause_committed_undoes_the_pausing_nodes_work(
-    pg_engine: AsyncEngine, clock: StoreClock
-) -> None:
-    """The node pauses, starting work after its pause commits, and a Stop
-    cuts the segment during that work. The turn closes `cancelled`, and
-    what the node registered to undo its work runs once."""
-    store = TurnStore(pg_engine)
-    lease_a, lease_b = await _instance(pg_engine, clock), await _instance(pg_engine, clock)
-    segment_id = await _claim(lease_a)
-    undone: list[str] = []
-
-    async def start_work() -> None:
-        await _make_cut(lease_a, lease_b, "stop")
-        await asyncio.sleep(3600)
-
-    async def ask(ctx: NodeCtx, node_input: Any) -> Pause:
-        ctx.after_commit(start_work)
-        ctx.on_cut_close(lambda: undone.append("work"))
-        return Pause(kind="ask", payload={}, message="Which donor?")
-
-    async def answered(ctx: NodeCtx, node_input: Any, answer: dict[str, Any]) -> Next:
-        return Next("next")
-
-    graph = Graph(
-        start="ask", nodes={"ask": Node(run=ask, resume=answered)}, edges={("ask", "next"): END}
-    )
-    opened = await _open(store, segment_id, graph)
-    segment = await asyncio.wait_for(_segment(store, lease_a, opened, segment_id, graph, []), 5)
-
-    assert segment.outcome is Outcome.CANCELLED
-    assert (await store.turn(opened.id)).status is TurnStatus.CANCELLED
-    assert undone == ["work"]
 
 
 class _WriteAbsorbsCut(TurnStore):

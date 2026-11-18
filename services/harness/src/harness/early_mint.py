@@ -43,9 +43,7 @@ waiting for one of its card's slots is withdrawn, unsent and logged
 `withdrawn`, when a newer revision is offered, the card is approved
 (`withdraw`, called from `harness.graph.approve.decide`), or its
 conversation is evicted past `MAX_CALLERS`: the run then asks for the frames
-itself. A Stop that closes the turn once the card's pause committed cancels
-every call of the card still unfinished, sent or not, and logs each
-`cancelled` (`cancel`). Nothing here touches the card,
+itself. Nothing here touches the card,
 the plan or the run ledger. Each call logs one line with its spec_id, the
 revision, its outcome and the seconds since the card was offered, and a
 failure is logged and dropped.
@@ -163,21 +161,6 @@ class EarlyMints:
         mint_set = self._sets.get(current_conversation_id.get())
         if mint_set is not None:
             self._withdraw(mint_set)
-
-    def cancel(self, plan: Plan, *, conversation: str) -> None:
-        """Cancel every unfinished call of `plan`'s card in `conversation`,
-        sent or not, and log each one `cancelled`, once a Stop closed the
-        turn that offered the card. A card a newer offer replaced is left
-        alone."""
-        mint_set = self._sets.get(conversation)
-        if mint_set is None or mint_set.revision != plan_revision(plan):
-            return
-        del self._sets[conversation]
-        for task, call in mint_set.calls.items():
-            if not task.done():
-                task.cancel()
-                if not call.logged:
-                    self._log(mint_set, call, "cancelled")
 
     def _withdraw(self, mint_set: _MintSet) -> None:
         """Cancel each call of `mint_set` that has not gone out, and log it

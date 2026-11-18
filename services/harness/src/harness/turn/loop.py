@@ -58,7 +58,7 @@ import contextlib
 import copy
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -181,16 +181,13 @@ class _Moving:
 class Segment:
     """One run of the loop under one lease: the cursor as last written, how
     the run ended (`None` while it runs), the `Paused` event of a pause the
-    segment is writing and has not yet reported, the move or end it is
-    writing and has not yet reported (`moving`), and what undoes the
-    pausing node's work after its commit when a cut closes the turn
-    (`NodeCtx.on_cut_close`)."""
+    segment is writing and has not yet reported, and the move or end it is
+    writing and has not yet reported (`moving`)."""
 
     cursor: Cursor
     outcome: Outcome | None = None
     pausing: Paused | None = None
     moving: _Moving | None = None
-    cut_closes: list[Callable[[], None]] = field(default_factory=list)
 
 
 # The attributes an exception sets to name the MCP call whose pinned timeout
@@ -303,6 +300,37 @@ async def _after_commit(ctx: NodeCtx[Any], node: str) -> None:
             await work()
         except Exception:
             logger.exception("turn node %s: work after its commit failed", node)
+
+
+async def _commit_boundary(
+    store: TurnStore,
+    cursor: Cursor,
+    *,
+    segment_id: str,
+    node: str,
+    node_input: Any,
+    result: Next | Pause,
+    following: str | None,
+    interrupt_id: str,
+    ctx: NodeCtx[Any],
+) -> Cursor:
+    """Write the boundary after `node` (`_write_boundary`), then run the
+    node's work after the commit (`_after_commit`). `drive` awaits the two
+    as one step, so a write that caught a cut and returned still runs the
+    work its commit is owed before the cut is raised again."""
+    written = await _write_boundary(
+        store,
+        cursor,
+        segment_id=segment_id,
+        node=node,
+        node_input=node_input,
+        result=result,
+        following=following,
+        interrupt_id=interrupt_id,
+        ctx=ctx,
+    )
+    await _after_commit(ctx, node)
+    return written
 
 
 def _following(graph: Graph[Any], node: str, result: Next | Pause) -> str | None:
@@ -606,7 +634,6 @@ async def drive[E](
                 payload=result.payload,
                 message=result.message,
             )
-            segment.cut_closes = ctx.cut_closes
         else:
             assert following is not None
             segment.moving = _Moving(
@@ -619,7 +646,7 @@ async def drive[E](
         # stored, which reports the boundary a write committed (`_settle`).
         try:
             cursor = segment.cursor = await _step(
-                _write_boundary(
+                _commit_boundary(
                     store,
                     cursor,
                     segment_id=segment_id,
@@ -637,12 +664,11 @@ async def drive[E](
             segment.pausing, segment.moving = None, None
             logger.exception("turn %s: the write after node %s failed", key, node)
             return await close(TurnStatus.FAILED, node, exc)
-        await _step(_after_commit(ctx, node))
 
         if segment.pausing is not None:
             segment.outcome = Outcome.PAUSED
             emit(segment.pausing)
-            segment.pausing, segment.cut_closes = None, []
+            segment.pausing = None
             return segment
         assert segment.moving is not None
         emit(segment.moving.done)
@@ -745,14 +771,10 @@ async def _settle(
     committed has its `NodeDone` emitted here when the cut came before
     `drive` emitted it, whether the cut came while the write's
     acknowledgement was awaited, during the node's work after the commit,
-    or after it. When a Stop closes a turn whose pause the segment wrote,
-    what undoes the pausing node's work after its commit runs
-    (`NodeCtx.on_cut_close`), so nothing it started goes on for the closed
-    turn."""
+    or after it."""
     stored = await store.turn(segment.cursor.id)
     pausing, segment.pausing = segment.pausing, None
     moving, segment.moving = segment.moving, None
-    cut_closes, segment.cut_closes = segment.cut_closes, []
     if moving is not None and moving.committed(stored):
         emit(moving.done)
     paused_here = (
@@ -774,12 +796,6 @@ async def _settle(
         segment.cursor = await store.finish(
             stored, segment_id=segment_id, status=TurnStatus.CANCELLED
         )
-        if paused_here:
-            for undo in cut_closes:
-                try:
-                    undo()
-                except Exception:
-                    logger.exception("turn %s: undoing a paused node's work failed", stored.id)
 
 
 async def run_segment[E](
