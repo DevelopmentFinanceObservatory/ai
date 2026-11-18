@@ -25,6 +25,7 @@ from planner.plan import (
     windowed_origins,
 )
 
+from harness.conversation import current_conversation_id
 from harness.decision_pick import decision_pick
 from harness.early_mint import EarlyMints
 from harness.graph.events import GraphEvent
@@ -66,15 +67,20 @@ def offer(
     that dies before the commit and runs again offers once, and one that dies
     between the commit and the offer offers nothing, and the run then asks
     for its frames itself. The answer reaches `decide`, which makes no offer.
+    A Stop that closes the turn once the pause committed cancels the
+    retrievals the offer started (`EarlyMints.cancel`), so nothing fetches
+    for the closed turn.
     """
     if early_mints is not None:
         offered = stored_plan(ctx.state.get("plan"), state_key="plan")
         if offered is not None and offered.status is PlanStatus.PENDING_APPROVAL:
+            conversation = current_conversation_id.get()
 
             async def start_retrievals() -> None:
                 early_mints.offer(offered)
 
             ctx.after_commit(start_retrievals)
+            ctx.on_cut_close(lambda: early_mints.cancel(offered, conversation=conversation))
     return Pause(kind=APPROVE_PAUSE, payload=node_input, message=APPROVE_MESSAGE)
 
 

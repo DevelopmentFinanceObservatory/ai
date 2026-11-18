@@ -4,7 +4,8 @@ A turn is one `turn_cursors` row (defined in
 `harness/db/migrations/0003_turns.sql`): the node it stands at and that
 node's input, its status, its open pause or the answered pause its node
 owes `resume`, the inputs fixed when it opened, the turn-scoped state its
-nodes share, and the error that closed it. Its spec blocks are
+nodes share, the error that closed it, and the lease segment whose write
+it last took (`written_by`). Its spec blocks are
 `turn_specs` rows, its accepted answers `turn_answers` rows and its
 transcript `agent_records` rows. A conversation has at most one open
 (running or paused) turn, which the database enforces.
@@ -156,7 +157,8 @@ class Cursor:
     stored blocks as decoded, in a mapping of their own, so a change to the
     state's mapping leaves them as stored. `owed` is set on a running turn
     whose node owes an accepted answer to its `resume`, and `None`
-    otherwise."""
+    otherwise. `written_by` is the lease segment whose write the cursor
+    last took, `None` on a row no write set it on."""
 
     id: int
     conversation: int
@@ -174,6 +176,7 @@ class Cursor:
     record_count: int
     spec_digests: dict[str, str]
     spec_blocks: dict[str, dict[str, Any]] = field(default_factory=dict, compare=False, repr=False)
+    written_by: str | None = None
 
 
 def _json(value: Any) -> str | None:
@@ -186,7 +189,8 @@ def _json(value: Any) -> str | None:
 
 _COLUMNS = (
     "id, conversation, turn_index, node, node_input, status, round, pause_kind, "
-    "interrupt_id, pause_payload, owed_interrupt_id, inputs, state, error, version"
+    "interrupt_id, pause_payload, owed_interrupt_id, inputs, state, error, version, "
+    "written_by"
 )
 
 
@@ -242,6 +246,7 @@ def _cursor(row: Any, record_count: int, specs: _StoredSpecs) -> Cursor:
         version=row.version,
         record_count=record_count,
         spec_digests=specs.digests,
+        written_by=row.written_by,
         spec_blocks=specs.blocks,
     )
 
@@ -256,10 +261,6 @@ _FENCE_BY_KEY = text(
 )
 _HAS_OPEN_TURN = text(
     "SELECT 1 FROM turn_cursors WHERE conversation = :conversation "
-    "AND status IN ('running', 'paused')"
-)
-_OPEN_TURN_VERSION = text(
-    "SELECT id, version FROM turn_cursors WHERE conversation = :conversation "
     "AND status IN ('running', 'paused')"
 )
 _APPEND = text(
@@ -395,14 +396,16 @@ async def _swap(
     conn: AsyncConnection,
     cursor: Cursor,
     *,
+    segment_id: str,
     statuses: tuple[TurnStatus, ...],
     sets: str,
     params: dict[str, Any],
     state: Mapping[str, Any] | None,
     records: Sequence[AgentRecord],
 ) -> Cursor:
-    """Apply `sets` and bump the version where the row holds the version
-    `cursor` read and one of `statuses`, and append `records`. When `state`
+    """Apply `sets`, bump the version and record `segment_id` as the
+    writer where the row holds the version `cursor` read and one of
+    `statuses`, and append `records`. When `state`
     is given, store it with its spec blocks as rows (`_write_specs`).
     Otherwise keep the stored blocks `cursor` holds."""
     if state is not None:
@@ -412,12 +415,14 @@ async def _swap(
     row = (
         await conn.execute(
             text(
-                f"UPDATE turn_cursors SET version = version + 1, updated_at = now(), {sets} "
+                "UPDATE turn_cursors SET version = version + 1, updated_at = now(), "
+                f"written_by = :written_by, {sets} "
                 "WHERE id = :id AND version = :version AND status = ANY(:statuses) "
                 f"RETURNING {_COLUMNS}"
             ),
             {
                 **params,
+                "written_by": segment_id,
                 "id": cursor.id,
                 "version": cursor.version,
                 "statuses": [status.value for status in statuses],
@@ -487,9 +492,9 @@ class TurnStore:
                 await conn.execute(
                     text(
                         "INSERT INTO turn_cursors "
-                        "(conversation, turn_index, node, status, inputs, state) VALUES "
-                        "(:conversation, :turn_index, :node, 'running', "
-                        "CAST(:inputs AS json), CAST(:state AS json)) "
+                        "(conversation, turn_index, node, status, inputs, state, written_by) "
+                        "VALUES (:conversation, :turn_index, :node, 'running', "
+                        "CAST(:inputs AS json), CAST(:state AS json), :written_by) "
                         f"RETURNING {_COLUMNS}"
                     ),
                     {
@@ -498,6 +503,7 @@ class TurnStore:
                         "node": node,
                         "inputs": _json(inputs),
                         "state": _json(_split(state)[0]),
+                        "written_by": segment_id,
                     },
                 )
             ).one()
@@ -513,6 +519,21 @@ class TurnStore:
                 "t.conversation = (SELECT id FROM conversations WHERE principal = :principal "
                 "AND conversation_id = :conversation_id) AND t.status IN ('running', 'paused')",
                 {"principal": principal, "conversation_id": conversation_id},
+            )
+
+    async def turn_at(self, principal: str, conversation_id: str, turn_index: int) -> Cursor | None:
+        """The conversation's turn `turn_index`, open or closed, or `None`
+        when it has no cursor."""
+        async with self._engine.connect() as conn:
+            return await _read_cursor(
+                conn,
+                "t.conversation = (SELECT id FROM conversations WHERE principal = :principal "
+                "AND conversation_id = :conversation_id) AND t.turn_index = :turn_index",
+                {
+                    "principal": principal,
+                    "conversation_id": conversation_id,
+                    "turn_index": turn_index,
+                },
             )
 
     async def turn(self, turn_id: int) -> Cursor:
@@ -594,6 +615,7 @@ class TurnStore:
             return await _swap(
                 conn,
                 cursor,
+                segment_id=segment_id,
                 statuses=(TurnStatus.RUNNING,),
                 sets="node = :node, node_input = CAST(:node_input AS json), "
                 "owed_interrupt_id = NULL",
@@ -633,6 +655,7 @@ class TurnStore:
             return await _swap(
                 conn,
                 cursor,
+                segment_id=segment_id,
                 statuses=(TurnStatus.RUNNING,),
                 sets="status = 'paused', round = round + 1, node = :node, "
                 "node_input = CAST(:node_input AS json), pause_kind = :kind, "
@@ -677,6 +700,7 @@ class TurnStore:
             running = await _swap(
                 conn,
                 cursor,
+                segment_id=segment_id,
                 statuses=(TurnStatus.PAUSED,),
                 sets="status = 'running', pause_kind = NULL, interrupt_id = NULL, "
                 "pause_payload = NULL, owed_interrupt_id = :interrupt_id",
@@ -767,6 +791,7 @@ async def finish_on(
     closed = await _swap(
         conn,
         cursor,
+        segment_id=segment_id,
         statuses=(TurnStatus.RUNNING, TurnStatus.PAUSED),
         sets="status = :status, error = CAST(:error AS json), pause_kind = NULL, "
         "interrupt_id = NULL, pause_payload = NULL, owed_interrupt_id = NULL",
@@ -788,11 +813,3 @@ async def cursor_at(conn: AsyncConnection, conversation: int, turn_index: int) -
         "t.conversation = :conversation AND t.turn_index = :turn_index",
         {"conversation": conversation, "turn_index": turn_index},
     )
-
-
-async def open_turn_version(conn: AsyncConnection, conversation: int) -> tuple[int, int] | None:
-    """The id and version of the open (running or paused) turn of the
-    `conversations` row `conversation`, read on `conn` in the caller's
-    transaction, or `None` when no turn is open."""
-    row = (await conn.execute(_OPEN_TURN_VERSION, {"conversation": conversation})).first()
-    return None if row is None else (row.id, row.version)

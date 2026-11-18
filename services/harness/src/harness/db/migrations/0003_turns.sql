@@ -52,6 +52,12 @@ CREATE TABLE turn_cursors (
     state json NOT NULL,
     error json,
     version bigint NOT NULL DEFAULT 0,
+    -- The lease segment whose write the cursor last took, set by every
+    -- cursor write (`harness.turn.store.TurnStore`). A segment cut off
+    -- mid-write reads it back to tell its own committed write from another
+    -- segment's (`harness.turn.loop`). Nullable: a row no cursor write has
+    -- set it on holds NULL.
+    written_by text,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (conversation, turn_index),

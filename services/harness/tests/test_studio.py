@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import itertools
 import json
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -2374,7 +2375,7 @@ async def _close_claim_refused_before_its_save(monkeypatch: pytest.MonkeyPatch) 
     ) -> None:
         raise ConversationStale(conversation_id)
 
-    app.state.studio.store.save = claimed_elsewhere  # type: ignore[method-assign]
+    app.state.studio.store.claim_turn_lease = claimed_elsewhere  # type: ignore[method-assign]
     async with _client(app) as client:
         refused = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
     assert refused.status_code == 409
@@ -3547,14 +3548,14 @@ async def test_a_turn_whose_claim_loses_forgets_the_turn_it_began() -> None:
     )
     lock = store.lock_for(PRINCIPAL, CONVERSATION)
     app = _app(_text("Hello."), store=store)
-    save = store.save
+    claim = store.claim_turn_lease
 
     async def claimed_elsewhere(
         principal: str, conversation_id: str, *args: Any, **kwargs: Any
     ) -> None:
         raise ConversationStale(conversation_id)
 
-    store.save = claimed_elsewhere  # type: ignore[method-assign]
+    store.claim_turn_lease = claimed_elsewhere  # type: ignore[method-assign]
 
     async with _client(app) as client:
         response = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
@@ -3564,7 +3565,7 @@ async def test_a_turn_whose_claim_loses_forgets_the_turn_it_began() -> None:
     assert (live.turn_index, live.segment) == (0, None)
     assert store.lock_for(PRINCIPAL, CONVERSATION) is lock
     assert not lock.locked()
-    store.save = save  # type: ignore[method-assign]
+    store.claim_turn_lease = claim  # type: ignore[method-assign]
     stored = await store.load(PRINCIPAL, CONVERSATION)
     assert stored is not None and (stored.turn_index, stored.segment) == (0, None)
 
@@ -4282,95 +4283,28 @@ def _reading(checkpoint: int) -> dict[str, Any]:
     )
 
 
-@pytest.mark.parametrize("writes", ["once", "every_read"])
-async def test_a_turn_abandons_the_previous_turn_as_its_owner_last_wrote_it(
-    monkeypatch: pytest.MonkeyPatch, writes: str
-) -> None:
-    """A's turn is left running under a lease that lapsed, and A writes a
-    checkpoint after B's `/turn` read the turn and before B's claim
-    commits. Once: B's turn streams, and the turn it abandons closes with
-    the records A's last checkpoint wrote. After every read: B claims
-    nothing and answers a retryable 409, the turn left running as A wrote
-    it."""
-    clock = await StoreClock.start(_engine())
-    store_a = StudioStore(_engine(), **clock.store_kwargs)
-    turns = turn_store_module.TurnStore(_engine())
-    state_a = await store_a.create(PRINCIPAL, CONVERSATION)
-    segment_a = store_a.claim_segment(PRINCIPAL, CONVERSATION)
-    state_a.begin_turn()
-    state_a.turn_user_message = "aid to Kenya"
-    await store_a.save(PRINCIPAL, CONVERSATION)
-    left = await turns.open_turn(
-        PRINCIPAL,
-        CONVERSATION,
-        segment_id=segment_a,
-        turn_index=1,
-        node="plan",
-        inputs={},
-        state={ORCHESTRATOR_SEARCHES_KEY: [_reading(1)]},
-    )
-    await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)  # A's lease has lapsed
-
-    store_b = StudioStore(_engine(), **clock.store_kwargs)
-    app_b = _app(_text("Hello."), store=store_b)
-    read = app_b.state.studio.turns.open_cursor
-    written = [left]
-
-    async def read_then_checkpoint(principal: str, conversation_id: str) -> Any:
-        cursor = await read(principal, conversation_id)
-        if cursor is not None and (writes == "every_read" or len(written) == 1):
-            reading = _reading(len(written) + 1)
-            written.append(
-                await turns.advance(
-                    written[-1],
-                    segment_id=segment_a,
-                    node="plan",
-                    node_input=None,
-                    state={ORCHESTRATOR_SEARCHES_KEY: [reading]},
-                )
-            )
-        return cursor
-
-    monkeypatch.setattr(app_b.state.studio.turns, "open_cursor", read_then_checkpoint)
-    async with _client(app_b) as client:
-        if writes == "once":
-            frames = await _stream(client, "/api/studio/turn", _turn_body("hi"))
-        else:
-            response = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
-
-    stored = await turns.turn(left.id)
-    conversation = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
-    assert conversation is not None
-    if writes == "once":
-        assert _events(frames)[-1] == "done"
-        assert stored.status is TurnStatus.ABANDONED
-        record = conversation.turns[0]
-        assert (record["error"], record["readings"]) == ("abandoned", [_reading(2)])
-    else:
-        assert response.status_code == 409
-        assert response.json()["error"] == "transient_unavailable"
-        assert (stored.status, stored.version) == (TurnStatus.RUNNING, written[-1].version)
-        assert (conversation.turn_index, conversation.segment.id) == (1, segment_a)
-
-
-@pytest.mark.parametrize("lapsed", ["finishes_the_turn", "writes_the_record"])
-async def test_a_turn_claimed_over_a_lapsed_segment_s_last_write_builds_on_it(
+@pytest.mark.parametrize("lapsed", ["finishes_the_turn", "writes_continuously"])
+async def test_a_turn_claimed_over_a_lapsed_segment_records_its_last_write(
     monkeypatch: pytest.MonkeyPatch, lapsed: str
 ) -> None:
-    """A's turn is left running under a lease that lapsed, and between B's
-    `/turn` read and its claim A either finishes the turn `done`, its
-    record unwritten, or saves the conversation's record, which moves the
-    row's version. B claims on a fresh load, and streams. The turn A
-    finished is recorded with the readings, plans and specs its cursor
-    holds. The turn A wrote the record of is abandoned on that record."""
+    """A's turn is left running under a lease that lapsed, and A goes on
+    writing while B's `/turn` runs. Either A finishes the turn `done` after
+    B's load, its record unwritten, or A writes the turn's cursor and the
+    conversation's record over and over until B's claim fences it out. B
+    streams, and the turn A left is recorded from A's last write: the
+    finished turn with the readings, plans and specs its cursor holds, the
+    turn left running abandoned on A's last cursor and record."""
     _, record = _top_donors()
     plan = record.model_dump(mode="json")
     used = record.sources[0].spec_id
-    turn_state = {
-        ORCHESTRATOR_SEARCHES_KEY: [_reading(1)],
-        ORCHESTRATOR_PLAN_RECORDS_KEY: [plan],
-        ORCHESTRATOR_SPECS_KEY: {used: {"spec_id": used}},
-    }
+
+    def turn_state(checkpoint: int) -> dict[str, Any]:
+        return {
+            ORCHESTRATOR_SEARCHES_KEY: [_reading(checkpoint)],
+            ORCHESTRATOR_PLAN_RECORDS_KEY: [plan],
+            ORCHESTRATOR_SPECS_KEY: {used: {"spec_id": used}},
+        }
+
     clock = await StoreClock.start(_engine())
     store_a = StudioStore(_engine(), **clock.store_kwargs)
     turns = turn_store_module.TurnStore(_engine())
@@ -4386,47 +4320,70 @@ async def test_a_turn_claimed_over_a_lapsed_segment_s_last_write_builds_on_it(
         turn_index=1,
         node="plan",
         inputs={},
-        state=turn_state,
+        state=turn_state(1),
     )
     await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)  # A's lease has lapsed
 
     store_b = StudioStore(_engine(), **clock.store_kwargs)
     app_b = _app(_text("Hello."), store=store_b)
-    read = app_b.state.studio.turns.open_cursor
-    wrote: list[str] = []
+    # A's last committed cursor checkpoint and record text.
+    last = {"checkpoint": 1, "text": ""}
+    writing: asyncio.Task[None] | None = None
 
-    async def read_then_write(principal: str, conversation_id: str) -> Any:
-        cursor = await read(principal, conversation_id)
-        if cursor is not None and not wrote:
-            wrote.append(lapsed)
+    async def write_until_fenced() -> None:
+        cursor = left
+        for checkpoint in itertools.count(2):
+            try:
+                cursor = await turns.advance(
+                    cursor,
+                    segment_id=segment_a,
+                    node="plan",
+                    node_input=None,
+                    state=turn_state(checkpoint),
+                )
+                last["checkpoint"] = checkpoint
+                state_a.turn_final_text = f"written by A at {checkpoint}"
+                await store_a.save(PRINCIPAL, CONVERSATION)
+                last["text"] = state_a.turn_final_text
+            except (SegmentLost, ConversationStale, CursorStale):
+                return
+
+    load = store_b.load
+
+    async def load_then_write(principal: str, conversation_id: str) -> Any:
+        nonlocal writing
+        loaded = await load(principal, conversation_id)
+        if writing is None:
             if lapsed == "finishes_the_turn":
                 await turns.finish(
-                    left, segment_id=segment_a, status=TurnStatus.DONE, state=turn_state
+                    left, segment_id=segment_a, status=TurnStatus.DONE, state=turn_state(1)
                 )
+                writing = asyncio.get_running_loop().create_task(asyncio.sleep(0))
             else:
-                state_a.turn_final_text = "written by A"
-                await store_a.save(PRINCIPAL, CONVERSATION)
-        return cursor
+                writing = asyncio.get_running_loop().create_task(write_until_fenced())
+                while last["checkpoint"] < 3:
+                    await asyncio.sleep(0)
+        return loaded
 
-    monkeypatch.setattr(app_b.state.studio.turns, "open_cursor", read_then_write)
+    monkeypatch.setattr(store_b, "load", load_then_write)
     async with _client(app_b) as client:
         frames = await _stream(client, "/api/studio/turn", _turn_body("hi"))
+    assert writing is not None
+    await asyncio.wait_for(writing, 5)
 
-    assert wrote == [lapsed]
     assert _events(frames)[-1] == "done"
     stored = await turns.turn(left.id)
     conversation = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
     assert conversation is not None
     first = conversation.turns[0]
+    assert first["readings"][0] == _reading(last["checkpoint"])
+    assert [p["revision"] for p in first["plans"]] == [plan["revision"]]
+    assert first["specs"] == {used: {"spec_id": used}}
     if lapsed == "finishes_the_turn":
-        assert stored.status is TurnStatus.DONE
-        assert first["error"] == "state_not_saved"
-        assert first["readings"][0] == _reading(1)
-        assert [p["revision"] for p in first["plans"]] == [plan["revision"]]
-        assert first["specs"] == {used: {"spec_id": used}}
+        assert (stored.status, first["error"]) == (TurnStatus.DONE, "state_not_saved")
     else:
-        assert stored.status is TurnStatus.ABANDONED
-        assert (first["error"], first["assistant"]) == ("abandoned", "written by A")
+        assert (stored.status, first["error"]) == (TurnStatus.ABANDONED, "abandoned")
+        assert first["assistant"] == last["text"]
 
 
 class _CallingSurface(ScriptedSurface):
@@ -4798,7 +4755,7 @@ async def test_an_answer_after_a_refused_turn_resumes_on_the_paused_turn_s_span(
     the paused turn's trace id."""
     app = _app(*_plan(), tool_surface=ScriptedSurface())
     store = app.state.studio.store
-    real_save = store.save
+    real_claim = store.claim_turn_lease
     refused: list[str] = []
 
     async def claimed_elsewhere(
@@ -4810,15 +4767,14 @@ async def test_an_answer_after_a_refused_turn_resumes_on_the_paused_turn_s_span(
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
-        store.save = claimed_elsewhere  # type: ignore[method-assign]
+        store.claim_turn_lease = claimed_elsewhere  # type: ignore[method-assign]
         stale = await client.post("/api/studio/turn", json=_turn_body("other"), headers=AUTH)
-        store.save = real_save  # type: ignore[method-assign]
+        store.claim_turn_lease = real_claim  # type: ignore[method-assign]
         second = await _stream(
             client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
         )
 
-    # Every attempt at the claim loses (`_CLAIM_ATTEMPTS`).
-    assert (stale.status_code, refused) == (409, [CONVERSATION] * studio_module._CLAIM_ATTEMPTS)
+    assert (stale.status_code, refused) == (409, [CONVERSATION])
     trace_id = _frame(second, "done")["trace_id"]
     turns = [span for span in otlp_spans.get_finished_spans() if span.name == "turn"]
     assert (turns[-1].attributes or {})["dfo.external_id"] == trace_id
@@ -7612,7 +7568,7 @@ async def _stop_after_the_turn_ended(row: _Row):
 async def _stop_before_the_claim_save(row: _Row):
     app = await row.build(*_card(), resolver=_HangingResolver(), heartbeat_seconds=0.1)
     store = app.state.studio.store
-    real = store.save
+    real = store.claim_turn_lease
     entered, go = asyncio.Event(), asyncio.Event()
 
     async def held(*args: Any, **kwargs: Any) -> Any:
@@ -7621,7 +7577,7 @@ async def _stop_before_the_claim_save(row: _Row):
             await go.wait()
         return await real(*args, **kwargs)
 
-    store.save = held
+    store.claim_turn_lease = held  # type: ignore[method-assign]
     async with _client(app) as client:
         stream = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
         await asyncio.wait_for(entered.wait(), timeout=5)
@@ -7883,22 +7839,22 @@ async def test_a_stop_that_lands_at_the_claim_save_closes_the_turn_and_the_retry
     stopped card's answer is refused, and the retried `/turn` streams."""
     app = _app(*_plan(), _text("Hello."))
     store = app.state.studio.store
-    real_save = store.save
+    real_claim = store.claim_turn_lease
     landed: list[bool] = []
 
     async def stop_lands_first(*args: Any, **kwargs: Any) -> Any:
-        if not landed and len(args) > 2:
-            # The claim save of the second `/turn`, which passes its working copy.
+        if not landed:
+            # The claim of the second `/turn`.
             landed.append(True)
             async with _engine().begin() as conn:
                 await conn.execute(text("UPDATE conversations SET lease_cancel = true"))
-        return await real_save(*args, **kwargs)
+        return await real_claim(*args, **kwargs)
 
     async with _client(app) as client:
         plan = _frame(
             await _stream(client, "/api/studio/turn", _turn_body("q with forks")), "plan.proposed"
         )
-        store.save = stop_lands_first
+        store.claim_turn_lease = stop_lands_first  # type: ignore[method-assign]
         refused = await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
         assert landed
         stopped = await _turn_statuses()

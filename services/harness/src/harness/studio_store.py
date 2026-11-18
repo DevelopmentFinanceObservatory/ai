@@ -1253,6 +1253,70 @@ class StudioStore:
         entry.claimed_reserved = target.seq + SEQ_BLOCK
         return segment.id
 
+    async def claim_turn_lease(self, principal: str, conversation_id: str) -> str:
+        """Claim the conversation's lease for a new turn and write the lease
+        alone, under the row lock, and return the segment's id. The turn
+        state and its version are left as stored, so a lapsed segment that
+        wrote them since this instance's `load` does not refuse the claim.
+        Once the claim commits, that segment's writes are fenced out: its
+        cursor writes on the lease id (`harness.turn.store`), its saves on
+        the live lease this claim holds. The claim reserves the new turn's
+        frame numbers, `0` to `SEQ_BLOCK` (`claim_segment`), and the caller
+        loads the conversation afresh before it begins the turn.
+
+        Raises:
+            SegmentBusy: the loaded lease had not lapsed by the database
+                clock's reading taken with the load.
+            ConversationStale: a lease another segment holds is live on the
+                row as locked.
+            StopPending: a Stop is live for the conversation's open turn
+                (`StopState.live`).
+        """
+        entry = self._runtime[(principal, conversation_id)]
+        assert entry.pk is not None and entry.state is not None
+        live = entry.state.segment
+        if live is not None and live.expires_at > entry.read_at:
+            raise SegmentBusy(retry_after_seconds=math.ceil(live.expires_at - entry.read_at))
+        segment_id = _wire_id("seg")
+        stamp = self._clock()
+        async with entry.write_lock:
+            async with self._transaction() as conn:
+                row = (await conn.execute(self._lock_conversation, {"pk": entry.pk})).first()
+                if row is None:
+                    raise ConversationStale(conversation_id)
+                stored_lease = _row_segment(row)
+                if stored_lease is not None and stored_lease.expires_at > row.db_now:
+                    raise ConversationStale(conversation_id)
+                if (await _stop_state(conn, row, lease_live=False)).live:
+                    raise StopPending(conversation_id)
+                claimed = (
+                    await conn.execute(
+                        text(
+                            "UPDATE conversations SET lease_segment_id = :segment_id, "
+                            "lease_owner = :owner, "
+                            f"lease_expires_at = {self._time_sql} + :ttl, "
+                            "seq_reserved = :reserved "
+                            "WHERE id = :pk RETURNING lease_expires_at"
+                        ),
+                        {
+                            "pk": entry.pk,
+                            "segment_id": segment_id,
+                            "owner": _OWNER_ID,
+                            "ttl": SEGMENT_TTL_S,
+                            "reserved": SEQ_BLOCK,
+                        },
+                    )
+                ).one()
+            segment = Segment(id=segment_id, owner=_OWNER_ID, expires_at=claimed.lease_expires_at)
+            entry.state.segment = segment
+            self._note_segment(entry, segment)
+            entry.lease_stamp = stamp
+            entry.held = segment_id
+            entry.seq_reserved, entry.claimed_reserved = SEQ_BLOCK, None
+            entry.claimed.set()
+            entry.claimed = asyncio.Event()
+        return segment_id
+
     async def save(
         self,
         principal: str,
