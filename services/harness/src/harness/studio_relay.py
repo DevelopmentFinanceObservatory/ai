@@ -1,12 +1,12 @@
-"""The response of a Studio stream: it relays the frames its owner puts on a
-channel (`harness.studio_stream`) as SSE.
+"""The response of a Studio stream, which relays the frames its owner puts on
+a channel (`harness.studio_stream`) as SSE.
 
 `StudioStream` serialises the channel's frames as SSE `data:` lines and sends
 a `: ka` comment while the next frame is slow. A `finally` around its ASGI
 call sets the client-gone flag and waits, shielded, for the owner to finish,
 however the call ends: the client left, the body ended, or the server
 cancelled the request. It holds the channel, the flag and the owner's task,
-and nothing of the conversation or the store: this module imports neither.
+and imports neither the conversation nor the store.
 """
 
 from __future__ import annotations

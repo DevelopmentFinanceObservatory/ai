@@ -19,9 +19,9 @@ refusal whose sentence comes from `harness.sentences`.
 `ctx.state["plan"]` is the graph's own authoritative record;
 `planner.plan.save_plan`/`load_plan` read and write a second, namespaced key
 (`planner.plan.PLAN_STATE_KEY`, `"planner:plan"`) in that same `ctx.state`
-for the planner's own drafting state -- one store, two keys, not two stores
-kept in step. The turn loop writes the state with the turn's cursor at the
-node's boundary, a pause on the planner's ask included.
+for the planner's own drafting state, so one store holds both keys. The turn
+loop writes the state with the turn's cursor at the node's boundary, a pause
+on the planner's ask included.
 
 A run's records go to the turn's transcript as they happen
 (`planner.session.response_record`, `answers_record`): each model response
@@ -434,9 +434,9 @@ class PlannerAdapter:
         )
         _forget_ask(state)
         if not resuming:
-            # One `__call__` is one entry into the planner, EXCEPT when it
-            # re-enters with the user's answer to the ask a run of this entry
-            # ended on, which the planner node paused on, in `answer` -- the
+            # One `__call__` is one entry into the planner, except when it
+            # re-enters with the user's answer (`answer`) to the ask a run of
+            # this entry ended on, which the planner node paused on. The
             # graph's own "amend" and "replan" edges both re-enter `__call__`
             # fresh, with no answer, so they get a new budget here.
             # Resetting unconditionally would zero the budget partway through
@@ -468,7 +468,7 @@ class PlannerAdapter:
                 # None` alone is not enough to gate this on: a caller of
                 # this adapter directly can omit it on a real amendment too
                 # (`amendment` set, still nothing to seed `propose_plan`
-                # from but the state's own last draft -- see
+                # from but the state's own last draft, as in
                 # `test_a_sixth_amendment_turn_still_records_its_own_
                 # version`), and that call must not have its own
                 # in-progress draft wiped out from under it. Gated the same

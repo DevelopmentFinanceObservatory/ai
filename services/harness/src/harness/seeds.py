@@ -4,7 +4,7 @@ A seed is a Search result the user carries into a turn. This module reads each
 one as a `harness.wire.Seed` (`seeds_slot`, `take_seeds`), checks Search's
 current answer for its identity (`resolve_seed`, `answered_block`), and
 words the seeds a turn keeps and drops for the orchestrator's agent
-(`seeds_hand_back`). Nothing here touches the turn's context or routing;
+(`seeds_hand_back`). Nothing here touches the turn's context or routing.
 `harness.graph` calls it from its nodes and `harness.studio` calls
 `seeds_slot` before the turn opens.
 """
@@ -243,15 +243,16 @@ def _read_seed(index: int, item: object) -> Seed | _SeedRefusal:
 
 
 def seeds_slot(posted: Sequence[object]) -> list[dict[str, Any]]:
-    """The seeds slot (`harness.graph.state.TurnInput.seeds`) for a turn that posted `posted`, one entry per seed.
+    """The seeds slot (`harness.graph.state.TurnInput.seeds`) for a turn that
+    posted `posted`, one entry per seed.
 
     Each seed is read as `take_seeds` reads it (`_read_seed`). One it can
     take is kept as its `harness.wire.Seed`: the spec_id, the definition
     and the operations, and nothing else of the Spec block. One it cannot
-    take is kept as the refusal its step fails with,
-    under `_SEED_REFUSED`. A seed's position is its index in the slot, so
-    `seed` refuses each at the index it was posted at, and no posted block
-    enters the turn's inputs.
+    take is kept as the refusal its step fails with, under `_SEED_REFUSED`.
+    A seed's position is its index in the slot, so `seed` refuses each at
+    the index it was posted at, and no posted block enters the turn's
+    inputs.
     """
     entries: list[dict[str, Any]] = []
     for index, item in enumerate(posted):

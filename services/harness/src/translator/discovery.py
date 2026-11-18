@@ -49,10 +49,10 @@ one quietly from several, nor borrow a source discovered for a different
 requirement -- the log keeps each requirement's own view of a source, even one
 two requirements both found.
 
-Pydantic AI runs several function calls from one model response concurrently over
-one shared session state mapping, so two concurrent `discover_source` calls can
-each want to spend the same slice of `DISCOVERY_CALL_BUDGET` before either has
-written a record for it. `discovery_lock` serialises only the budget check,
+Pydantic AI runs several function calls from one model response concurrently
+over one shared session state mapping, so two concurrent `discover_source`
+calls can each want to spend the same slice of `DISCOVERY_CALL_BUDGET` before
+either has written a record for it. `discovery_lock` serialises only the budget check,
 the reservation it makes, and the log's own read-modify-write; the `search`
 call to data-mcp, and `fetch_definitions`'s own `describe` round trip, both
 run with the lock released, so several calls reach the server at once. A
@@ -956,8 +956,7 @@ def save_log(state: SessionState, log: DiscoveryLog) -> None:
     """Record `log` as the session's discovery log.
 
     Persisted as a dict keyed by each record's own `id`, with `sources`
-    keyed the same way `DiscoveryLog.sources` already is, never as one JSON
-    string.
+    keyed the same way `DiscoveryLog.sources` already is.
     """
     state[DISCOVERY_STATE_KEY] = {
         "records": {record.id: record.model_dump(mode="json") for record in log.records},

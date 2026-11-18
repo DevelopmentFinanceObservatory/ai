@@ -277,10 +277,10 @@ def _postgres_database(settings: Settings) -> DatabaseHandle:
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
-    # Runs at startup: an instance that can't reach its database, or whose
-    # tables are behind this release's migrations, fails its startup probe,
-    # since every studio route needs the conversation tables. `create_app`
-    # refuses any database but Postgres.
+    # Runs at startup, so an instance that can't reach its database, or whose
+    # tables are behind this release's migrations, fails its startup probe.
+    # Every studio route needs the conversation tables. `create_app` refuses
+    # any database but Postgres.
     await _apply_migrations_with_retries(
         app.state.database_engine,
         budget_s=_STARTUP_DB_RETRY_BUDGET_S,
@@ -387,9 +387,9 @@ def create_app(
     ASGI-integration contract for sub-app mounting.
     """
     configure_logging()
-    # Before the agents are built: a backend coming up says whether their
-    # spans carry message content (`common.telemetry`), which the planner
-    # reads as it is built (`harness.planner_adapter.PlannerAdapter`).
+    # Runs before the agents are built. A backend coming up says whether
+    # their spans carry message content (`common.telemetry`), which the
+    # planner reads as it is built (`harness.planner_adapter.PlannerAdapter`).
     init_telemetry(service_name=SERVICE_NAME)
     resolved_settings = settings or Settings()
 
@@ -443,9 +443,10 @@ def create_app(
     app.state.live_refresh = live_refresh
 
     # The studio stack: the turn graph, its orchestrator agent and planner,
-    # behind the v1 wire contract (docs/studio-contract-v1.md). Resolver/executor speak
-    # MCP to the mounts below over loopback; the agents build their genai
-    # clients lazily, so construction here stays keyless. A missing
+    # behind the v1 wire contract (docs/studio-contract-v1.md).
+    # Resolver/executor speak MCP to the mounts below over loopback; the
+    # agents build their genai clients lazily, so construction here stays
+    # keyless. A missing
     # GOOGLE_API_KEY fails the first turn, visibly, as a stream-fatal error
     # frame. The planner node is the planner with
     # `translator.tool.build_translate`'s translation attached to

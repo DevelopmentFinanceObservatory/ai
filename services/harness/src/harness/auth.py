@@ -12,9 +12,9 @@ a route.
 (`live_refresh_admits`), and that value opens no other route.
 
 The returned principal is a stable derivation of the token: it keys the
-stored conversations, which must not embed credentials. Two
-requests with the same token always land on the
-same principal, which is what keys conversation isolation.
+stored conversations, which must not embed credentials. Two requests with
+the same token always land on the same principal, which is what keys
+conversation isolation.
 """
 
 from __future__ import annotations

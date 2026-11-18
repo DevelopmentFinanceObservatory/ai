@@ -96,9 +96,9 @@ class PlannerResponse:
     `parts` are its parts as google-genai parts: each function call with its
     id, text, and each thought with `thought` set, each with its thought
     signature, less its unsigned thought summaries
-    (`harness.gemini_agent.without_unsigned_thoughts`).
-    A blocked prompt is a response with no parts. The usage the API reported is
-    read off the stream by `harness.gemini_wire`.
+    (`harness.gemini_agent.without_unsigned_thoughts`). A blocked prompt is a
+    response with no parts. The usage the API reported is read off the stream
+    by `harness.gemini_wire`.
     """
 
     parts: tuple[types.Part, ...]
@@ -152,9 +152,10 @@ def planner_agent(
 
     A call to a tool the planner lacks is answered with
     `harness.gemini_agent.tool_not_found`, and the run goes on however many
-    such calls the model makes (`harness.gemini_agent.UNLIMITED_RETRIES`). Each request replays
-    the run's earlier responses less their unsigned thought summaries, as the
-    session keeps them (`harness.gemini_agent.replayed_history`).
+    such calls the model makes (`harness.gemini_agent.UNLIMITED_RETRIES`).
+    Each request replays the run's earlier responses less their unsigned
+    thought summaries, as the transcript keeps them
+    (`harness.gemini_agent.replayed_history`).
 
     The agent traces through the global tracer provider: a span per run
     (`invoke_agent <name>`), per model call (`chat <model>`) and per tool call
@@ -199,9 +200,9 @@ def _tool_function(spec: ToolSpec) -> Callable[..., Any]:
 
     It runs the spec's body (`serve_tool`) over the call's `PlannerCall`, whose
     state is the view the response's calls write through. An answer that is
-    no dict is wrapped under `result`. A body that raises is
-    answered with `tool_failed`'s answer, and a cancellation propagates. An
-    answer of the body's holding an `error` key, the refusal of a call missing a required
+    not a dict is wrapped under `result`. A body that raises is answered with
+    `tool_failed`'s answer, and a cancellation propagates. An answer of the
+    body's holding an `error` key, the refusal of a call missing a required
     argument (`planner.tool_spec.missing_arguments`), marks the call's span
     failed (`planner.tool_spec.serve_tool`). Either answer goes to
     `tool_answered` as the call finishes, and what that raises fails the run.

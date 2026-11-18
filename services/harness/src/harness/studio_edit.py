@@ -24,11 +24,11 @@ Failures serialise into the stream as a stream-fatal error frame, as
 they do in a turn.
 
 The edit runs as two halves (`harness.studio_stream.Work`). `edit_events`
-makes the edit's calls in the work's drive and reads the conversation, but
-writes none of it: what the edit sends and changes it emits as events, its
-frames unnumbered. `edit_event_frames` turns each event into frames in the
-stream owner's task, which numbers them, records the turn, and writes the
-card to the canvas (`StudioStore.change_canvas`).
+makes the edit's calls in the work's drive and reads the conversation. It
+emits what the edit sends and changes as events, with its frames unnumbered,
+and leaves every write to the other half. `edit_event_frames` turns each
+event into frames in the stream owner's task, which numbers them, records
+the turn, and writes the card to the canvas (`StudioStore.change_canvas`).
 """
 
 from __future__ import annotations
@@ -114,13 +114,13 @@ class EditFailed:
 
 @dataclass(frozen=True)
 class CanvasChange:
-    """A card write: `change` runs on the canvas as stored, and returns
+    """A card write. `change` runs on the canvas as stored and returns
     whether it changed the canvas (`StudioStore.change_canvas`)."""
 
     change: Callable[[ConversationState], bool]
 
 
-# What the edit emits: a frame to number, or one of the events above.
+# An edit emits a frame to number or one of the events above.
 type EditEvent = BaseModel | EditClosed | EditFailed | CanvasChange
 
 
@@ -134,9 +134,9 @@ async def edit_events(
 ) -> AsyncGenerator[EditEvent]:
     """The Edit Card route's events: no resolve, no plan.
 
-    Failures serialise INTO the stream as a stream-fatal error frame, as
-    they do in a turn: a malformed model draft must not kill the transport
-    with no error frame."""
+    Failures serialise into the stream as a stream-fatal error frame, as
+    they do in a turn, so a malformed model draft cannot end the transport
+    without an error frame."""
     try:
         async for event in _edit_flow(
             recorder=recorder,
@@ -365,7 +365,7 @@ async def _edit_flow(
     created = component_created(written["component"], step_id="e2")
     component = written["component"]
     token = recorder.write_token(component)
-    # The step frame is yielded first: frames are numbered in the order they
+    # The step frame is yielded first. Frames are numbered in the order they
     # are yielded, and the step precedes the card it produced on the wire.
     yield _step(
         "e2",

@@ -14,7 +14,7 @@ call, and the turn pauses for the user's answer or runs the plan path.
 The model sees digests only: part readings, frame views, one-line
 summaries, and of a drawn card what it holds and the figures a reply may
 state (`harness.reply_figures`). It sees no rows. Frames are named to it by short
-ids (`harness.graph.state.frame_id_for`) kept in session state, so `make_charts`
+ids (`harness.graph.state.frame_id_for`) kept in the turn's state, so `make_charts`
 can only draw a frame `fetch` or an executed plan produced this turn, after
 `describe_frame` answered for it. `search` also stores every part it
 read, failed ones included, as a `harness.turn_records.SearchReading`

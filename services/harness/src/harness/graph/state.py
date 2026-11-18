@@ -4,8 +4,9 @@ The keys and statuses the turn's nodes and the orchestrator's tools
 (`harness.orchestrator_tools`) read and write, the inputs a turn opens with
 (`TurnInput`), the one pending action the agent's hand-off records, the
 tools' budgets, and the helpers more than one node reads: the stored plan
-(`readable_plan`), the answers to the agent's question (`resume_answers`), and the read-only
-reads of the large containers (`stored_mapping`, `stored_sequence`).
+(`readable_plan`), the answers to the agent's question (`resume_answers`),
+and the read-only reads of the large containers (`stored_mapping`,
+`stored_sequence`).
 """
 
 from __future__ import annotations
@@ -116,13 +117,12 @@ ORCHESTRATOR_PLAN_RAN_STATUS = "Reading the plan's results"
 
 class TurnInput(BaseModel):
     """What a turn opens with, fixed for the turn: the user's `message`, the
-    canvas and conversation digests as the JSON text the agent reads, and
-    the seeds slot, the Search results a "... in Studio" action handed over
-    (each seed as `harness.seeds.seeds_slot` keeps it, or the one reference
-    `harness.wire.TurnRequest.seed_spec` also takes). The digests are the
-    text the agent reads, as the conversation wrote it.
-    The rest of what a turn opens with, which the orchestrator's tools also
-    read, is opening state (`turn_budgets`)."""
+    canvas and conversation digests, as the JSON text the conversation wrote
+    and the agent reads, and the seeds slot, the Search results a "... in
+    Studio" action handed over (each seed as `harness.seeds.seeds_slot`
+    keeps it, or the one reference `harness.wire.TurnRequest.seed_spec` also
+    takes). The rest of what a turn opens with, which the orchestrator's
+    tools also read, is opening state (`turn_budgets`)."""
 
     message: str
     canvas_digest: str | None = None
@@ -334,8 +334,8 @@ def resume_answers(result: Any) -> dict[str, dict[str, Any]] | None:
     """The clarify interrupt's resume value as one answer per question id, or
     None when the user dismissed the whole pause (`{"skip": True}`).
 
-    The value `harness.studio`'s `/interrupt` route resumes a clarify with is
-    `{"answers": {question id: answer}}`, each answer
+    The value `harness.studio`'s `/interrupt` route resumes a clarify with
+    is `{"answers": {question id: answer}}`, each answer
     `{"kind": "option", "spec_id"}`, `{"kind": "text", "text"}` or
     `{"kind": "skipped"}`. Any other value, such as the plan card's answer,
     answers no question.

@@ -23,7 +23,7 @@ this module's `_SegmentWork`, `_RejectWork` or `_EditWork` as the work.
 Conversation identity (contract delta 5): the client mints
 `conversation_id`; the bearer token resolves to a principal
 (`harness.auth`); the store and the turn's cursor are keyed on the pair.
-Each `turn.request` opens a FRESH turn whose state starts empty: turn 2's
+Each `turn.request` opens a FRESH turn whose state starts empty. Turn 2's
 planner drafts from a clean state, with no plan left over from turn 1,
 while the composition manifest and the turn records persist across turns
 in the store. Cross-turn context reaches the models as the turn's inputs:
@@ -626,7 +626,7 @@ class _SegmentWork:
     (`recorded_fatal`). A taken Stop whose close could not be written
     (`unclosed` with no `TurnFailed`) leaves the turn open with that Stop
     live, so the work ends `cancelled` and the owner's closing write closes
-    the turn. A turn another instance abandoned ends `abandoned`; one this
+    the turn. A turn another instance abandoned ends `abandoned`. One this
     segment closed `abandoned` on a node's failure ends `failed` on that
     failure's frame. Cancelling the drive cancels the segment, which leaves
     the cursor as last written and its runs unfinished, for the next request
@@ -673,8 +673,8 @@ class _SegmentWork:
 
     async def drive(self, emit: Emit[_MarkedEvent]) -> Segment:
         """Run the segment, emitting each event marked with the calls
-        recorded before it (`_EventRecords`); a plan step's progress report
-        replaces one of the same step that still waits."""
+        recorded before it (`_EventRecords`). A plan step's progress report
+        replaces one of the same step that is waiting."""
         runner, marks = self._runner, self._marks
 
         def recorded(event: GraphEvent | TurnEvent) -> None:
@@ -720,7 +720,7 @@ class _SegmentWork:
 
     def fatal(self, error: BaseException) -> ErrorFrame:
         """The stream-fatal frame for `error` (`_stream_fatal`), which
-        records the turn failed on it; a cancellation of the work's own is a
+        records the turn failed on it. A cancellation of the work's own is a
         fault of the segment's frames."""
         if not isinstance(error, Exception):
             error = RuntimeError("the segment's frames were cancelled")
@@ -783,7 +783,7 @@ class _EditWork:
     The edit ends on its reply and `done`, or on a stream-fatal `error`
     frame that records the turn failed, and the work ends `done` or
     `failed`. A heartbeat that reads a Stop first cancels the edit and the
-    work ends `cancelled`; one that finds the lease another's, or cannot
+    work ends `cancelled`. One that finds the lease another's, or cannot
     renew it before the lease's deadline, ends it `lost`, as does a card
     write fenced out by another instance's takeover or unable to reach the
     database (`StudioStore.change_canvas`). An ending the edit emitted
@@ -982,7 +982,7 @@ def _no_pending_interrupt_response(interrupt_id: str) -> JSONResponse:
 
 def _unknown_conversation_response(conversation_id: str) -> JSONResponse:
     """The 404 every route answers with for a conversation id its store
-    does not hold -- the wire has no "new conversation" signal, so this is
+    does not hold. The wire has no "new conversation" signal, so this is
     what tells a lost or mistyped id apart from a fresh one (`/turn` is the
     only route that creates)."""
     return _tool_error_response(
@@ -1034,10 +1034,10 @@ async def _act_on_stop(
     """Act on a Stop live for the conversation's turn
     (`StudioStore.stop_live`) before a request claims the conversation: the
     open turn, running or paused, is closed `cancelled` under a claim of its
-    own (`_stop_turn_at`). Returns the error to answer, `None` once the turn
-    is closed or none is open: the 503 `_stop_turn_at` answers when the
-    close fails, or a retryable 409 when its claim lost to another request
-    or the turn moved first. With no open turn the Stop names a turn
+    own (`_stop_turn_at`). Returns `None` once the turn is closed or none is
+    open, and otherwise the error to answer: the 503 `_stop_turn_at` answers
+    when the close fails, or a retryable 409 when its claim lost to another
+    request or the turn moved first. With no open turn the Stop names a turn
     claimed and not yet opened, whose live lease refuses this request's
     claim."""
     cursor = await studio.turns.open_cursor(principal, conversation_id)
@@ -1146,10 +1146,10 @@ async def _stop_open_turn(
     it left computing, so no later turn carries them on. When that close
     fails, a retryable 503 is answered and the turn stays open with a Stop
     live, which the next claimant or a retried Stop acts on. With no open
-    turn, the lease on record is cleared: it has lapsed, since
+    turn, the lease on record is cleared. It has lapsed, since
     `request_cancel` found no live segment and the save refuses if one went
-    live since, and clearing it fences out a stream still running under it,
-    whose writes are fenced on the lease id alone.
+    live since, and clearing it fences out a stream running under it, whose
+    writes are fenced on the lease id alone.
 
     Raises:
         _ClaimLost: another request claimed the conversation, or moved its
@@ -1178,7 +1178,7 @@ async def _stop_turn_at(
     with its pending interrupts cleared (`_save_turn_closed`), then closes
     the turn, which ends the runs it left computing in the same transaction
     (`harness.turn.loop.stop_turn`) and ends the Stop. Returns `None` once
-    the turn is closed, and a retryable 503 when a write fails: the turn
+    the turn is closed, and a retryable 503 when a write fails. The turn
     then stays open with a Stop live, so the next claimant closes it
     (`_act_on_stop`) and no later turn carries its runs on. A turn closed
     here ran no segment of its own, so its trace ends on a closing span
@@ -1244,8 +1244,8 @@ async def _save_turn_closed(
 ) -> ClosedTurn | None:
     """Save the conversation's turn closed `cancelled` when it is open,
     keeping the records `open_turn`, its cursor, holds (`keep_turn_records`),
-    with its pending interrupts cleared, so an answer to one is refused;
-    with `clear_lease`, the lease on record cleared too. The change is made
+    with its pending interrupts cleared, so an answer to one is refused.
+    With `clear_lease`, the lease on record is cleared too. The change is made
     on a working copy (`StudioStore.draft`) and saved (`StudioStore.save`):
     only once the save commits does the live state take it. Returns the
     turn it closed, `None` when none was open, for a caller that closed it
@@ -1316,17 +1316,17 @@ async def _unclaimed(
 
 
 # How long, by wall time, `/cancel` waits on a lock held with no live lease
-# (a request before its claim save, or a stream after its closing write) before it
-# answers a retryable 503.
+# (a request before its claim save, or a stream after its closing write)
+# before it answers a retryable 503.
 CANCEL_LOCK_WAIT_S = 5.0
 
 
 async def _lock_or_claim(lock: asyncio.Lock, claimed: asyncio.Event, *, timeout: float) -> bool:
     """Wait up to `timeout` for `lock` or for `claimed`, whichever comes
-    first. Past the deadline (`timeout` spent) a free lock with no waiter is
-    still taken at once. Returns whether this now holds `lock`; `False` when
-    a claim committed first or the time ran out. Cancelled after it took the
-    lock, it releases the lock."""
+    first. Once `timeout` is spent, a free lock with no waiter is taken at
+    once. Returns `True` when this holds `lock`, and `False` when a claim
+    committed first or the time ran out. Cancelled after it took the lock,
+    it releases the lock."""
     if claimed.is_set():
         return False
     if timeout <= 0:
@@ -1369,7 +1369,7 @@ async def _stop_under_lock(studio: StudioRunner, principal: str, conversation_id
     lease went live since (another instance claimed while this one waited,
     and the Stop is recorded on it), when the store holds no such
     conversation, or once what an open turn left is closed
-    (`_stop_open_turn`); that close's 503 when it fails.
+    (`_stop_open_turn`). It answers that close's 503 when it fails.
 
     Raises:
         _ClaimLost: this route's claim lost to another request.
@@ -1464,7 +1464,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # A turn the tables record as open with no cursor closes on what
             # the conversation holds. Every change up to the claim save is
             # made on a working copy, which the save swaps into the live
-            # state once it commits; a request that claims nothing leaves
+            # state once it commits. A request that claims nothing leaves
             # the live state as loaded.
             work = studio.store.draft(principal, body.conversation_id)
             left_open = await studio.turns.open_cursor(principal, body.conversation_id)
@@ -1513,10 +1513,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # since. Claiming first leaves no crash window: a crash between
             # the claim and the turn's opening leaves the store at the new
             # turn_index with no turn open, and the next `/turn` claims the
-            # one after it; the segment it also claimed simply expires by
-            # its own TTL. The save refuses while a Stop is live for the
-            # open turn (`StopPending`), so the turn index never moves past
-            # one: a Stop that landed since the check above ends that turn
+            # one after it. The segment it also claimed expires by its own
+            # TTL. The save refuses while a Stop is live for the open turn
+            # (`StopPending`), so the turn index stops at the open turn.
+            # A Stop that landed since the check above ends that turn
             # here, and the request is answered a retryable 409.
             try:
                 await studio.store.save(principal, body.conversation_id, work)
@@ -1643,10 +1643,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # The stream's owner releases the segment and the lock. A
             # failure before the response starts streaming releases them
             # here (`_release_claim`). Before the claim save commits, the
-            # working copy is given up and the live state stays as loaded. After it, the lease is dropped. The
-            # claim save already covers `begin_turn`'s effects, and a turn
-            # opened here stays open, so the next `/turn` closes both as it
-            # closes any open turn.
+            # working copy is given up and the live state stays as loaded.
+            # After it, the lease is dropped. The claim save already covers
+            # `begin_turn`'s effects, and a turn opened here stays open, so
+            # the next `/turn` closes both as it closes any open turn.
             if lock.locked():
                 await _release_claim(
                     studio.store,
@@ -1681,12 +1681,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         closing write (`StudioStore.close_segment`) once the drive has
         returned. Every stream ends on one frame, sent after that write, so a
         Stop the closing write acts on ends the stream on `cancelled` alone.
-        When the holder
-        cannot, the next claim does: a claim that starts or resumes work
-        refuses while a Stop is live for the open turn (`StopPending`), so
-        `/turn` and `/interrupt` first close that turn `cancelled` under a
-        claim of their own (`_act_on_stop`); then `/turn` claims and
-        `/interrupt` answers 404. A cancelled close ends the turn's
+        When the holder cannot, the next claim does. A claim that starts or
+        resumes work refuses while a Stop is live for the open turn
+        (`StopPending`), so `/turn` and `/interrupt` first close that turn
+        `cancelled` under a claim of their own (`_act_on_stop`). Then `/turn`
+        claims and `/interrupt` answers 404. A cancelled close ends the turn's
         unfinished runs in its own transaction
         (`harness.turn.store.TurnStore.finish`). The one exception is the
         first Stop while a node holds the turn's `StopScope` armed: the
@@ -1696,37 +1695,38 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         | When the Stop commits | Acted on by | Turn after | Client is told |
         |---|---|---|---|
         | Lease live, a node running | heartbeat | `cancelled` | `cancelled` frame |
-        | Lease live, `StopScope` armed, first Stop | the scope; the re-offer's pause write records it taken | paused on the re-offered plan | `plan.proposed`, whose card can be answered |
+        | Lease live, `StopScope` armed, first Stop | the scope, whose re-offer's pause write records it taken | paused on the re-offered plan | `plan.proposed`, whose card can be answered |
         | The same, a second Stop before the pause write | heartbeat | `cancelled` | `cancelled` frame |
         | The same, a second Stop after the pause write, before the closing write | the closing write | `cancelled`, pending cleared | `cancelled` frame in place of `plan.proposed` |
         | The scope took the first Stop, then the client left before the pause write | the closing write | `cancelled` | nothing more |
         | The scope took the first Stop, and the pause write failed | the drive, which closes the turn on the failure | `failed` | `error` frame |
-        | The scope took the first Stop, and its node ended the turn or left on an edge that is not a stop edge, or the node after it did not pause | the drive, in place of that write; when that close fails, the closing write or the next claimant | `cancelled` | `cancelled` frame |
-        | Lease live, pause committed, the drive in after-commit work | heartbeat, `_settle` | `cancelled` | `cancelled` frame |
+        | The scope took the first Stop, and its node ended the turn or left on an edge that is not a stop edge, or the node after it did not pause | the drive, in place of that write, and when that close fails, the closing write or the next claimant | `cancelled` | `cancelled` frame |
+        | Lease live, pause committed, the drive in after-commit work | heartbeat, `harness.turn.loop._settle` | `cancelled` | `cancelled` frame |
         | Lease live, the segment returned paused, before the closing write | the closing write | `cancelled`, pending cleared | `cancelled` frame in place of the pause frame |
-        | Lease live, turn closed, before the closing write | nobody: the close ended the Stop | unchanged | nothing more |
+        | Lease live, turn closed, before the closing write | nobody, since the close ended the Stop | unchanged | nothing more |
         | `/turn` claimed, before it abandons the turn left open | the new turn's heartbeat | the old turn `abandoned`, the new `cancelled` | `cancelled` frame |
         | Lease live, an Edit Card stream | its heartbeat | the turn's record `cancelled` | `cancelled` frame |
         | The same, the client gone before the heartbeat reads it | the closing write | the turn's record `cancelled` | nothing more |
-        | The closing write failed or timed out, such as when ending the turn's runs fails | the next claimant, once the lease lapses (up to the lease's 45 s expiry; a request before then answers a retryable 409) | `cancelled` | `cancelled` frame when the work ended on the Stop, `transient_unavailable` when it had paused; the next `/turn` streams, an `/interrupt` answers 404 |
-        | The same, and the next `/turn`'s close of the turn is refused | the `/turn` retried after its 409 | `cancelled` | nothing more; that `/turn` answers a retryable 409 and starts nothing, and its retry streams |
-        | A lapsed lease, after the next claimant's check and before its claim save | that claimant, whose save refuses | `cancelled` | nothing more; that `/turn` answers a retryable 409 and its retry streams, an `/interrupt` answers 404 |
+        | The closing write failed or timed out, such as when ending the turn's runs fails | the next claimant, once the lease lapses (up to the lease's 45 s expiry, and a request before then answers a retryable 409) | `cancelled` | `cancelled` frame when the work ended on the Stop, `transient_unavailable` when it had paused, and the next `/turn` streams while an `/interrupt` answers 404 |
+        | The same, and the next `/turn`'s close of the turn is refused | the `/turn` retried after its 409 | `cancelled` | nothing more, since that `/turn` answers a retryable 409 and starts nothing, and its retry streams |
+        | A lapsed lease, after the next claimant's check and before its claim save | that claimant, whose save refuses | `cancelled` | nothing more, since that `/turn` answers a retryable 409 and its retry streams, and an `/interrupt` answers 404 |
         | No live lease, turn paused | this route, under the lock | `cancelled`, pending cleared | 204 |
         | No live lease, turn left running | this route, under the lock | `cancelled`, its runs ended | 204, or 503 when the close fails, which leaves a Stop live for the next claimant |
         | No live lease, no open turn | this route, under the lock, finding nothing open | unchanged | 204 |
         | No live lease, and this route's own claim loses to another request | the holder of the lease that request claimed, as this route decides again | as the row it lands on | 204, or 503 after `CANCEL_LOCK_WAIT_S` |
         | Lock held here, no live lease | the claim's holder once it claims, or this route once the lock is free | as the row it lands on | 204, or 503 after `CANCEL_LOCK_WAIT_S` |
         | The same, the claim committing just after this route found no lease | the claim's holder | as the row it lands on | 204 |
-        | The same, this request cancelled once the lock passed to it | nobody: the Stop was never recorded | unchanged | nothing; the lock is let go |
-        | The same, and the request then abandons its claim | the next claimant | `cancelled` | nothing more; the next `/turn` streams |
+        | The same, this request cancelled once the lock passed to it | nobody, since the Stop was never recorded | unchanged | nothing, and the lock is let go |
+        | The same, and the request then abandons its claim | the next claimant | `cancelled` | nothing more, and the next `/turn` streams |
 
-        A live segment, on any instance, is stopped through its lease:
+        A live segment, on any instance, is stopped through its lease.
         `request_cancel` sets `lease_cancel`, the segment's next renewal
         records it as the Stop of the lease's turn and reports it, and the
         heartbeat stops the turn (`harness.turn.loop.run_segment`). A segment
         streaming on this instance is made to renew at once
         (`renew_lease_now`), so the Stop reaches it without waiting for the
-        beat; another instance's reads it within `HEARTBEAT_INTERVAL_S`. A
+        beat. Another instance's segment reads it within
+        `HEARTBEAT_INTERVAL_S`. A
         Stop that commits after the segment's last renewal is read by the
         segment's closing write under the row lock, which closes an open
         turn `cancelled` in the same transaction. This route answers 204
@@ -1734,21 +1734,21 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
 
         A request on this instance that holds the lock with no lease live (a
         `/turn` or `/interrupt` before its claim save, or a stream after its
-        closing write) is waited on: the Stop is recorded once the claim lands,
-        or taken under the lock once it is free, and a retryable 503 is
-        answered after `CANCEL_LOCK_WAIT_S` of wall time.
+        closing write) is waited on. The Stop is recorded once the claim
+        lands, or taken under the lock once it is free, and a retryable 503
+        is answered after `CANCEL_LOCK_WAIT_S` of wall time.
 
         With no live segment on record anywhere, this takes the lock,
-        reloads, and closes what is left: a turn paused on a question, or
+        reloads, and closes what is left. A turn paused on a question, or
         left running by a segment whose lease lapsed, is closed `cancelled`
         under a lease this route claims (`harness.turn.loop.stop_turn`), its
         record is closed `cancelled`, and the conversation's pending
         interrupts are cleared, so an answer to one is refused. A close that
         fails, such as ending the turn's runs, answers a retryable 503 and
         leaves the turn open with a Stop live, which the next claimant acts
-        on (`_stop_open_turn`). A claim of this
-        route's that loses to another request decides again from the top,
-        within the same `CANCEL_LOCK_WAIT_S`.
+        on (`_stop_open_turn`). A claim of this route's that loses to
+        another request decides again from the top, within the same
+        `CANCEL_LOCK_WAIT_S`.
         """
         principal = principal_for(authorization, settings=settings)
         lock = studio.store.lock_for(principal, body.conversation_id)
@@ -1787,8 +1787,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # No live lease: take the lock, or, while a request on this
             # instance holds it (a `/turn` or `/interrupt` before its claim
             # save, or a stream after its closing write), wait for its claim to
-            # commit or for the lock, then decide again. Past the deadline
-            # a free lock is still taken.
+            # commit or for the lock, then decide again. Once the deadline
+            # has passed, a free lock is taken.
             if await _lock_or_claim(lock, claimed, timeout=deadline - loop.time()):
                 try:
                     return await _stop_under_lock(studio, principal, body.conversation_id)
@@ -1864,8 +1864,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             resuming = pending.resuming_segment is not None
             # The answer reaches the paused node's `resume`. A retry of an
             # answer the turn already took finds the turn running and carries
-            # it on from its cursor: the node still owes the answer its
-            # `resume`, or the turn moved past it; a retried rejection finds
+            # it on from its cursor, when the node owes the answer its
+            # `resume` or the turn is past it. A retried rejection finds
             # the turn already closed. Anything else answers no pause, and is
             # refused before the save below records an approval of it or
             # marks it resuming.
@@ -1972,16 +1972,16 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             raise
 
         # Every failure from here to the stream's start drops the lease the
-        # save above claimed, and releases the lock. Only the lease: once the
-        # answer is saved below, the pending entry stays resuming under the
-        # dropped segment with the answer recorded, so a retry of the same
-        # answer claims at once and resumes. The turn lines added below stay
-        # unsaved, and the retry's load reads the row afresh.
+        # save above claimed, and releases the lock. It drops only the lease.
+        # Once the answer is saved below, the pending entry stays resuming
+        # under the dropped segment with the answer recorded, so a retry of
+        # the same answer claims at once and resumes. The turn lines added
+        # below stay unsaved, and the retry's load reads the row afresh.
         try:
             # The read above only gated the claim. A segment whose lease
             # lapsed can still write the turn until the claim commits, so
             # the answer runs on the cursor read after it, and is refused
-            # when that cursor no longer holds the same open pause. Nothing
+            # when that cursor does not hold the same open pause. Nothing
             # of the answer is saved yet, so the refusal leaves the entry
             # to be answered again as the reloaded conversation shows it.
             claimed = await studio.turns.open_cursor(principal, body.conversation_id)
@@ -2034,7 +2034,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # A crash between this save and the resumed stream's closing
             # write still leaves a durable, retryable record. The stream's
             # owner drops it in that write on every ending but a client
-            # that left (`harness.studio_stream`); a client that left, or a
+            # that left (`harness.studio_stream`). A client that left, or a
             # crash, leaves it for this same retry path to pick back up.
             pending.answer = requested_answer
             pending.resuming_segment = segment_id
@@ -2050,7 +2050,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             except ConversationStale:
                 # The lease this request holds refuses every other save, so
                 # only a takeover after it lapsed moves the conversation
-                # here; nothing of the answer was stored.
+                # here, and nothing of the answer was stored.
                 await _release_claim(
                     studio.store, principal, body.conversation_id, lock, segment_id, turn=claiming
                 )

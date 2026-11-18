@@ -31,8 +31,8 @@ def wire_error(
     (`timed_out`) reads as `transient_unavailable` whatever its own code.
     Otherwise the refusal's own `retry_mode` decides: `retry_after_delay`,
     or none, becomes `transient_unavailable`, anything else
-    `capability_unavailable`, so a do-not-retry refusal is never told to the
-    user as a reason to retry."""
+    `capability_unavailable`, so a do-not-retry refusal tells the user the
+    capability is unavailable."""
     wire_code = ErrorCode.TRANSIENT_UNAVAILABLE.value if timed_out else refusal.get("code")
     try:
         return ErrorCode(wire_code), RetryMode(refusal.get("retry_mode", RetryMode.DO_NOT_RETRY))

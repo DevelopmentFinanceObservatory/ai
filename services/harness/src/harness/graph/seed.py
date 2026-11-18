@@ -111,7 +111,7 @@ def seed_node(
         (`harness.graph.resume.Resumed.acknowledge`, run after the commit).
 
         The node's output is that hand-back, or None when there is none of
-        these. The node runs once per turn, as its first; a rerun after a
+        these. The node runs once per turn, as its first. A rerun after a
         crash before its boundary does it all again.
 
         Raises:
@@ -152,11 +152,10 @@ def seed_node(
         definite search results.
 
         The seeds slot (`TurnInput.seeds`) holds them as `seeds_slot` kept
-        them. Each seed is taken once
-        (`take_seeds`), and each one taken is resolved again through
-        Search's `dataset_resubmit` door, all at once, through
-        `definition_surface` (`resolve_seed`), so every fact the turn reads
-        of it is Search's current answer, never the browser's block.
+        them. Each seed is taken once (`take_seeds`), and each one taken is
+        resolved again through Search's `dataset_resubmit` door, all at once,
+        through `definition_surface` (`resolve_seed`), so every fact the turn
+        reads of it is Search's current answer, never the browser's block.
 
         The seeds kept are stored as `search` stores a definite part
         (`store_search`, with origin `seed`), so `fetch`, `plan` and later

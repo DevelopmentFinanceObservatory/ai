@@ -49,8 +49,8 @@ class StepProgress:
     `tool`: the report's `message`, if it has one, and the step's row on the
     plan card the user approved, its 1-based `position` among `count` rows,
     the row's `description` and whether its result answers the question
-    (`gives_answer`). The four row fields are `None` for a step the card
-    does not show."""
+    (`gives_answer`). The four row fields are `None` when the card shows
+    no row for the step."""
 
     step_id: str
     tool: str

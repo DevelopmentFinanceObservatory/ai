@@ -122,8 +122,9 @@ def function_declaration(spec: ToolSpec) -> types.FunctionDeclaration:
     when `spec.compact` is set. A tool with no parameters declares no schema.
     This is the declaration for the Gemini developer API, which the harness
     runs on. It carries no response schema and keeps optional `anyOf` schemas
-    as pydantic writes them. Vertex AI rejects that form, and `planner.model.refuse_vertex_ai` stops the
-    planner building when its model's google-genai client would use Vertex AI.
+    as pydantic writes them. Vertex AI rejects that form, and
+    `planner.model.refuse_vertex_ai` stops the planner building when its
+    model's google-genai client would use Vertex AI.
 
     Raises:
         ValueError: `spec` is compact and some parameter has no description.
@@ -153,7 +154,8 @@ def _validated(name: str, validate: Callable[[Any], Any], target: Any, value: An
 
 
 def _converted(name: str, annotation: Any, value: Any) -> Any:
-    """`value` converted to `annotation` where the declaration's types call for it, else unchanged."""
+    """`value` converted to `annotation` where the declaration's types call
+    for it, else unchanged."""
     target = _strip_annotated(annotation)
     if get_origin(target) in (Union, UnionType):
         others = [_strip_annotated(arg) for arg in get_args(target) if arg is not type(None)]
@@ -249,7 +251,8 @@ def run_tool(
     return spec.body(call, end_run, filled)
 
 
-# The `error.type` a tool call's span records when its answer holds an `error` key.
+# The `error.type` a tool call's span records when its answer holds an `error`
+# key.
 _TOOL_ERROR = "TOOL_ERROR"
 
 

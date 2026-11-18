@@ -971,7 +971,7 @@ async def _drive(
 
     Raises:
         LedgerUnavailableError: the ledger's store could not record the run's
-            progress; the run is left unfinished, never failed for it.
+            progress; the run is left unfinished.
         RunAbandonedError: a defect stopped the computation, among them a
             `CancelledError` that reached this task while nobody cancelled
             it, as a tool client's cancel scope can leak one from a step;

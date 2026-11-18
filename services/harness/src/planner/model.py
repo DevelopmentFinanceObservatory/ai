@@ -1,10 +1,11 @@
 """The Gemini model the planner runs on, kept to the turn's budget.
 
 `planner_model` builds Pydantic AI's `GoogleModel` over a google-genai client
-whose streamed call is `harness.gemini_wire.GeminiStream`: the request put in
-one fixed form, sent against the shared prefix cache under the turn's budget,
-its malformed function calls sent again once, and its usage recorded on the
-call's span. The planner adds its `before_request` and `after_response` hooks.
+whose streamed call is `harness.gemini_wire.GeminiStream`. That call puts the
+request in one fixed form, sends it against the shared prefix cache under the
+turn's budget, sends a malformed function call again once, and records its
+usage on the call's span. The planner adds its `before_request` and
+`after_response` hooks.
 `refuse_vertex_ai` refuses a model the planner's declarations cannot run on.
 """
 
@@ -67,9 +68,9 @@ def refuse_vertex_ai(model_name: str, client: Client | None = None) -> None:
     optional `anyOf` schemas. `harness.planner_adapter.PlannerAdapter` calls this
     with the planner's model name and the client it calls through.
 
-    A `projects/...` name is refused whatever the client: it is a Vertex AI
-    resource path, and the planner runs on the developer API, which serves no
-    model by that name. A given client decides by its `vertexai`. With none,
+    A `projects/...` name is refused whatever the client, since it is a Vertex
+    AI resource path and the planner runs on the developer API, which serves
+    no model by that name. A given client decides by its `vertexai`. With none,
     the planner builds a plain `google.genai.Client()`, whose backend the
     environment decides: `GOOGLE_GENAI_USE_ENTERPRISE` when set, else
     `GOOGLE_GENAI_USE_VERTEXAI`, each true when `true` or `1`. The rule is read

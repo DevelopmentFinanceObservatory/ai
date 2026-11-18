@@ -14,34 +14,34 @@ A node that raises, a boundary write that fails for any reason but a lost
 lease, a moved cursor or an answer to no open pause, and an owed answer the
 store lacks each close the turn `failed`, with `failure`'s record of the
 exception as its error. A cursor naming a node the running `Graph` lacks, or
-paused at a node that can no longer resume, closes the turn `abandoned` with
-a `TurnExpired` error, before any answer to it is accepted: no turn is
+paused at a node that cannot resume, closes the turn `abandoned` with
+a `TurnExpired` error, before any answer to it is accepted. No turn is
 carried across a graph change. A close that cannot be written is logged and
 leaves the turn running or paused as last written, for a Stop or the
-conversation's next turn to close; the segment ends `unclosed` and still
-reports the error (`TurnFailed`).
+conversation's next turn to close. The segment ends `unclosed` and reports
+the error (`TurnFailed`).
 
 A segment runs a node only on a cursor that is current (`TurnStore.load`).
 A crash leaves the cursor as last written. The segment that takes the turn
-over runs the node at the cursor again from its start, with the state, specs
-and transcript as of that write: from `run`, or from `resume` with the
-answer the turn accepted when the cursor still owes it (`Cursor.owed`).
+over runs the node at the cursor from its start, with the state, specs and
+transcript as of that write. It runs `run`, or `resume` with the answer the
+turn accepted when the cursor owes it (`Cursor.owed`).
 
 `run_segment` runs `drive` under the conversation's lease
 (`StudioStore.renew`), renewing it every `HEARTBEAT_INTERVAL_S`. The renewal
 reports the Stop live for the turn, posted from any instance
-(`StudioStore.request_cancel`, `harness.studio_store.StopState`): while a
+(`StudioStore.request_cancel`, `harness.studio_store.StopState`). While a
 node holds the turn's `StopScope` armed, the first Stop ends only the
 scope's work, and the turn's next pause write records it taken, which ends
-it; any other Stop cancels the node and closes the turn `cancelled`. A lost
+it. Any other Stop cancels the node and closes the turn `cancelled`. A lost
 lease cancels the node and leaves the cursor to the instance that holds the
-lease now. Either way the segment then reads the turn back, and reports a
-close or a pause that committed before the cut as the store holds it; a
+lease. Either way the segment then reads the turn back, and reports a
+close or a pause that committed before the cut as the store holds it. A
 pause the segment wrote is reported (`Paused`) and kept, whichever cut came
 after it.
 
 The caller may hand `run_segment` an event that makes the heartbeat renew
-at once (`renew_now`): a Stop posted on the instance that runs the segment
+at once (`renew_now`). A Stop posted on the instance that runs the segment
 then reaches the node without waiting for the next beat.
 
 A turn no segment runs is closed without running its node: `stop_turn`
@@ -94,7 +94,7 @@ class TurnExpired(Exception):  # noqa: N818 -- names the turn's state, as the cu
 
 
 class TurnAbandoned(Exception):  # noqa: N818 -- names the turn's state, as the cursor does
-    """The conversation's next turn opened while this one was still open."""
+    """The conversation's next turn opened while this one was open."""
 
 
 class NoEdge(Exception):  # noqa: N818 -- names the missing edge
@@ -209,8 +209,8 @@ async def _close_on_error(
     """Close the turn `status` on `error` at `node` and report `error`. A
     close the store refuses for any reason but those `_NOT_THE_TURNS` names
     is logged and leaves the turn as last written, running or paused, for a
-    Stop or the conversation's next turn to close: the segment ends
-    `unclosed`, and `error` is still reported."""
+    Stop or the conversation's next turn to close. The segment ends
+    `unclosed` and `error` is reported."""
     try:
         segment.cursor = await store.finish(
             segment.cursor, segment_id=segment_id, status=status, error=failure(node, error)
@@ -233,11 +233,11 @@ async def _close_on_taken_stop(
     """Close the turn `cancelled` on the Stop its `StopScope` took, whose
     pause never came, without writing the node's outcome. A close the store
     refuses for any reason but those `_NOT_THE_TURNS` names may still have
-    committed (its acknowledgement lost), so the turn is read again as
-    stored, as `_settle` does: a turn the store closed keeps that outcome.
-    One still open, or one that cannot be read, is logged and left running
-    with the Stop live, for the segment's closing write to close
-    (`StudioStore.close_segment`); the segment ends `unclosed`, and emits no
+    committed (its acknowledgement lost), so the turn is read back as
+    stored, as `_settle` does. A turn the store closed keeps that outcome.
+    One that is open, or cannot be read, is logged and left running with
+    the Stop live, for the segment's closing write to close
+    (`StudioStore.close_segment`). The segment ends `unclosed` and emits no
     `TurnFailed`."""
     try:
         segment.cursor = await store.finish(
@@ -263,7 +263,7 @@ async def _close_on_taken_stop(
 
 
 async def _after_commit(ctx: NodeCtx[Any], node: str) -> None:
-    """Run the node's `after_commit` work. A failure is logged: the write
+    """Run the node's `after_commit` work. A failure is logged. The write
     before it holds the node's outcome, and a crash between the two loses
     the work the same way."""
     for work in ctx.committed:
@@ -283,8 +283,8 @@ def _following(graph: Graph[Any], node: str, result: Next | Pause) -> str | None
     return following
 
 
-# The failures a boundary write passes up rather than closing the turn on:
-# the turn now belongs to another writer, or the answer named no open pause.
+# A boundary write fails with one of these when the turn belongs to another
+# writer or the answer named no open pause. They pass up and close nothing.
 _NOT_THE_TURNS = (SegmentLost, CursorStale, PauseNotOpen)
 
 
@@ -346,8 +346,8 @@ async def _write_boundary(
 
 
 class _Closes(Exception):  # noqa: N818 -- carries the close, not an error kind
-    """`_enter` found the turn cannot go on: close it with `status` and
-    `error`."""
+    """`_enter` found the turn cannot go on. The turn closes with `status`
+    and `error`."""
 
     def __init__(self, status: TurnStatus, error: Exception) -> None:
         super().__init__(str(error))
@@ -446,7 +446,7 @@ async def drive[E](
     cursor after claiming the lease and no node runs on a cursor another
     write has moved or closed. A paused cursor takes `answer`, which the
     first write accepts (`TurnStore.record_answer`) before the paused node's
-    `resume` runs. A running cursor runs its node again from its start.
+    `resume` runs. A running cursor runs its node from its start.
 
     A write that fails for any reason but those `_NOT_THE_TURNS` names (a
     value JSON cannot hold, a database error) closes the turn `failed` at
@@ -462,7 +462,7 @@ async def drive[E](
     Raises:
         ValueError: the cursor is paused and no `answer` was given.
         PauseNotOpen: `answer` names a pause the turn does not have open.
-        SegmentLost: `segment_id` no longer holds the conversation's lease.
+        SegmentLost: `segment_id` does not hold the conversation's lease.
         CursorStale: another writer moved the cursor, or the turn is closed.
     """
     cursor = segment.cursor
@@ -577,13 +577,13 @@ async def drive[E](
 
 async def stop_turn(store: TurnStore, cursor: Cursor, *, segment_id: str) -> Cursor:
     """Close the open turn at `cursor` `cancelled` without running its node,
-    writing under `segment_id`, the conversation lease the caller claimed:
-    the Stop of a turn no segment runs, paused on a question or left running
-    by a segment whose lease lapsed. A paused turn's pause is dropped, so an
-    answer to it is refused (`PauseNotOpen`).
+    writing under `segment_id`, the conversation lease the caller claimed.
+    It serves the Stop of a turn no segment runs, paused on a question or
+    left running by a segment whose lease lapsed. A paused turn's pause is
+    dropped, so an answer to it is refused (`PauseNotOpen`).
 
     Raises:
-        SegmentLost: `segment_id` no longer holds the conversation's lease.
+        SegmentLost: `segment_id` does not hold the conversation's lease.
         CursorStale: another writer moved the cursor, or closed the turn.
     """
     return await store.finish(cursor, segment_id=segment_id, status=TurnStatus.CANCELLED)
@@ -592,12 +592,12 @@ async def stop_turn(store: TurnStore, cursor: Cursor, *, segment_id: str) -> Cur
 async def reject(store: TurnStore, cursor: Cursor, *, segment_id: str, answer: Answer) -> Cursor:
     """Close the paused turn at `cursor` `done` on the user's reject of its
     open pause, writing under `segment_id`, the conversation lease the
-    caller claimed. The paused node does not run; `answer` joins the
+    caller claimed. The paused node does not run. `answer` joins the
     turn's transcript in the same write.
 
     Raises:
         PauseNotOpen: `answer` names a pause the turn does not have open.
-        SegmentLost: `segment_id` no longer holds the conversation's lease.
+        SegmentLost: `segment_id` does not hold the conversation's lease.
         CursorStale: another writer moved the cursor, or closed the turn.
     """
     require_open_pause(cursor, interrupt_id=answer.interrupt_id, round=answer.round)
@@ -618,7 +618,7 @@ async def abandon(store: TurnStore, cursor: Cursor, *, segment_id: str) -> Curso
     node it stands at. A paused turn's pause is dropped.
 
     Raises:
-        SegmentLost: `segment_id` no longer holds the conversation's lease.
+        SegmentLost: `segment_id` does not hold the conversation's lease.
         CursorStale: another writer moved the cursor, or closed the turn.
     """
     left = TurnAbandoned(
@@ -653,15 +653,15 @@ async def _settle(
 ) -> None:
     """Set `segment`'s cursor and outcome after the heartbeat cut its node
     off for a Stop or a lost lease. The node may have been inside a
-    boundary's write, which may have committed, so the turn is read again
+    boundary's write, which may have committed, so the turn is read back
     as stored. A turn the store closed keeps that outcome. A Stop closes
-    any other `cancelled`, a pause the segment wrote included: the user
-    stopped the turn, and the work after the pause's write was cut off as
-    a Stop. After a lost lease a pause the segment was writing that
+    any other `cancelled`, a pause the segment wrote included, since the
+    user stopped the turn and the work after the pause's write was cut off
+    as a Stop. After a lost lease a pause the segment was writing that
     committed keeps the turn paused, and its `Paused` is emitted here when
     the cut came before `drive` emitted it, so the client gets the
-    question the store holds; a turn still running is left to the instance
-    that holds the lease now."""
+    question the store holds. A turn still running is left to the instance
+    that holds the lease."""
     stored = await store.turn(segment.cursor.id)
     pausing, segment.pausing = segment.pausing, None
     if stored.status in CLOSED:
@@ -705,17 +705,17 @@ async def run_segment[E](
     A renewal reports the Stop live for the turn (`Renewal.stop_id`). While
     a node holds the turn's `StopScope` armed, the first Stop it reports
     sets the scope's event and the scope keeps its id (`StopScope.take`),
-    with no write: the node goes on, and the turn's next pause write records
+    with no write. The node goes on, and the turn's next pause write records
     the id taken (`TurnStore.pause`), so renewals stop reporting it. That
     pause is the node's own or that of the node one of its stop edges leads
-    to (a switch's offer, `Node.stop_edges`); a turn that leaves another
+    to (a switch's offer, `Node.stop_edges`). A turn that leaves another
     way, ends, or goes further without it closes `cancelled` (`drive`).
     Until then the Stop stays live, and a client that leaves first leaves
     it to the segment's closing write. Any other Stop cancels the node,
     leaves no task of the segment running, and closes the turn `cancelled`.
     One a renewal reads after the drive finished is left to the segment's
-    closing write, which acts on a Stop
-    still live (`StudioStore.close_segment`). A renewal that finds the lease
+    closing write, which acts on a Stop still live
+    (`StudioStore.close_segment`). A renewal that finds the lease
     taken, or that keeps failing until the lease's deadline
     (`StudioStore.lease_deadline`, dated from the claim or the last renewal
     that landed), cancels the node and ends the segment `lost` without
@@ -723,10 +723,10 @@ async def run_segment[E](
     so a close or pause that committed before the cut is reported as
     stored.
 
-    `cursor` must be read after the caller claimed the lease; `drive`
+    `cursor` must be read after the caller claimed the lease. `drive`
     refuses one another write has moved since (`CursorStale`).
 
-    The node's work tells the two cuts apart through the scope: a Stop marks
+    The node's work tells the two cuts apart through the scope. A Stop marks
     it (`StopScope.mark_turn_stopped`) before cancelling the node, so the
     work ends what it started (an executor run is recorded failed), and a
     lost lease leaves it unmarked, so that work is left for the instance
@@ -805,7 +805,7 @@ async def run_segment[E](
             segment.outcome = Outcome.LOST
         except Exception:
             # A lease lost to failing renewals usually means the database
-            # is unreachable, so the read can fail too; the segment is lost.
+            # is unreachable, so the read can fail too. The segment is lost.
             if ended[0] is not Outcome.LOST:
                 raise
             logger.exception("turn %s: reading the turn after losing the lease failed", key)

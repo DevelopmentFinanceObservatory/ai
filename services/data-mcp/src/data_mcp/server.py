@@ -178,10 +178,10 @@ PUBLIC_SHAPES: Mapping[str, PublicShape] = {
 }
 
 # A templated resource, not a tool -- it surfaces only via
-# `resources/templates/list` discovery, not `resources/list`, so the harness's MCP
-# client cannot reach it (see `artifact_resource.py`'s module docstring). A raw MCP client
-# that already has the URI, from a `get_data` result's resource link, can
-# still read it.
+# `resources/templates/list` discovery, not `resources/list`, so the harness's
+# MCP client cannot reach it (see `artifact_resource.py`'s module docstring). A
+# raw MCP client that already has the URI, from a `get_data` result's resource
+# link, can still read it.
 mcp.resource(
     ARTIFACT_URI_TEMPLATE,
     name="artifact",

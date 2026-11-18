@@ -193,8 +193,9 @@ class Settings(BaseServiceSettings):
       model calls spend waiting on their streams, from the moment each request
       is sent, genai's own HTTP retries included, to each chunk in turn. The
       prefix cache's create does not count, and neither do the tools that
-      run while a call waits at a response it has delivered. It ends 1 of 187 simple and 3 of 182 plan requests
-      measured on dev. It cuts a call that is still streaming.
+      run while a call waits at a response it has delivered. It ends 1 of 187
+      simple and 3 of 182 plan requests measured on dev. It cuts a call that is
+      still streaming.
     - `turn_model_calls_max` (30) counts model calls, a first-chunk retry not
       included. Dev's most in one request was 61, local runs' 29.
     - `turn_wall_s` (600) meters wall-clock time from the request's start, tool

@@ -12,8 +12,8 @@ Tool-call progress (`activity.step`, `component.created`) comes from the
 `_RecordingSurface` wrapper around the tool surface: the graph's nodes make
 their calls in-node, so the recorders capture each call as it happens. Each
 event the segment emits takes the calls recorded before it
-(`_Translator.emit`), so a stream that falls behind the segment shows each
-call where it happened. A result carrying a `"component"` member becomes a
+(`_EventRecords`, `_Translator.translate_recorded`), so a stream that falls
+behind the segment shows each call where it happened. A result carrying a `"component"` member becomes a
 `component.created` frame and a composition update.
 
 While a plan step runs, `execute` emits the executor's report of the
@@ -376,7 +376,7 @@ def _fatal_frame(
     for a model or an operator and stay in the log the caller writes, as the
     turn's trace id does. The conversation's record of the turn closes on
     the frame's code and detail, also when the turn's own close could not
-    be written: the record holds the error the user saw, and whatever
+    be written. The record holds the error the user saw, and whatever
     closes the turn later leaves it as it is.
     """
     if timeout_tool is not None:
@@ -445,8 +445,8 @@ class _ExecutorRecord:
 class _Records:
     """Records by conversation, in the order their calls finished: an
     append-only queue that the task running a segment fills and that the
-    segment's stream owner alone drains (`take`). `count` is how many records a
-    conversation has had appended, which an event carries
+    segment's stream owner alone drains (`take`). `count` is how many records
+    a conversation has had appended, which an event carries
     (`_EventRecords`), so that the owner takes exactly the records made
     before it."""
 
@@ -508,12 +508,11 @@ class _RecordingExecutor:
     """Wraps the injected executor so every call becomes wire progress.
 
     The graph's nodes make their calls in-node and report no call as an
-    event, so per-call progress comes from here. The
-    wrapper is per-runner (the workflow closes over it) while turns of
-    DIFFERENT conversations run concurrently, so every record is tagged
-    with the conversation that made it and drained by tag; within one
-    conversation the lock serialises turns and the graph runs nodes
-    sequentially.
+    event, so per-call progress comes from here. The wrapper is per-runner
+    (the graph closes over it) while turns of DIFFERENT conversations run
+    concurrently, so every record is tagged with the conversation that made
+    it and drained by tag. Within one conversation the lock serialises turns
+    and the graph runs nodes sequentially.
 
     `store` is where the translator writes the cards a drain lands.
     """
@@ -602,7 +601,7 @@ class _RecordingExecutor:
         """Move a create's write token off `result`, before the record, the
         graph or the Edit Card route can read the result, into the call's
         record (`_ExecutorRecord.write_token`). The token is the grant
-        `harness.studio_edit` needs to revise that component; the stream's
+        `harness.studio_edit` needs to revise that component. The stream's
         owner keeps it in the conversation with the card. A successful
         create that returns no token is logged at error level, since that
         card is rebuilt as a new card on its next edit."""
@@ -1432,7 +1431,7 @@ type RecordMarks = tuple[int, int | None] | None
 
 class _EventRecords:
     """The half of a segment's translation that runs in the task running
-    the segment: it marks each event with how many calls the recorders
+    the segment. It marks each event with how many calls the recorders
     held for the conversation as it was emitted (`RecordMarks`), and reads
     nothing else. The stream's owner takes those calls when it translates
     the event (`_Translator.translate_recorded`)."""
@@ -1466,12 +1465,12 @@ class _Translator:
     It runs in the stream owner's task. Each event the segment emits
     arrives marked with how many calls the recorders held as it was emitted
     (`_EventRecords`), and the translator takes those calls and translates
-    them, then the event, in order (`translate_recorded`). The agent's tool calls run through the
-    recording executor and surface, so their steps and cards arrive as the
-    records each event took (`_record_frames`); the plan path's events (the
-    planner's status lines, the executor's step progress, the approval and
-    clarify pauses) go to `_plan_path_frames`. On top of those, the agent's
-    own events stream as they happen:
+    them, then the event, in order (`translate_recorded`). The agent's tool
+    calls run through the recording executor and surface, so their steps and
+    cards arrive as the records each event took (`_record_frames`). The plan
+    path's events (the planner's status lines, the executor's step progress,
+    the approval and clarify pauses) go to `_plan_path_frames`. On top of
+    those, the agent's own events stream as they happen:
 
     - one running status line (an `activity.step` with no `tool`) whenever
       the agent works and no tool step runs. After a batch of tool results
@@ -1536,7 +1535,7 @@ class _Translator:
         self._final_text = ""
         self.paused = False
         # Whether the planner's latest entry replans for a pick on the plan
-        # card (`PlannerStarted.pick`): its drafted plan keeps the planner
+        # card (`PlannerStarted.pick`). Its drafted plan keeps the planner
         # decisions' labels (`_node_done`).
         self._pick_replan = False
         # The running status line.
@@ -1601,11 +1600,11 @@ class _Translator:
             return []
         match event:
             case StepProgress():
-                # Mid-run: the run's records wait for the execute node's
+                # Mid-run, the run's records wait for the execute node's
                 # end. A report can arrive after the call it describes has
                 # returned and been recorded, so taking records here could
-                # close a step's line before this frame reopens it; and
-                # `harness.graph.execute` may still amend a finished step's
+                # close a step's line before this frame reopens it. Also,
+                # `harness.graph.execute` may amend a finished step's
                 # record (`_RecordingSurface.mark_step_failed`) once the
                 # whole run is over.
                 return [*self._close_starting(), self._running_step(event)]
@@ -1724,7 +1723,7 @@ class _Translator:
             # running belongs to a step that recorded nothing.
             frames.extend(self._close_unrecorded_steps(output))
             if label == "ok":
-                # The plan ran: `plan_done` describes its frames, then the
+                # The plan ran. `plan_done` describes its frames, then the
                 # agent reads them under the label of the step that gives
                 # the answer.
                 frames.extend(
@@ -2345,11 +2344,11 @@ class _Translator:
             )
             return frames
         # The graph's own `ask` node pauses with a `payload` that carries one
-        # to three `questions`, each with its `candidates`. A
-        # lone question is dismissed with the whole pause. Each of several
-        # may be left to the agent instead. The planner node's pause on the
-        # planner's ask carries the ask call's arguments as `payload`, one
-        # question (`_planner_question`).
+        # to three `questions`, each with its `candidates`. A lone question
+        # is dismissed with the whole pause. Each of several may be left to
+        # the agent. The planner node's pause on the planner's ask carries
+        # the ask call's arguments as `payload`, one question
+        # (`_planner_question`).
         asked = payload.get("questions")
         if asked:
             several = len(asked) > 1
@@ -2490,7 +2489,7 @@ class _Translator:
                     _PLAN_MADE, self._step(None, _PLAN_FAILED, StepStatus.FAILED, detail=detail)
                 )
             )
-        # The agent reads the planner's answer under its own line; a plan
+        # The agent reads the planner's answer under its own line. A plan
         # hand-back's status is the line the execute node's end opened,
         # which keeps running.
         frames.extend(self._open_status(event.text))
@@ -2559,7 +2558,8 @@ class _Translator:
 
         Pydantic AI answers every call of a response but a deferred one, and
         the agent's tools defer a call only on a hand-off they recorded
-        (`orchestrator.agent`), so such a call handed off; the run ends on it.
+        (`orchestrator.agent`), so such a call handed off, and the run ends
+        on it.
         An answer to no call of the response is the hand-back a resumed run
         opens on, which its status line shows (`_agent_status`)."""
         by_id = {answer.id or "": answer for answer in answers}
@@ -3258,7 +3258,8 @@ def _plan_step_detail(progress: StepProgress) -> str | None:
     (`harness.graph.execute._card_places`) shows the message alone, that one
     included. Every running frame of the step carries the whole detail,
     since a stream that falls behind keeps only a step's latest report
-    (`_Translator.emit`). A field of the wrong type counts as absent.
+    (`harness.studio_stream.Emit`). A field of the wrong type counts as
+    absent.
     """
     message = progress.message
     message = message.strip() if isinstance(message, str) else ""

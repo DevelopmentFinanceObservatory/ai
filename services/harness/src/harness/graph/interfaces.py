@@ -65,9 +65,8 @@ class PlannerModel(Protocol):
     that tells refusals apart. It returns `{"asked": {"call_id", "args"}}`
     when the planner's run ended on a question for the user, which the node
     pauses on; the resume calls the planner again with the user's `answer`
-    to it. The node validates a drafted
-    plan itself, so a malformed one fails here rather than at the approve
-    gate; a refusal never writes `ctx.state["plan"]`, so whatever plan was
+    to it. The node validates a drafted plan itself, so a malformed one
+    fails here rather than at the approve gate; a refusal never writes `ctx.state["plan"]`, so whatever plan was
     already there is exactly what this call leaves behind. Where that
     record is a plan still `PENDING_APPROVAL` -- an amendment that hit the
     cap trying to redraft it -- the node routes back to `approve`, offering

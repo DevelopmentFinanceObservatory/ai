@@ -2,7 +2,7 @@
 
 The stored transcript is the turn's `agent_records` rows
 (`harness.turn.store.TurnStore.records`). A segment of the turn loads it once
-and holds it as a `Transcript`; the nodes append to it as they run, and the
+and holds it as a `Transcript`. The nodes append to it as they run, and the
 loop writes what they appended with the cursor at each node boundary
 (`TurnStore`'s `records` argument), so entries appended after the last
 boundary die with a crash.
@@ -39,12 +39,12 @@ class Transcript:
         return tuple(self._records)
 
     def append(self, record: AgentRecord) -> None:
-        """Add `record` at the end; the loop writes it at the next boundary."""
+        """Add `record` at the end. The loop writes it at the next boundary."""
         self._records.append(record)
 
     def take(self) -> list[AgentRecord]:
         """The records appended since the last `take`, which the caller
-        writes; they count as written from here on."""
+        writes. They count as written from here on."""
         unwritten = self._records[self._written :]
         self._written = len(self._records)
         return unwritten

@@ -8,7 +8,7 @@ model (`orchestrator.model.orchestrator_model`) and is driven by
 call's `orchestrator.call.OrchestratorCall` with the model's arguments as sent
 (`_tool_function`). A tool that raises is answered with `raised` and the run
 goes on. A `plan` or `ask_user` call that records its hand-off
-(`orchestrator.call.HANDED_OFF`) is deferred: the run ends on it, and the
+(`orchestrator.call.HANDED_OFF`) is deferred. The run ends on it, and the
 planner's result or the user's answer is the call's result when the run
 resumes.
 
@@ -16,7 +16,7 @@ Every request replays the run's messages less unsigned thought summaries, with
 a call to a tool the agent lacks answered as
 `harness.gemini_agent.tool_not_found` (`harness.gemini_agent.replayed_history`).
 The instruction is the same on every request, so its prefix, with the tools,
-is served from the shared cache (`harness.prefix_cache`); what changes from
+is served from the shared cache (`harness.prefix_cache`). What changes from
 turn to turn opens the contents (`orchestrator.run.Opening`).
 """
 
@@ -367,7 +367,7 @@ def orchestrator_agent(
     on a response with no tool call, or on a call that handed off.
 
     The agent traces through the global tracer provider (`invoke_agent`,
-    `chat` and `execute_tool` spans); with `include_content` the spans carry
+    `chat` and `execute_tool` spans). With `include_content` the spans carry
     the messages. The request parameters are left off, since the tool
     declarations are on each model call's span.
     """
@@ -407,12 +407,12 @@ def _tool_function(function: FunctionType) -> Callable[..., Awaitable[dict[str, 
     """The function Pydantic AI calls for `function`, taking the arguments as sent.
 
     Arguments the function does not take are dropped. A function that takes
-    `call` runs over an `OrchestratorCall` on the response's state view. An answer that is no
-    dict is wrapped under `result`. A body that raises an `Exception` is
-    answered with `harness.orchestrator_tools.raised_answer` and logged at
-    ERROR with its traceback; a cancellation propagates and logs nothing. An
-    answer that records a hand-off (`HANDED_OFF`) defers the call, with the
-    answer as the deferral's `record`.
+    `call` runs over an `OrchestratorCall` on the response's state view. An
+    answer that is not a dict is wrapped under `result`. A body that raises an
+    `Exception` is answered with `harness.orchestrator_tools.raised_answer`
+    and logged at ERROR with its traceback. A cancellation propagates and logs
+    nothing. An answer that records a hand-off (`HANDED_OFF`) defers the call,
+    with the answer as the deferral's `record`.
     """
     parameters = set(inspect.signature(function).parameters)
     takes_call = CALL_PARAMETER in parameters

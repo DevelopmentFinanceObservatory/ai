@@ -20,10 +20,10 @@ Nothing in this process observes a conversation ending, so the registry is
 an LRU bounded at `MAX_CALLERS` held clients, the same bound
 `harness.provenance.ProvenanceStore` puts on its conversation buckets.
 
-Pydantic AI dispatches a response's tool calls concurrently, so two calls can be in
-flight on one caller's client at once. Every `get()` is paired with a
-`release()`, and a client that `discard()` or the LRU evicts is
-disconnected only once its last in-flight call releases it.
+Pydantic AI dispatches a response's tool calls concurrently, so two calls can
+be in flight on one caller's client at once. Every `get()` is paired with a
+`release()`, and a client that `discard()` or the LRU evicts is disconnected
+only once its last in-flight call releases it.
 
 A caller's first `get()` connects in a task of its own, outside the
 registry lock, so a slow connect delays only that caller's calls. Its other

@@ -2,11 +2,11 @@
 
 `orchestrator_model` builds Pydantic AI's `GoogleModel` over a google-genai
 client whose streamed call is `harness.gemini_wire.GeminiStream`, as the
-planner's is (`planner.model`): the request put in one fixed form, sent
-against the shared prefix cache under the turn's budget, its usage and how it
-ended recorded on the call's span, and a call Gemini ended on a function call
-it could not parse sent once more. Unlike the planner's, the stream passes
-answer text on as it arrives, since the user reads it as it streams.
+planner's is (`planner.model`). That call puts the request in one fixed form,
+sends it against the shared prefix cache under the turn's budget, records its
+usage and how it ended on the call's span, and sends once more a call Gemini
+ended on a function call it could not parse. The orchestrator's stream also
+passes answer text on as it arrives, since the user reads it as it streams.
 """
 
 from __future__ import annotations

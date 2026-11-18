@@ -19,9 +19,8 @@ The eval set for the studio surface. It scores two things at once:
 This suite has its own runner. The behaviors under test live in the HTTP
 surface: the translator, the Edit Card route, interrupt resumes, composition
 mutations, the canvas digest. The runner drives the real routes and shares
-the repo's two-lane rule
-(`evals/README.md`): the deterministic layer runs in CI, the model-judged
-layer never does.
+the repo's two-lane rule (`evals/README.md`): the deterministic layer runs in
+CI, the model-judged layer never does.
 
 ## Run it
 
@@ -74,7 +73,8 @@ battery via `services/harness/tests/test_studio_orchestrator_eval.py`. A case's 
 
 Every model request (system instruction and contents, as the model received them) and
 every tool call, a scripted planner's own included, is recorded in order. A
-case's `checks` list names properties from `checks.py`'s `CASE_CHECKS` that read that record:
+case's `checks` list names properties from `checks.py`'s `CASE_CHECKS` that read
+that record:
 
 - `approval_payload_absent_after_approval`: no request made after the plan's first
   step ran holds the approval pause (the plan card) or the user's answer to it.

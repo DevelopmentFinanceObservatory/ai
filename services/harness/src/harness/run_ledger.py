@@ -157,10 +157,9 @@ class StudioRunLedger:
     async def _fenced(self) -> AsyncIterator[tuple[AsyncConnection, int]]:
         """`StudioStore.fenced` on the current segment. A `SegmentLost` has
         the conversation's stream renew its lease at once (`renew_lease_now`),
-        which ends the stream, before it propagates:
-        `executor.ledger.store_faults` reports it to the graph as an
-        unavailable ledger, which a tool hands back as data, so the turn
-        would otherwise run on without the lease."""
+        which ends the stream, before it propagates. `executor.ledger.store_faults`
+        reports it to the graph as an unavailable ledger, which a tool hands
+        back as data, so the turn would otherwise run on without the lease."""
         key = current_conversation_key.get()
         try:
             async with self._store.fenced(*self._segment()) as held:

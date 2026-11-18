@@ -62,8 +62,8 @@ def offer(
     which starts its retrievals unless it already started that revision. The
     offer runs after the pause commits (`NodeCtx.after_commit`), so a node
     that dies before the commit and runs again offers once, and one that dies
-    between the commit and the offer offers nothing: the run then asks for
-    its frames itself. The answer reaches `decide`, which never offers.
+    between the commit and the offer offers nothing, and the run then asks
+    for its frames itself. The answer reaches `decide`, which makes no offer.
     """
     if early_mints is not None:
         offered = stored_plan(ctx.state.get("plan"), state_key="plan")
@@ -136,7 +136,7 @@ def decide(
                     "switch": switch,
                 },
             )
-        # A switch moves a scope choice and approves nothing: the `switch`
+        # A switch moves a scope choice and approves nothing. The `switch`
         # node revises the plan in code and offers it here again. A row it
         # cannot find, such as a planner decision the plan dropped or one
         # switched to the option it already has, it offers back unchanged

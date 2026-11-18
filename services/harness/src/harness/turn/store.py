@@ -3,11 +3,11 @@
 A turn is one `turn_cursors` row (defined in
 `harness/db/migrations/0003_turns.sql`): the node it stands at and that
 node's input, its status, its open pause or the answered pause its node
-still owes `resume`, the inputs fixed when it opened,
-the turn-scoped state its nodes share, and the error that closed it. Its
-spec blocks are `turn_specs` rows, its accepted answers `turn_answers` rows
-and its transcript `agent_records` rows. A conversation has at most one open (running or paused) turn, which
-the database enforces.
+owes `resume`, the inputs fixed when it opened, the turn-scoped state its
+nodes share, and the error that closed it. Its spec blocks are
+`turn_specs` rows, its accepted answers `turn_answers` rows and its
+transcript `agent_records` rows. A conversation has at most one open
+(running or paused) turn, which the database enforces.
 
 Every write is one transaction that does two things:
 
@@ -27,13 +27,13 @@ splits the mapping out of the state it is given, compares each block's
 digest with the digests its `Cursor` holds, and in the same transaction
 upserts the blocks that are new or changed, deletes the spec ids that are
 gone and moves the blocks whose position changed, so a checkpoint writes
-what changed rather than what the turn holds. Every block is serialised at
-every write to take its digest, so a block changed in place is written like
-any other; only a changed block is decoded again. The rows are updated as
-well as inserted because the mapping is not append-only: a later
-search reading of a held spec id rewrites its block
-(`planner.plan.with_blocks`), and a switch that fails or is stopped puts the
-mapping back as it was before the switch (`harness.graph.switch`). A read
+only what changed. Every block is serialised at every write to take its
+digest, so a block changed in place is written like any other, and only a
+changed block is decoded. The rows are updated as well as inserted because
+a block can change after it is first written. A later search reading of a
+held spec id rewrites its block (`planner.plan.with_blocks`), and a switch
+that fails or is stopped puts the mapping back as it was before the switch
+(`harness.graph.switch`). A read
 merges the blocks back into the state under `SPECS_KEY`, in their stored
 order and with their keys in the order the turn built them, and a write
 returns each block decoded from the JSON it stored, or the cursor's own
@@ -42,7 +42,7 @@ holds the state as stored, whether the next node runs live or reruns.
 
 A close `cancelled` ends the conversation's unfinished runs in its own
 transaction (`harness.run_ledger.end_unfinished`), so a cancelled turn
-leaves no run computing. A close reads no Stop: closing the turn a Stop
+leaves no run computing. A close reads no Stop. Closing the turn a Stop
 names ends that Stop (`harness.studio_store.StopState`). A pause write
 records the Stop the turn's `StopScope` answered (`stop_taken_id`).
 
@@ -68,7 +68,7 @@ from harness.run_ledger import end_unfinished
 from harness.studio_state import SegmentLost
 
 # The state key whose mapping, spec blocks by spec id, the store keeps as
-# `turn_specs` rows rather than in the stored state.
+# `turn_specs` rows, outside the stored state.
 SPECS_KEY = "orchestrator:specs"
 
 
@@ -93,7 +93,7 @@ class CursorStale(Exception):  # noqa: N818 -- named for the wire 409
 
 
 class TurnAlreadyOpen(Exception):  # noqa: N818 -- names the state that refuses
-    """`open_turn` found an open turn on the conversation; close it first."""
+    """`open_turn` found an open turn on the conversation. Close it first."""
 
 
 class PauseNotOpen(Exception):  # noqa: N818 -- names the state that refuses
@@ -138,7 +138,7 @@ class OpenPause:
 @dataclass(frozen=True)
 class OwedAnswer:
     """The pause `(interrupt_id, round)` whose accepted answer the node at
-    a running cursor still owes its `resume`: the cursor has not moved since
+    a running cursor owes its `resume`. The cursor has not moved since
     `TurnStore.record_answer` accepted it. `TurnStore.answer` reads the
     answer."""
 
@@ -155,7 +155,7 @@ class Cursor:
     of each stored block, by spec id in stored order, and `spec_blocks` the
     stored blocks as decoded, in a mapping of their own, so a change to the
     state's mapping leaves them as stored. `owed` is set on a running turn
-    whose node still owes an accepted answer to its `resume`, and `None`
+    whose node owes an accepted answer to its `resume`, and `None`
     otherwise."""
 
     id: int
@@ -397,10 +397,10 @@ async def _swap(
     state: Mapping[str, Any] | None,
     records: Sequence[AgentRecord],
 ) -> Cursor:
-    """Apply `sets` and bump the version where the row still holds the
-    version `cursor` read and one of `statuses`; when `state` is given,
-    store it, its spec blocks as rows (`_write_specs`), and otherwise
-    keep the stored blocks `cursor` holds; and append `records`."""
+    """Apply `sets` and bump the version where the row holds the version
+    `cursor` read and one of `statuses`, and append `records`. When `state`
+    is given, store it with its spec blocks as rows (`_write_specs`).
+    Otherwise keep the stored blocks `cursor` holds."""
     if state is not None:
         rest, specs = _split(state)
         sets += ", state = CAST(:state AS json)"
@@ -658,7 +658,7 @@ class TurnStore:
         records: Sequence[AgentRecord] = (),
     ) -> Cursor:
         """Accept `answer` to the open pause `(interrupt_id, round)` and set
-        the turn running again at the node it paused at, appending `records`.
+        the turn running at the node it paused at, appending `records`.
         The returned cursor's `owed` names the pause until the next write
         moves the cursor.
 
@@ -712,7 +712,7 @@ class TurnStore:
             ValueError: `status` is not a closing status, or `error` is
                 missing for `FAILED` or `ABANDONED` or given for another.
             SegmentLost: `segment_id` does not hold the conversation's lease.
-            CursorStale: the cursor moved, or the turn is already closed.
+            CursorStale: the cursor moved, or the turn is closed.
         """
         async with self._engine.begin() as conn:
             return await finish_on(
@@ -753,7 +753,7 @@ async def finish_on(
         ValueError: `status` is not a closing status, or `error` is
             missing for `FAILED` or `ABANDONED` or given for another.
         SegmentLost: `segment_id` does not hold the conversation's lease.
-        CursorStale: the cursor moved, or the turn is already closed.
+        CursorStale: the cursor moved, or the turn is closed.
     """
     if status not in CLOSED:
         raise ValueError(f"{status!r} does not close a turn")

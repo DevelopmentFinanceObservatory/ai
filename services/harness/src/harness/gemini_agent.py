@@ -2,15 +2,14 @@
 
 `GEMINI_PROFILE` is the model profile an agent's `GoogleModel` is built on,
 the one `harness.gemini_wire.in_canonical_form` expects. `declared_tool`
-serves a function under its Gemini declaration; `UNLIMITED_RETRIES`,
+serves a function under its Gemini declaration. `UNLIMITED_RETRIES`,
 `NO_REQUEST_LIMIT` and `QUESTION_INSTRUCTIONS` are the run settings both
-agents share. `replayed_history`
-is the history processor that puts a run's messages in the form they are
-stored and replayed in. `response_parts` turns a model response back into the
-google-genai parts Gemini sent, and `as_function_response` a tool's answer
-into the function response the model reads. `RecordingState` is the view a
-model response's tool calls write state through, so the keys they wrote are
-known.
+agents share. `replayed_history` is the history processor that puts a run's
+messages in the form they are stored and replayed in. `response_parts` turns
+a model response back into the google-genai parts Gemini sent, and
+`as_function_response` a tool's answer into the function response the model
+reads. `RecordingState` is the view a model response's tool calls write state
+through, so the keys they wrote are known.
 """
 
 from __future__ import annotations

@@ -10,9 +10,10 @@ first put in one fixed form (`in_canonical_form`). Each call, in order:
    the request against it (`harness.prefix_cache.against_cache`). A cache the
    API reports gone (`CACHE_GONE_CODES`) before any chunk arrived is
    forgotten, looked up again and the request resent once;
-3. sends the request under the turn's `TurnBudget` (`harness.turn_budget.bounded_by`),
-   with the model-time, call-cap and wall-clock bounds, the first-chunk
-   resend, and the HTTP retries (`model_retry_options`);
+3. sends the request under the turn's `TurnBudget`
+   (`harness.turn_budget.bounded_by`), with the model-time, call-cap and
+   wall-clock bounds, the first-chunk resend, and the HTTP retries
+   (`model_retry_options`);
 4. passes the streamed chunks on by the stream's rule (`_Relay`). A stream
    that holds (the planner's) holds every chunk until the call ends. Pydantic
    AI would run a tool from the chunk that carried it, so a call the budget
@@ -20,7 +21,7 @@ first put in one fixed form (`in_canonical_form`). Each call, in order:
    text on (the orchestrator's, whose answer reaches the user as it arrives)
    holds chunks until the first chunk of answer text and then passes them on
    in order, so the thought summaries a call opens with stay ahead of its
-   text; from the first chunk holding a function call it holds again, to the
+   text. From the first chunk holding a function call it holds again, to the
    call's end, for the same reason. A call a bound closes answers with the
    closing sentence `bounded_by` gives, as a paragraph of its own after text
    already passed on (`Closing.shown`), and its held chunks are dropped;
@@ -44,10 +45,10 @@ reads its calls as it sent them. Every request streams. A non-streamed call
 refuses, since it would bypass all of the above.
 
 Each call's span, Pydantic AI's `chat <model>`, is current while the call runs
-and carries the usage Langfuse reads from a GenAI span, which
-Pydantic AI leaves out (`_record_usage`). That is the reasoning tokens and the
-usage Langfuse derives from such a span, set outright so that the usage
-details Pydantic AI adds are not summed into the call's total. A turn put in
+and carries the usage Langfuse reads from a GenAI span, which Pydantic AI
+leaves out (`_record_usage`). That is the reasoning tokens and the usage
+Langfuse derives from such a span, set outright so that the usage details
+Pydantic AI adds are not summed into the call's total. A turn put in
 place of a request no attempt was sent for is no model call, so its span is
 marked a plain span for Langfuse. Every attempt sent records on the span how
 it ended, whether or not Gemini reported usage for it: the finish reason
@@ -106,8 +107,8 @@ _REASONING_TOKENS = "gen_ai.usage.reasoning.output_tokens"
 # Gemini could not parse, set only when one was.
 _MALFORMED_DISCARDED = "dfo.model.malformed_attempts_discarded"
 # How the latest attempt sent ended: Gemini's finish reason as it named it, or
-# `none` when no chunk carried one; and the class of the exception the call
-# raised, set only when it raised.
+# `none` when no chunk carried one. `_ERROR` is the class of the exception the
+# call raised, set only when it raised.
 _FINISH_REASON = "dfo.model.finish_reason"
 _ERROR = "dfo.model.error"
 

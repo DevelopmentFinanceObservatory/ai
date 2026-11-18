@@ -1396,11 +1396,11 @@ def approval_payload_absent_after_approval(evidence: Evidence) -> list[str]:
     """No model request made after the plan's first step ran carries the
     approval pause's payload or the user's answer to it. The turn writes
     both to its transcript (`harness.turn.transcript`), where the planner's
-    session reads the pause as a call and the answer as an answer step;
-    the browser reads both from the stream, and no model is meant to. The
-    pause's payload, the plan card, and the answer, `{"approved":
-    <revision>}`, both hold the plan's whole revision, which the plan's
-    hand-back names by a 12-character prefix alone."""
+    session reads the pause as a call and the answer as an answer step.
+    The browser reads both from the stream, and no model is meant to. The
+    pause's payload (the plan card) and the answer (`{"approved":
+    <revision>}`) both hold the plan's whole revision, which the plan's
+    hand-back names only by a 12-character prefix."""
     if missing := _need_log(evidence, "approval_payload_absent_after_approval"):
         return missing
     log = evidence.log or []
@@ -1427,7 +1427,7 @@ def approval_payload_absent_after_approval(evidence: Evidence) -> list[str]:
 
 def refused_step_reaches_the_next_plan(evidence: Evidence) -> list[str]:
     """A refused plan step reaches the orchestrator, and the planner is
-    entered again after it: the orchestrator's first request after the
+    entered again after it. The orchestrator's first request after the
     refusal names the refusal's code in the plan's hand-back, and a planner
     request follows that one. The turn graph hands the refused run back to
     the orchestrator, whose second `plan` call opens the planner once more

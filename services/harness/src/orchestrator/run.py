@@ -6,14 +6,14 @@ they happen:
 
 - `TextDelta`: answer text as the model streams it (Studio's `message.delta`).
 - `ModelResponded`: a whole model response, once streamed, before its tools
-  run (Activity lines for its calls; the thoughts are for traces).
+  run (Activity lines for its calls, the thoughts for traces).
 - `ToolsAnswered`: the answers of one response's calls once every call that
   ran has answered, and a copy of the state those calls wrote.
 - `HandedOff`: the run ended on a `plan` or `ask_user` call, which waits on a
   hand-back. It carries the hand-off's record and the history to store with
   the turn until the hand-back arrives.
-- `Answered`: the run ended on the reply. Nothing is stored: the next turn
-  opens from the digests.
+- `Answered`: the run ended on the reply. Nothing is stored, and the next
+  turn opens from the digests.
 
 The run happens in the caller's task, so cancelling the caller cancels the
 model stream and any tool in flight. A call a bound of the turn's budget
@@ -170,7 +170,7 @@ class ToolsAnswered:
     """The answers of one response's calls, with each call's id, in call
     order, and a copy of the turn state's value of every key those calls
     wrote, so a later call's change does not reach an event still queued. A
-    call that handed off has no answer here; a run resumed after it opens on
+    call that handed off has no answer here. A run resumed after it opens on
     one whose answer is the hand-back."""
 
     answers: tuple[types.FunctionResponse, ...]
@@ -223,7 +223,7 @@ async def run_orchestrator(
     `orchestrator.call.OrchestratorCall`. `model` is the run's model
     (`orchestrator.model.orchestrator_model`, on the turn's budget).
     `conversation_id` is the conversation the run's spans name
-    (`gen_ai.conversation.id`); on a resume it takes the place of the id the
+    (`gen_ai.conversation.id`). On a resume it takes the place of the id the
     stored conversation opened with. None keeps the stored id, or leaves
     Pydantic AI to make one up for a first run.
 
@@ -372,9 +372,9 @@ def _written_state(deps: OrchestratorDeps, held: Mapping[str, Any]) -> dict[str,
     """A copy of each state key the response's calls wrote, for a
     `ToolsAnswered` event that may wait in the translator's queue while
     later calls change the state. Each key is copied deep, except the spec
-    blocks: a block the calls wrote (one that is not the object `held`, the
+    blocks. A block the calls wrote (one that is not the object `held`, the
     blocks before the response, holds under its id) is copied deep, and the
-    rest are shared: a writer replaces a block whole
+    rest are shared. A writer replaces a block whole
     (`harness.graph.state.stored_mapping`), so a shared block stays as the
     event read it."""
     written: dict[str, Any] = {}

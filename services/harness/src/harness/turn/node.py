@@ -5,16 +5,16 @@ where the turn goes next: `Next` (an edge label and the next node's input)
 or `Pause` (a question for the user). A node that pauses also has a
 `resume` function, which the loop calls with the user's answer in place of
 `run`, so the work a node does before its pause runs once. An error is a
-raised exception: the loop records it on the turn's cursor and ends the
+raised exception. The loop records it on the turn's cursor and ends the
 turn.
 
 A node's events have a type of the graph's own, `E`, which the loop passes
 to the caller's `emit` beside its own `TurnEvent`s; the loop reads none of
 them.
 
-A node never writes the store. It reads and changes `ctx.state` and
-`ctx.transcript`, and the loop writes both with the cursor at the node's
-boundary. Changes since the last boundary die with the
+A node writes to the store only through the loop. It reads and changes
+`ctx.state` and `ctx.transcript`, and the loop writes both with the cursor
+at the node's boundary. Changes since the last boundary die with the
 process, and the node then runs again from its start.
 """
 
@@ -60,13 +60,13 @@ class Pause:
 
 class StopScope:
     """The work a node runs under a Stop that ends only that work (a
-    plan-card switch, a pick's replan), not the turn.
+    plan-card switch, a pick's replan).
 
     While a node holds the scope open, the first Stop sets the event `open`
-    yielded and the scope keeps that Stop's id (`taken`); the node goes on
+    yielded and the scope keeps that Stop's id (`taken`). The node goes on
     along its own edge, and the turn's next pause write records the id on
     the turn's cursor, which ends that Stop. Any Stop while no scope is
-    open, or once the open scope's event is set, ends the turn: the loop
+    open, or once the open scope's event is set, ends the turn. The loop
     marks it (`mark_turn_stopped`) before it cancels the node, so work the
     cancellation reaches tells a Stop (`turn_stopped`) from a client that
     left or a lost lease, which leave the turn for a later segment to carry
@@ -88,12 +88,12 @@ class StopScope:
 
     @property
     def armed(self) -> bool:
-        """Whether a Stop now would end only the open scope's work."""
+        """Whether a Stop would end only the open scope's work."""
         return self._event is not None and not self._event.is_set()
 
     def take(self, stop_id: str) -> bool:
         """Stop the open scope's work on the Stop `stop_id`, keeping its id
-        (`taken`). Returns whether the scope was armed; when it was not, the
+        (`taken`). Returns whether the scope was armed. When it was not, the
         Stop is the turn's and nothing changes."""
         if self._event is None or self._event.is_set():
             return False
@@ -102,13 +102,13 @@ class StopScope:
         return True
 
     def mark_turn_stopped(self) -> None:
-        """Record that a Stop ends the turn; the loop then cancels the node."""
+        """Record that a Stop ends the turn. The loop then cancels the node."""
         self._turn_stopped = True
 
     @property
     def turn_stopped(self) -> bool:
         """Whether a Stop ended the turn. A node's cancellation with this
-        unset is not the user's: the client left or the lease was lost."""
+        unset comes from a client that left or a lost lease."""
         return self._turn_stopped
 
 
@@ -118,10 +118,11 @@ class NodeCtx[E]:
 
     `inputs` are the turn's inputs, fixed when it opened. `state` is the
     turn-scoped state the nodes share, the turn's spec blocks included
-    (`harness.turn.store.SPECS_KEY`): a copy of the state as stored, which
-    the node changes as it likes. `transcript` holds the agents' records.
-    The loop writes both with the cursor at the node's boundary. `emit` streams an event to
-    the client at once: one of the graph's own (`E`), or a `TurnEvent`.
+    (`harness.turn.store.SPECS_KEY`). It is a copy of the state as stored,
+    which the node changes as it likes. `transcript` holds the agents'
+    records. The loop writes both with the cursor at the node's boundary.
+    `emit` streams an event to the client at once, either one of the
+    graph's own (`E`) or a `TurnEvent`.
     `stop` is the turn's `StopScope`. `after_commit` registers work that must
     follow the boundary's write, such as acknowledging what a hand-back
     delivered.

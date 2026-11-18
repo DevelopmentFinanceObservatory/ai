@@ -169,7 +169,7 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
 
 def _handed_off(ctx: NodeCtx[GraphEvent], handed: HandedOff) -> Next:
     """Store the conversation `handed` waits with, and go on along the edge
-    of the action its call recorded, which leaves the state."""
+    of the action its call recorded, removing that action from the state."""
     pending = pending_action(ctx.state)
     ctx.state.pop(ORCHESTRATOR_PENDING_KEY, None)
     if pending is None or pending.kind != HAND_OFF_EDGES.get(handed.tool):

@@ -31,7 +31,7 @@ request cancels. For its segment it alone:
 - makes the segment's one closing write (`StudioStore.close_segment`), which
   saves the conversation, clears the lease and, when a Stop is live for the
   open turn, closes it `cancelled`, in one transaction. A segment whose
-  work ended `lost` or `abandoned` makes none: the lease is another's;
+  work ended `lost` or `abandoned` makes none, since the lease is another's;
 - decides how the stream ends from the work's end and that write's result,
   once (`ending`);
 - forgets this instance's copy of the conversation when the closing write
@@ -53,11 +53,11 @@ past every number they can take. A later segment numbers from the block its
 claim reserves (`harness.studio_store.SEQ_BLOCK`). After the closing write
 the owner changes no conversation state.
 
-The drive's tool calls still meet the conversation in two ways. A tool
-reads the live canvas and digest (`harness.studio_state.make_canvas_cards`
-and its siblings). The `remove_cards` tool writes the canvas through
+The drive's tool calls meet the conversation in two ways. A tool reads the
+live canvas and digest (`harness.studio_state.make_canvas_cards` and its
+siblings). The `remove_cards` tool writes the canvas through
 `StudioStore.change_canvas`, since the model reads its result in the same
-model call: the store's write lock orders that write with the owner's, it
+model call. The store's write lock orders that write with the owner's, it
 commits only the fields its change made, and those reach the live state
 only once it commits. The recorders the drive's calls write
 (`harness.studio_translate._RecordingExecutor` and `_RecordingSurface`)
@@ -317,9 +317,9 @@ def ending(work: WorkEnd, close: SegmentClose | None) -> Ending:
     `lost` and `abandoned` work ends on the transient frame, `lost`. "pause",
     "done" and "error" are the work's own ending frame. A closing write that
     found a Stop live for the open turn (`stopped`) cannot meet a turn that
-    ended `done` or `failed`, since a closed turn voids its Stop; it reads
+    ended `done` or `failed`, since a closed turn voids its Stop, so it reads
     as `saved` there. A `cancelled` frame goes out whether or not the close
-    committed: the Stop stays live, and the next claimant closes the turn.
+    committed. The Stop stays live, and the next claimant closes the turn.
 
     Raises:
         ValueError: `close` is `None` for work that makes a closing write.
@@ -340,7 +340,7 @@ def ending(work: WorkEnd, close: SegmentClose | None) -> Ending:
 
 class Emit[E](Protocol):
     """How a drive hands the owner an event. An event emitted with a `key`
-    replaces one with the same key that still waits, so a stream that falls
+    replaces one with the same key that waits, so a stream that falls
     behind its drive translates only the latest of them."""
 
     def __call__(self, event: E, /, *, key: Hashable | None = None) -> None: ...
@@ -350,10 +350,10 @@ class Work[E, R](Protocol):
     """A segment's work, as the route that claimed the segment builds it, in
     two halves.
 
-    `drive` runs in a task of its own: the turn loop's segment, or the Edit
-    Card's calls, which hands each event it makes to `emit` and writes no
+    `drive` runs in a task of its own. It is the turn loop's segment or the
+    Edit Card's calls, hands each event it makes to `emit`, and writes no
     conversation state of its own beyond a card write whose result its
-    model reads (module docstring). The owner's task runs the rest: it
+    model reads (module docstring). The owner's task runs the rest. It
     starts the work (`begin`) before the drive runs, translates each event
     into wire frames (`frames`), in order, and once the drive has returned,
     and every event it emitted is translated, reads how the work ended and
@@ -387,7 +387,7 @@ class Work[E, R](Protocol):
 
     def fatal(self, error: BaseException) -> ErrorFrame:
         """The stream-fatal frame for work that raised `error`, or that ended
-        with no ending frame its outcome needs; it records the turn failed
+        with no ending frame its outcome needs. It records the turn failed
         on it."""
         ...
 
@@ -415,8 +415,8 @@ class SegmentStore(Protocol):
 class _OpenLines:
     """The Activity lines a stream opened and has not closed.
 
-    Studio shows a line as pending while its latest frame carries no
-    `duration_ms`: a `running` or `pending` step report. A later frame on
+    Studio shows a line as pending while its latest frame, a `running` or
+    `pending` step report, carries no `duration_ms`. A later frame on
     the same `step_id` with a `duration_ms` closes it. A stream that ends on
     an `error` frame sends no such frame, so the owner closes each open line
     itself.
@@ -472,7 +472,7 @@ class _Events[E]:
         self._arrived.set()
 
     def take(self) -> E:
-        """The oldest event waiting; there must be one."""
+        """The oldest event waiting. The queue must hold one."""
         return self._waiting.popitem(last=False)[1]
 
     def arrived(self) -> Coroutine[Any, Any, bool]:
@@ -535,8 +535,8 @@ class _Owner[E, R]:
             close = await self._close(finish)
             return ending(WorkEnd(finish, self._held), close)
         except Exception:
-            # A fault in the owner itself: no frame of the work's can be
-            # trusted to end the stream, and the closing write's outcome is
+            # A fault in the owner itself leaves no frame of the work's to
+            # trust to end the stream, and the closing write's outcome is
             # unknown. The transient frame takes the next unsent number.
             logger.exception(
                 "studio stream: the owner of conversation %s segment %s failed",
@@ -552,9 +552,9 @@ class _Owner[E, R]:
 
     async def _work_to_end(self) -> Finish:
         """Translate the drive's events until it ends, the client leaves, or
-        the save after `plan.approved` or a card write finds the lease lost;
-        then how the work ended. When the owner cuts the drive off, it
-        cancels it and waits for it. A client that left still has the events
+        the save after `plan.approved` or a card write finds the lease lost,
+        and return how the work ended. When the owner cuts the drive off, it
+        cancels it and waits for it. A client that left has the events
         the drive emitted translated, unsaved, so the closing write stores
         the state they leave; a lost lease drops them, since no write of
         this segment's can land."""
@@ -630,8 +630,8 @@ class _Owner[E, R]:
     async def _take(self, frames: list[BaseModel], *, saving: bool = True) -> bool:
         """Hold the work's ending frame and put every other frame on the
         channel, in order. After `plan.approved`, when `saving`, save the
-        conversation; returns whether that save found the lease lost. The
-        frames after it are still taken, unsaved."""
+        conversation and return whether that save found the lease lost. The
+        frames after it are taken, unsaved."""
         lost = False
         for frame in frames:
             if isinstance(frame, _ENDING_FRAMES):
@@ -657,9 +657,9 @@ class _Owner[E, R]:
     async def _approved(self) -> bool:
         """Record that `plan.approved` went out and save it, so a retry of
         the same answer after this segment dies does not send it again (a
-        crash before the save sends it twice, which beats never). Returns
-        whether the save found the lease lost; any other failure is logged
-        and the stream goes on.
+        crash before the save sends it twice, so the frame arrives at least
+        once). Returns whether the save found the lease lost. Any other
+        failure is logged and the stream goes on.
 
         The owner alone translates, so the pending interrupts the snapshot
         reads, with no await since the frame went on the channel, are those
@@ -690,8 +690,8 @@ class _Owner[E, R]:
 
     async def _ended(self, task: asyncio.Task[R]) -> Finish:
         """How the work ended, once the drive has ended on its own and every
-        event it emitted is taken: the work's outcome, with the frames that
-        close it taken. A drive that raised, a cancellation of its own
+        event it emitted is taken. That is the work's outcome, with the frames
+        that close it taken. A drive that raised, a cancellation of its own
         included, or work that ended without the ending frame its outcome
         needs, ends `unclosed` on the work's fatal frame. A lost lease the
         drive or a card write raised ends it `lost`."""
@@ -722,7 +722,7 @@ class _Owner[E, R]:
         """The segment's closing write, or `None` for work that ended `lost`
         or `abandoned`. A Stop that ended the work closes the turn's record
         `cancelled` first, and every finish but `left` drops the pending
-        entries resuming under the segment: a client that left keeps them,
+        entries resuming under the segment. A client that left keeps them,
         for a retry of the same answer to carry the turn on. The write stores
         `seq` past every number the closing frames can take. They start at
         the number the work gave its ending frame when nothing went out after
@@ -786,11 +786,11 @@ async def own_segment[E, R](
     on `channel` and reading `gone`, the client-gone flag.
 
     `settle`, when given, runs once the channel has ended and the span is
-    exported: a wait that keeps the request open, and so its CPU, for work
-    the segment started (`harness.early_mint.EarlyMints.settle`). When it
-    returns `True` the spans are exported again.
+    exported. It is a wait that keeps the request open, and so its CPU, for
+    work the segment started (`harness.early_mint.EarlyMints.settle`). When
+    it returns `True` the spans are exported again.
 
-    Raises nothing, and is never cancelled by a request.
+    Raises nothing. No request cancels it.
     """
     owner = _Owner(
         work,
@@ -861,8 +861,8 @@ class LiveOwners:
         return task
 
     async def wait(self, *, timeout: float = SHUTDOWN_WAIT_S) -> None:
-        """Wait up to `timeout` seconds for every owner still running; log
-        the ones still running then."""
+        """Wait up to `timeout` seconds for every running owner, and log
+        those that outlast it."""
         if not self._running:
             return
         _, running = await asyncio.wait(set(self._running), timeout=timeout)

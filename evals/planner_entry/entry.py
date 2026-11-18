@@ -11,16 +11,16 @@ each of the task's payloads makes. `run_entry` replays them through production c
   recorded envelope through `resolver_digest` and stores the readings, spec blocks and
   warnings as a served turn does (`harness.graph.state.store_search`);
 - its `plan` tool checks the asks and records the hand-off;
-- the graph's `plan_start` and `planner` nodes, the turn's spec blocks in their state,
-  take the action the `plan` call recorded as the `orchestrate` node hands it on, and
-  run as the turn loop runs them (`harness.turn.loop`), each node's state and input
-  passed on as the turn store hands them back: the planner's ask pauses the
-  entry and the user's answer, recorded in the turn's transcript, resumes it. They
+- the graph's `plan_start` and `planner` nodes, with the turn's spec blocks in their
+  state, take the action the `plan` call recorded, as the `orchestrate` node hands it
+  on. They run as the turn loop runs them (`harness.turn.loop`), each node's state and
+  input passed on as the turn store hands them back. The planner's ask pauses the
+  entry, and the user's answer, recorded in the turn's transcript, resumes it. They
   run inside a conversation that holds those spec blocks as `harness.studio` holds a
   turn's (`planner.plan.current_recorded_identity`), and hand the brief to the real
   `PlannerAdapter`, which renders the planner's first message from that state and runs
-  the planner, with production's instruction and tools, each request
-  under the `TurnBudget` a served request gets (`harness.turn_budget`).
+  the planner, with production's instruction and tools, each request under the
+  `TurnBudget` a served request gets (`harness.turn_budget`).
 
 Two edges are replaced. The planner's `get_skill` reads the recording through
 `RecordedSurface`. The adapter's translate step is the eval's own,
@@ -707,9 +707,9 @@ class ModelRequest:
     """One request the planner's model client is sent, in google-genai's types.
 
     The planner sends the system instruction as a string and every declaration in
-    one `Tool` (`harness.gemini_wire.in_canonical_form`). `system_text` and `declarations` read
-    any shape google-genai takes, so an edit reads a request the same way
-    whichever form it arrives in.
+    one `Tool` (`harness.gemini_wire.in_canonical_form`). `system_text` and
+    `declarations` read any shape google-genai takes, so an edit reads a request
+    the same way whichever form it arrives in.
     """
 
     model: str
@@ -1041,9 +1041,9 @@ async def run_entry(
     the entry's asks, in order. Each resumes the paused entry, as the studio's
     interrupt route does, in a request of its own with a fresh budget. A live run
     passes none, so an ask ends it. Each answer is the reply the studio's interrupt
-    route reads, the user's answer under `result`. With `translation`, production's translation
-    runs on the recorded plan over those calls, and `probe.translation` holds its
-    answer.
+    route reads, the user's answer under `result`. With `translation`,
+    production's translation runs on the recorded plan over those calls, and
+    `probe.translation` holds its answer.
     """
     probe = Probe()
     if translation is not None:
@@ -1334,7 +1334,7 @@ def record_period_reduction(record: Mapping[str, Any], task: Task) -> PeriodRedu
 def stop_reason(run: EntryRun) -> str:
     """How the entry ended: `error`, `accepted`, `timeout` (the eval's own limit), the
     adapter's refusal code, or `asked_user` (an ask the tool took, which the entry paused
-    on, still awaiting the user's answer). An error wins over a recorded plan: a step
+    on, awaiting the user's answer). An error wins over a recorded plan: a step
     that raised, or a state the turn store refused at the node's boundary, fails the
     served turn, so the plan never reaches the user. A refusal wins over an ask, since
     the entry it ends pauses on nothing."""

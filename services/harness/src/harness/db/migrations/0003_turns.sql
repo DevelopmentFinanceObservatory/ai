@@ -10,28 +10,29 @@
 -- names (`stop_turn`), recorded from `lease_cancel` by the next write of the
 -- lease columns, which stamps the row's turn index as stored before that
 -- write (`harness.studio_store.StopState`). A Stop ends when the turn it
--- names closes, whatever the status; no write marks it read.
+-- names closes, whatever the status. No write marks it read.
 ALTER TABLE conversations ADD COLUMN stop_id text;
 ALTER TABLE conversations ADD COLUMN stop_turn integer;
 
--- Every value column is `json`, which keeps the text as written: a node's
+-- Every value column is `json`, which keeps the text as written. A node's
 -- input, the state and the transcript hold values a model reads verbatim,
 -- such as a hand-back's fields and the orchestrator's stored history, and
 -- `jsonb` would reorder their objects' keys.
 
 -- One row per turn. `node` is where the turn stands and `node_input` what
--- that node runs on; `inputs` is fixed when the turn opens; `state` is the
+-- that node runs on. `inputs` is fixed when the turn opens. `state` is the
 -- turn-scoped state the nodes share, the orchestrator's stored history
--- included; its spec blocks are `turn_specs` rows. `round` counts the turn's pauses; a paused turn's
--- open pause is round `round`, of kind `pause_kind`, under the wire
--- interrupt id `interrupt_id`. `owed_interrupt_id` names the pause of round
--- `round` whose accepted answer the node at the cursor still owes its
--- `resume`: set by the write that accepts the answer and moves the turn from
--- paused to running, cleared by the next write, so it is set only on a
--- running turn whose cursor has not moved since its answer.
+-- included; its spec blocks are `turn_specs` rows. `round` counts the
+-- turn's pauses. A paused turn's open pause is round `round`, of kind
+-- `pause_kind`, under the wire interrupt id `interrupt_id`.
+-- `owed_interrupt_id` names the pause of round `round` whose accepted
+-- answer the node at the cursor owes its `resume`. The write that
+-- accepts the answer and moves the turn from paused to running sets it and
+-- the next write clears it, so it is set only on a running turn whose
+-- cursor has not moved since its answer.
 -- `stop_taken_id` is the Stop the turn's `StopScope` answered, set by the
--- pause write that ended the scope's work; that Stop no longer stops the
--- turn.
+-- pause write that ended the scope's work. The turn ignores that Stop from
+-- then on.
 CREATE TABLE turn_cursors (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     conversation bigint NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
@@ -63,7 +64,7 @@ CREATE TABLE turn_cursors (
     CHECK (owed_interrupt_id IS NULL OR (status = 'running' AND round >= 1))
 );
 
--- At most one open turn per conversation: a new turn opens only once the
+-- At most one open turn per conversation. A new turn opens only once the
 -- previous one is closed, so a late answer to an earlier pause finds nothing
 -- open.
 CREATE UNIQUE INDEX turn_cursors_one_open ON turn_cursors (conversation)
@@ -71,9 +72,9 @@ CREATE UNIQUE INDEX turn_cursors_one_open ON turn_cursors (conversation)
 
 -- The orchestrator's spec blocks for the turn, one row per spec id. A
 -- checkpoint writes only the blocks that changed since the last one and
--- deletes those the turn dropped; `block` is the JSON text as the turn
+-- deletes those the turn dropped. `block` is the JSON text as the turn
 -- built it and `digest` its SHA-256, which that comparison reads. `seq` is
--- the block's position in the turn's state as last written: a checkpoint
+-- the block's position in the turn's state as last written. A checkpoint
 -- that finds the order changed rewrites the positions of the blocks that
 -- moved.
 CREATE TABLE turn_specs (

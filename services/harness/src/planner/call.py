@@ -70,9 +70,9 @@ class Step(NamedTuple):
     `message` is a message the user typed into the session, which the
     planner adapter's own messages are not (`planner.session._user_message`).
     `call` is an ask, the planner's own (`PLANNER_ASK`) or a pause the turn
-    put to the user, with its id and `args`. `answer` is a
-    response to one, with its id, the `args` of the nearest preceding call
-    sharing that id (`None` when none precedes it) and the response body.
+    put to the user, with its id and `args`. `answer` is a response to one,
+    with its id, the `args` of the nearest preceding call sharing that id
+    (`None` when none precedes it) and the response body.
     `response` is any other tool's response, with its `name` and body.
     """
 
@@ -141,9 +141,9 @@ def _offered_candidates(args: dict[str, Any]) -> dict[str, frozenset[str]]:
     - the pause the graph's `ask` node puts to the user: its `args` hold the
       pause's message and its `payload`, which nests under `args["payload"]`
       (`planner.session.session_steps` says how the transcript records it).
-      Its `questions` each carry their own `id` and
-      `candidates`, whose ids are scoped to that question. A `payload` with
-      `candidates` and no `questions` holds the one question `q1`.
+      Its `questions` each carry their own `id` and `candidates`, whose ids
+      are scoped to that question. A `payload` with `candidates` and no
+      `questions` holds the one question `q1`.
     """
     return {
         question_id: candidate_ids(candidates)
@@ -386,16 +386,14 @@ def elected_spec_ids(call: PlannerCall) -> frozenset[str]:
     node tells the agent to fetch.
 
     The steps walk the turn's transcript once, in order, and pair each
-    answer with the call whose offer was seen most recently at that point --
-    the nearest preceding call sharing its id -- so an answer resolves
-    against the offer it answered, whatever a later offer under the same id
-    holds.
+    answer with the call whose offer was seen most recently at that point (the
+    nearest preceding call sharing its id), so an answer resolves against the
+    offer it answered, whatever a later offer under the same id holds.
 
-    The record is read, not kept in a state key: the call carrying its
-    offered candidates, and the answer once it arrives, are both in the
-    turn's transcript (`planner.session.session_steps` says how it holds
-    them), read whole, since the ask pauses the turn and the answer resumes
-    it in a later segment.
+    The call carrying its offered candidates, and the answer once it arrives,
+    are both in the turn's transcript (`planner.session.session_steps` says
+    how it holds them). The transcript is read whole, since the ask pauses the
+    turn and the answer resumes it in a later segment.
     """
     specs = stored_mapping(call.state, ORCHESTRATOR_SPECS_KEY)
     elected: set[str] = set()
@@ -417,11 +415,11 @@ def _is_answer(body: Mapping[str, Any]) -> bool:
     """Whether an ask's response body carries something the user said.
 
     A user's answer is `{"result": ...}` (`planner.session.session_steps` wraps
-    it), read as `harness.graph.state.resume_answers`
-    reads it: a pick of a candidate, or free text for a reply outside the offered
-    options. A body with no `result` is a call the tool rejected. A dismissal of
-    the pause and a question left to the planner are the user declining to choose, and
-    blank text says nothing.
+    it), read as `harness.graph.state.resume_answers` reads it: a pick of a
+    candidate, or free text for a reply outside the offered options. A body
+    with no `result` is a call the tool rejected. A dismissal of the pause and
+    a question left to the planner are the user declining to choose, and blank
+    text says nothing.
     """
     return any(_said(answer) for answer in _answers(body.get("result")).values())
 
@@ -452,9 +450,8 @@ def user_spoke_since_recorded(call: PlannerCall, version: int) -> bool:
     Every Studio turn has a transcript of its own (`planner.session`), and
     every turn starts with the user's message. A plan this transcript holds
     no recording response for was recorded before that message, so this
-    answers `True`. The planner adapter
-    seeds such a plan from the graph's record
-    (`harness.planner_adapter.PlannerAdapter`).
+    answers `True`. The planner adapter seeds such a plan from the graph's
+    record (`harness.planner_adapter.PlannerAdapter`).
     """
     last: object = None
     recorded = False
@@ -512,8 +509,8 @@ def answers_since_referral(call: PlannerCall) -> ReferralAnswers:
     pairs them. A pick made before the referral is not counted. Picks keep the
     order the answers came in. An ask with no answer, a skip included, leaves
     every id it offered unanswered. An ask whose response has no `result`,
-    one the tool refused, never reached the user, so it offered
-    nothing. A pending ask has no response and stays unanswered.
+    one the tool refused, never reached the user, so it offered nothing. A
+    pending ask has no response and stays unanswered.
 
     `picked_ever` holds the user's standing picks since the first referral,
     which a later translation does not clear. An answered ask, picked or in

@@ -77,24 +77,24 @@ async def _draft(
     conversation's search readings and this node only validates it
     (`PlannerModel`'s contract): versioning, `previous_version` lineage and the
     DRAFT/PENDING_APPROVAL transitions are enforced by `planner.plan.Plan`
-    itself, inside the planner, never here.
+    itself, inside the planner.
 
-    Three edges out: `"ok"`, to the `approve` node, for a drafted plan;
-    `"pending_refusal"`, also to the `approve` node, for a planner that
-    refuses to draft one at all -- either `PlannerAdapter`'s own
+    Three edges leave the node. `"ok"` goes to the `approve` node with a
+    drafted plan. `"pending_refusal"` also goes to `approve`, for a planner
+    that refuses to draft one at all (`PlannerAdapter`'s own
     `MAX_PLAN_ROUNDS` cap, or `starts_new_plan` refused as `QUESTION_FIXED`
-    because the turn's question is fixed (`submission.service._resolve_intent`)
-    -- surfaced as `{"refused": {"text": ...}}` rather than a raised
-    `PlannerAdapterError` -- while `ctx.state["plan"]` still holds a plan
-    `PENDING_APPROVAL`; and `"refused"`, to `plan_done`, for the same two
-    refusals when it does not. Raising `PlannerAdapterError` here instead
-    would fail the turn, abandoning exactly the plan a refusal that still has
-    one pending needs the user to be able to act on. `ctx.state["plan"]` is
-    never written on either refusal edge, so it is unchanged either way; what
-    differs is only whether that unchanged record is worth offering again.
-    `"refused"` covers a refusal on a first draft (nothing was ever submitted
-    this turn) and on a replan (the record on file is already `APPROVED`, not
-    something a fresh approval could act on). A planner that raises fails the
+    because the turn's question is fixed,
+    `submission.service._resolve_intent`) while `ctx.state["plan"]` still
+    holds a plan `PENDING_APPROVAL`. The refusal arrives as
+    `{"refused": {"text": ...}}` rather than a raised `PlannerAdapterError`,
+    which would fail the turn and abandon the plan the user still needs to
+    act on. `"refused"` goes to `plan_done` for the same two refusals when
+    no such plan is on record. `ctx.state["plan"]` is never written on
+    either refusal edge, so it is unchanged either way. The edges differ in
+    whether that unchanged record is worth offering again. `"refused"`
+    covers a refusal on a first draft (nothing was ever submitted this turn)
+    and on a replan (the record on file is already `APPROVED`, so a fresh
+    approval cannot act on it). A planner that raises fails the
     turn. A planner that answers `"asked"`, for a planner run that ended on a
     question for the user (`ask_user_question`, `planner.specs`), pauses the
     entry on that question (`planner_ask_pause`); the resume runs the planner
@@ -116,14 +116,14 @@ async def _draft(
     planner decision's row so) replans with the user's pick held: the
     planner is passed it, and admission refuses a plan that does not state
     it. The run can be stopped as a switch is, so it runs under the switch
-    node's `_unless_stopped`. A stop or a refusal leaves on
+    node's `_unless_stopped`. A stop or a refusal ends on
     `"pending_refusal"` with the unchanged plan and the `switch_failed` the
     switch node offers (`switch_failed_offer`). It puts back the state from
     before the pick (`_pick_snapshot`), as it does when the run raises.
     Every end of the entry but a planner-side ask clears the pick, so no
     later entry or revision of the plan holds it. An ask keeps the replan's
     state for its resume and records the snapshot under `PICK_REPLAN_KEY`,
-    which the resume restores from, and whose replan runs under
+    which the resume restores from, and the resumed replan runs under
     `_unless_stopped` again. The entry's `PlannerStarted` says it is a
     pick's.
 
@@ -140,25 +140,22 @@ async def _draft(
     refusal = payload.get("refusal")
     amendment_answer = payload.get("answer")
     amendment = amendment_answer.get("amendment") if isinstance(amendment_answer, dict) else None
-    # A first-draft entry -- `plan_start`'s, the only one of the three
-    # that lands here with neither a `"plan"` key (`approve`'s
-    # own "amend" route, whether the answer carries amendment text or
-    # merely names a stale revision) nor a `"refusal"` key (`execute`'s own
-    # "replan" route) -- passes no `prior_plan`, even when
-    # `ctx.state["plan"]` already holds one. Keyed on which of those the
-    # payload carries, not on whether `refusal`/`amendment` themselves
-    # are `None`: a stale-revision "amend" carries no amendment text
-    # either, and reading that shape as a first draft would wipe out a
-    # plan still `PENDING_APPROVAL` right before the `approve` node re-offers
-    # it. A later `plan` call in the same turn finds the earlier call's
-    # plan on record -- withholding it here is what lets
-    # `harness.planner_adapter.PlannerAdapter.__call__` tell this is a genuine
-    # first draft and clear its own `planner:plan` drafting state for it,
-    # rather than reading as a continuing call on a plan already drafted
-    # this turn that would
-    # need `starts_new_plan` (refused, the turn's question being
-    # fixed) to draft anything but an amendment to
-    # that stale plan.
+    # A first-draft entry passes no `prior_plan`, even when
+    # `ctx.state["plan"]` already holds one. It is `plan_start`'s, the only
+    # entry of the three that carries neither a `"plan"` key (`approve`'s
+    # "amend" edge, whether the answer carries amendment text or merely
+    # names a stale revision) nor a `"refusal"` key (`execute`'s "replan"
+    # edge). The test is which keys the payload carries, because a
+    # stale-revision "amend" carries no amendment text either, and reading
+    # that shape as a first draft would wipe out a plan still
+    # `PENDING_APPROVAL` right before the `approve` node offers it again.
+    # A later `plan` call in the same turn finds the earlier call's plan on
+    # record. Withholding it here lets
+    # `harness.planner_adapter.PlannerAdapter.__call__` see a genuine first
+    # draft and clear its own `planner:plan` drafting state. Otherwise it
+    # would read a continuing call on a plan already drafted this turn,
+    # which needs `starts_new_plan` (refused, the turn's question being
+    # fixed) to draft anything but an amendment to that stale plan.
     existing = readable_plan(ctx, raw)
     is_first_draft = "plan" not in payload and "refusal" not in payload
     # The plan this entry amends or replans could not be read: found so
@@ -248,14 +245,12 @@ async def _draft(
     if refused is not None:
         text = str(refused.get("text", ""))
         if existing is not None and existing.status is PlanStatus.PENDING_APPROVAL:
-            # The plan the user was already looking at is untouched
-            # (see the docstring: this refusal never writes
-            # `ctx.state["plan"]`) and still `PENDING_APPROVAL`, so it
-            # is a real thing to re-offer, not a stale claim -- go
-            # back to the `approve` node with that same plan, carrying the
-            # refusal's own sentence so the user reads why their
-            # change did not land before seeing the unchanged plan
-            # again.
+            # The plan the user was already looking at is untouched (this
+            # refusal never writes `ctx.state["plan"]`) and still
+            # `PENDING_APPROVAL`, so it can be offered again as it stands.
+            # Go back to the `approve` node with that same plan, carrying
+            # the refusal's own sentence so the user reads why their change
+            # did not land before seeing the unchanged plan again.
             note = (
                 f"{text} Version {existing.version} is still there to "
                 "approve; anything past that needs a new question."

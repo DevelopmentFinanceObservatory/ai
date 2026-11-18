@@ -390,8 +390,8 @@ class _PendingInterrupt:
 # instance can take over.
 SEGMENT_TTL_S = 45
 # How often a stream's heartbeat renews the live segment's lease
-# (`harness.turn.loop.run_segment`, `harness.studio.StudioRunner._heartbeat`), well inside the TTL so a slow renewal still lands before it
-# lapses.
+# (`harness.turn.loop.run_segment`, `harness.studio.StudioRunner._heartbeat`),
+# well inside the TTL so a slow renewal still lands before it lapses.
 HEARTBEAT_INTERVAL_S = 5
 
 
@@ -457,7 +457,7 @@ class ConversationState:
     # cleared by `close_segment`; a `checkpoint` writes whatever value it holds
     # like any other durable field.
     segment: Segment | None = None
-    # Set while a stream runs on this instance: setting it makes the
+    # Set while a stream runs on this instance. Setting it makes the
     # stream's heartbeat renew the lease at once, so a Stop posted here
     # (`POST /api/studio/cancel`) or a lease another instance took reaches
     # the stream without waiting for the next beat (`renew_lease_now`).
@@ -816,7 +816,7 @@ class ConversationState:
         match_notes: str | None = None,
         basis_line: str | None = None,
     ) -> None:
-        """Append the turn's record, once -- the resume protocol can end a
+        """Append the turn's record, once, since the resume protocol can end a
         turn from more than one code path. A turn recorded with an `error`
         drops its pending interrupts: no pause is left to answer, so
         `/interrupt` answers 404. The segment's telemetry span takes the
@@ -1015,8 +1015,8 @@ class ConversationState:
         turn.request on a paused conversation ends the pause. Returns the
         previous turn when this closed it as `abandoned`, whatever state it
         was left in, for the caller to record its closing span once the new
-        turn's claim commits (`record_closed_turn_span`). It opens no span:
-        the owner of the segment the claim starts opens that segment's
+        turn's claim commits (`record_closed_turn_span`). It opens no span.
+        The owner of the segment the claim starts opens that segment's
         (`harness.studio_stream`).
 
         A turn with a cursor whose stream's closing write failed is recorded
@@ -1024,7 +1024,7 @@ class ConversationState:
         (`harness.studio_store.StudioStore.load`). An Edit Card turn has no
         cursor, so one whose stream sent its ending frame and whose closing
         write then failed is recorded `abandoned` here, where its stream
-        said otherwise. That one-fault case is a known gap."""
+        said otherwise."""
         previous = ClosedTurn(self.trace_id, self.turn_user_message, "abandoned")
         abandoned = None
         self.turn_index += 1
@@ -1184,10 +1184,10 @@ def make_remove_cards(store: StudioStore) -> Any:
     the stream learn what the commit did.
 
     A `SegmentLost` or `DatabaseUnavailable` there has the stream renew its
-    lease at once (`renew_lease_now`) before it propagates: raised inside
-    the tool, it reaches the model as a failed call, and the renewal that
-    finds the lease gone, or that cannot reach the database before the
-    lease's deadline either, ends the turn's segment as lost."""
+    lease at once (`renew_lease_now`) before it propagates. Raised inside
+    the tool, it reaches the model as a failed call. The renewal then ends
+    the turn's segment as lost, whether it finds the lease gone or cannot
+    reach the database before the lease's deadline."""
 
     async def remove(*, component_ids: list[str], all_cards: bool) -> tuple[list[str], list[str]]:
         key = current_conversation_key.get()

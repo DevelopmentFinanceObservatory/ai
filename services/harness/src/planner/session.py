@@ -13,12 +13,12 @@ turn loop writes, and the planner's own run records, which the planner host
   order the calls were made.
 
 `SessionCall` is the `planner.call.PlannerCall` of a call over the
-transcript as it stands when the call runs. So a call sees the earlier
+transcript as it stands when the call runs, so a call sees the earlier
 records, its own response's record, and no answer of its own response's
 calls.
 
-A record's body is JSON, as the transcript stores it: a planner record's is
-a google-genai `Content` dumped with `model_dump(mode="json",
+A record's body is JSON, as the transcript stores it. A planner record's is a
+google-genai `Content` dumped with `model_dump(mode="json",
 exclude_none=True)`, read here as the dict it is.
 """
 
@@ -110,7 +110,7 @@ class SessionCall:
 
 
 def _parts(record: AgentRecord, kind: str) -> list[Mapping[str, Any]]:
-    """The parts of a planner record of `kind`, in order; none for any other record."""
+    """The parts of a planner record of `kind`, in order, or none for any other record."""
     if record.agent != "planner" or record.kind != kind:
         return []
     return list(record.body.get("parts") or ())
@@ -170,11 +170,11 @@ def session_steps(records: Records, *, serving: str | None = None) -> Iterator[S
 
     The planner's own ask (`PLANNER_ASK`) is a `call` step under the call's id,
     its question flat in `args`. A planner ask its tool refused never reached
-    the user: it yields no step at all, so every reader sees the transcript as
+    the user. It yields no step at all, so every reader sees the transcript as
     if the ask had not been made. An accepted one's tool answers
     `ASK_ACCEPTED`, which says nothing the user did and is not read. The
     planner node pauses on it (`PLANNER_ASK_PAUSE`), and that pause yields no
-    step of its own: it puts the ask its payload names (`ASKED_CALL_ID`) to
+    step of its own. It puts the ask its payload names (`ASKED_CALL_ID`) to
     the user, so the answer to the pause is the answer to that call. Every
     other tool's response is a `response` step.
 
@@ -218,7 +218,7 @@ def _loop_step(
     record: AgentRecord, calls: dict[str, dict[str, Any]], asks: Mapping[str, str]
 ) -> Step | None:
     """The step of a record the turn loop wrote, other than a planner-side
-    pause, recording a pause's `args` in `calls`; `None` for a record no
+    pause, recording a pause's `args` in `calls`, or `None` for a record no
     reader reads."""
     body = record.body
     if record.kind == transcript.USER:

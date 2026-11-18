@@ -13,11 +13,11 @@ a model or an upstream would answer:
   the canned plan `harness.scripted_plan` builds, through a `propose_plan`
   that declares the plan on record ready
   (`harness.scripted.use_compiled_proposals`), so the adapter renders its real
-  first message and the graph's approval, execution and hand-back nodes
-  run as served, or, when the case scripts it (`planner`),
-  answers from that script and drives the real `propose_plan`, whose
-  translation discovers through the case's canned `translator_search`
-  results and compiles against the real servers' tool schemas;
+  first message and the graph's approval, execution and hand-back nodes run
+  as served. When the case scripts the planner (`planner`), it answers from
+  that script and drives the real `propose_plan`, whose translation
+  discovers through the case's canned `translator_search` results and
+  compiles against the real servers' tool schemas;
 - search answers from the case's canned envelopes, run through the digest the
   served resolver builds (`harness.tool_contracts.resolver_digest`);
 - the tool surface and executor are `harness.scripted`'s, wrapped to log

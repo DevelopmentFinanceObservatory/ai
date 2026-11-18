@@ -59,7 +59,7 @@ switch the user stops ends the same way under `SWITCH_CANCELLED`, so the
 card stays answerable: the revision runs under the turn's `StopScope`
 (`harness.turn.node.NodeCtx.stop`), so the first Stop while it runs ends
 the revision and the node returns its offer, which the loop writes with the
-state put back; a second Stop ends the turn. A switch that raises closes
+state put back. A second Stop ends the turn. A switch that raises closes
 the turn with nothing it wrote stored.
 
 A chip under an answer applies one option the same way, with no plan

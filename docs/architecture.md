@@ -36,11 +36,12 @@ the alternatives it considered, and the evidence an acceptable answer rests on.
 It holds the plan at the user's approval, ships inside `harness` as a sibling
 top-level module, and knows nothing about execution. The DFO Studio runs the
 modules described below, adapted for its workflow by
-`harness.planner_adapter.PlannerAdapter`. The planner is a Pydantic AI agent that
-runs inside the turn's `planner` node (`harness.graph.planning`). Its model calls go
-through `planner.model` over `harness.gemini_wire`, and the adapter writes each response and
-its tools' answers to the turn's transcript (`planner.session`). The adapter builds the
-tool specs and the instruction the agent serves.
+`harness.planner_adapter.PlannerAdapter`. The planner is a Pydantic AI agent
+that runs inside the turn's `planner` node (`harness.graph.planning`). Its
+model calls go through `planner.model` over `harness.gemini_wire`, and the
+adapter writes each response and its tools' answers to the turn's transcript
+(`planner.session`). The adapter builds the tool specs and the instruction the
+agent serves.
 
 The plan-approve-execute workflow spans four top-level modules beside it,
 `planner`, `translator`, `compiler` and `executor`. The planner settles
@@ -198,10 +199,10 @@ text as its step's `StepRecord.digest`, which the workflow's `plan_done`
 node hands to the agent as `step_summaries`. The planner's model reaches
 these Python functions through the planner's tool specs (`planner.specs`),
 which `harness.planner_adapter.PlannerAdapter` serves, so no
-`CallToolResult` dump is built for them. Where a tool
-does answer with a digest, a refusal's machine-readable detail rides the
-same call. data-mcp and analysis-mcp put the actionable recovery grammar in
-`structuredContent`, and the harness's own mounted consumers read it there.
+`CallToolResult` dump is built for them. Where a tool does answer with a
+digest, a refusal's machine-readable detail rides the same call. data-mcp and
+analysis-mcp put the actionable recovery grammar in `structuredContent`, and
+the harness's own mounted consumers read it there.
 
 **Telemetry.** The harness records agent usage through its own Langfuse and
 OpenTelemetry traces. The website proxy's analytics cover other usage, so

@@ -20,11 +20,11 @@ is the one the turn that admitted it wrote.
 
 A completed run's delivery is decided by `harness.graph.delivery.deliver`, as
 `plan_done` decides it for a run that completes in its own turn:
-`Resumed.acknowledge`, called once the hand-back is in the turn's cursor, records
-each run whose frames were all read `executor.ledger.Delivered`, and a run
-with a frame left unread is recorded `executor.ledger.Undelivered`, its
-standing carrying `harness.graph.delivery.RESULT_UNDELIVERED`, and is listed again by the next turn
-until the delivery bound ends it.
+`Resumed.acknowledge`, called once the hand-back is in the turn's cursor,
+records each run whose frames were all read `executor.ledger.Delivered`, and
+a run with a frame left unread is recorded `executor.ledger.Undelivered`, its
+standing carrying `harness.graph.delivery.RESULT_UNDELIVERED`, and is listed
+again by the next turn until the delivery bound ends it.
 
 Carrying a run on never ends the turn. A run whose stored submission is
 missing or unreadable is recorded failed (`run_record_unreadable`); a fault

@@ -475,8 +475,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     (`SessionView.record_reduction_refused`).
     """
     try:
-        # `planner.tool_spec.convert_arguments` silently falls back to raw dicts for the
-        # *whole* list if any single item fails validation (e.g. a
+        # `planner.tool_spec.convert_arguments` silently falls back to raw
+        # dicts for the *whole* list if any single item fails validation (e.g. a
         # Decision's `chosen` not in `options`), and skips conversion
         # entirely for a value that isn't a list at all. Re-validating here
         # turns either case into a retryable tool problem, keeping
@@ -1039,9 +1039,10 @@ def _slot_code_writes(slot: str) -> bool:
 class _Patch(BaseModel):
     """The lists one `propose_plan` call states, checked before they reach a `Plan`.
 
-    `planner.tool_spec.convert_arguments` hands `propose_plan` raw values wherever it
-    could not convert them, and the tool's declaration is built from the signature with every `Annotated`
-    limit stripped, so the count and shape of each list is enforced here. A
+    `planner.tool_spec.convert_arguments` hands `propose_plan` raw values
+    wherever it could not convert them, and the tool's declaration is built
+    from the signature with every `Annotated` limit stripped, so the count
+    and shape of each list is enforced here. A
     removal names a slot or an id, so it is held to `Identifier`; each list
     holds no more items than a plan does.
     """

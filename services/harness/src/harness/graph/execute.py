@@ -281,7 +281,7 @@ def _step_progress(
     step_id: str, report: ProgressReport, *, tool: str, place: _CardPlace | None
 ) -> StepProgress:
     """Step `step_id`'s progress report, with its `place` on the plan card,
-    each row field `None` for a step the card does not show."""
+    each row field `None` when the card shows no row for the step."""
     return StepProgress(
         step_id=step_id,
         tool=tool,

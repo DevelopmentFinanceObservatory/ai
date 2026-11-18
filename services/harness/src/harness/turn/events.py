@@ -2,8 +2,8 @@
 translator turns into wire frames beside the events of the graph's own
 nodes (`harness.turn.node.NodeCtx.emit`).
 
-Each is a frozen dataclass and carries what the translator reads and nothing
-of how it was produced. `TurnEvent` is their union.
+Each is a frozen dataclass carrying what the translator reads. `TurnEvent`
+is their union.
 """
 
 from __future__ import annotations
