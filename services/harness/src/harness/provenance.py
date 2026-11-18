@@ -213,8 +213,7 @@ class CardLineages(Protocol):
     ) -> CardLineage | None:
         """The stored lineage of card `component_id`, else of a card drawn
         from `frame`, else of a card whose write named `frame`; `None` when
-        none is stored. Raises `CardLineageDecodeError` for a row that does
-        not decode."""
+        none is stored or none decodes."""
         ...
 
 

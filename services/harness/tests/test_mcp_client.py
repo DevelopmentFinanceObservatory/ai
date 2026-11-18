@@ -40,6 +40,7 @@ from data_mcp.stat_var_list import STAT_VARS_OMITTED_KEY
 from executor.classify import MAX_ATTEMPTS_PER_STEP
 from fastmcp import Client, Context, FastMCP
 from fastmcp.tools import ToolResult
+from harness import mcp_client
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.mcp_client import (
     McpExecutor,
@@ -987,8 +988,6 @@ class _CardLineages:
     def __init__(self) -> None:
         self.committed: list[CardLineage] = []
         self.reads: list[dict[str, Any]] = []
-        # How many reads fail first, as a store whose retries ran out does.
-        self.fails = 0
         # Raised by every read when set: a row that does not decode, a fault.
         self.raises: Exception | None = None
         # How long each read takes.
@@ -1009,9 +1008,6 @@ class _CardLineages:
     ) -> CardLineage | None:
         del principal, conversation_id
         self.reads.append({"component_id": component_id, "frame": frame})
-        if self.fails:
-            self.fails -= 1
-            raise DatabaseUnavailable("the conversation store stayed unreachable")
         if self.delay_s:
             await asyncio.sleep(self.delay_s)
         if self.raises is not None:
@@ -1066,8 +1062,8 @@ async def test_a_revise_of_a_card_with_no_lineage_row_borrows_the_row_of_a_card_
     later drawn on F stored F's. A fresh executor revises X, naming F as Edit
     Card does: one read finds no row of X's and Y's row for F, and X is drawn
     with Y's sources and count. A revise of Y on the instance that drew it,
-    which holds F, reads nothing. Each revise carries its card's lineage for
-    its write to commit, and the store keeps a card's first row."""
+    which holds F, reads nothing and carries no lineage. X's revise, whose
+    read found no row of X's own, carries X's for its write to commit."""
     client = scripted_presentation_client(
         [
             _written_on_f("cmp_y"),
@@ -1101,7 +1097,7 @@ async def test_a_revise_of_a_card_with_no_lineage_row_borrows_the_row_of_a_card_
     assert revised_x[CARD_LINEAGE_KEY].component_id == "cmp_x"
     assert revised_x[CARD_LINEAGE_KEY].lineage == lineages.committed[0].lineage
     assert revised_y["outcome"] == "ok", revised_y
-    assert revised_y[CARD_LINEAGE_KEY].component_id == "cmp_y"
+    assert CARD_LINEAGE_KEY not in revised_y
 
 
 async def test_a_card_on_a_bare_spec_id_the_platform_resolves_to_a_held_frame_draws(
@@ -1125,138 +1121,72 @@ async def test_a_card_on_a_bare_spec_id_the_platform_resolves_to_a_held_frame_dr
     assert drawn[CARD_LINEAGE_KEY].frame == _KEY_F
 
 
-async def test_a_lineage_that_cannot_be_read_refuses_the_write_before_it_is_sent(
-    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
-) -> None:
-    """The store's retries ran out: the write is refused with a code that says
-    it may be tried again, and nothing reaches the platform. The next write,
-    once the store answers, draws."""
-    client = scripted_presentation_client([_written_on_f("cmp_1"), _written_on_f("cmp_2")])
-    current_conversation_key.set(("principal", current_conversation_id.get()))
-    lineages = _CardLineages()
-    drawing = McpExecutor(settings=Settings(), provenance=_drawn_on_f(), card_lineages=lineages)
-    drawn = await drawing(
-        tool="write_component",
-        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F}},
-    )
-    lineages.commit(drawn.pop(CARD_LINEAGE_KEY))
-    lineages.fails = 1
-    fresh = McpExecutor(settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages)
-    args = {"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F}}
-
-    refused = await fresh(tool="write_component", args=args)
-    sent = len(client.calls)
-    drawn_again = await fresh(tool="write_component", args=args)
-
-    assert refused["outcome"] == "refusal"
-    assert refused["refusal"]["code"] == HarnessCode.TRANSIENT_UNAVAILABLE
-    assert refused["refusal"]["retry_mode"] == "retry_after_delay"
-    assert sent == 1
-    assert drawn_again["outcome"] == "ok", drawn_again
-    assert (
-        drawn_again["component"]["provenance"]["sources"]
-        == (drawn["component"]["provenance"]["sources"])
-    )
-
-
 @pytest.mark.parametrize(
-    ("args", "undecodable"),
+    ("args", "fault"),
     [
         pytest.param(
             {"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_G}},
-            False,
+            None,
             id="create-on-a-frame-no-card-holds",
         ),
         pytest.param(
             {"component_id": "cmp_x", "intent": {"title": "New"}, CARD_FRAME_KEY: _FRAME_G},
-            False,
+            None,
             id="revise-on-a-frame-no-card-holds",
         ),
         pytest.param(
-            {"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F}},
-            True,
+            {"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_G}},
+            CardLineageDecodeError("members do not decode"),
             id="row-that-does-not-decode",
         ),
+        pytest.param(
+            {"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_G}},
+            DatabaseUnavailable("unreachable"),
+            id="store-unreachable",
+        ),
+        pytest.param(
+            {"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_G}},
+            LookupError("not loaded"),
+            id="not-loaded",
+        ),
+        pytest.param(
+            {"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_G}},
+            "hangs",
+            id="past-the-budget",
+        ),
     ],
 )
-async def test_a_write_whose_frame_has_no_lineage_anywhere_is_refused_before_it_is_sent(
+async def test_a_write_whose_lineage_cannot_be_restored_goes_on_as_with_no_lineage_store(
     scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
     args: dict[str, Any],
-    undecodable: bool,
+    fault: Exception | str | None,
 ) -> None:
-    """No lineage in memory or stored with any card, or a stored one that
-    does not decode: the card could state no source, so nothing is sent and
-    the platform stores no card the canvas cannot show."""
-    client = scripted_presentation_client([])
+    """Restoring is best effort. Whether no card on the frame has a row or the
+    read fails, however it fails, the write is sent and comes back exactly as
+    it does from an executor with no lineage store: here, a card withheld
+    for a frame with no lineage."""
+    monkeypatch.setattr(mcp_client, "_LINEAGE_READ_BUDGET_S", 0.05)
+    client = scripted_presentation_client([_written_on_f("cmp_1"), _written_on_f("cmp_1")])
     current_conversation_key.set(("principal", current_conversation_id.get()))
     lineages = _CardLineages()
-    lineages.commit(
-        CardLineage(component_id="cmp_y", frame=_KEY_F, lineage=(), stat_var_count=None)
-    )
-    if undecodable:
-        lineages.raises = CardLineageDecodeError("members do not decode")
-    executor = McpExecutor(
+    if fault == "hangs":
+        lineages.delay_s = 60.0
+    elif isinstance(fault, Exception):
+        lineages.raises = fault
+    with_store = McpExecutor(
         settings=Settings(), provenance=ProvenanceStore(), card_lineages=lineages
     )
+    without = McpExecutor(settings=Settings(), provenance=ProvenanceStore())
 
-    refused = await executor(tool="write_component", args=args)
+    async with asyncio.timeout(5):
+        written = await with_store(tool="write_component", args=dict(args))
+    expected = await without(tool="write_component", args=dict(args))
 
-    assert refused["outcome"] == "refusal"
-    assert (refused["refusal"]["code"], refused["refusal"]["retry_mode"]) == (
-        HarnessCode.PROVENANCE_UNAVAILABLE,
-        "do_not_retry",
-    )
-    assert client.calls == []
-
-
-@pytest.mark.parametrize(
-    ("fault", "code", "retry_mode"),
-    [
-        pytest.param(
-            DatabaseUnavailable("retries ran out"),
-            "transient_unavailable",
-            "retry_after_delay",
-            id="store-retries-ran-out",
-        ),
-        pytest.param(
-            ConnectionRefusedError("refused"),
-            "transient_unavailable",
-            "retry_after_delay",
-            id="transient-fault",
-        ),
-        pytest.param(None, "transient_unavailable", "retry_after_delay", id="past-the-budget"),
-        pytest.param(LookupError("not loaded"), "raised", "do_not_retry", id="not-loaded"),
-        pytest.param(RuntimeError("a bug"), "raised", "do_not_retry", id="any-other-fault"),
-    ],
-)
-async def test_a_lineage_read_that_fails_refuses_the_write_by_whether_a_retry_may_mend_it(
-    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
-    fault: Exception | None,
-    code: str,
-    retry_mode: str,
-) -> None:
-    """A fault a retry may mend (the store's retries ran out, a transient
-    fault, a read past the write's own deadline) is retryable; any other is a
-    fault in DFO that another try would meet again. Nothing is sent."""
-    client = scripted_presentation_client([])
-    current_conversation_key.set(("principal", current_conversation_id.get()))
-    lineages = _CardLineages()
-    lineages.raises = fault
-    if fault is None:
-        lineages.delay_s = 5.0
-    executor = McpExecutor(
-        settings=Settings(mcp_call_timeout_s=0.05),
-        provenance=ProvenanceStore(),
-        card_lineages=lineages,
-    )
-
-    refused = await executor(
-        tool="write_component",
-        args={"intent": {"type": "line_chart", "title": "t", "frame_ref": _FRAME_F}},
-    )
-
-    assert (refused["refusal"]["code"], refused["refusal"]["retry_mode"]) == (code, retry_mode)
-    assert client.calls == []
+    assert client.calls == ["write_component", "write_component"]
+    assert written == expected
+    assert written["refusal"]["code"] == HarnessCode.PROVENANCE_UNAVAILABLE
+    assert len(lineages.reads) == 2
 
 
 async def test_a_card_whose_resolved_frame_the_store_lacks_reads_it_once_after_the_write(

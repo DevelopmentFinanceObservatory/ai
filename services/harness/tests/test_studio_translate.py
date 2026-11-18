@@ -2116,6 +2116,40 @@ async def test_component_frames_land_false_commits_the_token_and_lineage_of_a_dr
     assert await other.card_lineage("principal", "c1", component_id="cmp_two") == lineage
 
 
+async def test_component_frames_land_false_leaves_the_token_for_the_closing_write_when_its_commit_fails(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Committing a card that did not land is best effort: a write that fails
+    leaves the token with the conversation, as for a card with no lineage."""
+    current_conversation_id.set("c1")
+    store, conversation = await _stored_conversation(pg_engine)
+    translator = _Translator(
+        conversation=conversation, recorder=_RecordingExecutor(_dummy_executor, store=store)
+    )
+
+    async def unreachable(*args: Any, **kwargs: Any) -> None:
+        raise ConnectionRefusedError("refused")
+
+    monkeypatch.setattr(store, "change_canvas", unreachable)
+    lineage = CardLineage(
+        component_id="cmp_two",
+        frame=("ops_f", "ocv_f"),
+        lineage=(ProvenanceInput("spec_a", "cv_a", {"citation": {"text": "a"}}),),
+        stat_var_count=1,
+    )
+
+    frames = await _component_frames_of(
+        translator,
+        _written_component("cmp_two"),
+        land=False,
+        write_token="token-two",
+        card_lineage=lineage,
+    )
+
+    assert [getattr(f, "event", None) for f in frames] == ["component.created"]
+    assert translator._conversation.write_tokens == {"cmp_two": "token-two"}
+
+
 # --- `_RecordingExecutor.land_component`: stamps the record, decides nothing -
 
 

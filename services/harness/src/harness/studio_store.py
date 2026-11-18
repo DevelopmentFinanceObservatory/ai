@@ -110,7 +110,6 @@ from harness.studio_state import (
     _PendingOption,
     _PendingQuestion,
     _wire_id,
-    renew_lease_now,
 )
 from harness.tool_contracts import HarnessCode
 from harness.turn.store import CLOSED, Cursor, TurnStatus, cursor_at, finish_on
@@ -874,7 +873,8 @@ _INSERT_CARD_LINEAGE = text(
 
 # A card's stored lineage in conversation `:pk`: the row of card
 # `:component_id`, else one drawn from the frame `:spec_id`/`:content_version`,
-# else one whose write named that frame, the latest written first among equals.
+# else one whose write named that frame, the latest written first among equals,
+# at most `:limit` of them.
 # Cards on one frame share one lineage, so any of them serves.
 _SELECT_CARD_LINEAGE = text(
     "SELECT component_id, spec_id, content_version, requested_spec_id, "
@@ -886,8 +886,12 @@ _SELECT_CARD_LINEAGE = text(
     "ORDER BY COALESCE(component_id = :component_id, false) DESC, "
     "COALESCE(spec_id = :spec_id AND content_version = :content_version, false) DESC, "
     "created_at DESC, component_id "
-    "LIMIT 1"
+    "LIMIT :limit"
 )
+
+# How many matching rows `StudioStore.card_lineage` reads, so a row that does
+# not decode leaves the next to serve.
+_CARD_LINEAGE_CANDIDATES = 5
 
 
 def _card_lineage_row(lineage: CardLineage) -> dict[str, Any] | None:
@@ -1528,11 +1532,8 @@ class StudioStore:
         entry: _RuntimeEntry,
         conversation_id: str,
         attempt: Callable[[], Awaitable[T]],
-        *,
-        what: str = "write",
     ) -> T:
-        """Run `attempt`, a write fenced on the live segment or a read a
-        stream makes before one (`card_lineage`), retrying a
+        """Run `attempt`, a write fenced on the live segment, retrying a
         transient database fault (`compiler.surface.transient`, the
         harness's one fault classifier) with backoff until the lease's
         deadline (`lease_deadline`), then raising `DatabaseUnavailable` from
@@ -1551,13 +1552,12 @@ class StudioStore:
                     raise
                 if self._clock() + delay >= self._lease_deadline(entry):
                     raise DatabaseUnavailable(
-                        f"conversation {conversation_id!r} {what} did not complete before "
-                        f"its lease's deadline: {exc}"
+                        f"conversation {conversation_id!r} could not be written before its "
+                        f"lease's deadline: {exc}"
                     ) from exc
                 logger.warning(
-                    "studio store: conversation %s %s failed, retrying in %ss: %s",
+                    "studio store: conversation %s write failed, retrying in %ss: %s",
                     conversation_id,
-                    what,
                     delay,
                     exc,
                 )
@@ -2071,14 +2071,11 @@ class StudioStore:
     ) -> CardLineage | None:
         """The stored lineage of card `component_id`, else of a card drawn from
         `frame`, else of a card whose write named `frame`
-        (`harness.provenance.CardLineages`), read in one statement on the
-        conversation this instance loaded, with no lock. A transient database
-        fault is retried until the lease's deadline (`_retrying`), as the
-        stream's card writes are, then has the stream renew its lease at once
-        (`renew_lease_now`) and raises `DatabaseUnavailable`. A row
-        that does not decode is logged with its key and raises
-        `CardLineageDecodeError`. `None` when no such card's lineage is
-        stored.
+        (`harness.provenance.CardLineages`), read in one statement and one
+        attempt on the conversation this instance loaded, with no lock and no
+        retry: the caller bounds the read and goes on without it. The first of
+        the matching rows that decodes serves; one that does not is logged with
+        its key and skipped. `None` when none is stored or none decodes.
 
         Raises:
             LookupError: This instance has not loaded the conversation.
@@ -2089,44 +2086,39 @@ class StudioStore:
         entry = self._runtime.get((principal, conversation_id))
         if entry is None or entry.pk is None:
             raise LookupError(f"conversation {conversation_id!r} is not loaded here")
-        params = {
-            "pk": entry.pk,
-            "component_id": component_id,
-            "spec_id": spec_id,
-            "content_version": content_version,
-        }
-
-        async def read() -> Any:
-            async with self._transaction() as conn:
-                return (await conn.execute(_SELECT_CARD_LINEAGE, params)).first()
-
-        try:
-            row = await self._retrying(entry, conversation_id, read, what="card lineage read")
-        except DatabaseUnavailable:
-            # The lease may be lost too: the stream renews at once, and ends
-            # when it is.
-            if entry.state is not None:
-                renew_lease_now(entry.state)
-            raise
-        if row is None:
-            return None
-        try:
-            lineage = lineage_from_json(row.members)
-        except CardLineageDecodeError:
-            logger.exception(
-                "studio store: the lineage row of conversation %s component_id=%r does not decode",
-                conversation_id,
-                row.component_id,
+        async with self._engine.begin() as conn:
+            rows = (
+                await conn.execute(
+                    _SELECT_CARD_LINEAGE,
+                    {
+                        "pk": entry.pk,
+                        "component_id": component_id,
+                        "spec_id": spec_id,
+                        "content_version": content_version,
+                        "limit": _CARD_LINEAGE_CANDIDATES,
+                    },
+                )
+            ).all()
+        for row in rows:
+            try:
+                lineage = lineage_from_json(row.members)
+            except CardLineageDecodeError:
+                logger.exception(
+                    "studio store: skipping the lineage row of conversation %s "
+                    "component_id=%r, which does not decode",
+                    conversation_id,
+                    row.component_id,
+                )
+                continue
+            requested = (row.requested_spec_id, row.requested_content_version)
+            return CardLineage(
+                component_id=row.component_id,
+                frame=(row.spec_id, row.content_version),
+                lineage=lineage,
+                stat_var_count=row.stat_var_count,
+                requested=requested if requested != (None, None) else None,
             )
-            raise
-        requested = (row.requested_spec_id, row.requested_content_version)
-        return CardLineage(
-            component_id=row.component_id,
-            frame=(row.spec_id, row.content_version),
-            lineage=lineage,
-            stat_var_count=row.stat_var_count,
-            requested=requested if requested != (None, None) else None,
-        )
+        return None
 
     async def run_statuses(
         self, principal: str, conversation_id: str, *, conversation: ConversationState
