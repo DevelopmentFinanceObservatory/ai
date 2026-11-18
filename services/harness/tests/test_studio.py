@@ -77,7 +77,7 @@ from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.plan_display import decision_option_id
 from harness.planner_adapter import PlannerAdapter
 from harness.provenance import ProvenanceStore
-from harness.scripted import ScriptedPlannerModel, ScriptedSurface
+from harness.scripted import SCRIPTED_SPEC, ScriptedPlannerModel, ScriptedSurface
 from harness.sentences import FAILURE_CLASS, StopCode, refusal_sentence
 from harness.settings import Settings
 from harness.studio import (
@@ -8198,3 +8198,44 @@ def test_the_turn_keeps_the_plan_records_readings_and_spec_blocks_its_events_wri
     assert conversation.turn_plans == [{"plan": 1}]
     assert conversation.turn_readings == [{"reading": 1}]
     assert conversation.turn_specs == {"spec_a": {"spec_id": "spec_a"}}
+
+
+@pytest.mark.parametrize("closer", ["cancel", "next_turn"])
+async def test_a_paused_turn_closed_without_a_stream_keeps_its_stored_spec_blocks(
+    closer: str,
+) -> None:
+    """The record a turn paused on a question closes with, by `/cancel` or by
+    the next `/turn` abandoning it, holds the spec blocks the turn's rows
+    hold, as a turn closed any other way does."""
+    app = _app(
+        search_call("aid to Kenya"),
+        *_plan("q with forks", *_ask()),
+        resolver=CannedSearch(definite_envelope(spec_id=SCRIPTED_SPEC)),
+        executor=ScriptedExecutor(),
+        tool_surface=ScriptedSurface(),
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        paused = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+        assert _events(paused)[-1] == "elicitation.request"
+        cursor = await app.state.studio.turns.open_cursor(PRINCIPAL, CONVERSATION)
+        assert cursor is not None
+        stored = await app.state.studio.turns.specs(cursor)
+        assert stored
+
+        if closer == "cancel":
+            cancel = await client.post(
+                "/api/studio/cancel",
+                json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
+                headers=AUTH,
+            )
+            assert cancel.status_code == 204
+        else:
+            await _stream(client, "/api/studio/turn", _turn_body("another question"))
+
+    record = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns[0]
+    assert record["error"] == ("cancelled" if closer == "cancel" else "abandoned")
+    assert record["specs"] == stored

@@ -1650,7 +1650,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             closed_here = False
             if conversation.turn_index and not conversation.turn_recorded:
                 # A turn paused on a question, or one its client left while
-                # it ran, is open with no stream to close it.
+                # it ran, is open with no stream to close it. Its records are
+                # taken first, so the close keeps them (`_open_turn_records`).
+                open_turn = await studio.turns.open_cursor(principal, body.conversation_id)
+                if open_turn is not None:
+                    await _open_turn_records(studio, conversation, open_turn)
                 conversation.close_turn(
                     final_text=conversation.turn_final_text, error=ErrorCode.CANCELLED.value
                 )
