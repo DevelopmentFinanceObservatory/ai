@@ -4484,18 +4484,29 @@ async def test_a_retried_resume_of_an_ask_must_carry_the_answers_that_resumed_it
     assert retry.status_code == status
 
 
+class _GatedSurface(ScriptedSurface):
+    """`ScriptedSurface`, but each `call_tool` waits for `release` first, so a
+    resumed segment holds its lease until the test lets it go on."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def call_tool(self, **kwargs: Any) -> ToolCallResult:
+        await self.release.wait()
+        return await super().call_tool(**kwargs)
+
+
 async def test_two_concurrent_first_answers_to_one_interrupt_give_one_stream_and_one_409() -> None:
     """A and B both answer the SAME fresh interrupt at once: whichever
     instance's claim save lands first resumes the turn; the other's save
     finds the ledger already moved and answers the existing 409, rather
-    than each resuming its own segment of the turn."""
-    app_a = _app(
-        *_plan(),
-        tool_surface=ScriptedSurface(),
-    )
-    app_b = _app(
-        tool_surface=ScriptedSurface(),
-    )
+    than each resuming its own segment of the turn. The winner's plan step
+    waits on a gate, so its segment still holds the lease when the loser's
+    answer comes back."""
+    surface_a, surface_b = _GatedSurface(), _GatedSurface()
+    app_a = _app(*_plan(), tool_surface=surface_a)
+    app_b = _app(tool_surface=surface_b)
 
     async with _client(app_a) as client_a:
         first = await _stream(client_a, "/api/studio/turn", _turn_body("q with forks"))
@@ -4516,6 +4527,12 @@ async def test_two_concurrent_first_answers_to_one_interrupt_give_one_stream_and
                 headers=AUTH,
             )
         )
+        done, _ = await asyncio.wait(
+            {task_a, task_b}, timeout=10, return_when=asyncio.FIRST_COMPLETED
+        )
+        assert [task.result().status_code for task in done] == [409]
+        surface_a.release.set()
+        surface_b.release.set()
         responses = await asyncio.gather(task_a, task_b)
 
     statuses = sorted(response.status_code for response in responses)
