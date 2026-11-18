@@ -539,8 +539,8 @@ class ConversationState:
     # as `changed_from` for a choice that holds another label now.
     turn_choice_baseline: dict[str, str] = field(default_factory=dict)
     turn_recorded: bool = False
-    # This instance's telemetry span for the turn's current `/interrupt` or
-    # Edit Card segment, on the turn's `trace_id`. `open_segment_span` opens
+    # This instance's telemetry span for the turn's current Edit Card
+    # segment, on the turn's `trace_id`. `open_segment_span` opens
     # it, and
     # `end_segment_span` ends it once when the segment ends on this instance,
     # so no span outlives the segment. Streams make it current with
@@ -1108,11 +1108,7 @@ class ConversationState:
     def open_segment_span(self) -> None:
         """Open a span for the segment about to run, on this conversation's
         `trace_id`, ending any span still held first (`end_leftover_span`).
-        The Edit Card stream opens its own here once its claim commits, and
-        each later segment of the turn, the `/interrupt` that resumes a pause
-        on any instance, opens its own here on the request's working copy
-        (`StudioStore.draft`), whose save hands the span to the live state
-        (`StudioStore._take_draft`)."""
+        The Edit Card stream opens its own here once its claim commits."""
         self.end_leftover_span()
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 

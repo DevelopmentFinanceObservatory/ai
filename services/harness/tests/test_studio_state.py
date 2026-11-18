@@ -1817,7 +1817,9 @@ async def test_the_ledger_stores_a_turns_blocks_only_when_the_turn_closes(
     state.turn_specs = dict(blocks)
     state.turn_plans = [_PLAN_JSON]
 
-    await store_a.checkpoint("principal", CONVERSATION, segment_id)
+    await store_a.checkpoint(
+        "principal", CONVERSATION, segment_id, store_a.snapshot("principal", CONVERSATION)
+    )
 
     written = await _stored_rows_text(pg_engine)
     assert "used block" not in written and "unused block" not in written
@@ -2808,10 +2810,37 @@ async def test_checkpoint_raises_segment_lost_after_a_takeover_and_writes_nothin
 
     store_a.current("principal", CONVERSATION).turn_final_text = "a's answer, too late"
     with pytest.raises(SegmentLost):
-        await store_a.checkpoint("principal", CONVERSATION, segment_id)
+        await store_a.checkpoint(
+            "principal", CONVERSATION, segment_id, store_a.snapshot("principal", CONVERSATION)
+        )
 
     reloaded = await new_store().load("principal", CONVERSATION)
     assert reloaded.turn_final_text == ""
+
+
+async def test_checkpoint_writes_its_snapshot_and_keeps_a_renewal_made_since(
+    new_store, clock, pg_engine
+) -> None:
+    """The checkpoint stores the conversation as its snapshot holds it: a
+    change the live state takes after the snapshot is left for the next
+    write, and a renewal of the lease since keeps its expiry."""
+    store = new_store(clock=clock)
+    state = await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    state.turn_final_text = "at the snapshot"
+    snapshot = store.snapshot("principal", CONVERSATION)
+    state.turn_final_text = "after the snapshot"
+    await clock.advance(10)
+    assert (await store.renew("principal", CONVERSATION, segment_id)).held
+    renewed = state.segment.expires_at
+
+    await store.checkpoint("principal", CONVERSATION, segment_id, snapshot)
+
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert reloaded.turn_final_text == "at the snapshot"
+    assert reloaded.segment.expires_at == renewed
+    assert state.turn_final_text == "after the snapshot"
 
 
 async def test_checkpoint_raises_segment_lost_when_the_ledger_is_gone(new_store, pg_engine) -> None:
@@ -2824,7 +2853,9 @@ async def test_checkpoint_raises_segment_lost_when_the_ledger_is_gone(new_store,
 
     store.current("principal", CONVERSATION).turn_final_text = "an answer with no ledger"
     with pytest.raises(SegmentLost):
-        await store.checkpoint("principal", CONVERSATION, segment_id)
+        await store.checkpoint(
+            "principal", CONVERSATION, segment_id, store.snapshot("principal", CONVERSATION)
+        )
 
 
 # --- canvas writes: change_canvas and mutate_composition ------------------

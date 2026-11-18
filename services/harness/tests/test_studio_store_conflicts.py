@@ -102,7 +102,9 @@ async def test_heartbeat_checkpoint_canvas_cancel_and_runs_commit_side_by_side(
         try:
             for index in range(ROUNDS):
                 state.turn_final_text = f"answer {index}"
-                await owner.checkpoint(PRINCIPAL, CONVERSATION, segment_id)
+                await owner.checkpoint(
+                    PRINCIPAL, CONVERSATION, segment_id, owner.snapshot(PRINCIPAL, CONVERSATION)
+                )
                 run = await ledger.admit(_candidate(f"t{index}"), submission={})
                 await ledger.record(run.run.run_id, Start())
         finally:

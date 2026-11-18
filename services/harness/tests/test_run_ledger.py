@@ -170,7 +170,9 @@ async def test_run_items_stay_out_of_conversation_state_and_survive_its_saves(
 
     state.turn_final_text = "answered"
     await store.save(PRINCIPAL, CONVERSATION)
-    await store.checkpoint(PRINCIPAL, CONVERSATION, segment_id)
+    await store.checkpoint(
+        PRINCIPAL, CONVERSATION, segment_id, store.snapshot(PRINCIPAL, CONVERSATION)
+    )
 
     async with pg_engine.connect() as conn:
         stored_keys = (

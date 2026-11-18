@@ -421,7 +421,12 @@ def _deserialize_pending(data: dict[str, Any]) -> dict[str, _PendingInterrupt]:
     return {interrupt_id: _deserialize_entry(entry) for interrupt_id, entry in data.items()}
 
 
-def _serialize_durable(state: ConversationState) -> dict[str, Any]:
+# A conversation's durable fields as `_serialize_durable` serialises them:
+# what `StudioStore.snapshot` hands out and `StudioStore.checkpoint` writes.
+type Snapshot = dict[str, Any]
+
+
+def _serialize_durable(state: ConversationState) -> Snapshot:
     """Every durable field of `state` as the flat map the tables store,
     proven JSON-safe. Both a save's candidate delta (before diffing against
     a baseline) and the snapshot later saves diff against."""
@@ -1004,9 +1009,7 @@ class StudioStore:
         that saves nothing (`drop_draft`), the live state stays as loaded.
         The copy is one level deep (`_shallow_copy`), with each pending
         interrupt copied too, since an answer is marked on its entry. The
-        copy starts with no telemetry span. An `/interrupt`'s
-        `ConversationState.open_segment_span` on it opens the span of the
-        segment its claim starts, which the save hands to the live state."""
+        copy starts with no telemetry span."""
         entry = self._runtime[(principal, conversation_id)]
         assert entry.state is not None
         work = _shallow_copy(entry.state)
@@ -1579,6 +1582,7 @@ class StudioStore:
         *,
         retried: bool = False,
         keep_for_stop: bool = False,
+        snapshot: Snapshot | None = None,
     ) -> T:
         """`checkpoint` and `change_canvas`'s one write. Under the row lock
         and fenced on `segment_id`, run `change` on a one-level copy of the live
@@ -1588,10 +1592,13 @@ class StudioStore:
         written keys in the baseline and the version, and assign the canvas
         read back and each field `change` changed to the live state.
 
-        The copy is taken under the row lock with no await between it and
-        the write, so the write holds the live state as it then stood. A
-        field the live stream changes during the write keeps its new value,
-        which differs from the baseline and goes out with the next write.
+        Without `snapshot` the durable keys are the copy's, taken under the
+        row lock with no await between it and the write, so the write holds
+        the live state as it then stood. With `snapshot` (`checkpoint`'s)
+        they are the snapshot's, the lease aside: the lease is the copy's,
+        since a renewal since the snapshot moved it. Either way a field the
+        live stream changes during the write keeps its new value, which
+        differs from the baseline and goes out with the next write.
 
         A `retried` write that clears the lease (`release`'s) and finds the
         row holding no lease at the version the earlier attempt's commit
@@ -1637,7 +1644,10 @@ class StudioStore:
                 kept = fenced if stop_live and work.segment is None else None
                 if kept is not None:
                     work.segment = kept
-                changed = _changed_since(_serialize_durable(work), entry.baseline)
+                durable = _serialize_durable(work)
+                if snapshot is not None:
+                    durable = {**snapshot, _KEY_SEGMENT: durable[_KEY_SEGMENT]}
+                changed = _changed_since(durable, entry.baseline)
                 if kept is not None:
                     # The kept lease is written again, which stamps a pending
                     # Stop as every lease write does.
@@ -1749,18 +1759,26 @@ class StudioStore:
         if live is not None and live.segment is not None and live.segment.id == segment.id:
             live.segment = segment
 
+    def snapshot(self, principal: str, conversation_id: str) -> Snapshot:
+        """The durable fields of this instance's live state of
+        `conversation_id`, serialised now, for `checkpoint` to write."""
+        entry = self._runtime[(principal, conversation_id)]
+        assert entry.state is not None
+        return _serialize_durable(entry.state)
+
     async def checkpoint(
         self,
         principal: str,
         conversation_id: str,
         segment_id: str,
+        snapshot: Snapshot,
         *,
         keep_for_stop: bool = False,
     ) -> None:
-        """The save of a streaming segment: this instance's changed keys,
-        fenced on `segment_id`. Runs before every actionable pause frame and
-        before `done`, and once more, with the segment cleared, at the end of
-        the segment (`release`). It does not run before `message.complete`.
+        """The save of a streaming segment: the keys of `snapshot`, taken by
+        `snapshot` at the point the caller saves, that differ from what this
+        instance last stored, fenced on `segment_id`. The live state may
+        have moved on since the snapshot, and the write holds none of that.
 
         Under the row lock, it raises `SegmentLost` and writes nothing when
         the stored lease is not `segment_id` (another instance's claim
@@ -1787,6 +1805,7 @@ class StudioStore:
                 lambda _work: None,
                 retried=retried,
                 keep_for_stop=keep_for_stop,
+                snapshot=snapshot,
             ),
         )
 
@@ -1875,7 +1894,11 @@ class StudioStore:
                     state.segment = None
                 try:
                     await self.checkpoint(
-                        principal, conversation_id, segment_id, keep_for_stop=True
+                        principal,
+                        conversation_id,
+                        segment_id,
+                        self.snapshot(principal, conversation_id),
+                        keep_for_stop=True,
                     )
                     saved = True
                     return state.segment is not None and state.segment.id == segment_id

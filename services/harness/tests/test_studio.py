@@ -47,7 +47,7 @@ import httpx2
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common import telemetry
-from common.telemetry import record_event, start_turn_span
+from common.telemetry import record_event
 from compiler.surface import (
     FixtureSurface,
     McpSurface,
@@ -129,6 +129,7 @@ from harness.wire import (
     Done,
     ErrorCode,
     ErrorFrame,
+    InterruptResponse,
     MessageDelta,
     PlanApproved,
     PlanDecision,
@@ -1639,30 +1640,30 @@ async def test_a_rejected_plan_s_stream_ends_its_span_and_reads_a_stop(
     """The stream that answers a plan's rejection runs as every segment's
     stream does: its span ends `done` and is exported. The rejection closes
     the turn before its first frame, which ends any Stop for it, so a Stop
-    while that frame's number is reserved changes nothing, and the stream
-    still ends on `done`, as the span says."""
+    before the stream's closing write changes nothing, and the stream still
+    ends on `done`, as the span says."""
     app = _app(*_plan(), tool_surface=ScriptedSurface())
     store = app.state.studio.store
     ended = _recording_span_ends(monkeypatch)
     async with _client(app) as client:
         plan = _frame(await _stream(client, "/api/studio/turn", _turn_body("q")), "plan.proposed")
-        reserving, proceed = asyncio.Event(), asyncio.Event()
-        real_reserve = store.reserve_frames
+        closing, proceed = asyncio.Event(), asyncio.Event()
+        real_close = store.close_segment
 
-        async def reserve(*args: Any, **kwargs: Any) -> None:
-            if stopped and not reserving.is_set():
-                reserving.set()
+        async def close(*args: Any, **kwargs: Any) -> SegmentClose:
+            if stopped and not closing.is_set():
+                closing.set()
                 await proceed.wait()
-            await real_reserve(*args, **kwargs)
+            return await real_close(*args, **kwargs)
 
-        store.reserve_frames = reserve  # type: ignore[method-assign]
+        store.close_segment = close  # type: ignore[method-assign]
         rejecting = asyncio.ensure_future(
             _stream(
                 client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
             )
         )
         if stopped:
-            await asyncio.wait_for(reserving.wait(), timeout=5)
+            await asyncio.wait_for(closing.wait(), timeout=5)
             await _post_stop(client)
             proceed.set()
         frames = await asyncio.wait_for(rejecting, timeout=5)
@@ -2212,13 +2213,15 @@ async def test_a_segment_s_span_names_how_its_stream_ended(
 
 # --- the ending table against the real store --------------------------------------
 #
-# Each row ends a `/turn` segment's work one way through the route and its
-# real work adapter, and makes the closing write on the real store end one
-# way by acting on the database first: a Stop recorded on the lease, the
-# lease handed to another segment, or the conversation's row held locked by
-# another connection past a short timeout. The row asserts what the real
-# store returned, the wire and span `harness.studio_stream.ending` gives,
-# and what a fresh instance reads back.
+# Each row ends a segment's work one way through a route and its real work
+# adapter: `/turn`'s first segment, `/interrupt`'s resume of the plan it
+# paused on, or `/interrupt`'s rejection of that plan. It makes the closing
+# write on the real store end one way by acting on the database first: a
+# Stop recorded on the lease, the lease handed to another segment, or the
+# conversation's row held locked by another connection past a short
+# timeout. The row asserts what the real store returned, the wire and span
+# `harness.studio_stream.ending` gives, and what a fresh instance reads
+# back.
 
 
 async def _work_ends_done(
@@ -2271,25 +2274,172 @@ async def _work_left(
     return await _read_until(app, lambda frames: False, resolver.entered)
 
 
-# Each way the work ends: its driver, the app's script, and whether the
-# script searches on a resolver that never answers.
-_WORK_ENDS = {
-    Finish.DONE: (_work_ends_done, (_text("Hello."),), False),
-    Finish.PAUSED: (_work_pauses, tuple(_plan()), False),
-    Finish.FAILED: (_work_fails_at_a_node, (_text("Hello."),), False),
-    Finish.CANCELLED: (_work_stopped, tuple(_card()), True),
-    Finish.UNCLOSED: (_work_raises, (_text("Hello."),), False),
-    Finish.LEFT: (_work_left, tuple(_card()), True),
+def _interrupt_endpoint(studio: Any) -> Callable[..., Any]:
+    router = create_studio_router(studio, settings=Settings())
+    return next(
+        route.endpoint
+        for route in router.routes
+        if getattr(route, "path", "") == "/api/studio/interrupt"
+    )
+
+
+class _HangingSurface(ScriptedSurface):
+    """`ScriptedSurface`, but its first `call_tool` hangs forever -- the
+    resumed segment's crash point every test below abandons A's resume at:
+    after `/interrupt`'s own save (the segment claimed, the entry marked
+    resuming, the answer recorded) has already landed, but before the
+    resumed segment's first plan step -- let alone its own checkpoint --
+    completes."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Mapping[str, Any],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        self.entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+class _BrokenSurface(ScriptedSurface):
+    """A plan step's tool call fails, so the node running it fails."""
+
+    async def call_tool(self, **kwargs: Any) -> ToolCallResult:
+        raise RuntimeError("analysis mount went away")
+
+
+async def _paused_plan(client: httpx2.AsyncClient) -> dict[str, Any]:
+    """`/turn`'s first segment, paused on its plan; the plan.proposed frame."""
+    return _frame(
+        await _stream(client, "/api/studio/turn", _turn_body("q with forks")), "plan.proposed"
+    )
+
+
+async def _plan_approved(
+    app: FastAPI, resolver: Any, monkeypatch: pytest.MonkeyPatch
+) -> list[dict[str, Any]]:
+    async with _client(app) as client:
+        plan = await _paused_plan(client)
+        return await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+
+
+async def _plan_switched(
+    app: FastAPI, resolver: Any, monkeypatch: pytest.MonkeyPatch
+) -> list[dict[str, Any]]:
+    async with _client(app) as client:
+        plan = await _plan_with_a_choice(app, client)
+        return await _stream(client, "/api/studio/interrupt", _switch_body(plan))
+
+
+async def _plan_approved_then_stopped(
+    app: FastAPI, resolver: Any, monkeypatch: pytest.MonkeyPatch
+) -> list[dict[str, Any]]:
+    hanging = app.state.studio.surface_recorder._surface
+    async with _client(app) as client:
+        plan = await _paused_plan(client)
+        streaming = asyncio.ensure_future(
+            _stream(
+                client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+            )
+        )
+        await asyncio.wait_for(hanging.entered.wait(), timeout=5)
+        await _post_stop(client)
+        return await asyncio.wait_for(streaming, timeout=5)
+
+
+async def _plan_approved_then_raises(
+    app: FastAPI, resolver: Any, monkeypatch: pytest.MonkeyPatch
+) -> list[dict[str, Any]]:
+    def broken(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the segment failed")
+
+    async with _client(app) as client:
+        plan = await _paused_plan(client)
+        monkeypatch.setattr(studio_module, "keep_turn_records", broken)
+        return await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+
+
+async def _plan_approved_then_left(
+    app: FastAPI, resolver: Any, monkeypatch: pytest.MonkeyPatch
+) -> list[dict[str, Any]]:
+    studio = app.state.studio
+    async with _client(app) as client:
+        plan = await _paused_plan(client)
+    response = await _interrupt_endpoint(studio)(
+        InterruptResponse.model_validate(_interrupt_body(plan["interrupt_id"], "approve")),
+        authorization=AUTH["Authorization"],
+    )
+    return await _leave(response, lambda frames: False, studio.surface_recorder._surface.entered)
+
+
+async def _plan_rejected(
+    app: FastAPI, resolver: Any, monkeypatch: pytest.MonkeyPatch
+) -> list[dict[str, Any]]:
+    async with _client(app) as client:
+        plan = await _paused_plan(client)
+        return await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
+        )
+
+
+# Each way a route's work ends: its driver, the app's script, the resolver
+# its search waits on (`None` for the default), the tool surface its plan
+# steps call, and how many closing writes its driver lets through before
+# the one under test (the `/turn` that pauses before an `/interrupt`).
+_PLAN_SCRIPT = (*_plan(), _text("Hello."))
+_WORK_ENDS: dict[tuple[str, Finish], tuple[Any, tuple[types.Part, ...], bool, Any, int]] = {
+    ("turn", Finish.DONE): (_work_ends_done, (_text("Hello."),), False, None, 0),
+    ("turn", Finish.PAUSED): (_work_pauses, tuple(_plan()), False, None, 0),
+    ("turn", Finish.FAILED): (_work_fails_at_a_node, (_text("Hello."),), False, None, 0),
+    ("turn", Finish.CANCELLED): (_work_stopped, tuple(_card()), True, None, 0),
+    ("turn", Finish.UNCLOSED): (_work_raises, (_text("Hello."),), False, None, 0),
+    ("turn", Finish.LEFT): (_work_left, tuple(_card()), True, None, 0),
+    ("resume", Finish.DONE): (_plan_approved, _PLAN_SCRIPT, False, ScriptedSurface, 1),
+    ("resume", Finish.PAUSED): (_plan_switched, tuple(_plan()), False, ScriptedSurface, 1),
+    ("resume", Finish.FAILED): (_plan_approved, _PLAN_SCRIPT, False, _BrokenSurface, 1),
+    ("resume", Finish.CANCELLED): (
+        _plan_approved_then_stopped,
+        _PLAN_SCRIPT,
+        False,
+        _HangingSurface,
+        1,
+    ),
+    ("resume", Finish.UNCLOSED): (
+        _plan_approved_then_raises,
+        _PLAN_SCRIPT,
+        False,
+        ScriptedSurface,
+        1,
+    ),
+    ("resume", Finish.LEFT): (_plan_approved_then_left, _PLAN_SCRIPT, False, _HangingSurface, 1),
+    ("reject", Finish.DONE): (_plan_rejected, tuple(_plan()), False, ScriptedSurface, 1),
 }
 
 
-def _close_on_the_database(store: StudioStore, close: SegmentClose) -> list[SegmentClose]:
+def _close_on_the_database(
+    store: StudioStore, close: SegmentClose, *, after: int = 0
+) -> list[SegmentClose]:
     """Make the segment's closing write on the real store end `close` by
-    acting on the database before it runs; returns the results it gave."""
+    acting on the database before it runs, once `after` closing writes have
+    gone through untouched; returns the results the write under test gave."""
     real = store.close_segment
     results: list[SegmentClose] = []
+    passed = 0
 
     async def close_segment(principal: str, conversation_id: str, segment_id: str) -> SegmentClose:
+        nonlocal passed
+        if passed < after:
+            passed += 1
+            return await real(principal, conversation_id, segment_id)
         if close is SegmentClose.STOPPED:
             await store.request_cancel(principal, conversation_id)
         if close is SegmentClose.LOST:
@@ -2319,52 +2469,101 @@ _CAP = "capability_unavailable"
 _TRANSIENT = "transient_unavailable"
 
 
+_ENDINGS_BY_FINISH = {
+    Finish.DONE: [
+        (_SAVED, "done", "done", "done"),
+        (_LOST, _TRANSIENT, "done", None),
+        (_FAILED, _TRANSIENT, "done", None),
+    ],
+    Finish.PAUSED: [
+        (_SAVED, "pause", "paused", None),
+        (_STOPPED, "cancelled", "cancelled", "cancelled"),
+        (_LOST, _TRANSIENT, "paused", None),
+        (_FAILED, _TRANSIENT, "paused", None),
+    ],
+    Finish.FAILED: [
+        (_SAVED, _CAP, "failed", _CAP),
+        (_LOST, _CAP, "failed", None),
+        (_FAILED, _CAP, "failed", None),
+    ],
+    Finish.CANCELLED: [
+        (_SAVED, "cancelled", "cancelled", "cancelled"),
+        (_LOST, "cancelled", "cancelled", None),
+        (_FAILED, "cancelled", "cancelled", None),
+    ],
+    Finish.UNCLOSED: [
+        (_SAVED, _CAP, "running", _CAP),
+        (_STOPPED, "cancelled", "cancelled", "cancelled"),
+        (_LOST, _TRANSIENT, "running", None),
+        (_FAILED, _CAP, "running", None),
+    ],
+    Finish.LEFT: [
+        (_SAVED, None, "running", None),
+        (_STOPPED, None, "cancelled", "cancelled"),
+        (_LOST, None, "running", None),
+        (_FAILED, None, "running", None),
+    ],
+}
+
+
+def _endings(route: str, finish: Finish) -> list[Any]:
+    """The cells of `finish`'s row of the ending table `route` reaches, as
+    `(route, finish, close, wire, cursor, recorded)`. A resume whose work
+    raises does so before its segment runs, so its turn stays paused where
+    `/turn`'s stays running."""
+    paused = route == "resume" and finish is Finish.UNCLOSED
+    return [
+        (
+            route,
+            finish,
+            close,
+            wire,
+            "paused" if paused and cursor == "running" else cursor,
+            recorded,
+        )
+        for close, wire, cursor, recorded in _ENDINGS_BY_FINISH[finish]
+    ]
+
+
 @pytest.mark.parametrize(
-    ("finish", "close", "wire", "cursor", "recorded"),
+    ("route", "finish", "close", "wire", "cursor", "recorded"),
     [
-        (Finish.DONE, _SAVED, "done", "done", "done"),
-        (Finish.DONE, _LOST, _TRANSIENT, "done", None),
-        (Finish.DONE, _FAILED, _TRANSIENT, "done", None),
-        (Finish.PAUSED, _SAVED, "pause", "paused", None),
-        (Finish.PAUSED, _STOPPED, "cancelled", "cancelled", "cancelled"),
-        (Finish.PAUSED, _LOST, _TRANSIENT, "paused", None),
-        (Finish.PAUSED, _FAILED, _TRANSIENT, "paused", None),
-        (Finish.FAILED, _SAVED, _CAP, "failed", _CAP),
-        (Finish.FAILED, _LOST, _CAP, "failed", None),
-        (Finish.FAILED, _FAILED, _CAP, "failed", None),
-        (Finish.CANCELLED, _SAVED, "cancelled", "cancelled", "cancelled"),
-        (Finish.CANCELLED, _LOST, "cancelled", "cancelled", None),
-        (Finish.CANCELLED, _FAILED, "cancelled", "cancelled", None),
-        (Finish.UNCLOSED, _SAVED, _CAP, "running", _CAP),
-        (Finish.UNCLOSED, _STOPPED, "cancelled", "cancelled", "cancelled"),
-        (Finish.UNCLOSED, _LOST, _TRANSIENT, "running", None),
-        (Finish.UNCLOSED, _FAILED, _CAP, "running", None),
-        (Finish.LEFT, _SAVED, None, "running", None),
-        (Finish.LEFT, _STOPPED, None, "cancelled", "cancelled"),
-        (Finish.LEFT, _LOST, None, "running", None),
-        (Finish.LEFT, _FAILED, None, "running", None),
+        *(
+            row
+            for finish in Finish
+            if finish in _ENDINGS_BY_FINISH
+            for row in _endings("turn", finish)
+        ),
+        *(
+            row
+            for finish in Finish
+            if finish in _ENDINGS_BY_FINISH
+            for row in _endings("resume", finish)
+        ),
+        *_endings("reject", Finish.DONE),
     ],
     ids=str,
 )
 async def test_every_ending_this_route_reaches_holds_on_the_real_store(
     otlp_spans: InMemorySpanExporter,
     monkeypatch: pytest.MonkeyPatch,
+    route: str,
     finish: Finish,
     close: SegmentClose,
     wire: str | None,
     cursor: str,
     recorded: str | None,
 ) -> None:
-    """The work ends `finish` and the real store's closing write ends
-    `close`. The stream's last ending frame is `wire`, the span ends on the
-    status `ending` gives that cell with `dfo.saved` saying whether the
-    write committed, and a fresh instance reads the turn's cursor as
-    `cursor`, the record closed on `recorded` (open for `None`), and the
-    lease cleared exactly when the write committed."""
-    drive, script, hangs = _WORK_ENDS[finish]
+    """The work `route` streams ends `finish` and the real store's closing
+    write ends `close`. The stream's last ending frame is `wire`, the span
+    ends on the status `ending` gives that cell with `dfo.saved` saying
+    whether the write committed, and a fresh instance reads the turn's
+    cursor as `cursor`, the record closed on `recorded` (open for `None`),
+    and the lease cleared exactly when the write committed."""
+    drive, script, hangs, surface, after = _WORK_ENDS[route, finish]
     resolver = _HangingResolver() if hangs else None
-    app = _app(*script, resolver=resolver)
-    results = _close_on_the_database(app.state.studio.store, close)
+    app = _app(*script, resolver=resolver, tool_surface=surface() if surface is not None else None)
+    results = _close_on_the_database(app.state.studio.store, close, after=after)
     ended = _recording_span_ends(monkeypatch)
 
     frames = await drive(app, resolver, monkeypatch)
@@ -2373,8 +2572,9 @@ async def test_every_ending_this_route_reaches_holds_on_the_real_store(
     end = ending(WorkEnd(finish), close)
     assert _ending_frame(frames) == wire
     assert ended[-1][0] == end.status.value
-    (span,) = [span for span in otlp_spans.get_finished_spans() if span.name == "turn"]
-    assert (span.attributes or {}).get("dfo.saved") == str(end.saved).lower()
+    spans = [span for span in otlp_spans.get_finished_spans() if span.name == "turn"]
+    assert len(spans) == len(ended) == after + 1
+    assert (spans[-1].attributes or {}).get("dfo.saved") == str(end.saved).lower()
     assert await _turn_statuses() == [cursor]
     async with _engine().connect() as conn:
         lease = (
@@ -2555,22 +2755,6 @@ async def _close_turn_over_one_that_failed_before_streaming(
         await _stream(client, "/api/studio/turn", _turn_body("hi again"))
 
 
-async def _close_answer_over_a_span_left_on_the_live_state(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    app = _app(*_plan(), tool_surface=ScriptedSurface())
-    store = app.state.studio.store
-    async with _client(app) as client:
-        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
-        plan = _frame(first, "plan.proposed")
-        live = store.current(PRINCIPAL, CONVERSATION)
-        assert live is not None
-        live._telemetry_span = start_turn_span("tr_leftover", session_id=CONVERSATION)
-        await _stream(
-            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
-        )
-
-
 _DONE = ("done", "DEFAULT")
 _PAUSED = ("paused", "DEFAULT")
 _ABANDONED = ("abandoned", "WARNING")
@@ -2630,11 +2814,6 @@ _LEFT = ("left", "WARNING")
             _close_turn_over_one_that_failed_before_streaming,
             [("failed", "ERROR"), _ABANDONED, _DONE],
             id="turn-over-one-that-failed-before-streaming",
-        ),
-        pytest.param(
-            _close_answer_over_a_span_left_on_the_live_state,
-            [_PAUSED, ("orphaned", "WARNING"), _DONE],
-            id="answer-over-a-span-left-on-the-live-state",
         ),
     ],
 )
@@ -4185,29 +4364,6 @@ async def test_answering_a_plan_interrupt_is_a_422_binding_error() -> None:
     assert "approve" in body["fix"]
 
 
-class _HangingSurface(ScriptedSurface):
-    """`ScriptedSurface`, but its first `call_tool` hangs forever -- the
-    resumed segment's crash point every test below abandons A's resume at:
-    after `/interrupt`'s own save (the segment claimed, the entry marked
-    resuming, the answer recorded) has already landed, but before the
-    resumed segment's first plan step -- let alone its own checkpoint --
-    completes."""
-
-    def __init__(self) -> None:
-        self.entered = asyncio.Event()
-
-    async def call_tool(
-        self,
-        *,
-        tool: ToolId,
-        arguments: Mapping[str, Any],
-        on_progress: ProgressCallback | None = None,
-    ) -> ToolCallResult:
-        self.entered.set()
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
-
-
 async def _noop_release(*args: Any, **kwargs: Any) -> None:
     """Stands in for `StudioStore.release`: a crashed instance's segment
     lease and resuming pending entries are never cleared or dropped --
@@ -4499,7 +4655,9 @@ async def test_a_cancel_on_a_lapsed_lease_fences_out_the_stream_still_running_un
 
     state_a.turn_final_text = "written after the Stop"
     with pytest.raises(SegmentLost):
-        await store_a.checkpoint(PRINCIPAL, CONVERSATION, segment_id)
+        await store_a.checkpoint(
+            PRINCIPAL, CONVERSATION, segment_id, store_a.snapshot(PRINCIPAL, CONVERSATION)
+        )
     reloaded = await StudioStore(
         _engine(),
     ).load(PRINCIPAL, CONVERSATION)
@@ -7644,16 +7802,16 @@ async def _stop_taken_by_the_scope_then_the_client_leaves(row: _Row):
 
 async def _second_stop_after_the_pause_write(row: _Row):
     """The scope takes the first Stop, the turn pauses on the re-offered
-    plan, recording it taken, and a second Stop commits before the release:
-    the release keeps the lease and closes the turn `cancelled`, after the
-    stream sent `plan.proposed`."""
+    plan, recording it taken, and a second Stop commits before the closing
+    write: that write closes the turn `cancelled`, and the stream ends on
+    `cancelled` alone, the re-offered plan never sent."""
     _switch_held_by_a_stop(row, deaf=False)
     app = await row.build(*_plan())
     store = app.state.studio.store
     sent: list[httpx2.Response] = []
     async with _client(app) as client:
         plan = await _plan_with_a_choice(app, client)
-        real = store.release
+        real = store.close_segment
 
         async def second_stop_first(*args: Any, **kwargs: Any) -> Any:
             if not sent:
@@ -7666,9 +7824,9 @@ async def _second_stop_after_the_pause_write(row: _Row):
         assert first.status_code == 204
         assert row.readers is not None
         await row.readers.heartbeat.reach(1)
-        store.release = second_stop_first
+        store.close_segment = second_stop_first
         frames = await asyncio.wait_for(stream, timeout=5)
-    assert _events(frames)[-2:] == ["plan.proposed", "error"]
+    assert "plan.proposed" not in _events(frames)
     return frames, sent[0]
 
 
@@ -7847,16 +8005,16 @@ def _stop_before_the_release(message: str, *, contested: bool = False):
 
 async def _stop_whose_release_cannot_close_the_running_turn(row: _Row):
     """A node fails and its close is not written, so the turn is left
-    running; the Stop commits before the release, which keeps the lease,
-    and ending the turn's runs fails. The stream ends `cancelled`, the
-    lease is dropped with the Stop live, and the next turn acts on it
-    first."""
+    running; the Stop commits before the closing write, and ending the
+    turn's runs inside that write fails. The stream ends on the node's
+    error frame alone, the lease lapses with the Stop live, and the next
+    turn acts on it first."""
 
     class BrokenSurface(ScriptedSurface):
         async def call_tool(self, **kwargs: Any) -> ToolCallResult:
             raise RuntimeError("analysis mount went away")
 
-    app = await row.build(*_plan(), _text("Hello."), tool_surface=BrokenSurface())
+    app = await row.build(*_plan(), _text("Hello."), tool_surface=BrokenSurface(), clock=True)
     studio = app.state.studio
     real_finish = studio.turns.finish
 
@@ -7879,22 +8037,23 @@ async def _stop_whose_release_cannot_close_the_running_turn(row: _Row):
             await _stream(client, "/api/studio/turn", _turn_body("q with forks")), "plan.proposed"
         )
         studio.turns.finish = finish_unwritten
-        real_release = studio.store.release
+        real_close = studio.store.close_segment
         sent: list[httpx2.Response] = []
 
         async def stopped_first(*args: Any, **kwargs: Any) -> Any:
             if not sent:
                 sent.append(await _post_stop(client))
-            return await real_release(*args, **kwargs)
+            return await real_close(*args, **kwargs)
 
-        studio.store.release = stopped_first
+        studio.store.close_segment = stopped_first
         stopped = await _stream(
             client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
         )
-        # The turn is still open, but its live Stop closes it `cancelled`
-        # before anything else, so the stream ends `cancelled`.
-        assert stopped[-1]["error"]["error"] == "cancelled"
+        # The closing write did not commit, so the turn stays open with its
+        # Stop live, and the stream ends on the node's own error frame.
+        assert stopped[-1]["error"]["error"] == "capability_unavailable"
         assert await _stop_live()
+        await row.lapse()
         return await _stream(client, "/api/studio/turn", _turn_body("hi")), sent[0]
 
 

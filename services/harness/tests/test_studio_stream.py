@@ -5,7 +5,7 @@
 `test_every_run_of_the_owner_keeps_the_invariants` runs the real owner and
 the real response class over an in-memory model of the store and of a
 segment's work, for every script, input, place the input lands, and fault of
-the closing write, and checks eight invariants after each run:
+the closing write, and checks nine invariants after each run:
 
 - I1: a present client receives exactly one ending frame, and it is the last
   frame; a client that left is owed none, and gets nothing after one.
@@ -22,6 +22,9 @@ the closing write, and checks eight invariants after each run:
 - I7: after a Stop the store accepted, the turn is cancelled, already closed,
   or holds a live Stop.
 - I8: the instance's live state equals the stored row, or is evicted.
+- I9: the save after `plan.approved` stores the conversation as it stood
+  when the owner marked that frame sent, though the work changes it while
+  the save waits.
 
 The response runs its real ASGI call over an in-memory transport that
 delivers `http.disconnect` when the client leaves, as uvicorn's protocols do
@@ -364,6 +367,8 @@ class World:
     evicted: bool = False
     writes: list[str] = field(default_factory=list)
     changed: asyncio.Event = field(default_factory=asyncio.Event)
+    # Set once the save after `plan.approved` is under way.
+    saving: asyncio.Event = field(default_factory=asyncio.Event)
 
     def stop_live(self) -> bool:
         return self.stop and self.cursor in _OPEN
@@ -389,6 +394,11 @@ class Run:
     close: SegmentClose | None = None
     work_task: asyncio.Task[Any] | None = None
     approved_lost: bool = False
+    # The conversation when the owner marked `plan.approved` sent, what the
+    # save after it stored, and whether the work had changed it by then.
+    boundary: Durable | None = None
+    approved_stored: Durable | None = None
+    moved_during_save: bool = False
 
     async def land(self, point: Point) -> None:
         """Apply the case's inputs that land at `point`."""
@@ -498,6 +508,10 @@ class FakeWork:
                 )
             )
         send(self._step("s1", StepStatus.RUNNING))
+        if script is Script.APPROVED:
+            # The rest of the turn runs while the save after `plan.approved`
+            # waits for the database.
+            await w.saving.wait()
         await self._tick(Point.WORK_EARLY)
         match script:
             case Script.HANGS:
@@ -543,6 +557,11 @@ class FakeWork:
         return self._fatal(ErrorCode.CAPABILITY_UNAVAILABLE)
 
 
+# How many times the save after `plan.approved` yields to the work before it
+# writes: enough for the work to reach its end when nothing stops it.
+_SAVE_YIELDS = 20
+
+
 class FakeStore:
     """The owner's writes, over the model."""
 
@@ -551,13 +570,24 @@ class FakeStore:
         self._c = run.conversation
         self._w = run.world
 
-    async def checkpoint(self, principal: str, conversation_id: str, segment_id: str) -> None:
+    def snapshot(self, principal: str, conversation_id: str) -> Durable:
+        return _durable(self._c)
+
+    async def checkpoint(
+        self, principal: str, conversation_id: str, segment_id: str, snapshot: Durable
+    ) -> None:
         self._w.writes.append("checkpoint")
+        self._w.saving.set()
         await self._run.land(Point.APPROVED_BEFORE)
         if self._w.lease != segment_id:
             self._run.approved_lost = True
             raise SegmentLost(conversation_id)
-        self._w.stored = _durable(self._c)
+        # The database is slow: the work runs on, and may record the turn,
+        # before the row is written.
+        for _ in range(_SAVE_YIELDS):
+            await asyncio.sleep(0)
+        self._run.moved_during_save = _durable(self._c) != snapshot
+        self._w.stored = self._run.approved_stored = snapshot
         await self._run.land(Point.APPROVED_AFTER)
 
     async def close_segment(
@@ -641,6 +671,13 @@ _ENDING_EVENTS = {"error", "done", "plan.proposed", "elicitation.request"}
 
 async def _one(case: Case, spans: Spans) -> list[str]:
     """Run the owner and the response over `case`; the invariants it broke."""
+    broken, _ = await _run_case(case, spans)
+    return broken
+
+
+async def _run_case(case: Case, spans: Spans) -> tuple[list[str], Run]:
+    """Run the owner and the response over `case`; the invariants it broke,
+    and the run."""
     conversation = ConversationState(conversation_id=CONVERSATION, trace_id="tr", seq=FIRST_SEQ)
     if case.script is Script.APPROVED:
         conversation.pending["i0"] = _PendingInterrupt(
@@ -649,6 +686,13 @@ async def _one(case: Case, spans: Spans) -> list[str]:
     await conversation.lock.acquire()
     world = World(stored=_durable(conversation))
     run = Run(case, conversation, world)
+    mark_approved_sent = conversation.mark_approved_sent
+
+    def marked(segment_id: str) -> None:
+        mark_approved_sent(segment_id)
+        run.boundary = _durable(conversation)
+
+    conversation.mark_approved_sent = marked  # type: ignore[method-assign]
     channel: studio_stream.Channel = asyncio.Queue()
     owner = asyncio.create_task(
         own_segment(
@@ -679,8 +723,8 @@ async def _one(case: Case, spans: Spans) -> list[str]:
             await response(_SCOPE, receive, send)
             await asyncio.wait({owner})
     except TimeoutError:
-        return ["the run did not finish"]
-    return _broken(run, owner, spans, b"".join(body).decode())
+        return ["the run did not finish"], run
+    return _broken(run, owner, spans, b"".join(body).decode()), run
 
 
 def _broken(run: Run, owner: asyncio.Task[None], spans: Spans, wire: str) -> list[str]:
@@ -787,17 +831,25 @@ def _broken(run: Run, owner: asyncio.Task[None], spans: Spans, wire: str) -> lis
     # I8
     if not world.evicted and _durable(conversation) != world.stored:
         broken.append(f"I8: live {_durable(conversation)} stored {world.stored}")
+
+    # I9
+    if run.approved_stored is not None and run.approved_stored != run.boundary:
+        broken.append(f"I9: saved {run.approved_stored} at plan.approved {run.boundary}")
     return broken
 
 
 async def test_every_run_of_the_owner_keeps_the_invariants(spans: Spans) -> None:
     cases = _cases()
     failures: dict[str, list[str]] = {}
+    moved = 0
     for case in cases:
-        if broken := await _one(case, spans):
+        broken, run = await _run_case(case, spans)
+        moved += run.moved_during_save
+        if broken:
             failures[str(case)] = broken
-    print(f"{len(cases)} runs of the owner")
+    print(f"{len(cases)} runs of the owner, {moved} with the work moving during a save")
     assert cases
+    assert moved
     assert not failures, (
         "\n".join(f"{case}: {'; '.join(broken)}" for case, broken in list(failures.items())[:40])
         + f"\n({len(failures)} of {len(cases)} runs broke an invariant)"

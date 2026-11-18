@@ -24,7 +24,7 @@ from harness.graph.state import frame_id_for
 from harness.run_ledger import StudioRunLedger
 from harness.scripted import ScriptedSurface
 from harness.studio_state import SEGMENT_TTL_S
-from harness.studio_store import StudioStore
+from harness.studio_store import SegmentClose, StudioStore
 from harness.turn.store import TurnStatus
 from planner.workflow import ToolId
 from sqlalchemy import text
@@ -348,12 +348,13 @@ async def test_a_run_left_by_an_instance_that_died_is_carried_on_by_another_once
         run_ledger=StudioRunLedger(store_b),
     )
 
-    async def dies(*args: Any, **kwargs: Any) -> None:
-        """A's end-of-segment save, which a dead instance never makes."""
+    async def dies(*args: Any, **kwargs: Any) -> SegmentClose:
+        """A's closing write, which a dead instance never makes."""
+        return SegmentClose.FAILED
 
     async with studio_client(app_a) as client_a:
         first = await stream(client_a, "/api/studio/turn", turn_body("Kenya's debt service?"))
-        store_a.release = dies  # type: ignore[method-assign]
+        store_a.close_segment = dies  # type: ignore[method-assign]
         await _leaves_when(
             app_a,
             "/api/studio/interrupt",

@@ -15,8 +15,10 @@ request cancels. For its segment it alone:
 - puts each frame the work sends on the channel, except the work's ending
   frame (a pause frame, `done`, or a stream-fatal `error`), which it holds;
 - saves the conversation once `plan.approved` has gone out, so a retry of the
-  same answer does not send it again. A save that finds the lease lost ends
-  the work `lost`;
+  same answer does not send it again. The save writes the conversation as it
+  stood when that frame went out, serialised before the save's first await;
+  what the work changes while the save runs waits for the closing write. A
+  save that finds the lease lost ends the work `lost`;
 - reads the client-gone flag in one place, while it waits for the work's
   next frame. Once the flag is set it cancels the work with the turn's
   `StopScope` unmarked, so the cursor stays as last written for a later
@@ -89,7 +91,7 @@ from harness.studio_state import (
     SegmentLost,
     _recorded_reply,
 )
-from harness.studio_store import SegmentClose
+from harness.studio_store import SegmentClose, Snapshot
 from harness.studio_translate import SEGMENT_LOST_DETAIL, STREAM_RETRY_AFTER_S
 from harness.turn.loop import Outcome
 from harness.wire import (
@@ -358,7 +360,11 @@ class Work(Protocol):
 class SegmentStore(Protocol):
     """The writes an owner makes (`harness.studio_store.StudioStore`)."""
 
-    async def checkpoint(self, principal: str, conversation_id: str, segment_id: str) -> None: ...
+    def snapshot(self, principal: str, conversation_id: str) -> Snapshot: ...
+
+    async def checkpoint(
+        self, principal: str, conversation_id: str, segment_id: str, snapshot: Snapshot
+    ) -> None: ...
 
     async def close_segment(
         self, principal: str, conversation_id: str, segment_id: str
@@ -551,10 +557,19 @@ class _Owner:
         the same answer after this segment dies does not send it again (a
         crash before the save sends it twice, which beats never). Returns
         whether the save found the lease lost; any other failure is logged
-        and the stream goes on."""
+        and the stream goes on.
+
+        The work runs on while the save waits for the database, so the
+        conversation is serialised here, before the first await, and the
+        save writes that snapshot: a turn the work records or pauses
+        meanwhile reaches the store only through the closing write, after
+        the client has been told how the stream ended."""
         self._conversation.mark_approved_sent(self._segment_id)
         try:
-            await self._store.checkpoint(self._principal, self._conversation_id, self._segment_id)
+            snapshot = self._store.snapshot(self._principal, self._conversation_id)
+            await self._store.checkpoint(
+                self._principal, self._conversation_id, self._segment_id, snapshot
+            )
         except (SegmentLost, DatabaseUnavailable):
             logger.warning(
                 "studio stream: conversation %s segment %s lost its lease at the save after "
