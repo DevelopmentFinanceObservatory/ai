@@ -2,11 +2,10 @@
 
 A conversation is one `conversations` row (defined in
 `harness/db/migrations/0001_conversations.sql`) and its per-item rows: closed turns, the digest
-entry and write token of each component, and approvals. Every durable field
-of a `ConversationState`, everything but the identity field
-`conversation_id` and the process-local fields `_PROCESS_LOCAL_FIELDS`
-names, lives there, so any instance can load a conversation and continue it.
-The store keeps only runtime objects and each instance's own live
+entry and write token of each component, and approvals. Every durable field of a
+`ConversationState` lives there, which is everything but the identity field `conversation_id`
+and the process-local fields `_PROCESS_LOCAL_FIELDS` names, so any instance can load a
+conversation and continue it. The store keeps only runtime objects and each instance's own live
 `ConversationState` in process, like `harness.provenance.ProvenanceStore`.
 
 The row's column groups each have their own writer, so writers that touch
@@ -39,7 +38,7 @@ transient database fault until the lease's deadline
 do not retry. The run ledger
 (`harness.run_ledger`) writes inside `fenced`.
 
-The open turn's spec blocks are the one thing read from elsewhere: the
+The open turn's spec blocks are the one thing read from elsewhere. The
 turn's own ADK session holds them, and `load` reads them back through the
 `turn_specs` reader the store is given
 (`harness.adk_import.open_turn_specs`) and converts blocks stored before
@@ -221,7 +220,7 @@ _SEQ_HEADROOM = 64
 _RETRY_FIRST_DELAY_S = 0.25
 _RETRY_MAX_DELAY_S = 4.0
 # How long before its lease lapses an instance stops trusting it holds the
-# conversation: the heartbeat gives up renewing and writes stop retrying
+# conversation. The heartbeat gives up renewing and writes stop retrying then
 # (`StudioStore.lease_deadline`).
 LEASE_MARGIN_S = 10
 
@@ -235,10 +234,11 @@ def _assign_changed(
 ) -> None:
     """Assign to `live` each field of `work`, a copy taken from it
     (`_shallow_copy`), that changed since `base`, the snapshot taken with
-    the copy: a container that compares unequal, any other value that is
-    not the same object. A field `live` changed meanwhile and `work` did not
-    keeps `live`'s value. The telemetry span is not assigned: it moves from
-    a working copy to the live state only in `StudioStore._take_draft`."""
+    the copy. A container counts as changed when it compares unequal, any
+    other value when it is not the same object. A field `live` changed
+    meanwhile and `work` did not keeps `live`'s value. The telemetry span is
+    not assigned. It moves from a working copy to the live state only in
+    `StudioStore._take_draft`."""
     for f in dataclasses.fields(ConversationState):
         if f.name == "_telemetry_span":
             continue
@@ -272,7 +272,7 @@ async def _run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
     `Task.cancel`, which no anyio shield stops. Cancelled mid-statement, the
     write never lands.
 
-    The caller's cancellation wins over whatever `work` ended with: a
+    The caller's cancellation wins over whatever `work` ended with. A
     heartbeat cancelled while its renewal fails must stop, or the stream it
     renews never finishes unwinding. What `work` raised is then logged."""
     task = asyncio.ensure_future(work)
@@ -440,7 +440,7 @@ def _serialize_durable(state: ConversationState) -> dict[str, Any]:
         _KEY_SEQ: state.seq,
         _KEY_TRACE_ID: state.trace_id,
         _KEY_PENDING: _serialize_pending(state.pending),
-        # A JSON object's keys are always strings; `plan_version_ids`' int
+        # A JSON object's keys are always strings. `plan_version_ids`' int
         # keys are recovered on load.
         _KEY_PLAN_VERSION_IDS: {
             str(version): value for version, value in state.plan_version_ids.items()
@@ -552,7 +552,7 @@ class ConversationExists(Exception):  # noqa: N818 -- named for the race it repo
 
 class ConversationHeld(Exception):  # noqa: N818 -- names the state the routes refuse
     """`StudioStore.load` cannot serve the conversation, and no retry will
-    until an operator acts, raised by `AdkBridge.reimport`: the
+    until an operator acts. `AdkBridge.reimport` raises it when the
     conversation's ADK ledger session and its rows both changed since the
     last copy (the wire's `conversation_diverged`)."""
 
@@ -776,12 +776,11 @@ class _RuntimeEntry:
     requests; `load` refreshes its durable fields in place, so `lock`,
     `cancel_event` and `_telemetry_span` keep their identity across a reload.
     `draft` is the working copy a request's claim is built on (`draft`) and
-    the live state as it stood when the copy was taken.
-    `baseline` is the last durable snapshot known stored, the reference a
-    save diffs against. `composition_lock` serialises same-instance
-    `/composition` calls on the shared `state` object, separate from `lock`
-    since a canvas edit must land while a turn streams. `write_lock`
-    serialises this instance's own
+    the live state as it stood when the copy was taken. `baseline` is the
+    last durable snapshot known stored, the reference a save diffs against.
+    `composition_lock` serialises same-instance `/composition` calls on the
+    shared `state` object, separate from `lock` since a canvas edit must
+    land while a turn streams. `write_lock` serialises this instance's own
     writes on the conversation, so two of them never interleave their
     `state`/`baseline` updates.
     """
@@ -812,9 +811,9 @@ class StudioStore:
     `ConversationState.close_turn`. `adk.reimport` runs before `load` reads
     a conversation (`adk.moved` answers whether ADK has moved since), so a
     conversation the previous release still writes to ADK is read as ADK
-    last stored it. `claim_segment`/`renew`/`checkpoint`/`request_cancel` are
-    the segment lease API: together they keep at most one instance streaming
-    a conversation at a time.
+    last stored it. `claim_segment`, `renew`, `checkpoint` and
+    `request_cancel` form the segment lease API and together keep at most one
+    instance streaming a conversation at a time.
 
     Lease expiry is decided on the database's clock: `time_sql` is the SQL
     expression every lease statement reads the time from, epoch seconds,
@@ -879,7 +878,7 @@ class StudioStore:
         that saves nothing (`drop_draft`), the live state stays as loaded.
         The copy is one level deep (`_shallow_copy`), with each pending
         interrupt copied too, since an answer is marked on its entry. The
-        copy starts with no telemetry span; a `begin_turn` on it opens the
+        copy starts with no telemetry span. A `begin_turn` on it opens the
         span of the segment its claim starts, which the save hands to the
         live state."""
         entry = self._runtime[(principal, conversation_id)]
@@ -905,7 +904,7 @@ class StudioStore:
 
     def lease_deadline(self, principal: str, conversation_id: str) -> float:
         """When, on this instance's clock (`now`), it stops trusting that it
-        still holds the lease it claimed on `conversation_id`:
+        still holds the lease it claimed on `conversation_id`. That is
         `LEASE_MARGIN_S` before the lease would lapse, counted from just
         before the read or renewal that set its expiry. The heartbeat ends
         the stream there when renewals keep failing, and a write that keeps
@@ -917,7 +916,7 @@ class StudioStore:
 
     def lock_for(self, principal: str, conversation_id: str) -> asyncio.Lock:
         """This (principal, conversation_id) pair's lock, creating its
-        runtime entry on first use. Callers acquire it BEFORE `load` or
+        runtime entry on first use. Callers acquire it before `load` or
         `create` touch any durable state, so ownership settles while the
         request handler still controls the response."""
         return self._entry(principal, conversation_id).lock
@@ -1077,16 +1076,16 @@ class StudioStore:
         `load` must have run first). Raises
         `SegmentBusy` when the loaded lease had not lapsed by the database
         clock's reading taken with the load. Otherwise writes a fresh segment
-        into `entry.state`, expiring `SEGMENT_TTL_S` after that reading, and
+        into that state, expiring `SEGMENT_TTL_S` after that reading, and
         returns its id.
 
         The claim also takes the segment's first block of frame numbers and
-        starts the state's `seq` there: `0` up to `SEQ_BLOCK` for a turn
-        `begin_turn` just opened, else the block after every number reserved
-        before, so a stream resuming the turn never repeats a number an
-        earlier segment sent.
+        starts the state's `seq` there. For a turn `begin_turn` just opened
+        the block runs from `0` to `SEQ_BLOCK`. Otherwise it starts after
+        every number reserved before, so a stream resuming the turn never
+        repeats a number an earlier segment sent.
 
-        Does no I/O: the caller's own claim save (the `/turn` claim or the
+        Does no I/O. The caller's own claim save (the `/turn` claim or the
         `/interrupt` save) persists it, and refuses it when the stored lease
         is live by then."""
         entry = self._runtime[(principal, conversation_id)]
@@ -1113,9 +1112,9 @@ class StudioStore:
         on the turn state's version. Given `state`, the working copy `draft`
         handed out, the fields are the copy's, and once the write commits
         each field the copy changed is assigned to the live state, which
-        stays as it was when the write fails. Only the keys whose serialised value
-        changed since the last load or save on this instance are written; a
-        save with nothing changed writes nothing.
+        stays as it was when the write fails. Only the keys whose serialised
+        value changed since the last load or save on this instance are
+        written, and a save with nothing changed writes nothing.
 
         Raises `ConversationStale` when another instance's claim, save or
         checkpoint moved the version since this instance last read or wrote
@@ -1174,7 +1173,7 @@ class StudioStore:
         or `ConversationState.open_segment_span`), the span of the segment its
         claim starts, then moves to the live state. A span the live state
         still holds at that moment breaks the rule that every segment ends
-        its own span before the lock is free; it is logged and ended
+        its own span before the lock is free. It is logged and ended
         `orphaned` first, while the live state still holds the turn it was
         opened for."""
         if entry.draft is None or entry.draft[0] is not state:
@@ -1199,10 +1198,10 @@ class StudioStore:
         that takes the turn over after this one dies starts past every
         number this one could have sent. Raises `SegmentLost` when
         `segment_id` is no longer the stored lease, or its lease has lapsed by
-        the database clock: another instance may have loaded the reserved end
+        the database clock. Another instance may have loaded the reserved end
         to claim the turn from, so a lapsed stream extending it would hand
         out numbers that claim also uses. A transient database fault is
-        retried until the lease's deadline (`_retrying`); the write takes the
+        retried until the lease's deadline (`_retrying`). The write takes the
         greater of the stored end and its own, so a retry whose first commit
         landed writes the same end."""
         entry = self._runtime[(principal, conversation_id)]
@@ -1330,7 +1329,7 @@ class StudioStore:
         that segment, so a stream another instance took over lands no card.
         Otherwise `change` runs on a copy of the live state whose canvas is
         the canvas as stored. It must replace what it changes (a digest
-        entry included) rather than mutate it in place, since the copy is
+        entry included) and must not mutate it in place, since the copy is
         one level deep. The fields `change` changed are assigned to the live
         state only once the write has committed, so a write that fails
         leaves the live state as it was. A transient database fault is
@@ -1359,12 +1358,11 @@ class StudioStore:
     ) -> T:
         """Run `attempt`, a write fenced on the live segment, retrying a
         transient database fault (`compiler.surface.transient`, the
-        harness's one fault classifier) with backoff until the
-        lease's deadline (`lease_deadline`), then raising
-        `DatabaseUnavailable` from the last fault: by then another instance
-        may claim the conversation, though none has. Each retry sleeps
-        with no lock held, so the heartbeat's renewal is never queued behind
-        it. An attempt whose commit landed but whose acknowledgement was
+        harness's one fault classifier) with backoff until the lease's
+        deadline (`lease_deadline`), then raising `DatabaseUnavailable` from
+        the last fault. By then another instance may claim the conversation,
+        though none has. Each retry sleeps with no lock held, so the
+        heartbeat's renewal is never queued behind it. An attempt whose commit landed but whose acknowledgement was
         lost is retried as well, so every attempt must leave the stored row
         as one attempt would. `attempt` is told whether an earlier attempt
         met a fault, so it may have committed."""
@@ -1400,8 +1398,8 @@ class StudioStore:
         *,
         retried: bool = False,
     ) -> T:
-        """`checkpoint` and `change_canvas`'s one write. Under the row lock,
-        fenced on `segment_id`: run `change` on a one-level copy of the live
+        """`checkpoint` and `change_canvas`'s one write. Under the row lock
+        and fenced on `segment_id`, run `change` on a one-level copy of the live
         state holding the canvas as stored, then write the copy's canvas when
         `change` replaced it, and every durable key whose value differs from
         `entry.baseline`, in one transaction. Once it commits, record the
@@ -1486,14 +1484,14 @@ class StudioStore:
         job.
 
         `"lost"` when the stored segment is no longer `segment_id` (another
-        instance took over after this one's TTL lapsed); the caller ends the
+        instance took over after this one's TTL lapsed). The caller ends the
         stream fatally. `"cancelled"` when it is still `segment_id` but its
         `cancel` flag is set, still renewed, so the flag keeps being observed
         until the caller reacts to it. With `consume_cancel` the same update
         clears the flag, so a later `request_cancel` sets it again and the
         next renewal reports that Stop on its own. `"ok"` otherwise. A
         database error propagates, as does a `TimeoutError` when the renewal
-        takes longer than `timeout`; the caller's own heartbeat decides how
+        takes longer than `timeout`. The caller's own heartbeat decides how
         long to keep trying.
 
         Runs to the end even when the caller is cancelled
@@ -1574,12 +1572,12 @@ class StudioStore:
     async def checkpoint(self, principal: str, conversation_id: str, segment_id: str) -> None:
         """The save of a streaming segment: this instance's changed keys,
         fenced on `segment_id`. Runs before every actionable pause frame and
-        before `done` (never `message.complete`), and once more, with the
-        segment cleared, at the end of the segment (`release`).
+        before `done`, and once more, with the segment cleared, at the end of
+        the segment (`release`). It does not run before `message.complete`.
 
-        Under the row lock: raises `SegmentLost` and writes nothing when the
-        stored lease is not `segment_id` (another instance's claim outlived
-        this one's TTL). The diff is computed once the row is locked, with
+        Under the row lock, it raises `SegmentLost` and writes nothing when
+        the stored lease is not `segment_id` (another instance's claim
+        outlived this one's TTL). The diff is computed once the row is locked, with
         no await between it and the write (`_fenced_save`, the write
         `change_canvas` shares). While the lease is held, this stream is the
         turn state's one writer (`save` refuses every other), so the diff is
@@ -1612,7 +1610,7 @@ class StudioStore:
         `move_on_after` would re-cancel at every await until its scope
         exits, cutting short the rollback and connection close.
 
-        Never raises anything but the caller's own cancellation: a
+        Raises nothing but the caller's own cancellation. A
         `checkpoint` that cannot land (fenced out by a takeover, a database
         unreachable until the lease's deadline, another database error, or
         the timeout above) is logged, each as what it is, and swallowed. The
@@ -1660,7 +1658,7 @@ class StudioStore:
         timeout: float,
     ) -> None:
         """`release`'s save, run as its own task. A release that did not land
-        gives the lease up all the same: this instance stops counting
+        gives the lease up all the same. This instance stops counting
         `segment_id` as held, so none of its later saves writes under it."""
         saved = False
         try:
@@ -1706,19 +1704,19 @@ class StudioStore:
     async def drop_lease(
         self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0
     ) -> None:
-        """Clear the stored lease when it is still `segment_id`, and nothing
-        else: one conditional update of the lease columns, which leaves the
-        turn state and its version as the claim save stored them. The
-        release of a claim whose stream never started (a route failing
-        between its claim save and its response), so a retry of the same
-        request claims at once and finds what the claim save stored, a
-        resuming pending entry included. Whatever the failed request changed
-        in this instance's live state after its claim save stays unsaved;
-        the retry's `load` reads the row afresh.
+        """Clear the stored lease when it is `segment_id` and write nothing
+        else. It is one conditional update of the lease columns, which leaves
+        the turn state and its version as the claim save stored them. It
+        releases a claim whose stream never started (a route failing between
+        its claim save and its response), so a retry of the same request
+        claims at once and finds what the claim save stored, a resuming
+        pending entry included. Whatever the failed request changed in this
+        instance's live state after its claim save stays unsaved, and the
+        retry's `load` reads the row afresh.
 
-        Runs to the end even when the caller is cancelled, and never raises
-        anything but that cancellation, as `release`: a clear that cannot
-        land is logged, and the lease then expires by its own TTL.
+        Runs to the end even when the caller is cancelled, and raises nothing
+        but that cancellation, as `release` does. A clear that cannot land is
+        logged, and the lease then expires by its own TTL.
         """
         await _run_to_completion(
             self._drop_lease(principal, conversation_id, segment_id, timeout=timeout)
@@ -1765,8 +1763,8 @@ class StudioStore:
         a claim landing and the stream arming its local `cancel_event`. One
         conditional update of the lease columns.
 
-        Returns whether a live segment was found and signalled: `False`
-        when there is none, or the one on record has already expired by the
+        Returns whether a live segment was found and signalled. `False`
+        means there is none, or the one on record has already expired by the
         database clock. The caller falls back to whatever cancellation means
         with no active segment.
         """

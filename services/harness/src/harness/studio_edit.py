@@ -260,8 +260,8 @@ async def _edit_flow(
 
             # Whether an earlier attempt of the card's write changed the
             # canvas: a retry after a commit whose acknowledgement was lost
-            # finds the block already refreshed, and still owes the client
-            # the `composition.updated` that commit made.
+            # finds the block already refreshed, and owes the client the
+            # `composition.updated` that commit made.
             refreshed = False
 
             def revise(work: ConversationState) -> bool:
@@ -370,12 +370,12 @@ def _canvas_is_behind(
     conversation: ConversationState, component_id: str, head: dict[str, Any]
 ) -> bool:
     """Whether the conversation shows an older revision than `head`, a readable
-    head the platform stored for an earlier edit whose own reply the harness
-    never received (a timeout), or whose canvas write failed: the card's digest
-    entry, or its canvas block where it has one, is below the head. A no-op
-    write over such a head is applied as a revise, so the card catches up. A
-    card with no block (held, or removed) is judged by its digest entry
-    alone."""
+    head the platform stored for an earlier edit. That edit's reply never
+    reached the harness (a timeout), or its canvas write failed. The card is
+    behind when its digest entry, or its canvas block where it has one, is
+    below the head. A no-op write over such a head is applied as a revise, so
+    the card catches up. A card with no block (held, or removed) is judged by
+    its digest entry alone."""
     head_revision = head["revision"]
     recorded = (conversation.components.get(component_id) or {}).get("revision")
     if isinstance(recorded, int) and recorded < head_revision:
@@ -486,8 +486,8 @@ def _record_revision(
 ) -> None:
     """Bring a landed revise's digest entry up to `revision` and add its turn
     record. `title` is the card's new title, None when the edit left it. The
-    entry is replaced, never changed in place, since the store runs this on a
-    one-level copy of the live state (`StudioStore.change_canvas`)."""
+    entry is a new dict, since the store runs this on a one-level copy of the
+    live state (`StudioStore.change_canvas`)."""
     entry = dict(conversation.components.get(component_id) or _digest_entry(component))
     entry["revision"] = revision
     entry["fact_summary"] = component.get("fact_summary") or entry.get("fact_summary")
@@ -516,7 +516,7 @@ def _refresh_block(
     """Bring the edited component's block up to `revision`, and `title` when
     given; True iff a block changed. A card that is not composed, or whose
     block already shows `revision` and `title`, mints no empty manifest
-    revision: the store retries a write whose commit landed but whose
+    revision. The store retries a write whose commit landed but whose
     acknowledgement was lost, and that retry reads the block the commit
     wrote."""
     previous = conversation.composition

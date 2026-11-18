@@ -562,7 +562,7 @@ async def _sse_stream(
     (`harness.graph.switch.SWITCH_STOP`). The cancel event is armed again,
     so a second Stop ends the stream as any Stop does, and so does the
     stream reaching `SWITCH_REOFFER_SECONDS` after the first with no
-    `plan.proposed`: a Stop never leaves a stream open. Once that frame
+    `plan.proposed`. A Stop never leaves a stream open. Once that frame
     passes, the deadline is met, so a slow unwind after it leaves the
     paused turn open. `"segment_lost"` (this stream's segment lease was
     taken over: the heartbeat's renewal, a card removal or the run ledger
@@ -726,14 +726,15 @@ async def _sse_stream(
 
 def _keep_turn_records(conversation: ConversationState, event: Event, store: StudioStore) -> None:
     """Keep the plan records, search readings, spec blocks and applied chip
-    `event` writes to the turn's session state, for `ConversationState.close_turn` to store
-    with the turn. Each key holds the turn's whole value, so the latest
-    write replaces. The blocks stay in process (`turn_specs`) until the turn
-    closes, converted as `load` reads them (`StudioStore.adk_convert_specs`):
-    a turn the previous release opened holds blocks in the form it stored.
-    They are converted until a conversion changes nothing
-    (`turn_specs_settled`), so a turn this release opened, whose graph
-    writes the current form, is never walked."""
+    `event` writes to the turn's session state, for
+    `ConversationState.close_turn` to store with the turn. Each key holds the
+    turn's whole value, so the latest write replaces. The blocks stay in
+    process (`turn_specs`) until the turn closes, converted as `load` reads
+    them (`StudioStore.adk_convert_specs`), since a turn the previous
+    release opened holds blocks in the form that release stored. They are
+    converted until a conversion changes nothing (`turn_specs_settled`). A
+    turn this release opened, whose graph writes the current form, needs no
+    conversion."""
     delta = event.actions.state_delta
     if ORCHESTRATOR_PLAN_RECORDS_KEY in delta:
         conversation.turn_plans = list(delta[ORCHESTRATOR_PLAN_RECORDS_KEY])
@@ -936,7 +937,9 @@ class StudioRunner:
         Failures are serialised into the stream as a stream-fatal `error`
         frame. SSE headers are already on the wire, so an exception can't
         become an HTTP status. The exception is logged with the trace id;
-        it is not re-raised into the transport.
+        it is not re-raised into the transport. A lost segment or an
+        unreachable database (`SegmentLost`, `DatabaseUnavailable`) is
+        re-raised, and `_checkpointed` ends the stream on it.
         """
         translator = _Translator(
             conversation=conversation,
@@ -1005,8 +1008,8 @@ class StudioRunner:
         as this stream runs. A `renew` that reports `"cancelled"` (a Stop,
         from any instance) or `"lost"` (another instance's claim outlived
         this one's TTL) ends the stream by arming `conversation.cancel_event`
-        with `"cancelled"` or `"segment_lost"`. `_sse_stream`'s cancel branch turns it into the
-        matching frame, one mechanism for every kind of mid-stream stop.
+        with `"cancelled"` or `"segment_lost"`. `_sse_stream`'s cancel branch
+        reads it, one mechanism for every kind of mid-stream stop.
 
         On a stream running a plan-card switch whose Stop has not come yet
         (`conversation.switch_stop` armed and unset), the renewal clears the
@@ -1015,15 +1018,18 @@ class StudioRunner:
         (`_sse_stream`), and a second one, from any instance, sets the flag
         again and ends the stream.
 
-        A `renew` call that raises is retried every interval until the lease's deadline
-        (`StudioStore.lease_deadline`, on this instance's own clock, anchored just before the read
-        or renewal that set the lease's expiry), then ends the stream with the reason
-        `"database_unavailable"`: an instance this deaf to its own renewal cannot be trusted to
-        still own the segment, even though nothing else has claimed it yet. The turn stays as
-        stored, its lease lapses by its TTL, and a retry resumes it or closes it as
-        `ConversationState.begin_turn` does. A span on one clock leaves the gap between this clock
-        and the database's, which decides the lease, out of the deadline. The store's writes stop
-        retrying at the same deadline.
+        A `renew` call that raises is retried every interval until the
+        lease's deadline (`StudioStore.lease_deadline`, on this instance's own
+        clock, anchored just before the read or renewal that set the lease's
+        expiry), then ends the stream with the reason
+        `"database_unavailable"`. An instance this deaf to its own renewal
+        cannot be trusted to still own the segment, even though nothing else
+        has claimed it yet. The turn stays as stored, its lease lapses by its
+        TTL, and a retry resumes it or closes it as
+        `ConversationState.begin_turn` does. Measuring the deadline on one
+        clock keeps the gap between this clock and the database's, which
+        decides the lease, out of it. The store's writes stop retrying at the
+        same deadline.
         """
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL_S)
@@ -1066,9 +1072,8 @@ class StudioRunner:
         """Relay `frames`, each once its `seq` lies inside the segment's
         reserved frame numbers (`StudioStore.reserve_frames`), checkpointing
         durably before every actionable pause (`plan.proposed`,
-        `elicitation.request`) and before `done`.
-        The client never sees a frame that says "paused" or "done" before
-        the store agrees. `done`'s frame is rebuilt to carry the canvas
+        `elicitation.request`) and before `done`. The client never sees a
+        frame that says "paused" or "done" before the store agrees. `done`'s frame is rebuilt to carry the canvas
         the checkpoint read back from the store, so a `/composition` edit
         another instance made meanwhile reaches the client on it. A
         checkpoint that fails (the segment was taken over, or the write
@@ -1076,7 +1081,7 @@ class StudioRunner:
         pause or terminal frame it would have carried, and ends the stream
         there. Once a `plan.approved` frame is sent, the interrupt it answers
         records it (`ConversationState.mark_approved_sent`) and is
-        checkpointed: a lost segment, or a database unreachable until the
+        checkpointed. A lost segment, or a database unreachable until the
         lease's deadline, ends the stream the same way, and any other
         failure there is logged alone. A card's canvas write in `frames`
         that loses the segment, or cannot reach the database, ends `frames`
@@ -1209,35 +1214,35 @@ class StudioRunner:
         heartbeat is stopped, then the segment released (with this
         segment's resuming pending entries), then the local lock, so a
         heartbeat that ends with a non-cancel exception still reaches both
-        releases; `_unwind` re-raises that exception once they have run. A
-        DB error the release cannot itself raise (it never does; see
-        `StudioStore.release`) could still not strand the lock, since
-        releasing it does not depend on the release having succeeded.
+        releases; `_unwind` re-raises that exception once they have run. The
+        release itself never raises on a DB error (`StudioStore.release`),
+        and releasing the lock would not depend on it if it did.
 
         Every change a Stop, a loss or a disconnect makes to the turn is made
-        here, in this generator's own task, before the release saves it;
-        `_sse_stream` only records what it read (`_StreamEnding`). Each frame is
-        pulled from `_checkpointed` in a task of its own, raced against a Stop
-        or loss the stream reads (`_StreamEnding.stop_read`). One that still
-        applies (`_StreamEnding.stop_applies`) cancels that task and nothing
-        more is relayed, even from frames that swallow the cancellation or raise
-        in its place; a cancellation of this generator is always the client's. A
-        Stop then closes the turn as `cancelled` and drops its pending
-        interrupts. The frames that end the stream, a `failed` frame for every
-        open Activity line and then the `cancelled` frame or a lost segment's
-        `transient_unavailable` frame, are numbered (reserved first for a Stop)
-        before the release, which saves the turn as the Stop left it, and are
-        sent after it. A Stop read while the release writes is applied the same
-        way once it has, with a save of its own (`_stop_frames`); the turn stays
-        as released after a loss read then. A client that leaves before the
-        stream sent an ending frame closes a running turn as `cancelled` before
-        the release; a turn paused for an answer stays open.
+        here, in this generator's own task, before the release saves it.
+        `_sse_stream` only records what it read (`_StreamEnding`). Each frame
+        is pulled from `_checkpointed` in a task of its own, raced against a
+        Stop or loss the stream reads (`_StreamEnding.stop_read`). One that
+        still applies (`_StreamEnding.stop_applies`) cancels that task and
+        nothing more is relayed, even from frames that swallow the
+        cancellation or raise in its place. A cancellation of this generator
+        is always the client's. A Stop then closes the turn as `cancelled` and
+        drops its pending interrupts. The frames that end the stream, a
+        `failed` frame for every open Activity line and then the `cancelled`
+        frame or a lost segment's `transient_unavailable` frame, are numbered
+        (reserved first for a Stop) before the release, which saves the turn
+        as the Stop left it, and are sent after it. A Stop read while the
+        release writes is applied the same way once it has, with a save of its
+        own (`_stop_frames`), and the turn stays as released after a loss read
+        then. A client that leaves before the stream sent an ending frame
+        closes a running turn as `cancelled` before the release. A turn
+        paused for an answer stays open.
 
         The segment's span ends here, after the last frame this sent
-        (`harness.studio_state.span_level`'s table). Its status is the
-        cause of the last ending frame the stream sent (`_StreamEnding`); a
-        stream that sent none ended because its frames ran out (`failed`) or
-        because it was closed or cancelled first (`disconnected`). Its
+        (`harness.studio_state.span_level`'s table). Its status is the cause
+        of the last ending frame the stream sent (`_StreamEnding`). A stream
+        that sent none ended because its frames ran out (`failed`) or because
+        it was closed or cancelled first (`disconnected`). Its
         `stored` is the turn as this instance last saved it
         (`StudioStore.stored_turn`), read after the release, which runs to
         the end even when this generator is cancelled while it waits.
@@ -1260,7 +1265,7 @@ class StudioRunner:
             return ending.stop_applies(conversation)
 
         # Set once the relay broke on a Stop or loss, and held, so it
-        # outlasts frames that record the turn as they unwind; settled once
+        # outlasts frames that record the turn as they unwind. Settled once
         # the frames are unwound.
         stopped = False
 
@@ -1287,7 +1292,7 @@ class StudioRunner:
                         pulling = asyncio.ensure_future(anext(checked))
                         while not pulling.done():
                             if ending.stop is not None:
-                                # Read while the frames end on their own:
+                                # Read while the frames end on their own, so
                                 # they run on to their ending frame.
                                 await asyncio.wait({pulling})
                                 break
@@ -1387,7 +1392,7 @@ class StudioRunner:
             finally:
                 try:
                     # The segment ends here on this instance, and its span
-                    # with it; the stream's end exports the span
+                    # with it. The stream's end exports the span
                     # (`_sse_stream`).
                     conversation.end_segment_span(
                         ending.status or ("failed" if ran_out else "disconnected"),
@@ -1407,7 +1412,7 @@ class StudioRunner:
     ) -> list[Any]:
         """The frames that end a stream whose frames failed with a cancellation
         of their own, the segment's task uncancelled (an awaited future
-        cancelled under them, say), by the rule every ending follows. After an
+        cancelled under them, say). As with any ending (`_StreamEnding`), after an
         ending frame went out (`done`, a stream-fatal frame or a pause), it
         sends nothing, keeps that frame's status and logs a warning. Otherwise
         it logs an error and the turn closes with a stream-fatal frame
@@ -1495,7 +1500,7 @@ class StudioRunner:
 
     def _stored_turn(self, principal: str, conversation_id: str) -> str | None:
         """`StudioStore.stored_turn`, or `None` (logged) when it fails, so
-        reading it never keeps the segment's span from ending."""
+        a failed read cannot keep the segment's span from ending."""
         try:
             return self.store.stored_turn(principal, conversation_id)
         except Exception:
@@ -1537,10 +1542,9 @@ class _StreamEnding:
     before it is relayed (`offer`), and `_sse_stream` sets `status` as that
     frame goes out (`sent`). It is set on sending, since `_sse_stream` can
     be closed at a heartbeat's yield while a frame `_locked` yielded waits
-    unread. `stop` is a Stop
-    or a loss the stream read (`read_stop`), which `_locked` acts on, and
-    `client_gone` a client that left. `open_steps` are the Activity lines
-    the stream has sent open."""
+    unread. `stop` is a Stop or a loss the stream read (`read_stop`), which
+    `_locked` acts on, and `client_gone` a client that left. `open_steps`
+    are the Activity lines the stream has sent open."""
 
     status: str | None = None
     stop: Literal["cancelled"] | StreamLoss | None = None
@@ -1562,8 +1566,8 @@ class _StreamEnding:
 
     def withdraw(self) -> None:
         """Withdraw an offered ending frame that will not be relayed. An
-        offered loss frame stays: the segment is another instance's to end,
-        and it keeps blocking a Stop."""
+        offered loss frame stays. The segment is another instance's to end,
+        and the frame keeps blocking a Stop."""
         if self._offered is not None and self._offered[1] not in STREAM_LOSSES:
             self._offered = None
 
@@ -1662,8 +1666,8 @@ def _streaming_conflict_response(detail: str, *, retry_after_seconds: int = 5) -
     a live segment lease held by any instance (`SegmentBusy`), or the store's
     compare-and-swap on the `/turn` claim (`ConversationStale`).
     `retry_after_seconds` defaults to a flat 5s for the process-local and
-    claim guards, which carry no TTL of their own to report; a `SegmentBusy`
-    conflict passes its own remaining TTL instead."""
+    claim guards, which carry no TTL of their own to report. A `SegmentBusy`
+    conflict passes its own remaining TTL."""
     return _tool_error_response(
         ToolError(
             error=ErrorCode.TRANSIENT_UNAVAILABLE,
@@ -1774,7 +1778,7 @@ def _unknown_conversation_response(conversation_id: str) -> JSONResponse:
 def _held_response() -> JSONResponse:
     """The 409 every route answers for a conversation `StudioStore.load`
     cannot serve until an operator acts (`ConversationHeld`). A retry
-    cannot succeed, so it is `do_not_retry`; the operator's command is in
+    cannot succeed, so it is `do_not_retry`. The operator's command is in
     the log line the store's `adk.reimport` wrote."""
     return _tool_error_response(
         ToolError(
@@ -1838,13 +1842,13 @@ def _turn_session_state(conversation: ConversationState, body: TurnRequest) -> d
         state[ORCHESTRATOR_PRIOR_LEDGER_KEY] = ledger
     if isinstance(body.seed_spec, list):
         # Each seed as the `seed` node takes it, or the refusal its step
-        # fails with: no posted Spec block enters the session.
+        # fails with. No posted Spec block enters the session.
         state[SEEDS_STATE_KEY] = json.dumps(seeds_slot(body.seed_spec))
     elif body.seed_spec is not None:
         # One reference, the reserved shape: `graph.seed` reports it unused.
         state[SEEDS_STATE_KEY] = json.dumps(body.seed_spec.model_dump(mode="json"))
     if body.apply_choice is not None:
-        # `graph.seed` applies the chip, and the turn neither searches nor plans.
+        # `graph.seed` applies the chip, and the turn skips search and planning.
         state[APPLY_CHOICE_STATE_KEY] = json.dumps(body.apply_choice.model_dump())
     return state
 
@@ -1927,8 +1931,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     # Another instance's `/turn` created this same
                     # never-before-seen conversation between this request's
                     # own load and create. Load what it created and continue
-                    # to the claim below -- its compare-and-swap decides the
-                    # race; a lost claim is the existing `ConversationStale`
+                    # to the claim below. Its compare-and-swap decides the
+                    # race, and a lost claim is the `ConversationStale`
                     # 409, not a bare 500.
                     conversation = await studio.store.load(principal, body.conversation_id)
                     assert conversation is not None
@@ -1960,7 +1964,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     return label
                 chip_label = label
             # Every change up to the claim save is made on a working copy,
-            # which the save swaps into the live state once it commits; a
+            # which the save swaps into the live state once it commits. A
             # request that claims nothing leaves the live state as loaded.
             work = studio.store.draft(principal, body.conversation_id)
             abandoned = work.begin_turn()
@@ -1981,7 +1985,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # save below persists it, so the save's own compare-and-swap
             # covers both in one write. `SegmentBusy` means a live segment,
             # on this instance or another, already owns the conversation's
-            # stream; its own `retry_after_seconds` is the ceiling of that
+            # stream. Its own `retry_after_seconds` is the ceiling of that
             # segment's remaining TTL.
             try:
                 segment_id = studio.store.claim_segment(principal, body.conversation_id, work)
@@ -2034,7 +2038,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # `ConversationStale` here means another instance's `/turn`
             # claimed a turn on this conversation since. The session this
             # request created is then a leftover, which the next claim of
-            # the same turn replaces; a crash between the create and the
+            # the same turn replaces. A crash between the create and the
             # claim leaves the same leftover. A crash after the claim leaves
             # the store at the new turn_index, and the segment it claimed
             # expires by its own TTL.
@@ -2055,7 +2059,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             assert conversation is not None
             if abandoned is not None:
                 # The unrecorded turn this one closed as `abandoned` ends its
-                # trace as its record now does; the stream's end exports the
+                # trace as its record does. The stream's end exports the
                 # span.
                 record_closed_turn_span(body.conversation_id, abandoned)
             # Set in the request task's context (each request gets a fresh
@@ -2120,8 +2124,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 media_type=SSE_MEDIA_TYPE,
             )
         except BaseException as exc:
-            # The stream wrapper normally releases the segment and the lock;
-            # a failure before the response starts streaming releases them
+            # The stream wrapper normally releases the segment and the lock.
+            # A failure before the response starts streaming releases them
             # here (`_release_claim`). Before the claim save commits, the
             # working copy is given up and the live state stays as loaded.
             # After it, the lease is dropped, and the claim save already
@@ -2198,7 +2202,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # id alone, and would otherwise write over the turn this closes.
             conversation.segment = None
             # With no live segment there is nothing for a release to fence
-            # against; a plain save persists the clear. A stale write (a
+            # against. A plain save persists the clear. A stale write (a
             # segment claimed the instant after `request_cancel` checked) is
             # a rare enough race that losing this save is acceptable. The
             # claiming stream's own release still checkpoints whatever it
@@ -2240,7 +2244,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 return refusal
             assert pending is not None  # narrowed by _interrupt_refusal
             # Every change up to the claim save is made on a working copy,
-            # which the save swaps into the live state once it commits; a
+            # which the save swaps into the live state once it commits. A
             # request that claims nothing leaves the live state as loaded.
             work = studio.store.draft(principal, body.conversation_id)
             pending = work.pending[body.interrupt_id]
@@ -2346,8 +2350,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # A crash between this save and the resumed stream's own
             # checkpoint still leaves a durable, retryable record.
             # `_checkpointed` drops it once the resumed segment reaches its
-            # own pause or terminal frame; its release drops it on every
-            # other ending (error, cancel, disconnect); only a crash
+            # own pause or terminal frame. Its release drops it on every
+            # other ending (error, cancel, disconnect). Only a crash
             # leaves it for this same retry path to pick back up.
             pending.answer = requested_answer
             pending.resuming_segment = segment_id
@@ -2381,11 +2385,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             raise
 
         # Every failure from here to the stream's start drops the lease the
-        # save above claimed, and releases the lock. Only the lease: the
-        # pending entry stays resuming under the dropped segment with the
-        # answer recorded, so a retry of the same answer claims at once and
-        # resumes. The turn lines added below stay unsaved, and the retry's
-        # load reads the row afresh.
+        # save above claimed, and releases the lock. The pending entry stays
+        # resuming under the dropped segment with the answer recorded, so a
+        # retry of the same answer claims at once and resumes. The turn lines
+        # added below stay unsaved, and the retry's load reads the row afresh.
         try:
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None

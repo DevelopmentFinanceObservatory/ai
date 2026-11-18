@@ -23,22 +23,22 @@ Verbs:
   ledger's tables, writing through `harness.studio_store`'s own write path,
   so what it writes is what `StudioStore.load` reads. Records are copied
   verbatim, bar the spec block conversion, the open turn's fields and
-  `pending` included, since this release still resumes a pause ADK holds.
+  `pending` included, because this release resumes a pause ADK holds.
   A conversation is refused whole, with every reason named, for a
   structural fault: a key the job does not know, a turn or approval
   position that is not a number or leaves a gap, a write token that is not
   a string, or a run-ledger item naming a run the ledger does not hold.
   Any other failure while importing one conversation refuses it too, and
-  the run goes on with the rest. Records this release's load skips or fails on (a
-  plan record, search reading, identity, approval, canvas, pending
-  interrupt or run record its model refuses, or a spec block whose
+  the run goes on with the rest. Records this release's load skips or
+  fails on (a plan record, search reading, identity, approval, canvas,
+  pending interrupt or run record its model refuses, or a spec block whose
   `_bound_refs` does not convert, which the reader drops) are reported and
   copied as they are.
 
   `adk_ledger_imports` records a digest of each imported ADK state, the
   ledger session's `update_time` read with it, and a digest of the rows
   written, so a rerun leaves alone a conversation whose ADK state has not
-  moved, re-imports one whose ADK state moved while its rows are still as
+  moved, re-imports one whose ADK state moved while its rows are as
   imported, and reports a conflict when both moved, unless `--prefer-adk`
   names it as `principal/conversation_id`. Under `--apply` a conflict
   marks the conversation diverged, and the serving release refuses it
@@ -65,14 +65,14 @@ Verbs:
   `--verify` writes nothing and compares, for every ledger session, the
   conversation as ADK's state loads (`_apply_delta` over the mapped keys)
   with `StudioStore.load` from the tables, the canvas included, and the
-  run-ledger items with the run rows, its lease's cancel flag left out.
+  run-ledger items with the run rows, leaving out the lease's cancel flag.
   Both sides take the open turn's spec blocks from its turn session
   through the reader the server serves (`open_turn_specs`), converted as
-  `StudioStore.load` converts them. A conversation
-  whose ADK state moved since the job imported it while its rows did not
-  (the previous release still serving), and one whose rows moved since,
+  `StudioStore.load` converts them. A conversation whose ADK state moved
+  since the job imported it while its rows did not (the previous release
+  wrote it, serving until cutover), and one whose rows moved since,
   written by the release that reads the tables (one written while verify
-  compares it included), are each listed and not compared; one where both
+  compares it included), are each listed and not compared. One where both
   moved is a conflict, listed, not compared, and fails the verify.
 - `close-open-turns`: closes, in the tables, every open turn that holds no
   live lease and ran on ADK (its turn session `{conversation_id}#t{n}`
@@ -84,11 +84,11 @@ Verbs:
   stored, as `import` keeps one, and reported. A diverged conversation is
   left alone and listed, and fails the run: its rows lack the turns ADK
   holds, so `--prefer-adk` must take ADK's copy first. A conversation
-  whose close fails is refused and left open; the run goes on with the
-  rest.
+  whose close fails is refused and left open, and the run goes on with
+  the rest.
 
 The serving release reads conversations from the tables while the previous
-release may still finish turns on ADK. `reimport_on_access` is the
+release may finish turns on ADK. `reimport_on_access` is the
 `AdkBridge` the server gives `StudioStore`: before each load it brings
 the conversation up to date with its ledger session through `import`'s own
 path, so a turn the previous release served after the last `--apply` is in
@@ -103,7 +103,7 @@ does not convert.
 
 Without `--apply` nothing is written to the conversation tables. Only
 `import` migrates, so `--verify` and `close-open-turns` also run from an
-image older than the database's schema; they refuse to start when the
+image older than the database's schema. They refuse to start when the
 tables do not exist.
 
 The database comes from the settings the service uses
@@ -179,9 +179,8 @@ LEDGER_APP = f"{AGENT_NAME}.ledger"
 TURN_APP = AGENT_NAME
 ADK_SCHEMA_VERSION = "1"
 # Frame numbers an imported conversation reserves past the last one ADK
-# recorded. A resume the previous release retried after its stream died
-# started that many past the stored number, since the dead stream may have
-# sent frames past its last save; a resumed pause starts past these.
+# recorded. A stream the previous release lost may have sent frames past its
+# last save, so the stream that resumes the turn starts past all of them.
 IMPORTED_SEQ_MARGIN = 1000
 
 _ADK_PREFIX = "studio:"
@@ -267,7 +266,7 @@ def _convert_block(block: Mapping[str, Any]) -> Mapping[str, Any]:
     row's identity is its text and its role is unstated, and
     `compiler.evidence.bound_refs_of` finds it by its text, case-folded, with
     any role fitting, as it read the mapping. An entry with no text or no
-    string ref is dropped; a mapping left with no entry drops the key, as a
+    string ref is dropped. A mapping left with no entry drops the key, as a
     block whose part bound nothing is written.
 
     Raises:
@@ -290,7 +289,7 @@ def _convert_block(block: Mapping[str, Any]) -> Mapping[str, Any]:
 def _convert_blocks(value: Any, where: str, blocks: Blocks) -> Any:
     """`value` with every spec block in it, an object carrying `_bound_refs`
     at any depth, read by `_convert_block`. A block that does not convert is
-    left as it is and named in `blocks`; `value` itself comes back when
+    left as it is and named in `blocks`. `value` itself comes back when
     nothing changed."""
     if isinstance(value, Mapping) and "_bound_refs" in value:
         try:
@@ -323,9 +322,9 @@ class Ledger:
     `flat` holds the conversation's flat keys (`harness.studio_store`) in the
     session state's own order, which is the order the canvas digest reads
     components in, with its spec blocks converted (`_convert_blocks`).
-    `faults` are the structural faults that refuse the conversation;
-    `findings` the records this release's load skips or fails on, a block that does
-    not convert among them. `blocks` counts the conversion.
+    `faults` are the structural faults that refuse the conversation.
+    `findings` are the records this release's load skips or fails on, a
+    block that does not convert among them. `blocks` counts the conversion.
     """
 
     flat: dict[str, Any]
@@ -602,7 +601,7 @@ def _converted_turn(
 async def _turn_session_row(
     engine: AsyncEngine, principal: str, session_id: str
 ) -> tuple[dict[str, Any], int] | None:
-    """`_stored_turn_specs` on a connection of its own: the one read of a
+    """`_stored_turn_specs` on a connection of its own, the one read of a
     turn session's row outside the import's transaction."""
     async with engine.connect() as conn:
         return await _stored_turn_specs(conn, principal, session_id)
@@ -638,10 +637,10 @@ def open_turn_specs(engine: AsyncEngine, *, found: set[str] | None = None) -> Tu
     turn session `session_id` (app `dfo_analyst_graph`) holds, read by SQL
     as stored. Empty when the session holds none or does not exist.
     `StudioStore.load` converts what it reads, once, through its bridge's
-    `convert_specs`. The server serves Studio through it, and `--verify`
-    reads open turns through it and the job's bridge (`_NoAdk`), whose
-    conversion is the serving bridge's (`_converted_specs`), so the gate
-    checks the blocks the serving release loads, and `close-open-turns`
+    `convert_specs`. The server serves Studio through this reader.
+    `--verify` reads open turns through it and the job's bridge (`_NoAdk`),
+    whose conversion is the serving bridge's (`_converted_specs`), so the
+    gate checks the blocks the serving release loads. `close-open-turns`
     reads them through it too, with `found` gathering the ids of the
     sessions that exist."""
 
@@ -669,9 +668,9 @@ _LOGGED_BLOCKS_KEPT = 1024
 
 
 async def _find_row(conn: AsyncConnection, names: dict[str, str], *, lock: bool) -> int | None:
-    """The id of the conversation `names` holds the `principal` and
-    `conversation_id` of, None when no row holds it. With `lock`, the row is
-    locked for the transaction."""
+    """The id of the row for the conversation `names` identifies by its
+    `principal` and `conversation_id`, None when there is none. With `lock`,
+    the row is locked for the transaction."""
     return (
         await conn.execute(
             text(
@@ -728,11 +727,11 @@ async def _lease_live(conn: AsyncConnection, pk: int) -> bool:
     )
 
 
-# The lease field neither the rows' digest nor `--verify`'s comparison
-# reads. A Stop sent to this release on a stream the previous release runs
-# sets it on the lease a copy brought across; the flag never reaches that
-# stream, and the next copy replaces it with ADK's, so it is no write the
-# tables would lose.
+# The lease field left out of the rows' digest and of `--verify`'s
+# comparison. A Stop sent to this release on a stream the previous release
+# runs sets it on the lease a copy brought across. The flag does not reach
+# that stream and the next copy replaces it with ADK's, so ignoring it
+# loses no write the tables hold.
 _UNCOMPARED_LEASE_FIELD = "cancel"
 
 
@@ -980,7 +979,7 @@ async def _import_one(
     copies serialised on the lock read ADK in the order they commit. A
     conflict records the session's `update_time` and marks the record
     `diverged`, its digests left as they were, so the job and `--verify`
-    still decide by digest. A refusal writes nothing, a row inserted for it
+    decide by digest. A refusal writes nothing, a row inserted for it
     included. A dry run takes no lock, writes nothing, and builds the rows
     the write would write, so it refuses what the write would refuse.
     """
@@ -1118,7 +1117,7 @@ async def import_conversations(
 ) -> ImportReport:
     """Import every ledger session (module docstring). With `apply` false,
     read and decide only. `prefer_adk` holds `principal/conversation_id`
-    names to re-import over rows changed on both sides; one a stream holds
+    names to re-import over rows changed on both sides. One a stream holds
     is refused unless `force`.
 
     Raises:
@@ -1144,7 +1143,7 @@ async def import_conversations(
                 force=force,
                 open_turn=True,
             )
-        # One conversation's failure refuses it, with nothing written; the
+        # One conversation's failure refuses it, with nothing written. The
         # run goes on with the rest.
         except Exception as exc:
             report.refused[key.name] = [f"the import failed: {type(exc).__name__}: {exc}"]
@@ -1175,12 +1174,12 @@ async def import_conversations(
     return report
 
 
-# One conversation's ledger session against what was last copied of it: no
-# row when ADK holds no ledger session for it; `current` false when the
-# session's `update_time` is not the one last recorded, or nothing is
-# recorded; `diverged` when the last copy found both sides changed. One
-# lookup of `sessions` by its primary key, joined to `adk_ledger_imports` by
-# its own.
+# One conversation's ledger session against what was last copied of it. No
+# row comes back when ADK holds no ledger session for it. `current` is false
+# when the session's `update_time` is not the one last recorded, or nothing
+# is recorded. `diverged` is true when the last copy found both sides
+# changed. One lookup of `sessions` by its primary key, joined to
+# `adk_ledger_imports` by its own.
 _ADK_MOVED = text(
     "SELECT i.source_updated_at IS NOT DISTINCT FROM s.update_time AS current, "
     "coalesce(i.diverged, false) AS diverged, s.update_time "
@@ -1191,9 +1190,8 @@ _ADK_MOVED = text(
 
 
 def reimport_on_access(engine: AsyncEngine) -> AdkBridge:
-    """`StudioStore`'s `AdkBridge` for the release that
-    serves Studio from the tables while the previous release still finishes
-    turns on ADK.
+    """`StudioStore`'s `AdkBridge` for the release that serves Studio from
+    the tables while the previous release finishes turns on ADK.
 
     `AdkBridge.moved` says whether ADK's ledger session for a conversation moved
     since it was last copied or refused, or the conversation is diverged
@@ -1209,7 +1207,7 @@ def reimport_on_access(engine: AsyncEngine) -> AdkBridge:
     session for it (a conversation started on this release) or the session
     has not moved, that one read is all it does. Otherwise it copies the
     conversation through the job's own path (`_import_one`), under the row's
-    lock: a conversation only ADK changed is re-imported in place and one
+    lock. A conversation only ADK changed is re-imported in place and one
     never imported is imported.
 
     A conversation that changed on both sides is diverged: an error names
@@ -1218,7 +1216,7 @@ def reimport_on_access(engine: AsyncEngine) -> AdkBridge:
     holds, so serving them would lose the previous release's turns. A
     conversation whose ledger session the copy refuses (`_Copy.reasons`)
     is logged as an error once per ADK revision in this process and served
-    as the tables hold it: when they do not hold it, `load` finds no
+    as the tables hold it. When they do not hold it, `load` finds no
     conversation and the next `/turn` starts it afresh. Its later reads
     find the row that turn created, refuse the copy again and serve the
     tables, so no conflict follows. Any other failure of the copy
@@ -1454,12 +1452,13 @@ async def _outcome(view: Any) -> tuple[str, Any]:
 class VerifyReport:
     """For every ledger session, by `principal/conversation_id`, the keys
     whose value differs between ADK's load and the tables' load. Three
-    kinds are listed apart and not compared. A conversation whose ADK state
-    moved since the import while its rows stayed as imported, written by
-    the previous release still serving, which the serving release
-    re-imports on its next read. One whose rows the serving release has
-    written since the import: its tables hold turns ADK never saw. One
-    where both moved is a conflict, and fails the verify."""
+    kinds are listed apart and not compared. One is a conversation whose
+    ADK state moved since the import while its rows stayed as imported,
+    written by the previous release, which serves until cutover. The serving
+    release re-imports it on its next read. Another is a conversation whose
+    rows the serving release has written since the import, so its tables
+    hold turns ADK never saw. The third is a conflict, where both moved,
+    and it fails the verify."""
 
     total: int = 0
     differences: dict[str, list[str]] = field(default_factory=dict)
@@ -1532,8 +1531,8 @@ async def verify(engine: AsyncEngine) -> VerifyReport:
         side = await _tables_side(engine, session)
         if side == "as imported" and (differences := await _differences(engine, session)):
             # A write the serving release commits between the classification
-            # and the compared reads shows as a difference; the rows' digest,
-            # read again, tells it from one.
+            # and the compared reads shows as a difference. The rows' digest,
+            # read again, tells the two apart.
             side = await _tables_side(engine, session)
             if side == "as imported":
                 report.differences[session.name] = differences
@@ -1548,7 +1547,7 @@ async def verify(engine: AsyncEngine) -> VerifyReport:
 
 async def _differences(engine: AsyncEngine, session: _Session) -> list[str]:
     """What differs between the conversation as ADK's state loads and as the
-    tables load: the keys whose values differ, or how the loads failed."""
+    tables load, as the keys whose values differ or how the loads failed."""
     old_kind, old = await _outcome(_adk_view(engine, session))
     new_kind, new = await _outcome(_table_view(engine, session))
     if new_kind == "view" and new is None:
@@ -1634,7 +1633,7 @@ async def close_open_turns(engine: AsyncEngine, *, apply: bool) -> CloseReport:
             await _close_one(
                 engine, principal, conversation_id, leased=leased, apply=apply, report=report
             )
-        # One conversation's failure refuses it; the run goes on with the rest.
+        # One conversation's failure refuses it. The run goes on with the rest.
         except Exception as exc:
             report.refused[f"{principal}/{conversation_id}"] = [
                 f"the close failed: {type(exc).__name__}: {exc}"
@@ -1677,9 +1676,8 @@ async def _close_one(
     state.close_turn(final_text=state.turn_final_text, error="abandoned")
     state.pending.clear()
     # No stream holds the lease, so any lease on record has lapsed. Clearing
-    # it fences out a stream still running under it: its checkpoint is
-    # fenced on the lease id alone, and would otherwise write over the turn
-    # this closes.
+    # it fences out a stream running under it, whose checkpoint is fenced on
+    # the lease id alone and would otherwise write over the turn this closes.
     state.segment = None
     try:
         await store.save(principal, conversation_id)

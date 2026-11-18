@@ -266,13 +266,12 @@ async def _apply_migrations_with_retries(
     budget_s: float,
 ) -> None:
     """Retry `apply_pending` under `_retry_startup_step`'s budget. An
-    attempt has no bound of its own: `apply_pending` bounds each statement
+    attempt has no bound of its own. `apply_pending` bounds each statement
     with `statement_timeout` and each lock wait with `lock_timeout`, so a
-    migration of several statements runs as long as its statements take
-    and is not cut short. An attempt that fails leaves no lock behind:
-    `apply_pending` holds a transaction-level lock. A
-    `MigrationChecksumError` is a fault in the files, so it propagates at
-    once."""
+    migration of several statements runs as long as its statements take.
+    A failed attempt leaves no lock behind, because `apply_pending` holds
+    a transaction-level lock. A `MigrationChecksumError` is a fault in the
+    files, so it propagates at once."""
     await _retry_startup_step(
         "apply_pending",
         lambda: apply_pending(engine),

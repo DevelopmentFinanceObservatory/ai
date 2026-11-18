@@ -212,8 +212,8 @@ turn reserves a block of 256 numbers (a new turn numbers from 0), and a
 resumed segment, whether it follows a pause or a dead stream, starts in
 the block after every one reserved before. The first frame after a resume
 therefore carries a number past the paused segment's last, with a gap
-between them. Gaps are legal; order is not. Use `seq` to order frames,
-never as an index.
+between them. Gaps are legal, and `seq` always orders frames. Use it for
+ordering only.
 
 ### Heartbeats (delta 3)
 

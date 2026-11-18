@@ -614,11 +614,11 @@ def end_turn_span(
     span's observation, which is what an evaluator on that observation reads.
     Several spans opened on one `external_id` are several root observations
     on one trace, and the trace's own input and output are those of whichever
-    root Langfuse ingests last. An `error` (a machine-readable code, never
+    root Langfuse ingests last. An `error` (a machine-readable code, with no
     exception text) sets the observation's level to `level` with `error` as
-    its status message. Off Langfuse all four are ignored. `attributes` go
-    on the span itself, on any backend, and on Langfuse into the
-    observation's metadata as well.
+    its status message. Off Langfuse `request`, `response`, `error` and
+    `level` are ignored. `attributes` go on the span itself, on any backend,
+    and on Langfuse into the observation's metadata as well.
 
     Callable from any asyncio task: the span's scope is exited in the context
     it was entered in. Swallows any error from closing it, since telemetry

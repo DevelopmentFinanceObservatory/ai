@@ -2,7 +2,7 @@
 -- and the run ledger.
 --
 -- Each column group of `conversations` has its own writer, so writers that
--- touch different groups never conflict:
+-- touch different groups do not conflict:
 --   version, turn_state  the turn's bookkeeping. Written by the lease holder
 --                        (fenced on lease_segment_id) or, with no live lease,
 --                        by a compare-and-swap on version.

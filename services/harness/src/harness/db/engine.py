@@ -8,11 +8,11 @@ the Cloud SQL Python Connector (PSC, IAM auth) when
 `session_store_instance_connection_name` is set, the shape a deployed `ai`
 Cloud Run instance connecting to Postgres over IAM auth needs.
 
-The connector path mirrors apis' `dataset_store.connection.build_connector`
-(`refresh_strategy="lazy"`, so a Cloud Run freeze/thaw cycle never hands out
-a stale token; `ip_type=IPTypes.PSC`, the only reachable path to the
-platform Postgres instance) and diverges from it only because SQLAlchemy's
-async engine needs an async DB-API connection, not a bare connection pool:
+The connector path mirrors apis' `dataset_store.connection.build_connector`.
+It uses `refresh_strategy="lazy"`, so a Cloud Run freeze/thaw cycle does not
+hand out a stale token, and `ip_type=IPTypes.PSC`, the only reachable path to
+the platform Postgres instance. It diverges from apis only because
+SQLAlchemy's async engine needs an async DB-API connection:
 `create_async_connector` / `connect_async(..., "asyncpg", ...)` /
 `close_async()` replace apis' synchronous `Connector` / `pg8000` / `close()`
 calls one level down.
@@ -33,8 +33,8 @@ from harness.settings import Settings
 
 logger = logging.getLogger(__name__)
 
-# The Postgres async driver every consumer of the engine expects; the
-# connector also supports pg8000 and psycopg, but only asyncpg gives
+# The Postgres async driver every consumer of the engine expects. The
+# connector also supports pg8000 and psycopg, and only asyncpg gives
 # SQLAlchemy an async engine.
 _CONNECTOR_DRIVER = "asyncpg"
 
@@ -128,9 +128,9 @@ def _build_connector_backed_database(*, settings: Settings) -> DatabaseHandle:
         runtime_db_user=runtime_db_user,
         connect_timeout_s=settings.session_store_connect_timeout_s,
     )
-    # The URL carries only the dialect+driver; `async_creator` supplies the
-    # actual connection, and SQLAlchemy's own docs for it say the URL's
-    # parameters are never applied.
+    # The URL carries only the dialect+driver. `async_creator` supplies the
+    # actual connection, and SQLAlchemy ignores the URL's parameters when it
+    # is set.
     engine = create_async_engine(
         "postgresql+asyncpg://",
         async_creator=source.connect,
