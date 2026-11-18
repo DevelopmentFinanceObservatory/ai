@@ -43,7 +43,7 @@ import httpx2
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common import telemetry
-from common.telemetry import record_event, start_turn_span
+from common.telemetry import record_event
 from compiler.surface import (
     FixtureSurface,
     McpSurface,
@@ -2265,8 +2265,8 @@ async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claim
     landed, so `/turn` fails before its stream starts. The lock and the
     segment it claimed are both released, the claimed segment's span ends
     `failed` and is exported, and the next `/turn` is accepted. That turn
-    closes the first as `abandoned`, which records a zero-length span on the
-    first turn's trace."""
+    closes the first as `abandoned`; the first was not paused, and its
+    segment's span already ended, so it gets no second span."""
     ended = _recording_span_ends(monkeypatch)
     store = StudioStore(
         _engine(),
@@ -2300,10 +2300,10 @@ async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claim
         frames = await _stream(client, "/api/studio/turn", _turn_body("hi again"))
 
     assert _events(frames)[-1] == "done"
-    assert ended == [("failed", "ERROR"), ("abandoned", "WARNING"), ("done", "DEFAULT")]
+    assert ended == [("failed", "ERROR"), ("done", "DEFAULT")]
     assert [
         (span.attributes or {})["dfo.external_id"] for span in otlp_spans.get_finished_spans()
-    ] == [first_trace, first_trace, _frame(frames, "done")["trace_id"]]
+    ] == [first_trace, _frame(frames, "done")["trace_id"]]
 
 
 async def test_a_turn_replaces_the_leftover_adk_session_it_meets(
@@ -3610,76 +3610,6 @@ async def test_a_release_whose_caller_is_cancelled_ends_the_span_as_the_save_lef
 
     assert ended == [("done", "DEFAULT")]
     assert not conversation.lock.locked()
-
-
-async def test_a_turn_begun_over_a_leftover_span_ends_it_as_orphaned(
-    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A span the live state still holds, from a segment whose end never
-    reached it, ends `orphaned` at warning level once the next turn's claim
-    commits; the new turn's segment ends its own span."""
-    app = _app(_text("Hello."), _text("Hello again."))
-    store = app.state.studio.store
-    ended = _recording_span_ends(monkeypatch)
-    async with _client(app) as client:
-        await _stream(client, "/api/studio/turn", _turn_body("hi"))
-        live = store.current(PRINCIPAL, CONVERSATION)
-        assert live is not None
-        live._telemetry_span = start_turn_span("tr_leftover", session_id=CONVERSATION)
-        frames = await _stream(client, "/api/studio/turn", _turn_body("hi again"))
-
-    assert _events(frames)[-1] == "done"
-    assert ended == [("done", "DEFAULT"), ("orphaned", "WARNING"), ("done", "DEFAULT")]
-    assert [(span.attributes or {})["dfo.external_id"] for span in otlp_spans.get_finished_spans()][
-        1:
-    ] == ["tr_leftover", _frame(frames, "done")["trace_id"]]
-
-
-async def test_an_answer_refused_over_a_leftover_span_ends_each_span_once(
-    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An answer whose claim save is refused gives up its working copy,
-    which holds none of the live state's spans, so the leftover span the
-    live state holds is not ended through it. The answer that then resumes
-    the turn ends the leftover once, `orphaned`, and its own segment's span
-    once."""
-    app = _app(*_plan(), tool_surface=ScriptedSurface())
-    store = app.state.studio.store
-    real_save = store.save
-    ended_handles: list[Any] = []
-    real_end = studio_state_module.end_turn_span
-
-    def recording_end(handle: Any, **kwargs: Any) -> None:
-        if handle is not None:
-            ended_handles.append(handle)
-        real_end(handle, **kwargs)
-
-    async def claimed_elsewhere(principal: str, conversation_id: str, *args: Any) -> None:
-        raise ConversationStale(conversation_id)
-
-    async with _client(app) as client:
-        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
-        plan = _frame(first, "plan.proposed")
-        live = store.current(PRINCIPAL, CONVERSATION)
-        assert live is not None
-        leftover = live._telemetry_span = start_turn_span("tr_leftover", session_id=CONVERSATION)
-        monkeypatch.setattr(studio_state_module, "end_turn_span", recording_end)
-        store.save = claimed_elsewhere  # type: ignore[method-assign]
-        stale = await client.post(
-            "/api/studio/interrupt",
-            json=_interrupt_body(plan["interrupt_id"], "reject"),
-            headers=AUTH,
-        )
-        assert stale.status_code == 409
-        assert ended_handles == []
-        store.save = real_save  # type: ignore[method-assign]
-        second = await _stream(
-            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
-        )
-
-    assert _events(second)[-1] == "done"
-    assert len(ended_handles) == len({id(handle) for handle in ended_handles}) == 2
-    assert ended_handles[0] is leftover
 
 
 async def test_a_paused_segment_s_span_ends_paused_and_the_answer_opens_its_own(
@@ -8004,17 +7934,20 @@ async def test_a_stalled_segments_expiry_lets_another_instance_take_over(
 
 @pytest.mark.parametrize("claim_takes", [0, 13], ids=["prompt-claim", "slow-claim"])
 async def test_a_heartbeat_that_cannot_renew_ends_the_stream_once_its_clock_passes_the_deadline(
-    monkeypatch: pytest.MonkeyPatch, claim_takes: float
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch, claim_takes: float
 ) -> None:
     """`renew` raises on every call: the stream stays open, retried every
     heartbeat interval, for as long as the store's instance clock reads
     before 10 seconds short of a TTL past the load the claim's lease expiry
     was dated from. Moving that clock past the deadline, with no real time
-    elapsed, is what ends the stream with a stream-fatal `segment_lost`
-    error. A claim whose session creation is slow (`claim_takes` seconds)
-    starts its heartbeat later and keeps the same deadline, since the lease
-    expires on the same date."""
+    elapsed, is what ends the stream with a stream-fatal
+    `transient_unavailable` error. A claim whose session creation is slow
+    (`claim_takes` seconds) starts its heartbeat later and keeps the same
+    deadline, since the lease expires on the same date. The segment's span
+    ends `database_unavailable`, the status a save that cannot reach the
+    database gives, although the release's own save lands."""
     monkeypatch.setattr(studio_module, "HEARTBEAT_INTERVAL_S", 0.05)
+    ended = _recording_span_ends(monkeypatch)
     clock = await StoreClock.start(_engine())
     loaded_at = clock.at
     session_service = _database_session_service()
@@ -8057,6 +7990,7 @@ async def test_a_heartbeat_that_cannot_renew_ends_the_stream_once_its_clock_pass
     assert _frame(frames, "error")["error"]["error"] == "transient_unavailable"
     assert "done" not in _events(frames)
     assert state.turn_recorded is False  # the turn stays as stored for a retry
+    assert ended == [("database_unavailable", "WARNING")]
 
 
 async def test_cancel_from_another_instance_stops_the_live_stream_within_a_heartbeat(
@@ -8216,12 +8150,25 @@ async def test_a_request_cancelled_while_it_drops_its_claim_still_releases_the_l
     assert stored is not None and stored.segment is None
 
 
+@pytest.mark.parametrize(
+    ("client_leaves", "span"),
+    [
+        pytest.param(True, ("cancelled", "WARNING"), id="client-gone"),
+        pytest.param(False, ("failed", "ERROR"), id="inner-cancellation"),
+    ],
+)
 async def test_a_request_cancelled_after_its_claim_ends_the_span_as_cancelled(
-    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+    otlp_spans: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+    client_leaves: bool,
+    span: tuple[str, str],
 ) -> None:
-    """`/turn` claims, and the client leaves while the leftover session it
-    met is being replaced. The claimed segment's span ends `cancelled` at
-    warning level: a client gone is no failure."""
+    """`/turn` claims, and a `CancelledError` ends the request while the
+    leftover session it met is being replaced. When the client left, which
+    cancels the request's own task, the claimed segment's span ends
+    `cancelled` at warning level: a client gone is no failure. A
+    `CancelledError` an inner task let out, with the request's task never
+    cancelled, is a failure."""
     app = _app(_text("Hello."))
     studio = app.state.studio
     await studio.runner.session_service.create_session(
@@ -8232,6 +8179,8 @@ async def test_a_request_cancelled_after_its_claim_ends_the_span_as_cancelled(
 
     async def hanging_replace(**kwargs: Any) -> None:
         replacing.set()
+        if not client_leaves:
+            raise asyncio.CancelledError
         await asyncio.Event().wait()
 
     monkeypatch.setattr(studio, "_replace_leftover_session", hanging_replace)
@@ -8245,11 +8194,12 @@ async def test_a_request_cancelled_after_its_claim_ends_the_span_as_cancelled(
         endpoint(TurnRequest.model_validate(_turn_body("hi")), authorization=AUTH["Authorization"])
     )
     await asyncio.wait_for(replacing.wait(), timeout=5)
-    request.cancel()
+    if client_leaves:
+        request.cancel()
     with pytest.raises(asyncio.CancelledError):
         await request
 
-    assert ended == [("cancelled", "WARNING")]
+    assert ended == [span]
     assert not studio.store.lock_for(PRINCIPAL, CONVERSATION).locked()
 
 
@@ -8436,19 +8386,22 @@ async def test_a_stream_ended_by_a_failed_checkpoint_keeps_that_ending_when_its_
 
 @pytest.mark.parametrize("write", ["reserve_frames", "checkpoint"])
 @pytest.mark.parametrize(
-    "failure",
+    ("failure", "loss"),
     [
-        pytest.param(SegmentLost("taken over"), id="segment-lost"),
-        pytest.param(DatabaseUnavailable("unreachable"), id="database-unavailable"),
+        pytest.param(SegmentLost("taken over"), "segment_lost", id="segment-lost"),
+        pytest.param(
+            DatabaseUnavailable("unreachable"), "database_unavailable", id="database-unavailable"
+        ),
     ],
 )
 async def test_a_lost_segment_at_a_save_ends_the_stream_as_the_heartbeat_does(
-    caplog: pytest.LogCaptureFixture, write: str, failure: Exception
+    caplog: pytest.LogCaptureFixture, write: str, failure: Exception, loss: str
 ) -> None:
     """A frame-number reservation or a checkpoint that finds the segment
     lost, or the database unreachable until the lease's deadline, ends the
-    stream with the frame a heartbeat that cannot renew sends, logs a
-    warning, and leaves the turn as stored."""
+    stream with the frame a heartbeat that cannot renew sends, reports the
+    loss by its cause, logs a warning, and leaves the turn as stored."""
+    reported: list[str] = []
     studio = _app().state.studio
     conversation = await studio.store.create("u_a", CONVERSATION)
     segment_id = studio.store.claim_segment("u_a", CONVERSATION)
@@ -8465,10 +8418,11 @@ async def test_a_lost_segment_at_a_save_ends_the_stream_as_the_heartbeat_does(
         sent = [
             frame
             async for frame in studio._checkpointed(
-                "u_a", CONVERSATION, segment_id, conversation, frames()
+                "u_a", CONVERSATION, segment_id, conversation, frames(), report=reported.append
             )
         ]
 
+    assert reported == [loss]
     assert [
         (
             frame.event,
@@ -8483,24 +8437,27 @@ async def test_a_lost_segment_at_a_save_ends_the_stream_as_the_heartbeat_does(
 
 
 @pytest.mark.parametrize(
-    ("failure", "relayed", "logged"),
+    ("failure", "relayed", "logged", "reported"),
     [
         pytest.param(
             SegmentLost("taken over"),
             ["plan.approved", "error"],
             (logging.WARNING, False),
+            ["segment_lost"],
             id="segment-lost",
         ),
         pytest.param(
             DatabaseUnavailable("unreachable"),
             ["plan.approved", "error"],
             (logging.WARNING, False),
+            ["database_unavailable"],
             id="database-unavailable",
         ),
         pytest.param(
             RuntimeError("a bug"),
             ["plan.approved", "message.delta"],
             (logging.ERROR, True),
+            [],
             id="other-failure",
         ),
     ],
@@ -8510,11 +8467,13 @@ async def test_a_lost_segment_after_plan_approved_ends_the_stream(
     failure: Exception,
     relayed: list[str],
     logged: tuple[int, bool],
+    reported: list[str],
 ) -> None:
     """The save after `plan.approved` is sent fails. A lost segment ends the stream
     with a stream-fatal error frame, as at every other checkpoint, since another
-    instance now owns the conversation; any other failure is logged and the stream
-    goes on, logged as an error."""
+    instance now owns the conversation, and is reported by its cause; any other
+    failure is logged and the stream goes on, logged as an error."""
+    losses: list[str] = []
     studio = _app().state.studio
     conversation = await studio.store.create("u_a", CONVERSATION)
     segment_id = studio.store.claim_segment("u_a", CONVERSATION)
@@ -8540,11 +8499,12 @@ async def test_a_lost_segment_after_plan_approved_ends_the_stream(
         sent = [
             frame.event
             async for frame in studio._checkpointed(
-                "u_a", CONVERSATION, segment_id, conversation, frames()
+                "u_a", CONVERSATION, segment_id, conversation, frames(), report=losses.append
             )
         ]
 
     assert sent == relayed
+    assert losses == reported
     # A lost segment is a warning; any other fault, which the stream goes on
     # past, is an error with its traceback.
     assert [(r.levelno, r.exc_info is not None) for r in caplog.records] == [logged]

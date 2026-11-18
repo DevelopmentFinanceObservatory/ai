@@ -88,6 +88,7 @@ from harness.studio_state import (
     SegmentBusy,
     SegmentEnding,
     SegmentLost,
+    StreamLoss,
     _apply_operations,
     _end_stream,
     _next_manifest,
@@ -95,12 +96,14 @@ from harness.studio_state import (
     _PendingQuestion,
     _tool_error_response,
     record_closed_turn_span,
+    stream_loss,
 )
 from harness.studio_store import (
     ConversationExists,
     ConversationHeld,
     ConversationStale,
     StudioStore,
+    _run_to_completion,
 )
 from harness.studio_translate import (
     SEGMENT_LOST_DETAIL,
@@ -657,7 +660,10 @@ async def _sse_stream(
                                     cancel_wait = asyncio.ensure_future(armed_cancel.wait())
                                     continue
                                 await _unwind(next_frame)
-                                if conversation.cancel_reason == "segment_lost":
+                                if conversation.cancel_reason in (
+                                    "segment_lost",
+                                    "database_unavailable",
+                                ):
                                     # Another instance took the segment over,
                                     # or this one could not reach the database
                                     # before the lease's deadline.
@@ -948,12 +954,12 @@ class StudioRunner:
                         yield frame
             for frame in await translator.finish():
                 yield frame
-        except (SegmentLost, DatabaseUnavailable) as exc:
-            # A card's write fenced out by another instance's takeover, which
-            # finishes the turn, or one that could not reach the database
-            # before the lease's deadline (`StudioStore.change_canvas`).
-            logger.warning("studio card write failed (trace_id=%s): %s", conversation.trace_id, exc)
-            yield _checkpoint_failed_frame(conversation, exc)
+        except (SegmentLost, DatabaseUnavailable):
+            # A card's write fenced out by another instance's takeover, or one
+            # that could not reach the database before the lease's deadline
+            # (`StudioStore.change_canvas`), ends the stream where every save
+            # that loses the segment does (`StudioRunner._checkpointed`).
+            raise
         except Exception as exc:
             logger.exception("studio turn failed (trace_id=%s)", conversation.trace_id)
             yield _stream_fatal(conversation, exc)
@@ -1034,7 +1040,7 @@ class StudioRunner:
                     return
                 if self.store.now() < self.store.lease_deadline(principal, conversation_id):
                     continue
-                _end_stream(conversation, "segment_lost")
+                _end_stream(conversation, "database_unavailable")
                 return
             if result == "ok":
                 continue
@@ -1050,6 +1056,8 @@ class StudioRunner:
         segment_id: str,
         conversation: ConversationState,
         frames: AsyncGenerator[Any],
+        *,
+        report: Callable[[StreamLoss], None],
     ) -> AsyncGenerator[Any]:
         """Relay `frames`, each once its `seq` lies inside the segment's
         reserved frame numbers (`StudioStore.reserve_frames`), checkpointing
@@ -1066,43 +1074,55 @@ class StudioRunner:
         (`ConversationState.mark_approved_sent`) and is checkpointed: a lost
         segment, or a database unreachable until the lease's deadline, ends
         the stream the same way, and any other failure there is
-        logged alone. This is the one
-        interception point for every route this runs under (`/turn`, its
-        edit-card branch, and `/interrupt`)."""
-        async for frame in frames:
-            try:
-                await self.store.reserve_frames(principal, conversation_id, segment_id)
-            except Exception as exc:
-                _log_save_failure("frame reservation", conversation, segment_id, exc)
-                yield _checkpoint_failed_frame(conversation, exc)
-                return
-            event = getattr(frame, "event", None)
-            outgoing = frame
-            if event in _CHECKPOINT_BEFORE_EVENTS:
-                conversation.drop_resuming(segment_id)
+        logged alone. A card's canvas write in `frames` that loses the
+        segment, or cannot reach the database, ends the stream the same way
+        too. Each loss is handed to `report` (`stream_loss`) before its frame
+        goes out. This is the one interception point for every route this
+        runs under (`/turn`, its edit-card branch, and `/interrupt`)."""
+
+        def failed(what: str, exc: Exception) -> ErrorFrame:
+            _log_save_failure(what, conversation, segment_id, exc)
+            if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
+                report(stream_loss(exc))
+            return _checkpoint_failed_frame(conversation, exc)
+
+        try:
+            async for frame in frames:
                 try:
-                    await self.store.checkpoint(principal, conversation_id, segment_id)
+                    await self.store.reserve_frames(principal, conversation_id, segment_id)
                 except Exception as exc:
-                    _log_save_failure("checkpoint", conversation, segment_id, exc)
-                    yield _checkpoint_failed_frame(conversation, exc)
+                    yield failed("frame reservation", exc)
                     return
-                if event == "done":
-                    outgoing = frame.model_copy(update={"composition": conversation.composition})
-            yield outgoing
-            if event == "plan.approved":
-                # Saved once sent, so a retry of the same answer after this
-                # segment dies does not send it again. A crash before the
-                # save sends it twice, which beats never.
-                conversation.mark_approved_sent(segment_id)
-                try:
-                    await self.store.checkpoint(principal, conversation_id, segment_id)
-                except Exception as exc:
-                    _log_save_failure(
-                        "checkpoint after plan.approved", conversation, segment_id, exc
-                    )
-                    if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
-                        yield _checkpoint_failed_frame(conversation, exc)
+                event = getattr(frame, "event", None)
+                outgoing = frame
+                if event in _CHECKPOINT_BEFORE_EVENTS:
+                    conversation.drop_resuming(segment_id)
+                    try:
+                        await self.store.checkpoint(principal, conversation_id, segment_id)
+                    except Exception as exc:
+                        yield failed("checkpoint", exc)
                         return
+                    if event == "done":
+                        outgoing = frame.model_copy(
+                            update={"composition": conversation.composition}
+                        )
+                yield outgoing
+                if event == "plan.approved":
+                    # Saved once sent, so a retry of the same answer after this
+                    # segment dies does not send it again. A crash before the
+                    # save sends it twice, which beats never.
+                    conversation.mark_approved_sent(segment_id)
+                    try:
+                        await self.store.checkpoint(principal, conversation_id, segment_id)
+                    except Exception as exc:
+                        if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
+                            yield failed("checkpoint after plan.approved", exc)
+                            return
+                        _log_save_failure(
+                            "checkpoint after plan.approved", conversation, segment_id, exc
+                        )
+        except (SegmentLost, DatabaseUnavailable) as exc:
+            yield failed("card write", exc)
 
     async def _locked(
         self,
@@ -1132,29 +1152,54 @@ class StudioRunner:
         `store.release` cannot itself raise (it never does; see
         `StudioStore.release`), and still could not strand the lock, since
         releasing it does not depend on the release call having succeeded.
+
+        The segment's span ends here, with the first ending any path
+        reported: a save in `_checkpointed` that lost the segment, a loss
+        `_end_stream` armed (`conversation.cancel_reason`: the heartbeat, a
+        card removal, the run ledger), else the release's own. The release
+        runs as a task of its own, so its ending is read from the task even
+        when this generator is cancelled while it waits.
         """
+        ending: SegmentEnding | None = None
+
+        def report(loss: StreamLoss) -> None:
+            nonlocal ending
+            ending = ending or loss
+
         heartbeat = asyncio.ensure_future(
             self._heartbeat(principal, conversation_id, segment_id, conversation)
         )
         try:
             async for frame in self._checkpointed(
-                principal, conversation_id, segment_id, conversation, frames
+                principal, conversation_id, segment_id, conversation, frames, report=report
             ):
                 yield frame
         finally:
             try:
                 await _unwind(heartbeat)
             finally:
+                release = asyncio.ensure_future(
+                    self.store.release(principal, conversation_id, segment_id)
+                )
                 try:
-                    await self.store.release(principal, conversation_id, segment_id)
+                    await _run_to_completion(release)
                 finally:
                     # The segment ends here on this instance, and its span
-                    # with it, as the release recorded the ending on the
-                    # state, which it does even when this task is cancelled
-                    # while it waits; the stream's end exports the span
+                    # with it; the stream's end exports the span
                     # (`_sse_stream`).
-                    conversation.end_segment_span()
+                    armed = conversation.cancel_reason
+                    if armed in ("segment_lost", "database_unavailable"):
+                        report(armed)
+                    conversation.end_segment_span(ending or _released(release))
                     conversation.lock.release()
+
+
+def _released(release: asyncio.Future[SegmentEnding]) -> SegmentEnding:
+    """How `StudioStore.release`'s task ended the segment: its result, or
+    `failed` when it did not return one."""
+    if release.done() and not release.cancelled() and release.exception() is None:
+        return release.result()
+    return "failed"
 
 
 def _log_save_failure(
@@ -1394,10 +1439,15 @@ async def _release_claim(
     A claim that committed (`segment_id`) drops its lease
     (`StudioStore.drop_lease`, which runs to the end under cancellation),
     and the segment's span, if one opened, ends `cancelled` when `cause`,
-    the exception that ended the request, is its cancellation (the client
-    gone), and `failed` otherwise. Then `lock` is released and any span that
+    the exception that ended the request, is this task's own cancellation
+    (the client gone), and `failed` otherwise, a `CancelledError` an inner
+    task let out among them. Then `lock` is released and any span that
     ended is exported."""
-    ending: SegmentEnding = "cancelled" if isinstance(cause, asyncio.CancelledError) else "failed"
+    task = asyncio.current_task()
+    cancelled = (
+        isinstance(cause, asyncio.CancelledError) and task is not None and task.cancelling() > 0
+    )
+    ending: SegmentEnding = "cancelled" if cancelled else "failed"
     ended = False
     try:
         ended = store.drop_draft(principal, conversation_id)

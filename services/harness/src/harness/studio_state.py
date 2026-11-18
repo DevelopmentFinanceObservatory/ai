@@ -563,10 +563,6 @@ class ConversationState:
     # stream last reported one (`take_unreported_removal`). Not durable.
     # Reset by `begin_turn`.
     _removal_unreported: bool = field(default=False, repr=False, compare=False)
-    # How this instance's current segment ended, as the first save that
-    # failed or its release decided it (`note_segment_ending`), read when its
-    # span ends (`end_segment_span`). Not durable.
-    segment_ending: SegmentEnding | None = field(default=None, repr=False, compare=False)
 
     def take_unreported_removal(self) -> bool:
         """Whether `remove_cards` changed the canvas since the last call: the
@@ -1046,11 +1042,15 @@ class ConversationState:
         """Reset per-turn wire state. Abandons any pending interrupt: a fresh
         turn.request on a paused conversation ends the pause, and the paused
         ADK invocation stays parked in its own per-turn session. Returns the
-        previous turn when this closed it as `abandoned`, for the caller to
-        record its span once the new turn's claim commits
-        (`record_closed_turn_span`)."""
-        previous = ClosedTurn(self.trace_id, self.turn_user_message, "abandoned")
-        abandoned = None
+        previous turn when it was paused and this closed it as `abandoned`,
+        for the caller to record its span once the new turn's claim commits
+        (`record_closed_turn_span`). A turn that was not paused ended its
+        last segment's span with that segment, and gets none."""
+        abandoned = (
+            ClosedTurn(self.trace_id, self.turn_user_message, "abandoned")
+            if self.awaiting_answer
+            else None
+        )
         self.turn_index += 1
         self.seq = 0
         self.trace_id = _wire_id("tr")
@@ -1062,7 +1062,6 @@ class ConversationState:
             # pause, or a death no code path recorded). Its record keeps
             # what was asked, with the error marked as abandoned.
             self.close_turn(final_text=self.turn_final_text, error="abandoned")
-            abandoned = previous
         self.turn_user_message = ""
         self.turn_user_words = ""
         self.turn_final_text = ""
@@ -1074,31 +1073,18 @@ class ConversationState:
         self.turn_applied_choice = None
         self.turn_recorded = False
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
-        self.segment_ending = None
         return abandoned
 
-    def note_segment_ending(self, ending: SegmentEnding) -> None:
-        """Record how the current segment ended, unless something already
-        did: a checkpoint that lost the segment or could not reach the
-        database ends the stream as the user sees it, and the release that
-        follows keeps that ending."""
-        if self.segment_ending is None:
-            self.segment_ending = ending
-
-    def end_segment_span(self, ending: SegmentEnding | None = None) -> bool:
+    def end_segment_span(self, ending: SegmentEnding) -> bool:
         """End this instance's span for the turn's segment, once, as the
-        segment ended (`segment_span_status`): `ending` when the caller names
-        it, else the one recorded (`note_segment_ending`), else `failed`.
-        The span carries the turn's message and, once the turn is recorded,
-        its reply as its input and output. Returns whether a span was open to
-        end, for the caller to flush."""
+        segment ended (`segment_span_status`), with the turn's message and,
+        once the turn is recorded, its reply as the span's input and output.
+        Returns whether a span was open to end, for the caller to flush."""
         span = self._telemetry_span
-        recorded = self.segment_ending
-        self.segment_ending = None
         if span is None:
             return False
         self._telemetry_span = None
-        status, level = segment_span_status(self, ending or recorded or "failed")
+        status, level = segment_span_status(self, ending)
         end_turn_span(
             span,
             request=self.turn_user_message,
@@ -1116,7 +1102,6 @@ class ConversationState:
         same trace."""
         if self._telemetry_span is None:
             self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
-            self.segment_ending = None
 
     def in_turn_span(self) -> AbstractContextManager[None]:
         """Make this segment's telemetry span current for a `with` block.
@@ -1187,22 +1172,17 @@ def make_canvas_cards(store: StudioStore) -> Any:
     return canvas_cards
 
 
+# How a stream lost its segment: another instance took it over
+# (`segment_lost`), or the database stayed unreachable until the lease's
+# deadline (`database_unavailable`).
+type StreamLoss = Literal["segment_lost", "database_unavailable"]
+
 # How a segment ended on this instance: its release saved the turn
-# (`saved`), another instance had taken the segment over (`segment_lost`),
-# the database stayed unreachable (`database_unavailable`), the save failed
-# otherwise or the segment failed before streaming (`failed`), the request
+# (`saved`), the stream lost its segment (`StreamLoss`), the release could
+# not save or the segment failed before streaming (`failed`), the request
 # was cancelled before streaming (`cancelled`), or the claim never committed
-# (`not_started`), or its span was still open when the next segment's claim
-# committed (`orphaned`).
-type SegmentEnding = Literal[
-    "saved",
-    "segment_lost",
-    "database_unavailable",
-    "failed",
-    "cancelled",
-    "not_started",
-    "orphaned",
-]
+# (`not_started`).
+type SegmentEnding = Literal["saved", "failed", "cancelled", "not_started"] | StreamLoss
 
 # The span statuses that are not failures, and the level each ends at.
 _SPAN_STATUS_LEVELS: dict[str, EventLevel] = {
@@ -1212,26 +1192,29 @@ _SPAN_STATUS_LEVELS: dict[str, EventLevel] = {
     "segment_lost": "WARNING",
     "database_unavailable": "WARNING",
     "not_started": "WARNING",
-    "orphaned": "WARNING",
-    "abandoned": "WARNING",
 }
+
+
+def stream_loss(exc: SegmentLost | DatabaseUnavailable) -> StreamLoss:
+    """How a lost segment or an unreachable database that ends a stream
+    ends its segment. Every place that ends a stream for either cause names
+    it through this, so one cause gives one status."""
+    return "segment_lost" if isinstance(exc, SegmentLost) else "database_unavailable"
 
 
 def segment_span_status(state: ConversationState, ending: SegmentEnding) -> tuple[str, EventLevel]:
     """The status and level a segment's span ends with. A release that
     saved names how the turn stood: recorded (`done`, or the error code the
-    record names, `cancelled` among them), paused on an answer (`paused`),
-    or left running because the stream lost its segment (`segment_lost`).
-    Any other ending names itself. A failure, which is any status not in
-    `_SPAN_STATUS_LEVELS`, is at level `ERROR`."""
+    record names, `cancelled` among them), or paused on an answer
+    (`paused`); a turn left neither is `failed`. Any other ending names
+    itself. A failure, which is any status not in `_SPAN_STATUS_LEVELS`, is
+    at level `ERROR`."""
     status: str = ending
     if ending == "saved":
         if state.turn_recorded and state.turns:
             status = state.turns[-1].get("error") or "done"
         elif state.awaiting_answer:
             status = "paused"
-        elif state.cancel_reason == "segment_lost":
-            status = "segment_lost"
         else:
             status = "failed"
     return status, _SPAN_STATUS_LEVELS.get(status, "ERROR")
@@ -1239,24 +1222,24 @@ def segment_span_status(state: ConversationState, ending: SegmentEnding) -> tupl
 
 @dataclass(frozen=True)
 class ClosedTurn:
-    """A turn closed while no segment of it ran, as its trace records it
-    (`record_closed_turn_span`)."""
+    """A paused turn closed with no segment of it running: its trace id,
+    the user's message, and the status it closed with (`cancelled` by
+    `/cancel`, `abandoned` by the next turn's `begin_turn`)."""
 
     trace_id: str
     user_message: str
-    status: str
+    status: Literal["cancelled", "abandoned"]
 
 
 def record_closed_turn_span(conversation_id: str, turn: ClosedTurn) -> None:
-    """Record a zero-length span for `turn` on its own trace id, with its
-    closing status (`cancelled` for a `/cancel` of a paused turn, `abandoned`
-    for one a new turn ended) at level `WARNING`, so the turn's trace ends as
-    the turn did and not on its paused segment's span."""
+    """Record a zero-length span on `turn`'s trace id, at level `WARNING`,
+    whose status is the one `turn` closed with and whose input is its
+    message. It is the last span on that trace."""
     end_turn_span(
         start_turn_span(turn.trace_id, session_id=conversation_id),
         request=turn.user_message,
         error=turn.status,
-        level=_SPAN_STATUS_LEVELS[turn.status],
+        level="WARNING",
     )
 
 
@@ -1267,11 +1250,13 @@ def _recorded_reply(record: dict[str, Any]) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
-def _end_stream(conversation: ConversationState, reason: str) -> None:
+def _end_stream(conversation: ConversationState, reason: Literal["cancelled"] | StreamLoss) -> None:
     """Arm `conversation.cancel_event` with `reason`, read back by
-    `harness.studio._sse_stream`'s cancel branch to pick the frame. A no-op
-    when no stream is currently armed to receive it (the segment ended some
-    other way in the gap between the caller's check and this call)."""
+    `harness.studio._sse_stream`'s cancel branch to pick the frame and by
+    `harness.studio.StudioRunner._locked` to name how a lost segment ended
+    (`stream_loss`). A no-op when no stream is currently armed to receive it
+    (the segment ended some other way in the gap between the caller's check
+    and this call)."""
     conversation.cancel_reason = reason
     if conversation.cancel_event is not None:
         conversation.cancel_event.set()
@@ -1312,8 +1297,8 @@ def make_remove_cards(store: StudioStore) -> Any:
 
         try:
             return await store.change_canvas(*key, change)
-        except (SegmentLost, DatabaseUnavailable):
-            _end_stream(conversation, "segment_lost")
+        except (SegmentLost, DatabaseUnavailable) as exc:
+            _end_stream(conversation, stream_loss(exc))
             raise
 
     return remove

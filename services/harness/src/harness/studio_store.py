@@ -194,7 +194,6 @@ _PROCESS_LOCAL_FIELDS = frozenset(
         "switch_stop",
         "_telemetry_span",
         "_removal_unreported",
-        "segment_ending",
         "turn_specs",
         "turn_specs_settled",
     }
@@ -259,9 +258,11 @@ def _shallow_copy(state: ConversationState) -> ConversationState:
     )
 
 
-async def _run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
-    """Run `work` in a task of its own and wait for it to finish even when
-    the caller is cancelled, then re-raise the caller's cancellation.
+async def _run_to_completion[T](work: Coroutine[Any, Any, T] | asyncio.Future[T]) -> T:
+    """Run `work` in a task of its own, or wait for the task or future it
+    is, until it finishes even when the caller is cancelled, then re-raise
+    the caller's cancellation. A caller that passes its own task reads the
+    result from it after the cancellation.
 
     A write the stream makes from a `finally` (`release`) or from a task the
     stream cancels (`renew`, on the heartbeat) is cancelled with
@@ -874,9 +875,9 @@ class StudioStore:
         the live state once the write commits; until then, and on any exit
         that saves nothing (`drop_draft`), the live state stays as loaded.
         The copy is one level deep (`_shallow_copy`), with each pending
-        interrupt copied too, since an answer is marked on its entry. It
-        holds no telemetry span: one the live state holds stays the live
-        state's to end, and the copy holds only a span its own turn opens."""
+        interrupt copied too, since an answer is marked on its entry. The
+        copy's telemetry span is the one its own turn opens; a span on the
+        live state stays the live state's to end."""
         entry = self._runtime[(principal, conversation_id)]
         assert entry.state is not None
         work = _shallow_copy(entry.state)
@@ -1165,16 +1166,13 @@ class StudioStore:
         """Assign each field the working copy `state` changed since `draft`
         took it to the live state, once its save committed. Nothing when
         `state` is the live state itself. A turn the copy began
-        (`begin_turn`) brings the span of the segment its claim starts. A
-        span the live state still holds belongs to a segment whose end never
-        reached it, and ends `orphaned` before the copy's is taken."""
+        (`begin_turn`) brings the span of the segment its claim starts."""
         if entry.draft is None or entry.draft[0] is not state:
             return
         work, base = entry.draft
         entry.draft = None
         live = entry.state
         assert live is not None
-        live.end_segment_span("orphaned")
         _assign_changed(live, work, base)
 
     async def reserve_frames(self, principal: str, conversation_id: str, segment_id: str) -> None:
@@ -1604,10 +1602,10 @@ class StudioStore:
         unreachable until the lease's deadline, another database error, or
         the timeout above) is logged, each as what it is, and swallowed. The
         segment then expires by its own TTL, which is what makes it safe to
-        give up here. How the segment ended (`SegmentEnding`), which names
-        the status its span ends with, is recorded on the live state
-        (`ConversationState.note_segment_ending`) before this returns or
-        re-raises a cancellation, and returned.
+        give up here. Returns how the segment ended (`SegmentEnding`), which
+        names the status its span ends with. A caller that must know it even
+        when cancelled runs this as a task of its own and reads the task's
+        result (`harness.studio.StudioRunner._locked`).
         """
         entry = self._runtime.get((principal, conversation_id))
         if entry is None or entry.state is None:
@@ -1667,7 +1665,6 @@ class StudioStore:
                 timeout,
             )
         finally:
-            state.note_segment_ending(ending)
             entry = self._runtime[(principal, conversation_id)]
             if ending != "saved" and entry.held == segment_id:
                 entry.held = None

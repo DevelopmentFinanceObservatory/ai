@@ -2956,7 +2956,7 @@ async def test_a_removal_that_cannot_reach_the_database_ends_the_stream_as_lost(
         current_conversation_key.reset(token)
 
     assert state.cancel_event.is_set()
-    assert state.cancel_reason == "segment_lost"
+    assert state.cancel_reason == "database_unavailable"
 
 
 async def test_a_removal_fenced_out_by_a_takeover_ends_the_stream(new_store, clock) -> None:
