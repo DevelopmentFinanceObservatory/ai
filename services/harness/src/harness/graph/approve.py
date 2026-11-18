@@ -101,7 +101,8 @@ def decide(
 
     The answer names under `run_id` the run the studio admitted with the
     approval, when it admitted one, and the approval keeps it for `execute`
-    under `APPROVED_RUN_KEY`.
+    under `APPROVED_RUN_KEY`. An approving answer to a plan that no longer
+    awaits approval raises `ValueError` (`Plan.approve`) and fails the turn.
 
     An answer carrying `switch` (`{"choice_id", "option_id"}`, a scope choice
     the user moved on the card) routes `switch` to the `switch` node
@@ -148,9 +149,10 @@ def decide(
         # switched to the option it already has, it offers back unchanged
         # with `switch_failed`.
         return Next("switch", {"switch": switch})
-    approved = approved_plan(plan, answer)
-    if approved is None:
+    approved_at = approval_time(plan, answer)
+    if approved_at is None:
         return Next("amend", {"plan": plan.model_dump(mode="json"), "answer": answer})
+    approved = plan.approve(at=approved_at)
     ctx.state["plan"] = approved.model_dump_json()
     run_id = answer.get("run_id")
     ctx.state[APPROVED_RUN_KEY] = run_id if isinstance(run_id, str) else None
@@ -166,20 +168,18 @@ def decide(
     return Next("approved", approved.model_dump(mode="json"))
 
 
-def approved_plan(plan: PlannerPlan, answer: Mapping[str, Any]) -> PlannerPlan | None:
-    """`plan` stamped approved as of the time `answer` gives, when `answer`,
-    one that switches nothing, approves it by `decide`'s rule: `plan` awaits
-    approval, and the answer names its revision and says under `at` when the
-    user gave it. `None` for an answer that approves nothing, a plan already
-    answered included; it raises nothing. The studio's interrupt route
-    applies the same rule to admit the approved plan's run in the save that
-    records the approval (`harness.studio`)."""
-    if plan.status is not PlanStatus.PENDING_APPROVAL:
-        return None
+def approval_time(plan: PlannerPlan, answer: Mapping[str, Any]) -> datetime | None:
+    """When `answer`, one that switches nothing, approves `plan` by
+    `decide`'s rule: it names `plan`'s revision and says under `at`, as an
+    ISO 8601 time with its offset, when the user gave it. `None` for an
+    answer that approves nothing. Whether `plan` can still be approved is
+    `Plan.approve`'s to say. The studio's interrupt route applies the same
+    rule to admit the approved plan's run in the save that records the
+    approval (`harness.studio`)."""
     approved_at = _answered_at(answer)
     if answer.get("approved") != plan_revision(plan) or approved_at is None:
         return None
-    return plan.approve(at=approved_at)
+    return approved_at
 
 
 def _answered_at(answer: Mapping[str, Any]) -> datetime | None:

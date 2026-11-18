@@ -17,9 +17,11 @@ second waits for the first to commit and then decides against its run. A
 record change locks its run row. Nothing retries.
 
 A plan's approval admits its run in the save that records the approval
-(`admit_on`, from `harness.studio`'s interrupt route): one transaction that
-holds the conversation's row `FOR UPDATE` under the lease the route claimed,
-so an approval on record always has its run, whenever the client leaves.
+(`approval_admission`, which `harness.studio`'s interrupt route hands the
+save): a savepoint of the transaction that holds the conversation's row
+`FOR UPDATE` under the lease the route claimed, so an approval on record has
+its run whenever the client leaves. An admission refused or faulted there
+leaves the approval without a run, and `execute` admits it.
 
 A Stop ends the runs of the turn it closes: `end_unfinished` records them
 failed on the connection of the transaction that closes the turn
@@ -40,7 +42,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -49,14 +51,18 @@ from executor.classify import ExecutorCode
 from executor.ledger import (
     TERMINAL_STATUSES,
     Admission,
+    ApprovalAdmission,
     Fail,
+    LedgerUnavailableError,
     RunChange,
+    RunLedgerError,
     RunNotFoundError,
     RunRecord,
     RunStatus,
     Seal,
     admit_against,
     advance,
+    store_faults,
     stored_run,
 )
 from pydantic import JsonValue, ValidationError
@@ -152,8 +158,8 @@ async def admit_on(
     transaction, with `submission` stored beside a new run and `now` the
     time its authorisation is checked against: the run its key already
     names, or `candidate` (`admit_against`). `StudioRunLedger.admit` runs it
-    fenced on the live segment, and the studio's interrupt route in the save
-    that records a plan's approval (`harness.studio`).
+    fenced on the live segment, and `StudioRunLedger.approval_admission` in
+    the save that records a plan's approval.
 
     Raises what `admit_against` raises, and what the database raises; either
     leaves the caller's transaction to roll back."""
@@ -290,6 +296,41 @@ class StudioRunLedger:
     async def admit(self, candidate: RunRecord, *, submission: JsonValue) -> Admission:
         async with self._fenced() as (conn, pk):
             return await admit_on(conn, pk, candidate, submission=submission, now=self._now())
+
+    def approval_admission(
+        self,
+        store: object,
+        *,
+        candidate: Callable[[datetime], RunRecord],
+        submission: JsonValue,
+        revision: str,
+        plan: JsonValue,
+    ) -> ApprovalAdmission | None:
+        """The approval's admission over this ledger's own `StudioStore`, and
+        None for any other `store`. The write stores the plan and admits the
+        run (`store_plan_on`, `admit_on`) in a savepoint of the save's
+        transaction. A refusal (`RunLedgerError`: a key naming other work,
+        an approval already expired) or a store fault in it
+        (`store_faults`, a `run_keys` row with no `runs` row among them)
+        rolls the savepoint back, is logged, and answers None, and the save
+        commits the approval without a run for `execute` to admit. A fault
+        the savepoint cannot roll back raises and fails the save."""
+        if store is not self._store:
+            return None
+
+        async def admit(conn: AsyncConnection, pk: int) -> Admission | None:
+            now = self._now()
+            try:
+                async with conn.begin_nested(), store_faults(None):
+                    await store_plan_on(conn, pk, revision, plan)
+                    return await admit_on(conn, pk, candidate(now), submission=submission, now=now)
+            except (RunLedgerError, LedgerUnavailableError) as exc:
+                logger.warning(
+                    "run ledger: the approval of revision %s admits no run: %s", revision, exc
+                )
+                return None
+
+        return admit
 
     async def get(self, run_id: str) -> RunRecord | None:
         raw = await self._column("record", run_id)

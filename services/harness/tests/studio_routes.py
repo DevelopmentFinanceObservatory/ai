@@ -182,6 +182,7 @@ def orchestrator_app(
         tool_surface=tool_surface,
         edit_model=edit_model,
         early_mints=early_mints,
+        run_ledger=ledger,
         **({"heartbeat_seconds": heartbeat_seconds} if heartbeat_seconds is not None else {}),
     )
     app = FastAPI()

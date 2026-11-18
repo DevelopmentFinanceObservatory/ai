@@ -773,7 +773,9 @@ async def execute_authorised(
     carries that run on: one whose computation finished returns the outcome it
     recorded and only resumes publication, and one that was still computing
     runs its workflow again, the tools answering what the store already
-    holds. A key whose run failed admits a new run of the work. Every tool call
+    holds. A run the key names that is still `admitted`, as the studio
+    admits one with the plan's approval, starts here and counts no resume
+    (`RunRecord.resumes`). A key whose run failed admits a new run of the work. Every tool call
     is recorded as an attempt before it goes out, and the retrieved inputs are
     sealed, and checked against the authorisation's sources, before the first
     derived step. An accepted run then publishes each derived terminal frame
@@ -835,8 +837,11 @@ async def execute_authorised(
         return Refused(
             revision=submission.revision, refusal=RefusalKind.AUTHORISATION_EXPIRED, detail=str(exc)
         )
+    # A run its key names that is still `admitted` was never computed, so
+    # computing it here starts it and counts no resume.
+    resumed = admission.resumed and admission.run.status is not RunStatus.ADMITTED
     return await _carry_out(
-        admission.run, submission, ledger=ledger, runtime=runtime, resumed=admission.resumed
+        admission.run, submission, ledger=ledger, runtime=runtime, resumed=resumed
     )
 
 
@@ -906,7 +911,10 @@ async def resume_run(
 ) -> RunOutcome:
     """Carry an unfinished `run` of `ledger` on from `submission`, the one
     stored with it (`load_submission`), as `execute_authorised` carries on a
-    run its key already names. Raises as `execute_authorised` does."""
+    run its key already names. A later turn's carry-on: it counts a resume
+    for any unfinished run, an `admitted` one included, so a run whose start
+    keeps failing meets `MAX_PUBLICATION_RESUMES`. Raises as
+    `execute_authorised` does."""
     runtime = _Runtime(
         surface=surface,
         capabilities=capabilities,
@@ -1042,10 +1050,6 @@ async def _compute(
     one resumed too often or too old, when it was admitted before
     (`resumed`) or is already `running`: a caller that finds it running
     took it over from a driver whose cancellation left it unfinished. A run
-    still `admitted` never started, so its first computation is a start
-    whoever makes it, `execute` after the studio admitted it with the
-    approval or the next turn's `seed`, and records no `Resume`: `resumes`
-    counts the times a started run was carried on. A run
     that already came to an outcome returns it, and one failed before it
     came to any answers `RUN_ABANDONED`.
 
@@ -1059,9 +1063,7 @@ async def _compute(
         run = await ledger.get(run_id)
     if run is None:
         raise RunNotFoundError(run_id)
-    if run.status not in (*TERMINAL_STATUSES, RunStatus.ADMITTED) and (
-        resumed or run.status is RunStatus.RUNNING
-    ):
+    if run.status not in TERMINAL_STATUSES and (resumed or run.status is RunStatus.RUNNING):
         run = await record_change(ledger, run_id, Resume())
     if run.outcome is not None:
         publishing = run.status in (RunStatus.PUBLISHING, RunStatus.PENDING)

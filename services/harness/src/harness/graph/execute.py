@@ -528,11 +528,12 @@ def execute_node(
 
         The run is usually admitted already: the studio's interrupt route
         admits it in the save that records the approval, with the same
-        candidate and key, and stores its plan, so this node stores no plan
-        (`APPROVED_RUN_KEY` names the run) and its admission finds the run
-        and carries it on. A store that cannot record that admission leaves
-        the run held, standing `unfinished` under its id, for the next turn
-        to carry on. A run whose `Start` the store refuses on every turn is
+        candidate and key, and stores its plan, which this node's store of
+        it leaves as it is; its admission then finds the run and computes
+        it, counting no resume. A store that cannot record that admission
+        leaves the run the approval admitted (`APPROVED_RUN_KEY`) held,
+        standing `unfinished` under its id, for the next turn to carry on;
+        with none admitted it stands `not_started`. A run whose `Start` the store refuses on every turn is
         tried again each turn until its approval expires. A turn that closes `abandoned` or `failed` between the approval
         and this node leaves that run unfinished for the next turn to carry
         on, as a crash after this node's admission does; only a Stop, which
@@ -561,9 +562,7 @@ def execute_node(
             logger.exception("execute: no plan card places for plan version %s", plan.version)
             places = {}
         approved_run = ctx.state.get(APPROVED_RUN_KEY)
-        if not isinstance(approved_run, str):
-            # The approval's save stored the plan with the run it admitted.
-            await store_run_plan(run_ledger, revision=plan_revision(plan), plan=plan)
+        await store_run_plan(run_ledger, revision=plan_revision(plan), plan=plan)
 
         def on_progress(step_id: str, report: ProgressReport) -> None:
             ctx.emit(

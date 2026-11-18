@@ -596,6 +596,7 @@ def create_app(
         tool_surface=tool_surface,
         provenance=provenance,
         early_mints=early_mints,
+        run_ledger=run_ledger,
     )
     app.state.studio = studio
     app.include_router(create_studio_router(studio, settings=resolved_settings))

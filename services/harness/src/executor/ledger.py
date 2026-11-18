@@ -57,7 +57,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from collections import defaultdict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -220,7 +220,9 @@ class RunRecord(StrictModel):
     `submission_digest()` of the submission and source policy the run
     executes. `outcome` is what its computation came to, as the executor
     states it, recorded once with `Publishing` or `Fail`. `resumes` counts
-    how often the unfinished run was carried on (`Resume`). `delivered` says
+    how often a later turn carried the unfinished run on (`Resume`), an
+    `admitted` run included; the first computation of a run admitted in the
+    turn that computes it counts none. `delivered` says
     no later turn carries a completed run on: the conversation recorded the
     hand-back of its result, or `undelivered` reached the delivery bound
     (`Undelivered`). `undelivered` counts the turns that carried a completed
@@ -704,6 +706,12 @@ def advance(run: RunRecord, change: RunChange, *, now: datetime) -> RunRecord:  
 # --- storage -----------------------------------------------------------------
 
 
+# The write `RunLedger.approval_admission` hands the conversation store's
+# save: given the save's connection and the conversation's row id, it admits
+# the run and answers the `Admission`, or `None` when it admitted nothing.
+type ApprovalAdmission = Callable[[Any, int], Awaitable[Admission | None]]
+
+
 class RunLedger(Protocol):
     """Where runs are kept. Every method that writes raises before writing
     anything when its change is refused."""
@@ -749,6 +757,25 @@ class RunLedger(Protocol):
         `RunNotFoundError` when no run `run_id` is recorded."""
         ...
 
+    def approval_admission(
+        self,
+        store: object,
+        *,
+        candidate: Callable[[datetime], RunRecord],
+        submission: JsonValue,
+        revision: str,
+        plan: JsonValue,
+    ) -> ApprovalAdmission | None:
+        """The write that admits `candidate`, minted at the ledger's clock,
+        with `submission` beside it and `plan` stored under `revision`, on a
+        connection of `store`, the conversation store whose save records the
+        plan's approval, and in that save's transaction. `None` when this
+        ledger does not keep its runs in `store`: nothing is admitted with
+        the approval, and `execute` admits the run. The write answers the
+        `Admission`, or `None` when the ledger refused it or its store
+        faulted, with nothing of it written and the save going on."""
+        ...
+
 
 def carried_on(run: RunRecord) -> bool:
     """Whether a later turn carries `run` on: it is neither completed nor
@@ -790,6 +817,19 @@ class InMemoryRunLedger:
 
     def _book(self) -> _Book:
         return self._books[self._scope()]
+
+    def approval_admission(
+        self,
+        store: object,
+        *,
+        candidate: Callable[[datetime], RunRecord],
+        submission: JsonValue,
+        revision: str,
+        plan: JsonValue,
+    ) -> ApprovalAdmission | None:
+        """None: this ledger keeps its runs in process, in no conversation
+        store, so `execute` admits each run."""
+        return None
 
     async def admit(self, candidate: RunRecord, *, submission: JsonValue) -> Admission:
         book = self._book()

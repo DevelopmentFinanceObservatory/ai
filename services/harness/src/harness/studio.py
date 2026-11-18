@@ -46,16 +46,13 @@ from typing import Any, Literal
 
 from common.telemetry import flush_telemetry
 from compiler.surface import ToolSurface
-from executor.ledger import (
-    AuthorisationExpiredError,
-    IdempotencyConflictError,
-    submission_content,
-)
+from executor.ledger import RunLedger, RunStatus, submission_content
 from executor.run import UnrunnablePlan, approved_work, run_candidate
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from planner.plan import (
+    PlanStatus,
     current_earlier_block,
     current_recorded_identity,
     plan_revision,
@@ -73,7 +70,7 @@ from harness.conversation import (
 )
 from harness.decision_pick import is_decision_choice
 from harness.early_mint import EarlyMints
-from harness.graph.approve import approved_plan
+from harness.graph.approve import approval_time
 from harness.graph.events import GraphEvent, StepProgress
 from harness.graph.execute import ledger_conversation_id
 from harness.graph.interfaces import Executor
@@ -83,7 +80,6 @@ from harness.graph.state import (
     TurnInput,
 )
 from harness.provenance import ProvenanceStore
-from harness.run_ledger import admit_on, store_plan_on
 from harness.seeds import seeds_slot
 from harness.settings import Settings
 from harness.studio_edit import (
@@ -526,7 +522,11 @@ class StudioRunner:
     (the owner's `settle`). A stream renews the conversation's lease every
     `heartbeat_seconds`. `owners` holds the owners of the streams running on
     this instance (`harness.studio_stream`), which the app's lifespan
-    shutdown waits for before it closes the database.
+    shutdown waits for before it closes the database. `run_ledger` is the
+    graph's ledger, through which `/interrupt` admits an approved plan's run
+    in the save that records the approval
+    (`executor.ledger.RunLedger.approval_admission`); with none, `execute`
+    admits every run.
     """
 
     def __init__(
@@ -541,8 +541,10 @@ class StudioRunner:
         provenance: ProvenanceStore | None = None,
         early_mints: EarlyMints | None = None,
         heartbeat_seconds: float = HEARTBEAT_INTERVAL_S,
+        run_ledger: RunLedger | None = None,
     ) -> None:
         self.edit_model = edit_model
+        self.run_ledger = run_ledger
         self.early_mints = early_mints
         self.store = store
         self.turns = turns
@@ -1315,44 +1317,45 @@ def _same_open_pause(before: Cursor | None, after: Cursor | None) -> bool:
 
 
 def _approval_admission(
-    store: StudioStore,
+    studio: StudioRunner,
     state: Mapping[str, Any],
     pending: _PendingInterrupt,
     *,
     at: datetime,
     principal: str,
     conversation_id: str,
-) -> Callable[[AsyncConnection, int], Awaitable[None]] | None:
+) -> Callable[[AsyncConnection, int], Awaitable[bool]] | None:
     """The write that admits the run of the plan the turn's `state` holds,
-    approved through plan interrupt `pending` at `at`, for
-    `StudioStore.save` to make in the transaction that records the approval
-    (`alongside`). It names the run on `pending` (`admitted_run`), which the
-    same save stores, so the answer to `approve` names it on this attempt and
-    on every retry resuming it.
+    approved through plan interrupt `pending` at `at`, for `StudioStore.save`
+    to make in the transaction that records the approval (`alongside`).
 
-    The plan is the one `approve.decide` reads from the same cursor, and
-    approved by the same rule (`approved_plan`); its run is the candidate
-    `execute_approved_plan` builds (`approved_work`, `run_candidate`), stored
-    with its plan, as `execute` stores it (`store_run_plan`), and admitted by
-    the same rule (`harness.run_ledger.admit_on`). So `execute` finds the
+    The plan is the one `approve.decide` reads from the same cursor, approved
+    by the same rule (`approval_time`); its run is the candidate
+    `execute_approved_plan` builds (`approved_work`, `run_candidate`), and
+    `studio.run_ledger` stores it with its plan and admits it by
+    `execute`'s rule (`RunLedger.approval_admission`). So `execute` finds the
     run its key names and carries it on, and a turn that ends before
-    `execute` leaves the run for the next turn's `seed`. None when there is
-    nothing to admit: no plan the state holds that this release reads, or
-    one the answer does not approve, a plan already approved among them, or
-    `approved_work` finds nothing to run for. `decide` and `execute` then
-    report it in the turn. It raises nothing.
+    `execute` leaves the run for the next turn's `seed`. When the admission
+    leaves that run unfinished, the write names it on `pending`
+    (`admitted_run`), which the same save stores, so the answer to `approve`
+    names it on this attempt and on every retry resuming it; it answers
+    whether it did.
 
-    A key that names a run of other work (`IdempotencyConflictError`), or an
-    approval already expired, admits nothing in a savepoint the save
-    survives, and `execute` surfaces it. A database fault fails the save,
-    which then records neither the approval nor the run."""
+    None when there is nothing to admit: no ledger that admits with the
+    approval, no plan the state holds that this release reads, an answer the
+    rule does not approve (`decide` amends), a plan that no longer awaits
+    approval (`decide` raises in the turn), or one `approved_work` finds
+    nothing to run for. It raises nothing."""
+    if studio.run_ledger is None:
+        return None
     raw = state.get("plan")
     plan = stored_plan(raw if isinstance(raw, str) else None, state_key="plan")
-    if plan is None:
+    if plan is None or plan.status is not PlanStatus.PENDING_APPROVAL:
         return None
-    approved = approved_plan(plan, {"approved": pending.plan_revision, "at": at.isoformat()})
-    if approved is None:
+    approved_at = approval_time(plan, {"approved": pending.plan_revision, "at": at.isoformat()})
+    if approved_at is None:
         return None
+    approved = plan.approve(at=approved_at)
     work = approved_work(
         approved,
         approver=principal,
@@ -1360,36 +1363,33 @@ def _approval_admission(
     )
     if isinstance(work, UnrunnablePlan):
         return None
-    plan_json = approved.model_dump_json()
+    admit = studio.run_ledger.approval_admission(
+        studio.store,
+        candidate=lambda now: run_candidate(
+            work.submission,
+            authorisation=work.authorisation,
+            idempotency_key=work.idempotency_key,
+            now=now,
+        ),
+        submission=submission_content(work.submission),
+        revision=plan_revision(approved),
+        plan=approved.model_dump_json(),
+    )
+    if admit is None:
+        return None
 
-    async def admit(conn: AsyncConnection, pk: int) -> None:
-        now = datetime.fromtimestamp(store.now(), UTC)
-        try:
-            async with conn.begin_nested():
-                await store_plan_on(conn, pk, plan_revision(approved), plan_json)
-                admission = await admit_on(
-                    conn,
-                    pk,
-                    run_candidate(
-                        work.submission,
-                        authorisation=work.authorisation,
-                        idempotency_key=work.idempotency_key,
-                        now=now,
-                    ),
-                    submission=submission_content(work.submission),
-                    now=now,
-                )
-        except (IdempotencyConflictError, AuthorisationExpiredError) as exc:
-            logger.warning(
-                "studio: the approval of revision %s in conversation %s admits no run: %s",
-                pending.plan_revision,
-                conversation_id,
-                exc,
-            )
-            return
-        pending.admitted_run = admission.run.run_id
+    async def admit_and_name(conn: AsyncConnection, pk: int) -> bool:
+        admitted = await admit(conn, pk)
+        if admitted is None or admitted.run.status not in _UNFINISHED_RUN:
+            return False
+        pending.admitted_run = admitted.run.run_id
+        return True
 
-    return admit
+    return admit_and_name
+
+
+# The runs an admission leaves for `execute` to compute.
+_UNFINISHED_RUN = frozenset({RunStatus.ADMITTED, RunStatus.RUNNING})
 
 
 async def _unclaimed(
@@ -2094,7 +2094,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             cursor = claimed
             work = studio.store.draft(principal, body.conversation_id)
             pending = work.pending[body.interrupt_id]
-            admission: Callable[[AsyncConnection, int], Awaitable[None]] | None = None
+            admission: Callable[[AsyncConnection, int], Awaitable[bool]] | None = None
             # A switch revises the plan and approves nothing, so it leaves
             # no approval record.
             if (
@@ -2131,7 +2131,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     # A first answer answers the open pause on the claimed cursor.
                     assert cursor is not None
                     admission = _approval_admission(
-                        studio.store,
+                        studio,
                         cursor.state,
                         pending,
                         at=record.at,
