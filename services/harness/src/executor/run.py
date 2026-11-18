@@ -948,8 +948,11 @@ async def _carry_out(
     """Take `run` to its outcome, or, when this process is already carrying
     it out, wait for that outcome without driving the run a second time. The
     driver starts from the ledger's current record, since `run` may be a
-    snapshot taken before an earlier driver finished. `resumed` says `run`
-    was admitted before this call, so driving it carries it on (`_drive`).
+    snapshot taken before an earlier driver finished. `resumed` says driving
+    `run` carries on a started run and counts a resume (`_compute`): a later
+    turn's `resume_run`, which counts an `admitted` run as started, or a
+    submission whose key names a run past `admitted`. A run still
+    `admitted` that its own submission finds is started, not resumed.
 
     A waiter cancelled leaves the run going on for the caller driving it. A
     driver cancelled before its computation finished fails the run

@@ -23,6 +23,17 @@ from common.caller import conversation_caller
 
 NO_CONVERSATION = "no-conversation"
 
+
+def ledger_conversation_id(principal: str, conversation_id: str) -> str:
+    """The id the studio names `principal`'s conversation `conversation_id`
+    by: what `current_conversation_id` holds for its segments, what the
+    recording surface keys its step order on, and what its runs are admitted
+    under (`executor.ledger.idempotency_key`), by `execute` and by the
+    interrupt route. Every turn of the conversation names the same one, so a
+    later turn executing the same revision carries the run on."""
+    return f"{principal}/{conversation_id}"
+
+
 current_conversation_id: ContextVar[str] = ContextVar(
     "studio_conversation_id", default=NO_CONVERSATION
 )

@@ -46,6 +46,7 @@ from planner.plan import Plan as PlannerPlan
 from planner.plan import SessionState, aligned_pins, plan_revision, windowed_origins
 
 from harness import plan_display
+from harness.conversation import ledger_conversation_id
 from harness.graph.answer import (
     answer_frames,
     answer_notes,
@@ -294,17 +295,6 @@ def _step_progress(
     )
 
 
-def ledger_conversation_id(principal: str, conversation_id: str) -> str:
-    """The conversation id `principal`'s runs in `conversation_id` are
-    admitted under (`executor.ledger.idempotency_key`), by `execute` and by
-    the studio's interrupt route: the principal and the conversation, as the
-    studio names the conversation to its tools
-    (`harness.conversation.current_conversation_id`). Every turn of the
-    conversation names the same one, so a later turn executing the same
-    revision carries the run on."""
-    return f"{principal}/{conversation_id}"
-
-
 def _mark_masked_step_failed(
     tool_surface: ToolSurface | None,
     outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused,
@@ -526,18 +516,21 @@ def execute_node(
         the conversation's next turn carries it on (`harness.graph.resume`),
         as does this node run again from the cursor.
 
-        The run is usually admitted already: the studio's interrupt route
-        admits it in the save that records the approval, with the same
-        candidate and key, and stores its plan, which this node's store of
-        it leaves as it is; its admission then finds the run and computes
-        it, counting no resume. A store that cannot record that admission
-        leaves the run the approval admitted (`APPROVED_RUN_KEY`) held,
-        standing `unfinished` under its id, for the next turn to carry on;
-        with none admitted it stands `not_started`. A run whose `Start` the store refuses on every turn is
-        tried again each turn until its approval expires. A turn that closes `abandoned` or `failed` between the approval
-        and this node leaves that run unfinished for the next turn to carry
-        on, as a crash after this node's admission does; only a Stop, which
-        closes the turn `cancelled`, ends it.
+        The run is usually admitted already: the studio's interrupt route admits
+        it in the save that records the approval, with the same candidate and
+        key, and stores its plan, which this node's store of it leaves as it is;
+        its admission then finds the run and computes it, counting no resume. A
+        store that cannot record that admission leaves the run the approval
+        admitted (`APPROVED_RUN_KEY`) held, standing `unfinished` under its id,
+        for the next turn to carry on; with none admitted it stands
+        `not_started`. A run whose `Start` the store keeps refusing stays
+        `admitted` and is carried on by each later turn
+        (`harness.graph.resume`), each counting a resume, until it fails
+        `computation_abandoned` at `MAX_PUBLICATION_RESUMES`. A turn that closes
+        `abandoned` or `failed` between the approval and this node leaves that
+        run unfinished for the next turn to carry on, as a crash after this
+        node's admission does; only a Stop, which closes the turn `cancelled`,
+        ends it.
 
         A plan stored in a shape this release does not read
         (`readable_plan`) runs nothing and spends no replan: it routes

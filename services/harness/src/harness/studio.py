@@ -67,11 +67,11 @@ from harness.conversation import (
     current_conversation_id,
     current_conversation_key,
     current_user_message,
+    ledger_conversation_id,
 )
 from harness.decision_pick import is_decision_choice
 from harness.early_mint import EarlyMints
 from harness.graph.events import GraphEvent, StepProgress
-from harness.graph.execute import ledger_conversation_id
 from harness.graph.interfaces import Executor
 from harness.graph.state import (
     APPLY_CHOICE_STATE_KEY,
@@ -79,7 +79,7 @@ from harness.graph.state import (
     TurnInput,
 )
 from harness.provenance import ProvenanceStore
-from harness.run_ledger import StudioRunLedger
+from harness.run_ledger import ApprovedRun, StudioRunLedger
 from harness.seeds import seeds_slot
 from harness.settings import Settings
 from harness.studio_edit import (
@@ -1299,7 +1299,7 @@ def _set_turn_context(
     same conversation_id must not share a canvas. The user's words are what
     a search sends. The budget bounds every model call the segment makes
     (`harness.turn_budget`)."""
-    current_conversation_id.set(f"{principal}/{conversation_id}")
+    current_conversation_id.set(ledger_conversation_id(principal, conversation_id))
     current_conversation_key.set((principal, conversation_id))
     current_user_message.set(conversation.turn_user_words)
     current_earlier_block.set(conversation.earlier_block)
@@ -1324,7 +1324,7 @@ def _approval_admission(
     at: datetime,
     principal: str,
     conversation_id: str,
-) -> Callable[[AsyncConnection, int], Awaitable[bool]] | None:
+) -> Callable[[AsyncConnection, int], Awaitable[None]] | None:
     """The write that admits the run of the plan the turn's `state` holds,
     approved at `at` through plan interrupt `pending`, for `StudioStore.save`
     to make in the transaction that records the approval (`alongside`).
@@ -1339,7 +1339,7 @@ def _approval_admission(
     leaves the run for the next turn's `seed`. When the admission leaves
     that run unfinished, the write names it on `pending` (`admitted_run`),
     which the same save stores, so the answer to `approve` names it on this
-    attempt and on every retry resuming it; it answers whether it did.
+    attempt and on every retry resuming it.
 
     None when there is nothing to admit: no Studio ledger, no plan the state
     holds that this release reads, a plan keyed on another revision
@@ -1366,11 +1366,9 @@ def _approval_admission(
     if isinstance(work, UnrunnablePlan):
         return None
 
-    async def admit(conn: AsyncConnection, pk: int) -> bool:
-        admitted = await ledger.admit_with_approval(
-            conn,
-            pk,
-            candidate=lambda now: run_candidate(
+    def build(now: datetime) -> ApprovedRun:
+        return ApprovedRun(
+            candidate=run_candidate(
                 work.submission,
                 authorisation=work.authorisation,
                 idempotency_key=work.idempotency_key,
@@ -1380,10 +1378,11 @@ def _approval_admission(
             revision=plan_revision(approved),
             plan=approved.model_dump_json(),
         )
-        if admitted is None or admitted.run.status not in UNFINISHED_STATUSES:
-            return False
-        pending.admitted_run = admitted.run.run_id
-        return True
+
+    async def admit(conn: AsyncConnection, pk: int) -> None:
+        admitted = await ledger.admit_with_approval(conn, pk, build)
+        if admitted is not None and admitted.run.status in UNFINISHED_STATUSES:
+            pending.admitted_run = admitted.run.run_id
 
     return admit
 
@@ -2090,7 +2089,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             cursor = claimed
             work = studio.store.draft(principal, body.conversation_id)
             pending = work.pending[body.interrupt_id]
-            admission: Callable[[AsyncConnection, int], Awaitable[bool]] | None = None
+            admission: Callable[[AsyncConnection, int], Awaitable[None]] | None = None
             # A switch revises the plan and approves nothing, so it leaves
             # no approval record.
             if (
@@ -2176,7 +2175,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # before anything below can run the graph or close the turn.
             if studio.surface_recorder is not None:
                 studio.surface_recorder.set_step_order(
-                    f"{principal}/{body.conversation_id}", pending.step_order, pending.step_labels
+                    ledger_conversation_id(principal, body.conversation_id),
+                    pending.step_order,
+                    pending.step_labels,
                 )
 
             if body.decision is InterruptDecision.REJECT:

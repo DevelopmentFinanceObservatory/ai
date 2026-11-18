@@ -149,7 +149,7 @@ def decide(
         # switched to the option it already has, it offers back unchanged
         # with `switch_failed`.
         return Next("switch", {"switch": switch})
-    approved_at = approval_time(plan, answer)
+    approved_at = _approval_time(plan, answer)
     if approved_at is None:
         return Next("amend", {"plan": plan.model_dump(mode="json"), "answer": answer})
     approved = plan.approve(at=approved_at)
@@ -168,7 +168,7 @@ def decide(
     return Next("approved", approved.model_dump(mode="json"))
 
 
-def approval_time(plan: Plan, answer: Mapping[str, Any]) -> datetime | None:
+def _approval_time(plan: Plan, answer: Mapping[str, Any]) -> datetime | None:
     """When `answer`, one that switches nothing, approves `plan` by
     `decide`'s rule: it names `plan`'s revision and says under `at`, as an
     ISO 8601 time with its offset, when the user gave it. `None` for an

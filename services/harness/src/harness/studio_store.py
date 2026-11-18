@@ -1260,7 +1260,7 @@ class StudioStore:
         state: ConversationState | None = None,
         *,
         stopping: bool = False,
-        alongside: Callable[[AsyncConnection, int], Awaitable[bool]] | None = None,
+        alongside: Callable[[AsyncConnection, int], Awaitable[None]] | None = None,
     ) -> None:
         """Write this instance's changed durable fields, compare-and-swapped
         on the turn state's version. Given `state`, the working copy `draft`
@@ -1291,9 +1291,9 @@ class StudioStore:
         transaction, with the conversation's row id, once the row is locked
         and the checks above passed and before the fields are written: what
         it writes commits with the save or not at all, and anything it raises
-        rolls the save back and propagates. It may change the state's
-        pending interrupts, and answers whether it did; the save then
-        serialises them again and writes them. It runs even when no field
+        rolls the save back and propagates. It may change the durable fields
+        of the state being saved, the segment excepted, and the save writes
+        what it changed. It runs even when no field
         changed. The interrupt route admits an approved plan's run through it
         (`harness.run_ledger.StudioRunLedger.admit_with_approval`) and names the run on
         the pending interrupt.
@@ -1323,10 +1323,9 @@ class StudioStore:
                     lease_live = stored_lease is not None and stored_lease.expires_at > row.db_now
                     if (await _stop_state(conn, row, lease_live=lease_live)).live:
                         raise StopPending(conversation_id)
-                if alongside is not None and await alongside(conn, entry.pk):
-                    pending = _json_safe(_serialize_pending(target.pending))
-                    if entry.baseline.get(_KEY_PENDING, _NO_BASELINE_VALUE) != pending:
-                        delta[_KEY_PENDING] = pending
+                if alongside is not None:
+                    await alongside(conn, entry.pk)
+                    delta = _changed_since(_serialize_durable(target), entry.baseline)
                 version = (
                     await self._write(conn, entry.pk, delta, seq_reserved=reserved)
                     if delta

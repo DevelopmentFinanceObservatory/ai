@@ -44,6 +44,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -245,6 +246,18 @@ async def store_plan_on(conn: AsyncConnection, pk: int, revision: str, plan: Jso
     )
 
 
+@dataclass(frozen=True, kw_only=True)
+class ApprovedRun:
+    """What `StudioRunLedger.admit_with_approval` writes for an approved
+    plan: the run `candidate`, the `submission` stored beside it, and the
+    `plan` stored under its `revision`."""
+
+    candidate: RunRecord
+    submission: JsonValue
+    revision: str
+    plan: JsonValue
+
+
 class StudioRunLedger:
     """A `RunLedger` over `store`'s conversations."""
 
@@ -298,34 +311,30 @@ class StudioRunLedger:
             return await admit_on(conn, pk, candidate, submission=submission, now=self._now())
 
     async def admit_with_approval(
-        self,
-        conn: AsyncConnection,
-        pk: int,
-        *,
-        candidate: Callable[[datetime], RunRecord],
-        submission: JsonValue,
-        revision: str,
-        plan: JsonValue,
+        self, conn: AsyncConnection, pk: int, admission: Callable[[datetime], ApprovedRun]
     ) -> Admission | None:
-        """Store `plan` under `revision` and admit `candidate`, minted at this
-        ledger's clock, with `submission` beside it (`store_plan_on`,
-        `admit_on`), for the conversation row `pk`, on `conn`, the connection
-        of the `StudioStore.save` that records the plan's approval, in a
-        savepoint of its transaction. Returns the `Admission`. A refusal
-        (`RunLedgerError`: a key naming other work, an approval already
-        expired) or a store fault in it (`store_faults`, a `run_keys` row
-        with no `runs` row among them) rolls the savepoint back, is logged,
-        and returns None, and the save commits the approval without a run
-        for `execute` to admit. A fault the savepoint cannot roll back raises
-        and fails the save."""
+        """Admit the run `admission` builds at this ledger's clock and store
+        its plan (`store_plan_on`, `admit_on`), for the conversation row
+        `pk`, on `conn`, the connection of the `StudioStore.save` that
+        records the plan's approval, in a savepoint of its transaction.
+        Returns the `Admission`. A refusal (`RunLedgerError`: a key naming
+        other work, an approval already expired) or any other raise in the
+        savepoint, building the run included (`store_faults`, a `run_keys`
+        row with no `runs` row among them), rolls the savepoint back, is
+        logged with its cause, and returns None, and the save commits the
+        approval without a run for `execute` to admit. A fault the
+        savepoint cannot roll back raises and fails the save."""
         now = self._now()
         try:
             async with conn.begin_nested(), store_faults(None):
-                await store_plan_on(conn, pk, revision, plan)
-                return await admit_on(conn, pk, candidate(now), submission=submission, now=now)
-        except (RunLedgerError, LedgerUnavailableError) as exc:
+                built = admission(now)
+                await store_plan_on(conn, pk, built.revision, built.plan)
+                return await admit_on(
+                    conn, pk, built.candidate, submission=built.submission, now=now
+                )
+        except (RunLedgerError, LedgerUnavailableError):
             logger.warning(
-                "run ledger: the approval of revision %s admits no run: %s", revision, exc
+                "run ledger: the approval admits no run; execute admits it", exc_info=True
             )
             return None
 

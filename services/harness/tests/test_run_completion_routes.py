@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -662,35 +663,47 @@ async def test_an_approval_a_client_left_before_execute_admitted_is_carried_on_b
 
 
 @pytest.mark.parametrize(
-    "refusal",
+    ("where", "cause"),
     [
-        pytest.param(lambda candidate: ConnectionError("the database went away"), id="fault"),
-        pytest.param(
-            lambda candidate: IdempotencyConflictError(candidate, "sha_other"), id="conflict"
-        ),
+        pytest.param("admit_on", "the database went away", id="fault"),
+        pytest.param("admit_on", "already names run", id="conflict"),
+        pytest.param("build", "the submission cannot be read", id="build"),
     ],
 )
 async def test_an_admission_refused_at_the_approval_leaves_the_approval_for_execute_to_run(
-    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, refusal: Any
+    pg_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    where: str,
+    cause: str,
 ) -> None:
     """A store fault or a ledger refusal while the approval's save admits
-    the run rolls back that admission alone: the save commits the approval
-    with no run, no stored plan and no admitted run named, and `execute`
-    then admits the run and completes it."""
+    the run, or a raise building what it writes, rolls back that admission
+    alone and is logged with its cause: the save commits the approval with
+    no run, no stored plan and no admitted run named, and `execute` then
+    admits the run and completes it."""
     store = StudioStore(pg_engine)
     app, _, ledger = _studio_app(store, *_charts_the_plan())
     admit_on = run_ledger_module.admit_on
 
     async def admits_then_refuses(conn: Any, pk: int, candidate: RunRecord, **kwargs: Any) -> Any:
         await admit_on(conn, pk, candidate, **kwargs)
-        raise refusal(candidate)
+        if cause == "already names run":
+            raise IdempotencyConflictError(candidate, "sha_other")
+        raise ConnectionError(cause)
+
+    def unreadable(submission: Any) -> Any:
+        raise ValueError(cause)
 
     hang = _hang_at(app, monkeypatch, "record_answer")
     async with studio_client(app) as client:
         first = await stream(client, "/api/studio/turn", turn_body("Kenya's debt service?"))
         interrupt_id = _frame(first, "plan.proposed")["interrupt_id"]
         with monkeypatch.context() as patched:
-            patched.setattr(run_ledger_module, "admit_on", admits_then_refuses)
+            if where == "admit_on":
+                patched.setattr(run_ledger_module, "admit_on", admits_then_refuses)
+            else:
+                patched.setattr(studio_module, "submission_content", unreadable)
             await _leaves_when(
                 app, "/api/studio/interrupt", _approve_body(interrupt_id), leave=hang.entered
             )
@@ -704,6 +717,9 @@ async def test_an_admission_refused_at_the_approval_leaves_the_approval_for_exec
     assert "component.created" in [frame["event"] for frame in frames]
     (run,) = await _runs(pg_engine, ledger)
     assert (run.status, run.resumes) == (RunStatus.COMPLETED, 0)
+    (logged,) = [r for r in caplog.records if "admits no run" in r.getMessage()]
+    assert logged.exc_info is not None
+    assert cause in (logged.exc_text or logging.Formatter().formatException(logged.exc_info))
 
 
 @pytest.mark.parametrize(

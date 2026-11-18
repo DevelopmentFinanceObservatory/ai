@@ -30,11 +30,10 @@ from executor.ledger import (
     RunStatus,
     idempotency_key,
 )
-from harness.conversation import current_conversation_key
+from harness.conversation import current_conversation_key, ledger_conversation_id
 from harness.graph import plan_done as plan_done_module
 from harness.graph.approve import APPROVE_MESSAGE
 from harness.graph.events import StepProgress
-from harness.graph.execute import ledger_conversation_id
 from harness.graph.plan_done import (
     HandBack,
     StepSummary,
