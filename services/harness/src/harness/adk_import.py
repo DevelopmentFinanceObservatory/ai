@@ -80,11 +80,15 @@ Verbs:
   closes an open turn: the record keeps what was asked with the error
   `abandoned`, and the blocks of the sources its plans used, read from the
   turn session's `orchestrator:specs`. Its pending interrupts and its
-  lapsed lease are dropped. A turn the next release's turn loop opened
-  under the same number (its `turn_cursors` holds a row for it) is left
-  open and listed, decided under the row lock the closing write takes, so
-  the job may run while that release serves. A block that does not convert
-  is kept as stored, as `import` keeps one, and reported. A diverged conversation is
+  lapsed lease are dropped. A turn the `turn_cursors` table holds a row
+  for, by (conversation, turn_index), is left open and listed: it was
+  opened there, under the same number as an ADK turn session left behind.
+  A writer of `turn_cursors` inserts that row under `FOR SHARE` on the
+  conversation's row, and the job reads it under the `FOR UPDATE` its
+  closing write takes, so it sees every such turn committed before its
+  write. Whether the table exists is read once, as the run starts. A block
+  that does not convert is kept as stored, as `import` keeps one, and
+  reported. A diverged conversation is
   left alone and listed, and fails the run: its rows lack the turns ADK
   holds, so `--prefer-adk` must take ADK's copy first. A conversation
   whose close fails is refused and left open, and the run goes on with
@@ -1569,7 +1573,7 @@ class CloseReport:
     closed: list[str] = field(default_factory=list)
     live: list[str] = field(default_factory=list)
     not_on_adk: list[str] = field(default_factory=list)
-    on_turn_loop: list[str] = field(default_factory=list)
+    in_turn_cursors: list[str] = field(default_factory=list)
     changed: list[str] = field(default_factory=list)
     diverged: list[str] = field(default_factory=list)
     refused: dict[str, list[str]] = field(default_factory=dict)
@@ -1587,7 +1591,7 @@ class CloseReport:
                 (f"{would}closed as abandoned", self.closed),
                 ("left open, a stream holds its lease", self.live),
                 ("left open, no ADK turn session", self.not_on_adk),
-                ("left open, a turn the turn loop opened", self.on_turn_loop),
+                ("left open, turn_cursors holds the turn", self.in_turn_cursors),
                 ("changed during the run, run again", self.changed),
                 ("left alone, diverged (--prefer-adk first)", self.diverged),
             )
@@ -1604,7 +1608,7 @@ class CloseReport:
         lines.append(
             f"{len(self.closed)} {would}closed, {len(self.live)} live, "
             f"{len(self.not_on_adk)} without an ADK turn session, "
-            f"{len(self.on_turn_loop)} opened by the turn loop, {len(self.changed)} changed, "
+            f"{len(self.in_turn_cursors)} in turn_cursors, {len(self.changed)} changed, "
             f"{len(self.diverged)} diverged, {len(self.refused)} refused"
         )
         return "\n".join(lines)
@@ -1618,12 +1622,15 @@ async def close_open_turns(engine: AsyncEngine, *, apply: bool) -> CloseReport:
     await _check_tables(engine)
     report = CloseReport(apply=apply)
     async with engine.connect() as conn:
+        turn_cursors = (
+            await conn.execute(text("SELECT to_regclass('turn_cursors')"))
+        ).scalar() is not None
         conversations = (
             await conn.execute(
                 text(
                     # Lease expiry is read on the database's clock, as the
                     # store reads it.
-                    "SELECT c.principal, c.conversation_id, "
+                    "SELECT c.id, c.principal, c.conversation_id, "
                     f"coalesce(c.lease_expires_at > {DATABASE_NOW}, false) AS leased, "
                     "coalesce(i.diverged, false) AS diverged "
                     "FROM conversations c LEFT JOIN adk_ledger_imports i "
@@ -1631,13 +1638,19 @@ async def close_open_turns(engine: AsyncEngine, *, apply: bool) -> CloseReport:
                 )
             )
         ).all()
-    for principal, conversation_id, leased, diverged in conversations:
+    for pk, principal, conversation_id, leased, diverged in conversations:
         if diverged:
             report.diverged.append(f"{principal}/{conversation_id}")
             continue
         try:
             await _close_one(
-                engine, principal, conversation_id, leased=leased, apply=apply, report=report
+                engine,
+                principal,
+                conversation_id,
+                pk=pk if turn_cursors else None,
+                leased=leased,
+                apply=apply,
+                report=report,
             )
         # One conversation's failure refuses it. The run goes on with the rest.
         except Exception as exc:
@@ -1652,6 +1665,7 @@ async def _close_one(
     principal: str,
     conversation_id: str,
     *,
+    pk: int | None,
     leased: bool,
     apply: bool,
     report: CloseReport,
@@ -1659,7 +1673,9 @@ async def _close_one(
     """Close one conversation's open ADK turn, if it has one, and note what
     became of it in `report`. The open turn's spec blocks are the ones the
     store's `load` read and converted, through the server's reader
-    (`open_turn_specs`)."""
+    (`open_turn_specs`). `pk` is the conversation's row id when the
+    `turn_cursors` table exists, else `None`, and a turn that table holds
+    is left open."""
     sessions: set[str] = set()
     bridge = _NoAdk()
     store = StudioStore(engine, turn_specs=open_turn_specs(engine, found=sessions), adk=bridge)
@@ -1675,58 +1691,51 @@ async def _close_one(
         return
     turn_index = state.turn_index
 
-    async def not_on_turn_loop(conn: AsyncConnection) -> None:
-        if await _turn_loop_holds(conn, principal, conversation_id, turn_index):
-            raise _TurnLoopOwnsTurnError
+    async def not_in_turn_cursors(conn: AsyncConnection, locked: int) -> None:
+        if await _turn_cursor_exists(conn, locked, turn_index):
+            raise _TurnCursorExistsError
 
-    if apply:
-        state.close_turn(final_text=state.turn_final_text, error="abandoned")
-        state.pending.clear()
-        # No stream holds the lease, so any lease on record has lapsed.
-        # Clearing it fences out a stream running under it, whose checkpoint
-        # is fenced on the lease id alone and would otherwise write over the
-        # turn this closes.
-        state.segment = None
-        try:
-            await store.save(principal, conversation_id, guard=not_on_turn_loop)
-        except ConversationStale:
-            report.changed.append(name)
-            return
-        except _TurnLoopOwnsTurnError:
-            report.on_turn_loop.append(name)
-            return
-    else:
+    if pk is not None and not apply:
         async with engine.connect() as conn:
-            if await _turn_loop_holds(conn, principal, conversation_id, turn_index):
-                report.on_turn_loop.append(name)
+            if await _turn_cursor_exists(conn, pk, turn_index):
+                report.in_turn_cursors.append(name)
                 return
     # A block that does not convert is kept as stored, as `import` keeps one.
     if bridge.blocks.unconvertible:
         report.findings[name] = bridge.blocks.unconvertible
-    report.closed.append(name)
+    if not apply:
+        report.closed.append(name)
+        return
+    state.close_turn(final_text=state.turn_final_text, error="abandoned")
+    state.pending.clear()
+    # No stream holds the lease, so any lease on record has lapsed. Clearing
+    # it fences out a stream running under it, whose checkpoint is fenced on
+    # the lease id alone and would otherwise write over the turn this closes.
+    state.segment = None
+    try:
+        await store.save(
+            principal, conversation_id, guard=not_in_turn_cursors if pk is not None else None
+        )
+    except _TurnCursorExistsError:
+        # Left open, so none of its blocks is closed as stored.
+        report.findings.pop(name, None)
+        report.in_turn_cursors.append(name)
+    except ConversationStale:
+        report.changed.append(name)
+    else:
+        report.closed.append(name)
 
 
-class _TurnLoopOwnsTurnError(Exception):
-    """The open turn's number is a turn the turn loop opened."""
+class _TurnCursorExistsError(Exception):
+    """`turn_cursors` holds the open turn."""
 
 
-async def _turn_loop_holds(
-    conn: AsyncConnection, principal: str, conversation_id: str, turn_index: int
-) -> bool:
-    """Whether the next release's turn loop opened turn `turn_index` of the
-    conversation: its `turn_cursors` (that release's migration 0003) holds a
-    row for it. False while the table does not exist. That release opens a
-    turn under a share lock on the conversation's row, so a caller holding
-    the row's update lock reads every turn it opened."""
-    if (await conn.execute(text("SELECT to_regclass('turn_cursors')"))).scalar() is None:
-        return False
+async def _turn_cursor_exists(conn: AsyncConnection, pk: int, turn_index: int) -> bool:
+    """Whether `turn_cursors` holds a row for turn `turn_index` of the
+    conversation whose row id is `pk`."""
     found = await conn.execute(
-        text(
-            "SELECT 1 FROM turn_cursors t JOIN conversations c ON c.id = t.conversation "
-            "WHERE c.principal = :principal AND c.conversation_id = :conversation_id "
-            "AND t.turn_index = :turn_index"
-        ),
-        {"principal": principal, "conversation_id": conversation_id, "turn_index": turn_index},
+        text("SELECT 1 FROM turn_cursors WHERE conversation = :pk AND turn_index = :turn_index"),
+        {"pk": pk, "turn_index": turn_index},
     )
     return found.first() is not None
 

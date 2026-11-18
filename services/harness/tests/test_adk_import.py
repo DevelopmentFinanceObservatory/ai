@@ -51,7 +51,12 @@ from harness.graph.state import AGENT_NAME, ORCHESTRATOR_SPECS_KEY, store_search
 from harness.run_ledger import StudioRunLedger
 from harness.studio import _keep_turn_records
 from harness.studio_state import ConversationState, SegmentLost
-from harness.studio_store import ConversationHeld, StudioStore, _serialize_pending
+from harness.studio_store import (
+    ConversationHeld,
+    ConversationStale,
+    StudioStore,
+    _serialize_pending,
+)
 from harness.tool_contracts import resolver_digest
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -898,9 +903,12 @@ async def test_close_open_turns_keeps_a_mapping_form_turn_block_as_rows(
     ]
 
 
+@pytest.mark.parametrize("changed", [False, True], ids=["closed", "changed"])
 async def test_close_open_turns_closes_a_turn_with_a_block_that_does_not_convert_as_stored(
-    adk: AsyncEngine,
+    adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch, changed: bool
 ) -> None:
+    """The dry run and the apply list the same block, and so does an apply
+    whose write another instance moved first."""
     await import_conversations(adk, apply=True)
     spec_id = next(iter(EXPECTED[FULL]["view"]["turn_specs"]))
     block = {**_mapping_block(), "spec_id": spec_id, "_bound_refs": "g7"}
@@ -919,13 +927,26 @@ async def test_close_open_turns_closes_a_turn_with_a_block_that_does_not_convert
             },
         )
 
+    dry = await close_open_turns(adk, apply=False)
+    if changed:
+
+        class Moved(StudioStore):
+            async def save(self, principal: str, conversation_id: str, *_: Any, **__: Any) -> None:
+                raise ConversationStale(conversation_id)
+
+        monkeypatch.setattr(adk_import, "StudioStore", Moved)
+
     report = await close_open_turns(adk, apply=True)
 
     turn = f"{_name(FULL)} turn 4"
-    assert (report.clean, report.refused) == (True, {})
-    assert turn in report.closed
+    assert report.findings == dry.findings
     (finding,) = report.findings[turn]
     assert finding.endswith("does not convert: TypeError: _bound_refs is of type str")
+    if changed:
+        assert turn in report.changed
+        return
+    assert (report.clean, report.refused) == (True, {})
+    assert turn in report.closed
     closed = await _load(adk, FULL)
     assert closed is not None and closed.turns[-1]["error"] == "abandoned"
     assert closed.turns[-1]["specs"][spec_id] == block
@@ -1199,8 +1220,7 @@ async def test_close_open_turns_fences_out_a_stream_whose_lease_lapsed(
     assert closed is not None and closed.turn_recorded and closed.segment is None
 
 
-# The columns of the next release's `turn_cursors` (its migration 0003) that
-# `close-open-turns` reads.
+# The columns of `turn_cursors` that `close-open-turns` reads.
 _TURN_CURSORS = (
     "CREATE TABLE turn_cursors (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, "
     "conversation bigint NOT NULL REFERENCES conversations (id) ON DELETE CASCADE, "
@@ -1208,45 +1228,52 @@ _TURN_CURSORS = (
 )
 
 
-async def test_close_open_turns_leaves_a_turn_the_next_release_opened_after_the_load(
-    adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+async def test_close_open_turns_leaves_a_turn_cursors_turn_opened_while_its_write_waits(
+    adk: AsyncEngine,
 ) -> None:
-    """A turn the release that reads the tables opened under the number of an
-    orphan ADK turn session is its own, even when it opens between the job's
-    load and its write: the write's row lock decides."""
+    """A writer opens turn 1 in `turn_cursors` under `FOR SHARE` on the
+    conversation's row, and commits only once the job's closing write waits
+    on that row. The write reads the cursor under its own row lock and
+    leaves the turn open, its pending interrupts and blocks kept."""
     await import_conversations(adk, apply=True)
     async with adk.begin() as conn:
         await conn.execute(text(_TURN_CURSORS))
     plan_paused = await _row_id(adk, PLAN_PAUSED)
+    # The writer and the poll run beside the job's own pool of two.
+    async with adk.connect() as conn:
+        schema = (await conn.execute(text("SELECT current_schema()"))).scalar_one()
+    side = create_async_engine(adk.url, connect_args={"server_settings": {"search_path": schema}})
+    try:
+        async with side.connect() as writer:
+            transaction = await writer.begin()
+            await writer.execute(
+                text("SELECT id FROM conversations WHERE id = :pk FOR SHARE"), {"pk": plan_paused}
+            )
+            await writer.execute(
+                text(
+                    "INSERT INTO turn_cursors (conversation, turn_index, status) "
+                    "VALUES (:pk, 1, 'paused')"
+                ),
+                {"pk": plan_paused},
+            )
+            run = asyncio.create_task(close_open_turns(adk, apply=True))
+            async with asyncio.timeout(10):
+                while not await _waiting_on_a_lock(side):
+                    await asyncio.sleep(0.02)
+            await transaction.commit()
+    finally:
+        await side.dispose()
+    report = await run
 
-    class Opening(StudioStore):
-        async def load(self, principal: str, conversation_id: str) -> Any:
-            state = await super().load(principal, conversation_id)
-            if conversation_id == PLAN_PAUSED:
-                async with adk.begin() as conn:
-                    await conn.execute(
-                        text(
-                            "INSERT INTO turn_cursors (conversation, turn_index, status) "
-                            "VALUES (:conversation, 1, 'paused') ON CONFLICT DO NOTHING"
-                        ),
-                        {"conversation": plan_paused},
-                    )
-            return state
-
-    monkeypatch.setattr(adk_import, "StudioStore", Opening)
-
-    report = await close_open_turns(adk, apply=True)
-
-    assert (report.closed, report.on_turn_loop, report.clean) == (
+    assert (report.closed, report.in_turn_cursors, report.clean) == (
         [f"{_name(FULL)} turn 4"],
         [f"{_name(PLAN_PAUSED)} turn 1"],
         True,
     )
     kept = await _load(adk, PLAN_PAUSED)
     assert kept is not None and not kept.turn_recorded and kept.pending
-    monkeypatch.undo()
     dry = await close_open_turns(adk, apply=False)
-    assert (dry.closed, dry.on_turn_loop) == ([], [f"{_name(PLAN_PAUSED)} turn 1"])
+    assert (dry.closed, dry.in_turn_cursors) == ([], [f"{_name(PLAN_PAUSED)} turn 1"])
 
 
 async def test_verify_and_close_open_turns_keep_one_conversation_at_a_time(

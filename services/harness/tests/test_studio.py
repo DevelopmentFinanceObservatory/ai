@@ -1588,7 +1588,15 @@ def _segment_sse(
     `StudioRunner._locked`, sharing one `_StreamEnding`."""
     ending = studio_module._StreamEnding()
     return _sse_stream(
-        studio._locked("u_a", CONVERSATION, conversation, segment_id, frames, ending),
+        studio._locked(
+            "u_a",
+            CONVERSATION,
+            conversation,
+            segment_id,
+            frames,
+            ending,
+            hold=_LockHold(conversation.lock),
+        ),
         conversation=conversation,
         ending=ending,
         **kwargs,
@@ -3606,7 +3614,9 @@ async def test_a_release_that_times_out_ends_the_segment_s_span(
     async def frames() -> Any:
         yield MessageDelta(event="message.delta", seq=0, text="one")
 
-    async for _ in studio._locked("u_a", CONVERSATION, conversation, segment_id, frames()):
+    async for _ in studio._locked(
+        "u_a", CONVERSATION, conversation, segment_id, frames(), hold=_LockHold(conversation.lock)
+    ):
         pass
 
     assert ended == [("failed", "ERROR")]
@@ -3643,7 +3653,14 @@ async def test_a_release_whose_caller_is_cancelled_still_reads_what_it_saved(
         yield MessageDelta(event="message.delta", seq=0, text="Hello.")
 
     async def stream() -> None:
-        async for _ in studio._locked("u_a", CONVERSATION, conversation, segment_id, frames()):
+        async for _ in studio._locked(
+            "u_a",
+            CONVERSATION,
+            conversation,
+            segment_id,
+            frames(),
+            hold=_LockHold(conversation.lock),
+        ):
             pass
 
     task = asyncio.ensure_future(stream())
@@ -9205,6 +9222,92 @@ async def test_a_request_cancelled_while_it_drops_its_claim_still_releases_the_l
     assert stored is not None and stored.segment is None
 
 
+async def test_a_claim_whose_span_end_raises_still_releases_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/turn` claims, then the leftover session it met cannot be replaced.
+    Ending the claimed segment's span raises as the request lets go; the
+    lock is released all the same."""
+    app = _app(_text("Hello."))
+    studio = app.state.studio
+    await studio.runner.session_service.create_session(
+        app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t1"
+    )
+
+    async def unavailable(**kwargs: Any) -> None:
+        raise RuntimeError("the session cannot be created")
+
+    def broken_end(self: Any, status: str, **kwargs: Any) -> bool:
+        raise RuntimeError("telemetry is down")
+
+    monkeypatch.setattr(studio, "_replace_leftover_session", unavailable)
+    monkeypatch.setattr(studio_state_module.ConversationState, "end_segment_span", broken_end)
+
+    async with _client(app) as client:
+        with pytest.raises(RuntimeError, match="telemetry is down"):
+            await client.post("/api/studio/turn", json=_turn_body("hi"), headers=AUTH)
+
+    assert not studio.store.lock_for(PRINCIPAL, CONVERSATION).locked()
+
+
+async def test_a_client_gone_before_the_body_starts_leaves_no_lock_or_lease() -> None:
+    """Under ASGI spec 2.3 Starlette reads the client's disconnect beside
+    the body. A client already gone ends the response before the body's
+    first frame is pulled, so the stream's own ending never runs. The lock
+    is released and the lease dropped all the same, and the next `/turn`
+    claims."""
+    app = _app(_text("Hello."), _text("Again."))
+    store = app.state.studio.store
+    body = json.dumps(_turn_body("hi")).encode()
+    received = 0
+
+    async def receive() -> dict[str, Any]:
+        nonlocal received
+        received += 1
+        if received == 1:
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        # A server's send yields to the loop, where the disconnect's
+        # cancellation lands before the body is pulled.
+        await asyncio.sleep(0)
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/studio/turn",
+        "raw_path": b"/api/studio/turn",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"authorization", AUTH["Authorization"].encode()),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": ("127.0.0.1", 1),
+        "server": ("test", 80),
+    }
+
+    await asyncio.wait_for(app(scope, receive, send), timeout=10)
+
+    assert not any(message.get("body") for message in sent)
+    assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
+    stored = await StudioStore(_engine(), adk=NO_ADK, turn_specs=no_turn_specs).load(
+        PRINCIPAL, CONVERSATION
+    )
+    assert stored is not None and stored.segment is None
+    async with _client(app) as client:
+        again = await _stream(client, "/api/studio/turn", _turn_body("again"))
+    assert _frame(again, "done")
+
+
 async def test_a_request_cancelled_after_it_let_go_leaves_the_next_request_s_claim_alone(
     otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -9336,7 +9439,14 @@ async def test_a_release_failure_does_not_strand_the_local_lock(
         yield MessageDelta(event="message.delta", seq=0, text="one")
 
     with pytest.raises(RuntimeError):
-        async for _ in studio._locked("u_a", CONVERSATION, conversation, segment_id, one_frame()):
+        async for _ in studio._locked(
+            "u_a",
+            CONVERSATION,
+            conversation,
+            segment_id,
+            one_frame(),
+            hold=_LockHold(conversation.lock),
+        ):
             pass
 
     assert not conversation.lock.locked()
@@ -9373,7 +9483,14 @@ async def test_a_heartbeat_exception_does_not_strand_the_local_lock() -> None:
         await started.wait()
 
     with pytest.raises(RuntimeError, match="heartbeat exploded"):
-        async for _ in studio._locked("u_a", CONVERSATION, conversation, segment_id, one_frame()):
+        async for _ in studio._locked(
+            "u_a",
+            CONVERSATION,
+            conversation,
+            segment_id,
+            one_frame(),
+            hold=_LockHold(conversation.lock),
+        ):
             pass
 
     assert not conversation.lock.locked()
@@ -9569,7 +9686,9 @@ async def test_a_client_leaving_at_a_frame_closes_the_frames_before_the_release(
         finally:
             order.append(("frames closed", conversation.lock.locked()))
 
-    stream = studio._locked("u_a", CONVERSATION, conversation, segment_id, frames())
+    stream = studio._locked(
+        "u_a", CONVERSATION, conversation, segment_id, frames(), hold=_LockHold(conversation.lock)
+    )
     await anext(stream)
     await stream.aclose()
 
@@ -9598,7 +9717,14 @@ async def test_a_stored_turn_that_cannot_be_read_still_ends_the_segment_s_span(
     async def one_frame() -> Any:
         yield MessageDelta(event="message.delta", seq=0, text="one")
 
-    async for _ in studio._locked("u_a", CONVERSATION, conversation, segment_id, one_frame()):
+    async for _ in studio._locked(
+        "u_a",
+        CONVERSATION,
+        conversation,
+        segment_id,
+        one_frame(),
+        hold=_LockHold(conversation.lock),
+    ):
         pass
 
     assert ended == [("failed", "ERROR")]
@@ -9997,7 +10123,15 @@ async def test_a_stop_read_as_the_client_leaves_an_unsent_pause_closes_the_turn(
     async def relayed() -> Any:
         # `_locked`'s frames as the parked stream's task receives them.
         async with aclosing(
-            studio._locked("u_a", CONVERSATION, conversation, segment_id, segment(), ending)
+            studio._locked(
+                "u_a",
+                CONVERSATION,
+                conversation,
+                segment_id,
+                segment(),
+                ending,
+                hold=_LockHold(conversation.lock),
+            )
         ) as locked:
             async for frame in locked:
                 if isinstance(frame, PlanProposed):
@@ -10200,7 +10334,15 @@ async def test_a_stop_ends_the_stream_on_its_frame_when_closing_the_frames_raise
         return [
             chunk
             async for chunk in _sse_stream(
-                studio._locked("u_a", CONVERSATION, conversation, segment_id, frames(), ending),
+                studio._locked(
+                    "u_a",
+                    CONVERSATION,
+                    conversation,
+                    segment_id,
+                    frames(),
+                    ending,
+                    hold=_LockHold(conversation.lock),
+                ),
                 conversation=conversation,
                 ending=ending,
             )

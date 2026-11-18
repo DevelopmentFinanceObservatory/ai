@@ -33,7 +33,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import (
     AbstractContextManager,
     aclosing,
@@ -43,7 +43,8 @@ from contextlib import (
 )
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from functools import partial
+from typing import Any, Literal, override
 
 import anyio
 from common.telemetry import flush_telemetry
@@ -61,6 +62,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
 )
 from google.genai import types
 from planner.plan import SEEDS_STATE_KEY, current_earlier_block, current_recorded_identity
+from starlette.types import Receive, Scope, Send
 
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
@@ -1197,10 +1199,12 @@ class StudioRunner:
         segment_id: str,
         frames: AsyncGenerator[Any],
         ending: _StreamEnding | None = None,
+        *,
+        hold: _LockHold,
     ) -> AsyncGenerator[Any]:
         """Stream frames, checkpointing before any that report success
-        (`_checkpointed`), then release the segment and the conversation
-        lock.
+        (`_checkpointed`), then release the segment and let go of the
+        conversation lock through `hold`, the route's hold on it.
 
         The ROUTE acquires the lock (eagerly, before touching turn state), so
         ownership is settled while the request handler still controls the
@@ -1399,7 +1403,7 @@ class StudioRunner:
                         stored=self._stored_turn(principal, conversation_id),
                     )
                 finally:
-                    conversation.lock.release()
+                    hold.release()
 
     async def _frames_failed(
         self,
@@ -1517,13 +1521,17 @@ class StudioRunner:
         segment_id: str,
         frames: AsyncGenerator[Any],
         *,
+        hold: _LockHold,
         switch: bool = False,
     ) -> AsyncGenerator[str]:
         """The SSE stream of a claimed segment: `frames` under `_locked`,
-        relayed by `_sse_stream`, both sharing one `_StreamEnding`."""
+        which lets go of `hold`, relayed by `_sse_stream`, both sharing one
+        `_StreamEnding`."""
         ending = _StreamEnding()
         return _sse_stream(
-            self._locked(principal, conversation_id, conversation, segment_id, frames, ending),
+            self._locked(
+                principal, conversation_id, conversation, segment_id, frames, ending, hold=hold
+            ),
             conversation=conversation,
             switch=switch,
             ending=ending,
@@ -1820,10 +1828,11 @@ async def _acquire_or_conflict(
     The check-and-acquire pair has no suspension point between them on
     the uncontended fast path, so two concurrent requests cannot both
     pass. A lazily-acquired lock let them race past the 409 guard and
-    clobber each other's turn state and cancel event. The streaming
-    wrapper (`StudioRunner._locked`) releases; early-exit route paths
-    must release explicitly. Returns the request's hold on the lock, not
-    a conversation -- a lock exists (and can be contended) before this
+    clobber each other's turn state and cancel event. The request's
+    stream (`StudioRunner._locked`) lets go of the hold, or `_ClaimedStream`
+    when that stream never starts; early-exit route paths let go
+    explicitly. Returns the request's hold on the lock, not a
+    conversation, since a lock exists (and can be contended) before this
     store has ever loaded or created the conversation it names.
     """
     lock = store.lock_for(principal, conversation_id)
@@ -1877,6 +1886,7 @@ async def _release_claim(
     segment_id: str | None,
     *,
     cause: BaseException | None = None,
+    status: str | None = None,
 ) -> None:
     """Let go of a request whose stream never started, on every path,
     cancellation included. A claim that never committed gives up its
@@ -1886,26 +1896,31 @@ async def _release_claim(
     and the segment's span, if one opened, ends `cancelled` when `cause`,
     the exception that ended the request, is this task's own cancellation
     (the client gone), and `failed` otherwise, a `CancelledError` an inner
-    task let out among them. Then `hold` lets go of the lock and any span
-    that ended is exported. It does nothing once `hold` has let go: the
-    working copy and the lease are then another request's."""
+    task let out among them. `status`, when given, is the span's status
+    whatever the cause. Then `hold` lets go of the lock, whatever the span
+    end raised, and any span that ended is exported. It does nothing once
+    `hold` has let go: the working copy and the lease are then another
+    request's."""
     if not hold.held:
         return
-    task = asyncio.current_task()
-    cancelled = (
-        isinstance(cause, asyncio.CancelledError) and task is not None and task.cancelling() > 0
-    )
-    status = "cancelled" if cancelled else "failed"
+    if status is None:
+        task = asyncio.current_task()
+        cancelled = (
+            isinstance(cause, asyncio.CancelledError) and task is not None and task.cancelling() > 0
+        )
+        status = "cancelled" if cancelled else "failed"
     ended = False
     try:
         ended = store.drop_draft(principal, conversation_id)
         if segment_id is not None:
             await store.drop_lease(principal, conversation_id, segment_id)
     finally:
-        live = store.current(principal, conversation_id)
-        if segment_id is not None and live is not None:
-            ended = live.end_segment_span(status) or ended
-        hold.release()
+        try:
+            live = store.current(principal, conversation_id)
+            if segment_id is not None and live is not None:
+                ended = live.end_segment_span(status) or ended
+        finally:
+            hold.release()
         if ended:
             await flush_telemetry()
 
@@ -1921,6 +1936,35 @@ async def _unclaimed(
     once it has let go of it (`_release_claim`)."""
     await _release_claim(store, principal, conversation_id, hold, None)
     return response
+
+
+class _ClaimedStream(StreamingResponse):
+    """The SSE response of a claimed segment. Its body,
+    `StudioRunner._segment_stream`, releases the segment and lets go of
+    the request's lock hold as it ends. A body that never starts runs none
+    of that: under ASGI spec 2.3 Starlette cancels the response's send
+    task when the client has already left, possibly before the task pulls
+    the first frame. So once the response ends, this closes the body,
+    which runs the ending of a body suspended at a frame, and then lets go
+    of a claim the body never let go of (`_release_claim`, `disconnected`):
+    the lease dropped and the lock released."""
+
+    def __init__(
+        self, content: AsyncGenerator[str], *, let_go: Callable[[], Awaitable[None]]
+    ) -> None:
+        super().__init__(content, media_type=SSE_MEDIA_TYPE)
+        self._body = content
+        self._let_go = let_go
+
+    @override
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            try:
+                await self._body.aclose()
+            finally:
+                await self._let_go()
 
 
 def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRouter:
@@ -2074,6 +2118,16 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     ),
                 )
             claimed = segment_id
+            # A response whose body never starts lets go of the claim.
+            let_go = partial(
+                _release_claim,
+                studio.store,
+                principal,
+                body.conversation_id,
+                hold,
+                segment_id,
+                status="disconnected",
+            )
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
             if abandoned is not None:
@@ -2110,7 +2164,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # model's patch-or-recreate decision, and the platform write.
                 # It streams under the same segment the claim save above
                 # just persisted.
-                return StreamingResponse(
+                return _ClaimedStream(
                     studio._segment_stream(
                         principal,
                         body.conversation_id,
@@ -2123,12 +2177,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                             component_id=body.component_ref.component_id,
                             message=body.message,
                         ),
+                        hold=hold,
                     ),
-                    media_type=SSE_MEDIA_TYPE,
+                    let_go=let_go,
                 )
             text = body.message if chip_label is None else f"Count {chip_label}."
             message = types.Content(role="user", parts=[types.Part.from_text(text=text)])
-            return StreamingResponse(
+            return _ClaimedStream(
                 studio._settling(
                     studio._segment_stream(
                         principal,
@@ -2138,9 +2193,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         studio._frames(
                             principal=principal, conversation=conversation, message=message
                         ),
+                        hold=hold,
                     )
                 ),
-                media_type=SSE_MEDIA_TYPE,
+                let_go=let_go,
             )
         except BaseException as exc:
             # The stream wrapper normally releases the segment and the lock.
@@ -2406,6 +2462,16 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         # resuming under the dropped segment with the answer recorded, so a
         # retry of the same answer claims at once and resumes. The turn lines
         # added below stay unsaved, and the retry's load reads the row afresh.
+        # A response whose body never starts lets go the same way.
+        let_go = partial(
+            _release_claim,
+            studio.store,
+            principal,
+            body.conversation_id,
+            hold,
+            segment_id,
+            status="disconnected",
+        )
         try:
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
@@ -2438,11 +2504,16 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         composition=conversation.composition,
                     )
 
-                return StreamingResponse(
+                return _ClaimedStream(
                     studio._segment_stream(
-                        principal, body.conversation_id, conversation, segment_id, _rejected()
+                        principal,
+                        body.conversation_id,
+                        conversation,
+                        segment_id,
+                        _rejected(),
+                        hold=hold,
                     ),
-                    media_type=SSE_MEDIA_TYPE,
+                    let_go=let_go,
                 )
 
             if pending.kind == "elicitation":
@@ -2519,7 +2590,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 message=message,
                 approving=approving,
             )
-            return StreamingResponse(
+            return _ClaimedStream(
                 studio._settling(
                     studio._segment_stream(
                         principal,
@@ -2527,10 +2598,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         conversation,
                         segment_id,
                         frames,
+                        hold=hold,
                         switch=switching,
                     )
                 ),
-                media_type=SSE_MEDIA_TYPE,
+                let_go=let_go,
             )
         except BaseException as exc:
             await _release_claim(
