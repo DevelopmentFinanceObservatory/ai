@@ -1199,6 +1199,56 @@ async def test_close_open_turns_fences_out_a_stream_whose_lease_lapsed(
     assert closed is not None and closed.turn_recorded and closed.segment is None
 
 
+# The columns of the next release's `turn_cursors` (its migration 0003) that
+# `close-open-turns` reads.
+_TURN_CURSORS = (
+    "CREATE TABLE turn_cursors (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, "
+    "conversation bigint NOT NULL REFERENCES conversations (id) ON DELETE CASCADE, "
+    "turn_index integer NOT NULL, status text NOT NULL, UNIQUE (conversation, turn_index))"
+)
+
+
+async def test_close_open_turns_leaves_a_turn_the_next_release_opened_after_the_load(
+    adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn the release that reads the tables opened under the number of an
+    orphan ADK turn session is its own, even when it opens between the job's
+    load and its write: the write's row lock decides."""
+    await import_conversations(adk, apply=True)
+    async with adk.begin() as conn:
+        await conn.execute(text(_TURN_CURSORS))
+    plan_paused = await _row_id(adk, PLAN_PAUSED)
+
+    class Opening(StudioStore):
+        async def load(self, principal: str, conversation_id: str) -> Any:
+            state = await super().load(principal, conversation_id)
+            if conversation_id == PLAN_PAUSED:
+                async with adk.begin() as conn:
+                    await conn.execute(
+                        text(
+                            "INSERT INTO turn_cursors (conversation, turn_index, status) "
+                            "VALUES (:conversation, 1, 'paused') ON CONFLICT DO NOTHING"
+                        ),
+                        {"conversation": plan_paused},
+                    )
+            return state
+
+    monkeypatch.setattr(adk_import, "StudioStore", Opening)
+
+    report = await close_open_turns(adk, apply=True)
+
+    assert (report.closed, report.on_turn_loop, report.clean) == (
+        [f"{_name(FULL)} turn 4"],
+        [f"{_name(PLAN_PAUSED)} turn 1"],
+        True,
+    )
+    kept = await _load(adk, PLAN_PAUSED)
+    assert kept is not None and not kept.turn_recorded and kept.pending
+    monkeypatch.undo()
+    dry = await close_open_turns(adk, apply=False)
+    assert (dry.closed, dry.on_turn_loop) == ([], [f"{_name(PLAN_PAUSED)} turn 1"])
+
+
 async def test_verify_and_close_open_turns_keep_one_conversation_at_a_time(
     adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:

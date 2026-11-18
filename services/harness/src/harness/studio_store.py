@@ -1106,7 +1106,12 @@ class StudioStore:
         return segment.id
 
     async def save(
-        self, principal: str, conversation_id: str, state: ConversationState | None = None
+        self,
+        principal: str,
+        conversation_id: str,
+        state: ConversationState | None = None,
+        *,
+        guard: Callable[[AsyncConnection], Awaitable[None]] | None = None,
     ) -> None:
         """Write this instance's changed durable fields, compare-and-swapped
         on the turn state's version. Given `state`, the working copy `draft`
@@ -1129,6 +1134,10 @@ class StudioStore:
         turn starts past the stored reserved end when that moved since the
         load: the lapsed stream the claim takes over reserved more numbers
         before its lease lapsed, and may have sent them.
+
+        `guard`, when given, runs in the write's transaction once the row is
+        locked and its version and lease pass, with the transaction's
+        connection. A raise from it aborts the write.
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
@@ -1151,6 +1160,8 @@ class StudioStore:
                     and stored_lease.id not in {entry.held, claimed.id if claimed else None}
                 ):
                     raise ConversationStale(conversation_id)
+                if guard is not None:
+                    await guard(conn)
                 if claimed is not None and entry.claim_resumes and row.seq_reserved > target.seq:
                     target.seq = row.seq_reserved
                     reserved = row.seq_reserved + SEQ_BLOCK

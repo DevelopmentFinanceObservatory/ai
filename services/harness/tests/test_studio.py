@@ -90,6 +90,7 @@ from harness.studio import (
     _acquire_or_conflict,
     _end_stream,
     _keep_turn_records,
+    _LockHold,
     _sse_stream,
     _unwind,
     create_studio_router,
@@ -7947,8 +7948,8 @@ async def test_the_lock_is_held_from_the_route_not_from_the_first_frame() -> Non
     store = StudioStore(_engine(), adk=NO_ADK, turn_specs=no_turn_specs)
 
     first = await _acquire_or_conflict(store, "u_a", CONVERSATION)
-    assert isinstance(first, asyncio.Lock)
-    assert first.locked()
+    assert isinstance(first, _LockHold)
+    assert first.lock.locked()
 
     second = await _acquire_or_conflict(store, "u_a", CONVERSATION)
     assert isinstance(second, JSONResponse)
@@ -7956,12 +7957,12 @@ async def test_the_lock_is_held_from_the_route_not_from_the_first_frame() -> Non
     assert json.loads(second.body)["error"] == "transient_unavailable"
 
     other = await _acquire_or_conflict(store, "u_a", "conv_01test0009")
-    assert isinstance(other, asyncio.Lock)
-    assert other is not first
+    assert isinstance(other, _LockHold)
+    assert other.lock is not first.lock
 
     first.release()
     third = await _acquire_or_conflict(store, "u_a", CONVERSATION)
-    assert third is first
+    assert isinstance(third, _LockHold) and third.lock is first.lock
 
 
 async def test_closing_at_a_heartbeat_unwinds_cleanly() -> None:
@@ -9202,6 +9203,59 @@ async def test_a_request_cancelled_while_it_drops_its_claim_still_releases_the_l
     assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
     stored = await store.load(PRINCIPAL, CONVERSATION)
     assert stored is not None and stored.segment is None
+
+
+async def test_a_request_cancelled_after_it_let_go_leaves_the_next_request_s_claim_alone(
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `/turn` refused as busy releases the lock, then waits on the export
+    of the span it ended. Request B takes the lock and a working copy, and A
+    is cancelled during that export: B keeps both."""
+    session_service = _database_session_service()
+    app = _app(_text("Hello."), session_service=session_service)
+    studio = app.state.studio
+    store = studio.store
+    other = StudioStore(
+        _engine(),
+        adk=NO_ADK,
+        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+    )
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("hi"))
+    await other.load(PRINCIPAL, CONVERSATION)
+    other.claim_segment(PRINCIPAL, CONVERSATION)
+    await other.save(PRINCIPAL, CONVERSATION)
+    flushing = asyncio.Event()
+
+    async def held_flush() -> None:
+        flushing.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(studio_module, "flush_telemetry", held_flush)
+    router = create_studio_router(studio, settings=Settings())
+    endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if getattr(route, "path", "") == "/api/studio/turn"
+    )
+    request_a = asyncio.ensure_future(
+        endpoint(
+            TurnRequest.model_validate(_turn_body("again")), authorization=AUTH["Authorization"]
+        )
+    )
+    await asyncio.wait_for(flushing.wait(), timeout=5)
+    lock = store.lock_for(PRINCIPAL, CONVERSATION)
+    assert not lock.locked()
+    await lock.acquire()
+    work_b = store.draft(PRINCIPAL, CONVERSATION)
+
+    request_a.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request_a
+
+    assert lock.locked()
+    draft = store._runtime[(PRINCIPAL, CONVERSATION)].draft
+    assert draft is not None and draft[0] is work_b
 
 
 @pytest.mark.parametrize(

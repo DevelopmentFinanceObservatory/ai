@@ -1795,9 +1795,25 @@ def _held_response() -> JSONResponse:
     )
 
 
+class _LockHold:
+    """One request's hold on its conversation's process-local lock. The
+    request lets go through `release`, once: a later call does nothing, so
+    a request that let go never releases the lock another request took
+    since. `asyncio.Lock.locked()` says only that someone holds it."""
+
+    def __init__(self, lock: asyncio.Lock) -> None:
+        self.lock = lock
+        self.held = True
+
+    def release(self) -> None:
+        if self.held:
+            self.held = False
+            self.lock.release()
+
+
 async def _acquire_or_conflict(
     store: StudioStore, principal: str, conversation_id: str
-) -> asyncio.Lock | JSONResponse:
+) -> _LockHold | JSONResponse:
     """Take the conversation's lock BEFORE loading or touching any turn
     state.
 
@@ -1806,15 +1822,15 @@ async def _acquire_or_conflict(
     pass. A lazily-acquired lock let them race past the 409 guard and
     clobber each other's turn state and cancel event. The streaming
     wrapper (`StudioRunner._locked`) releases; early-exit route paths
-    must release explicitly. Returns the lock itself, not a conversation --
-    a lock exists (and can be contended) before this store has ever loaded
-    or created the conversation it names.
+    must release explicitly. Returns the request's hold on the lock, not
+    a conversation -- a lock exists (and can be contended) before this
+    store has ever loaded or created the conversation it names.
     """
     lock = store.lock_for(principal, conversation_id)
     if lock.locked():
         return _streaming_conflict_response("another request is streaming on this conversation")
     await lock.acquire()
-    return lock
+    return _LockHold(lock)
 
 
 def _turn_session_state(conversation: ConversationState, body: TurnRequest) -> dict[str, Any]:
@@ -1857,7 +1873,7 @@ async def _release_claim(
     store: StudioStore,
     principal: str,
     conversation_id: str,
-    lock: asyncio.Lock,
+    hold: _LockHold,
     segment_id: str | None,
     *,
     cause: BaseException | None = None,
@@ -1870,8 +1886,11 @@ async def _release_claim(
     and the segment's span, if one opened, ends `cancelled` when `cause`,
     the exception that ended the request, is this task's own cancellation
     (the client gone), and `failed` otherwise, a `CancelledError` an inner
-    task let out among them. Then `lock` is released and any span that
-    ended is exported."""
+    task let out among them. Then `hold` lets go of the lock and any span
+    that ended is exported. It does nothing once `hold` has let go: the
+    working copy and the lease are then another request's."""
+    if not hold.held:
+        return
     task = asyncio.current_task()
     cancelled = (
         isinstance(cause, asyncio.CancelledError) and task is not None and task.cancelling() > 0
@@ -1886,7 +1905,7 @@ async def _release_claim(
         live = store.current(principal, conversation_id)
         if segment_id is not None and live is not None:
             ended = live.end_segment_span(status) or ended
-        lock.release()
+        hold.release()
         if ended:
             await flush_telemetry()
 
@@ -1895,12 +1914,12 @@ async def _unclaimed(
     store: StudioStore,
     principal: str,
     conversation_id: str,
-    lock: asyncio.Lock,
+    hold: _LockHold,
     response: Response,
 ) -> Response:
     """Answer `response` for a request whose claim save never committed,
     once it has let go of it (`_release_claim`)."""
-    await _release_claim(store, principal, conversation_id, lock, None)
+    await _release_claim(store, principal, conversation_id, hold, None)
     return response
 
 
@@ -1911,9 +1930,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         body: TurnRequest, authorization: str | None = Header(default=None)
     ) -> Response:
         principal = principal_for(authorization, settings=settings)
-        lock = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
-        if isinstance(lock, JSONResponse):
-            return lock
+        hold = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
+        if isinstance(hold, JSONResponse):
+            return hold
         # The segment this request claimed once its claim save landed, which
         # every failure before the stream starts releases.
         claimed: str | None = None
@@ -1923,7 +1942,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 if body.component_ref is not None or body.apply_choice is not None:
                     # The client refers to state (a card to edit or to follow
                     # up on, or a chip under an answer) this store never had.
-                    lock.release()
+                    hold.release()
                     return _unknown_conversation_response(body.conversation_id)
                 try:
                     conversation = await studio.store.create(principal, body.conversation_id)
@@ -1943,7 +1962,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             ):
                 # A follow-up about a card this conversation never stored
                 # would run as a plain turn with no card in view.
-                lock.release()
+                hold.release()
                 return _tool_error_response(
                     ToolError(
                         error=ErrorCode.NOT_FOUND,
@@ -1960,7 +1979,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             if (pick := body.apply_choice) is not None:
                 label = _chip_label(conversation, pick)
                 if isinstance(label, JSONResponse):
-                    lock.release()
+                    hold.release()
                     return label
                 chip_label = label
             # Every change up to the claim save is made on a working copy,
@@ -1994,7 +2013,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     studio.store,
                     principal,
                     body.conversation_id,
-                    lock,
+                    hold,
                     _streaming_conflict_response(
                         "another request is streaming on this conversation",
                         retry_after_seconds=exc.retry_after_seconds,
@@ -2027,7 +2046,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         studio.store,
                         principal,
                         body.conversation_id,
-                        lock,
+                        hold,
                         _streaming_conflict_response(
                             "another request is streaming on this conversation"
                         ),
@@ -2049,7 +2068,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     studio.store,
                     principal,
                     body.conversation_id,
-                    lock,
+                    hold,
                     _streaming_conflict_response(
                         "another request is streaming on this conversation"
                     ),
@@ -2131,10 +2150,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # After it, the lease is dropped, and the claim save already
             # covers `begin_turn`'s effects, so the turn stays open and the
             # next `/turn` closes it as `begin_turn` closes any open turn.
-            if lock.locked():
-                await _release_claim(
-                    studio.store, principal, body.conversation_id, lock, claimed, cause=exc
-                )
+            await _release_claim(
+                studio.store, principal, body.conversation_id, hold, claimed, cause=exc
+            )
             raise
 
     router.add_api_route("/turn", turn, methods=["POST"], route_class_override=_BoundedTurnRoute)
@@ -2229,18 +2247,18 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         body: InterruptResponse, authorization: str | None = Header(default=None)
     ) -> Response:
         principal = principal_for(authorization, settings=settings)
-        lock = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
-        if isinstance(lock, JSONResponse):
-            return lock
+        hold = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
+        if isinstance(hold, JSONResponse):
+            return hold
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
-                lock.release()
+                hold.release()
                 return _unknown_conversation_response(body.conversation_id)
             pending = conversation.pending.get(body.interrupt_id)
             refusal = _interrupt_refusal(conversation.pending, body)
             if refusal is not None:
-                lock.release()
+                hold.release()
                 return refusal
             assert pending is not None  # narrowed by _interrupt_refusal
             # Every change up to the claim save is made on a working copy,
@@ -2313,7 +2331,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     studio.store,
                     principal,
                     body.conversation_id,
-                    lock,
+                    hold,
                     _streaming_conflict_response(
                         "another request is streaming on this conversation",
                         retry_after_seconds=exc.retry_after_seconds,
@@ -2332,7 +2350,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     studio.store,
                     principal,
                     body.conversation_id,
-                    lock,
+                    hold,
                     _tool_error_response(
                         ToolError(
                             error=ErrorCode.EDIT_CONFLICT,
@@ -2376,12 +2394,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     studio.store,
                     principal,
                     body.conversation_id,
-                    lock,
+                    hold,
                     _streaming_conflict_response("another request already answered this interrupt"),
                 )
         except BaseException:
-            if lock.locked():
-                await _release_claim(studio.store, principal, body.conversation_id, lock, None)
+            await _release_claim(studio.store, principal, body.conversation_id, hold, None)
             raise
 
         # Every failure from here to the stream's start drops the lease the
@@ -2517,7 +2534,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
         except BaseException as exc:
             await _release_claim(
-                studio.store, principal, body.conversation_id, lock, segment_id, cause=exc
+                studio.store, principal, body.conversation_id, hold, segment_id, cause=exc
             )
             raise
 
