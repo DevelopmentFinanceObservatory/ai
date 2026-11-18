@@ -5,7 +5,7 @@
 `test_every_run_of_the_owner_keeps_the_invariants` runs the real owner and
 the real response class over an in-memory model of the store and of a
 segment's work, for every script, input, place the input lands, and fault of
-the closing write, and checks nine invariants after each run:
+the closing write, and checks ten invariants after each run:
 
 - I1: a present client receives exactly one ending frame, and it is the last
   frame; a client that left is owed none, and gets nothing after one.
@@ -25,6 +25,8 @@ the closing write, and checks nine invariants after each run:
 - I9: the save after `plan.approved` stores the conversation as it stood
   when the owner marked that frame sent, though the work changes it while
   the save waits.
+- I10: every event the drive emitted is translated, unless the lease was
+  lost.
 
 The response runs its real ASGI call over an in-memory transport that
 delivers `http.disconnect` when the client leaves, as uvicorn's protocols do
