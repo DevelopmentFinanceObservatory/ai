@@ -1490,6 +1490,7 @@ class StudioStore:
         change: Callable[[ConversationState], T],
         *,
         lineage: CardLineage | None = None,
+        landed: Callable[[T], bool] = bool,
     ) -> T:
         """The write of a card change the turn makes: each card it lands,
         holds, swaps, revises or removes. A checkpoint of the whole
@@ -1501,7 +1502,9 @@ class StudioStore:
         drive makes (`harness.studio_state.make_remove_cards`) commits
         nothing the stream's owner has changed. `lineage`, the drawn card's
         frame lineage, is serialised before the row lock is taken and commits
-        in the same transaction, once per card. A lineage that cannot be
+        in the same transaction, once per card, when `landed` says from what
+        `change` returned that it wrote the card's block: a held card, or a
+        revise whose block is gone, stores none. A lineage that cannot be
         stored leaves the card to land without it (`_card_lineage_row`,
         `_insert_card_lineage`).
 
@@ -1526,7 +1529,9 @@ class StudioStore:
         return await self._retrying(
             entry,
             conversation_id,
-            lambda: self._fenced_save(entry, conversation_id, segment_id, change, lineage_row=row),
+            lambda: self._fenced_save(
+                entry, conversation_id, segment_id, change, lineage_row=row, landed=landed
+            ),
         )
 
     async def _retrying[T](
@@ -1575,12 +1580,14 @@ class StudioStore:
         *,
         snapshot: Callable[[], Snapshot] | None = None,
         lineage_row: Mapping[str, Any] | None = None,
+        landed: Callable[[T], bool] = bool,
     ) -> T:
         """`checkpoint` and `change_canvas`'s one write. Under the row lock
         and fenced on `segment_id`, run `change` on a one-level copy of the live
         state holding the canvas as stored, then write the copy's canvas when
         `change` replaced it, and the durable keys below whose value differs
-        from `entry.baseline`, and `lineage_row` when given, in one transaction.
+        from `entry.baseline`, and `lineage_row` when given and `landed` holds
+        for what `change` returned, in one transaction.
         Once it commits, record the
         written keys in the baseline and the version, and assign the canvas
         read back and each field `change` changed to the live state.
@@ -1625,7 +1632,7 @@ class StudioStore:
                         else None,
                     )
                 version = await self._write(conn, entry.pk, changed) if changed else row.version
-                if lineage_row is not None:
+                if lineage_row is not None and landed(result):
                     await _insert_card_lineage(conn, entry.pk, lineage_row)
             entry.version = version
             entry.baseline.update(changed)

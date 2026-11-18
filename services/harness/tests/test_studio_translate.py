@@ -43,6 +43,7 @@ from harness.graph.state import ORCHESTRATOR_PRIOR_LEDGER_KEY
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import decision_choice_id, decision_option_id
 from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
+from harness.provenance import CardLineage, ProvenanceInput
 from harness.scope_choices import PartScope, carried_entries
 from harness.scripted import ScriptedSurface
 from harness.scripted_plan import scripted_plan
@@ -1923,6 +1924,7 @@ async def _component_frames_of(
     *,
     land: bool,
     write_token: str | None = None,
+    card_lineage: CardLineage | None = None,
 ) -> list[Any]:
     """`translator._component_frames` for a component that passed the wire contract."""
     return await translator._component_frames(
@@ -1930,6 +1932,7 @@ async def _component_frames_of(
         land=land,
         created=component_created(component, step_id="s1"),
         write_token=write_token,
+        card_lineage=card_lineage,
     )
 
 
@@ -2060,6 +2063,33 @@ async def test_component_frames_land_true_holds_when_auto_add_is_off(
     assert stored.composition is None
     assert stored.components["cmp_two"] == conversation.components["cmp_two"]
     assert stored.write_tokens == {"cmp_two": "token-two"}
+
+
+@pytest.mark.parametrize("auto_add", [True, False], ids=["landed", "held"])
+async def test_component_frames_store_a_cards_lineage_only_when_it_lands_on_the_canvas(
+    pg_engine: AsyncEngine, auto_add: bool
+) -> None:
+    """A card that lands commits its frame lineage with its block; a held
+    card, which writes no block, stores none."""
+    current_conversation_id.set("c1")
+    store, conversation = await _stored_conversation(pg_engine)
+    translator = _Translator(
+        conversation=conversation, recorder=_RecordingExecutor(_dummy_executor, store=store)
+    )
+    conversation.auto_add = auto_add
+    lineage = CardLineage(
+        component_id="cmp_two",
+        frame=("ops_f", "ocv_f"),
+        lineage=(ProvenanceInput("spec_a", "cv_a", {"citation": {"text": "a"}}),),
+        stat_var_count=1,
+    )
+
+    await _component_frames_of(
+        translator, _written_component("cmp_two"), land=True, card_lineage=lineage
+    )
+
+    stored = await store.card_lineage("principal", "c1", component_id="cmp_two")
+    assert stored == (lineage if auto_add else None)
 
 
 async def test_component_frames_land_false_emits_only_component_created() -> None:

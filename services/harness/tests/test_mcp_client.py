@@ -2041,12 +2041,23 @@ def _assembled_summary(
     return store, envelope, facts
 
 
+async def _assembled_component(
+    executor: McpExecutor, *, reply: dict[str, Any], envelope: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The wire component `_assemble_component` builds, or `None` when it
+    refuses."""
+    assembled = await executor._assemble_component(reply=reply, envelope=envelope)
+    return assembled.component if assembled is not None else None
+
+
 async def test_a_cut_series_list_leaves_the_attribution_counting_every_stat_var() -> None:
     store, envelope, facts = _assembled_summary(drawn=20, resolved=3000, series_cut=40)
     executor = McpExecutor(settings=Settings(), provenance=store)
 
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+    component = await _assembled_component(
+        executor,
+        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts},
+        envelope=envelope,
     )
 
     assert component is not None
@@ -2061,9 +2072,9 @@ async def test_a_cut_series_list_states_how_many_of_the_series_it_shows() -> Non
     executor = McpExecutor(settings=Settings(), provenance=store)
     reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
 
-    cut = await executor._assemble_component(reply=reply, envelope=envelope)
+    cut = await _assembled_component(executor, reply=reply, envelope=envelope)
     facts["series_cut"] = 0
-    whole = await executor._assemble_component(reply=reply, envelope=envelope)
+    whole = await _assembled_component(executor, reply=reply, envelope=envelope)
 
     assert cut is not None and whole is not None
     assert cut["fact_summary"]["series_truncated"] == {"showing": 20, "total": 60}
@@ -2088,13 +2099,14 @@ async def test_a_card_over_a_derived_frame_counts_that_frames_stat_vars() -> Non
     executor = McpExecutor(settings=Settings(), provenance=store)
     reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
 
-    over_derived = await executor._assemble_component(
+    over_derived = await _assembled_component(
+        executor,
         reply=reply,
         envelope=resolved_revision(
             "line_chart", component_id="cmp_1", revision=1, frame_ref=derived
         ),
     )
-    over_root = await executor._assemble_component(reply=reply, envelope=root_envelope)
+    over_root = await _assembled_component(executor, reply=reply, envelope=root_envelope)
 
     assert over_derived is not None
     assert over_root is not None
@@ -2126,13 +2138,14 @@ async def test_a_card_over_a_summed_family_counts_the_stat_vars_the_sum_added() 
     executor = McpExecutor(settings=Settings(), provenance=store)
     reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
 
-    over_derived = await executor._assemble_component(
+    over_derived = await _assembled_component(
+        executor,
         reply=reply,
         envelope=resolved_revision(
             "line_chart", component_id="cmp_1", revision=1, frame_ref=derived
         ),
     )
-    over_root = await executor._assemble_component(reply=reply, envelope=root_envelope)
+    over_root = await _assembled_component(executor, reply=reply, envelope=root_envelope)
 
     assert over_derived is not None
     assert over_root is not None
@@ -2145,10 +2158,10 @@ async def test_the_platform_defaults_reach_the_wire_fact_summary() -> None:
     executor = McpExecutor(settings=Settings(), provenance=store)
     reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
 
-    without = await executor._assemble_component(reply=reply, envelope=envelope)
+    without = await _assembled_component(executor, reply=reply, envelope=envelope)
     facts["defaults"] = [{"pointer": "/intent/select", "detail": "Drew every recipient."}]
     facts["a_member_the_platform_adds_later"] = {"x": 1}
-    with_defaults = await executor._assemble_component(reply=reply, envelope=envelope)
+    with_defaults = await _assembled_component(executor, reply=reply, envelope=envelope)
 
     assert without is not None
     assert "defaults" not in without["fact_summary"]
@@ -2179,8 +2192,10 @@ async def test_the_platform_unit_reaches_the_wire_fact_summary_as_it_is(unit: ob
     executor = McpExecutor(settings=Settings(), provenance=store)
     facts["unit"] = unit
 
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+    component = await _assembled_component(
+        executor,
+        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts},
+        envelope=envelope,
     )
 
     assert component is not None
@@ -2223,8 +2238,10 @@ async def test_a_stored_card_the_frame_cannot_be_built_from_is_refused_naming_th
     ERROR without the stored values."""
     store, envelope, facts = _assembled_summary(drawn=1, resolved=1, series_cut=0)
     executor = McpExecutor(settings=Settings(), provenance=store)
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+    component = await _assembled_component(
+        executor,
+        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts},
+        envelope=envelope,
     )
     assert component is not None
     component = {**component, **fault}
@@ -2273,8 +2290,10 @@ async def test_each_series_states_the_periods_of_its_first_and_last_values() -> 
     ]
     executor = McpExecutor(settings=Settings(), provenance=store)
 
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+    component = await _assembled_component(
+        executor,
+        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts},
+        envelope=envelope,
     )
 
     assert component is not None

@@ -155,5 +155,25 @@ async def test_card_lineage_reads_get_a_pool_of_one_connection_of_their_own(
     # engine builds, not on the `Pool` it is typed as.
     assert database.lineage_engine.pool.size() == 1  # type: ignore[attr-defined]
     assert database.lineage_engine.pool._max_overflow == 0  # type: ignore[attr-defined]
+    assert database.lineage_engine.pool.timeout() == 1.5  # type: ignore[attr-defined]
 
+    await database.aclose()
+
+
+async def test_the_connector_backed_lineage_engine_bounds_each_statement(fake_connector) -> None:
+    """Its connections are dialled with asyncpg's `command_timeout`, so a
+    stalled lineage read cannot hold the pool's one connection."""
+    settings = Settings(
+        session_store_instance_connection_name="my-project:my-region:my-instance",
+        session_store_database="sessions",
+        session_store_runtime_db_user="ai-run",
+    )
+    database = build_database(settings=settings)
+    assert database is not None
+
+    with pytest.raises(RuntimeError, match="never dials a real Cloud SQL instance"):
+        async with database.lineage_engine.connect():
+            pass
+
+    assert fake_connector.connect_calls[-1]["command_timeout"] == 3.0
     await database.aclose()

@@ -16,15 +16,15 @@
 -- `members` is `json` so a manifest keeps its text as written.
 --
 -- Rows are best effort, and a card can have none: one written before this
--- table existed, one that did not land (a card the turn kept off the
--- canvas), and one whose lineage JSON cannot hold (a NaN in a manifest). A
--- revise writes the card's row only when its own read found none, so a
--- revise on the instance that holds the card's frame, which reads nothing,
--- writes no row for a card that had none. An edit of a card with no row
--- restores the lineage of another card drawn from the same frame. When no
--- card on that frame has a row and the instance holds no lineage for it, or
--- the read fails or runs past its budget, the edit is written and its card
--- withheld `provenance_unavailable`, as before this table existed.
+-- table existed, one that did not land on the canvas (a card the turn did
+-- not land, a held card, a revise whose block is gone), and one whose
+-- lineage JSON cannot hold (a NaN in a manifest). A revise writes the card's
+-- row only when its own read found none, so a revise on the instance that
+-- holds the card's frame, which reads nothing, writes no row for a card that
+-- had none. An edit of a card with no row restores the lineage of another
+-- card drawn from the same frame. When no card on that frame has a row and
+-- the instance holds no lineage for it, or the read fails or runs past its
+-- budget, the edit is written and its card withheld `provenance_unavailable`.
 --
 -- Creating the table takes SHARE ROW EXCLUSIVE on `conversations` for the
 -- foreign key, which waits for open writes of `conversations` rows and holds

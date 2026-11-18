@@ -43,6 +43,7 @@ from fastapi.responses import JSONResponse
 from harness import studio_state, studio_store
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.conversation import current_conversation_key
+from harness.db import engine as engine_module
 from harness.graph.state import ORCHESTRATOR_PLAN_RECORDS_KEY, ORCHESTRATOR_SEARCHES_KEY
 from harness.provenance import CardLineage, ProvenanceInput
 from harness.studio_edit import _refresh_block
@@ -83,10 +84,10 @@ from harness.wire import (
 )
 from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
-from sqlalchemy import text
+from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from . import drawn_cards
 from .resolved_revision import resolved_revision
@@ -2911,6 +2912,25 @@ async def test_a_cards_lineage_commits_with_it_once_and_any_instance_reads_it(ne
         await read("someone_else", CONVERSATION, component_id="cmp_two")
 
 
+@pytest.mark.parametrize("wrote_block", [True, False], ids=["block-written", "block-gone"])
+async def test_a_card_write_stores_its_lineage_only_when_it_wrote_the_cards_block(
+    new_store, wrote_block: bool
+) -> None:
+    """A revise whose card's block is gone from the canvas writes no block,
+    so its lineage is not stored; one that wrote the block stores it."""
+    store = new_store()
+    await _claimed(store)
+    lineage = _card_lineage("cmp_two", count=1)
+
+    returned = await store.change_canvas(
+        "principal", CONVERSATION, lambda work: wrote_block, lineage=lineage
+    )
+
+    assert returned is wrote_block
+    stored = await store.card_lineage("principal", CONVERSATION, component_id="cmp_two")
+    assert stored == (lineage if wrote_block else None)
+
+
 async def test_a_card_lineage_read_prefers_the_cards_own_row_then_its_frame_then_the_latest(
     new_store,
 ) -> None:
@@ -3356,6 +3376,50 @@ async def test_a_card_lineage_read_makes_one_attempt_and_leaves_the_lease_alone(
     with pytest.raises(ConnectionRefusedError):
         await store.card_lineage("principal", CONVERSATION, component_id="cmp_two")
     assert not state.renew_now.is_set()
+
+
+async def test_a_lineage_read_on_a_stalled_statement_gives_the_one_connection_back(
+    pg_database_url: str, monkeypatch
+) -> None:
+    """Read A stalls in its statement on the lineage engine's one connection
+    and nobody waits for it. The statement bound ends A, so read B, waiting
+    for the connection, gets it and reads the card's lineage."""
+    monkeypatch.setattr(engine_module, "_LINEAGE_COMMAND_TIMEOUT_S", 0.3)
+    stalling = studio_store._SELECT_CARD_LINEAGE.text.replace(
+        "SELECT component_id",
+        "WITH stall AS (SELECT pg_sleep(CASE WHEN CAST(:spec_id AS text) = 'stall' "
+        "THEN 30 ELSE 0 END)) SELECT component_id",
+        1,
+    ).replace("FROM conversation_card_lineage", "FROM conversation_card_lineage, stall", 1)
+    monkeypatch.setattr(
+        studio_store,
+        "_SELECT_CARD_LINEAGE",
+        text(stalling).bindparams(bindparam("skipped", type_=ARRAY(Text))),
+    )
+    engine = create_async_engine(pg_database_url)
+    lineage_engine = engine_module.build_lineage_engine(pg_database_url)
+    try:
+        store = StudioStore(engine, lineage_engine=lineage_engine)
+        await _claimed(store)
+        lineage = _card_lineage("cmp_two", count=1)
+        await store.change_canvas("principal", CONVERSATION, _landing("cmp_two"), lineage=lineage)
+
+        stalled = asyncio.create_task(
+            store.card_lineage(
+                "principal", CONVERSATION, component_id="cmp_two", frame=("stall", "stall")
+            )
+        )
+        await asyncio.sleep(0.05)
+        read = await asyncio.wait_for(
+            store.card_lineage("principal", CONVERSATION, component_id="cmp_two"), timeout=5
+        )
+
+        assert read == lineage
+        with pytest.raises(TimeoutError):
+            await stalled
+    finally:
+        await lineage_engine.dispose()
+        await engine.dispose()
 
 
 class _NoCheckout:

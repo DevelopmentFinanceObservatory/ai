@@ -207,10 +207,6 @@ _DESCRIBE_PENDING_MESSAGE = (
 # of the write, so it is bounded on its own, well inside the write's budget.
 _LINEAGE_READ_BUDGET_S = 2.0
 
-# Where `McpExecutor._presentation` hands a stored write's parts (`_Written`)
-# back through `_retried`, for `McpExecutor._drawn` to assemble.
-_WRITTEN_KEY = "_written"
-
 # The source the card names when neither the manifest nor the chart names one.
 _UNKNOWN_SOURCE = "Unknown source"
 
@@ -595,12 +591,26 @@ def _replay_unavailable(frame: FrameRef, why: str) -> PublishFault:
 class _Written:
     """A `write_component` the platform stored, before its card is
     assembled: the result's model vocabulary, its resolved revision, the
-    create's write token and the arguments sent."""
+    create's write token and the arguments sent. `McpExecutor._write`
+    returns it through `_retried` to `__call__` alone, which assembles it
+    (`_drawn`)."""
 
     body: dict[str, Any]
     envelope: dict[str, Any]
     write_token: Any
     args: dict[str, Any]
+
+
+@dataclasses.dataclass(frozen=True)
+class _Assembled:
+    """A card `McpExecutor._assemble_component` built: the wire component,
+    and the frame, lineage and stored StatVar count (`None` when the store
+    holds none) it was built from, which the card's write commits."""
+
+    component: dict[str, Any]
+    frame: tuple[str | None, str | None]
+    lineage: Lineage
+    stat_var_count: int | None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -830,9 +840,12 @@ class McpExecutor:
                 admitted = await self._admitted_write(args)
             except CardWithheld as withheld:
                 return {"outcome": "refusal", "refusal": withheld.refusal}
-            outcome = await self._retried(tool, admitted.args, on_progress=on_progress)
-            if isinstance(written := outcome.get(_WRITTEN_KEY), _Written):
-                outcome = await self._drawn(written, read=restored.read)
+            sent = await self._retried(
+                tool, admitted.args, on_progress=on_progress, call=self._write
+            )
+            outcome = (
+                await self._drawn(sent, read=restored.read) if isinstance(sent, _Written) else sent
+            )
             card = outcome.pop(CARD_LINEAGE_KEY, None)
             if card is not None and restored.carry:
                 outcome[CARD_LINEAGE_KEY] = (
@@ -843,17 +856,23 @@ class McpExecutor:
             if admitted.stored_card is not None and outcome.get("outcome") == "ok":
                 return _held_to_its_resolved_periods(admitted.stored_card, outcome)
             return outcome
-        return await self._retried(tool, args, on_progress=on_progress)
+        return await self._retried(tool, args, on_progress=on_progress, call=self._attempt)
 
-    async def _retried(
-        self, tool: str, args: dict[str, Any], *, on_progress: ProgressCallback | None
-    ) -> dict[str, Any]:
-        """One call of `tool` and the retries `__call__` describes."""
+    async def _retried[T: Mapping[str, Any] | _Written](
+        self,
+        tool: str,
+        args: dict[str, Any],
+        *,
+        on_progress: ProgressCallback | None,
+        call: Callable[..., Awaitable[T]],
+    ) -> T:
+        """One call of `tool` through `call` (`_attempt`, or `_write` for a
+        `write_component`) and the retries `__call__` describes."""
         deadline_s = self._policy.call_timeout_s(tool)
         started = self._clock()
-        outcome = await self._attempt(tool, args, on_progress=on_progress)
+        outcome = await call(tool, args, on_progress=on_progress)
         for attempt in range(MAX_ATTEMPTS_PER_STEP - 1):
-            refusal = outcome.get("refusal") if outcome.get("outcome") == "refusal" else None
+            refusal = _refusal_of(outcome)
             if refusal is None or not _safe_to_repeat(tool, refusal):
                 return outcome
             delay_s = delay_before_retry(refusal, attempt, jitter=self._jitter)
@@ -884,7 +903,7 @@ class McpExecutor:
             # retry runs under what is left of the call's deadline.
             try:
                 async with asyncio.timeout(deadline_s - (self._clock() - started)) as budget:
-                    outcome = await self._attempt(tool, args, on_progress=on_progress)
+                    outcome = await call(tool, args, on_progress=on_progress)
             except TimeoutError as exc:
                 if not budget.expired():
                     raise
@@ -1065,10 +1084,11 @@ class McpExecutor:
             card = await self._read_card_lineage(key, frame=frame)
             if card is not None:
                 self._provenance.restore(conversation=current_conversation_id.get(), card=card)
-        component = await self._assemble_component(reply=written.body, envelope=envelope)
+        assembled = await self._assemble_component(reply=written.body, envelope=envelope)
+        component = assembled.component if assembled is not None else None
         if (withheld := _withheld_card(component, written.args)) is not None:
             return withheld
-        assert component is not None
+        assert assembled is not None and component is not None
         title = (written.args.get("intent") or {}).get("title") or _envelope_title(envelope)
         summary = f"{component['type']}: {title}" if title else None
         outcome = {"outcome": "ok", "frame_refs": [], "component": component, "summary": summary}
@@ -1076,8 +1096,14 @@ class McpExecutor:
             # `_RecordingExecutor.__call__` pops this into the conversation's
             # `write_tokens` before the outcome reaches any other reader.
             outcome[WRITE_TOKEN_KEY] = written.write_token
-        # Taken off by `_RecordingExecutor.__call__` too, for the card's write.
-        outcome[CARD_LINEAGE_KEY] = self._card_lineage(str(component["component_id"]), frame)
+        # Taken off by `_RecordingExecutor.__call__` too, for the card's write,
+        # which commits the lineage the card was assembled from.
+        outcome[CARD_LINEAGE_KEY] = CardLineage(
+            component_id=str(component["component_id"]),
+            frame=assembled.frame,
+            lineage=assembled.lineage,
+            stat_var_count=assembled.stat_var_count,
+        )
         return outcome
 
     async def _admitted_write(self, args: dict[str, Any]) -> AdmittedWrite:
@@ -1154,7 +1180,7 @@ class McpExecutor:
         """One call of `tool`, in the outcome grammar."""
         if tool == "get_data":
             return await self._get_data(args, on_progress=on_progress)
-        if tool in _PRESENTATION_TOOLS:
+        if tool in _PRESENTATION_TOOLS and tool != "write_component":
             return await self._presentation(tool, args, on_progress=on_progress)
         return {
             "outcome": "refusal",
@@ -1224,9 +1250,11 @@ class McpExecutor:
         view = {**body, "rolling": True} if rolling else body
         return {"outcome": "ok", "frame_refs": [], "view": view}
 
-    async def _presentation(
-        self, tool: str, args: dict[str, Any], *, on_progress: ProgressCallback | None = None
-    ) -> dict[str, Any]:
+    async def _presentation_call(
+        self, tool: str, args: dict[str, Any], *, on_progress: ProgressCallback | None
+    ) -> tuple[Any, dict[str, Any], Any]:
+        """One call of presentation-mcp's `tool`: the result, its structured
+        content, and the create's write token taken off both."""
         if tool in {"write_component", "describe_component"}:
             # The event stream carries the render, and a describe's result is
             # read from its structured content alone, so neither the text
@@ -1245,6 +1273,13 @@ class McpExecutor:
         body = result.structured_content or {}
         write_token = body.pop(WRITE_TOKEN_KEY, None)
         result.content = _without_write_token_text(result.content)
+        return result, body, write_token
+
+    async def _presentation(
+        self, tool: str, args: dict[str, Any], *, on_progress: ProgressCallback | None = None
+    ) -> dict[str, Any]:
+        """A `describe_frame` or `describe_component` call, in the outcome grammar."""
+        result, body, _ = await self._presentation_call(tool, args, on_progress=on_progress)
         if result.is_error:
             return _presentation_refusal_outcome(
                 body, result.meta, fallback_text=_result_text(result)
@@ -1252,15 +1287,30 @@ class McpExecutor:
         if tool == "describe_frame":
             return await self._described_frame(args, body)
         envelope = (result.meta or {}).get(RESOLVED_PAYLOAD_META_KEY)
-        if tool == "describe_component":
-            # The body is the model vocabulary. The resolved payload holds the
-            # labels the platform drew for the revision's relative periods.
-            return {
-                "outcome": "ok",
-                "frame_refs": [],
-                "component_body": body,
-                "resolved_payload": envelope if isinstance(envelope, dict) else None,
-            }
+        # The body is the model vocabulary. The resolved payload holds the
+        # labels the platform drew for the revision's relative periods.
+        return {
+            "outcome": "ok",
+            "frame_refs": [],
+            "component_body": body,
+            "resolved_payload": envelope if isinstance(envelope, dict) else None,
+        }
+
+    async def _write(
+        self, tool: str, args: dict[str, Any], *, on_progress: ProgressCallback | None = None
+    ) -> dict[str, Any] | _Written:
+        """One `write_component` call: the refusal in the outcome grammar, or
+        the stored write (`_Written`) for `__call__` to assemble once
+        `_retried` returns, so restoring the resolved frame's lineage and the
+        assembly run outside the call's deadline."""
+        result, body, write_token = await self._presentation_call(
+            tool, args, on_progress=on_progress
+        )
+        if result.is_error:
+            return _presentation_refusal_outcome(
+                body, result.meta, fallback_text=_result_text(result)
+            )
+        envelope = (result.meta or {}).get(RESOLVED_PAYLOAD_META_KEY)
         if not isinstance(envelope, dict) or not isinstance(envelope.get("component"), dict):
             logger.warning(
                 "write_component withheld for component_id=%r: the result carries no "
@@ -1278,37 +1328,14 @@ class McpExecutor:
                     ),
                 ),
             }
-        # Assembled by `_drawn` once `_retried` returns, so restoring the
-        # resolved frame's lineage runs outside the call's deadline.
-        written = _Written(body=body, envelope=envelope, write_token=write_token, args=args)
-        return {"outcome": "written", _WRITTEN_KEY: written}
-
-    def _card_lineage(self, component_id: str, frame: tuple[str, str] | None) -> CardLineage | None:
-        """The `CardLineage` card `component_id`'s write commits: the lineage
-        and StatVar count the store holds for `frame`, the frame its resolved
-        revision names (`_resolved_frame`)."""
-        if frame is None:
-            return None
-        conversation = current_conversation_id.get()
-        lineage = self._provenance.get(
-            conversation=conversation, spec_id=frame[0], content_version=frame[1]
-        )
-        if lineage is None:
-            return None
-        return CardLineage(
-            component_id=component_id,
-            frame=frame,
-            lineage=lineage,
-            stat_var_count=self._provenance.stat_var_count(
-                conversation=conversation, spec_id=frame[0], content_version=frame[1]
-            ),
-        )
+        return _Written(body=body, envelope=envelope, write_token=write_token, args=args)
 
     async def _assemble_component(
         self, *, reply: dict[str, Any], envelope: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    ) -> _Assembled | None:
         """Build the wire `component.created` body from a `write_component`
-        result.
+        result, with the frame, lineage and stored StatVar count it was built
+        from (`_Assembled`).
 
         `reply` is the result's model vocabulary (`component_id`,
         `revision`, the platform's fact summary) and `envelope` the resolved
@@ -1367,7 +1394,7 @@ class McpExecutor:
             )
             return None
         manifest = merged_manifest(lineage)
-        return {
+        component = {
             "component_id": component_id,
             "revision": revision,
             "type": str(envelope["component"].get("type", "")),
@@ -1393,6 +1420,19 @@ class McpExecutor:
                 platform_facts=platform_facts,
             ),
         }
+        return _Assembled(
+            component=component,
+            frame=(frame_ref.get("spec_id"), frame_ref.get("content_version")),
+            lineage=lineage,
+            stat_var_count=frame_stat_var_count,
+        )
+
+
+def _refusal_of(outcome: Mapping[str, Any] | _Written) -> dict[str, Any] | None:
+    """The refusal `outcome` states, or `None` for any other outcome."""
+    if isinstance(outcome, _Written) or outcome.get("outcome") != "refusal":
+        return None
+    return outcome.get("refusal")
 
 
 def _resolved_frame(envelope: Mapping[str, Any]) -> tuple[str, str] | None:

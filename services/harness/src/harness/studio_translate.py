@@ -2098,8 +2098,8 @@ class _Translator:
         (`StudioStore.change_canvas`), which hands it the canvas as stored
         and commits the block it appends with the card's digest entry, turn
         line, write token and frame lineage (`card_lineage`). A held card
-        appends no block, and its entry, line, token and lineage commit the
-        same way."""
+        appends no block, and its entry, line and token commit the same way,
+        with no lineage."""
         key = current_conversation_key.get()
         assert key is not None, "a card lands only inside a conversation's stream"
 
@@ -2111,7 +2111,9 @@ class _Translator:
                 }
             return state_land_component(work, component, intent=intent)
 
-        return await self._recorder.store.change_canvas(*key, land, lineage=card_lineage)
+        return await self._recorder.store.change_canvas(
+            *key, land, lineage=card_lineage, landed=lambda landed: landed == "created"
+        )
 
     def _composition_update(self) -> list[CompositionUpdated]:
         """The `composition.updated` frame for the conversation's stored
