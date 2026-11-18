@@ -37,7 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import (
     suppress,
 )
@@ -46,11 +46,23 @@ from typing import Any, Literal
 
 from common.telemetry import flush_telemetry
 from compiler.surface import ToolSurface
+from executor.ledger import (
+    AuthorisationExpiredError,
+    IdempotencyConflictError,
+    submission_content,
+)
+from executor.run import ApprovedWork, approved_work
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
-from planner.plan import current_earlier_block, current_recorded_identity
+from planner.plan import (
+    current_earlier_block,
+    current_recorded_identity,
+    plan_revision,
+    stored_plan,
+)
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
@@ -61,7 +73,9 @@ from harness.conversation import (
 )
 from harness.decision_pick import is_decision_choice
 from harness.early_mint import EarlyMints
+from harness.graph.approve import approved_plan
 from harness.graph.events import GraphEvent, StepProgress
+from harness.graph.execute import ledger_conversation
 from harness.graph.interfaces import Executor
 from harness.graph.state import (
     APPLY_CHOICE_STATE_KEY,
@@ -69,6 +83,7 @@ from harness.graph.state import (
     TurnInput,
 )
 from harness.provenance import ProvenanceStore
+from harness.run_ledger import admit_on, store_plan_on
 from harness.seeds import seeds_slot
 from harness.settings import Settings
 from harness.studio_edit import (
@@ -127,6 +142,7 @@ from harness.turn.loop import (
     run_segment,
     stop_turn,
 )
+from harness.turn.node import TurnKey
 from harness.turn.store import Cursor, CursorStale, TurnStatus, TurnStore
 from harness.turn_budget import start_turn_budget
 from harness.turn_records import CHIP_STALE_NOTE, stored_choice
@@ -1299,6 +1315,74 @@ def _same_open_pause(before: Cursor | None, after: Cursor | None) -> bool:
     return after.status is before.status and after.pause == before.pause
 
 
+def _approval_admission(
+    store: StudioStore,
+    cursor: Cursor | None,
+    *,
+    revision: str,
+    at: datetime,
+    principal: str,
+    conversation_id: str,
+) -> Callable[[AsyncConnection, int], Awaitable[None]] | None:
+    """The write that admits the run of the plan `cursor` holds, approved as
+    revision `revision` at `at`, for `StudioStore.save` to make in the
+    transaction that records the approval (`alongside`).
+
+    The plan is the one `approve.decide` reads from the same cursor, and
+    approved by the same rule (`approved_plan`); its run is the candidate
+    `execute_approved_plan` builds (`approved_work`), stored with its plan,
+    as `execute` stores it (`store_run_plan`), and admitted by the same rule
+    (`harness.run_ledger.admit_on`). So `execute` finds the run its key names
+    and carries it on, and a turn that ends before `execute` leaves the run
+    for the next turn's `seed`. None when there is nothing to admit: no plan
+    the cursor holds that this release reads, or one the answer does not
+    approve or `approved_work` refuses, which `execute` refuses in turn.
+
+    A key that names a run of other work (`IdempotencyConflictError`), or an
+    approval already expired, admits nothing in a savepoint the save
+    survives, and `execute` surfaces it. A database fault fails the save,
+    which then records neither the approval nor the run."""
+    raw = cursor.state.get("plan") if cursor is not None else None
+    plan = stored_plan(raw if isinstance(raw, str) else None, state_key="plan")
+    if plan is None or cursor is None:
+        return None
+    approved = approved_plan(plan, {"approved": revision, "at": at.isoformat()})
+    if approved is None:
+        return None
+    work = approved_work(
+        approved,
+        approver=principal,
+        conversation_id=ledger_conversation(
+            TurnKey(principal=principal, conversation_id=conversation_id, turn_index=0)
+        ),
+    )
+    if not isinstance(work, ApprovedWork):
+        return None
+    plan_json = approved.model_dump_json()
+
+    async def admit(conn: AsyncConnection, pk: int) -> None:
+        now = datetime.fromtimestamp(store.now(), UTC)
+        try:
+            async with conn.begin_nested():
+                await store_plan_on(conn, pk, plan_revision(approved), plan_json)
+                await admit_on(
+                    conn,
+                    pk,
+                    work.candidate(now=now),
+                    submission=submission_content(work.submission),
+                    now=now,
+                )
+        except (IdempotencyConflictError, AuthorisationExpiredError) as exc:
+            logger.warning(
+                "studio: the approval of revision %s in conversation %s admits no run: %s",
+                revision,
+                conversation_id,
+                exc,
+            )
+
+    return admit
+
+
 async def _unclaimed(
     store: StudioStore,
     principal: str,
@@ -2001,6 +2085,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             cursor = claimed
             work = studio.store.draft(principal, body.conversation_id)
             pending = work.pending[body.interrupt_id]
+            admission: Callable[[AsyncConnection, int], Awaitable[None]] | None = None
             # A switch revises the plan and approves nothing, so it leaves
             # no approval record.
             if (
@@ -2018,18 +2103,30 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # constructing the record ever raises, the entry is
                 # untouched and the interrupt can still be answered fresh.
                 assert pending.plan_revision is not None  # every plan interrupt carries one
-                work.approvals.append(
-                    ApprovalRecord(
-                        revision=pending.plan_revision,
-                        approver=principal,
-                        decision=_APPROVAL_DECISION[body.decision],
-                        at=datetime.now(UTC),
-                        conversation_id=body.conversation_id,
-                        interrupt_id=body.interrupt_id,
-                        plan_version=pending.plan_version,
-                        auth_enforced=settings.studio_api_token is not None,
-                    )
+                record = ApprovalRecord(
+                    revision=pending.plan_revision,
+                    approver=principal,
+                    decision=_APPROVAL_DECISION[body.decision],
+                    at=datetime.now(UTC),
+                    conversation_id=body.conversation_id,
+                    interrupt_id=body.interrupt_id,
+                    plan_version=pending.plan_version,
+                    auth_enforced=settings.studio_api_token is not None,
                 )
+                work.approvals.append(record)
+                if body.decision is InterruptDecision.APPROVE:
+                    # The approval and its run commit together: the save
+                    # below admits the run `execute` would, so a client
+                    # that leaves at any point after it has the plan carried
+                    # on by the next turn's `seed`.
+                    admission = _approval_admission(
+                        studio.store,
+                        cursor,
+                        revision=pending.plan_revision,
+                        at=record.at,
+                        principal=principal,
+                        conversation_id=body.conversation_id,
+                    )
             # The entry is kept, marked resuming under this fresh segment.
             # A crash between this save and the resumed stream's closing
             # write still leaves a durable, retryable record. The stream's
@@ -2046,7 +2143,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     **work.turn_choice_baseline,
                 }
             try:
-                await studio.store.save(principal, body.conversation_id, work)
+                await studio.store.save(principal, body.conversation_id, work, alongside=admission)
             except ConversationStale:
                 # The lease this request holds refuses every other save, so
                 # only a takeover after it lapsed moves the conversation

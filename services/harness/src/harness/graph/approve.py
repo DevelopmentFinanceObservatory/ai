@@ -10,10 +10,12 @@ plan `approve` approved.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, cast
 
 from common.telemetry import record_span
+from planner.plan import Plan as PlannerPlan
 from planner.plan import (
     PlanStatus,
     SessionState,
@@ -142,10 +144,9 @@ def decide(
         # switched to the option it already has, it offers back unchanged
         # with `switch_failed`.
         return Next("switch", {"switch": switch})
-    approved_at = _answered_at(answer)
-    if answer.get("approved") != plan_revision(plan) or approved_at is None:
+    approved = approved_plan(plan, answer)
+    if approved is None:
         return Next("amend", {"plan": plan.model_dump(mode="json"), "answer": answer})
-    approved = plan.approve(at=approved_at)
     ctx.state["plan"] = approved.model_dump_json()
 
     async def record_approval() -> None:
@@ -159,7 +160,20 @@ def decide(
     return Next("approved", approved.model_dump(mode="json"))
 
 
-def _answered_at(answer: dict[str, Any]) -> datetime | None:
+def approved_plan(plan: PlannerPlan, answer: Mapping[str, Any]) -> PlannerPlan | None:
+    """`plan` stamped approved as of the time `answer` gives, when `answer`,
+    one that switches nothing, approves it by `decide`'s rule: it names
+    `plan`'s revision and says under `at` when the user gave it. `None` for
+    an answer that approves nothing. The studio's interrupt route applies
+    the same rule to admit the approved plan's run in the save that records
+    the approval (`harness.studio`)."""
+    approved_at = _answered_at(answer)
+    if answer.get("approved") != plan_revision(plan) or approved_at is None:
+        return None
+    return plan.approve(at=approved_at)
+
+
+def _answered_at(answer: Mapping[str, Any]) -> datetime | None:
     """When an approve answer says the user gave it, or `None` when it states
     no timezone-aware ISO 8601 time under `at`."""
     raw = answer.get("at")

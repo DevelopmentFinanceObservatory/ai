@@ -1257,6 +1257,7 @@ class StudioStore:
         state: ConversationState | None = None,
         *,
         stopping: bool = False,
+        alongside: Callable[[AsyncConnection, int], Awaitable[None]] | None = None,
     ) -> None:
         """Write this instance's changed durable fields, compare-and-swapped
         on the turn state's version. Given `state`, the working copy `draft`
@@ -1282,13 +1283,20 @@ class StudioStore:
         for the conversation's turn as the locked row and its cursor stand
         (`StopState.live`), unless `stopping`: the claim then acts on the
         Stop, closing the turn `cancelled`.
+
+        `alongside`, when given, runs after the fields are written, on the
+        save's connection and in its transaction, with the conversation's
+        row id, the row still locked: what it writes commits with the save
+        or not at all, and anything it raises rolls the save back and
+        propagates. It runs even when no field changed. The interrupt route
+        admits an approved plan's run through it (`harness.run_ledger.admit_on`).
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
         target = state if state is not None else entry.state
         async with entry.write_lock:
             delta = _changed_since(_serialize_durable(target), entry.baseline)
-            if not delta:
+            if not delta and alongside is None:
                 self._take_draft(entry, target)
                 return
             claimed = _deserialize_segment(delta.get(_KEY_SEGMENT))
@@ -1308,7 +1316,13 @@ class StudioStore:
                     lease_live = stored_lease is not None and stored_lease.expires_at > row.db_now
                     if (await _stop_state(conn, row, lease_live=lease_live)).live:
                         raise StopPending(conversation_id)
-                version = await self._write(conn, entry.pk, delta, seq_reserved=reserved)
+                version = (
+                    await self._write(conn, entry.pk, delta, seq_reserved=reserved)
+                    if delta
+                    else row.version
+                )
+                if alongside is not None:
+                    await alongside(conn, entry.pk)
             entry.version = version
             entry.baseline.update(delta)
             self._take_draft(entry, target)

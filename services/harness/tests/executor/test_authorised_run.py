@@ -1450,7 +1450,8 @@ async def test_a_caller_taking_over_a_running_run_records_it_carried_on(
     """The first submission admits the run but the second drives it. When the
     second leaves with the run unfinished, the first takes over a `running`
     run and records it carried on, counted against the resume limit, though
-    its own admission was new."""
+    its own admission was new. The second's first computation of the
+    `admitted` run is a start and counts nothing."""
     plan = approved_plan()
     submission = _submission(plan)
     authorisation = _approval(plan, submission.source_policy(), expires_at=datetime.now(UTC) + HOUR)
@@ -1492,7 +1493,7 @@ async def test_a_caller_taking_over_a_running_run_records_it_carried_on(
 
     assert isinstance(outcome, Accepted), outcome
     run = await ledger.get(outcome.run_id or "")
-    assert run is not None and run.resumes == 2
+    assert run is not None and run.resumes == 1
     assert _tools(surface) == ["get_data", "get_data", "aggregate"]
 
 

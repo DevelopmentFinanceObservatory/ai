@@ -523,6 +523,14 @@ def execute_node(
         the conversation's next turn carries it on (`harness.graph.resume`),
         as does this node run again from the cursor.
 
+        The run is usually admitted already: the studio's interrupt route
+        admits it in the save that records the approval, with the same
+        candidate and key, so the admission here finds it and carries it
+        on. A turn that closes `abandoned` or `failed` between the approval
+        and this node leaves that run unfinished for the next turn to carry
+        on, as a crash after this node's admission does; only a Stop, which
+        closes the turn `cancelled`, ends it.
+
         A plan stored in a shape this release does not read
         (`readable_plan`) runs nothing and spends no replan: it routes
         `"replan"` with `{"unreadable_plan": True}`, and `planner` drafts the
