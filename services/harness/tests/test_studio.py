@@ -5559,8 +5559,9 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
     release = _RecordingExecutor.release
 
     def _keep_and_release(self: _RecordingExecutor, conversation: str) -> None:
-        # The records the stream did not translate, which its owner's end drops.
-        records.extend(self.drain(conversation))
+        # The records the stream did not translate, which its owner's end
+        # drops, taken through the unpatched drain so none is kept twice.
+        records.extend(drain(self, conversation))
         release(self, conversation)
 
     monkeypatch.setattr(_RecordingExecutor, "drain", _drain_and_keep)
