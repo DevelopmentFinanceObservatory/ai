@@ -1256,8 +1256,11 @@ def span_level(status: str) -> EventLevel:
     | Stop mid-run, release fails  | `cancelled` | `cancelled`            | WARNING | `open`      |
     | Stop after the pause frame   | pause, then | `cancelled`            | WARNING | `cancelled` |
     |                              | `cancelled` |                        |         |             |
+    | Stop read while the release  | `cancelled` | `cancelled`            | WARNING | as the      |
+    | writes, its own save fails   |             |                        |         | release     |
+    |                              |             |                        |         | saved it    |
     | Loss after the pause frame   | pause       | `paused`               | DEFAULT | `paused`    |
-    | Turn fails (model fault,     | error       | the recorded code      | ERROR   | the code,   |
+    | Turn fails (model fault,     | error       | the frame's error code | ERROR   | the code,   |
     | `state_not_saved`)           |             |                        |         | or `open`   |
     |                              |             |                        |         | when        |
     |                              |             |                        |         | unsaved     |

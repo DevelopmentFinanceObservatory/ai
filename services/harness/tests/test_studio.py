@@ -3942,6 +3942,28 @@ async def _stream_stopped_while_the_release_writes(
     return frames
 
 
+async def _stream_stopped_while_the_release_writes_unsaved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, Any]]:
+    app = _app(*_plan())
+    store = app.state.studio.store
+    real_release = store.release
+
+    async def release(*args: Any, **kwargs: Any) -> None:
+        _stop_here(store)()
+        await asyncio.sleep(0.05)
+        await real_release(*args, **kwargs)
+
+        async def unsaved(*args: Any, **kwargs: Any) -> None:
+            raise DatabaseUnavailable("unreachable")
+
+        store.save = unsaved  # type: ignore[method-assign]
+
+    store.release = release  # type: ignore[method-assign]
+    async with _client(app) as client:
+        return await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+
+
 async def _stream_stopped_after_done(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     app = _app(_text("Hello."))
     _as_the_heartbeat_stops(app.state.studio, _stop_here(app.state.studio.store))
@@ -4179,6 +4201,13 @@ _ENDING_FRAME_OF = {
             ("cancelled", "WARNING"),
             "cancelled",
             id="stop-while-the-release-writes",
+        ),
+        pytest.param(
+            _stream_stopped_while_the_release_writes_unsaved,
+            "cancelled",
+            ("cancelled", "WARNING"),
+            "paused",
+            id="stop-while-the-release-writes-its-save-fails",
         ),
         pytest.param(
             _stream_stopped_after_done, "done", ("done", "DEFAULT"), "done", id="stop-after-done"
@@ -9630,6 +9659,190 @@ async def test_the_stored_turn_reads_what_the_live_turn_status_reads() -> None:
     conversation.close_turn(final_text="Hello.")
     await store.save("u_a", CONVERSATION)
     assert store.stored_turn("u_a", CONVERSATION) == conversation.turn_status == "done"
+
+
+async def test_a_stop_read_as_a_switch_s_final_frame_arrives_is_ignored(
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stopped switch reaches its re-offer deadline as its stream-fatal
+    frame is ready. That frame goes out, and the Stop the deadline reads is
+    ignored: no `cancelled` frame follows, and the span names the frame."""
+    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.1)
+    studio, conversation, segment_id = await _claimed_segment()
+    ended = _recording_span_ends(monkeypatch)
+
+    async def segment() -> Any:
+        yield _running_line(0)
+        await asyncio.sleep(0.05)  # idle while the first Stop is read
+        # Blocks the loop past the deadline, so the frame is ready as it
+        # is read.
+        time.sleep(0.15)
+        yield ErrorFrame(
+            event="error",
+            seq=conversation.next_seq(),
+            error=ToolError(
+                error=ErrorCode.CAPABILITY_UNAVAILABLE,
+                retry=RetryMode.DO_NOT_RETRY,
+                detail="The model failed.",
+            ),
+        )
+
+    stream = _segment_sse(
+        studio, conversation, segment_id, segment(), switch=True, heartbeat_seconds=1
+    )
+    sent = [await anext(stream)]
+    _end_stream(conversation, "cancelled")
+
+    async def rest() -> list[str]:
+        return [chunk async for chunk in stream]
+
+    sent += await asyncio.wait_for(rest(), timeout=5)
+
+    assert _ending_frame(_data_frames(sent)) == "capability_unavailable"
+    assert ended == [("capability_unavailable", "ERROR")]
+
+
+async def test_a_stop_read_as_a_failure_s_closing_lines_go_out_is_ignored(
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Stop arrives as the segment's frames end on a stream-fatal error
+    with an Activity line open. The line's closing frame and then the error
+    frame go out, and the Stop is ignored: no `cancelled` frame follows,
+    and the span names the error frame's own code."""
+    studio, conversation, segment_id = await _claimed_segment(seq=1)
+    ended = _recording_span_ends(monkeypatch)
+
+    async def segment() -> Any:
+        yield _running_line(0)
+        _end_stream(conversation, "cancelled")
+        yield ErrorFrame(
+            event="error",
+            seq=conversation.next_seq(),
+            error=ToolError(
+                error=ErrorCode.CAPABILITY_UNAVAILABLE,
+                retry=RetryMode.DO_NOT_RETRY,
+                detail="The model failed.",
+            ),
+        )
+
+    frames = _data_frames(
+        [chunk async for chunk in _segment_sse(studio, conversation, segment_id, segment())]
+    )
+
+    assert [(f["event"], f.get("status")) for f in frames] == [
+        ("activity.step", "running"),
+        ("activity.step", "failed"),
+        ("error", None),
+    ]
+    assert frames[-1]["error"]["error"] == "capability_unavailable"
+    assert ended == [("capability_unavailable", "ERROR")]
+
+
+async def test_a_stream_fatal_frame_names_the_span_by_its_own_code(
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The turn is recorded with no error, then the segment fails before
+    `done` and sends a stream-fatal error frame. The span ends with the
+    frame's own code at error level, whatever the record says."""
+    studio, conversation, segment_id = await _claimed_segment()
+    ended = _recording_span_ends(monkeypatch)
+
+    async def segment() -> Any:
+        conversation.close_turn(final_text="Hello.")
+        yield ErrorFrame(
+            event="error",
+            seq=conversation.next_seq(),
+            error=ToolError(
+                error=ErrorCode.CAPABILITY_UNAVAILABLE,
+                retry=RetryMode.DO_NOT_RETRY,
+                detail="The model failed.",
+            ),
+        )
+
+    [chunk async for chunk in _segment_sse(studio, conversation, segment_id, segment())]
+
+    assert ended == [("capability_unavailable", "ERROR")]
+
+
+async def test_a_segment_task_that_ends_cancelled_ends_the_stream_cleanly() -> None:
+    """The frames' task ends cancelled without the response being
+    cancelled. The stream ends there, as a stream whose frames ran out."""
+
+    async def segment() -> Any:
+        yield MessageDelta(event="message.delta", seq=0, text="one")
+        raise asyncio.CancelledError
+
+    sent = [chunk async for chunk in _sse_stream(segment())]
+
+    assert [frame["event"] for frame in _data_frames(sent)] == ["message.delta"]
+
+
+async def test_a_stop_and_a_disconnect_together_end_the_segment_promptly() -> None:
+    """A Stop is read, and the client leaves before the segment acts on it,
+    while the Stop's frame reservation waits on the database. The
+    disconnect cancels the segment at once: the turn still closes as
+    stopped, and the lock frees."""
+    studio, conversation, segment_id = await _claimed_segment()
+    reserving = asyncio.Event()
+    calls: list[int] = []
+
+    async def reserve(*args: Any, **kwargs: Any) -> None:
+        calls.append(1)
+        if len(calls) > 1:
+            reserving.set()
+            await asyncio.Event().wait()  # retrying until the lease's deadline
+
+    studio.store.reserve_frames = reserve  # type: ignore[method-assign]
+
+    async def segment() -> Any:
+        yield MessageDelta(event="message.delta", seq=conversation.next_seq(), text="one")
+        await asyncio.Event().wait()
+
+    received: list[str] = []
+
+    async def consume() -> None:
+        async for chunk in _segment_sse(
+            studio, conversation, segment_id, segment(), heartbeat_seconds=0.02
+        ):
+            received.append(chunk)  # noqa: PERF401 -- observed one chunk at a time
+
+    task = asyncio.ensure_future(consume())
+    while not received:
+        await asyncio.sleep(0.01)
+    _end_stream(conversation, "cancelled")
+    await asyncio.wait_for(reserving.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2)
+
+    assert conversation.turns[-1].get("error") == "cancelled"
+    assert not conversation.lock.locked()
+
+
+async def test_frames_that_swallow_a_stop_relay_nothing_after_it() -> None:
+    """The segment's frames catch the cancellation a Stop delivers and go on
+    yielding. Nothing they yield after the Stop is relayed, and the stream
+    still ends on `cancelled` with the turn closed."""
+    studio, conversation, segment_id = await _claimed_segment()
+
+    async def segment() -> Any:
+        yield MessageDelta(event="message.delta", seq=conversation.next_seq(), text="one")
+        with suppress(asyncio.CancelledError):
+            await asyncio.Event().wait()
+        yield Done(event="done", seq=conversation.next_seq(), trace_id=conversation.trace_id)
+
+    stream = _segment_sse(studio, conversation, segment_id, segment(), heartbeat_seconds=0.02)
+    sent = [await anext(stream)]
+    _end_stream(conversation, "cancelled")
+
+    async def rest() -> list[str]:
+        return [chunk async for chunk in stream]
+
+    sent += await asyncio.wait_for(rest(), timeout=5)
+
+    assert [frame["event"] for frame in _data_frames(sent)] == ["message.delta", "error"]
+    assert _ending_frame(_data_frames(sent)) == "cancelled"
+    assert conversation.turns[-1].get("error") == "cancelled"
 
 
 async def test_a_stop_ends_the_stream_on_its_frame_when_closing_the_frames_raises(
