@@ -40,11 +40,6 @@ ManifestFactory = Callable[..., dict[str, Any]]
 SourceFactory = Callable[..., SelectedSource]
 
 
-def _component(assembled: tuple[dict[str, Any], Any] | None) -> dict[str, Any] | None:
-    """The component `McpExecutor._assemble_component` built, or `None`."""
-    return assembled[0] if assembled is not None else None
-
-
 def _retrieval_terminal_plan(
     *,
     decisions: list[Decision],
@@ -143,11 +138,9 @@ async def test_a_retrieval_terminal_plan_assembles_a_card_from_its_own_source(
     frame_ref = outcome.results["annual_debt_service"].model_dump()
 
     executor = McpExecutor(settings=Settings(), provenance=store)
-    component = _component(
-        await executor._assemble_component(
-            reply={"component_id": "cmp_1", "revision": 1},
-            envelope=resolved_revision("line_chart", frame_ref=frame_ref),
-        )
+    component = await executor._assemble_component(
+        reply={"component_id": "cmp_1", "revision": 1},
+        envelope=resolved_revision("line_chart", frame_ref=frame_ref),
     )
 
     assert component is not None
@@ -190,11 +183,9 @@ async def test_a_retrieval_terminal_card_counts_the_stat_vars_its_frame_holds(
     frame_ref = outcome.results["annual_debt_service"].model_dump()
 
     executor = McpExecutor(settings=Settings(), provenance=store)
-    component = _component(
-        await executor._assemble_component(
-            reply={"component_id": "cmp_1", "revision": 1},
-            envelope=resolved_revision("line_chart", frame_ref=frame_ref),
-        )
+    component = await executor._assemble_component(
+        reply={"component_id": "cmp_1", "revision": 1},
+        envelope=resolved_revision("line_chart", frame_ref=frame_ref),
     )
 
     assert component is not None

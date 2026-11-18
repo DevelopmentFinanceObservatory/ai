@@ -334,27 +334,6 @@ class ProvenanceStore:
         )
         return True
 
-    def card_lineage(
-        self,
-        *,
-        conversation: str,
-        component_id: str,
-        spec_id: str | None,
-        content_version: str | None,
-    ) -> CardLineage | None:
-        """The `CardLineage` card `component_id` commits when it is drawn from
-        the frame `(spec_id, content_version)`, or `None` when the store holds
-        no lineage for that frame."""
-        entry = self._entry(conversation, (spec_id, content_version))
-        if entry is None:
-            return None
-        return CardLineage(
-            component_id=component_id,
-            frame=(spec_id, content_version),
-            lineage=entry.lineage,
-            stat_var_count=entry.stat_var_count,
-        )
-
     def restore(self, *, conversation: str, card: CardLineage) -> None:
         """Put a stored card's lineage back under its frame, and under the
         frame its write named, wherever the store holds none."""

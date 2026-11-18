@@ -3315,12 +3315,14 @@ async def test_a_card_lineage_read_retries_a_transient_fault_until_the_leases_de
 ) -> None:
     """The read a write makes before it is sent retries a transient fault as
     the card writes do: one lost checkout reads the lineage, and a fault that
-    lasts past the lease's deadline raises `DatabaseUnavailable`."""
+    lasts past the lease's deadline has the stream renew its lease at once and
+    raises `DatabaseUnavailable`."""
     monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
     store = new_store()
-    await store.create("principal", CONVERSATION)
+    state = await store.create("principal", CONVERSATION)
     store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
+    state.renew_now = asyncio.Event()
     lineage = _card_lineage("cmp_two", count=1)
     await store.change_canvas(
         "principal", CONVERSATION, lambda work: land_component(work, _CARD), lineage=lineage
@@ -3337,6 +3339,7 @@ async def test_a_card_lineage_read_retries_a_transient_fault_until_the_leases_de
             lineage
         )
     assert store._engine.fault is None
+    assert state.renew_now.is_set() == persists
 
 
 async def test_a_removal_whose_commit_lost_its_acknowledgement_reports_the_cards_it_removed(

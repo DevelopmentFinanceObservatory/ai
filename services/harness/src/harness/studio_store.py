@@ -110,6 +110,7 @@ from harness.studio_state import (
     _PendingOption,
     _PendingQuestion,
     _wire_id,
+    renew_lease_now,
 )
 from harness.tool_contracts import HarnessCode
 from harness.turn.store import CLOSED, Cursor, TurnStatus, cursor_at, finish_on
@@ -1527,6 +1528,8 @@ class StudioStore:
         entry: _RuntimeEntry,
         conversation_id: str,
         attempt: Callable[[], Awaitable[T]],
+        *,
+        what: str = "write",
     ) -> T:
         """Run `attempt`, a write fenced on the live segment or a read a
         stream makes before one (`card_lineage`), retrying a
@@ -1548,12 +1551,13 @@ class StudioStore:
                     raise
                 if self._clock() + delay >= self._lease_deadline(entry):
                     raise DatabaseUnavailable(
-                        f"conversation {conversation_id!r} could not be written before its "
-                        f"lease's deadline: {exc}"
+                        f"conversation {conversation_id!r} {what} did not complete before "
+                        f"its lease's deadline: {exc}"
                     ) from exc
                 logger.warning(
-                    "studio store: conversation %s write failed, retrying in %ss: %s",
+                    "studio store: conversation %s %s failed, retrying in %ss: %s",
                     conversation_id,
+                    what,
                     delay,
                     exc,
                 )
@@ -2070,7 +2074,8 @@ class StudioStore:
         (`harness.provenance.CardLineages`), read in one statement on the
         conversation this instance loaded, with no lock. A transient database
         fault is retried until the lease's deadline (`_retrying`), as the
-        stream's card writes are, then raises `DatabaseUnavailable`. A row
+        stream's card writes are, then has the stream renew its lease at once
+        (`renew_lease_now`) and raises `DatabaseUnavailable`. A row
         that does not decode is logged with its key and raises
         `CardLineageDecodeError`. `None` when no such card's lineage is
         stored.
@@ -2095,7 +2100,14 @@ class StudioStore:
             async with self._transaction() as conn:
                 return (await conn.execute(_SELECT_CARD_LINEAGE, params)).first()
 
-        row = await self._retrying(entry, conversation_id, read)
+        try:
+            row = await self._retrying(entry, conversation_id, read, what="card lineage read")
+        except DatabaseUnavailable:
+            # The lease may be lost too: the stream renews at once, and ends
+            # when it is.
+            if entry.state is not None:
+                renew_lease_now(entry.state)
+            raise
         if row is None:
             return None
         try:

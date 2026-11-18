@@ -2069,11 +2069,15 @@ class _Translator:
         resolves to `"held"` inside `harness.studio_state.land_component`
         itself, also only `component.created`, and writes the card's entry
         with no block. The card's `write_token` is kept with it, in its
-        write, or in the conversation for the closing write when nothing
-        lands, and its `card_lineage` commits in its write."""
+        write, and its `card_lineage` commits in that write. A card that does
+        not land keeps its token in the conversation for the closing write,
+        or, when it has a lineage, commits both in a write of their own
+        (`_keep_unlanded`), since the client can still ask to edit it."""
         created.seq = self._conversation.next_seq()
         if not land:
-            if write_token:
+            if card_lineage is not None:
+                await self._keep_unlanded(created.component_id, write_token, card_lineage)
+            elif write_token:
                 self._conversation.write_tokens[created.component_id] = write_token
             return [created]
         landed = await self._land(
@@ -2083,6 +2087,21 @@ class _Translator:
             return [created]
         # Read with no await since the landing, so this is the manifest it wrote.
         return [created, *self._composition_update()]
+
+    async def _keep_unlanded(
+        self, component_id: str, write_token: str | None, card_lineage: CardLineage
+    ) -> None:
+        """Commit the write token and frame lineage of a card that did not
+        land, in one card write (`StudioStore.change_canvas`) that changes
+        nothing else."""
+        key = current_conversation_key.get()
+        assert key is not None, "a card is kept only inside a conversation's stream"
+
+        def keep(work: ConversationState) -> None:
+            if write_token:
+                work.write_tokens = {**work.write_tokens, component_id: write_token}
+
+        await self._recorder.store.change_canvas(*key, keep, lineage=card_lineage)
 
     async def _land(
         self,
