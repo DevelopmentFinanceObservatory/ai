@@ -28,17 +28,19 @@ different groups never conflict:
   the boolean `lease_cancel`, as does any writer that knows only that flag.
   A renewal that finds it set clears it and records the Stop as a fresh id
   (`lease_stop_id`) in the same update.
+- `reserve_frames` extends the frame numbers the live segment may send,
+  fenced on the segment and its lease being live.
 
 A Stop stays unread (`StopRead.unread`) until a party acts on it and
 records the id it acted on (`stop_acted_id`) in the write that acts: the
-close of the turn `cancelled` (`harness.turn.store.TurnStore.finish`), a
-`StopScope` taking it (`acknowledge_stop`), or a claim or release that finds
-no open turn, which leaves nothing to stop (`_delta_write`). Nothing else
-clears the Stop columns, so a write that fails, a lease that lapses, or a
-claim that is abandoned leaves the Stop for whoever claims the open turn
+close of the turn `cancelled` (`harness.turn.store.TurnStore.finish`,
+which closes `cancelled` a turn a claim abandons while such a Stop is
+unread), a `StopScope` taking it (`acknowledge_stop`; `hand_back_stop` marks
+it unread again when the scope had closed first), or a claim or release that
+finds no open turn, which leaves nothing to stop (`_delta_write`). Nothing
+else clears the Stop columns, so a write that fails, a lease that lapses, or
+a claim that is abandoned leaves the Stop for whoever claims the open turn
 next.
-- `reserve_frames` extends the frame numbers the live segment may send,
-  fenced on the segment and its lease being live.
 
 Every canvas writer holds the row lock, so each applies its change to the
 canvas as stored. Lease expiry is compared against the database's clock in
@@ -502,7 +504,8 @@ class ConversationExists(Exception):  # noqa: N818 -- named for the race it repo
 @dataclass(frozen=True)
 class Renewal:
     """What a lease renewal found: whether the segment still `held` the
-    lease, and the latest Stop request made of it (`stop_id`), if any."""
+    lease, and the latest Stop request on the conversation while no party
+    has acted on it (`stop_id`, `StopRead.unread`), else `None`."""
 
     held: bool
     stop_id: str | None
@@ -530,7 +533,7 @@ class StopRead:
         return self.flagged or (self.stop_id is not None and self.stop_id != self.acted_id)
 
 
-# Whether the conversation (the row being updated) has an open turn.
+# Whether the conversation (the row being read) has an open turn.
 _OPEN_TURN_SQL = (
     "EXISTS (SELECT 1 FROM turn_cursors t WHERE t.conversation = conversations.id "
     "AND t.status IN ('running', 'paused'))"
@@ -647,8 +650,9 @@ def _check_column(key: str, value: Any, kind: type | tuple[type, ...]) -> None:
         raise TypeError(f"{key} is of type {type(value).__name__}")
 
 
-def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
-    """The statements that write `delta`'s flat keys. Raises on a value the
+def _delta_write(delta: dict[str, Any], *, open_turn: bool) -> _DeltaWrite:
+    """The statements that write `delta`'s flat keys, on a conversation
+    that has an open turn when `open_turn`, as its locked row read. Raises on a value the
     columns cannot hold (a `seq` that is not an integer, a segment without
     an id or whose id, owner or expiry is of another type, a position that
     is not a number, a write token that is not a string, a value
@@ -671,23 +675,24 @@ def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
             _check_column("segment id", segment.id, str)
             _check_column("segment owner", segment.owner, str)
             _check_column("segment expiry", segment.expires_at, (int, float))
-        # A claim or a release reads every Stop recorded so far when the
-        # conversation has no open turn, which leaves nothing to stop, and
-        # leaves an unread one in place for the open turn's next claimant.
         sets.append(
-            "lease_segment_id = :segment_id, lease_owner = :owner, "
-            "lease_expires_at = :expires_at, "
-            f"stop_acted_id = CASE WHEN {_OPEN_TURN_SQL} THEN stop_acted_id "
-            "WHEN lease_cancel THEN :minted ELSE lease_stop_id END, "
-            f"lease_stop_id = CASE WHEN lease_cancel AND NOT {_OPEN_TURN_SQL} THEN :minted "
-            "ELSE lease_stop_id END, "
-            f"lease_cancel = lease_cancel AND {_OPEN_TURN_SQL}"
+            "lease_segment_id = :segment_id, lease_owner = :owner, lease_expires_at = :expires_at"
         )
+        if not open_turn:
+            # A claim or a release reads every Stop recorded so far when the
+            # conversation has no open turn, which leaves nothing to stop,
+            # and leaves an unread one in place for the open turn's next
+            # claimant.
+            sets.append(
+                "stop_acted_id = CASE WHEN lease_cancel THEN :minted ELSE lease_stop_id END, "
+                "lease_stop_id = CASE WHEN lease_cancel THEN :minted ELSE lease_stop_id END, "
+                "lease_cancel = false"
+            )
+            params["minted"] = _wire_id("stop")
         params |= {
             "segment_id": segment.id if segment else None,
             "owner": segment.owner if segment else None,
             "expires_at": segment.expires_at if segment else None,
-            "minted": _wire_id("stop"),
         }
     rows: dict[str, list[dict[str, Any]]] = {}
     for key, value in delta.items():
@@ -709,11 +714,14 @@ def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
     return _DeltaWrite(sets=tuple(sets), params=params, rows=rows)
 
 
-async def _write_delta(conn: AsyncConnection, pk: int, delta: dict[str, Any]) -> int:
+async def _write_delta(
+    conn: AsyncConnection, pk: int, delta: dict[str, Any], *, open_turn: bool
+) -> int:
     """Write `delta`'s flat keys to their columns and rows, bump the turn
     state's version, and return the new version. The caller holds the row
-    lock and decided the write is allowed."""
-    return await _run_delta_write(conn, pk, _delta_write(delta))
+    lock, read whether the conversation has an open turn (`open_turn`), and
+    decided the write is allowed."""
+    return await _run_delta_write(conn, pk, _delta_write(delta, open_turn=open_turn))
 
 
 async def _run_delta_write(conn: AsyncConnection, pk: int, write: _DeltaWrite) -> int:
@@ -914,12 +922,13 @@ class StudioStore:
         pk: int,
         delta: dict[str, Any],
         *,
+        open_turn: bool,
         seq_reserved: int | None = None,
     ) -> int:
         """Write `delta` to the turn state, the canvas, the lease and the item
         rows, and `seq_reserved` when given, and return the row's new version
         (`_write_delta`)."""
-        version = await _write_delta(conn, pk, delta)
+        version = await _write_delta(conn, pk, delta, open_turn=open_turn)
         if seq_reserved is not None:
             await conn.execute(
                 text("UPDATE conversations SET seq_reserved = :reserved WHERE id = :pk"),
@@ -1110,7 +1119,9 @@ class StudioStore:
                     target.seq = row.seq_reserved
                     reserved = row.seq_reserved + SEQ_BLOCK
                     delta = _changed_since(_serialize_durable(target), entry.baseline)
-                version = await self._write(conn, entry.pk, delta, seq_reserved=reserved)
+                version = await self._write(
+                    conn, entry.pk, delta, open_turn=row.open_turn, seq_reserved=reserved
+                )
             entry.version = version
             entry.baseline.update(delta)
             self._take_draft(entry, target)
@@ -1423,7 +1434,11 @@ class StudioStore:
                             if work.composition is not None
                             else None,
                         )
-                    version = await self._write(conn, entry.pk, changed) if changed else row.version
+                    version = (
+                        await self._write(conn, entry.pk, changed, open_turn=row.open_turn)
+                        if changed
+                        else row.version
+                    )
             entry.version = version
             entry.baseline.update(changed)
             if work.segment is None:
@@ -1452,12 +1467,12 @@ class StudioStore:
         `Renewal.held` is `False` when the stored segment is no longer
         `segment_id` (another instance took over after this one's TTL
         lapsed); the caller ends the stream fatally. Otherwise
-        `Renewal.stop_id` is the latest Stop request made of the segment
-        (`request_cancel`), or `None`: a set `lease_cancel` is cleared and
-        recorded as a fresh id in the same update, and any other renewal
-        leaves the id as stored. The renewal never clears the id, so a
-        renewal whose acknowledgement is lost reports the same request
-        again, and the caller acts once on each id it has not acted on. A
+        `Renewal.stop_id` is the latest Stop request (`request_cancel`)
+        while it is unread, and `None` once a party has acted on it: a set
+        `lease_cancel` is cleared and recorded as a fresh id in the same
+        update. The renewal marks nothing read, so a renewal whose
+        acknowledgement is lost reports the same request again, and the
+        caller acts once on each id it has not acted on. A
         database error propagates, as does a `TimeoutError` when the renewal
         takes longer than `timeout`; the caller's own heartbeat decides how
         long to keep trying.
@@ -1781,6 +1796,33 @@ class StudioStore:
                         "WHERE principal = :principal AND conversation_id = :conversation_id "
                         "AND lease_segment_id = :segment_id AND lease_stop_id = :stop_id "
                         "RETURNING id"
+                    ),
+                    {
+                        "principal": principal,
+                        "conversation_id": conversation_id,
+                        "segment_id": segment_id,
+                        "stop_id": stop_id,
+                    },
+                )
+            ).first()
+        return row is not None
+
+    async def hand_back_stop(
+        self, principal: str, conversation_id: str, segment_id: str, stop_id: str
+    ) -> bool:
+        """Mark the Stop `stop_id` unread again, when `segment_id` recorded
+        it acted on (`acknowledge_stop`) and nothing acted on it: the scope
+        it was recorded for had closed. Fenced as `acknowledge_stop` is.
+        Returns whether it was marked."""
+        entry = self._entry(principal, conversation_id)
+        async with entry.write_lock, self._transaction() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "UPDATE conversations SET stop_acted_id = NULL "
+                        "WHERE principal = :principal AND conversation_id = :conversation_id "
+                        "AND lease_segment_id = :segment_id AND lease_stop_id = :stop_id "
+                        "AND stop_acted_id = :stop_id RETURNING id"
                     ),
                     {
                         "principal": principal,

@@ -1113,8 +1113,9 @@ class StudioRunner:
         the party that acts on it: the turn closes `cancelled` under the
         lease (`_close_on_stop`). Returns whether it did, with the lease
         still held for the closing frames and a last release. When closing
-        fails, the lease is left to lapse with the Stop unread, for the next
-        claimant; when no turn is open after all, the lease is released."""
+        fails, the lease is dropped with the Stop unread (`drop_lease`), so
+        the next claimant acts on it; when no turn is open after all, the
+        lease is released."""
         if not await self.store.release(principal, conversation_id, segment_id):
             return False
         try:
@@ -1124,9 +1125,16 @@ class StudioRunner:
         except Exception:
             logger.exception(
                 "studio stream: conversation %s's turn could not be closed on a Stop; the "
-                "lease is left to lapse with the Stop unread",
+                "lease is dropped with the Stop unread",
                 conversation_id,
             )
+            try:
+                await self.store.drop_lease(principal, conversation_id, segment_id)
+            except Exception:
+                logger.exception(
+                    "studio stream: conversation %s's lease could not be dropped; it lapses",
+                    conversation_id,
+                )
             return False
         if not closed:
             await self.store.release(principal, conversation_id, segment_id)
@@ -1528,20 +1536,31 @@ CANCEL_LOCK_WAIT_S = 5.0
 
 async def _lock_or_claim(lock: asyncio.Lock, claimed: asyncio.Event, *, timeout: float) -> bool:
     """Wait up to `timeout` for `lock` or for `claimed`, whichever comes
-    first. Returns whether this now holds `lock`; `False` when a claim
-    committed first or the time ran out."""
+    first; a free lock is taken at once, whatever `timeout`. Returns whether
+    this now holds `lock`; `False` when a claim committed first or the time
+    ran out. Cancelled after it took the lock, it releases the lock."""
+    if claimed.is_set():
+        return False
+    if not lock.locked():
+        # A free lock is taken without waiting, past the deadline too.
+        return await lock.acquire()
     acquiring = asyncio.ensure_future(lock.acquire())
     claiming = asyncio.ensure_future(claimed.wait())
+    waited = False
     try:
         await asyncio.wait(
             {acquiring, claiming}, timeout=max(timeout, 0), return_when=asyncio.FIRST_COMPLETED
         )
+        waited = True
     finally:
         claiming.cancel()
         if not acquiring.done():
             acquiring.cancel()
         with suppress(asyncio.CancelledError):
             await acquiring
+        if not waited and not acquiring.cancelled():
+            # Cancelled after the lock was taken: let it go.
+            lock.release()
     if acquiring.cancelled():
         return False
     if claimed.is_set():
@@ -1635,6 +1654,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             left_open = await studio.turns.open_cursor(principal, body.conversation_id)
             if left_open is not None and not work.turn_recorded:
                 keep_turn_records(work, left_open.state)
+                if studio.store.stop_unread(principal, body.conversation_id):
+                    # A Stop the claimant above could not act on: the
+                    # abandon below closes the turn `cancelled` on it.
+                    work.close_turn(
+                        final_text=work.turn_final_text, error=ErrorCode.CANCELLED.value
+                    )
             work.begin_turn()
             work.auto_add = body.auto_add
             if pick is None:
@@ -1830,15 +1855,19 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         | Lease live, `StopScope` armed, first Stop | heartbeat, the scope | paused on the re-offered plan | `plan.proposed` |
         | The same, second Stop | heartbeat | `cancelled` | `cancelled` frame |
         | The scope took the first Stop, then the client left | heartbeat, the scope | left running, abandoned by the next turn | nothing more |
+        | Lease live, `StopScope` armed, its work ends while the Stop is recorded for it | heartbeat, or the release when the drive has ended | `cancelled` | `cancelled` frame |
         | Lease live, pause committed, the drive in after-commit work | heartbeat, `_settle` | `cancelled` | `cancelled` frame |
         | Lease live, the segment returned paused, lease not yet released | the release, under the lease it keeps | `cancelled`, pending cleared | `cancelled` frame after the pause frame, while the stream is open; another request meanwhile answers 409 |
         | Lease live, turn closed, lease not yet released | the release | unchanged | nothing more |
-        | The release kept the lease and closing failed, such as ending the turn's runs | the next claimant, once the lease lapses | `cancelled` | nothing more; the next `/turn` streams, an `/interrupt` answers 404 |
+        | The release kept the lease and closing failed, such as ending the turn's runs | the next claimant, as the lease is dropped | `cancelled` | nothing more; the next `/turn` streams, an `/interrupt` answers 404 |
         | The release's write failed or timed out | the next claimant, once the lease lapses | `cancelled` | nothing more; the next `/turn` streams, an `/interrupt` answers 404 |
+        | The same, and the next `/turn`'s close of the turn is refused | that `/turn`, in the close of the turn it abandons | `cancelled` | nothing more; the new turn streams |
         | No live lease, turn paused | this route, under the lock | `cancelled`, pending cleared | 204 |
         | No live lease, turn left running | this route, under the lock | `cancelled` once its runs are ended | 204, or 503 when they cannot be |
         | No live lease, no open turn | this route, under the lock, finding nothing open | unchanged | 204 |
         | Lock held here, no live lease | the claim's holder once it claims, or this route once the lock is free | as the row it lands on | 204, or 503 after `CANCEL_LOCK_WAIT_S` |
+        | The same, the claim committing just after this route found no lease | the claim's holder | as the row it lands on | 204 |
+        | The same, this request cancelled once the lock passed to it | nobody: the Stop was never recorded | unchanged | nothing; the lock is let go |
         | The same, and the request then abandons its claim | the next claimant | `cancelled` | nothing more; the next `/turn` streams |
 
         A live segment, on any instance, is stopped through its lease:
@@ -1876,6 +1905,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         loop = asyncio.get_running_loop()
         deadline = loop.time() + CANCEL_LOCK_WAIT_S
         while True:
+            # Taken before the lease is read, so a claim that commits after
+            # the read sets this very event.
+            claimed = studio.store.claimed_event(principal, body.conversation_id)
             if await studio.store.request_cancel(principal, body.conversation_id):
                 live = studio.store.current(principal, body.conversation_id)
                 if live is not None:
@@ -1884,13 +1916,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # No live lease: take the lock, or, while a request on this
             # instance holds it (a `/turn` or `/interrupt` before its claim
             # save, or a stream after its release), wait for its claim to
-            # commit or for the lock, then decide again.
-            if await _lock_or_claim(
-                lock,
-                studio.store.claimed_event(principal, body.conversation_id),
-                timeout=deadline - loop.time(),
-            ):
+            # commit or for the lock, then decide again. Past the deadline
+            # a free lock is still taken.
+            if await _lock_or_claim(lock, claimed, timeout=deadline - loop.time()):
                 break
+            if claimed.is_set():
+                continue
             if loop.time() >= deadline:
                 return _tool_error_response(
                     ToolError(

@@ -546,7 +546,9 @@ async def abandon(store: TurnStore, cursor: Cursor, *, segment_id: str) -> Curso
     """Close the open turn at `cursor` `abandoned` without running its node,
     writing under `segment_id`, the conversation lease the caller claimed to
     open the conversation's next turn. Its error is a `TurnAbandoned` at the
-    node it stands at. A paused turn's pause is dropped.
+    node it stands at. A paused turn's pause is dropped. A turn whose
+    conversation holds an unread Stop closes `cancelled` instead, acting on
+    that Stop (`harness.turn.store.TurnStore.finish`).
 
     Raises:
         SegmentLost: `segment_id` no longer holds the conversation's lease.
@@ -614,6 +616,52 @@ async def _settle(
         )
 
 
+async def _scope_takes(
+    lease: StudioStore,
+    stop: StopScope,
+    *,
+    principal: str,
+    conversation_id: str,
+    segment_id: str,
+    stop_id: str,
+    key: TurnKey,
+) -> bool | None:
+    """Record the Stop `stop_id` acted on (`StudioStore.acknowledge_stop`)
+    and set the scope's event. Returns whether the scope took it; `False`
+    when its work ended while the record was written, which leaves the Stop
+    recorded read and the turn's to act on; `None` when nothing was
+    recorded, for the next renewal to try again."""
+    try:
+        acknowledged = await lease.acknowledge_stop(principal, conversation_id, segment_id, stop_id)
+    except Exception:
+        logger.exception("turn %s: recording the Stop the scope takes failed", key)
+        return None
+    if not acknowledged:
+        return None
+    return stop.take()
+
+
+async def _hand_back_stop(
+    lease: StudioStore,
+    *,
+    principal: str,
+    conversation_id: str,
+    segment_id: str,
+    stop_id: str,
+    key: TurnKey,
+) -> None:
+    """Mark the Stop `stop_id` unread again (`StudioStore.hand_back_stop`):
+    it was recorded for a scope whose work ended first, and the drive ended
+    too, so the release of the lease acts on it."""
+    try:
+        await lease.hand_back_stop(principal, conversation_id, segment_id, stop_id)
+    except Exception:
+        logger.exception(
+            "turn %s: a Stop recorded for a scope that had closed could not be handed back",
+            key,
+        )
+
+
 async def run_segment[E](
     store: TurnStore,
     lease: StudioStore,
@@ -637,7 +685,9 @@ async def run_segment[E](
     (`harness.studio_store.StopRead`). While a node holds the turn's
     `StopScope` armed, the store records the Stop acted on
     (`StudioStore.acknowledge_stop`) and then the scope's event is set; the
-    node goes on. Any other unread Stop cancels the node, leaves no task of
+    node goes on. When the scope's work ended while that record was written,
+    the Stop is the turn's: it closes the turn as below, or, once the drive
+    has finished, is marked unread again for the release. Any other unread Stop cancels the node, leaves no task of
     the segment running, and closes the turn `cancelled`, a close that
     records every Stop so far acted on. The segment keeps the request it
     acted on (`Segment.stop_id`), so a renewal that reports it again before
@@ -686,6 +736,12 @@ async def run_segment[E](
     )
     # Why the heartbeat cancelled the node, when it did.
     ended: list[Outcome] = []
+    # Clear while the heartbeat records a Stop the scope takes; the segment
+    # lets that step finish before it ends, so a Stop it recorded is acted
+    # on or handed back unread.
+    acking = asyncio.Event()
+    acking.set()
+    exiting = False
 
     def end(outcome: Outcome) -> None:
         if outcome is Outcome.CANCELLED:
@@ -711,20 +767,41 @@ async def run_segment[E](
                 continue
             if stop.armed:
                 # The scope takes the Stop once the store records it acted
-                # on, so no later reader acts on it again. Recorded, it is
-                # the scope's, even when the scope's work ended while the
-                # record was written.
+                # on, so no later reader acts on it again. The segment waits
+                # for this step before it ends (`acking`).
+                acking.clear()
                 try:
-                    acknowledged = await lease.acknowledge_stop(
-                        principal, conversation_id, segment_id, renewal.stop_id
+                    taken = await _scope_takes(
+                        lease,
+                        stop,
+                        principal=principal,
+                        conversation_id=conversation_id,
+                        segment_id=segment_id,
+                        stop_id=renewal.stop_id,
+                        key=key,
                     )
-                except Exception:
-                    logger.exception("turn %s: recording the Stop the scope takes failed", key)
-                    continue
-                if acknowledged:
-                    stop.take()
-                    segment.stop_id = renewal.stop_id
-                continue
+                    if taken is None:
+                        continue
+                    if taken:
+                        segment.stop_id = renewal.stop_id
+                        continue
+                    # The scope's work ended while the record was written,
+                    # so the Stop is the turn's.
+                    if task.done() or exiting:
+                        await _hand_back_stop(
+                            lease,
+                            principal=principal,
+                            conversation_id=conversation_id,
+                            segment_id=segment_id,
+                            stop_id=renewal.stop_id,
+                            key=key,
+                        )
+                        return
+                finally:
+                    acking.set()
+                segment.stop_id = renewal.stop_id
+                end(Outcome.CANCELLED)
+                return
             if task.done():
                 # The turn's last write landed before this renewal read the
                 # Stop, so the segment acts on none: the release of the
@@ -757,6 +834,8 @@ async def run_segment[E](
         segment.outcome = Outcome.LOST
         return segment
     finally:
+        exiting = True
+        await acking.wait()
         beat.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await beat

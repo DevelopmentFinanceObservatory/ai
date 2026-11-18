@@ -111,7 +111,7 @@ from harness.studio_translate import (
     keep_turn_records,
 )
 from harness.tool_contracts import HarnessCode, ResolverError, harness_refusal
-from harness.turn.store import TurnStatus
+from harness.turn.store import CursorStale, TurnStatus
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from harness.wire import (
@@ -5809,6 +5809,23 @@ class _StopsTaken:
             await asyncio.wait_for(self._changed.wait_for(lambda: self.taken >= taken), timeout=5)
 
 
+async def test_a_cancel_cancelled_after_it_took_the_lock_lets_the_lock_go() -> None:
+    """`/cancel` waits for the conversation lock, the lock passes to it, and
+    the request is cancelled before it runs again: the lock is released, so
+    the conversation is not locked out."""
+    lock = asyncio.Lock()
+    await lock.acquire()
+    waiting = asyncio.ensure_future(studio_module._lock_or_claim(lock, asyncio.Event(), timeout=5))
+    await asyncio.sleep(0)
+    lock.release()
+    await asyncio.sleep(0)  # the lock passes to the wait, which has not run since
+    waiting.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert not lock.locked()
+
+
 @pytest.mark.parametrize(
     ("stops", "deaf"),
     [(1, False), (2, True)],
@@ -5891,7 +5908,8 @@ class _StopReaders:
     unread stop id, `_StopsTaken`); the release of the lease (a release
     whose write read the Stop, or a stream closing the turn under the lease
     it kept, `_close_on_stop`); a claimant that found the Stop unread and
-    left it read (`_act_on_unread_stop`); or `/cancel` under the lock
+    left it read (`_act_on_unread_stop`, or the close of the turn it
+    abandons); or `/cancel` under the lock
     (`_stop_open_turn`)."""
 
     def __init__(self, app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5902,6 +5920,7 @@ class _StopReaders:
         close_on_stop = studio_module._close_on_stop
         act_on_unread = studio_module._act_on_unread_stop
         stop_open = studio_module._stop_open_turn
+        abandon = studio_module.abandon
 
         async def counted_release(*args: Any, **kwargs: Any) -> Any:
             before = (await _stop_columns()).unread
@@ -5929,6 +5948,15 @@ class _StopReaders:
         monkeypatch.setattr(studio_module, "_close_on_stop", counted_close)
         monkeypatch.setattr(studio_module, "_act_on_unread_stop", counted_claim)
         monkeypatch.setattr(studio_module, "_stop_open_turn", counted_cancel)
+
+        async def counted_abandon(*args: Any, **kwargs: Any) -> Any:
+            before = (await _stop_columns()).unread
+            closed = await abandon(*args, **kwargs)
+            if before and not (await _stop_columns()).unread:
+                self.counts["claim"] += 1
+            return closed
+
+        monkeypatch.setattr(studio_module, "abandon", counted_abandon)
 
     def read(self) -> dict[str, int]:
         counts = {"heartbeat": self.heartbeat.taken, **self.counts}
@@ -5986,20 +6014,33 @@ async def _stop_while_a_node_runs(row: _Row):
         return await asyncio.wait_for(stream, timeout=5), cancel
 
 
-def _switch_held_by_a_stop(row: _Row, *, deaf: bool) -> None:
-    """The switch's revision hangs until cancelled; a deaf switch holds the
-    scope open without hearing its event."""
+def _switch_held_by_a_stop(row: _Row, *, deaf: bool, ends: asyncio.Event | None = None) -> None:
+    """The switch's revision hangs until cancelled, or, given `ends`, fails
+    once it is set; a deaf switch holds the scope open without hearing its
+    event, and sets `row.scope_closed` once the scope has closed."""
     entered = asyncio.Event()
     row.switch_entered = entered  # type: ignore[attr-defined]
 
     async def revising(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         entered.set()
+        if ends is not None:
+            await ends.wait()
+            raise switch_module.SwitchFailedError("r", code="c")
         await asyncio.sleep(5)
         raise AssertionError("a stopped revision is cancelled")
 
+    scopes: list[asyncio.Event] = []
+    row.scopes = scopes  # type: ignore[attr-defined]
+    closed = asyncio.Event()
+    row.scope_closed = closed  # type: ignore[attr-defined]
+
     async def deaf_scope(_ctx: Any, revision: Any, **_kwargs: Any) -> dict[str, Any]:
-        async with _ctx.stop.open():
-            return await revision
+        try:
+            async with _ctx.stop.open() as stopped:
+                scopes.append(stopped)
+                return await revision
+        finally:
+            closed.set()
 
     row.monkeypatch.setattr(switch_module, "_switched_plan", revising)
     if deaf:
@@ -6039,14 +6080,102 @@ async def _stop_taken_by_the_scope_then_the_client_leaves(row: _Row):
         cancel = await _post_stop(client)
         assert row.readers is not None
         await row.readers.heartbeat.reach(1)
-        while (await _stop_columns()).unread:  # the scope's record has landed
-            await asyncio.sleep(0.01)
+        await asyncio.wait_for(row.scopes[0].wait(), timeout=5)  # type: ignore[attr-defined]
         stream.cancel()
         with suppress(asyncio.CancelledError):
             await stream
         while app.state.studio.store.lock_for(PRINCIPAL, CONVERSATION).locked():
             await asyncio.sleep(0.01)
         return await _stream(client, "/api/studio/turn", _turn_body("hi")), cancel
+
+
+async def _stop_whose_scope_closes_while_it_is_recorded(row: _Row):
+    """The renewal reads the Stop with the scope armed, and the scope's work
+    ends while the store records the Stop for it: the scope never takes it,
+    so the Stop is the turn's, which closes `cancelled`."""
+    ends = asyncio.Event()
+    _switch_held_by_a_stop(row, deaf=True, ends=ends)
+    app = await row.build(*_plan())
+    store = app.state.studio.store
+    recorded = store.acknowledge_stop
+
+    async def scope_closes_meanwhile(*args: Any, **kwargs: Any) -> bool:
+        acknowledged = await recorded(*args, **kwargs)
+        ends.set()
+        await row.scope_closed.wait()  # type: ignore[attr-defined]
+        return acknowledged
+
+    store.acknowledge_stop = scope_closes_meanwhile
+    async with _client(app) as client:
+        plan = await _plan_with_a_choice(app, client)
+        stream = asyncio.ensure_future(_stream(client, "/api/studio/interrupt", _switch_body(plan)))
+        await asyncio.wait_for(row.switch_entered.wait(), timeout=5)  # type: ignore[attr-defined]
+        cancel = await _post_stop(client)
+        return await asyncio.wait_for(stream, timeout=5), cancel
+
+
+async def _stop_whose_claimant_cannot_close_the_turn(row: _Row):
+    """A Stop left unread on a paused turn whose lease lapsed. The next
+    `/turn` acts on it first, but its close is refused (another writer moved
+    the cursor), and the `/turn` goes on: the close of the turn it abandons
+    acts on the Stop, so the new turn runs."""
+    app = await row.build(*_plan(), _text("Hello."), clock=True)
+    store = app.state.studio.store
+    sent: list[httpx2.Response] = []
+    async with _client(app) as client:
+        real_release = store.release
+
+        async def stop_then_fail(*args: Any, **kwargs: Any) -> Any:
+            if not sent:
+                sent.append(await _post_stop(client))
+                return False
+            return await real_release(*args, **kwargs)
+
+        store.release = stop_then_fail
+        await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        assert (await _stop_columns()).unread
+        await row.lapse()
+
+        async def moved(*_args: Any, **_kwargs: Any) -> Any:
+            raise CursorStale("another writer moved the cursor")
+
+        row.monkeypatch.setattr(studio_module, "stop_turn", moved)
+        return await _stream(client, "/api/studio/turn", _turn_body("hi")), sent[0]
+
+
+async def _stop_whose_claim_commits_as_the_lease_is_read(row: _Row):
+    """`/cancel` finds no live lease while a `/turn` on this instance holds
+    the lock, and that `/turn`'s claim commits before `/cancel` starts to
+    wait: the wait sees the claim, and the Stop is recorded on it."""
+    row.monkeypatch.setattr(studio_module, "CANCEL_LOCK_WAIT_S", 1.0)
+    app = await row.build(*_card(), resolver=_HangingResolver(), heartbeat_seconds=0.1)
+    store = app.state.studio.store
+    real_save, real_request = store.save, store.request_cancel
+    entered, go, saved = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def held(*args: Any, **kwargs: Any) -> Any:
+        if entered.is_set():
+            return await real_save(*args, **kwargs)
+        entered.set()
+        await go.wait()
+        result = await real_save(*args, **kwargs)
+        saved.set()
+        return result
+
+    async def claimed_after_the_read(*args: Any, **kwargs: Any) -> bool:
+        found = await real_request(*args, **kwargs)
+        if not go.is_set():
+            go.set()
+            await saved.wait()
+        return found
+
+    store.save = held
+    store.request_cancel = claimed_after_the_read
+    async with _client(app) as client:
+        stream = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        cancel = await _post_stop(client)
+        return await asyncio.wait_for(stream, timeout=5), cancel
 
 
 async def _stop_in_after_commit_work(row: _Row):
@@ -6115,14 +6244,14 @@ def _stop_before_the_release(message: str, *, contested: bool = False):
 async def _stop_whose_release_cannot_close_the_running_turn(row: _Row):
     """A node fails and its close is not written, so the turn is left
     running; the Stop commits before the release, which keeps the lease,
-    and ending the turn's runs fails. The lease lapses with the Stop unread,
+    and ending the turn's runs fails. The lease is dropped with the Stop unread,
     and the next turn acts on it first."""
 
     class BrokenSurface(ScriptedSurface):
         async def call_tool(self, **kwargs: Any) -> ToolCallResult:
             raise RuntimeError("analysis mount went away")
 
-    app = await row.build(*_plan(), _text("Hello."), tool_surface=BrokenSurface(), clock=True)
+    app = await row.build(*_plan(), _text("Hello."), tool_surface=BrokenSurface())
     studio = app.state.studio
     real_finish = studio.turns.finish
 
@@ -6158,7 +6287,6 @@ async def _stop_whose_release_cannot_close_the_running_turn(row: _Row):
             client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
         )
         assert (await _stop_columns()).unread
-        await row.lapse()
         return await _stream(client, "/api/studio/turn", _turn_body("hi")), sent[0]
 
 
@@ -6318,6 +6446,13 @@ async def _stop_whose_claim_is_abandoned(row: _Row):
             id="lease-live-scope-took-it-then-the-client-left",
         ),
         pytest.param(
+            _stop_whose_scope_closes_while_it_is_recorded,
+            ["cancelled"],
+            "cancelled",
+            {"heartbeat": 1},
+            id="lease-live-scope-closes-while-the-stop-is-recorded",
+        ),
+        pytest.param(
             _stop_in_after_commit_work,
             ["cancelled"],
             "cancelled",
@@ -6360,6 +6495,13 @@ async def _stop_whose_claim_is_abandoned(row: _Row):
             id="release-write-fails-next-claim-acts",
         ),
         pytest.param(
+            _stop_whose_claimant_cannot_close_the_turn,
+            ["cancelled", "done"],
+            "done",
+            {"claim": 1},
+            id="claimant-close-refused-its-abandon-acts",
+        ),
+        pytest.param(
             _stop_with_no_lease(running=False),
             ["cancelled"],
             "plan.proposed",
@@ -6386,6 +6528,13 @@ async def _stop_whose_claim_is_abandoned(row: _Row):
             "cancelled",
             {"heartbeat": 1},
             id="lock-held-before-the-claim-save",
+        ),
+        pytest.param(
+            _stop_whose_claim_commits_as_the_lease_is_read,
+            ["cancelled"],
+            "cancelled",
+            {"heartbeat": 1},
+            id="lock-held-claim-commits-as-the-lease-is-read",
         ),
         pytest.param(
             _stop_whose_claim_is_abandoned,
@@ -6445,8 +6594,11 @@ async def test_a_stop_from_another_instance_stops_a_switch_and_a_second_ends_its
         await finish.wait()
         raise switch_module.SwitchFailedError("r", code="c")
 
+    scopes: list[asyncio.Event] = []
+
     async def _deaf(_ctx: Any, revision: Any, **_kwargs: Any) -> dict[str, Any]:
-        async with _ctx.stop.open():
+        async with _ctx.stop.open() as stopped:
+            scopes.append(stopped)
             return await revision
 
     monkeypatch.setattr(switch_module, "_switched_plan", _revising)
@@ -6466,6 +6618,7 @@ async def test_a_stop_from_another_instance_stops_a_switch_and_a_second_ends_its
             assert cancelled.status_code == 204
             await taken.reach(sent)
         if stops == 1:
+            await asyncio.wait_for(scopes[0].wait(), timeout=5)  # the scope took it
             finish.set()
         frames = await asyncio.wait_for(resumed, timeout=5)
 

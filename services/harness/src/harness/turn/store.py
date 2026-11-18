@@ -245,6 +245,12 @@ _READ_STOPS = text(
     "lease_stop_id = CASE WHEN lease_cancel THEN :minted ELSE lease_stop_id END, "
     "lease_cancel = false WHERE id = :conversation"
 )
+# Whether the conversation holds a Stop no party acted on
+# (`harness.studio_store.StopRead.unread`), its row locked for the close.
+_STOP_UNREAD = text(
+    "SELECT lease_cancel OR lease_stop_id IS DISTINCT FROM stop_acted_id "
+    "FROM conversations WHERE id = :conversation FOR UPDATE"
+)
 _FENCE = text(
     "SELECT id FROM conversations WHERE id = :conversation "
     "AND lease_segment_id = :segment_id FOR SHARE"
@@ -700,7 +706,10 @@ class TurnStore:
         it. A close `CANCELLED` acts on every Stop recorded on the
         conversation so far, and records that in the same transaction
         (`_READ_STOPS`), so a Stop stays unread until its turn's close
-        commits.
+        commits. A close `ABANDONED` of a turn whose conversation holds an
+        unread Stop closes it `CANCELLED` in its place: the claim that
+        abandons the turn acts on the Stop, so the next turn's renewals do
+        not read it.
 
         Raises:
             ValueError: `status` is not a closing status, or `error` is
@@ -714,6 +723,13 @@ class TurnStore:
             raise ValueError(f"a turn closed {status.value} takes an error only when it failed")
         async with self._engine.begin() as conn:
             await self._fence(conn, cursor.conversation, segment_id)
+            if (
+                status is TurnStatus.ABANDONED
+                and (
+                    await conn.execute(_STOP_UNREAD, {"conversation": cursor.conversation})
+                ).scalar_one()
+            ):
+                status, error = TurnStatus.CANCELLED, None
             closed = await self._swap(
                 conn,
                 cursor,
