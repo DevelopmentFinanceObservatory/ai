@@ -874,6 +874,28 @@ async def test_the_stream_that_offers_a_card_closes_once_its_early_mints_are_pos
     assert _events(frames)[-1] == "plan.proposed"
 
 
+async def test_a_stop_on_a_turn_paused_at_a_plan_card_cancels_the_card_s_early_mints() -> None:
+    """The card's stream ends while its early call is still running. A Stop
+    then closes the turn paused on the card, and the call is cancelled, so
+    nothing fetches for the closed turn."""
+    sends = _HeldSends()
+    early = EarlyMints(send=sends, max_concurrent=4, settle_s=0.05)
+    app = _app(*_plan("q with forks"), tool_surface=ScriptedSurface(), early_mints=early)
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        assert _events(frames)[-1] == "plan.proposed"
+        (running,) = early._tasks
+        assert sends.sent and not running.done()
+
+        stop = await _post_stop(client)
+        await asyncio.wait({running}, timeout=2)
+        cancelled = running.cancelled()
+        sends.release.set()
+
+    assert stop.status_code == 204
+    assert cancelled
+
+
 async def test_the_stream_that_waits_on_early_mints_flushes_telemetry_after_they_end(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4386,6 +4408,78 @@ async def test_a_turn_claimed_over_a_lapsed_segment_records_its_last_write(
         assert first["assistant"] == last["text"]
 
 
+async def test_a_turn_that_fails_after_its_claim_leaves_the_paused_turn_s_frame_numbers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Turn 1 pauses on a question after two segments. A `/turn` claims the
+    lease and fails before it opens its turn. The answer to the question
+    then resumes turn 1 with frame numbers past every number its segments
+    sent, since the failed claim reserved none."""
+    app = _app(
+        search_call("aid to Kenya"),
+        *_plan("q with forks", *_ask()),
+        _text("Reading A."),
+        resolver=CannedSearch(definite_envelope(spec_id=SCRIPTED_SPEC)),
+        executor=ScriptedExecutor(),
+        tool_surface=ScriptedSurface(),
+    )
+    turns = app.state.studio.turns
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        paused = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+        elicitation = _frame(paused, "elicitation.request")
+        (question,) = elicitation["questions"]
+
+        with monkeypatch.context() as patch:
+
+            async def unreadable(*args: Any, **kwargs: Any) -> Any:
+                raise RuntimeError("the turn could not be read")
+
+            patch.setattr(turns, "open_cursor", unreadable)
+            with pytest.raises(RuntimeError, match="could not be read"):
+                await client.post("/api/studio/turn", json=_turn_body("other"), headers=AUTH)
+
+        resumed = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(
+                elicitation["interrupt_id"],
+                "answer",
+                answers={"q1": _pick(question["options"][0]["id"])},
+            ),
+        )
+
+    sent = [frame["seq"] for frame in (*first, *paused)]
+    assert min(frame["seq"] for frame in resumed) > max(sent)
+
+
+async def test_a_turn_on_a_row_nothing_moved_reads_the_conversation_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second `/turn` on a conversation whose row no one wrote since its
+    load reads the conversation once: the claim finds the row as loaded, so
+    the turn opens on that load."""
+    app = _app(_text("Hello."), _text("Again."))
+    store = app.state.studio.store
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("hi"))
+        loads: list[str] = []
+        load = store.load
+
+        async def counted(principal: str, conversation_id: str) -> Any:
+            loads.append(conversation_id)
+            return await load(principal, conversation_id)
+
+        monkeypatch.setattr(store, "load", counted)
+        second = await _stream(client, "/api/studio/turn", _turn_body("again"))
+
+    assert _events(second)[-1] == "done"
+    assert loads == [CONVERSATION]
+
+
 class _CallingSurface(ScriptedSurface):
     """`ScriptedSurface`, recording the name of every tool it is called with."""
 
@@ -5613,13 +5707,15 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
     ]
     assert "cmw_" not in json.dumps(client_visible, default=str)
     assert "cmw_" not in repr(conversation)
-    # The edit names the card's frame, read from its stored intent, so the
-    # executor reads the card's lineage without describing the card again.
-    assert [
-        record.args.get(CARD_FRAME_KEY)
+    # The edit's revise names the card's frame to the executor, which strips
+    # it, and the call's record leaves it out too.
+    revises = [
+        record
         for record in records
         if record.tool == "write_component" and "component_id" in record.args
-    ] == [REF_A]
+    ]
+    assert len(revises) == 1
+    assert CARD_FRAME_KEY not in revises[0].args
     assert "cmw_" not in json.dumps(
         [(record.args, record.result) for record in records], default=str
     )

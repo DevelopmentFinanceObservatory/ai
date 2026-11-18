@@ -92,6 +92,7 @@ from harness.graph.switch import APPLY_CHOICE_STEP_TOOL
 from harness.mcp_client import _manifest_summary
 from harness.orchestrator_tools import HANDED_OFF
 from harness.provenance import (
+    CARD_FRAME_KEY,
     CARD_LINEAGE_KEY,
     CardLineage,
     ProvenanceStore,
@@ -411,6 +412,12 @@ def _fatal_frame(
 SEGMENT_LOST_DETAIL = failure_sentence(ErrorCode.TRANSIENT_UNAVAILABLE, RetryMode.RETRY_AFTER_DELAY)
 
 
+# The arguments a call record leaves out: the write token, a grant the
+# platform issued, and the card's frame, the executor's own hint that it
+# strips before sending (`harness.mcp_client.McpExecutor`).
+_UNRECORDED_ARGS = frozenset({WRITE_TOKEN_KEY, CARD_FRAME_KEY})
+
+
 @dataclass
 class _ExecutorRecord:
     tool: str
@@ -605,7 +612,7 @@ class _RecordingExecutor:
         self._records.append(
             _ExecutorRecord(
                 tool=tool,
-                args={key: value for key, value in args.items() if key != WRITE_TOKEN_KEY},
+                args={key: value for key, value in args.items() if key not in _UNRECORDED_ARGS},
                 result=result,
                 duration_ms=int((time.monotonic() - started) * 1000),
                 conversation=current_conversation_id.get(),

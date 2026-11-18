@@ -569,6 +569,18 @@ class Renewal:
     stop_id: str | None
 
 
+@dataclass(frozen=True)
+class TurnLease:
+    """A lease `StudioStore.claim_turn_lease` claimed: the segment's id, the
+    `conversations` row's id, and whether the row moved since this
+    instance's load (`moved`): its version changed, or the claim displaced
+    a lapsed lease, whose segment may have written since."""
+
+    segment_id: str
+    conversation: int
+    moved: bool
+
+
 class SegmentClose(StrEnum):
     """How a segment's closing write (`StudioStore.close_segment`) ended.
 
@@ -868,24 +880,22 @@ async def _run_delta_write(conn: AsyncConnection, pk: int, write: _DeltaWrite) -
 
 _INSERT_CARD_LINEAGE = text(
     "INSERT INTO conversation_card_lineage (conversation, component_id, spec_id, "
-    "content_version, requested_spec_id, requested_content_version, members, stat_var_count) "
-    "VALUES (:pk, :component_id, :spec_id, :content_version, :requested_spec_id, "
-    ":requested_content_version, CAST(:members AS json), :stat_var_count) "
+    "content_version, members, stat_var_count) "
+    "VALUES (:pk, :component_id, :spec_id, :content_version, "
+    "CAST(:members AS json), :stat_var_count) "
     "ON CONFLICT (conversation, component_id) DO NOTHING"
 )
 
 # A card's stored lineage in conversation `:pk`: the row of card
 # `:component_id`, else one drawn from the frame `:spec_id`/`:content_version`,
-# else one whose write named that frame, the latest written first among equals,
-# leaving out the cards in `:skipped`, whose rows did not decode.
+# the latest written first among equals, leaving out the cards in `:skipped`,
+# whose rows did not decode.
 # Cards on one frame share one lineage, so any of them serves.
 _SELECT_CARD_LINEAGE = text(
-    "SELECT component_id, spec_id, content_version, requested_spec_id, "
-    "requested_content_version, members, stat_var_count "
+    "SELECT component_id, spec_id, content_version, members, stat_var_count "
     "FROM conversation_card_lineage WHERE conversation = :pk AND ("
     "component_id = :component_id "
-    "OR (spec_id = :spec_id AND content_version = :content_version) "
-    "OR (requested_spec_id = :spec_id AND requested_content_version = :content_version)) "
+    "OR (spec_id = :spec_id AND content_version = :content_version)) "
     "AND component_id <> ALL(:skipped) "
     "ORDER BY COALESCE(component_id = :component_id, false) DESC, "
     "COALESCE(spec_id = :spec_id AND content_version = :content_version, false) DESC, "
@@ -908,13 +918,10 @@ def _card_lineage_row(lineage: CardLineage) -> dict[str, Any] | None:
             lineage.component_id,
         )
         return None
-    requested = lineage.requested or (None, None)
     return {
         "component_id": lineage.component_id,
         "spec_id": lineage.frame[0],
         "content_version": lineage.frame[1],
-        "requested_spec_id": requested[0],
-        "requested_content_version": requested[1],
         "members": members,
         "stat_var_count": lineage.stat_var_count,
     }
@@ -1334,16 +1341,18 @@ class StudioStore:
         entry.claimed_reserved = target.seq + SEQ_BLOCK
         return segment.id
 
-    async def claim_turn_lease(self, principal: str, conversation_id: str) -> str:
+    async def claim_turn_lease(self, principal: str, conversation_id: str) -> TurnLease:
         """Claim the conversation's lease for a new turn and write the lease
-        alone, under the row lock, and return the segment's id. The turn
-        state and its version are left as stored, so a lapsed segment that
-        wrote them since this instance's `load` does not refuse the claim.
-        Once the claim commits, that segment's writes are fenced out: its
-        cursor writes on the lease id (`harness.turn.store`), its saves on
-        the live lease this claim holds. The claim reserves the new turn's
-        frame numbers, `0` to `SEQ_BLOCK` (`claim_segment`), and the caller
-        loads the conversation afresh before it begins the turn.
+        alone, under the row lock. The turn state, its version and the frame
+        numbers reserved are left as stored, so a lapsed segment that wrote
+        them since this instance's `load` does not refuse the claim, and a
+        request that fails after the claim leaves the open turn's
+        reservation as it was. The save that opens the turn reserves its
+        frame numbers (`save`'s `seq_reserved`). Once the claim commits, the
+        lapsed segment's writes are fenced out: its cursor writes on the
+        lease id (`harness.turn.store`), its saves on the live lease this
+        claim holds. The caller loads the conversation afresh when the
+        lease says the row moved (`TurnLease.moved`).
 
         Raises:
             SegmentBusy: the loaded lease had not lapsed by the database
@@ -1375,8 +1384,7 @@ class StudioStore:
                         text(
                             "UPDATE conversations SET lease_segment_id = :segment_id, "
                             "lease_owner = :owner, "
-                            f"lease_expires_at = {self._time_sql} + :ttl, "
-                            "seq_reserved = :reserved "
+                            f"lease_expires_at = {self._time_sql} + :ttl "
                             "WHERE id = :pk RETURNING lease_expires_at"
                         ),
                         {
@@ -1384,19 +1392,18 @@ class StudioStore:
                             "segment_id": segment_id,
                             "owner": _OWNER_ID,
                             "ttl": SEGMENT_TTL_S,
-                            "reserved": SEQ_BLOCK,
                         },
                     )
                 ).one()
+            moved = row.version != entry.version or stored_lease is not None
             segment = Segment(id=segment_id, owner=_OWNER_ID, expires_at=claimed.lease_expires_at)
             entry.state.segment = segment
             self._note_segment(entry, segment)
             entry.lease_stamp = stamp
             entry.held = segment_id
-            entry.seq_reserved, entry.claimed_reserved = SEQ_BLOCK, None
             entry.claimed.set()
             entry.claimed = asyncio.Event()
-        return segment_id
+        return TurnLease(segment_id=segment_id, conversation=entry.pk, moved=moved)
 
     async def save(
         self,
@@ -1406,6 +1413,7 @@ class StudioStore:
         *,
         stopping: bool = False,
         alongside: Callable[[AsyncConnection, int], Awaitable[None]] | None = None,
+        seq_reserved: int | None = None,
     ) -> None:
         """Write this instance's changed durable fields, compare-and-swapped
         on the turn state's version. Given `state`, the working copy `draft`
@@ -1424,8 +1432,9 @@ class StudioStore:
         while another instance streams, whose turn state that stream alone
         writes. A renewal, a cancel, a canvas edit or a run-ledger write does
         not move the version. A save that persists `claim_segment`'s claim
-        also stores the frame numbers it reserved; only a claim save moves
-        them, so the end the claim read with its load is the stored one.
+        also stores the frame numbers it reserved. Only a claim save, or one
+        given `seq_reserved`, moves them, so the end the claim read with its
+        load is the stored one.
 
         Raises `StopPending` when the save persists a claim and a Stop is live
         for the conversation's turn as the locked row and its cursor stand
@@ -1442,6 +1451,11 @@ class StudioStore:
         changed. The interrupt route admits an approved plan's run through it
         (`harness.run_ledger.StudioRunLedger.admit_with_approval`) and names the run on
         the pending interrupt.
+
+        `seq_reserved`, when given, is the end of the frame numbers the save
+        reserves, written with the fields it changes: `/turn`'s save that opens a turn on a
+        lease `claim_turn_lease` claimed reserves the new turn's `0` to
+        `SEQ_BLOCK`.
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
@@ -1452,7 +1466,7 @@ class StudioStore:
                 self._take_draft(entry, target)
                 return
             claimed = _deserialize_segment(delta.get(_KEY_SEGMENT))
-            reserved = entry.claimed_reserved if claimed is not None else None
+            reserved = entry.claimed_reserved if claimed is not None else seq_reserved
             async with self._transaction() as conn:
                 row = (await conn.execute(self._lock_conversation, {"pk": entry.pk})).first()
                 if row is None or row.version != entry.version:
@@ -2165,8 +2179,7 @@ class StudioStore:
         frame: tuple[str | None, str | None] | None = None,
     ) -> CardLineage | None:
         """The stored lineage of card `component_id`, else of a card drawn from
-        `frame`, else of a card whose write named `frame`
-        (`harness.provenance.CardLineages`), read on the conversation this
+        `frame` (`harness.provenance.CardLineages`), read on the conversation this
         instance loaded over the lineage engine, in one attempt with no lock
         and no retry: the caller bounds the read and goes on without it. One
         row is read; only when it does not decode, logged with its key, is the
@@ -2210,13 +2223,11 @@ class StudioStore:
                     skipped.append(row.component_id)
                     continue
                 break
-        requested = (row.requested_spec_id, row.requested_content_version)
         return CardLineage(
             component_id=row.component_id,
             frame=(row.spec_id, row.content_version),
             lineage=lineage,
             stat_var_count=row.stat_var_count,
-            requested=requested if requested != (None, None) else None,
         )
 
     async def run_statuses(

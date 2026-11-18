@@ -521,20 +521,11 @@ class TurnStore:
                 {"principal": principal, "conversation_id": conversation_id},
             )
 
-    async def turn_at(self, principal: str, conversation_id: str, turn_index: int) -> Cursor | None:
-        """The conversation's turn `turn_index`, open or closed, or `None`
-        when it has no cursor."""
+    async def turn_at(self, conversation: int, turn_index: int) -> Cursor | None:
+        """The turn `turn_index` of the `conversations` row `conversation`,
+        open or closed, or `None` when it has no cursor (`cursor_at`)."""
         async with self._engine.connect() as conn:
-            return await _read_cursor(
-                conn,
-                "t.conversation = (SELECT id FROM conversations WHERE principal = :principal "
-                "AND conversation_id = :conversation_id) AND t.turn_index = :turn_index",
-                {
-                    "principal": principal,
-                    "conversation_id": conversation_id,
-                    "turn_index": turn_index,
-                },
-            )
+            return await cursor_at(conn, conversation, turn_index)
 
     async def turn(self, turn_id: int) -> Cursor:
         """The turn `turn_id` as stored, open or closed.
