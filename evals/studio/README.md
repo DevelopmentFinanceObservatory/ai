@@ -32,7 +32,8 @@ just eval-studio            # --mode live: live agent + judge (needs GOOGLE_API_
 ```
 
 Live mode needs a running harness first. `just studio-live` starts one on
-port 8080:
+port 8080, on the local Postgres `just pg-up` starts unless `.env` sets
+`DATABASE_URL`:
 
 ```
 just studio-live

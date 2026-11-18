@@ -2251,7 +2251,7 @@ async def test_a_removal_reported_after_a_newer_canvas_edit_carries_that_edit(
     conversation = store.current("principal", "c1")
     assert conversation is not None
 
-    def land_two(manifest: CompositionManifest | None) -> CompositionManifest | None:
+    def land_two(manifest: CompositionManifest | None, _components: object) -> CompositionManifest:
         for cid in ("cmp_01", "cmp_02"):
             land_component(
                 conversation,
@@ -2259,7 +2259,9 @@ async def test_a_removal_reported_after_a_newer_canvas_edit_carries_that_edit(
             )
         return conversation.composition
 
-    def remove_one(manifest: CompositionManifest | None) -> CompositionManifest | None:
+    def remove_one(
+        manifest: CompositionManifest | None, _components: object
+    ) -> CompositionManifest:
         remove_cards(conversation, ["cmp_01"], all_cards=False)
         return conversation.composition
 
@@ -2270,7 +2272,7 @@ async def test_a_removal_reported_after_a_newer_canvas_edit_carries_that_edit(
     )
     await store.mutate_composition("principal", "c1", remove_one)
 
-    def pin(manifest: CompositionManifest | None) -> CompositionManifest:
+    def pin(manifest: CompositionManifest | None, _components: object) -> CompositionManifest:
         assert manifest is not None
         blocks = [block.model_copy(update={"pinned": True}) for block in manifest.blocks]
         return _next_manifest(manifest, blocks, actor=CompositionActor.USER)

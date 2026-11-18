@@ -219,7 +219,8 @@ def bound_rows(refs: Mapping[str, object]) -> tuple[BoundEntity, ...]:
     unstated. A reader finds the row by its text, case-folded, with any role
     fitting, as it read the mapping. Only the string refs of an entry count,
     each once, and an entry with no text or no such ref is left out. The
-    import job rewrites stored mapping-form blocks by this rule
+    import job, and the serving release's read of an open turn's blocks,
+    rewrite stored mapping-form blocks by this rule
     (`harness.adk_import._convert_block`), so a stored block holds the same
     rows whichever way it was written.
     """

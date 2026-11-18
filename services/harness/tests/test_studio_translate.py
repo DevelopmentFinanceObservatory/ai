@@ -179,7 +179,7 @@ def _on_canvas(conversation: ConversationState, change: Any) -> Any:
     """A canvas write running `change` on `conversation`, as the turn's
     landings and removals run inside `StudioStore.change_canvas`."""
 
-    def mutate(manifest: CompositionManifest | None) -> CompositionManifest | None:
+    def mutate(manifest: CompositionManifest | None, _components: object) -> CompositionManifest:
         change()
         return conversation.composition
 
@@ -1926,7 +1926,9 @@ async def test_component_frames_lands_and_appends(pg_engine: AsyncEngine) -> Non
         conversation=conversation, recorder=_RecordingExecutor(_dummy_executor, store=store)
     )
     await store.mutate_composition(
-        "principal", "c1", lambda manifest: _next_manifest(None, [], actor=CompositionActor.MODEL)
+        "principal",
+        "c1",
+        lambda manifest, _components: _next_manifest(None, [], actor=CompositionActor.MODEL),
     )
 
     frames = await _component_frames_of(translator, _written_component("cmp_two"), land=True)
@@ -2016,18 +2018,32 @@ async def test_a_step_that_removes_a_card_and_draws_one_streams_each_write_s_own
     ]
 
 
-async def test_component_frames_land_true_holds_when_auto_add_is_off() -> None:
+async def test_component_frames_land_true_holds_when_auto_add_is_off(
+    pg_engine: AsyncEngine,
+) -> None:
     """`land=True` against a conversation with `auto_add` off resolves to
     `harness.studio_state.land_component`'s `"held"`: no block for
-    `composition.updated` to report."""
+    `composition.updated` to report. The held card's digest entry and the
+    write token its create returned are stored at once, with no block."""
     current_conversation_id.set("c1")
-    translator = _translator()
-    translator._conversation.auto_add = False
+    store, conversation = await _stored_conversation(pg_engine)
+    translator = _Translator(
+        conversation=conversation, recorder=_RecordingExecutor(_dummy_executor, store=store)
+    )
+    conversation.auto_add = False
+    conversation.write_tokens["cmp_two"] = "token-two"
 
     frames = await _component_frames_of(translator, _written_component("cmp_two"), land=True)
 
     events = [getattr(f, "event", None) for f in frames]
     assert events == ["component.created"]
+    stored = await StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs).load(
+        "principal", "c1"
+    )
+    assert stored is not None
+    assert stored.composition is None
+    assert stored.components["cmp_two"] == conversation.components["cmp_two"]
+    assert stored.write_tokens == {"cmp_two": "token-two"}
 
 
 async def test_component_frames_land_false_emits_only_component_created() -> None:

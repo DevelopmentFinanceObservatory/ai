@@ -37,13 +37,12 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocketClose
 
 from harness import __version__
-from harness.adk_import import reimport_on_access
+from harness.adk_import import open_turn_specs, reimport_on_access
 from harness.agents import build_tool_surface
 from harness.combined_mcp import build_combined_mcp, children_start_once, combined_http_app
 from harness.db.migrate import MigrationChecksumError, apply_pending
 from harness.early_mint import EarlyMints
 from harness.generative import GeminiEdit
-from harness.graph.state import AGENT_NAME
 from harness.graph.workflow import create_root_workflow
 from harness.live_refresh import build_live_refresh, create_live_refresh_router
 from harness.mcp_client import McpExecutor, McpResolver
@@ -51,7 +50,7 @@ from harness.orchestrator_tools import build_orchestrator_tools
 from harness.prefix_cache import PrefixCache
 from harness.provenance import ProvenanceStore
 from harness.run_ledger import StudioRunLedger
-from harness.session_store import adk_turn_specs, build_session_service
+from harness.session_store import build_session_service
 from harness.settings import (
     ANALYSIS_MCP_MOUNT_PATH,
     COMBINED_MCP_MOUNT_PATH,
@@ -174,13 +173,14 @@ def _loopback_only(app: ASGIApp) -> ASGIApp:
     return guarded
 
 
-# Total wall-clock budget `_retry_startup_step` spends retrying one startup
-# database step (`DatabaseSessionService.prepare_tables`, `apply_pending`). A
-# runtime identity's IAM grant can still be propagating when a fresh revision
+# Total wall-clock budget `_lifespan` gives the startup database steps
+# (`DatabaseSessionService.prepare_tables`, then `apply_pending`), one
+# deadline the second step inherits what the first left of. A runtime
+# identity's IAM grant can still be propagating when a fresh revision
 # starts, taking minutes rather than seconds to land; Cloud Run's default
 # startup probe window is 240 s, so this leaves headroom for the rest of
 # startup.
-_PREPARE_TABLES_RETRY_BUDGET_S = 120.0
+_STARTUP_DB_RETRY_BUDGET_S = 120.0
 _PREPARE_TABLES_INITIAL_BACKOFF_S = 1.0
 _PREPARE_TABLES_MAX_BACKOFF_S = 30.0
 
@@ -292,17 +292,18 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # route needs the session service. It's a no-op after the first call, so
     # this costs nothing beyond startup. `_prepare_tables_with_retries`
     # bounds each attempt by `session_store_connect_timeout_s` and retries
-    # transient failures within its own budget.
+    # transient failures; both steps share one deadline.
+    deadline = time.monotonic() + _STARTUP_DB_RETRY_BUDGET_S
     await _prepare_tables_with_retries(
         app.state.session_service,
         connect_timeout_s=app.state.settings.session_store_connect_timeout_s,
-        budget_s=_PREPARE_TABLES_RETRY_BUDGET_S,
+        budget_s=_STARTUP_DB_RETRY_BUDGET_S,
     )
     # The harness's own tables, in the same Postgres database as ADK's
     # (`create_app` refuses any other database).
     await _apply_migrations_with_retries(
         app.state.session_service_engine,
-        budget_s=_PREPARE_TABLES_RETRY_BUDGET_S,
+        budget_s=max(0.0, deadline - time.monotonic()),
     )
     # A 401 from a mounted app reaches an MCP client as a raised `MCPError`,
     # not a tool result: `raise_on_error=False` on `call_tool` doesn't catch
@@ -515,10 +516,11 @@ def create_app(
         )
     # The previous release may still finish turns on ADK while this one
     # serves, so each load first brings the conversation up to date with its
-    # ADK ledger session (`harness.adk_import.reimport_on_access`).
+    # ADK ledger session (`harness.adk_import.reimport_on_access`), and an
+    # open turn's spec blocks are read as the import reads them.
     store = StudioStore(
         engine,
-        turn_specs=adk_turn_specs(app.state.session_service, app_name=AGENT_NAME),
+        turn_specs=open_turn_specs(engine),
         adk=reimport_on_access(engine),
     )
     # Built once and threaded into both the `execute` node below and

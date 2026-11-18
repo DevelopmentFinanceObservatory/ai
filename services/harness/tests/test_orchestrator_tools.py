@@ -74,7 +74,7 @@ from harness.orchestrator_tools import (
 from harness.reply_figures import card_result, drawn_series
 from harness.rolling_cards import CardWithheld, RollingCards
 from harness.scope_choices import served_facts
-from harness.studio_edit import _revised_frames
+from harness.studio_edit import _record_revision
 from harness.studio_state import (
     ConversationState,
     _apply_operations,
@@ -3862,7 +3862,7 @@ async def test_make_charts_reads_a_card_the_user_added_back(
     await tools["remove_cards"](ctx, ["cmp_01"])
     state = executor.state
     applied = _apply_operations(
-        state, state.composition, [AddOp(op=MutationOp.ADD, component_id="cmp_01")]
+        state.components, state.composition, [AddOp(op=MutationOp.ADD, component_id="cmp_01")]
     )
     assert isinstance(applied, tuple)
     state.composition = _next_manifest(state.composition, applied[0], actor=CompositionActor.USER)
@@ -3886,12 +3886,12 @@ async def test_make_charts_draws_again_a_card_revised_since_it_was_drawn(
     await tools["make_charts"]([_wide_chart()], ctx)
     revised = executor.cards["cmp_01"] | {"revision": executor.cards["cmp_01"]["revision"] + 1}
     patch = {"title": "Renamed"}
-    _revised_frames(
+    _record_revision(
         executor.state,
         component_id="cmp_01",
         component=revised,
-        patch=patch,
-        revised=component_revised(revised, "cmp_01", patch),
+        revision=component_revised(revised, "cmp_01", patch).revision,
+        title=patch["title"],
     )
     executor.cards["cmp_01"] = revised
     if later_turn:

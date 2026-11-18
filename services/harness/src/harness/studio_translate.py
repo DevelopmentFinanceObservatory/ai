@@ -530,7 +530,10 @@ class _RecordingExecutor:
         no conversation to hold it is dropped, and that component's later
         edits recreate it instead. A successful create that returns no
         token is logged at error level, since that card is rebuilt as a
-        new card on its next edit."""
+        new card on its next edit. The token is set on the live state, so
+        the card's own write (`StudioStore.change_canvas`, which commits
+        every durable field the live state changed) stores it with the
+        card."""
         token = result.pop(WRITE_TOKEN_KEY, None)
         component = result.get("component")
         if not isinstance(component, dict):
@@ -1985,7 +1988,8 @@ class _Translator:
         all) means no block exists to report, so only `component.created`
         goes out. `land=True` against an `auto_add=False` conversation
         resolves to `"held"` inside `harness.studio_state.land_component`
-        itself, also only `component.created`, and writes nothing."""
+        itself, also only `component.created`, and writes the card's entry
+        with no block."""
         created.seq = self._conversation.next_seq()
         if not land:
             return [created]
@@ -1998,13 +2002,11 @@ class _Translator:
         self, component: dict[str, Any], *, intent: dict[str, Any] | None
     ) -> Literal["created", "held"]:
         """`harness.studio_state.land_component` on the current
-        conversation, inside the store's canvas write
+        conversation, inside the store's card write
         (`StudioStore.change_canvas`), which hands it the canvas as stored
-        and writes the block it appends under the row lock. A held card
-        changes no canvas, so it lands with no write."""
-        conversation = self._conversation
-        if not conversation.auto_add:
-            return state_land_component(conversation, component, intent=intent)
+        and commits the block it appends with the card's digest entry, turn
+        line and write token. A held card appends no block, and its entry,
+        line and token commit the same way."""
         key = current_conversation_key.get()
         assert key is not None, "a card lands only inside a conversation's stream"
         return await self._recorder.store.change_canvas(

@@ -58,7 +58,7 @@ def _block(component_id: str) -> CompositionBlock:
 
 
 def _adding(component_id: str):
-    def mutate(manifest: CompositionManifest | None) -> CompositionManifest:
+    def mutate(manifest: CompositionManifest | None, _components: object) -> CompositionManifest:
         blocks = [*(manifest.blocks if manifest else []), _block(component_id)]
         return _next_manifest(manifest, blocks, actor=CompositionActor.USER)
 

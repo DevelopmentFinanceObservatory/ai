@@ -10,8 +10,8 @@ once.
 
 Every write is one transaction fenced on the conversation's live segment
 (`StudioStore.fenced`): a writer whose segment another instance took over
-gets `SegmentLost` and records nothing, publication included, and a takeover
-waits for an in-flight write to commit. Two admissions of one key settle on
+gets `SegmentLost` and records nothing, publication included, and ends the
+conversation's stream, and a takeover waits for an in-flight write to commit. Two admissions of one key settle on
 the `run_keys` primary key: the second waits for the first to commit and
 then decides against its run. A record change locks its run row. Nothing
 retries.
@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -51,7 +53,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from harness.conversation import current_conversation_key
-from harness.studio_state import SegmentLost
+from harness.studio_state import SegmentLost, _end_stream
 from harness.studio_store import StudioStore
 from harness.tool_contracts import HarnessCode
 
@@ -108,6 +110,23 @@ class StudioRunLedger:
             raise SegmentLost("no conversation segment is streaming on this instance")
         return key[0], key[1], state.segment.id
 
+    @asynccontextmanager
+    async def _fenced(self) -> AsyncIterator[tuple[AsyncConnection, int]]:
+        """`StudioStore.fenced` on the current segment. A `SegmentLost` ends
+        the conversation's stream (`_end_stream`) before it propagates:
+        `executor.ledger.store_faults` reports it to the graph as an
+        unavailable ledger, which a tool hands back as data, so the turn
+        would otherwise run on without the lease."""
+        key = current_conversation_key.get()
+        try:
+            async with self._store.fenced(*self._segment()) as held:
+                yield held
+        except SegmentLost:
+            conversation = self._store.current(*key) if key is not None else None
+            if conversation is not None:
+                _end_stream(conversation, "segment_lost")
+            raise
+
     async def _column(self, column: str, run_id: str) -> Any:
         key = current_conversation_key.get()
         if key is None:
@@ -122,7 +141,7 @@ class StudioRunLedger:
         return value
 
     async def admit(self, candidate: RunRecord, *, submission: JsonValue) -> Admission:
-        async with self._store.fenced(*self._segment()) as (conn, pk):
+        async with self._fenced() as (conn, pk):
             # Insert the key first. A concurrent admission of the same key
             # waits here for the first to commit, then finds its row taken.
             fresh = (
@@ -136,30 +155,37 @@ class StudioRunLedger:
             ).first()
             existing = None
             if fresh is None:
-                held = (
+                # The key row alone is locked, then its run read: a lock
+                # taken through a join re-checks the join against the run
+                # row it first read, so an admission that waited while
+                # another moved the key to a new run would find no row.
+                held_id = (
                     await conn.execute(
                         text(
-                            "SELECT k.run_id, r.record FROM run_keys k "
-                            "JOIN runs r ON r.conversation = k.conversation "
-                            "AND r.run_id = k.run_id "
-                            "WHERE k.conversation = :pk AND k.idempotency_key = :key "
-                            "FOR UPDATE"
+                            "SELECT run_id FROM run_keys "
+                            "WHERE conversation = :pk AND idempotency_key = :key FOR UPDATE"
                         ),
                         {"pk": pk, "key": candidate.idempotency_key},
                     )
-                ).one()
-                raw = held.record
+                ).scalar_one()
+                raw = (
+                    await conn.execute(
+                        text(
+                            "SELECT record FROM runs "
+                            "WHERE conversation = :pk AND run_id = :run_id FOR UPDATE"
+                        ),
+                        {"pk": pk, "run_id": held_id},
+                    )
+                ).scalar_one()
                 # A failed run binds nothing (`admit_against`), readable or not,
                 # and one this release cannot read is recorded failed here.
                 if isinstance(raw, dict) and _status_of(raw) != RunStatus.FAILED:
                     try:
                         existing = stored_run(raw)
                     except ValidationError as exc:
-                        logger.error(
-                            "run ledger: stored run %s is unreadable: %s", held.run_id, exc
-                        )
+                        logger.error("run ledger: stored run %s is unreadable: %s", held_id, exc)
                         reason = f"the stored run is unreadable: {exc}"
-                        await _put_record(conn, pk, held.run_id, _unreadable(raw, reason))
+                        await _put_record(conn, pk, held_id, _unreadable(raw, reason))
             admission = admit_against(existing, candidate, now=self._now())
             if admission.resumed:
                 return admission
@@ -196,7 +222,7 @@ class StudioRunLedger:
         return await self._column("retrievals", run_id)
 
     async def store_plan(self, revision: str, plan: JsonValue) -> None:
-        async with self._store.fenced(*self._segment()) as (conn, pk):
+        async with self._fenced() as (conn, pk):
             await conn.execute(
                 text(
                     "INSERT INTO run_plans (conversation, revision, plan) "
@@ -255,7 +281,7 @@ class StudioRunLedger:
 
     async def _fail_unreadable(self, reasons: dict[str, str]) -> None:
         """Record each stored run in `reasons` failed, with its reason."""
-        async with self._store.fenced(*self._segment()) as (conn, pk):
+        async with self._fenced() as (conn, pk):
             for run_id, reason in reasons.items():
                 raw = (
                     await conn.execute(
@@ -270,7 +296,7 @@ class StudioRunLedger:
                     await _put_record(conn, pk, run_id, _unreadable(raw, reason))
 
     async def record(self, run_id: str, change: RunChange) -> RunRecord:
-        async with self._store.fenced(*self._segment()) as (conn, pk):
+        async with self._fenced() as (conn, pk):
             raw = (
                 await conn.execute(
                     text(

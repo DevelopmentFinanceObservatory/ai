@@ -241,11 +241,10 @@ _secret NAME:
 # than through pydantic-settings, so .env has to be exported into the process.
 # That's what `uv run --env-file` does here.
 #
-# A DATABASE_URL in the environment or in .env points the harness at another
-# database; otherwise it uses `just pg-up`'s.
+# The harness runs on the database `_local-database-url` picks.
 #
 # Run the harness locally, with the MCP services mounted in-process
-dev: _check-env pg-up
+dev: _check-env
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -z "$(grep -s '^GOOGLE_API_KEY=' {{ENV_FILE}} | cut -d= -f2-)" ]; then
@@ -258,11 +257,28 @@ dev: _check-env pg-up
     echo "  presentation-mcp → http://localhost:{{PORT}}/mcp/presentation/mcp"
     echo "    (presentation-mcp fetches its release once at startup and mounts no tools"
     echo "     unless an apis instance with DFO_PRESENTATION_SURFACE=1 answers)"
-    if [ -z "${DATABASE_URL:-}" ] && [ -z "$(grep -s '^DATABASE_URL=' {{ENV_FILE}} | cut -d= -f2-)" ]; then
-        export DATABASE_URL="{{PG_URL}}"
+    database_url="$({{just_executable()}} --justfile {{justfile()}} _local-database-url)"
+    if [ -n "$database_url" ]; then
+        export DATABASE_URL="$database_url"
     fi
     PORT={{PORT}} PRESENTATION_PUBLIC_URL=http://localhost:{{PORT}}/mcp/presentation \
         PRESENTATION_RELEASE_REQUIRED=false uv run --env-file {{ENV_FILE}} harness-server
+
+# The database `dev` and `studio-live` run the harness on. Prints nothing when
+# the environment or {{ENV_FILE}} configures one, through DATABASE_URL or the
+# Cloud SQL Connector's SESSION_STORE_INSTANCE_CONNECTION_NAME, and Docker is
+# then not needed. Otherwise it starts `just pg-up`'s Postgres and prints its URL.
+_local-database-url:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    configured() {
+        [ -n "${!1:-}" ] || [ -n "$(grep -s "^$1=" {{ENV_FILE}} | cut -d= -f2-)" ]
+    }
+    if configured DATABASE_URL || configured SESSION_STORE_INSTANCE_CONNECTION_NAME; then
+        exit 0
+    fi
+    {{just_executable()}} --justfile {{justfile()}} pg-up >&2
+    printf '%s' "{{PG_URL}}"
 
 # Start the local Postgres (postgres:18-alpine on 127.0.0.1 only) and wait until it answers. Safe to repeat.
 pg-up:
@@ -301,7 +317,8 @@ apis-proxy:
 
 # Serve the studio surface against the real model and the real platform.
 # Needs GOOGLE_API_KEY in {{ENV_FILE}} and dfo-apis at DFO_APIS_URL (`just
-# apis-proxy`). Costs model spend on every turn.
+# apis-proxy`), and runs on the database `_local-database-url` picks. Costs
+# model spend on every turn.
 # A plan whose steps include an analysis verb runs and narrates its answer,
 # then cannot render a card: the platform refuses a frame_ref an analysis verb
 # minted. The turn still reaches `done` with the figures in prose.
@@ -315,6 +332,10 @@ studio-live: _check-env _check-apis
     echo "Live studio → http://localhost:{{PORT}}/api/studio/turn (any Bearer token)"
     echo "  platform   → {{DFO_APIS_URL}}"
     echo "  startup takes 15-20s while presentation-mcp fetches its release"
+    database_url="$({{just_executable()}} --justfile {{justfile()}} _local-database-url)"
+    if [ -n "$database_url" ]; then
+        export DATABASE_URL="$database_url"
+    fi
     DFO_APIS_URL={{DFO_APIS_URL}} SEED_FIXTURE_FRAMES=true PORT={{PORT}} \
         PRESENTATION_PUBLIC_URL=http://localhost:{{PORT}}/mcp/presentation \
         uv run --env-file {{ENV_FILE}} harness-server

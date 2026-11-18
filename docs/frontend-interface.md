@@ -12,7 +12,9 @@ frame and request. This document agrees with both.
 
 1. Put a `GOOGLE_API_KEY` in `.env` (`just env`) and start a local
    server against the real model and platform: `just studio-live`. Every
-   turn costs model spend.
+   turn costs model spend. The server stores conversations in Postgres:
+   the recipe starts a local one in Docker unless `.env` sets
+   `DATABASE_URL`.
 
 1. Send a turn and watch the stream:
 
@@ -626,8 +628,9 @@ the answer before it starts resuming, so retrying the identical body is
 safe. While the resumed stream from your first attempt is still running,
 on any instance, the retry answers 409 `transient_unavailable` with
 `retry_after_seconds`; once that stream is gone, the retry resumes the
-turn again on a fresh stream, with `seq` restarting 1000 higher than
-whatever the dead stream already sent. Retrying with a different
+turn again on a fresh stream, whose `seq` starts in the 256-number block
+after every block the dead stream reserved, so above anything it sent.
+Retrying with a different
 decision, payload or answers than the one that actually resumed answers 409
 `edit_conflict`.
 
