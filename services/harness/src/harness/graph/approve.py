@@ -28,7 +28,7 @@ from planner.plan import (
 from harness.decision_pick import decision_pick
 from harness.early_mint import EarlyMints
 from harness.graph.events import GraphEvent
-from harness.graph.state import APPROVE_PAUSE, readable_plan
+from harness.graph.state import APPROVE_PAUSE, APPROVED_RUN_KEY, readable_plan
 from harness.turn.node import Next, Node, NodeCtx, Pause
 
 logger = logging.getLogger(__name__)
@@ -99,6 +99,10 @@ def decide(
     the approval's lifetime runs. An answer with no such time approves
     nothing and routes `amend`, as one naming another revision does.
 
+    The answer names under `run_id` the run the studio admitted with the
+    approval, when it admitted one, and the approval keeps it for `execute`
+    under `APPROVED_RUN_KEY`.
+
     An answer carrying `switch` (`{"choice_id", "option_id"}`, a scope choice
     the user moved on the card) routes `switch` to the `switch` node
     (`harness.graph.switch`), which offers the revised plan back here. A
@@ -148,6 +152,8 @@ def decide(
     if approved is None:
         return Next("amend", {"plan": plan.model_dump(mode="json"), "answer": answer})
     ctx.state["plan"] = approved.model_dump_json()
+    run_id = answer.get("run_id")
+    ctx.state[APPROVED_RUN_KEY] = run_id if isinstance(run_id, str) else None
 
     async def record_approval() -> None:
         amended = approved.version > 1
@@ -162,11 +168,14 @@ def decide(
 
 def approved_plan(plan: PlannerPlan, answer: Mapping[str, Any]) -> PlannerPlan | None:
     """`plan` stamped approved as of the time `answer` gives, when `answer`,
-    one that switches nothing, approves it by `decide`'s rule: it names
-    `plan`'s revision and says under `at` when the user gave it. `None` for
-    an answer that approves nothing. The studio's interrupt route applies
-    the same rule to admit the approved plan's run in the save that records
-    the approval (`harness.studio`)."""
+    one that switches nothing, approves it by `decide`'s rule: `plan` awaits
+    approval, and the answer names its revision and says under `at` when the
+    user gave it. `None` for an answer that approves nothing, a plan already
+    answered included; it raises nothing. The studio's interrupt route
+    applies the same rule to admit the approved plan's run in the save that
+    records the approval (`harness.studio`)."""
+    if plan.status is not PlanStatus.PENDING_APPROVAL:
+        return None
     approved_at = _answered_at(answer)
     if answer.get("approved") != plan_revision(plan) or approved_at is None:
         return None

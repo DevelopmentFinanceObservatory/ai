@@ -37,7 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextlib import (
     suppress,
 )
@@ -51,7 +51,7 @@ from executor.ledger import (
     IdempotencyConflictError,
     submission_content,
 )
-from executor.run import ApprovedWork, approved_work
+from executor.run import UnrunnablePlan, approved_work, run_candidate
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
@@ -75,7 +75,7 @@ from harness.decision_pick import is_decision_choice
 from harness.early_mint import EarlyMints
 from harness.graph.approve import approved_plan
 from harness.graph.events import GraphEvent, StepProgress
-from harness.graph.execute import ledger_conversation
+from harness.graph.execute import ledger_conversation_id
 from harness.graph.interfaces import Executor
 from harness.graph.state import (
     APPLY_CHOICE_STATE_KEY,
@@ -142,7 +142,6 @@ from harness.turn.loop import (
     run_segment,
     stop_turn,
 )
-from harness.turn.node import TurnKey
 from harness.turn.store import Cursor, CursorStale, TurnStatus, TurnStore
 from harness.turn_budget import start_turn_budget
 from harness.turn_records import CHIP_STALE_NOTE, stored_choice
@@ -1317,46 +1316,49 @@ def _same_open_pause(before: Cursor | None, after: Cursor | None) -> bool:
 
 def _approval_admission(
     store: StudioStore,
-    cursor: Cursor | None,
+    state: Mapping[str, Any],
+    pending: _PendingInterrupt,
     *,
-    revision: str,
     at: datetime,
     principal: str,
     conversation_id: str,
 ) -> Callable[[AsyncConnection, int], Awaitable[None]] | None:
-    """The write that admits the run of the plan `cursor` holds, approved as
-    revision `revision` at `at`, for `StudioStore.save` to make in the
-    transaction that records the approval (`alongside`).
+    """The write that admits the run of the plan the turn's `state` holds,
+    approved through plan interrupt `pending` at `at`, for
+    `StudioStore.save` to make in the transaction that records the approval
+    (`alongside`). It names the run on `pending` (`admitted_run`), which the
+    same save stores, so the answer to `approve` names it on this attempt and
+    on every retry resuming it.
 
     The plan is the one `approve.decide` reads from the same cursor, and
     approved by the same rule (`approved_plan`); its run is the candidate
-    `execute_approved_plan` builds (`approved_work`), stored with its plan,
-    as `execute` stores it (`store_run_plan`), and admitted by the same rule
-    (`harness.run_ledger.admit_on`). So `execute` finds the run its key names
-    and carries it on, and a turn that ends before `execute` leaves the run
-    for the next turn's `seed`. None when there is nothing to admit: no plan
-    the cursor holds that this release reads, or one the answer does not
-    approve or `approved_work` refuses, which `execute` refuses in turn.
+    `execute_approved_plan` builds (`approved_work`, `run_candidate`), stored
+    with its plan, as `execute` stores it (`store_run_plan`), and admitted by
+    the same rule (`harness.run_ledger.admit_on`). So `execute` finds the
+    run its key names and carries it on, and a turn that ends before
+    `execute` leaves the run for the next turn's `seed`. None when there is
+    nothing to admit: no plan the state holds that this release reads, or
+    one the answer does not approve, a plan already approved among them, or
+    `approved_work` finds nothing to run for. `decide` and `execute` then
+    report it in the turn. It raises nothing.
 
     A key that names a run of other work (`IdempotencyConflictError`), or an
     approval already expired, admits nothing in a savepoint the save
     survives, and `execute` surfaces it. A database fault fails the save,
     which then records neither the approval nor the run."""
-    raw = cursor.state.get("plan") if cursor is not None else None
+    raw = state.get("plan")
     plan = stored_plan(raw if isinstance(raw, str) else None, state_key="plan")
-    if plan is None or cursor is None:
+    if plan is None:
         return None
-    approved = approved_plan(plan, {"approved": revision, "at": at.isoformat()})
+    approved = approved_plan(plan, {"approved": pending.plan_revision, "at": at.isoformat()})
     if approved is None:
         return None
     work = approved_work(
         approved,
         approver=principal,
-        conversation_id=ledger_conversation(
-            TurnKey(principal=principal, conversation_id=conversation_id, turn_index=0)
-        ),
+        conversation_id=ledger_conversation_id(principal, conversation_id),
     )
-    if not isinstance(work, ApprovedWork):
+    if isinstance(work, UnrunnablePlan):
         return None
     plan_json = approved.model_dump_json()
 
@@ -1365,20 +1367,27 @@ def _approval_admission(
         try:
             async with conn.begin_nested():
                 await store_plan_on(conn, pk, plan_revision(approved), plan_json)
-                await admit_on(
+                admission = await admit_on(
                     conn,
                     pk,
-                    work.candidate(now=now),
+                    run_candidate(
+                        work.submission,
+                        authorisation=work.authorisation,
+                        idempotency_key=work.idempotency_key,
+                        now=now,
+                    ),
                     submission=submission_content(work.submission),
                     now=now,
                 )
         except (IdempotencyConflictError, AuthorisationExpiredError) as exc:
             logger.warning(
                 "studio: the approval of revision %s in conversation %s admits no run: %s",
-                revision,
+                pending.plan_revision,
                 conversation_id,
                 exc,
             )
+            return
+        pending.admitted_run = admission.run.run_id
 
     return admit
 
@@ -2119,10 +2128,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     # below admits the run `execute` would, so a client
                     # that leaves at any point after it has the plan carried
                     # on by the next turn's `seed`.
+                    # A first answer answers the open pause on the claimed cursor.
+                    assert cursor is not None
                     admission = _approval_admission(
                         studio.store,
-                        cursor,
-                        revision=pending.plan_revision,
+                        cursor.state,
+                        pending,
                         at=record.at,
                         principal=principal,
                         conversation_id=body.conversation_id,
@@ -2224,6 +2235,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # retry resuming the same answer later approves as of the same
                 # moment. The graph's `approve` node approves nothing without it.
                 answer = {"approved": pending.plan_revision}
+                if pending.admitted_run is not None:
+                    # The run the approval's save admitted, for `execute`.
+                    answer["run_id"] = pending.admitted_run
                 recorded = next(
                     (
                         r

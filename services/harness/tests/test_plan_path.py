@@ -34,7 +34,7 @@ from harness.conversation import current_conversation_key
 from harness.graph import plan_done as plan_done_module
 from harness.graph.approve import APPROVE_MESSAGE
 from harness.graph.events import StepProgress
-from harness.graph.execute import ledger_conversation
+from harness.graph.execute import ledger_conversation_id
 from harness.graph.plan_done import (
     HandBack,
     StepSummary,
@@ -54,7 +54,6 @@ from harness.sentences import DECLINE_REASONS
 from harness.studio_state import ConversationState, SegmentLost
 from harness.turn.events import NodeDone, Paused
 from harness.turn.loop import Outcome, run_segment
-from harness.turn.node import TurnKey
 from harness.turn.store import TurnStatus
 from harness.turn_records import PlanAsk, PlanRecord
 from planner.plan import AskAnswer, Decline, Plan, PlanStatus, UnsupportedOperation, load_asks
@@ -377,10 +376,10 @@ async def test_the_approved_plans_run_is_kept_in_the_conversations_ledger_under_
     assert run is not None and run.status is RunStatus.COMPLETED
     assert run.idempotency_key == idempotency_key(
         caller=PRINCIPAL,
-        conversation_id=ledger_conversation(TurnKey(PRINCIPAL, CONVERSATION, 1)),
+        conversation_id=ledger_conversation_id(PRINCIPAL, CONVERSATION),
         task=f"plan:{card.payload['revision']}",
     )
-    assert ledger_conversation(TurnKey(PRINCIPAL, CONVERSATION, 1)) == f"{PRINCIPAL}/{CONVERSATION}"
+    assert ledger_conversation_id(PRINCIPAL, CONVERSATION) == f"{PRINCIPAL}/{CONVERSATION}"
 
 
 class _ProcessDiedError(BaseException):

@@ -344,6 +344,8 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             ),
             "card_new_plan": bool(p.card and p.card.new_plan),
             "approved_sent": p.approved_sent,
+            # Written only when set, so an entry with none stores as before.
+            **({"admitted_run": p.admitted_run} if p.admitted_run is not None else {}),
         }
         for interrupt_id, p in pending.items()
     }
@@ -377,6 +379,7 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
             else None
         ),
         approved_sent=bool(entry.get("approved_sent")),
+        admitted_run=entry.get("admitted_run"),
     )
     if "questions" in entry:
         pending.questions = tuple(
@@ -1284,12 +1287,15 @@ class StudioStore:
         (`StopState.live`), unless `stopping`: the claim then acts on the
         Stop, closing the turn `cancelled`.
 
-        `alongside`, when given, runs after the fields are written, on the
-        save's connection and in its transaction, with the conversation's
-        row id, the row still locked: what it writes commits with the save
-        or not at all, and anything it raises rolls the save back and
-        propagates. It runs even when no field changed. The interrupt route
-        admits an approved plan's run through it (`harness.run_ledger.admit_on`).
+        `alongside`, when given, runs on the save's connection and in its
+        transaction, with the conversation's row id, once the row is locked
+        and the checks above passed and before the fields are written: what
+        it writes commits with the save or not at all, and anything it raises
+        rolls the save back and propagates. It may change the durable fields
+        of the state being saved, the segment excepted, and the save writes
+        them. It runs even when no field changed. The interrupt route admits
+        an approved plan's run through it (`harness.run_ledger.admit_on`) and
+        records the run on the pending interrupt.
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
@@ -1316,13 +1322,14 @@ class StudioStore:
                     lease_live = stored_lease is not None and stored_lease.expires_at > row.db_now
                     if (await _stop_state(conn, row, lease_live=lease_live)).live:
                         raise StopPending(conversation_id)
+                if alongside is not None:
+                    await alongside(conn, entry.pk)
+                    delta = _changed_since(_serialize_durable(target), entry.baseline)
                 version = (
                     await self._write(conn, entry.pk, delta, seq_reserved=reserved)
                     if delta
                     else row.version
                 )
-                if alongside is not None:
-                    await alongside(conn, entry.pk)
             entry.version = version
             entry.baseline.update(delta)
             self._take_draft(entry, target)

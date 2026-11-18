@@ -1178,23 +1178,23 @@ class ApprovedWork:
     authorisation: PlanApproval
     idempotency_key: str
 
-    def candidate(self, *, now: datetime) -> RunRecord:
-        """The run a ledger admits for this work, minted at `now` (`run_candidate`)."""
-        return run_candidate(
-            self.submission,
-            authorisation=self.authorisation,
-            idempotency_key=self.idempotency_key,
-            now=now,
-        )
+
+@dataclass(frozen=True, kw_only=True)
+class UnrunnablePlan:
+    """An approved plan `approved_work` finds nothing to run for: the `plan`
+    as its rules leave it and the `refused` outcome it answers with."""
+
+    plan: Plan
+    refused: Refused
 
 
 def approved_work(
     plan: Plan, *, approver: str, conversation_id: str
-) -> ApprovedWork | tuple[Plan, Refused]:
+) -> ApprovedWork | UnrunnablePlan:
     """The work approved `plan` runs as under `execute_approved_plan`'s rules,
-    or the plan as those rules leave it and the `Refused` it cannot run
-    under: `NOT_APPROVED` for a plan that is not `APPROVED`, `STALE_REVISION`
-    for one whose content no longer hashes to its approved revision, and
+    or the `UnrunnablePlan` it cannot run as: `NOT_APPROVED` for a plan that
+    is not `APPROVED` or carries no workflow, `STALE_REVISION` for one whose
+    content no longer hashes to its approved revision, and
     `AUTHORISATION_EXPIRED`, the plan failed, for one with no approval time.
     Its authorisation is a `PlanApproval` of the approved revision by
     `approver` over every source the workflow retrieves, in force for
@@ -1202,27 +1202,46 @@ def approved_work(
     revision for `approver` in `conversation_id`. Pure: it reads and writes
     no ledger, so the studio's interrupt route admits the same run in the
     save that records the approval, and `execute_approved_plan` then
-    carries that run on."""
+    carries that run on. It raises nothing."""
     if plan.status is not PlanStatus.APPROVED:
-        return plan, Refused(
-            revision=plan_revision(plan),
-            refusal=RefusalKind.NOT_APPROVED,
-            detail=f"this plan is {plan.status.value}, not approved; nothing runs",
+        return UnrunnablePlan(
+            plan=plan,
+            refused=Refused(
+                revision=plan_revision(plan),
+                refusal=RefusalKind.NOT_APPROVED,
+                detail=f"this plan is {plan.status.value}, not approved; nothing runs",
+            ),
+        )
+    if plan.workflow is None:
+        return UnrunnablePlan(
+            plan=plan,
+            refused=Refused(
+                revision=plan_revision(plan),
+                refusal=RefusalKind.NOT_APPROVED,
+                detail="this plan carries no workflow; nothing runs",
+            ),
         )
     try:
         running = plan.start_execution()
     except ValueError as exc:
         # Approved as different content: nothing runs.
-        return plan, Refused(
-            revision=plan_revision(plan), refusal=RefusalKind.STALE_REVISION, detail=str(exc)
+        return UnrunnablePlan(
+            plan=plan,
+            refused=Refused(
+                revision=plan_revision(plan), refusal=RefusalKind.STALE_REVISION, detail=str(exc)
+            ),
         )
-    assert running.workflow is not None, "an EXECUTING plan always carries a workflow"
-    assert running.approved_revision is not None, "an EXECUTING plan was approved"
+    assert running.workflow is not None  # checked on `plan` above
+    # `start_execution` refuses a plan whose content does not hash to it.
+    assert running.approved_revision is not None
     if running.approved_at is None:
-        return running.fail(), Refused(
-            revision=plan_revision(running),
-            refusal=RefusalKind.AUTHORISATION_EXPIRED,
-            detail="this plan carries no approval time, so it needs approving again",
+        return UnrunnablePlan(
+            plan=running.fail(),
+            refused=Refused(
+                revision=plan_revision(running),
+                refusal=RefusalKind.AUTHORISATION_EXPIRED,
+                detail="this plan carries no approval time, so it needs approving again",
+            ),
         )
     # The plan validated its own workflow and requirements.
     submission = Submission.model_construct(
@@ -1320,8 +1339,8 @@ async def execute_approved_plan(
             the run (`execute_authorised`).
     """
     work = approved_work(plan, approver=approver, conversation_id=conversation_id)
-    if not isinstance(work, ApprovedWork):
-        return work
+    if isinstance(work, UnrunnablePlan):
+        return work.plan, work.refused
     running = work.running
     ledger = ledger if ledger is not None else InMemoryRunLedger()
     outcome = await execute_authorised(
