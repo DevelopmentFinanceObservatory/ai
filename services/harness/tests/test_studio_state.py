@@ -2401,7 +2401,9 @@ async def _streaming_turn(
     return store, segment_id
 
 
-@pytest.mark.parametrize("write", ["renew", "release", "claim-resume", "claim-next-turn"])
+@pytest.mark.parametrize(
+    "write", ["renew", "release", "drop-lease", "claim-resume", "claim-next-turn"]
+)
 async def test_the_next_lease_write_stamps_a_stop_with_the_turn_index_it_found(
     new_store, clock, pg_engine, write: str
 ) -> None:
@@ -2417,6 +2419,8 @@ async def test_the_next_lease_write_stamps_a_stop_with_the_turn_index_it_found(
             assert (await store.renew("principal", CONVERSATION, segment_id)).stop_id is not None
         case "release":
             await store.release("principal", CONVERSATION, segment_id)
+        case "drop-lease":
+            await store.drop_lease("principal", CONVERSATION, segment_id)
         case _:
             await clock.advance(studio_state.SEGMENT_TTL_S + 1)
             other = new_store(clock=clock)

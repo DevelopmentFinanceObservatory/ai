@@ -533,11 +533,12 @@ def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) 
             label_refs=no_label_refs,
         )
 
+    store = StudioStore(engine)
     studio = StudioRunner(
         create_graph=create_graph,
         executor=LoggingExecutor(log=log),
-        store=StudioStore(engine),
-        turns=TurnStore(engine),
+        store=store,
+        turns=TurnStore(engine, clock=store.now),
         tool_surface=surface,
     )
     app = FastAPI()

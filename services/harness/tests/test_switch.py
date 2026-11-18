@@ -1364,6 +1364,33 @@ async def test_a_stopped_revision_ends_the_switch_as_stopped_however_it_unwinds(
     assert not ctx.stop.armed
 
 
+async def test_no_stop_is_taken_once_the_revision_has_finished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The revision finishes first, and a Stop arrives while the switch
+    awaits its cleanup: the scope has closed, so the Stop is not taken (it
+    is the turn's), and the switch applies its revision."""
+    ctx = node_ctx()
+    real_wait = asyncio.wait
+    taken: list[bool] = []
+
+    async def stop_during_cleanup(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("return_when") is None:
+            # The cleanup's wait on what the race left unfinished.
+            taken.append(ctx.stop.take("stop_1"))
+        return await real_wait(*args, **kwargs)
+
+    monkeypatch.setattr(switch_module.asyncio, "wait", stop_during_cleanup)
+
+    async def revision() -> dict[str, Any]:
+        return {"revised": True}
+
+    revised = await asyncio.wait_for(switch_module._unless_stopped(ctx, revision()), timeout=5)
+
+    assert taken == [False]
+    assert revised == {"revised": True}
+
+
 async def test_a_replan_that_asked_in_the_same_wait_as_the_stop_stays_paused() -> None:
     """A pick's replan ends on the planner's question to the user as the Stop
     lands. The question is the user's to answer, so `_unless_stopped` answers

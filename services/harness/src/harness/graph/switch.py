@@ -331,12 +331,14 @@ async def _unless_stopped(
 
     The revision runs while the node holds the turn's `StopScope` open
     (`harness.turn.node.NodeCtx.stop`), so the first Stop sets the scope's
-    event and ends the revision, not the turn. The scope closes before this
-    returns, so a later Stop ends the turn. A stopped revision is cancelled and awaited without taking its outcome, so
-    a revision that ends in any way once the Stop came, an error its cleanup
-    raises included, ends stopped, as does one that finishes in the same wait
-    as the Stop. The `switch` node puts the state it wrote back, so the plan
-    stands unchanged. A cancellation of the node itself,
+    event and ends the revision, not the turn. The scope closes as soon as
+    the revision or the Stop ends the wait, before any cleanup, so a Stop
+    the scope took always ends the switch stopped and a later one ends the
+    turn. A stopped revision is cancelled and awaited without taking its
+    outcome, so a revision that ends in any way once the Stop came, an error
+    its cleanup raises included, ends stopped, as does one that finishes in
+    the same wait as the Stop. The `switch` node puts the state it wrote
+    back, so the plan stands unchanged. A cancellation of the node itself,
     while the revision unwinds, still cancels the node. A pick's replan
     that ended on the planner's question to the user (`{"asked": ...}`,
     `harness.graph.interfaces.PlannerModel`) stays paused though the Stop came in
@@ -347,25 +349,31 @@ async def _unless_stopped(
         SwitchFailedError: Under `SWITCH_CANCELLED` when the user stopped
             the switch, else as `revision` raises it.
     """
-    async with ctx.stop.open() as stop:
-        running = asyncio.ensure_future(revision)
-        stopped = asyncio.ensure_future(stop.wait())
-        racing: set[asyncio.Future[Any]] = {running, stopped}
-        finished: set[asyncio.Future[Any]] = set()
-        try:
-            finished, _ = await asyncio.wait(racing, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            unfinished = {waiting for waiting in (running, stopped) if not waiting.done()}
-            for waiting in unfinished:
-                waiting.cancel()
-            if unfinished:
-                # Raises nothing the tasks raise. A cancellation of the node raises.
-                await asyncio.wait(unfinished)
-    if (
-        running in finished
-        and not running.cancelled()
-        and (stopped not in finished or _asked(running))
-    ):
+    running = asyncio.ensure_future(revision)
+    stopped: asyncio.Future[Any] | None = None
+    finished: set[asyncio.Future[Any]] = set()
+    was_stopped = False
+    try:
+        # The scope closes as the wait returns, before any cleanup awaits, so
+        # a Stop either lands while the revision can still be stopped or
+        # finds the scope closed and ends the turn.
+        async with ctx.stop.open() as stop:
+            stopped = asyncio.ensure_future(stop.wait())
+            racing: set[asyncio.Future[Any]] = {running, stopped}
+            try:
+                finished, _ = await asyncio.wait(racing, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                was_stopped = stop.is_set()
+    finally:
+        unfinished = {
+            waiting for waiting in (running, stopped) if waiting is not None and not waiting.done()
+        }
+        for waiting in unfinished:
+            waiting.cancel()
+        if unfinished:
+            # Raises nothing the tasks raise. A cancellation of the node raises.
+            await asyncio.wait(unfinished)
+    if running in finished and not running.cancelled() and (not was_stopped or _asked(running)):
         return running.result()
     error = None if running.cancelled() else running.exception()
     if error is not None:

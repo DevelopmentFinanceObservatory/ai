@@ -215,6 +215,28 @@ async def _close_on_error(
     return segment
 
 
+async def _close_on_taken_stop(
+    store: TurnStore, segment: Segment, *, key: TurnKey, segment_id: str
+) -> Segment:
+    """Close the turn `cancelled` on the Stop its `StopScope` took, whose
+    pause never came, without writing the node's outcome. A close the store
+    refuses for any reason but those `_NOT_THE_TURNS` names is logged and
+    leaves the turn running with the Stop live, for the release of the
+    lease to close (`StudioStore.release`); the segment ends `unclosed`."""
+    try:
+        segment.cursor = await store.finish(
+            segment.cursor, segment_id=segment_id, status=TurnStatus.CANCELLED
+        )
+    except _NOT_THE_TURNS:
+        raise
+    except Exception:
+        logger.exception("turn %s: closing the turn on the Stop its scope took failed", key)
+        segment.outcome = Outcome.UNCLOSED
+        return segment
+    segment.outcome = Outcome.CANCELLED
+    return segment
+
+
 async def _after_commit(ctx: NodeCtx[Any], node: str) -> None:
     """Run the node's `after_commit` work. A failure is logged: the write
     before it holds the node's outcome, and a crash between the two loses
@@ -405,6 +427,12 @@ async def drive[E](
     value JSON cannot hold, a database error) closes the turn `failed` at
     the node whose outcome it was writing.
 
+    A Stop the turn's `StopScope` took (`StopScope.taken`) must be recorded
+    by a pause of the node that took it or of the node its edge leads to.
+    When the node that took it ends the turn, or the next node returns
+    anything but a pause, the turn closes `cancelled` in place of that
+    node's write.
+
     Raises:
         ValueError: the cursor is paused and no `answer` was given.
         PauseNotOpen: `answer` names a pause the turn does not have open.
@@ -452,6 +480,7 @@ async def drive[E](
             emit=emit,
             stop=stop,
         )
+        taken_before = stop.taken
         try:
             if owed is not None and target.resume is not None:
                 result = await target.resume(ctx, node_input, owed)
@@ -462,6 +491,15 @@ async def drive[E](
             logger.exception("turn %s: node %s failed", key, node)
             return await close(TurnStatus.FAILED, node, exc)
         owed = None
+        if (
+            stop.taken is not None
+            and not isinstance(result, Pause)
+            and (stop.taken == taken_before or following == END)
+        ):
+            # The scope's Stop is recorded by a pause of the node that took it
+            # or of the node its edge leads to (a switch's offer). A turn
+            # that goes past that without pausing, or ends, is stopped.
+            return await _close_on_taken_stop(store, segment, key=key, segment_id=segment_id)
 
         interrupt_id = _wire_id("int")
         if isinstance(result, Pause):
@@ -638,8 +676,10 @@ async def run_segment[E](
     a node holds the turn's `StopScope` armed, the first Stop it reports
     sets the scope's event and the scope keeps its id (`StopScope.take`),
     with no write: the node goes on, and the turn's next pause write records
-    the id taken (`TurnStore.pause`), so renewals stop reporting it. Until
-    then the Stop stays live: a close of the turn ends it, and a client
+    the id taken (`TurnStore.pause`), so renewals stop reporting it. That
+    pause is the node's own or that of the node its edge leads to (a
+    switch's offer); a turn that goes further, or ends, without it closes
+    `cancelled` (`drive`). Until then the Stop stays live, and a client
     that leaves first leaves it to the release of the lease. Any other Stop
     cancels the node, leaves no task of the segment running, and
     closes the turn `cancelled`. One a renewal reads after the drive

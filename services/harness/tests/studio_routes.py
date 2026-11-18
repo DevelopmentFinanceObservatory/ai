@@ -178,7 +178,7 @@ def orchestrator_app(
         create_graph=create_graph,
         executor=executor or ScriptedExecutor(),
         store=store,
-        turns=TurnStore(store.engine),
+        turns=TurnStore(store.engine, clock=store.now),
         tool_surface=tool_surface,
         edit_model=edit_model,
         early_mints=early_mints,

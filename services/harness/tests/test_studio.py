@@ -5829,6 +5829,49 @@ async def test_a_lock_just_handed_to_a_waiter_bounds_the_cancels_wait() -> None:
     lock.release()
 
 
+async def test_a_claim_ends_the_cancels_wait_for_a_lock_just_handed_to_a_waiter() -> None:
+    """The lock was just handed to a waiting request, so it reads as free;
+    that request's claim commits while `/cancel` waits behind it, and the
+    wait ends on the claim, well before its deadline."""
+    lock = asyncio.Lock()
+    claimed = asyncio.Event()
+    await lock.acquire()
+    waiter = asyncio.ensure_future(lock.acquire())
+    await asyncio.sleep(0)
+    lock.release()
+    assert not lock.locked()
+
+    asyncio.get_running_loop().call_later(0.05, claimed.set)
+
+    took = await asyncio.wait_for(studio_module._lock_or_claim(lock, claimed, timeout=5), timeout=1)
+
+    assert not took
+    await waiter
+    lock.release()
+
+
+async def test_a_cancel_whose_claim_keeps_losing_backs_off_until_its_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/cancel` finds no live lease and its own claim loses each time: it
+    decides again after a backoff, as the store's retries do, and answers
+    the retryable 503 at `CANCEL_LOCK_WAIT_S`."""
+    monkeypatch.setattr(studio_module, "CANCEL_LOCK_WAIT_S", 1.0)
+    attempts: list[float] = []
+
+    async def loses(*_args: Any, **_kwargs: Any) -> Any:
+        attempts.append(time.monotonic())
+        raise studio_module._ClaimLost
+
+    monkeypatch.setattr(studio_module, "_stop_under_lock", loses)
+    async with _client(_app()) as client:
+        cancel = await _post_stop(client)
+
+    assert cancel.status_code == 503
+    assert cancel.json()["retry"] == "retry_after_delay"
+    assert 2 <= len(attempts) <= 4
+
+
 async def test_a_cancel_cancelled_after_it_took_the_lock_lets_the_lock_go() -> None:
     """`/cancel` waits for the conversation lock, the lock passes to it, and
     the request is cancelled before it runs again: the lock is released, so
@@ -6728,6 +6771,112 @@ async def test_a_cancel_whose_claim_loses_to_another_instance_records_the_stop_o
         flagged = (await conn.execute(text("SELECT lease_cancel FROM conversations"))).scalar_one()
     assert flagged
     assert await _turn_statuses() == ["paused"]
+
+
+@pytest.mark.parametrize("fails", ["record", "turn"], ids=["record-save-fails", "turn-close-fails"])
+async def test_a_release_whose_close_on_a_stop_fails_leaves_the_stop_for_the_next_claim(
+    fails: str,
+) -> None:
+    """A Stop commits before the release of a stream paused on a plan, and
+    one of the two writes that close the turn fails: the conversation's
+    record and pending interrupts, or the turn's cursor. The client is sent
+    no `cancelled` frame, the turn stays open with its Stop live, and the
+    next `/turn` closes it `cancelled` and streams."""
+    app = _app(*_plan(), _text("Hello."))
+    store, turns = app.state.studio.store, app.state.studio.turns
+    real_release, real_checkpoint, real_finish = store.release, store.checkpoint, turns.finish
+    sent: list[httpx2.Response] = []
+    closing = [False]
+
+    async def checkpoint(*args: Any, **kwargs: Any) -> Any:
+        if fails == "record" and closing[0]:
+            closing[0] = False
+            raise ConnectionError("the database is unreachable")
+        return await real_checkpoint(*args, **kwargs)
+
+    async def finish(cursor: Any, **kwargs: Any) -> Any:
+        if fails == "turn" and closing[0] and kwargs.get("status") is TurnStatus.CANCELLED:
+            closing[0] = False
+            raise ConnectionError("the database is unreachable")
+        return await real_finish(cursor, **kwargs)
+
+    store.checkpoint, turns.finish = checkpoint, finish
+    async with _client(app) as client:
+
+        async def stopped_first(*args: Any, **kwargs: Any) -> Any:
+            if sent:
+                return await real_release(*args, **kwargs)
+            sent.append(await _post_stop(client))
+            kept = await real_release(*args, **kwargs)
+            closing[0] = kept
+            return kept
+
+        store.release = stopped_first
+        frames = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        store.release = real_release
+        assert not closing[0]
+        live = await _stop_live()
+        statuses = await _turn_statuses()
+        stored = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+        assert stored is not None
+        after = await _stream(client, "/api/studio/turn", _turn_body("hi"))
+
+    assert sent[0].status_code == 204
+    assert _events(frames)[-1] == "plan.proposed"
+    assert live
+    assert statuses == ["paused"]
+    # Whichever write failed, the record and the turn agree once the Stop is
+    # acted on: the record is closed, or still open for the claimant to close.
+    assert bool(stored.pending) is (fails == "record")
+    assert _events(after)[-1] == "done"
+    assert await _turn_statuses() == ["cancelled", "done"]
+    assert store.current(PRINCIPAL, CONVERSATION).turns[0]["error"] == "cancelled"
+    assert not await _stop_live()
+
+
+@pytest.mark.parametrize("fails", ["record", "turn"], ids=["record-save-fails", "turn-close-fails"])
+async def test_a_cancel_whose_close_fails_answers_503_and_leaves_the_stop_live(
+    fails: str,
+) -> None:
+    """`/cancel` finds no live lease on a paused turn and one of the two
+    writes that close it fails: it answers a retryable 503, not 204, and
+    leaves a Stop live, so the next `/turn` closes the turn `cancelled`
+    before it streams."""
+    app = _app(*_plan(), _text("Hello."))
+    store, turns = app.state.studio.store, app.state.studio.turns
+    real_save, real_finish = store.save, turns.finish
+    claimed = [False]
+
+    async def save(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("stopping"):
+            claimed[0] = True
+        elif fails == "record" and claimed[0]:
+            claimed[0] = False
+            raise ConnectionError("the database is unreachable")
+        return await real_save(*args, **kwargs)
+
+    async def finish(cursor: Any, **kwargs: Any) -> Any:
+        if fails == "turn" and claimed[0] and kwargs.get("status") is TurnStatus.CANCELLED:
+            claimed[0] = False
+            raise ConnectionError("the database is unreachable")
+        return await real_finish(cursor, **kwargs)
+
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        store.save, turns.finish = save, finish
+        refused = await _post_stop(client)
+        store.save, turns.finish = real_save, real_finish
+        live = await _stop_live()
+        statuses = await _turn_statuses()
+        after = await _stream(client, "/api/studio/turn", _turn_body("hi"))
+
+    assert refused.status_code == 503
+    assert refused.json()["retry"] == "retry_after_delay"
+    assert live
+    assert statuses == ["paused"]
+    assert _events(after)[-1] == "done"
+    assert await _turn_statuses() == ["cancelled", "done"]
+    assert store.current(PRINCIPAL, CONVERSATION).turns[0]["error"] == "cancelled"
 
 
 class _HangingEditModel:

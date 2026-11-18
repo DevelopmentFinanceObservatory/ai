@@ -635,6 +635,52 @@ async def test_the_pause_after_a_scope_took_a_stop_records_it_taken(
     assert not await lease_b.stop_live(PRINCIPAL, CONVERSATION)
 
 
+@pytest.mark.parametrize("after", ["work", "end"], ids=["goes-on-to-work", "ends-the-turn"])
+async def test_a_stop_the_scope_took_closes_the_turn_when_no_pause_records_it(
+    pg_engine: AsyncEngine, clock: StoreClock, after: str
+) -> None:
+    """The scope takes the first Stop, and the turn does not pause next: the
+    node that took it ends the turn, or the node its edge leads to returns
+    on along another edge. The loop closes the turn `cancelled` in place of
+    that write, and runs nothing past it."""
+    store = TurnStore(pg_engine)
+    lease_a, lease_b = await _instance(pg_engine, clock), await _instance(pg_engine, clock)
+    segment_id = await _claim(lease_a)
+    switching = asyncio.Event()
+    ran: list[str] = []
+
+    async def switch(ctx: NodeCtx, node_input: Any) -> Next:
+        async with ctx.stop.open() as stopped:
+            switching.set()
+            await stopped.wait()
+        return Next("on")
+
+    async def work(ctx: NodeCtx, node_input: Any) -> Next:
+        ran.append("work")
+        return Next("on")
+
+    graph = Graph(
+        start="switch",
+        nodes={
+            "switch": Node(run=switch),
+            "work": Node(run=work),
+            "after": _stays("after", ran=ran),
+        },
+        edges={("switch", "on"): END if after == "end" else "work", ("work", "on"): "after"},
+    )
+    running = asyncio.create_task(
+        _segment(store, lease_a, await _open(store, segment_id, graph), segment_id, graph, [])
+    )
+    await switching.wait()
+    assert await lease_b.request_cancel(PRINCIPAL, CONVERSATION)
+    segment = await asyncio.wait_for(running, 5)
+
+    assert segment.outcome is Outcome.CANCELLED
+    assert segment.cursor.status is TurnStatus.CANCELLED
+    assert ran == ([] if after == "end" else ["work"])
+    assert not await lease_b.stop_live(PRINCIPAL, CONVERSATION)
+
+
 async def _at(store: TurnStore, node: str) -> bool:
     cursor = await store.open_cursor(PRINCIPAL, CONVERSATION)
     return cursor is not None and cursor.node == node
@@ -1123,7 +1169,9 @@ async def test_a_stop_whose_renewal_lost_its_acknowledgement_still_reaches_the_n
     segment = await asyncio.wait_for(running, 5)
 
     assert not lease_a.lose_next
-    assert segment.outcome is Outcome.DONE
+    # The scope took the Stop, and the turn ended with no pause to record
+    # it, so the turn closes on it.
+    assert segment.outcome is Outcome.CANCELLED
 
 
 async def test_a_cursor_owing_an_answer_the_store_lacks_closes_the_turn_failed(

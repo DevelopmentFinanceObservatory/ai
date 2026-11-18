@@ -30,9 +30,10 @@ different groups never conflict:
   fenced on the segment and its lease being live.
 
 A Stop names a turn. The next write of the lease columns after
-`request_cancel` (a renewal, a claim save, a release) clears `lease_cancel`
-and records the Stop as a fresh `stop_id` naming the row's turn index as
-stored before that write (`stop_turn`), in the same statement. Whether a
+`request_cancel` (a renewal, a claim save, a release, a dropped lease)
+clears `lease_cancel` and records the Stop as a fresh `stop_id` naming the
+row's turn index as stored before that write (`stop_turn`), in the same
+statement. Whether a
 Stop is live for the row's turn is one predicate (`StopState.live`); every
 reader locks the row first and reads the turn's cursor in a later
 statement, so it sees every write committed before its lock. Closing the
@@ -1737,7 +1738,8 @@ class StudioStore:
     ) -> None:
         """Clear the stored lease when it is still `segment_id`, and nothing
         else: one conditional update of the lease columns, which leaves the
-        turn state and its version as the claim save stored them. The
+        turn state and its version as the claim save stored them and records
+        a Stop set on the lease (`_STAMP_STOP`). The
         release of a claim whose stream never started (a route failing
         between its claim save and its response), so a retry of the same
         request claims at once and finds what the claim save stored, a
@@ -1764,7 +1766,7 @@ class StudioStore:
                     await conn.execute(
                         text(
                             "UPDATE conversations SET lease_segment_id = NULL, "
-                            "lease_owner = NULL, lease_expires_at = NULL "
+                            f"lease_owner = NULL, lease_expires_at = NULL, {_STAMP_STOP} "
                             "WHERE principal = :principal "
                             "AND conversation_id = :conversation_id "
                             "AND lease_segment_id = :segment_id"
@@ -1773,6 +1775,7 @@ class StudioStore:
                             "principal": principal,
                             "conversation_id": conversation_id,
                             "segment_id": segment_id,
+                            "minted": _wire_id("stop"),
                         },
                     )
                 if entry.held == segment_id:
