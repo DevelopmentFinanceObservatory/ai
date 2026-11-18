@@ -163,7 +163,10 @@ def _segment_state(*, recorded: str | None = None, paused: bool = False) -> Conv
             _segment_state(recorded="cancelled"), "saved", ("cancelled", "WARNING"), id="cancelled"
         ),
         pytest.param(
-            _segment_state(recorded="state_not_saved"), "saved", ("failed", "ERROR"), id="failed"
+            _segment_state(recorded="state_not_saved"),
+            "saved",
+            ("state_not_saved", "ERROR"),
+            id="recorded-error",
         ),
         pytest.param(_segment_state(paused=True), "saved", ("paused", "DEFAULT"), id="paused"),
         pytest.param(_segment_state(), "saved", ("failed", "ERROR"), id="left-running"),
@@ -188,8 +191,8 @@ def _segment_state(*, recorded: str | None = None, paused: bool = False) -> Conv
 def test_a_segment_s_span_status_names_how_the_segment_ended(
     state: ConversationState, ending: Any, status: tuple[str, str]
 ) -> None:
-    """A release that saved names how the turn stood; any other ending names
-    itself. Only a failure is an error."""
+    """A release that saved names how the turn stood, a recorded error by its
+    code; any other ending names itself. Only a failure is an error."""
     assert studio_state.segment_span_status(state, ending) == status
 
 

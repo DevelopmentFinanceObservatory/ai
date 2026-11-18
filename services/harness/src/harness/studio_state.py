@@ -563,6 +563,10 @@ class ConversationState:
     # stream last reported one (`take_unreported_removal`). Not durable.
     # Reset by `begin_turn`.
     _removal_unreported: bool = field(default=False, repr=False, compare=False)
+    # How this instance's current segment ended, as the first save that
+    # failed or its release decided it (`note_segment_ending`), read when its
+    # span ends (`end_segment_span`). Not durable.
+    segment_ending: SegmentEnding | None = field(default=None, repr=False, compare=False)
 
     def take_unreported_removal(self) -> bool:
         """Whether `remove_cards` changed the canvas since the last call: the
@@ -1038,10 +1042,15 @@ class ConversationState:
         self.latest_plan_version = None
         self.turn_choice_baseline = {}
 
-    def begin_turn(self) -> None:
+    def begin_turn(self) -> ClosedTurn | None:
         """Reset per-turn wire state. Abandons any pending interrupt: a fresh
         turn.request on a paused conversation ends the pause, and the paused
-        ADK invocation stays parked in its own per-turn session."""
+        ADK invocation stays parked in its own per-turn session. Returns the
+        previous turn when this closed it as `abandoned`, for the caller to
+        record its span once the new turn's claim commits
+        (`record_closed_turn_span`)."""
+        previous = ClosedTurn(self.trace_id, self.turn_user_message, "abandoned")
+        abandoned = None
         self.turn_index += 1
         self.seq = 0
         self.trace_id = _wire_id("tr")
@@ -1053,6 +1062,7 @@ class ConversationState:
             # pause, or a death no code path recorded). Its record keeps
             # what was asked, with the error marked as abandoned.
             self.close_turn(final_text=self.turn_final_text, error="abandoned")
+            abandoned = previous
         self.turn_user_message = ""
         self.turn_user_words = ""
         self.turn_final_text = ""
@@ -1064,17 +1074,31 @@ class ConversationState:
         self.turn_applied_choice = None
         self.turn_recorded = False
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
+        self.segment_ending = None
+        return abandoned
 
-    def end_segment_span(self, ending: SegmentEnding) -> bool:
+    def note_segment_ending(self, ending: SegmentEnding) -> None:
+        """Record how the current segment ended, unless something already
+        did: a checkpoint that lost the segment or could not reach the
+        database ends the stream as the user sees it, and the release that
+        follows keeps that ending."""
+        if self.segment_ending is None:
+            self.segment_ending = ending
+
+    def end_segment_span(self, ending: SegmentEnding | None = None) -> bool:
         """End this instance's span for the turn's segment, once, as the
-        segment ended (`segment_span_status`), with the turn's message and,
-        once the turn is recorded, its reply as the span's input and output.
-        Returns whether a span was open to end, for the caller to flush."""
+        segment ended (`segment_span_status`): `ending` when the caller names
+        it, else the one recorded (`note_segment_ending`), else `failed`.
+        The span carries the turn's message and, once the turn is recorded,
+        its reply as its input and output. Returns whether a span was open to
+        end, for the caller to flush."""
         span = self._telemetry_span
+        recorded = self.segment_ending
+        self.segment_ending = None
         if span is None:
             return False
         self._telemetry_span = None
-        status, level = segment_span_status(self, ending)
+        status, level = segment_span_status(self, ending or recorded or "failed")
         end_turn_span(
             span,
             request=self.turn_user_message,
@@ -1092,6 +1116,7 @@ class ConversationState:
         same trace."""
         if self._telemetry_span is None:
             self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
+            self.segment_ending = None
 
     def in_turn_span(self) -> AbstractContextManager[None]:
         """Make this segment's telemetry span current for a `with` block.
@@ -1162,37 +1187,77 @@ def make_canvas_cards(store: StudioStore) -> Any:
     return canvas_cards
 
 
-# How a segment ended on this instance, as its release or the request that
-# claimed it saw: its release saved the turn (`saved`), another instance had
-# taken the segment over (`segment_lost`), the database stayed unreachable
-# (`database_unavailable`), the save failed otherwise or the segment never
-# started streaming (`failed`), or the claim never committed (`not_started`).
+# How a segment ended on this instance: its release saved the turn
+# (`saved`), another instance had taken the segment over (`segment_lost`),
+# the database stayed unreachable (`database_unavailable`), the save failed
+# otherwise or the segment failed before streaming (`failed`), the request
+# was cancelled before streaming (`cancelled`), or the claim never committed
+# (`not_started`), or its span was still open when the next segment's claim
+# committed (`orphaned`).
 type SegmentEnding = Literal[
-    "saved", "segment_lost", "database_unavailable", "failed", "not_started"
+    "saved",
+    "segment_lost",
+    "database_unavailable",
+    "failed",
+    "cancelled",
+    "not_started",
+    "orphaned",
 ]
+
+# The span statuses that are not failures, and the level each ends at.
+_SPAN_STATUS_LEVELS: dict[str, EventLevel] = {
+    "done": "DEFAULT",
+    "paused": "DEFAULT",
+    "cancelled": "WARNING",
+    "segment_lost": "WARNING",
+    "database_unavailable": "WARNING",
+    "not_started": "WARNING",
+    "orphaned": "WARNING",
+    "abandoned": "WARNING",
+}
 
 
 def segment_span_status(state: ConversationState, ending: SegmentEnding) -> tuple[str, EventLevel]:
     """The status and level a segment's span ends with. A release that
-    saved names how the turn stood: recorded (`done`, or `cancelled`, or
-    `failed` for any other error the record names), paused on an answer
-    (`paused`), or left running because the stream lost its segment
-    (`segment_lost`). Any other ending names itself. Only a failure is at
-    level `ERROR`."""
+    saved names how the turn stood: recorded (`done`, or the error code the
+    record names, `cancelled` among them), paused on an answer (`paused`),
+    or left running because the stream lost its segment (`segment_lost`).
+    Any other ending names itself. A failure, which is any status not in
+    `_SPAN_STATUS_LEVELS`, is at level `ERROR`."""
     status: str = ending
     if ending == "saved":
         if state.turn_recorded and state.turns:
-            error = state.turns[-1].get("error")
-            status = "done" if error is None else "cancelled" if error == "cancelled" else "failed"
+            status = state.turns[-1].get("error") or "done"
         elif state.awaiting_answer:
             status = "paused"
         elif state.cancel_reason == "segment_lost":
             status = "segment_lost"
         else:
             status = "failed"
-    if status in ("done", "paused"):
-        return status, "DEFAULT"
-    return status, "ERROR" if status == "failed" else "WARNING"
+    return status, _SPAN_STATUS_LEVELS.get(status, "ERROR")
+
+
+@dataclass(frozen=True)
+class ClosedTurn:
+    """A turn closed while no segment of it ran, as its trace records it
+    (`record_closed_turn_span`)."""
+
+    trace_id: str
+    user_message: str
+    status: str
+
+
+def record_closed_turn_span(conversation_id: str, turn: ClosedTurn) -> None:
+    """Record a zero-length span for `turn` on its own trace id, with its
+    closing status (`cancelled` for a `/cancel` of a paused turn, `abandoned`
+    for one a new turn ended) at level `WARNING`, so the turn's trace ends as
+    the turn did and not on its paused segment's span."""
+    end_turn_span(
+        start_turn_span(turn.trace_id, session_id=conversation_id),
+        request=turn.user_message,
+        error=turn.status,
+        level=_SPAN_STATUS_LEVELS[turn.status],
+    )
 
 
 def _recorded_reply(record: dict[str, Any]) -> str:

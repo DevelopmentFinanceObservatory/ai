@@ -194,6 +194,7 @@ _PROCESS_LOCAL_FIELDS = frozenset(
         "switch_stop",
         "_telemetry_span",
         "_removal_unreported",
+        "segment_ending",
         "turn_specs",
         "turn_specs_settled",
     }
@@ -229,20 +230,14 @@ _CONTAINERS = (dict, list, set)
 
 
 def _assign_changed(
-    live: ConversationState,
-    work: ConversationState,
-    base: ConversationState,
-    *,
-    skip: frozenset[str] = frozenset(),
+    live: ConversationState, work: ConversationState, base: ConversationState
 ) -> None:
     """Assign to `live` each field of `work`, a copy taken from it
     (`_shallow_copy`), that changed since `base`, the snapshot taken with
-    the copy, bar the fields `skip` names: a container that compares
-    unequal, any other value that is not the same object. A field `live`
-    changed meanwhile and `work` did not keeps `live`'s value."""
+    the copy: a container that compares unequal, any other value that is
+    not the same object. A field `live` changed meanwhile and `work` did not
+    keeps `live`'s value."""
     for f in dataclasses.fields(ConversationState):
-        if f.name in skip:
-            continue
         value = getattr(work, f.name)
         before = getattr(base, f.name)
         if value != before if isinstance(value, _CONTAINERS) else value is not before:
@@ -879,10 +874,13 @@ class StudioStore:
         the live state once the write commits; until then, and on any exit
         that saves nothing (`drop_draft`), the live state stays as loaded.
         The copy is one level deep (`_shallow_copy`), with each pending
-        interrupt copied too, since an answer is marked on its entry."""
+        interrupt copied too, since an answer is marked on its entry. It
+        holds no telemetry span: one the live state holds stays the live
+        state's to end, and the copy holds only a span its own turn opens."""
         entry = self._runtime[(principal, conversation_id)]
         assert entry.state is not None
         work = _shallow_copy(entry.state)
+        work._telemetry_span = None
         work.pending = {key: copy.copy(pending) for key, pending in work.pending.items()}
         entry.draft = (work, _shallow_copy(entry.state))
         return work
@@ -1167,13 +1165,16 @@ class StudioStore:
         """Assign each field the working copy `state` changed since `draft`
         took it to the live state, once its save committed. Nothing when
         `state` is the live state itself. A turn the copy began
-        (`begin_turn`) brings the span of the segment its claim starts."""
+        (`begin_turn`) brings the span of the segment its claim starts. A
+        span the live state still holds belongs to a segment whose end never
+        reached it, and ends `orphaned` before the copy's is taken."""
         if entry.draft is None or entry.draft[0] is not state:
             return
         work, base = entry.draft
         entry.draft = None
         live = entry.state
         assert live is not None
+        live.end_segment_span("orphaned")
         _assign_changed(live, work, base)
 
     async def reserve_frames(self, principal: str, conversation_id: str, segment_id: str) -> None:
@@ -1601,10 +1602,12 @@ class StudioStore:
         Never raises anything but the caller's own cancellation: a
         `checkpoint` that cannot land (fenced out by a takeover, a database
         unreachable until the lease's deadline, another database error, or
-        the timeout above) is logged, each as what it is, and swallowed. The segment
-        then expires by its own TTL, which is what makes it safe to give up
-        here. Returns how the segment ended (`SegmentEnding`), which names
-        the status its span ends with.
+        the timeout above) is logged, each as what it is, and swallowed. The
+        segment then expires by its own TTL, which is what makes it safe to
+        give up here. How the segment ended (`SegmentEnding`), which names
+        the status its span ends with, is recorded on the live state
+        (`ConversationState.note_segment_ending`) before this returns or
+        re-raises a cancellation, and returned.
         """
         entry = self._runtime.get((principal, conversation_id))
         if entry is None or entry.state is None:
@@ -1664,6 +1667,7 @@ class StudioStore:
                 timeout,
             )
         finally:
+            state.note_segment_ending(ending)
             entry = self._runtime[(principal, conversation_id)]
             if ending != "saved" and entry.held == segment_id:
                 entry.held = None

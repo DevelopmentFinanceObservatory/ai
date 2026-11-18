@@ -393,8 +393,15 @@ def _checkpoint_failed_frame(conversation: ConversationState, exc: Exception) ->
     ends as when the heartbeat's renewals fail (`segment_lost_frame`).
     Anything else (a database error) closes the turn, since nothing else
     will finish it. The turn's record names `state_not_saved`, and the
-    frame, whose grammar has no such member, the transient code."""
-    if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
+    frame, whose grammar has no such member, the transient code. A lost
+    segment or an unreachable database is recorded as how the segment ended
+    (`ConversationState.note_segment_ending`), so its span names what the
+    user saw whatever the release saves after."""
+    if isinstance(exc, SegmentLost):
+        conversation.note_segment_ending("segment_lost")
+        return segment_lost_frame(conversation)
+    if isinstance(exc, DatabaseUnavailable):
+        conversation.note_segment_ending("database_unavailable")
         return segment_lost_frame(conversation)
     refusal = harness_refusal(
         code=HarnessCode.STATE_NOT_SAVED, message=f"the turn's state could not be saved: {exc}"
