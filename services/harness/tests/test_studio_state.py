@@ -76,10 +76,10 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from . import drawn_cards
-from .orchestrator_fakes import NO_ADK
 from .resolved_revision import resolved_revision
 from .store_clock import StoreClock
 from .test_turn_records import _scoped_part, _top_donors
+from .turn_driver import NO_ADK
 
 CONVERSATION = "conv_01test0000"
 

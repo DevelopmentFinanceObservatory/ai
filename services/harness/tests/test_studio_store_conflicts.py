@@ -22,9 +22,9 @@ from harness.studio_store import ConversationStale, StudioStore
 from harness.wire import ComponentType, CompositionActor, CompositionBlock, CompositionManifest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from .orchestrator_fakes import NO_ADK, no_turn_specs
 from .store_clock import StoreClock
 from .test_run_ledger import _another_engine
+from .turn_driver import NO_ADK, no_turn_specs
 
 PRINCIPAL = "principal"
 CONVERSATION = "conv_01conflict0"

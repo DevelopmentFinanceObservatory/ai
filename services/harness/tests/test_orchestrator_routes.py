@@ -6,20 +6,16 @@ from __future__ import annotations
 from google.genai import types
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from .orchestrator_fakes import (
+from .graph_turns import agent_read
+from .scripted_tools import (
     CannedSearch,
     chart,
     definite_envelope,
     fetch_call,
-    frame_for,
     make_charts_call,
-    orchestrator_app,
-    request_text,
     search_call,
-    stream,
-    studio_client,
-    turn_body,
 )
+from .studio_routes import frame_for, orchestrator_app, stream, studio_client, turn_body
 
 
 async def test_a_plain_text_turn_streams_the_agents_answer_over_the_studio_routes(
@@ -40,7 +36,7 @@ async def test_a_plain_text_turn_streams_the_agents_answer_over_the_studio_route
     ]
     assert frames[-3]["text"] == "Kenya's GDP was $101 billion."
     assert len(model.requests) == 1
-    assert "Kenya's GDP in 2020?" in request_text(model.requests[0])
+    assert "Kenya's GDP in 2020?" in agent_read(model.requests[0])
 
 
 async def test_a_search_fetch_and_chart_turn_lands_a_card_over_the_studio_routes(

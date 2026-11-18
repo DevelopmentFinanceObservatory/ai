@@ -1,22 +1,22 @@
-"""Behavioural tests for the plan path of the root workflow: the `planner`,
+"""Behavioural tests for the plan path of the turn graph: the `planner`,
 `approve` and `execute` nodes the orchestrator's `plan` tool reaches, and
 the helpers they share.
 
-The workflow tests run the orchestrator topology (`orchestrator_runner`):
-the agent hands a brief to a planner, the turn pauses on the plan card,
-and the answer resumes it into `execute` and `plan_done`. The rest are unit
-tests of the node helpers. Everything runs offline against scripted fakes:
-no model, no MCP server.
+The turn tests run the plan path on the turn loop (`_plan_runner`): the
+agent hands a brief to a planner, the turn pauses on the plan card, and the
+answer resumes it into `execute` and `plan_done`. The rest are unit tests
+of the node helpers. Everything runs offline against scripted fakes and a
+test Postgres database: no model, no MCP server.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -47,10 +47,6 @@ from executor.outcomes import (
     Refused,
 )
 from executor.run import execute_approved_plan
-from google.adk.events import Event
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.genai import types
 from harness.chart_binding import (
     LINE_CHART_MAX_VALUES,
     covers_every_row,
@@ -63,6 +59,7 @@ from harness.conversation import current_conversation_id
 from harness.decision_pick import DecisionPick
 from harness.early_mint import EarlyMints
 from harness.graph import answer as answer_module
+from harness.graph.events import PlannerStarted, StepProgress
 from harness.graph.execute import (
     _failed_step,
     _mark_masked_step_failed,
@@ -79,8 +76,6 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
     PICK_REPLAN_KEY,
-    PLANNER_STARTED_KEY,
-    STEP_PROGRESS_KEY,
     UNREADABLE_PLAN_NOTE,
     UNREADABLE_PLAN_UNPLANNED_NOTE,
     frame_id_for,
@@ -91,7 +86,8 @@ from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
 from harness.sentences import FAILURE_SENTENCES, FailureClass
-from harness.studio_translate import _node_name, failure_detail
+from harness.studio_translate import failure_detail
+from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
 from harness.turn_records import SearchReading, basis_line
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from planner.operations import AggregateOperation, GrowthOperation, RetrieveOperation, Translation
@@ -133,20 +129,11 @@ from planner.workflow import (
     WorkflowStep,
 )
 from pydantic import ValidationError
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
 from translator.discovery import PartFault, PartNotResolvedError
 
-from .orchestrator_fakes import (
-    ScriptLlm,
-    approve_answer,
-    create_request_input_response,
-    handed_back,
-    open_session,
-    orchestrator_runner,
-    plan_call,
-    request_text,
-    run_turn,
-    visited_nodes,
-)
+from .graph_turns import agent_read, opening_graph, visited
 from .plan_cards import (
     SPEC_A,
     ScriptedExecutor,
@@ -156,12 +143,14 @@ from .plan_cards import (
     _Planner,
     _planner_plan,
 )
-
-# test_studio imports these two from this module.
-from .scope_scenarios import _hashed_scope, _switched_answer  # noqa: F401
+from .plan_turns import approve_answer, plan_nodes
+from .planner_host import node_ctx
+from .scripted_genai import ScriptedGenai, reply, text_part
+from .scripted_tools import plan_call, scripted_orchestrator
 from .share_plan import ALL_DONORS, DAC_DONORS, US_DONOR, us_share_of_kenya_oda
 from .split_plan import FIRST_YEAR, SPEC_DEBT_HISTORY, split_draft, stored_split_plan
 from .test_turn_records import _example_part, _manifest, _served_identity
+from .turn_driver import CONVERSATION, SegmentRun, TurnDriver, scripted_models
 
 SPEC_B = "spec_" + "b" * 32
 REF_A = {"spec_id": SPEC_A, "content_version": "cv_" + "1" * 32}
@@ -201,48 +190,115 @@ class _CallRecordingSurface:
 
 
 _BRIEF = "kenya debt"
+# The pause kind of each pause a turn here answers, by the interrupt a test names.
+_PAUSE_KINDS = {APPROVE_INTERRUPT: "approve", "planner_ask": "planner_ask"}
+
+
+class _PlanTurn:
+    """One conversation's plan turn on the turn loop: `driver` runs its
+    segments, and `last` is the segment that ran last."""
+
+    def __init__(self, driver: TurnDriver) -> None:
+        self.driver = driver
+        self.last: SegmentRun | None = None
+
+    async def run(self, segment: Any) -> list[TurnEvent]:
+        """Await `segment`, keep it as `last`, and return its events. A node
+        that raised fails the turn, and its error is raised here."""
+        self.last = await segment
+        failed = [event for event in self.last.events if isinstance(event, TurnFailed)]
+        if failed:
+            raise failed[-1].error
+        return self.last.events
 
 
 def _plan_runner(
-    planner: Any, *, tool_surface: Any = None, executor: Any = None
-) -> tuple[Runner, ScriptLlm]:
-    """The orchestrator topology whose agent hands `_BRIEF` to `planner` and
-    then answers in plain text; `tool_surface` runs the approved plan."""
-    return orchestrator_runner(
-        plan_call(_BRIEF),
-        planner=planner,
-        tool_surface=tool_surface,
-        executor=executor or ScriptedExecutor(),
+    engine: AsyncEngine,
+    planner: Any,
+    *,
+    tool_surface: Any = None,
+    executor: Any = None,
+    early_mints: EarlyMints | None = None,
+    conversation_id: str = CONVERSATION,
+) -> tuple[_PlanTurn, ScriptedGenai]:
+    """The plan path whose agent hands `_BRIEF` to `planner` and then answers
+    in plain text, in conversation `conversation_id`, and the agent's
+    scripted client; `tool_surface` runs the approved plan, and with `None`
+    `execute` refuses."""
+    models = scripted_models(
+        orchestrator=[reply(plan_call(_BRIEF)), *(reply(text_part("done")) for _ in range(4))]
     )
+    executor = executor or ScriptedExecutor()
+    nodes = plan_nodes(
+        scripted_orchestrator(executor=executor),
+        models,
+        run_ledger=InMemoryRunLedger(),
+        tool_surface=tool_surface,
+        executor=executor,
+        planner=planner,
+        early_mints=early_mints,
+    )
+    driver = TurnDriver(engine, graph=opening_graph(nodes), conversation_id=conversation_id)
+    return _PlanTurn(driver), models.orchestrator
 
 
-async def _start(runner: Runner) -> list[Event]:
-    """Open `runner`'s session and run the turn that asks for a plan."""
-    await open_session(runner)
-    return await run_turn(runner, types.UserContent(_BRIEF))
+async def _start(turn: _PlanTurn) -> list[TurnEvent]:
+    """Run the turn that asks for a plan."""
+    return await turn.run(turn.driver.turn(_BRIEF))
 
 
-async def _resume(runner: Runner, interrupt_id: str, response: dict[str, Any]) -> list[Event]:
-    """Answer the pause `interrupt_id` with `response`."""
-    part = create_request_input_response(interrupt_id, {"result": response})
-    return await run_turn(runner, types.Content(role="user", parts=[part]))
+async def _resume(turn: _PlanTurn, interrupt_id: str, response: dict[str, Any]) -> list[TurnEvent]:
+    """Answer the pause the turn holds, of the kind `interrupt_id` names, with `response`."""
+    assert turn.last is not None
+    pause = turn.last.pause
+    assert pause.kind == _PAUSE_KINDS[interrupt_id], pause.kind
+    return await turn.run(turn.driver.answer(response, to=pause))
 
 
-def _session_state(runner: Runner) -> dict[str, Any]:
-    """The live state of the session `_start` opened."""
-    service = cast(InMemorySessionService, runner.session_service)
-    return service.sessions["t"]["u"]["s"].state
+def _session_state(turn: _PlanTurn) -> dict[str, Any]:
+    """The turn's state as its last segment stored it."""
+    assert turn.last is not None
+    return turn.last.cursor.state
 
 
-def _pending_interrupt(events: list[Event]) -> str | None:
-    """The pause the turn ended on, if it ended on one."""
-    ids = [c.id for e in events for c in e.get_function_calls() if c.name == "adk_request_input"]
-    return ids[-1] if ids else None
+async def _store_state(turn: _PlanTurn, key: str, value: Any) -> None:
+    """Store `value` under `key` in the paused turn's state, for a test that
+    needs state no real node would write."""
+    assert turn.last is not None
+    state = {**turn.last.cursor.state, key: value}
+    async with turn.driver.studio.engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE turn_cursors SET state = CAST(:state AS json) WHERE id = :id"),
+            {"state": json.dumps(state), "id": turn.last.cursor.id},
+        )
 
 
-def _output_of(events: list[Event], node: str) -> Any:
-    outputs = [e.output for e in events if _node_name(e) == node and e.output is not None]
+def _pending_interrupt(events: list[TurnEvent]) -> str | None:
+    """The interrupt of the pause the turn ended on, if it ended on one."""
+    kinds = {kind: interrupt for interrupt, kind in _PAUSE_KINDS.items()}
+    paused = [event for event in events if isinstance(event, Paused)]
+    return kinds[paused[-1].kind] if paused else None
+
+
+def _output_of(events: list[TurnEvent], node: str) -> Any:
+    outputs = [
+        event.output
+        for event in events
+        if isinstance(event, NodeDone) and event.node == node and event.output is not None
+    ]
     return outputs[-1] if outputs else None
+
+
+def handed_back(model: ScriptedGenai) -> tuple[str, dict[str, Any]]:
+    """The agent's last request as it reads it, and the last `plan` result in it."""
+    request = model.requests[-1]
+    (result, *_) = [
+        part.function_response.response or {}
+        for content in reversed(request.content_list)
+        for part in content.parts or []
+        if part.function_response is not None and part.function_response.name == "plan"
+    ]
+    return agent_read(request), result
 
 
 # --- execute's served scopes ---------------------------------------------------
@@ -353,8 +409,8 @@ _PREPARING = "Preparing the dataset (in progress, 3s)"
 _RECEIVED = "Result received; checking it"
 
 
-def _step_progress(event: Event) -> dict[str, Any] | None:
-    return (event.custom_metadata or {}).get(STEP_PROGRESS_KEY)
+def _step_progress(event: object) -> dict[str, Any] | None:
+    return dataclasses.asdict(event) if isinstance(event, StepProgress) else None
 
 
 class _ReportsThenWaits(ScriptedSurface):
@@ -387,34 +443,49 @@ class _ReportsThenWaits(ScriptedSurface):
         return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
 
 
-async def _approval_stream(surface: ToolSurface) -> Any:
-    """The event stream of an approved scripted plan's run against `surface`."""
-    runner, _ = _plan_runner(ScriptedPlannerModel(), tool_surface=surface)
+async def _approved_run(
+    engine: AsyncEngine, surface: ToolSurface, *, observe: Callable[[TurnEvent], None]
+) -> list[TurnEvent]:
+    """The events of an approved scripted plan's run against `surface`, each
+    told to `observe` as the segment emits it."""
+    runner, _ = _plan_runner(engine, ScriptedPlannerModel(), tool_surface=surface)
     events = await _start(runner)
-    part = create_request_input_response(
-        APPROVE_INTERRUPT, {"result": approve_answer(_output_of(events, "planner")["revision"])}
-    )
-    return runner.run_async(
-        user_id="u", session_id="s", new_message=types.Content(role="user", parts=[part])
+    runner.driver.observe = observe
+    return await _resume(
+        runner, APPROVE_INTERRUPT, approve_answer(_output_of(events, "planner")["revision"])
     )
 
 
-async def test_execute_relays_a_report_while_its_step_is_still_running() -> None:
+async def test_execute_relays_a_report_while_its_step_is_still_running(
+    pg_engine: AsyncEngine,
+) -> None:
     """The surface answers only once the test has seen the report, so the
     report must reach the event stream while the call is still waiting. Once
     a call answers, its step reports that, so the step's line stops showing
-    the server's wait while the run goes on."""
+    the server's wait while the run goes on. The reader keeps the latest
+    report of each step still waiting for it, as Studio's stream does."""
     surface = _ReportsThenWaits()
-    stream = await _approval_stream(surface)
-    seen: list[Event] = []
+    waiting: list[bool] = []
+    reports: dict[str, StepProgress] = {}
+    seen: list[StepProgress] = []
+
+    def read() -> None:
+        seen.extend(reports.values())
+        reports.clear()
+        if not surface.release.is_set():
+            waiting.append(surface.waiting is not None and not surface.waiting.done())
+            surface.release.set()
+
+    def observe(event: TurnEvent) -> None:
+        if isinstance(event, StepProgress):
+            if not reports:
+                asyncio.get_running_loop().call_soon(read)
+            reports[event.step_id] = event
 
     async with asyncio.timeout(10):
-        async for event in stream:
-            seen.append(event)
-            if _step_progress(event) is not None and not surface.release.is_set():
-                assert surface.waiting is not None and not surface.waiting.done()
-                surface.release.set()
+        events = await _approved_run(pg_engine, surface, observe=observe)
 
+    assert waiting == [True]
     progress = [_step_progress(event) for event in seen if _step_progress(event)]
     retrieve = {
         "step_id": "retrieve",
@@ -440,12 +511,18 @@ async def test_execute_relays_a_report_while_its_step_is_still_running() -> None
         {**retrieve, "message": _RECEIVED},
         {**totals, "message": _RECEIVED},
     ]
-    assert _node_name(next(e for e in seen if _step_progress(e))) == "execute"
-    assert "plan_done" in visited_nodes(seen)
+    assert _emitted_by(events, next(e for e in events if _step_progress(e))) == "execute"
+    assert "plan_done" in visited(events)
+
+
+def _emitted_by(events: list[TurnEvent], event: object) -> str:
+    """The node that emitted `event`: the next node to finish after it."""
+    after = events[events.index(event) :]
+    return next(e.node for e in after if isinstance(e, NodeDone))
 
 
 async def test_a_plan_whose_card_places_fail_still_runs_with_unplaced_steps(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The plan card places only label the step lines, so a failure building
     them is logged and the approved plan runs with every step unplaced."""
@@ -454,16 +531,15 @@ async def test_a_plan_whose_card_places_fail_still_runs_with_unplaced_steps(
         raise ValueError("no card for this plan")
 
     monkeypatch.setattr("harness.graph.execute._card_places", fails)
-    stream = await _approval_stream(ScriptedSurface())
 
     with caplog.at_level("ERROR", logger="harness.graph.execute"):
         async with asyncio.timeout(10):
-            seen = [event async for event in stream]
+            seen = await _approved_run(pg_engine, ScriptedSurface(), observe=lambda event: None)
 
     progress = [_step_progress(event) for event in seen if _step_progress(event)]
     assert progress
     assert all(report["position"] is None for report in progress)
-    assert "plan_done" in visited_nodes(seen)
+    assert "plan_done" in visited(seen)
     (logged,) = [r for r in caplog.records if r.name == "harness.graph.execute"]
     assert logged.exc_info is not None
 
@@ -481,13 +557,15 @@ async def test_a_plan_whose_card_places_fail_still_runs_with_unplaced_steps(
     ],
     ids=["stale_revision", "no_time", "time_without_offset", "unreadable_time"],
 )
-async def test_stale_version_approval_routes_to_amend(wrong: Callable[[str], Any]) -> None:
+async def test_stale_version_approval_routes_to_amend(
+    pg_engine: AsyncEngine, wrong: Callable[[str], Any]
+) -> None:
     """A wrong answer, one naming another revision or stating no
     timezone-aware approval time, routes to amend; `ScriptedPlannerModel`
     redrafts the same canned steps as the next version, bumping `version`
     and `previous_version` the way any `PlannerModel` must."""
     surface = _CallRecordingSurface(ScriptedSurface())
-    runner, _ = _plan_runner(ScriptedPlannerModel(), tool_surface=surface)
+    runner, _ = _plan_runner(pg_engine, ScriptedPlannerModel(), tool_surface=surface)
     events = await _start(runner)
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     first = _output_of(events, "planner")
@@ -512,19 +590,19 @@ async def test_stale_version_approval_routes_to_amend(wrong: Callable[[str], Any
 
 
 async def test_a_plan_approved_unchanged_opens_a_span_and_logs_the_facts(
-    exported_spans: InMemorySpanExporter, caplog: pytest.LogCaptureFixture
+    pg_engine: AsyncEngine, exported_spans: InMemorySpanExporter, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Version 1 approved unchanged: `approve`'s `plan.approved` span and log
     line record the version and that no amendment preceded it."""
     surface = _CallRecordingSurface(ScriptedSurface())
-    runner, _ = _plan_runner(ScriptedPlannerModel(), tool_surface=surface)
+    runner, _ = _plan_runner(pg_engine, ScriptedPlannerModel(), tool_surface=surface)
     events = await _start(runner)
 
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     plan_payload = _output_of(events, "planner")
     assert plan_payload["version"] == 1
 
-    with caplog.at_level("INFO", logger="harness.graph.planning"):
+    with caplog.at_level("INFO", logger="harness.graph.approve"):
         events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_payload["revision"]))
 
     assert _output_of(events, "execute")["plan_version"] == 1
@@ -824,7 +902,7 @@ def _planner_plan_with_two_terminal_steps(*, schemas: list[ToolSchema]) -> Plann
     ids=["intermediate", "sibling_terminal"],
 )
 async def test_a_stopped_plan_hands_back_no_derived_steps_figures(
-    real_schemas: list[ToolSchema], build_plan: Callable[..., PlannerPlan]
+    pg_engine: AsyncEngine, real_schemas: list[ToolSchema], build_plan: Callable[..., PlannerPlan]
 ) -> None:
     """change fails past the replan budget, leaving get_data's and totals'
     frames in `completed`. totals' derived frame is never published on a
@@ -835,7 +913,10 @@ async def test_a_stopped_plan_hands_back_no_derived_steps_figures(
     planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     executor = ScriptedExecutor()
     runner, model = _plan_runner(
-        planner, tool_surface=_stopping_at_growth_surface(real_schemas), executor=executor
+        pg_engine,
+        planner,
+        tool_surface=_stopping_at_growth_surface(real_schemas),
+        executor=executor,
     )
     await _start(runner)
 
@@ -855,6 +936,7 @@ async def test_a_stopped_plan_hands_back_no_derived_steps_figures(
 
 
 async def test_two_terminal_steps_both_come_back_to_the_agent(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """`totals` (step index 1) and `change` (step index 2) are both
@@ -882,7 +964,7 @@ async def test_two_terminal_steps_both_come_back_to_the_agent(
         },
     )
     executor = ScriptedExecutor()
-    runner, model = _plan_runner(planner, tool_surface=surface, executor=executor)
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=surface, executor=executor)
     await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
@@ -1170,9 +1252,9 @@ def test_select_binding_ok_rejects_a_non_mapping_select() -> None:
 # --- the Plan objects stay real ------------------------------------------------
 
 
-async def test_plan_amendment_lineage_is_real() -> None:
+async def test_plan_amendment_lineage_is_real(pg_engine: AsyncEngine) -> None:
     """The plan carried through amend cycles is a valid `planner.plan.Plan`."""
-    runner, _ = _plan_runner(ScriptedPlannerModel())
+    runner, _ = _plan_runner(pg_engine, ScriptedPlannerModel())
     await _start(runner)
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(99))
 
@@ -1188,6 +1270,7 @@ async def test_plan_amendment_lineage_is_real() -> None:
 
 
 async def test_the_planner_node_validates_the_planners_plan_and_writes_it_to_state(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """The planner returns `{"plan": <planner.plan.Plan JSON>, "summary": ...}`;
@@ -1199,7 +1282,7 @@ async def test_the_planner_node_validates_the_planners_plan_and_writes_it_to_sta
     planner = _Planner(
         [{"plan": plan.model_dump(mode="json"), "summary": {"version": plan.version}}]
     )
-    runner, _ = _plan_runner(planner)
+    runner, _ = _plan_runner(pg_engine, planner)
 
     events = await _start(runner)
 
@@ -1211,62 +1294,20 @@ async def test_the_planner_node_validates_the_planners_plan_and_writes_it_to_sta
     assert validated == plan
 
 
-async def test_the_planner_node_raises_on_a_malformed_plan_rather_than_constructing_one() -> None:
+async def test_the_planner_node_raises_on_a_malformed_plan_rather_than_constructing_one(
+    pg_engine: AsyncEngine,
+) -> None:
     """A draft the planner could not itself validate must not reach the approve gate."""
     planner = _Planner([{"plan": {"decisions": "not-a-list"}, "summary": {}}])
-    runner, _ = _plan_runner(planner)
+    runner, _ = _plan_runner(pg_engine, planner)
 
     with pytest.raises(ValidationError):
         await _start(runner)
 
 
-class _AskingPlanner:
-    """A `PlannerModel` that reports two progress rounds, then answers that the
-    planner's run ended on a question for the user, as `PlannerAdapter` does once
-    `ask_user_question` (`planner.tools.ask_user`) accepted one."""
-
-    async def __call__(self, *, on_progress: Any = None, **_kwargs: Any) -> dict[str, Any]:
-        if on_progress is not None:
-            on_progress({"agent": "dfo_planner", "tools": ["propose_plan"]})
-            on_progress({"agent": "dfo_planner", "tools": ["ask_user_question"]})
-        return _ASKED
-
-
-async def test_a_planner_side_pause_relays_its_progress_before_the_question() -> None:
-    """The `planner` node relays the progress the planner reported, then pauses
-    on the planner's question under its call id, carrying the call's
-    arguments as the payload. No `plan.proposed` or `refused` output follows:
-    the turn is suspended, not settled."""
-    planner = _AskingPlanner()
-    runner, _ = _plan_runner(planner)
-
-    events = await _start(runner)
-
-    relayed = [
-        ("progress", event.custom_metadata["progress"]["tools"])
-        if event.custom_metadata and "progress" in event.custom_metadata
-        else ("ask", _pending_interrupt([event]))
-        for event in events
-        if (event.custom_metadata and "progress" in event.custom_metadata)
-        or _pending_interrupt([event]) is not None
-    ]
-    assert relayed == [
-        ("progress", ["propose_plan"]),
-        ("progress", ["ask_user_question"]),
-        ("ask", _PLANNER_ASK),
-    ]
-    (call,) = [
-        call for event in events for call in event.get_function_calls() if call.id == _PLANNER_ASK
-    ]
-    assert (call.args or {})["payload"] == _ASKED["asked"]["args"]
-    assert _output_of(events, "planner") is None
-    assert _output_of(events, "approve") is None
-    assert _output_of(events, "plan_done") is None
-
-
 class _GatedPlanner:
     """A `PlannerModel` that drafts only once its caller has seen the
-    planner node's start event, then pauses like `_AskingPlanner`."""
+    planner node's start event, then pauses on a question for the user."""
 
     def __init__(self) -> None:
         self.seen = asyncio.Event()
@@ -1278,25 +1319,29 @@ class _GatedPlanner:
         return _ASKED
 
 
-async def test_the_planner_node_announces_a_draft_before_the_planner_returns() -> None:
+async def test_the_planner_node_announces_a_draft_before_the_planner_returns(
+    pg_engine: AsyncEngine,
+) -> None:
     """The node's first event reaches the runner stream while the planner is
     still drafting, so Studio can say a plan is under way."""
     planner = _GatedPlanner()
-    runner, _ = _plan_runner(planner)
-    await open_session(runner)
+    runner, _ = _plan_runner(pg_engine, planner)
     started = []
-    async for event in runner.run_async(
-        user_id="u", session_id="s", new_message=types.UserContent(_BRIEF)
-    ):
-        if event.custom_metadata and PLANNER_STARTED_KEY in event.custom_metadata:
-            started.append(event.custom_metadata[PLANNER_STARTED_KEY])
+
+    def observe(event: TurnEvent) -> None:
+        if isinstance(event, PlannerStarted):
+            started.append({"revising": event.revising})
             planner.seen.set()
+
+    runner.driver.observe = observe
+    await _start(runner)
 
     assert started == [{"revising": False}]
     assert planner.drafted
 
 
 async def test_a_refused_redraft_over_an_unreadable_plan_says_the_plan_was_discarded(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """The user approved a plan the release cannot read, and the planner
@@ -1309,9 +1354,9 @@ async def test_a_refused_redraft_over_an_unreadable_plan_says_the_plan_was_disca
             {"refused": {"text": "The draft budget is spent.", "final": True}},
         ]
     )
-    runner, model = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
-    _session_state(runner)["plan"] = json.dumps({"question": "kenya debt", "tool_calls": []})
+    await _store_state(runner, "plan", json.dumps({"question": "kenya debt", "tool_calls": []}))
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(1))
 
@@ -1325,7 +1370,7 @@ async def test_a_refused_redraft_over_an_unreadable_plan_says_the_plan_was_disca
     assert _pending_interrupt(events) is None
     assert (
         f"The planner could not make a plan: {UNREADABLE_PLAN_UNPLANNED_NOTE} The draft "
-        "budget is spent." in request_text(model.requests[-1])
+        "budget is spent." in agent_read(model.requests[-1])
     )
 
 
@@ -1343,12 +1388,13 @@ class _AskingOnAmendPlanner(_Planner):
 
     async def __call__(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
-        if len(self.calls) > 1 and not kwargs["ctx"].resume_inputs:
+        if len(self.calls) > 1 and kwargs.get("answer") is None:
             return _ASKED
         return self._plans[0]
 
 
 async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_start(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """The planner asks the user a question while amending a plan, and the
@@ -1357,12 +1403,12 @@ async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_sta
     no amendment and no prior plan, and the card says why."""
     plan = _planner_plan(schemas=real_schemas)
     planner = _AskingOnAmendPlanner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
     events = await _resume(runner, APPROVE_INTERRUPT, {"approved": None, "amendment": "only 2020"})
     assert _pending_interrupt(events) == _PLANNER_ASK
     assert planner.calls[1]["amendment"] == "only 2020"
-    _session_state(runner)["plan"] = json.dumps({"question": "kenya debt", "tool_calls": []})
+    await _store_state(runner, "plan", json.dumps({"question": "kenya debt", "tool_calls": []}))
 
     events = await _resume(runner, _PLANNER_ASK, {"answer": "2020"})
 
@@ -1426,6 +1472,7 @@ class _ReplanPlanner(_Planner):
 
 
 async def test_an_approval_for_a_superseded_revision_routes_to_amend(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """The `approve` node keys a model-drafted plan on
@@ -1447,7 +1494,7 @@ async def test_an_approval_for_a_superseded_revision_routes_to_amend(
     )
     executor = ScriptedExecutor()
     runner, _ = _plan_runner(
-        planner, tool_surface=_fixture_surface(real_schemas), executor=executor
+        pg_engine, planner, tool_surface=_fixture_surface(real_schemas), executor=executor
     )
     events = await _start(runner)
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
@@ -1496,18 +1543,20 @@ async def test_the_scripted_surface_declares_the_schemas_the_saved_plan_names() 
         assert declared[step["tool"]["name"]].input_schema_hash == step["input_schema_hash"]
 
 
-async def test_a_pending_plan_saved_at_the_base_revision_format_is_approved_unamended() -> None:
+async def test_a_pending_plan_saved_at_the_base_revision_format_is_approved_unamended(
+    pg_engine: AsyncEngine,
+) -> None:
     """The card a user holds names the revision computed when the plan was
     saved. A plan saved without the fields its models have since gained
     still hashes to that revision, so the answer approves it and it runs."""
     planner = _Planner([{"plan": _BASE_FORMAT_PLAN["plan"], "summary": {}}])
     surface = _CallRecordingSurface(ScriptedSurface())
-    runner, _ = _plan_runner(planner, tool_surface=surface)
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=surface)
     events = await _start(runner)
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     assert _output_of(events, "planner")["revision"] == _BASE_FORMAT_PLAN["revision"]
     # The session holds the plan exactly as it was saved.
-    _session_state(runner)["plan"] = json.dumps(_BASE_FORMAT_PLAN["plan"])
+    await _store_state(runner, "plan", json.dumps(_BASE_FORMAT_PLAN["plan"]))
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(_BASE_FORMAT_PLAN["revision"]))
 
@@ -1608,6 +1657,7 @@ async def test_an_approved_plan_compiled_against_an_older_get_data_is_refused_fo
 
 
 async def test_a_refused_amendment_still_offers_the_pending_version_for_approval(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """A `PlannerModel` can refuse to draft at all
@@ -1637,7 +1687,7 @@ async def test_a_refused_amendment_still_offers_the_pending_version_for_approval
     )
     executor = ScriptedExecutor()
     runner, _ = _plan_runner(
-        planner, tool_surface=_fixture_surface(real_schemas), executor=executor
+        pg_engine, planner, tool_surface=_fixture_surface(real_schemas), executor=executor
     )
     events = await _start(runner)
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
@@ -1648,7 +1698,7 @@ async def test_a_refused_amendment_still_offers_the_pending_version_for_approval
 
     # Not a dead end: a fresh approval interrupt for the same, unmodified
     # plan comes back instead, carrying why the amendment did not land.
-    assert "plan_done" not in visited_nodes(events)
+    assert "plan_done" not in visited(events)
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     refused_output = _output_of(events, "planner")
     assert refused_output["revision"] == revision_1
@@ -1674,6 +1724,7 @@ async def test_a_refused_amendment_still_offers_the_pending_version_for_approval
 
 
 async def test_the_execute_node_runs_the_approved_workflow_through_the_surface(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """`execute` calls `execute_approved_plan` against the injected
@@ -1683,7 +1734,7 @@ async def test_the_execute_node_runs_the_approved_workflow_through_the_surface(
     planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     executor = ScriptedExecutor()
     surface = _CallRecordingSurface(_fixture_surface(real_schemas))
-    runner, _ = _plan_runner(planner, tool_surface=surface, executor=executor)
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=surface, executor=executor)
     events = await _start(runner)
     revision = plan_revision(plan)
 
@@ -1734,6 +1785,7 @@ class _ServedPairsPlatform:
 
 
 async def test_a_final_retrieval_read_with_extra_columns_is_shown_by_its_manifests_pair(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """A retrieval the plan answers with is held by data-mcp under a pair of its
@@ -1759,7 +1811,7 @@ async def test_a_final_retrieval_read_with_extra_columns_is_shown_by_its_manifes
         )
     )
     platform = _ServedPairsPlatform([served, total])
-    runner, model = _plan_runner(planner, tool_surface=surface, executor=platform)
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=surface, executor=platform)
     await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
@@ -1818,10 +1870,10 @@ async def test_a_hand_back_recorded_without_store_pairs_registers_its_frames(
     """A hand-back event or kept ask recorded without store pairs names each
     frame by the pair apis serves alone. Its frame is registered without
     a store pair, so the store is opened by the frame's own pair."""
-    ctx = SimpleNamespace(state=dict(state))
+    ctx = node_ctx(state=dict(state))
     plan_done = plan_done_node(executor=ScriptedExecutor(), run_ledger=InMemoryRunLedger())
 
-    [_ async for _ in plan_done(cast("Any", ctx), node_input)]
+    await plan_done.run(ctx, node_input)
 
     assert ctx.state[ORCHESTRATOR_FRAMES_KEY] == {frame_id_for(REF_A): {"ref": REF_A, "view": {}}}
     entry = ctx.state[ORCHESTRATOR_FRAMES_KEY][frame_id_for(REF_A)]
@@ -1839,20 +1891,20 @@ async def test_a_share_frame_is_registered_with_the_whole_its_plan_divides_by(
     """The final frame of a share step carries the whole the approved plan's
     denominator source holds, which `make_charts` writes into the card's title."""
     plan = us_share_of_kenya_oda(decision, whole=whole, numerator=US_DONOR)
-    ctx = SimpleNamespace(state={"plan": plan.model_dump_json()})
+    ctx = node_ctx(state={"plan": plan.model_dump_json()})
     plan_done = plan_done_node(executor=ScriptedExecutor(), run_ledger=InMemoryRunLedger())
     node_input = {
         "frame_refs": [REF_A],
         "frame_ref_steps": [{"step_id": "share", "tool": "share_of", "is_final_step": True}],
     }
 
-    [_ async for _ in plan_done(cast("Any", ctx), node_input)]
+    await plan_done.run(ctx, node_input)
 
     assert ctx.state[ORCHESTRATOR_FRAMES_KEY][frame_id_for(REF_A)]["whole"] == named
 
 
 async def test_a_summed_familys_total_reaches_the_agent_in_the_hand_back(
-    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
+    pg_engine: AsyncEngine, real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`execute` hands `plan_done` the sentences `_stat_var_totals` writes,
     and `plan_done` gives each to the agent under `totals`."""
@@ -1863,7 +1915,7 @@ async def test_a_summed_familys_total_reaches_the_agent_in_the_hand_back(
     monkeypatch.setattr(answer_module, "_stat_var_totals", lambda *a, **k: [sentence])
     plan = _planner_plan(schemas=real_schemas)
     planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-    runner, model = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
@@ -1874,6 +1926,7 @@ async def test_a_summed_familys_total_reaches_the_agent_in_the_hand_back(
 
 
 async def test_a_none_tool_surface_refuses_loudly_rather_than_executing_nothing(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """`create_root_workflow(tool_surface=None)`, stated explicitly, must not
@@ -1881,7 +1934,7 @@ async def test_a_none_tool_surface_refuses_loudly_rather_than_executing_nothing(
     cannot run has to fail loudly."""
     plan = _planner_plan(schemas=real_schemas)
     planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-    runner, _ = _plan_runner(planner)
+    runner, _ = _plan_runner(pg_engine, planner)
     await _start(runner)
     revision = plan_revision(plan)
 
@@ -1890,6 +1943,7 @@ async def test_a_none_tool_surface_refuses_loudly_rather_than_executing_nothing(
 
 
 async def test_a_rediscovery_outcome_replans_naming_the_requirement(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """A retrieval step's own evidence binding names the requirement and the
@@ -1908,7 +1962,7 @@ async def test_a_rediscovery_outcome_replans_naming_the_requirement(
         text="refused",
     )
     surface = _fixture_surface(real_schemas, get_data_result=refusal)
-    runner, _ = _plan_runner(planner, tool_surface=surface)
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=surface)
     events = await _start(runner)
     revision = plan_revision(plan)
 
@@ -1935,6 +1989,7 @@ async def test_a_rediscovery_outcome_replans_naming_the_requirement(
 
 
 async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """`MAX_REPLANS == 1`: a second identical refusal closes the turn with
@@ -1953,7 +2008,7 @@ async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step
     )
     surface = _fixture_surface(real_schemas, analysis_call_result=refusal)
     executor = ScriptedExecutor()
-    runner, model = _plan_runner(planner, tool_surface=surface, executor=executor)
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=surface, executor=executor)
     events = await _start(runner)
     revision = plan_revision(plan)
 
@@ -1978,6 +2033,7 @@ async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step
 
 
 async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_replan(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """An `over_ceiling` refusal naming no `ceiling_kind` at all -- an older
@@ -2001,7 +2057,7 @@ async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_repl
         text="refused",
     )
     surface = _fixture_surface(real_schemas, analysis_call_result=refusal)
-    runner, model = _plan_runner(planner, tool_surface=surface)
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=surface)
     events = await _start(runner)
     revision = plan_revision(plan)
 
@@ -2031,6 +2087,7 @@ async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_repl
 
 
 async def test_a_member_cardinality_ceiling_closes_the_turn_without_replanning(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """A `member_cardinality` `over_ceiling` refusal is fixed by the resolved
@@ -2058,7 +2115,7 @@ async def test_a_member_cardinality_ceiling_closes_the_turn_without_replanning(
         text="refused",
     )
     surface = _fixture_surface(real_schemas, get_data_result=refusal)
-    runner, model = _plan_runner(planner, tool_surface=surface)
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=surface)
     events = await _start(runner)
     revision = plan_revision(plan)
 
@@ -2082,6 +2139,7 @@ async def test_a_member_cardinality_ceiling_closes_the_turn_without_replanning(
 
 
 async def test_a_member_cardinality_ceilings_remedy_reaches_the_agent_in_the_hand_back(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """`fix.remedy`, the one user-facing sentence naming what the user can do
@@ -2113,7 +2171,7 @@ async def test_a_member_cardinality_ceilings_remedy_reaches_the_agent_in_the_han
         text="refused",
     )
     surface = _fixture_surface(real_schemas, get_data_result=refusal)
-    runner, model = _plan_runner(planner, tool_surface=surface)
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=surface)
     await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
@@ -2125,6 +2183,7 @@ async def test_a_member_cardinality_ceilings_remedy_reaches_the_agent_in_the_han
 
 
 async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_can_act_on(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """A `get_data` asked to sum its family declares three StatVars, so the
@@ -2141,7 +2200,7 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
         text="fetched",
     )
     surface = _fixture_surface(real_schemas, get_data_result=unsummed)
-    runner, model = _plan_runner(planner, tool_surface=surface)
+    runner, model = _plan_runner(pg_engine, planner, tool_surface=surface)
     events = await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
@@ -2173,6 +2232,7 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
 
 
 async def test_an_over_ceiling_rows_refusal_still_replans(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """A `rows`/`bytes` ceiling narrows with `scope.entities`/`scope.window`,
@@ -2191,7 +2251,7 @@ async def test_an_over_ceiling_rows_refusal_still_replans(
         text="refused",
     )
     surface = _fixture_surface(real_schemas, analysis_call_result=refusal)
-    runner, _ = _plan_runner(planner, tool_surface=surface)
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=surface)
     events = await _start(runner)
     revision = plan_revision(plan)
 
@@ -2273,6 +2333,7 @@ def _stop(revision: str, step_id: str, spec: _StopSpec) -> Refused:
     ],
 )
 async def test_a_wave_of_dead_ends_closes_the_turn(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
     monkeypatch: pytest.MonkeyPatch,
     primary: _StopSpec,
@@ -2298,7 +2359,7 @@ async def test_a_wave_of_dead_ends_closes_the_turn(
         return drafted_plan, stop.model_copy(update={"also_stopped": siblings})
 
     monkeypatch.setattr("harness.graph.execute.execute_approved_plan", _stub_wave)
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
@@ -2319,7 +2380,10 @@ async def test_a_wave_of_dead_ends_closes_the_turn(
 
 @pytest.mark.parametrize("retryable", [True, False], ids=["retryable", "permanent"])
 async def test_a_transport_stop_closes_the_turn_only_when_no_retry_can_help(
-    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch, retryable: bool
+    pg_engine: AsyncEngine,
+    real_schemas: list[ToolSchema],
+    monkeypatch: pytest.MonkeyPatch,
+    retryable: bool,
 ) -> None:
     """A step the tool surface failed for a fault no later attempt gets past
     closes the turn without a replan, which would spend an approval on the
@@ -2338,7 +2402,7 @@ async def test_a_transport_stop_closes_the_turn_only_when_no_retry_can_help(
         return drafted_plan, stop
 
     monkeypatch.setattr("harness.graph.execute.execute_approved_plan", _stub_wave)
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
     events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
@@ -2348,7 +2412,7 @@ async def test_a_transport_stop_closes_the_turn_only_when_no_retry_can_help(
 
 
 async def test_a_not_approved_outcome_raises_instead_of_replanning(
-    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
+    pg_engine: AsyncEngine, real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`Refused(NOT_APPROVED)` means the workflow's own `approve` node let an
     unapproved plan through -- replanning would loop on the same defect, so
@@ -2371,7 +2435,7 @@ async def test_a_not_approved_outcome_raises_instead_of_replanning(
         )
 
     monkeypatch.setattr("harness.graph.execute.execute_approved_plan", _stub_not_approved)
-    runner, _ = _plan_runner(planner, tool_surface=_fixture_surface(real_schemas))
+    runner, _ = _plan_runner(pg_engine, planner, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
     revision = plan_revision(plan)
 
@@ -2793,10 +2857,10 @@ async def test_a_stop_on_a_copy_names_the_requirement_the_model_wrote(
     )
 
     refusal = _planner_refusal(stop, plan=plan, origins={})
-    ctx = SimpleNamespace(state={"plan": plan.model_dump_json()})
+    ctx = node_ctx(state={"plan": plan.model_dump_json()})
     plan_done = plan_done_node(executor=ScriptedExecutor(), run_ledger=InMemoryRunLedger())
     node_input = {"frame_refs": [], "frame_ref_steps": [], "failed_step": _failed_step(stop)}
-    (handed,) = [event async for event in plan_done(cast("Any", ctx), node_input)]
+    handed = (await plan_done.run(ctx, node_input)).output
 
     assert (refusal["step_id"], refusal["requirement_id"]) == ids
     assert "debt_history" not in json.dumps(refusal)
@@ -3090,6 +3154,7 @@ class _EarlySends:
 
 
 async def test_each_card_offered_starts_its_retrievals_once_with_the_arguments_execution_sends(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
 ) -> None:
     """The first card starts its retrieval, an amendment's card starts its own,
@@ -3105,11 +3170,10 @@ async def test_each_card_offered_starts_its_retrievals_once_with_the_arguments_e
     )
     sends = _EarlySends()
     surface = _CallRecordingSurface(_fixture_surface(real_schemas))
-    runner, _ = orchestrator_runner(
-        plan_call(_BRIEF),
-        planner=planner,
+    runner, _ = _plan_runner(
+        pg_engine,
+        planner,
         tool_surface=surface,
-        executor=ScriptedExecutor(),
         early_mints=EarlyMints(send=sends, max_concurrent=4, settle_s=3.0),
     )
 
@@ -3140,6 +3204,7 @@ async def test_each_card_offered_starts_its_retrievals_once_with_the_arguments_e
     ids=["declined", "raised"],
 )
 async def test_an_early_mint_that_fails_is_logged_and_leaves_the_card_and_plan_alone(
+    pg_engine: AsyncEngine,
     real_schemas: list[ToolSchema],
     caplog: pytest.LogCaptureFixture,
     outcome: str | Exception,
@@ -3149,8 +3214,11 @@ async def test_an_early_mint_that_fails_is_logged_and_leaves_the_card_and_plan_a
 
     async def card(early_mints: EarlyMints | None) -> tuple[Any, Any, str | None]:
         planner = _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-        runner, _ = orchestrator_runner(
-            plan_call(_BRIEF), planner=planner, executor=ScriptedExecutor(), early_mints=early_mints
+        runner, _ = _plan_runner(
+            pg_engine,
+            planner,
+            early_mints=early_mints,
+            conversation_id="conv_early" if early_mints is not None else "conv_none",
         )
         events = await _start(runner)
         await asyncio.sleep(0)
@@ -3295,17 +3363,16 @@ async def test_evicting_a_conversation_withdraws_its_calls_still_waiting_for_a_s
 
 
 async def test_approving_a_card_withdraws_its_early_calls_and_offering_it_does_not(
-    real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
+    pg_engine: AsyncEngine, real_schemas: list[ToolSchema], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     plan = _planner_plan(schemas=real_schemas)
     early = EarlyMints(send=_EarlySends(), max_concurrent=4, settle_s=3.0)
     withdrawn: list[str] = []
     monkeypatch.setattr(early, "withdraw", lambda: withdrawn.append("withdraw"))
-    runner, _ = orchestrator_runner(
-        plan_call(_BRIEF),
-        planner=_Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}]),
+    runner, _ = _plan_runner(
+        pg_engine,
+        _Planner([{"plan": plan.model_dump(mode="json"), "summary": {}}]),
         tool_surface=_fixture_surface(real_schemas),
-        executor=ScriptedExecutor(),
         early_mints=early,
     )
 

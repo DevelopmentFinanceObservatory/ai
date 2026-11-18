@@ -31,8 +31,8 @@ from ..planner_expectations import briefs as _briefs
 from ..planner_expectations import expect, expectation_name, shared
 from ..planner_expectations import request_dumped as _request_dumped
 from ..scripted_genai import Reply, Request, ScriptedGenai, call_part, reply
-from ..scripted_planner import numbered_call_ids as _numbered_call_ids
 from ..test_planner_entry_eval import entry, validate
+from ..turn_driver import numbered_call_ids as _numbered_call_ids
 
 _MODEL = AgentSettings().planner_model_name
 

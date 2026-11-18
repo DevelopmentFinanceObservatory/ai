@@ -1,8 +1,8 @@
 """The studio routes end-to-end over real HTTP, with scripted fakes.
 
 Everything runs against a FastAPI app through httpx2's ASGI transport, with
-real routing, real SSE streaming and real ADK run/resume mechanics, on the
-orchestrator topology `orchestrator_fakes.orchestrator_app` wires as
+real routing, real SSE streaming and the real turn engine's run and resume,
+on the turn graph `tests.studio_routes.orchestrator_app` wires as
 `harness.server` does. The agent's model answers from a script, and search,
 the executor, the planner and the plan's tool surface are scripted (no
 model, no MCP server). Every frame read off the wire is also validated
@@ -145,30 +145,22 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .failure_text import classed_sentence, is_user_sentence
-from .orchestrator_fakes import (
-    AUTH,
-    CONVERSATION,
-    NO_ADK,
+from .graph_turns import agent_read
+from .resolved_revision import resolved_revision
+from .scope_scenarios import _hashed_scope, _switched_answer
+from .scripted_genai import ScriptedGenai, call_part, reply, text_part
+from .scripted_tools import (
     CannedSearch,
-    ScriptLlm,
-    call,
     chart,
     definite_envelope,
     fetch_call,
     make_charts_call,
-    no_turn_specs,
-    orchestrator_app,
     plan_call,
-    request_text,
     search_call,
-    stream,
-    studio_client,
-    turn_body,
 )
-from .resolved_revision import resolved_revision
-from .scope_scenarios import _hashed_scope, _switched_answer
-from .scripted_genai import ScriptedGenai, call_part, reply, text_part
 from .store_clock import StoreClock
+from .studio_routes import AUTH, ScriptLlm, orchestrator_app, stream, studio_client, turn_body
+from .turn_driver import CONVERSATION, NO_ADK, no_turn_specs
 
 SPEC_A = "spec_" + "a" * 32
 REF_A = {"spec_id": SPEC_A, "content_version": "cv_" + "1" * 32}
@@ -395,12 +387,14 @@ def _ask(*options: str) -> tuple[types.Part, ...]:
 def _ask_questions(*questions: tuple[str, tuple[str, ...]]) -> tuple[types.Part, ...]:
     """A turn that asks the user each question, offering its options."""
     return (
-        call(
+        call_part(
             "ask_user",
-            questions=[
-                {"question": question, "options": [{"label": option} for option in options]}
-                for question, options in questions
-            ],
+            {
+                "questions": [
+                    {"question": question, "options": [{"label": option} for option in options]}
+                    for question, options in questions
+                ]
+            },
         ),
     )
 
@@ -2266,7 +2260,7 @@ async def test_an_ask_elicits_and_the_answer_resumes_on_a_new_stream() -> None:
 
     assert _events(second)[-1] == "done"
     assert _frame(second, "message.complete")["text"] == "You meant reading B."
-    assert "The user chose: reading B" in request_text(_model(app).requests[-1])
+    assert "The user chose: reading B" in agent_read(_model(app).requests[-1])
     (record,) = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
     assert record["user"] == "ambiguous q\n(then: reading B)"
 
@@ -2380,7 +2374,7 @@ async def test_several_questions_resume_with_every_answer_in_one_reply() -> None
         )
 
     assert _events(second)[-1] == "done"
-    asked = request_text(_model(app).requests[-1])
+    asked = agent_read(_model(app).requests[-1])
     assert "1. How should the aid be counted? The user chose: Gross" in asked
     assert "2. Which prices? The user left this to you. Go on with Constant." in asked
     (record,) = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
@@ -2392,14 +2386,16 @@ async def test_the_turn_record_keeps_a_picked_count_under_its_spec_id() -> None:
     so a later turn can tell which series the user settled."""
     app = _app(
         search_call("aid to Kenya"),
-        call(
+        call_part(
             "ask_user",
-            questions=[
-                {
-                    "question": "How should the aid be counted?",
-                    "options": [{"label": "Net", "spec_id": SPEC_A}, {"label": "Gross"}],
-                }
-            ],
+            {
+                "questions": [
+                    {
+                        "question": "How should the aid be counted?",
+                        "options": [{"label": "Net", "spec_id": SPEC_A}, {"label": "Gross"}],
+                    }
+                ]
+            },
         ),
         _text("Net it is."),
         resolver=_search(),
@@ -4828,7 +4824,7 @@ def _digest(request: Any, label: str) -> dict[str, Any] | None:
     """The digest the agent's `request` carries under `label`, the heading
     `orchestrator.agent` prepends it with, or `None` when it carries none."""
     opening = f"{label}: "
-    for line in request_text(request).split("\n"):
+    for line in agent_read(request).split("\n"):
         if line.startswith(opening):
             return json.loads(line.removeprefix(opening))
     return None
@@ -4867,7 +4863,7 @@ async def test_a_skipped_ask_resumes_and_hands_the_skip_back() -> None:
         )
 
     assert _events(second)[-1] == "done"
-    assert "The user skipped the question." in request_text(_model(app).requests[-1])
+    assert "The user skipped the question." in agent_read(_model(app).requests[-1])
 
 
 async def test_a_free_text_answer_resumes_in_the_users_own_words() -> None:
@@ -4887,7 +4883,7 @@ async def test_a_free_text_answer_resumes_in_the_users_own_words() -> None:
         )
 
     assert _events(second)[-1] == "done"
-    assert "The user answered in their own words: the OECD reading please" in request_text(
+    assert "The user answered in their own words: the OECD reading please" in agent_read(
         _model(app).requests[-1]
     )
 
@@ -4923,7 +4919,7 @@ async def test_a_pause_opened_before_questions_takes_its_answer_as_a_payload() -
         )
 
     assert _events(second)[-1] == "done"
-    assert "The user chose: reading B" in request_text(_model(app).requests[-1])
+    assert "The user chose: reading B" in agent_read(_model(app).requests[-1])
 
 
 # Each answer `/interrupt` refuses to an elicitation of two questions, both

@@ -161,8 +161,9 @@ from .context_probe import (
 from .context_probe import (
     record_chars as _record_chars,
 )
+from .planner_host import PlannerHarness
 from .scripted_genai import Reply, Request, ScriptedGenai, call_part, reply, text_part
-from .test_planner_adapter import _NO_DATA_SEARCH_RESPONSE, _AdapterHarness, _gdp_plan
+from .test_planner_adapter import _NO_DATA_SEARCH_RESPONSE, _gdp_plan
 
 # The root conftest.py chdirs every test into a tmp_path, so this must be absolute.
 _BASELINE_PATH = Path(__file__).resolve().parent / "context_baseline.json"
@@ -353,7 +354,7 @@ async def _recorded_round(
     adapter = _adapter(scripted)
 
     arguments: dict[str, Any] = {"question": draft.question, **context}
-    output = await _AdapterHarness(state).run(
+    output = await PlannerHarness(state).run(
         adapter, prior_plan=draft.model_dump(mode="json"), **arguments
     )
     assert output is not None and "refused" in output, output
@@ -422,7 +423,7 @@ async def _declaration_digests() -> dict[str, str]:
         specs=planner_specs(translate=build_translate(surface=surface), surface=surface),
         client=scripted.client,
     )
-    await _AdapterHarness().run(adapter, question="go", readings=[])
+    await PlannerHarness().run(adapter, question="go", readings=[])
     return {"served": _declarations_digest(scripted.requests[0])}
 
 

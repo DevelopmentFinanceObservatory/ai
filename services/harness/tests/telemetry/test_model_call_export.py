@@ -16,8 +16,8 @@ from google.genai import types
 from opentelemetry.proto.trace.v1.trace_pb2 import Span
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from ..orchestrator_fakes import orchestrator_app, stream, studio_client, turn_body
 from ..scripted_genai import Reply
+from ..studio_routes import orchestrator_app, stream, studio_client, turn_body
 from ..turn_driver import MODEL
 
 CHUNKS = ["Life ", "expectancy ", "rose."]

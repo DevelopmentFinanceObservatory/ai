@@ -122,10 +122,10 @@ from .scope_scenarios import (
     _switched_answer,
 )
 from .scripted_genai import ScriptedGenai, call_part, reply
-from .scripted_planner import SIGNED, numbered_call_ids
+from .scripted_planner import SIGNED
 from .scripted_tools import plan_call, scripted_orchestrator
 from .test_planner_node import _ask_call, _proposals, _steps
-from .turn_driver import SegmentRun, TurnDriver, scripted_models
+from .turn_driver import SegmentRun, TurnDriver, numbered_call_ids, scripted_models
 
 _BRIEF = "kenya debt"
 

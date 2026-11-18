@@ -1,15 +1,13 @@
-"""Scripted stand-ins for driving the Studio routes on the turn loop in tests.
+"""The Studio routes on the turn graph with a scripted orchestrator, for tests.
 
 `orchestrator_app` serves the studio routes on the turn graph, wired as
 `harness.server` wires it, its orchestrator answering from a script
 (`ScriptLlm`), and `stream` posts to a route and reads its SSE frames back.
-`call`, `search_call`, `fetch_call`, `make_charts_call` and `plan_call`
-build the script's parts; `request_text` and `handed_back` read what the
-model was sent.
+`studio_client` is an in-process client on the routes, `turn_body` a turn
+request's body, and `frame_for` the frame a `fetch` of a spec_id registers
+when `harness.scripted.ScriptedExecutor` answers it.
 
-`CannedSearch` answers `search` from data-mcp search envelopes that
-`definite_envelope` builds, and `frame_for` names the frame a `fetch` of a
-spec_id registers when `harness.scripted.ScriptedExecutor` answers it.
+The parts a script holds are built with `tests.scripted_tools`.
 """
 
 from __future__ import annotations
@@ -18,7 +16,6 @@ import asyncio
 import copy
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from datetime import UTC, datetime
 from typing import Any
 
 import httpx2
@@ -29,7 +26,7 @@ from harness.conversation import current_conversation_id
 from harness.graph.state import frame_id_for
 from harness.graph.workflow import studio_graph
 from harness.orchestrator_tools import build_orchestrator_tools
-from harness.planner_adapter import PlannerAdapterError, content_on_spans
+from harness.planner_adapter import content_on_spans
 from harness.scripted import (
     SCRIPTED_CV,
     SCRIPTED_SPEC,
@@ -42,25 +39,21 @@ from harness.settings import Settings
 from harness.studio import StudioRunner, create_studio_router
 from harness.studio_state import make_recall_part
 from harness.studio_store import StudioStore
-from harness.tool_contracts import ResolverError, resolver_digest
 from harness.turn.store import TurnStore
 from harness.turn_budget import TurnBudget, current_turn_budget
 from harness.wire import STUDIO_FRAME_ADAPTER
 from harness.wiring import handing_back_planner_failures
 from orchestrator.agent import orchestrator_agent
 from orchestrator.model import orchestrator_model
-from planner.plan import AskBreakdown, load_ask_breakdowns, load_asks, load_asks_across_years
 from pydantic_ai.models.google import GoogleModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .data_mcp_definitions import DataMcpDefinitions
 from .scripted_genai import Reply, Request, ScriptedGenai, _stream
-from .turn_driver import MODEL, NO_ADK, no_turn_specs, unconnected_store
-
-__all__ = ["NO_ADK", "no_turn_specs", "unconnected_store"]
+from .scripted_tools import no_resolver
+from .turn_driver import CONVERSATION, MODEL, NO_ADK, no_turn_specs
 
 AUTH = {"Authorization": "Bearer test-token"}
-CONVERSATION = "conv_01test0000"
 
 # A script entry: a part the model answers with, a whole reply, or a function
 # of the request that returns either, awaited when it returns an awaitable.
@@ -100,199 +93,10 @@ class ScriptLlm(ScriptedGenai):
         return _stream(reply)
 
 
-class FailingPlanner:
-    """A fake planner that raises `PlannerAdapterError`, the way `PlannerAdapter` fails."""
-
-    def __init__(
-        self,
-        message: str = (
-            "a plan that is draft was declared ready, not pending_approval; "
-            "refusing to report it ready"
-        ),
-    ) -> None:
-        self.message = message
-
-    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        raise PlannerAdapterError(self.message)
-
-
-class RefusingPlanner:
-    """A fake planner that refuses to draft, as `PlannerAdapter` does at its round cap."""
-
-    def __init__(self, *, final: bool = False) -> None:
-        self.questions: list[str] = []
-        self.readings: list[Any] = []
-        self.asks: list[tuple[str, ...]] = []
-        self.breakdowns: list[tuple[AskBreakdown, ...]] = []
-        self.across_years: list[tuple[int, ...]] = []
-        self.final = final
-
-    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        self.questions.append(kwargs["question"])
-        self.readings.append(kwargs.get("readings"))
-        self.asks.append(load_asks(kwargs["ctx"].state))
-        self.breakdowns.append(load_ask_breakdowns(kwargs["ctx"].state))
-        self.across_years.append(load_asks_across_years(kwargs["ctx"].state))
-        return {"refused": {"text": "the planner ran out of rounds", "final": self.final}}
-
-
-async def no_resolver(**kwargs: Any) -> dict[str, Any]:
-    raise AssertionError("no search expected")
-
-
-async def no_executor(*, tool: str, args: dict[str, Any], on_progress: Any = None) -> Any:
-    raise AssertionError(f"no tool call expected, got {tool}")
-
-
-def definite_envelope(
-    *, spec_id: str = SCRIPTED_SPEC, sentence: str = "Life expectancy in Kenya"
-) -> dict[str, Any]:
-    """A data-mcp search envelope with one definite part reading `spec_id`."""
-    spec = {
-        "spec_id": spec_id,
-        "resolved": {
-            "rendered_sentence": sentence,
-            "confidence": "high",
-            "coverage": {
-                "kind": "exact",
-                "has_data": True,
-                "window": {"start_year": 1960, "end_year": 2023},
-            },
-            "stat_vars": {
-                "member_count": 1,
-                "member_count_exact": True,
-                "served_count": 1,
-                "data_date_range": {"start": "1960", "end": "2023"},
-            },
-            "entities": [{"role": "observationAbout", "label": "Kenya", "ref": "country/KEN"}],
-            "facets": {},
-        },
-        "definition": {
-            "schema_version": 1,
-            "spec_id": spec_id,
-            "identity": {"stat_var": "LifeExpectancy_Person"},
-        },
-    }
-    part = {"status": "definite", "variable_text": sentence, "warnings": [], "spec": spec}
-    return {"schema_version": 1, "kind": "resolution", "status": "definite", "parts": [part]}
-
-
-class CannedSearch:
-    """A `Resolver` answering each search with the next envelope, digested as
-    `harness.mcp_client.McpResolver` digests it. `calls` records each call's
-    arguments. A search past the last envelope raises `ResolverError`."""
-
-    def __init__(self, *envelopes: Mapping[str, Any]) -> None:
-        self._envelopes = [dict(envelope) for envelope in envelopes]
-        self.calls: list[dict[str, Any]] = []
-
-    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        self.calls.append(kwargs)
-        if not self._envelopes:
-            raise ResolverError("no further search result was scripted")
-        return resolver_digest(self._envelopes.pop(0))
-
-
 def frame_for(spec_id: str = SCRIPTED_SPEC) -> str:
     """The frame id a `fetch` of `spec_id` registers when
     `harness.scripted.ScriptedExecutor` answers its `get_data`."""
     return frame_id_for({"spec_id": spec_id, "content_version": SCRIPTED_CV})
-
-
-def call(name: str, **args: Any) -> types.Part:
-    """A model turn calling the tool `name` with `args`."""
-    return types.Part.from_function_call(name=name, args=args)
-
-
-def search_call(*variables: str, text: str | None = None) -> types.Part:
-    """A parsed `search` call with one part per variable; `text` makes it a retry."""
-    args: dict[str, Any] = {"parts": [{"variable": v} for v in variables]}
-    if text is not None:
-        args["text"] = text
-    return call("search", **args)
-
-
-def fetch_call(spec_id: str = SCRIPTED_SPEC, **args: Any) -> types.Part:
-    """A `fetch` call; `args` are its `scope`, `stat_vars` or `breakdown`."""
-    return call("fetch", spec_id=spec_id, **args)
-
-
-def chart(
-    frame: str,
-    *,
-    type_: str = "line_chart",
-    title: str = "Life expectancy in Kenya",
-    select: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """One `make_charts` chart on `frame`, its `select` sent as `select_json`.
-    Left unset, the select names the one series of a scripted frame
-    (`harness.scripted.ScriptedExecutor`), whose rows no store holds for an
-    empty select to be checked against."""
-    if select is None:
-        select = {"stat_var": "dcid:LifeExpectancy_Person"}
-    return {"frame": frame, "type": type_, "title": title, "select_json": json.dumps(select)}
-
-
-def make_charts_call(*charts: Mapping[str, Any]) -> types.Part:
-    """A `make_charts` call drawing `charts`, each built with `chart`."""
-    return call("make_charts", charts=list(charts))
-
-
-def plan_call(brief: str, *asks: str) -> types.Part:
-    """A `plan` call handing `brief` and its `asks` to the planner. Given no
-    asks, it lists `brief` as the one output asked for, since the `plan` tool
-    refuses a call that lists none."""
-    return call("plan", brief=brief, asks=list(asks or (brief,)))
-
-
-def approve_answer(revision: object, *, at: datetime | None = None) -> dict[str, Any]:
-    """An answer approving the plan card that names `revision`, given at `at`
-    (now by default), as the studio's interrupt route builds it."""
-    return {"approved": revision, "at": (at or datetime.now(UTC)).isoformat()}
-
-
-def request_text(request: Request) -> str:
-    """Every text part of a model request, and every hand-back it shows as
-    the result of a `plan` or `ask_user` call (`hand_back_text`), one per line."""
-    return "\n".join(_part_text(p) for c in request.content_list for p in c.parts or [])
-
-
-def _part_text(part: types.Part) -> str:
-    response = part.function_response
-    if response is not None and response.name in _HANDED_BACK_TO:
-        return hand_back_text(response.response or {})
-    return part.text or ""
-
-
-# The calls `harness.graph.orchestrate` answers with a hand-back.
-_HANDED_BACK_TO = frozenset({"plan", "ask_user"})
-
-
-def hand_back_text(result: dict[str, Any]) -> str:
-    """A hand-back's result (`harness.graph.orchestrate.AgentHandBack.response`)
-    as lines: its text, its structured fields as one JSON object, then its
-    plan record. Empty for a result that holds no hand-back."""
-    if "result" not in result:
-        return ""
-    fields = {key: value for key, value in result.items() if key not in ("result", "plan_record")}
-    lines = [str(result["result"])]
-    if fields:
-        lines.append(json.dumps(fields))
-    if "plan_record" in result:
-        lines.append(str(result["plan_record"]))
-    return "\n".join(lines)
-
-
-def handed_back(model: ScriptLlm) -> tuple[str, dict[str, Any]]:
-    """The last request's text and the last `plan` result in it."""
-    request = model.requests[-1]
-    (result, *_) = [
-        part.function_response.response or {}
-        for content in reversed(request.content_list)
-        for part in content.parts or []
-        if part.function_response is not None and part.function_response.name == "plan"
-    ]
-    return request_text(request), result
 
 
 def orchestrator_app(

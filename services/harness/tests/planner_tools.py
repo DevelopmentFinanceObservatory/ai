@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from google.adk.tools.base_tool import BaseTool
 from google.genai import types
 from planner.session import SessionCall
 from planner.tool_spec import EndRun, ToolSpec, function_declaration, run_tool, serve_tool
@@ -51,13 +50,7 @@ async def serve_planner_tool(spec: ToolSpec, *, args: dict[str, Any], tool_conte
     )
 
 
-def planner_tool_declaration(tool: ToolSpec | BaseTool) -> types.FunctionDeclaration | None:
-    """Return the function declaration the model is shown for the tool.
-
-    A spec is declared as the planner's request declares it, and every ADK
-    tool, the orchestrator's `FunctionTool`s included, through ADK's own
-    declaration.
-    """
-    if isinstance(tool, ToolSpec):
-        return function_declaration(tool)
-    return tool._get_declaration()
+def planner_tool_declaration(tool: ToolSpec) -> types.FunctionDeclaration:
+    """Return the function declaration the model is shown for the tool, as the
+    planner's request declares it."""
+    return function_declaration(tool)

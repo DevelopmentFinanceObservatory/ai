@@ -1,13 +1,12 @@
 """`PlannerAdapter`'s planner on a scripted google-genai client: its model, its
-requests and its sessions over turns that amend, replan and switch, and its
-resume of the sessions in `fixtures/adk_planner_sessions`.
+requests and its transcript over turns that amend, replan and switch.
 
-Each test runs a script on a scripted google-genai client through the adapter. An
-entry is checked against the stored expectation of its test
-(`tests.planner_expectations`) on what the adapter answers, the progress it reports,
-the requests the model received, the events the session stores, the steps
-`session_steps` reads from them and the stored state, as `tests.test_planner_node`
-checks them.
+Each test runs a script on a scripted google-genai client through the adapter, as
+the turn's `planner` node runs it (`tests.planner_host.PlannerHarness`). An entry
+is checked against the stored expectation of its test
+(`tests.planner_expectations`) on what the adapter answers, the requests the model
+received, the steps `session_steps` reads from the turn's transcript and the
+stored state, as `tests.test_planner_node` checks them.
 """
 
 from __future__ import annotations
@@ -15,25 +14,17 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 from unittest import mock
 
 import pytest
 from compiler.surface import FixtureSurface
-from google.adk import Context, Event
-from google.adk.runners import Runner as AdkRunner
-from google.adk.sessions import InMemorySessionService
-from google.adk.workflow import START, Workflow, node
-from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import Client, types
 from harness import planner_adapter
-from harness import studio as studio_module
 from harness.graph import switch as switch_module
-from harness.planner_adapter import PlannerAdapter
-from harness.planner_node import SKIP_THOUGHT_SIGNATURE
+from harness.planner_adapter import SKIP_THOUGHT_SIGNATURE, PlannerAdapter
 from harness.planner_run import failed_tool_answer
 from harness.prefix_cache import PrefixCache, prefix_key
 from harness.scripted import _compiled_proposal, instruction_text
@@ -42,44 +33,29 @@ from harness.settings import Settings
 from harness.turn_budget import TurnBudget
 from harness.turn_events import PLANNER_ASK
 from planner.call import PlannerCall
-from planner.plan import (
-    Plan,
-)
-from planner.session import session_steps
+from planner.plan import Plan
 from planner.settings import AgentSettings
 from planner.specs import PROPOSE_PLAN
 from planner.tool_results import Outcome, ProblemCode
 from planner.tool_spec import ToolSpec
-from planner.tools import PENDING_ASK_STATE_KEY, EndRun
+from planner.tools import EndRun
 from sqlalchemy.ext.asyncio import AsyncEngine
 from translator.tool import build_translate
 
-from .orchestrator_fakes import plan_call
 from .planner.planner_pairs import adapter_specs
 from .planner_expectations import expect, expectation_name, expected, shared
+from .planner_host import PlannerHarness, planner_answers, planner_calls
 from .scripted_genai import Request, ScriptedGenai, call_part, reply
 from .scripted_planner import scripted_planner
-from .test_planner_adapter import (
-    _APP,
-    _PICKED,
-    _USER,
-    SPEC,
-    _AdapterHarness,
-    _brief_follows_the_question,
-    _pending_ask_interrupt_id,
-    _rediscovery_refusal,
-    _translated_plan,
-)
+from .scripted_tools import plan_call
+from .test_planner_adapter import _PICKED, _rediscovery_refusal, _translated_plan
 from .test_planner_model import CACHE_NAME, _Caches, _with_caches
 from .test_planner_node import (
-    _ELECTED_KEY,
     _MODEL,
     _QUESTION,
-    _READ_KEY,
     _REFUSED,
     _SIGNED,
     _SPEC,
-    _SSE,
     _ask_call,
     _assert_expected,
     _Entry,
@@ -87,7 +63,6 @@ from .test_planner_node import (
     _frames,
     _numbered_call_ids,
     _planned,
-    _planner_events,
     _proposals,
     _referral,
     _Script,
@@ -103,6 +78,7 @@ from .test_studio import (
     _events,
     _frame,
     _plan_with_a_choice,
+    _StopsTaken,
     _stream,
     _switch_body,
 )
@@ -133,7 +109,7 @@ async def test_the_planner_calls_the_gemini_model_adks_registry_resolves(
         ),
         client=scripted.client,
     )
-    await _AdapterHarness().run(adapter, run_config=_SSE, readings=[], **_planned(plan))
+    await PlannerHarness().run(adapter, readings=[], **_planned(plan))
 
     assert [request.model for request in scripted.requests] == [_MODEL]
 
@@ -160,7 +136,7 @@ async def test_two_planned_turns_over_one_prefix_cache_create_it_once(plan: Plan
             prefix_cache=cache,
             client=scripted.client,
         )
-        await _AdapterHarness().run(adapter, run_config=_SSE, readings=[], **_planned(plan))
+        await PlannerHarness().run(adapter, readings=[], **_planned(plan))
 
     assert len(caches.created) == 1
     assert [request.generate_config.cached_content for request in scripted.requests] == [
@@ -200,7 +176,7 @@ async def test_a_planned_turns_config_is_sent_in_wire_order(
         prefix_cache=PrefixCache() if cached else None,
         client=scripted.client,
     )
-    await _AdapterHarness().run(adapter, run_config=_SSE, readings=[], **_planned(plan))
+    await PlannerHarness().run(adapter, readings=[], **_planned(plan))
     (sent, *_) = scripted.requests
     if cached:
         (created,) = caches.created
@@ -376,12 +352,11 @@ async def test_the_adapters_observer_sees_each_answer_the_model_reads(plan: Plan
     )
     stored: list[tuple[str | None, dict[str, Any] | None]] = []
     for _ in range(2):
-        harness = _AdapterHarness()
-        await harness.run(adapter, run_config=_SSE, readings=[], **_planned(plan))
+        harness = PlannerHarness()
+        await harness.run(adapter, readings=[], **_planned(plan))
         stored += [
-            (response.name, response.response)
-            for event in _planner_events(_Entry([], [], [], await harness.events(), {}))
-            for response in event.get_function_responses()
+            (response["name"], response["response"])
+            for response in planner_answers(await harness.records())
         ]
 
     def key(item: tuple[str | None, dict[str, Any] | None]) -> str:
@@ -394,94 +369,6 @@ async def test_the_adapters_observer_sees_each_answer_the_model_reads(plan: Plan
     assert observed[2] == (PROPOSE_PLAN, failed_tool_answer(PROPOSE_PLAN, raised))
     assert observed[3][1] is not None and observed[3][1]["outcome"] == Outcome.OK
     assert len(observed) == 4
-
-
-# --- Sessions the ADK planner stored ------------------------------------------------------
-
-_ADK_SESSIONS = Path(__file__).parent / "fixtures" / "adk_planner_sessions"
-# The question the planner asked in each of `_ADK_SESSIONS`' sessions.
-_ASKED = {"message": "Which source did you mean?"}
-
-
-@pytest.mark.parametrize(
-    ("recording", "call_id", "asked", "answer", "picked", "elected"),
-    [
-        (
-            "paused_on_a_planner_ask",
-            "a1",
-            {**_ASKED, "candidates": [{"spec_id": SPEC, "label": "a candidate"}]},
-            {"result": {"spec_id": SPEC}},
-            f"They picked 'a candidate', id `{SPEC}`.",
-            [SPEC],
-        ),
-        (
-            "paused_on_adk_request_input",
-            "r1",
-            _ASKED,
-            {"result": "2020"},
-            "They picked '2020', id `2020`.",
-            [],
-        ),
-    ],
-    ids=["planner-ask", "adk-request-input"],
-)
-async def test_a_session_the_adk_planner_paused_on_an_ask_resumes_to_the_plan(
-    plan: Plan,
-    recording: str,
-    call_id: str,
-    asked: dict[str, Any],
-    answer: dict[str, Any],
-    picked: str,
-    elected: list[str],
-) -> None:
-    """A conversation the ADK planner left paused on an ask, as it stored it
-    (`fixtures/adk_planner_sessions`), resumes on the user's answer: the planner
-    reads the ask and its answer from the stored events, puts the question in
-    the brief, replays no empty text part, and lands the plan."""
-    stored = json.loads((_ADK_SESSIONS / f"{recording}.json").read_text())
-    harness = _AdapterHarness()
-    await harness.restore(
-        [Event.model_validate(event) for event in stored["events"]], stored["state"]
-    )
-    scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
-    adapter = scripted_planner(scripted, tools=_proposals())
-    assert _pending_ask_interrupt_id(await harness.events()) == call_id
-    resume = types.Content(role="user", parts=[create_request_input_response(call_id, answer)])
-
-    output = await harness.run(adapter, new_message=resume, readings=[], **_planned(plan))
-
-    assert (
-        output is not None
-        and output["plan"]["workflow"] == plan.model_dump(mode="json")["workflow"]
-    )
-    steps = list(session_steps(await harness.events()))
-    assert [(step.kind, step.call_id) for step in steps] == [
-        ("message", None),
-        ("call", call_id),
-        ("answer", call_id),
-        ("response", None),
-    ]
-    assert steps[1].args == steps[2].args == asked
-    assert steps[2].body == answer
-    state = await harness.state()
-    assert state[_READ_KEY] == {
-        "steps": [["message", None], ["call", call_id], ["answer", call_id]],
-        "response_calls": [[PROPOSE_PLAN, "p1"]],
-    }
-    assert state[_ELECTED_KEY] == elected
-    # The planner-ask recording holds the ask it paused on; the answer clears it.
-    assert state.get(PENDING_ASK_STATE_KEY) is None
-    (request,) = scripted.requests
-    brief = _brief_follows_the_question(request)
-    assert _ASKED["message"] in brief
-    assert picked in brief
-    assert not [
-        part
-        for content in request.content_list
-        if content.role == "model"
-        for part in content.parts or ()
-        if part.text == ""
-    ], "the ADK planner's trailing empty text part is replayed"
 
 
 # --- Amendments and replans ---------------------------------------------------------------
@@ -523,8 +410,8 @@ async def test_an_amendment_opens_a_turn_of_its_own_and_lands_a_plan(
 
 async def _replanned(plan: Plan, opened_by: Mapping[str, Any]) -> _Entry:
     """A first entry and a replan `opened_by` its refusal or pick, run in one
-    invocation of one session, as the graph's planner node runs a replan in the
-    turn it planned in. The replan's run has a node path of its own and follows
+    segment of the turn's `planner` node on one context, as the graph's
+    planner node runs a replan in the turn it planned in. The replan follows
     no other user message."""
     scripted = ScriptedGenai(
         [
@@ -533,40 +420,27 @@ async def _replanned(plan: Plan, opened_by: Mapping[str, Any]) -> _Entry:
         ]
     )
     adapter = scripted_planner(scripted, tools=_proposals())
-    reports: list[dict[str, Any]] = []
     outputs: list[dict[str, Any] | None] = []
 
-    async def entries(ctx: Context, node_input: Any) -> AsyncIterator[Event]:
-        del node_input
-        entry = {"ctx": ctx, "readings": [], "on_progress": reports.append, **_planned(plan)}
+    async def entries(*, ctx: Any, answer: Any) -> dict[str, Any]:
+        del answer
+        entry = {"ctx": ctx, "readings": [], **_planned(plan)}
         first = await adapter(**entry)
         outputs.extend([first, await adapter(**entry, **opened_by)])
-        yield Event(output={"entries": len(outputs)})
+        return {"entries": len(outputs)}
 
-    sessions = InMemorySessionService()
-    session = await sessions.create_session(app_name=_APP, user_id=_USER)
-    workflow = Workflow(
-        name="replan_wf", edges=[(START, node(entries, name="entries", rerun_on_resume=True))]
-    )
+    harness = PlannerHarness()
     # The refusal's time is recorded with it (`_record_refusal`).
     clock = mock.Mock(wraps=datetime)
     clock.now.return_value = datetime(2026, 11, 11, tzinfo=UTC)
     with _numbered_call_ids(), mock.patch.object(planner_adapter, "datetime", clock):
-        async for _ in AdkRunner(node=workflow, app_name=_APP, session_service=sessions).run_async(
-            user_id=_USER,
-            session_id=session.id,
-            new_message=types.Content(role="user", parts=[types.Part(text=_QUESTION)]),
-            run_config=_SSE,
-        ):
-            pass
-    stored = await sessions.get_session(app_name=_APP, user_id=_USER, session_id=session.id)
-    assert stored is not None
+        await harness.run(entries, message=_QUESTION)
     return _Entry(
         outputs=outputs,
-        reports=[{k: v for k, v in report.items() if k != "duration_ms"} for report in reports],
         requests=scripted.requests,
-        events=stored.events,
-        state=dict(stored.state),
+        records=await harness.records(),
+        state=dict(await harness.state()),
+        emitted=harness.emitted,
     )
 
 
@@ -686,13 +560,8 @@ async def test_a_refused_ask_put_in_the_models_place_is_replayed_without_its_cal
         if part.function_response is not None and part.function_response.name == PLANNER_ASK
     ]
     assert answered.function_response is not None and answered.function_response.id is None
-    (stored,) = [
-        call
-        for event in _planner_events(entry)
-        for call in event.get_function_calls()
-        if call.name == PLANNER_ASK
-    ]
-    assert stored.id == "adk-1", "the stored ask keeps its id"
+    (stored,) = [call for call in planner_calls(entry.records) if call["name"] == PLANNER_ASK]
+    assert stored["id"] == "adk-1", "the stored ask keeps its id"
     _assert_expected(request, entry, config="request_config_refusing_ask")
 
 
@@ -739,7 +608,7 @@ async def test_calls_without_ids_are_stored_under_adk_ids_and_replayed_without_t
         ),
     )
 
-    ids = [call.id for event in _planner_events(entry) for call in event.get_function_calls()]
+    ids = [call["id"] for call in planner_calls(entry.records)]
     assert ids == ["adk-1", "adk-2"]
     assert all(
         part.function_call.id is None
@@ -766,10 +635,10 @@ async def _stopped_switch(
         raise AssertionError("a stopped revision is cancelled")
 
     monkeypatch.setattr(switch_module, "_switched_plan", revising)
-    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.2)
     scripted = ScriptedGenai([reply(call_part(PROPOSE_PLAN, {}, id="p1", signature=_SIGNED))])
     adapter = scripted_planner(scripted, tools=_proposals(records=plan))
     app = _app(plan_call(_QUESTION), planner=adapter, engine=engine)
+    taken = _StopsTaken(app.state.studio.store)
     stop = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
     async with _client(app) as client:
         with _numbered_call_ids():
@@ -779,10 +648,9 @@ async def _stopped_switch(
             _stream(client, "/api/studio/interrupt", _switch_body(proposed))
         )
         await asyncio.wait_for(entered.wait(), timeout=5)
-        armed = conversation.cancel_event
-        assert armed is not None and not armed.is_set()
         cancelled = await client.post("/api/studio/cancel", json=stop, headers=AUTH)
         assert cancelled.status_code == 204
+        await taken.reach(1)
         frames = await asyncio.wait_for(resumed, timeout=5)
 
     assert _events(frames)[-1] == "plan.proposed"
@@ -793,7 +661,6 @@ async def _stopped_switch(
     assert again["switch_failed"]["code"] == "switch_cancelled"
     assert list(conversation.pending) == [again["interrupt_id"]]
     assert conversation.awaiting_answer
-    assert conversation.switch_stop is None
     return [proposed], frames
 
 

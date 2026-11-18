@@ -1,13 +1,18 @@
-"""The orchestrator's path through the workflow, run by a real ADK runner
-with a scripted model: answer, ask, plan, and what the agent reads after each."""
+"""The orchestrator's path through the turn graph on the turn loop, with a
+scripted model: ask, plan, and what the agent reads after each.
+
+Each turn runs the real nodes a plan call passes through
+(`tests.plan_turns.plan_nodes`), the orchestrator on its real tools over a
+scripted Gemini client, on Postgres (`tests.turn_driver.TurnDriver`).
+"""
 
 from __future__ import annotations
 
 import copy
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -18,19 +23,13 @@ from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp import get_data_digest
 from executor.completion import PublishFault
 from executor.ledger import InMemoryRunLedger
-from google.adk.events import EventActions
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService, State
-from google.adk.workflow import START, Workflow
 from google.genai import types
 from harness import plan_display
 from harness.conversation import current_conversation_id
 from harness.graph import execute as execute_module
-from harness.graph.plan_done import (
-    _DROPPED,
-)
+from harness.graph.events import AgentStatus
+from harness.graph.plan_done import _DROPPED
 from harness.graph.state import (
-    APPROVE_INTERRUPT,
     ORCHESTRATOR_BRIEF_KEY,
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
@@ -39,14 +38,9 @@ from harness.graph.state import (
     ORCHESTRATOR_READINGS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
-    ORCHESTRATOR_STATUS_FAILURE_KEY,
     UNREADABLE_PLAN_NOTE,
-    AskOption,
-    AskQuestion,
-    GraphState,
 )
-from harness.graph.workflow import planner_entry
-from harness.orchestrator_tools import HANDED_OFF, build_orchestrator_tools
+from harness.orchestrator_tools import HANDED_OFF
 from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
 from harness.provenance import ProvenanceStore
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface, scripted_publish_result
@@ -54,6 +48,7 @@ from harness.sentences import DECLINE_REASONS
 from harness.settings import Settings
 from harness.studio_translate import _RecordingSurface
 from harness.tool_contracts import HarnessCode
+from harness.turn.events import Paused, TurnEvent, TurnFailed
 from harness.turn_records import PlanRecord
 from harness.wiring import handing_back_planner_failures
 from planner.call import CallSession
@@ -69,34 +64,183 @@ from planner.plan import (
     load_asks,
 )
 from planner.session import SessionCall
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
-from .orchestrator_fakes import (
-    CannedSearch,
-    FailingPlanner,
-    RefusingPlanner,
-    ScriptLlm,
-    approve_answer,
-    call,
-    create_request_input_response,
-    definite_envelope,
-    handed_back,
-    no_executor,
-    no_resolver,
-    open_session,
-    orchestrator_runner,
-    quotes_another_agent,
-    request_text,
-    run_turn,
-    search_call,
-    single_pause,
-)
-from .scripted_genai import ScriptedGenai, reply, text_part
+from .graph_turns import agent_read, given, opening_graph
+from .plan_turns import approve_answer, plan_nodes
+from .planner_host import FailingPlanner, RefusingPlanner
+from .scripted_genai import ScriptedGenai, call_part, reply, text_part
+from .scripted_tools import no_executor, no_resolver, scripted_orchestrator
 from .test_plan_path import (
     SCRIPTED_SPEC,
     AskingPlanner,
     RefusingGetDataSurface,
     describes,
 )
+from .turn_driver import CONVERSATION, SegmentRun, TurnDriver, scripted_models
+
+
+def call(name: str, **args: Any) -> types.Part:
+    """A model turn calling the tool `name` with `args`."""
+    return call_part(name, args)
+
+
+class _Turn:
+    """One conversation's turn on the plan path, built on its first
+    `run_turn`: `model` is the agent's scripted client, and `last` the
+    segment that ran last."""
+
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        script: list[types.Part],
+        *,
+        conversation_id: str,
+        turn_index: int,
+        **wiring: Any,
+    ) -> None:
+        self.engine = engine
+        self.conversation_id = conversation_id
+        self.turn_index = turn_index
+        # The agent answers from `script`, then in plain text.
+        self.model = ScriptedGenai(
+            [*(reply(part) for part in script), *(reply(text_part("done")) for _ in range(4))]
+        )
+        self.wiring = wiring
+        self.opening: dict[str, Any] = {}
+        self.driver: TurnDriver | None = None
+        self.last: SegmentRun | None = None
+
+    def build(self) -> TurnDriver:
+        """The instance running the turn, its graph opening on the state
+        `open_session` gave it."""
+        models = scripted_models()
+        models.orchestrator = self.model
+        executor = self.wiring.pop("executor", None) or no_executor
+        resolver = self.wiring.pop("resolver", None) or no_resolver
+        planner = self.wiring.pop("planner", None) or RefusingPlanner()
+        nodes = plan_nodes(
+            scripted_orchestrator(resolver=resolver, executor=executor),
+            models,
+            executor=executor,
+            run_ledger=self.wiring.pop("run_ledger", None) or InMemoryRunLedger(),
+            planner=planner,
+            **self.wiring,
+        )
+        state = dict(self.opening)
+        specs = state.pop(ORCHESTRATOR_SPECS_KEY, None)
+        before = given(specs=specs, state=state) if state or specs else None
+        return TurnDriver(
+            self.engine,
+            graph=opening_graph(nodes, before=before),
+            conversation_id=self.conversation_id,
+        )
+
+    async def run(self, segment: Callable[[TurnDriver], Any]) -> list[TurnEvent]:
+        """Run the segment `segment` starts on the turn's instance, keep it
+        as `last`, and return its events. A node that raised fails the
+        turn, and its error is raised here."""
+        if self.driver is None:
+            self.driver = self.build()
+        self.last = await segment(self.driver)
+        failed = [event for event in self.last.events if isinstance(event, TurnFailed)]
+        if failed:
+            raise failed[-1].error
+        return self.last.events
+
+
+def orchestrator_runner(
+    engine: AsyncEngine,
+    *script: types.Part,
+    planner: Any = None,
+    tool_surface: Any = None,
+    executor: Any = None,
+    resolver: Any = None,
+    publisher: Any = scripted_publish_result,
+    run_ledger: Any = None,
+    conversation_id: str = CONVERSATION,
+    turn_index: int = 1,
+) -> tuple[_Turn, ScriptedGenai]:
+    """Turn `turn_index` of conversation `conversation_id`, whose agent
+    answers from `script`, then "done" in plain text, and the agent's
+    scripted client. The planner refuses (`RefusingPlanner`) unless
+    `planner` is given; search and every executor call fail the test unless
+    `resolver` or `executor` is given. `tool_surface` runs an approved plan,
+    `publisher` publishes a run's results and `run_ledger` keeps its runs."""
+    turn = _Turn(
+        engine,
+        list(script),
+        conversation_id=conversation_id,
+        turn_index=turn_index,
+        planner=planner,
+        tool_surface=tool_surface,
+        executor=executor,
+        resolver=resolver,
+        publisher=publisher,
+        run_ledger=run_ledger,
+    )
+    return turn, turn.model
+
+
+async def open_session(turn: _Turn, **state: Any) -> None:
+    """Open the turn on `state`, as its earlier turns and searches left it:
+    spec blocks under `ORCHESTRATOR_SPECS_KEY`, the rest as state."""
+    turn.opening = state
+
+
+async def run_turn(turn: _Turn, message: str) -> list[TurnEvent]:
+    """Run the turn on the user's `message` to its first pause or its end."""
+    return await turn.run(lambda driver: driver.turn(message, turn_index=turn.turn_index))
+
+
+async def answer_turn(turn: _Turn, answer: dict[str, Any]) -> list[TurnEvent]:
+    """Answer the pause the turn holds with `answer`, and run on."""
+    assert turn.last is not None
+    pause = turn.last.pause
+    return await turn.run(lambda driver: driver.answer(answer, to=pause))
+
+
+def single_pause(events: list[TurnEvent]) -> Paused:
+    """The one pause the segment ended on."""
+    (pause,) = [event for event in events if isinstance(event, Paused)]
+    return pause
+
+
+def turn_state(turn: _Turn) -> dict[str, Any]:
+    """The turn's state as its last segment stored it."""
+    assert turn.last is not None
+    return turn.last.cursor.state
+
+
+async def store_state(turn: _Turn, key: str, value: Any) -> None:
+    """Store `value` under `key` in the paused turn's state, for a test that
+    needs state no node of this release would write."""
+    assert turn.last is not None
+    state = {**turn.last.cursor.state, key: value}
+    async with turn.engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE turn_cursors SET state = CAST(:state AS json) WHERE id = :id"),
+            {"state": json.dumps(state), "id": turn.last.cursor.id},
+        )
+
+
+def handed_back(model: ScriptedGenai) -> tuple[str, dict[str, Any]]:
+    """The agent's last request as it reads it, and the last `plan` result in it."""
+    request = model.requests[-1]
+    (result, *_) = [
+        part.function_response.response or {}
+        for content in reversed(request.content_list)
+        for part in content.parts or []
+        if part.function_response is not None and part.function_response.name == "plan"
+    ]
+    return agent_read(request), result
+
+
+def request_text(request: Any) -> str:
+    """`request` as the agent reads it (`tests.graph_turns.agent_read`)."""
+    return agent_read(request)
+
 
 _CONGO = {
     "question": "Which Congo?",
@@ -263,7 +407,11 @@ _CONSTANT_LINE = f"2. In which prices? The user chose: Constant US dollars ({_FK
     ],
 )
 async def test_a_count_and_prices_picked_together_name_the_one_reading_with_both(
-    net_qualifier: str, answer: dict[str, Any], expected: list[str], elected: set[str]
+    pg_engine: AsyncEngine,
+    net_qualifier: str,
+    answer: dict[str, Any],
+    expected: list[str],
+    elected: set[str],
 ):
     """A count picked in one answer, search's own reading included, and
     other prices in another, both of one search result, name the listed
@@ -272,34 +420,38 @@ async def test_a_count_and_prices_picked_together_name_the_one_reading_with_both
     reads answer by answer."""
     block = _france_kenya_with_constant_prices(net_qualifier=net_qualifier)
     runner, model = orchestrator_runner(
-        call("ask_user", questions=_COUNT_AND_PRICES), types.Part.from_text(text="Done.")
+        pg_engine, call("ask_user", questions=_COUNT_AND_PRICES), text_part("Done.")
     )
     await open_session(runner, **{ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: block}})
-    pause = single_pause(await run_turn(runner, types.UserContent("Aid from France to Kenya?")))
+    single_pause(await run_turn(runner, "Aid from France to Kenya?"))
 
-    reply = create_request_input_response(pause.id, {"result": answer})
-    events = await run_turn(runner, types.Content(role="user", parts=[reply]))
+    events = await answer_turn(runner, answer)
 
-    assert not [e for e in events if e.error_code]
+    assert not [e for e in events if isinstance(e, TurnFailed)]
     assert "\n".join(["You asked the user:", *expected, _SETTLED]) in request_text(
         model.requests[-1]
     )
-    session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    assert session is not None
-    tool_context = SimpleNamespace(state=session.state, function_call_id=None, session=session)
-    chosen = CallSession(SessionCall.of(cast(Any, tool_context))).elected_spec_ids()
+    assert runner.driver is not None and runner.last is not None
+    records = await runner.driver.records(runner.last.cursor)
+    specs = await runner.driver.turns.specs(runner.last.cursor)
+    state = {**turn_state(runner), ORCHESTRATOR_SPECS_KEY: specs}
+    session = SessionCall(records=records, state=state, call_id=None)
+    chosen = CallSession(session).elected_spec_ids()
     assert {spec_id for spec_id in chosen if spec_id.startswith("spec_")} == elected
 
 
-async def test_a_planner_that_refuses_hands_back_and_the_agent_keeps_the_question():
+async def test_a_planner_that_refuses_hands_back_and_the_agent_keeps_the_question(
+    pg_engine: AsyncEngine,
+):
     planner = RefusingPlanner()
     runner, model = orchestrator_runner(
+        pg_engine,
         call(
             "plan",
             brief="Niger's Global Fund receipts as a share of health spending",
             asks=["Niger's Global Fund receipts as a share of health spending"],
         ),
-        types.Part.from_text(text="The share could not be calculated."),
+        text_part("The share could not be calculated."),
         planner=planner,
     )
     searched = {"text": "Global Fund receipts", "status": "no_data", "refusal_code": "no_match"}
@@ -312,9 +464,7 @@ async def test_a_planner_that_refuses_hands_back_and_the_agent_keeps_the_questio
         },
     )
 
-    events = await run_turn(
-        runner, types.UserContent("How much does Niger get from the Global Fund?")
-    )
+    events = await run_turn(runner, "How much does Niger get from the Global Fund?")
 
     assert planner.questions == ["Niger's Global Fund receipts as a share of health spending"]
     # An earlier turn's readings come first, then this turn's.
@@ -322,67 +472,16 @@ async def test_a_planner_that_refuses_hands_back_and_the_agent_keeps_the_questio
     after_plan = request_text(model.requests[-1])
     assert "How much does Niger get from the Global Fund?" in after_plan
     assert "The planner could not make a plan: the planner ran out of rounds" in after_plan
-    assert not [e for e in events if e.error_code]
-    session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    assert session.state.get("question") in (None, "")
-    assert session.state[ORCHESTRATOR_BRIEF_KEY].startswith("Niger's")
+    assert not [e for e in events if isinstance(e, TurnFailed)]
+    state = turn_state(runner)
+    assert state.get("question") in (None, "")
+    assert state[ORCHESTRATOR_BRIEF_KEY].startswith("Niger's")
 
 
-@pytest.mark.parametrize(
-    ("tool", "arguments", "questions", "asks"),
-    [
-        (
-            "plan",
-            {"brief": "Kenya's aid since 2015", "asks": ["the total"]},
-            ["Kenya's aid since 2015"],
-            [("the total",)],
-        ),
-        (
-            "ask_user",
-            {
-                "questions": [
-                    AskQuestion(question="Which years?", options=[AskOption(label="2015")])
-                ]
-            },
-            [],
-            [],
-        ),
-    ],
-)
-async def test_the_planner_entry_runs_alone_from_a_plan_calls_hand_off(
-    tool: str, arguments: dict[str, Any], questions: list[str], asks: list[tuple[str, ...]]
-):
-    """`planner_entry`'s nodes, run without the rest of the turn, give the planner the
-    brief and asks a `plan` call handed off and end on its answer. An `ask_user` hand-off
-    stops at `route`."""
-    tools = {
-        tool.__name__: tool
-        for tool in build_orchestrator_tools(resolver=no_resolver, executor=no_executor)
-    }
-    handed = SimpleNamespace(state={}, actions=EventActions())
-    tools[tool](**arguments, tool_context=handed)
-    planner = RefusingPlanner(final=True)
-    entry = planner_entry(planner)
-    runner = Runner(
-        node=Workflow(
-            name="planner_entry",
-            state_schema=GraphState,
-            edges=[(START, entry.route), *entry.edges],
-        ),
-        app_name="t",
-        session_service=InMemorySessionService(),
-    )
-    await open_session(runner, **handed.state)
-
-    events = await run_turn(runner, types.UserContent("How much aid has Kenya had?"))
-
-    assert (planner.questions, planner.asks) == (questions, asks)
-    assert not [e for e in events if e.error_code]
-
-
-async def test_a_failed_plan_gives_the_plan_call_back_once():
+async def test_a_failed_plan_gives_the_plan_call_back_once(pg_engine: AsyncEngine):
     planner = RefusingPlanner()
-    runner, _ = orchestrator_runner(
+    runner, model = orchestrator_runner(
+        pg_engine,
         call("plan", brief="Kenya's aid as a share of GDP", asks=["Kenya's aid as a share of GDP"]),
         call(
             "plan",
@@ -394,50 +493,57 @@ async def test_a_failed_plan_gives_the_plan_call_back_once():
             brief="Kenya's aid as a share of GDP, any source",
             asks=["Kenya's aid as a share of GDP, any source"],
         ),
-        types.Part.from_text(text="Could not be calculated."),
+        text_part("Could not be calculated."),
         planner=planner,
     )
     await open_session(runner)
 
-    events = await run_turn(runner, types.UserContent("Kenya's aid as a share of GDP?"))
+    await run_turn(runner, "Kenya's aid as a share of GDP?")
 
     assert len(planner.questions) == 2
     third = [
-        r.response
-        for e in events
-        for r in e.get_function_responses()
-        if r.name == "plan" and r.response and "error" in r.response
+        part.function_response.response
+        for content in model.requests[-1].content_list
+        for part in content.parts or []
+        if part.function_response is not None
+        and part.function_response.name == "plan"
+        and part.function_response.response
+        and "error" in part.function_response.response
     ]
     assert len(third) == 1 and "limit" in third[0]["error"]
 
 
 @pytest.mark.parametrize("final", [False, True])
-async def test_only_a_refusal_another_brief_could_avoid_offers_another_plan(final: bool):
+async def test_only_a_refusal_another_brief_could_avoid_offers_another_plan(
+    pg_engine: AsyncEngine, final: bool
+):
     """A final refusal (an internal or repeated failure, or a question declined
     whole) fails the same way for any brief, so the plan call is not given back
     and the hand-back does not offer one."""
     runner, model = orchestrator_runner(
+        pg_engine,
         call("plan", brief="Kenya's aid as a share of GDP", asks=["Kenya's aid as a share of GDP"]),
-        types.Part.from_text(text="Could not be calculated."),
+        text_part("Could not be calculated."),
         planner=RefusingPlanner(final=final),
     )
     await open_session(runner)
 
-    await run_turn(runner, types.UserContent("Kenya's aid as a share of GDP?"))
+    await run_turn(runner, "Kenya's aid as a share of GDP?")
 
-    session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    calls = session.state[ORCHESTRATOR_CALLS_KEY]
+    state = turn_state(runner)
+    calls = state[ORCHESTRATOR_CALLS_KEY]
     assert bool(calls.get("plan_given_back")) is not final
     assert ("planned once more" in request_text(model.requests[-1])) is not final
 
 
-async def test_each_plan_call_holds_the_planner_to_its_own_asks_alone():
+async def test_each_plan_call_holds_the_planner_to_its_own_asks_alone(pg_engine: AsyncEngine):
     """A plan call lists the asks for its own plan only: a later call with
     one ask and no breakdowns leaves no earlier call's asks, breakdowns, or
     across-years marks for the planner to account for."""
     planner = RefusingPlanner()
     asks = ["a chart of France's aid to Guatemala", "the total since 2010 by donor"]
     runner, _ = orchestrator_runner(
+        pg_engine,
         call(
             "plan",
             brief="France's aid to Guatemala since 2010",
@@ -448,51 +554,53 @@ async def test_each_plan_call_holds_the_planner_to_its_own_asks_alone():
             brief="France's bilateral aid to Guatemala",
             asks=["France's bilateral aid to Guatemala"],
         ),
-        types.Part.from_text(text="Could not be calculated."),
+        text_part("Could not be calculated."),
         planner=planner,
     )
     await open_session(runner)
 
-    await run_turn(runner, types.UserContent("France's aid to Guatemala since 2010?"))
+    await run_turn(runner, "France's aid to Guatemala since 2010?")
 
     assert planner.asks == [tuple(asks), ("France's bilateral aid to Guatemala",)]
     assert planner.breakdowns == [(AskBreakdown(ask=1, by=("donor",)),), ()]
     assert planner.across_years == [(1,), ()]
-    session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    assert session.state.get(ASKS_STATE_KEY) == ["France's bilateral aid to Guatemala"]
-    assert session.state.get(ASK_BREAKDOWNS_STATE_KEY) is None
-    assert session.state.get(ASKS_ACROSS_YEARS_STATE_KEY) is None
+    state = turn_state(runner)
+    assert state.get(ASKS_STATE_KEY) == ["France's bilateral aid to Guatemala"]
+    assert state.get(ASK_BREAKDOWNS_STATE_KEY) is None
+    assert state.get(ASKS_ACROSS_YEARS_STATE_KEY) is None
 
 
-async def test_a_planner_adapter_failure_is_handed_back_when_wrapped_and_fatal_when_not():
+async def test_a_planner_adapter_failure_is_handed_back_when_wrapped_and_fatal_when_not(
+    pg_engine: AsyncEngine,
+):
     runner, model = orchestrator_runner(
+        pg_engine,
         call("plan", brief="Kenya's debt", asks=["Kenya's debt"]),
-        types.Part.from_text(text="Could not be calculated."),
+        text_part("Could not be calculated."),
         planner=handing_back_planner_failures(FailingPlanner()),
     )
     await open_session(runner)
 
-    events = await run_turn(runner, types.UserContent("Kenya's debt?"))
+    events = await run_turn(runner, "Kenya's debt?")
 
     assert (
         "The planner could not make a plan: a plan that is draft was declared ready, not "
         "pending_approval; refusing to report it ready" in request_text(model.requests[-1])
     )
-    assert not [e for e in events if e.error_code]
+    assert not [e for e in events if isinstance(e, TurnFailed)]
     # The failure's code travels with the status that fails the plan's step.
-    failures = [
-        e.custom_metadata[ORCHESTRATOR_STATUS_FAILURE_KEY]
-        for e in events
-        if e.custom_metadata and ORCHESTRATOR_STATUS_FAILURE_KEY in e.custom_metadata
-    ]
+    failures = [e.failure for e in events if isinstance(e, AgentStatus) and e.failure]
     assert failures == [{"code": "internal_error"}]
 
     bare, _ = orchestrator_runner(
-        call("plan", brief="Kenya's debt", asks=["Kenya's debt"]), planner=FailingPlanner()
+        pg_engine,
+        call("plan", brief="Kenya's debt", asks=["Kenya's debt"]),
+        planner=FailingPlanner(),
+        conversation_id="conv_bare",
     )
     await open_session(bare)
     with pytest.raises(PlannerAdapterError):
-        await run_turn(bare, types.UserContent("Kenya's debt?"))
+        await run_turn(bare, "Kenya's debt?")
 
 
 async def _breaking_resolver(**kwargs: Any) -> dict[str, Any]:
@@ -503,7 +611,7 @@ def _tool_answers(request: Any) -> dict[str, Any]:
     """Each function response in `request`, by tool name."""
     return {
         p.function_response.name: p.function_response.response
-        for c in request.contents
+        for c in request.content_list
         for p in c.parts or []
         if p.function_response
     }
@@ -522,7 +630,7 @@ def _paired_results(request: Any) -> list[tuple[str, list[dict[str, Any]]]]:
     """Each function call in `request`, in order, by name, with the results
     the content after it gives that name. The request carries no call ids,
     so Gemini pairs a call with the responses that follow it."""
-    contents = request.contents
+    contents = request.content_list
     pairs = []
     for place, content in enumerate(contents):
         following = contents[place + 1] if place + 1 < len(contents) else None
@@ -538,7 +646,7 @@ def _assert_one_result_per_call(request: Any) -> None:
     result stands without its call."""
     pairs = _paired_results(request)
     assert [len(results) for _, results in pairs] == [1] * len(pairs)
-    responses = [p for c in request.contents for p in c.parts or [] if p.function_response]
+    responses = [p for c in request.content_list for p in c.parts or [] if p.function_response]
     assert len(responses) == len(pairs)
 
 
@@ -549,49 +657,49 @@ def _the_hand_back(request: Any, name: str) -> dict[str, Any]:
     return result
 
 
-async def test_a_trailing_hand_back_is_the_one_result_of_its_plan_call():
+async def test_a_trailing_hand_back_is_the_one_result_of_its_plan_call(pg_engine: AsyncEngine):
     """The model's request right after a plan ran ends on the plan's
     hand-back. ADK merges every response to the call there, the later
     replacing the earlier, so the call shows the hand-back and not `_pend`'s
     record of the hand-off."""
     runner, model = orchestrator_runner(
+        pg_engine,
         call("plan", brief="Kenya's debt service since 2015", asks=["Kenya's debt service"]),
-        types.Part.from_text(text="Charted."),
+        text_part("Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
         executor=describes,
     )
     await open_session(runner)
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    revision = approval.args["payload"]["revision"]
-    approve = create_request_input_response(approval.id, {"result": approve_answer(revision)})
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
+    approval = single_pause(await run_turn(runner, "Kenya's debt service?"))
+    revision = approval.payload["revision"]
+    await answer_turn(runner, approve_answer(revision))
 
     request = model.requests[-1]
-    assert _results_of(request.contents[-1], "plan")
+    assert _results_of(request.content_list[-1], "plan")
     result = _the_hand_back(request, "plan")
     assert result["result"] == "The approved plan ran. Chart its frames and answer."
     assert result["frames"]
     _assert_one_result_per_call(request)
 
 
-async def test_a_hand_back_in_history_is_the_one_result_of_its_plan_call():
+async def test_a_hand_back_in_history_is_the_one_result_of_its_plan_call(pg_engine: AsyncEngine):
     """A later request holds the plan's hand-back in its history, with the
     agent's `ask_user` call and its answer after it. ADK pairs a call in
     history with its last response, so the plan call still shows the
     hand-back alone, and the question its answer alone."""
     runner, model = orchestrator_runner(
+        pg_engine,
         call("plan", brief="Kenya's debt service", asks=["Kenya's debt service"]),
         call("ask_user", questions=[_CONGO]),
-        types.Part.from_text(text="Kenya's debt service could not be calculated."),
+        text_part("Kenya's debt service could not be calculated."),
     )
     await open_session(runner)
-    pause = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    answer = create_request_input_response(pause.id, {"result": {"spec_id": "o1"}})
-    await run_turn(runner, types.Content(role="user", parts=[answer]))
+    single_pause(await run_turn(runner, "Kenya's debt service?"))
+    await answer_turn(runner, {"spec_id": "o1"})
 
     request = model.requests[-1]
-    assert not _results_of(request.contents[-1], "plan")
+    assert not _results_of(request.content_list[-1], "plan")
     assert _the_hand_back(request, "plan")["result"].startswith("The planner could not make a plan")
     assert _the_hand_back(request, "ask_user")["result"].startswith(
         "You asked the user: Which Congo?\nThe user chose: Republic of the Congo"
@@ -599,90 +707,46 @@ async def test_a_hand_back_in_history_is_the_one_result_of_its_plan_call():
     _assert_one_result_per_call(request)
 
 
-async def test_a_tool_that_raises_answers_the_agent_with_its_class_and_the_turn_goes_on(caplog):
+async def test_a_tool_that_raises_answers_the_agent_with_its_class_and_the_turn_goes_on(
+    pg_engine: AsyncEngine, caplog
+):
     runner, model = orchestrator_runner(
+        pg_engine,
         call("search", parts=[{"variable": "GDP"}]),
-        types.Part.from_text(text="Search failed, so I cannot give Kenya's GDP."),
+        text_part("Search failed, so I cannot give Kenya's GDP."),
         resolver=_breaking_resolver,
     )
     await open_session(runner)
 
-    with caplog.at_level(logging.ERROR, logger="orchestrator.tool_failures"):
-        events = await run_turn(runner, types.UserContent("Kenya's GDP?"))
+    with caplog.at_level(logging.ERROR, logger="orchestrator.agent"):
+        events = await run_turn(runner, "Kenya's GDP?")
 
     answer = _tool_answers(model.requests[-1])["search"]
     assert answer["error"].startswith("search failed inside DFO (RuntimeError).")
     assert "internal.example" not in answer["error"]
     assert (answer["code"], answer["retry_mode"]) == (HarnessCode.RAISED, "do_not_retry")
-    assert not [e for e in events if e.error_code]
-    (record,) = [r for r in caplog.records if r.name == "orchestrator.tool_failures"]
+    assert not [e for e in events if isinstance(e, TurnFailed)]
+    (record,) = [r for r in caplog.records if r.name == "orchestrator.agent"]
     assert record.levelno == logging.ERROR
     assert record.exc_info is not None and record.exc_info[0] is RuntimeError
     assert record.args[0] == "search"
 
 
-async def test_a_made_up_tool_name_keeps_adk_answer_and_logs_no_failure(caplog):
+async def test_a_made_up_tool_name_keeps_adk_answer_and_logs_no_failure(
+    pg_engine: AsyncEngine, caplog
+):
     runner, model = orchestrator_runner(
-        call("summon_data", topic="GDP"), types.Part.from_text(text="Sorry.")
+        pg_engine, call("summon_data", topic="GDP"), text_part("Sorry.")
     )
     await open_session(runner)
 
-    with caplog.at_level(logging.ERROR, logger="orchestrator.tool_failures"):
-        events = await run_turn(runner, types.UserContent("Kenya's GDP?"))
+    with caplog.at_level(logging.ERROR, logger="orchestrator.agent"):
+        events = await run_turn(runner, "Kenya's GDP?")
 
     answer = _tool_answers(model.requests[-1])["summon_data"]
     assert "The tools you can call are: " in answer["error"]
-    assert not [e for e in events if e.error_code]
-    assert not [r for r in caplog.records if r.name == "orchestrator.tool_failures"]
-
-
-async def test_a_searched_and_approved_turn_copies_no_large_container_it_reads(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """ADK's `State` deep-copies a dict or list on its first read
-    (`_take_snapshot`), which costs milliseconds per read for the frames,
-    spec blocks and readings a turn holds. A turn reads them through
-    `stored_mapping` and `stored_sequence`, which take no copy; the small
-    containers it reads through `State` are still copied, which shows the
-    spy sees ADK's reads."""
-    copied: list[str] = []
-    take_snapshot = State._take_snapshot
-
-    def spy(self: State, key: str, value: Any) -> None:
-        copied.append(key)
-        take_snapshot(self, key, value)
-
-    monkeypatch.setattr(State, "_take_snapshot", spy)
-    runner, _ = orchestrator_runner(
-        search_call("debt service"),
-        call(
-            "plan",
-            brief="Kenya's debt service since 2015",
-            asks=["Kenya's debt service since 2015"],
-        ),
-        types.Part.from_text(text="Charted."),
-        planner=ScriptedPlannerModel(),
-        tool_surface=ScriptedSurface(),
-        executor=describes,
-        resolver=CannedSearch(definite_envelope(sentence="Kenya debt service")),
-    )
-    large: dict[str, Any] = {
-        ORCHESTRATOR_FRAMES_KEY: {"f" + "0" * 30: {"ref": {}, "view": {"dimensions": []}}},
-        ORCHESTRATOR_READINGS_KEY: {SCRIPTED_SPEC: ["sv/1"]},
-        ORCHESTRATOR_PRIOR_LEDGER_KEY: {"readings": [], "spec_ids": [], "warnings": {}},
-        ORCHESTRATOR_PLAN_RECORDS_KEY: [],
-    }
-    await open_session(runner, **large)
-
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    approve = create_request_input_response(
-        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
-    )
-    events = await run_turn(runner, types.Content(role="user", parts=[approve]))
-
-    assert not [e for e in events if e.error_code]
-    assert ORCHESTRATOR_CALLS_KEY in copied
-    assert not {*copied} & {*large, ORCHESTRATOR_SPECS_KEY, ORCHESTRATOR_SEARCHES_KEY}
+    assert not [e for e in events if isinstance(e, TurnFailed)]
+    assert not [r for r in caplog.records if r.name == "orchestrator.agent"]
 
 
 class _AmendedPlanner(ScriptedPlannerModel):
@@ -716,7 +780,9 @@ class _AmendedRefusingReplanner(_AmendedPlanner):
 
 
 @pytest.mark.parametrize("ending", ["ran", "stopped", "refused", "refused_after_computed"])
-async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_removed(ending: str):
+async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_removed(
+    pg_engine: AsyncEngine, ending: str
+):
     """Whether the run ran, stopped, or stopped and the planner refused to
     replan, the hand-back quotes the user's amendments in order and its lead
     keeps the removed ask out of the answer, so the agent does not report it
@@ -728,12 +794,13 @@ async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_remov
         "refused_after_computed": (_RemovingRefusingReplanner(), _EmptyAggregateSurface()),
     }[ending]
     runner, model = orchestrator_runner(
+        pg_engine,
         call(
             "plan",
             brief="ODA received by Ghana, Kenya and Nigeria",
             asks=["ODA to Ghana", "ODA to Kenya", "ODA to Nigeria"],
         ),
-        types.Part.from_text(text="Answered."),
+        text_part("Answered."),
         planner=planner,
         tool_surface=surface,
         executor=describes,
@@ -741,16 +808,10 @@ async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_remov
     await open_session(runner)
 
     amendments = ["Show each year.", "Drop Nigeria, just Ghana and Kenya."]
-    approval = single_pause(await run_turn(runner, types.UserContent("ODA to three countries?")))
+    approval = single_pause(await run_turn(runner, "ODA to three countries?"))
     for words in amendments:
-        amend = create_request_input_response(
-            approval.id, {"result": {"approved": None, "amendment": words}}
-        )
-        approval = single_pause(await run_turn(runner, types.Content(role="user", parts=[amend])))
-    approve = create_request_input_response(
-        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
-    )
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
+        approval = single_pause(await answer_turn(runner, {"approved": None, "amendment": words}))
+    await answer_turn(runner, approve_answer(approval.payload["revision"]))
 
     after_plan, body = handed_back(model)
     assert body["amendments"] == amendments
@@ -783,30 +844,25 @@ async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_remov
         assert 'Not computed: "ODA to Ghana"; "ODA to Kenya".' in body["result"]
 
 
-async def test_an_amendment_redrafts_and_the_amended_plan_runs():
+async def test_an_amendment_redrafts_and_the_amended_plan_runs(pg_engine: AsyncEngine):
     runner, model = orchestrator_runner(
+        pg_engine,
         call(
             "plan",
             brief="Kenya's debt service since 2015",
             asks=["Kenya's debt service since 2015"],
         ),
-        types.Part.from_text(text="Charted."),
+        text_part("Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
         executor=describes,
     )
     await open_session(runner)
 
-    first = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    amend = create_request_input_response(
-        first.id, {"result": {"approved": None, "amendment": "only 2020"}}
-    )
-    second = single_pause(await run_turn(runner, types.Content(role="user", parts=[amend])))
-    assert second.args["payload"]["version"] == first.args["payload"]["version"] + 1
-    approve = create_request_input_response(
-        second.id, {"result": approve_answer(second.args["payload"]["revision"])}
-    )
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
+    first = single_pause(await run_turn(runner, "Kenya's debt service?"))
+    second = single_pause(await answer_turn(runner, {"approved": None, "amendment": "only 2020"}))
+    assert second.payload["version"] == first.payload["version"] + 1
+    await answer_turn(runner, approve_answer(second.payload["revision"]))
 
     assert "The approved plan ran." in request_text(model.requests[-1])
 
@@ -833,12 +889,6 @@ _PLANS_WITH_MEMBER_LISTS: dict[str, Any] = json.loads(
 _UNREADABLE_PLAN = json.dumps(_PLANS_WITH_MEMBER_LISTS["aggregate"]["plan"])
 
 
-def _stored_state(runner: Runner) -> dict[str, Any]:
-    """The live state of the session `open_session` opened."""
-    service = cast(InMemorySessionService, runner.session_service)
-    return service.sessions["t"]["u"]["s"].state
-
-
 def _plan_warnings(caplog: pytest.LogCaptureFixture) -> list[tuple[object, ...]]:
     """The arguments of each warning `planner.plan` logged."""
     return [
@@ -858,27 +908,28 @@ def _plan_warnings(caplog: pytest.LogCaptureFixture) -> list[tuple[object, ...]]
     ],
 )
 async def test_an_answer_to_a_plan_stored_with_member_lists_gets_a_new_plan(
-    stored: str, answer: str, caplog: pytest.LogCaptureFixture
+    pg_engine: AsyncEngine, stored: str, answer: str, caplog: pytest.LogCaptureFixture
 ):
     """A plan awaiting approval across the release cannot be read. Approving
     it or amending it retrieves nothing: the question is planned from the
     start, the new card says why, and approving that one runs it."""
     surface = _CountingSurface()
     runner, model = orchestrator_runner(
+        pg_engine,
         call(
             "plan",
             brief="Kenya's debt service since 2015",
             asks=["Kenya's debt service since 2015"],
         ),
-        types.Part.from_text(text="Charted."),
+        text_part("Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=surface,
         executor=describes,
     )
     await open_session(runner)
-    first = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
+    single_pause(await run_turn(runner, "Kenya's debt service?"))
     held = _PLANS_WITH_MEMBER_LISTS[stored]
-    _stored_state(runner)["plan"] = json.dumps(held["plan"])
+    await store_state(runner, "plan", json.dumps(held["plan"]))
     result = (
         approve_answer(held["revision"])
         if answer == "approves"
@@ -886,40 +937,32 @@ async def test_an_answer_to_a_plan_stored_with_member_lists_gets_a_new_plan(
     )
 
     with caplog.at_level(logging.WARNING, logger="planner.plan"):
-        second = single_pause(
-            await run_turn(
-                runner,
-                types.Content(
-                    role="user",
-                    parts=[create_request_input_response(first.id, {"result": result})],
-                ),
-            )
-        )
+        second = single_pause(await answer_turn(runner, result))
 
-    assert second.id == APPROVE_INTERRUPT
-    assert second.args["payload"]["refusal_note"] == UNREADABLE_PLAN_NOTE
-    assert second.args["payload"]["version"] == 1
+    assert second.kind == "approve"
+    assert second.payload["refusal_note"] == UNREADABLE_PLAN_NOTE
+    assert second.payload["version"] == 1
     assert surface.calls == []
     ((state_key, entries, fields),) = _plan_warnings(caplog)
     assert (state_key, entries) == ("plan", 1)
     assert "workflow.sources.stat_vars" in str(fields)
     assert held["plan"]["question"] not in caplog.text
 
-    approve = create_request_input_response(
-        second.id, {"result": approve_answer(second.args["payload"]["revision"])}
-    )
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
+    await answer_turn(runner, approve_answer(second.payload["revision"]))
 
     assert "get_data" in surface.calls
     assert "The approved plan ran." in request_text(model.requests[-1])
 
 
-async def test_a_plan_call_drafts_over_an_earlier_plan_stored_with_member_lists():
+async def test_a_plan_call_drafts_over_an_earlier_plan_stored_with_member_lists(
+    pg_engine: AsyncEngine,
+):
     """A session's earlier plan call left a plan the release cannot read.
     The next plan call drafts its own plan as it would with none on record,
     and its card says nothing of the earlier one, which no card of this
     call showed."""
     runner, _ = orchestrator_runner(
+        pg_engine,
         call(
             "plan",
             brief="Kenya's debt service since 2015",
@@ -931,11 +974,11 @@ async def test_a_plan_call_drafts_over_an_earlier_plan_stored_with_member_lists(
     )
     await open_session(runner, plan=_UNREADABLE_PLAN)
 
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
+    approval = single_pause(await run_turn(runner, "Kenya's debt service?"))
 
-    assert approval.id == APPROVE_INTERRUPT
-    assert "refusal_note" not in approval.args["payload"]
-    assert Plan.model_validate_json(_stored_state(runner)["plan"]).version == 1
+    assert approval.kind == "approve"
+    assert "refusal_note" not in approval.payload
+    assert Plan.model_validate_json(turn_state(runner)["plan"]).version == 1
 
 
 class _StoredWithMemberLists(Plan):
@@ -952,6 +995,7 @@ class _StoredWithMemberLists(Plan):
 
 
 async def test_execute_plans_again_when_the_approved_plan_was_stored_with_member_lists(
+    pg_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """`execute` runs nothing of a plan it cannot read and spends no replan
@@ -966,6 +1010,7 @@ async def test_execute_plans_again_when_the_approved_plan_was_stored_with_member
     )
     surface = _CountingSurface()
     runner, _ = orchestrator_runner(
+        pg_engine,
         call(
             "plan",
             brief="Kenya's debt service since 2015",
@@ -976,20 +1021,18 @@ async def test_execute_plans_again_when_the_approved_plan_was_stored_with_member
         executor=describes,
     )
     await open_session(runner)
-    first = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    approve = create_request_input_response(
-        first.id, {"result": approve_answer(first.args["payload"]["revision"])}
-    )
+    first = single_pause(await run_turn(runner, "Kenya's debt service?"))
 
-    second = single_pause(await run_turn(runner, types.Content(role="user", parts=[approve])))
+    second = single_pause(await answer_turn(runner, approve_answer(first.payload["revision"])))
 
-    assert second.id == APPROVE_INTERRUPT
-    assert second.args["payload"]["refusal_note"] == UNREADABLE_PLAN_NOTE
+    assert second.kind == "approve"
+    assert second.payload["refusal_note"] == UNREADABLE_PLAN_NOTE
     assert surface.calls == []
-    assert not _stored_state(runner).get("replans")
+    assert not turn_state(runner).get("replans")
 
 
 async def test_the_hand_back_carries_no_record_of_a_plan_stored_with_member_lists(
+    pg_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """`plan_done` hands back the frames the run produced as it does when no
@@ -1002,35 +1045,38 @@ async def test_the_hand_back_carries_no_record_of_a_plan_stored_with_member_list
 
     monkeypatch.setattr(execute_module, "execute_approved_plan", stored_unreadable)
     runner, model = orchestrator_runner(
+        pg_engine,
         call(
             "plan",
             brief="Kenya's debt service since 2015",
             asks=["Kenya's debt service since 2015"],
         ),
-        types.Part.from_text(text="Charted."),
+        text_part("Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
         executor=describes,
     )
     await open_session(runner)
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    revision = approval.args["payload"]["revision"]
-    approve = create_request_input_response(approval.id, {"result": approve_answer(revision)})
+    approval = single_pause(await run_turn(runner, "Kenya's debt service?"))
+    revision = approval.payload["revision"]
 
-    events = await run_turn(runner, types.Content(role="user", parts=[approve]))
+    events = await answer_turn(runner, approve_answer(revision))
 
     handed_back = request_text(model.requests[-1])
     assert "The approved plan ran. Chart its frames and answer." in handed_back
     assert f"Plan {revision[:12]}" not in handed_back
-    assert not [e for e in events if e.error_code]
-    state = _stored_state(runner)
+    assert not [e for e in events if isinstance(e, TurnFailed)]
+    state = turn_state(runner)
     assert state["plan"] is None
     assert not state.get(ORCHESTRATOR_PLAN_RECORDS_KEY)
 
 
-async def test_approving_a_superseded_revision_retrieves_nothing_and_proposes_again():
+async def test_approving_a_superseded_revision_retrieves_nothing_and_proposes_again(
+    pg_engine: AsyncEngine,
+):
     surface = _CountingSurface()
     runner, _ = orchestrator_runner(
+        pg_engine,
         call(
             "plan",
             brief="Kenya's debt service since 2015",
@@ -1042,23 +1088,18 @@ async def test_approving_a_superseded_revision_retrieves_nothing_and_proposes_ag
     )
     await open_session(runner)
 
-    first = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    amend = create_request_input_response(
-        first.id, {"result": {"approved": None, "amendment": "only 2020"}}
-    )
-    second = single_pause(await run_turn(runner, types.Content(role="user", parts=[amend])))
-    stale = create_request_input_response(
-        second.id, {"result": approve_answer(first.args["payload"]["revision"])}
-    )
-    third = single_pause(await run_turn(runner, types.Content(role="user", parts=[stale])))
+    first = single_pause(await run_turn(runner, "Kenya's debt service?"))
+    second = single_pause(await answer_turn(runner, {"approved": None, "amendment": "only 2020"}))
+    third = single_pause(await answer_turn(runner, approve_answer(first.payload["revision"])))
 
-    assert third.id == APPROVE_INTERRUPT
-    assert third.args["payload"]["version"] == second.args["payload"]["version"] + 1
+    assert third.kind == "approve"
+    assert third.payload["version"] == second.payload["version"] + 1
     assert "get_data" not in surface.calls
 
 
-async def test_a_hand_back_is_still_in_view_after_a_later_pause():
+async def test_a_hand_back_is_still_in_view_after_a_later_pause(pg_engine: AsyncEngine):
     runner, model = orchestrator_runner(
+        pg_engine,
         call("plan", brief="Kenya's debt service", asks=["Kenya's debt service"]),
         call(
             "ask_user",
@@ -1069,13 +1110,12 @@ async def test_a_hand_back_is_still_in_view_after_a_later_pause():
                 }
             ],
         ),
-        types.Part.from_text(text="Kenya's debt service since 2015 could not be calculated."),
+        text_part("Kenya's debt service since 2015 could not be calculated."),
     )
     await open_session(runner)
 
-    pause = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    answer = create_request_input_response(pause.id, {"result": {"spec_id": "o1"}})
-    await run_turn(runner, types.Content(role="user", parts=[answer]))
+    single_pause(await run_turn(runner, "Kenya's debt service?"))
+    await answer_turn(runner, {"spec_id": "o1"})
 
     resumed = request_text(model.requests[-1])
     assert "Kenya's debt service?" in resumed
@@ -1083,21 +1123,24 @@ async def test_a_hand_back_is_still_in_view_after_a_later_pause():
     assert "The user chose: Since 2015" in resumed
 
 
-async def test_a_second_plan_call_runs_a_planner_that_never_sees_the_first_hand_back():
+async def test_a_second_plan_call_runs_a_planner_that_never_sees_the_first_hand_back(
+    pg_engine: AsyncEngine,
+):
     # The planner's model answers each run with text, which ends it with no plan.
     scripted = ScriptedGenai([reply(text_part("done"))] * 2)
     adapter = PlannerAdapter(
         settings=Settings(), surface=FixtureSurface(schemas=[]), client=scripted.client
     )
     runner, model = orchestrator_runner(
+        pg_engine,
         call("plan", brief="Kenya's debt, first brief", asks=["Kenya's debt, first brief"]),
         call("plan", brief="Kenya's debt, second brief", asks=["Kenya's debt, second brief"]),
-        types.Part.from_text(text="Could not be calculated."),
+        text_part("Could not be calculated."),
         planner=handing_back_planner_failures(adapter),
     )
     await open_session(runner)
 
-    events = await run_turn(runner, types.UserContent("Kenya's debt?"))
+    events = await run_turn(runner, "Kenya's debt?")
 
     hand_back = "The planner could not make a plan"
     planner_texts = [
@@ -1108,12 +1151,7 @@ async def test_a_second_plan_call_runs_a_planner_that_never_sees_the_first_hand_
     assert second_run
     assert not [text for text in second_run if hand_back in text]
     assert hand_back in request_text(model.requests[-1])
-    assert not quotes_another_agent(model.requests[-1])
-    # The hand-back's branch stays on the hand-back: the graph's own events
-    # reach the same agents after each hand-back as before the first.
-    graph_events = [e for e in events if e.author == "dfo_analyst_graph"]
-    assert graph_events and {e.branch for e in graph_events} == {None}
-    assert not [e for e in events if e.error_code]
+    assert not [e for e in events if isinstance(e, TurnFailed)]
 
 
 def _rows_led_by_a_wide_step(step_rows: Any) -> Any:
@@ -1146,18 +1184,19 @@ def _rows_led_by_a_wide_step(step_rows: Any) -> Any:
     ids=["found_by_the_translator", "searched_in_an_earlier_turn"],
 )
 async def test_the_plan_record_and_every_reading_reach_the_agent_past_wide_step_arguments(
-    monkeypatch: pytest.MonkeyPatch, prior_spec_ids: list[str], origin: str
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, prior_spec_ids: list[str], origin: str
 ):
     """A source an earlier turn's search returned is recorded as searched, so
     its block in that turn's record stays the one a later turn pins from."""
     monkeypatch.setattr(plan_display, "step_rows", _rows_led_by_a_wide_step(plan_display.step_rows))
     runner, model = orchestrator_runner(
+        pg_engine,
         call(
             "plan",
             brief="Kenya's debt service since 2015",
             asks=["Kenya's debt service since 2015"],
         ),
-        types.Part.from_text(text="Charted."),
+        text_part("Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
         executor=describes,
@@ -1165,24 +1204,23 @@ async def test_the_plan_record_and_every_reading_reach_the_agent_past_wide_step_
     prior = {"readings": [], "spec_ids": prior_spec_ids, "warnings": {}}
     await open_session(runner, **{ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
 
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    revision = approval.args["payload"]["revision"]
-    approve = create_request_input_response(approval.id, {"result": approve_answer(revision)})
-    events = await run_turn(runner, types.Content(role="user", parts=[approve]))
+    approval = single_pause(await run_turn(runner, "Kenya's debt service?"))
+    revision = approval.payload["revision"]
+    events = await answer_turn(runner, approve_answer(revision))
 
     after_plan = request_text(model.requests[-1])
     assert f"Plan {revision[:12]} (approved)" in after_plan
     assert f"({SCRIPTED_SPEC}, sum)" in after_plan
     assert "Wide_StatVar_" not in after_plan
-    session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    assert session.state[ORCHESTRATOR_READINGS_KEY] == {SCRIPTED_SPEC: "sum"}
-    (stored,) = session.state[ORCHESTRATOR_PLAN_RECORDS_KEY]
+    state = turn_state(runner)
+    assert state[ORCHESTRATOR_READINGS_KEY] == {SCRIPTED_SPEC: "sum"}
+    (stored,) = state[ORCHESTRATOR_PLAN_RECORDS_KEY]
     record = PlanRecord.model_validate(stored)
     assert record.revision == revision
     assert [source.origin for source in record.sources] == [origin]
     # The run the plan executed as, which the hand-back names.
     assert record.run_id is not None and f'"run_id": "{record.run_id}"' in after_plan
-    assert not [e for e in events if e.error_code]
+    assert not [e for e in events if isinstance(e, TurnFailed)]
 
 
 class _NoisySurface(ScriptedSurface):
@@ -1216,21 +1254,21 @@ class _NoisySurface(ScriptedSurface):
         return result.model_copy(update={"text": text})
 
 
-async def test_step_summaries_reach_the_agent_without_frame_references_or_operation_notes():
+async def test_step_summaries_reach_the_agent_without_frame_references_or_operation_notes(
+    pg_engine: AsyncEngine,
+):
     runner, model = orchestrator_runner(
+        pg_engine,
         call("plan", brief="Kenya's life expectancy", asks=["Kenya's life expectancy"]),
-        types.Part.from_text(text="Charted."),
+        text_part("Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=_NoisySurface(),
         executor=describes,
     )
     await open_session(runner)
 
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's life expectancy?")))
-    approve = create_request_input_response(
-        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
-    )
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
+    approval = single_pause(await run_turn(runner, "Kenya's life expectancy?"))
+    await answer_turn(runner, approve_answer(approval.payload["revision"]))
 
     after_plan = request_text(model.requests[-1])
     body = json.loads(after_plan.split("Chart its frames and answer.\n", 1)[1].split("\n", 1)[0])
@@ -1342,61 +1380,71 @@ class _StoredApart:
         return result.model_copy(update={"structured_content": {**content, "frame_ref": store_ref}})
 
 
-async def _store_versions(runner: Runner) -> dict[str, str]:
+async def _store_versions(runner: _Turn) -> dict[str, str]:
     """Each registered frame's id and the `content_version` the store holds it under."""
-    session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    assert session is not None
+    state = turn_state(runner)
     return {
         frame_id: frame["store_ref"]["content_version"]
-        for frame_id, frame in session.state[ORCHESTRATOR_FRAMES_KEY].items()
+        for frame_id, frame in state[ORCHESTRATOR_FRAMES_KEY].items()
     }
 
 
 async def _approved_two_asks(
+    pg_engine: AsyncEngine,
     surface: Any,
     planner: TwoAsksPlanner | None = None,
     *,
     publisher: Any = scripted_publish_result,
     run_ledger: Any = None,
-) -> tuple[ScriptLlm, TwoAsksPlanner]:
-    """Run the two-asks brief, approving every plan the planner drafts."""
+    turn_index: int = 1,
+) -> tuple[ScriptedGenai, TwoAsksPlanner]:
+    """Run the two-asks brief as turn `turn_index`, approving every plan the
+    planner drafts."""
     _, model, planner = await _run_two_asks(
-        surface, planner, publisher=publisher, run_ledger=run_ledger
+        pg_engine,
+        surface,
+        planner,
+        publisher=publisher,
+        run_ledger=run_ledger,
+        turn_index=turn_index,
     )
     return model, planner
 
 
 async def _run_two_asks(
+    pg_engine: AsyncEngine,
     surface: Any,
     planner: TwoAsksPlanner | None = None,
     *,
     publisher: Any = scripted_publish_result,
     run_ledger: Any = None,
-) -> tuple[Runner, ScriptLlm, TwoAsksPlanner]:
-    """`_approved_two_asks`, with the runner whose session holds the turn's state."""
+    turn_index: int = 1,
+) -> tuple[_Turn, ScriptedGenai, TwoAsksPlanner]:
+    """`_approved_two_asks`, with the turn that holds the turn's state."""
     planner = planner or TwoAsksPlanner()
     runner, model = orchestrator_runner(
+        pg_engine,
         call("plan", brief="Kenya's life expectancy and its mean", asks=_TWO_ASKS),
-        types.Part.from_text(text="Answered."),
+        text_part("Answered."),
         planner=planner,
         tool_surface=surface,
         executor=describes,
         publisher=publisher,
         run_ledger=run_ledger,
+        turn_index=turn_index,
     )
     await open_session(runner)
-    events = await run_turn(runner, types.UserContent("Kenya's life expectancy?"))
-    while any(c.name == "adk_request_input" for e in events for c in e.get_function_calls()):
+    events = await run_turn(runner, "Kenya's life expectancy?")
+    while any(isinstance(e, Paused) for e in events):
         approval = single_pause(events)
-        approve = create_request_input_response(
-            approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
-        )
-        events = await run_turn(runner, types.Content(role="user", parts=[approve]))
+        events = await answer_turn(runner, approve_answer(approval.payload["revision"]))
     return runner, model, planner
 
 
-async def test_a_terminal_step_another_step_reads_comes_back_on_an_accepted_plan():
-    model, _ = await _approved_two_asks(ScriptedSurface())
+async def test_a_terminal_step_another_step_reads_comes_back_on_an_accepted_plan(
+    pg_engine: AsyncEngine,
+):
+    model, _ = await _approved_two_asks(pg_engine, ScriptedSurface())
 
     _, body = handed_back(model)
     series, mean = (frame["frame"] for frame in body["frames"])
@@ -1413,8 +1461,12 @@ async def _publication_pending(frame: FrameRef) -> PublishFault:
     return PublishFault(code="service_unavailable", reason="busy", retryable=True)
 
 
-async def test_a_pending_run_hands_back_its_retrieved_terminal_and_withholds_the_derived_one():
-    model, _ = await _approved_two_asks(ScriptedSurface(), publisher=_publication_pending)
+async def test_a_pending_run_hands_back_its_retrieved_terminal_and_withholds_the_derived_one(
+    pg_engine: AsyncEngine,
+):
+    model, _ = await _approved_two_asks(
+        pg_engine, ScriptedSurface(), publisher=_publication_pending
+    )
 
     text, body = handed_back(model)
     (series,) = (frame["frame"] for frame in body["frames"])
@@ -1429,15 +1481,19 @@ async def test_a_pending_run_hands_back_its_retrieved_terminal_and_withholds_the
     assert "The frames listed hold retrieved data" in text
 
 
-async def test_a_pending_run_admitted_again_on_a_fresh_surface_keeps_its_retrieved_provenance():
+async def test_a_pending_run_admitted_again_on_a_fresh_surface_keeps_its_retrieved_provenance(
+    pg_engine: AsyncEngine,
+):
     """The process that computed the run is gone with its provenance store:
     the retrieved terminal it hands back rests on the retrievals it sealed."""
     ledger = InMemoryRunLedger(scope=current_conversation_id.get)
     first = _RecordingSurface(ScriptedSurface(), provenance=ProvenanceStore())
-    await _approved_two_asks(first, publisher=_publication_pending, run_ledger=ledger)
+    await _approved_two_asks(pg_engine, first, publisher=_publication_pending, run_ledger=ledger)
     provenance = ProvenanceStore()
     second = _RecordingSurface(ScriptedSurface(), provenance=provenance)
-    model, _ = await _approved_two_asks(second, publisher=_publication_pending, run_ledger=ledger)
+    model, _ = await _approved_two_asks(
+        pg_engine, second, publisher=_publication_pending, run_ledger=ledger, turn_index=2
+    )
 
     _, body = handed_back(model)
     assert body["run"]["status"] == "pending"
@@ -1457,10 +1513,11 @@ async def test_a_pending_run_admitted_again_on_a_fresh_surface_keeps_its_retriev
 
 @_IN_PART
 async def test_a_failed_plan_hands_back_the_terminal_frames_it_finished(
+    pg_engine: AsyncEngine,
     declined: tuple[Decline, ...],
 ):
     runner, model, _ = await _run_two_asks(
-        _StoredApart(_AggregateRefusingSurface()), TwoAsksPlanner(declined)
+        pg_engine, _StoredApart(_AggregateRefusingSurface()), TwoAsksPlanner(declined)
     )
 
     text, body = handed_back(model)
@@ -1480,29 +1537,27 @@ async def test_a_failed_plan_hands_back_the_terminal_frames_it_finished(
     assert f"Not computed: {json.dumps(_TWO_ASKS[1])}." in text
 
 
-async def test_a_failed_plan_hands_back_no_step_that_is_only_read():
+async def test_a_failed_plan_hands_back_no_step_that_is_only_read(pg_engine: AsyncEngine):
     """The retrieval finished, but only the refused aggregate answers an ask."""
     runner, model = orchestrator_runner(
+        pg_engine,
         call("plan", brief="Kenya's life expectancy", asks=["Kenya's mean life expectancy"]),
-        types.Part.from_text(text="It could not be computed."),
+        text_part("It could not be computed."),
         planner=AskingPlanner(),
         tool_surface=_AggregateRefusingSurface(),
         executor=describes,
     )
     await open_session(runner)
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's life expectancy?")))
-    approve = create_request_input_response(
-        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
-    )
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
+    approval = single_pause(await run_turn(runner, "Kenya's life expectancy?"))
+    await answer_turn(runner, approve_answer(approval.payload["revision"]))
 
     _, body = handed_back(model)
     assert body["frames"] == []
     assert body["failed_step"]["step_id"] == "totals"
 
 
-async def test_a_replan_names_the_asks_the_failed_run_computed():
-    _, planner = await _approved_two_asks(_EmptyAggregateSurface())
+async def test_a_replan_names_the_asks_the_failed_run_computed(pg_engine: AsyncEngine):
+    _, planner = await _approved_two_asks(pg_engine, _EmptyAggregateSurface())
 
     refusal = planner.refusals[-1]
     assert refusal is not None
@@ -1555,10 +1610,11 @@ class _RetrievalRefusingOnReplanSurface(_EmptyAggregateSurface):
 
 @_IN_PART
 async def test_a_planner_refusal_after_a_stopped_run_hands_back_the_asks_it_computed(
+    pg_engine: AsyncEngine,
     declined: tuple[Decline, ...],
 ):
     model, planner = await _approved_two_asks(
-        _EmptyAggregateSurface(), _RefusingReplanner(declined)
+        pg_engine, _EmptyAggregateSurface(), _RefusingReplanner(declined)
     )
 
     text, body = handed_back(model)
@@ -1579,10 +1635,11 @@ async def test_a_planner_refusal_after_a_stopped_run_hands_back_the_asks_it_comp
 
 @_IN_PART
 async def test_a_replanned_run_that_stops_earlier_keeps_the_asks_the_first_run_computed(
+    pg_engine: AsyncEngine,
     declined: tuple[Decline, ...],
 ):
     runner, model, _ = await _run_two_asks(
-        _StoredApart(_RetrievalRefusingOnReplanSurface()), TwoAsksPlanner(declined)
+        pg_engine, _StoredApart(_RetrievalRefusingOnReplanSurface()), TwoAsksPlanner(declined)
     )
 
     text, body = handed_back(model)

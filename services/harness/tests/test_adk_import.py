@@ -54,15 +54,9 @@ from harness.tool_contracts import resolver_digest
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from .orchestrator_fakes import (
-    AUTH,
-    NO_ADK,
-    orchestrator_app,
-    request_text,
-    stream,
-    studio_client,
-    turn_body,
-)
+from .graph_turns import agent_read
+from .studio_routes import AUTH, orchestrator_app, stream, studio_client, turn_body
+from .turn_driver import NO_ADK
 
 RECORDED = json.loads(
     (Path(__file__).parent / "fixtures" / "adk_import" / "ledger_sessions.json").read_text()
@@ -1126,7 +1120,7 @@ async def test_a_turn_the_previous_release_served_after_the_import_reaches_the_n
         )
 
     assert frames[-1]["event"] == "done"
-    assert "a third question" in request_text(model.requests[0])
+    assert "a third question" in agent_read(model.requests[0])
     state = await _load(adk, TEXT_ONLY)
     assert state is not None
     assert (state.turn_index, state.turns[2]) == (4, third)

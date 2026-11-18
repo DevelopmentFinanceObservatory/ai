@@ -10,16 +10,9 @@ import pytest
 from google.genai import types
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from .orchestrator_fakes import (
-    CannedSearch,
-    RefusingPlanner,
-    fetch_call,
-    orchestrator_app,
-    plan_call,
-    stream,
-    studio_client,
-    turn_body,
-)
+from .planner_host import RefusingPlanner
+from .scripted_tools import CannedSearch, fetch_call, plan_call
+from .studio_routes import orchestrator_app, stream, studio_client, turn_body
 from .test_seed_resolution import (  # noqa: F401 -- `definition_store` is a fixture
     _KENYA,
     _QUESTION,

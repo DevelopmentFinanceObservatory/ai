@@ -1,18 +1,16 @@
 """`PlannerAdapter` with its model calls answered by a `ScriptedGenai`.
 
-`scripted_planner` builds the adapter's planner over the scripted client.
+`scripted_planner` builds the adapter's planner over the scripted client. The
+ids given calls the model sent without one are numbered by
+`tests.turn_driver.numbered_call_ids`.
 """
 
 from __future__ import annotations
 
-import contextlib
-import itertools
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
-from unittest import mock
 
 from compiler.surface import FixtureSurface, ToolSurface
-from harness import gemini_wire
 from harness.planner_adapter import PlannerAdapter
 from harness.settings import Settings
 from planner.settings import AgentSettings
@@ -28,20 +26,6 @@ type Tools = Callable[[Sequence[ToolSpec]], Sequence[ToolSpec]]
 MODEL = AgentSettings().planner_model_name
 # Gemini signs the first function call of a response it thought before.
 SIGNED = b"scripted-signature"
-
-
-@contextlib.contextmanager
-def numbered_call_ids() -> Iterator[None]:
-    """Number the ids given a call that has none from 1, the model's and a
-    turn put in the model's place alike (`harness.gemini_wire.client_call_id`),
-    so each carries the same call id every time a test runs."""
-    counter = itertools.count(1)
-
-    def numbered() -> str:
-        return f"adk-{next(counter)}"
-
-    with mock.patch.object(gemini_wire, "client_call_id", numbered):
-        yield
 
 
 def scripted_planner(

@@ -32,15 +32,11 @@ self-isolating regardless of how it is invoked.
 `source` builds the `SelectedSource` a discovered dataset resolves to, for the
 compiler, translator and executor suites alike.
 
-`scripted_llm` and `run_to_completion` drive an agent through a real ADK
-`Runner` with a stand-in model, so a test can assert on what ADK itself does --
-the root-agent mode check, or the contents a second turn would carry -- rather
-than restating ADK's rules and hoping they hold. `running_lifespan` and
-`mounted_mcp_transport` drive the composed FastAPI app's lifespan by hand and
-reach a mounted MCP server through it, for tests that cross the boundary between
-services. All are fixtures rather than importable helpers because a test module
-importing its own conftest by name is ambiguous when the workspace root has one
-too.
+`running_lifespan` and `mounted_mcp_transport` drive the composed FastAPI
+app's lifespan by hand and reach a mounted MCP server through it, for tests
+that cross the boundary between services. Both are fixtures rather than
+importable helpers because a test module importing its own conftest by name is
+ambiguous when the workspace root has one too.
 
 The autouse `runner` fixture answers every call the analysis verbs make to
 dfo-apis' analysis runner, and every read of a frame it stored, from the replies
@@ -67,9 +63,7 @@ import importlib.util
 import os
 import uuid
 from collections.abc import (
-    AsyncGenerator,
     AsyncIterator,
-    Awaitable,
     Callable,
     Iterator,
     Mapping,
@@ -90,11 +84,7 @@ from data_mcp import node_lookup, resolution
 from data_mcp.graph_wire import NotHeldEntry
 from fastapi import FastAPI
 from fastmcp.client.transports import StreamableHttpTransport
-from google.adk.models.base_llm import BaseLlm
-from google.adk.models.llm_response import LlmResponse
-from google.adk.runners import Runner
-from google.adk.sessions import DatabaseSessionService, InMemorySessionService
-from google.genai import types
+from google.adk.sessions import DatabaseSessionService
 from harness.conversation import (
     NO_CONVERSATION,
     current_conversation_id,
@@ -117,7 +107,6 @@ from planner.plan import (
     Unit,
 )
 from planner.workflow import ResolvedEntity, SelectedSource
-from pydantic import Field
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -320,69 +309,6 @@ def requirements(
 ) -> tuple[EvidenceRequirement, ...]:
     """Return a minimal, valid pair: a dataset requirement and one that reads it."""
     return (requirement(), derived_requirement())
-
-
-class ScriptedLlm(BaseLlm):
-    """Answers with a scripted function call, then with a final text response.
-
-    Leaving `tool_name` unset answers with the text straight away, for a run
-    that needs no tool call to reach the end. Every `LlmRequest` lands in
-    `captured_requests`, so a test can inspect exactly what the model would see
-    on its next turn.
-    """
-
-    model: str = "scripted-llm"
-    tool_name: str | None = None
-    tool_args: dict[str, Any] = Field(default_factory=dict)
-    captured_requests: list[Any] = Field(default_factory=list)
-
-    async def generate_content_async(
-        self, llm_request: Any, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse]:
-        self.captured_requests.append(llm_request)
-        if self.tool_name is not None and len(self.captured_requests) == 1:
-            yield LlmResponse(
-                content=types.Content(
-                    role="model",
-                    parts=[types.Part.from_function_call(name=self.tool_name, args=self.tool_args)],
-                )
-            )
-        else:
-            yield LlmResponse(
-                content=types.Content(role="model", parts=[types.Part.from_text(text="done")])
-            )
-
-
-@pytest.fixture
-def scripted_llm() -> type[ScriptedLlm]:
-    """Return the stand-in model class, constructed per test with its own script."""
-    return ScriptedLlm
-
-
-@pytest.fixture
-def run_to_completion() -> Callable[..., Awaitable[list[Any]]]:
-    """Return a callable driving `agent` through a real `Runner` to the end.
-
-    Hands back every event the run produced, so a caller can assert the run
-    happened at all: ADK enforces its root-agent rules inside `run_async`
-    rather than at construction, so only a real run exercises them.
-    """
-
-    async def _run(
-        *, agent: Any, session_service: InMemorySessionService, app_name: str
-    ) -> list[Any]:
-        await session_service.create_session(app_name=app_name, user_id="user-1", session_id="s-1")
-        runner = Runner(agent=agent, app_name=app_name, session_service=session_service)
-        return [
-            event
-            async for event in runner.run_async(
-                user_id="user-1",
-                session_id="s-1",
-                new_message=types.Content(role="user", parts=[types.Part.from_text(text="go")]),
-            )
-        ]
-
-    return _run
 
 
 KENYA = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")

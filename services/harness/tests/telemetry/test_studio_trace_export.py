@@ -37,7 +37,8 @@ from opentelemetry.proto.trace.v1.trace_pb2 import Span
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.responses import StreamingResponse
 
-from ..orchestrator_fakes import orchestrator_app, plan_call
+from ..scripted_tools import plan_call
+from ..studio_routes import orchestrator_app
 
 CONVERSATION = "conv_trace_export_01"
 AUTH = {"Authorization": "Bearer test"}

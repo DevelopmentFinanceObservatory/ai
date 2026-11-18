@@ -2,9 +2,9 @@
 
 `ScriptedGenai` holds a list of `Reply` objects. Each `generate_content_stream`
 call on its `client` answers with the next reply and records the request it was
-sent. Pydantic AI's `GoogleProvider(client=...)` and ADK's `Gemini(client=...)`
-both accept the client and run their own request building and response parsing
-against it, so the recorded requests are what each would put on the wire.
+sent. Pydantic AI's `GoogleProvider(client=...)` accepts the client and runs its
+own request building and response parsing against it, so the recorded requests
+are what it would put on the wire.
 
 The part builders (`text_part`, `call_part`, `thought_part`), `usage_metadata`,
 `reply` and `Reply` describe a response; `Reply` options make a stream stall, fail

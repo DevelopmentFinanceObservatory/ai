@@ -81,10 +81,10 @@ from .scripted_genai import (
 from .scripted_planner import MODEL as _MODEL
 from .scripted_planner import SIGNED as _SIGNED
 from .scripted_planner import Tools, scripted_planner
-from .scripted_planner import numbered_call_ids as _numbered_call_ids
 from .test_planner_adapter import _sector_switched, _translated_plan
 from .test_planner_model import _HangingGenai
 from .test_turn_records import _switchable_scope
+from .turn_driver import numbered_call_ids as _numbered_call_ids
 
 _USAGE = usage_metadata(prompt=120, cached=40, candidates=9, thoughts=4)
 _QUESTION = "kenya debt"
@@ -1061,7 +1061,8 @@ async def _studio(
     planner, and of the answer that resumes it when `answer` is given."""
     # Studio's wiring is imported by the Studio tests alone, so the entry
     # tests above load apart from it.
-    from .orchestrator_fakes import plan_call, stream, studio_client, turn_body  # noqa: PLC0415
+    from .scripted_tools import plan_call  # noqa: PLC0415
+    from .studio_routes import stream, studio_client, turn_body  # noqa: PLC0415
     from .test_studio import _app, _interrupt_body, _text  # noqa: PLC0415
 
     scripted = ScriptedGenai(replies)
@@ -1236,7 +1237,8 @@ async def test_a_stream_google_genai_resumed_over_a_repeated_call_ends_the_turn_
         specs=_serving_proposals(adapter_specs(surface=surface, translate=translate), body),
         client=client,
     )
-    from .orchestrator_fakes import plan_call, stream, studio_client, turn_body  # noqa: PLC0415
+    from .scripted_tools import plan_call  # noqa: PLC0415
+    from .studio_routes import stream, studio_client, turn_body  # noqa: PLC0415
     from .test_studio import _app, _text  # noqa: PLC0415
 
     app = _app(plan_call(_QUESTION), _text("Planned."), planner=adapter, engine=pg_engine)

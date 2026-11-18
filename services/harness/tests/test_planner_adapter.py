@@ -14,7 +14,7 @@ translation loop against a canned surface. Whether the real model plans WELL is 
 
 `PlannerAdapter` runs the planner in the `planner` node's task, over the
 turn's state and transcript, so every test below calls it on a `NodeCtx`.
-`_AdapterHarness` (`tests.planner_host.PlannerHarness`) runs one turn's
+`tests.planner_host.PlannerHarness` runs one turn's
 `planner` node segment by segment, as the turn loop would.
 """
 
@@ -179,8 +179,7 @@ from .basis_alignment import (
     basis_block,
 )
 from .compiler.test_evidence import _manifest, _series_stats, _stat
-from .planner_host import PlannerHarness as _AdapterHarness
-from .planner_host import in_node, node_ctx, pauses, planner_answers, planner_calls
+from .planner_host import PlannerHarness, in_node, node_ctx, pauses, planner_answers, planner_calls
 from .scripted_genai import (
     Reply,
     Request,
@@ -320,9 +319,9 @@ def _computed(step: Callable[[Request], Sequence[tuple[str, Mapping[str, Any]]] 
 
 
 async def _run_adapter(adapter: PlannerAdapter, **kwargs: Any) -> dict[str, Any]:
-    """One-shot `_AdapterHarness.run`, for a test that only makes one call and
+    """One-shot `PlannerHarness.run`, for a test that only makes one call and
     does not need to inspect the state afterward."""
-    output = await _AdapterHarness().run(adapter, **kwargs)
+    output = await PlannerHarness().run(adapter, **kwargs)
     assert output is not None, "the adapter answered nothing: did the planner ask?"
     return output
 
@@ -420,7 +419,7 @@ async def test_a_prior_plan_is_what_propose_plan_amends_from(
     as amending the wrong version. What records version 6 is therefore the
     graph's own seeded record, not what this adapter left in the session.
     """
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     made_decision = decision()
     requirements = [requirement(), derived_requirement()]
     proposal = {
@@ -495,7 +494,7 @@ async def test_a_planner_tool_that_raises_ends_the_entry_on_a_final_refusal(
     scripted = ScriptedGenai([_calls(("get_skill", {"skill_id": "aid"})), _says("unreachable")])
     adapter = _scripted_planner(scripted, surface=_FailingSkillSurface(schemas=[]))
 
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     with caplog.at_level(logging.ERROR):
         output = await harness.run(
@@ -555,7 +554,7 @@ async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, en
         COMPILE_FAILURES_STATE_KEY: ["fingerprint"],
         REFUSED_SPECS_STATE_KEY: [SPEC],
     }
-    harness = _AdapterHarness(state=stale)
+    harness = PlannerHarness(state=stale)
     adapter = _scripted_planner(ScriptedGenai([_says("Which years did you have in mind?")]))
     kwargs: dict[str, Any] = {}
     if entry == "amendment":
@@ -634,7 +633,7 @@ async def test_a_question_with_nothing_left_after_a_decline_ends_on_the_decline(
         ]
     )
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(adapter, question="total aid", readings=[])
 
@@ -694,7 +693,7 @@ async def test_the_brief_lists_the_asks_and_propose_plan_holds_the_plan_to_them(
         ]
     )
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness(state={ASKS_STATE_KEY: asks})
+    harness = PlannerHarness(state={ASKS_STATE_KEY: asks})
 
     output = await harness.run(adapter, question="total aid", readings=[])
 
@@ -810,7 +809,7 @@ async def test_a_replan_over_a_refusal_no_operation_covers_earns_the_decline(
     }
     scripted = ScriptedGenai([_calls(("propose_plan", draft)), _says("Planned.")])
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness(state={ASKS_STATE_KEY: asks})
+    harness = PlannerHarness(state={ASKS_STATE_KEY: asks})
 
     await harness.run(adapter, question="GDP per person", readings=[], refusal=refusal)
 
@@ -856,7 +855,7 @@ async def test_a_first_draft_may_decline_an_ask_no_requirement_kind_states(
         }
     scripted = ScriptedGenai([_calls(("propose_plan", draft)), _says("Planned.")])
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness(state={ASKS_STATE_KEY: asks})
+    harness = PlannerHarness(state={ASKS_STATE_KEY: asks})
 
     await harness.run(adapter, question="donors whose aid rose every year", readings=[], **kwargs)
 
@@ -889,7 +888,7 @@ async def test_a_first_draft_with_only_declines_ends_on_the_declined_asks(paused
         script.insert(0, _calls((PLANNER_ASK, {"message": "Which period?"})))
     scripted = ScriptedGenai(script)
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness(state={ASKS_STATE_KEY: asks})
+    harness = PlannerHarness(state={ASKS_STATE_KEY: asks})
 
     result = await harness.run(adapter, question=draft["question"], readings=[])
     if paused:
@@ -939,7 +938,7 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() 
         ]
     )
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     output = await harness.run(adapter, question="kenya debt", readings=[])
 
@@ -971,7 +970,7 @@ async def test_a_slow_call_beside_an_accepted_ask_answers_before_the_pause_and_r
         [_calls((PLANNER_ASK, {"message": "Which years?"}), ("propose_plan", {})), _says("stop")]
     )
     adapter = scripted_planner(scripted, tools=slow_proposals)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     assert await harness.run(adapter, question="kenya debt", readings=[]) is None
     assert len(scripted.requests) == 1
@@ -1008,7 +1007,7 @@ async def test_a_terminal_refusal_beside_an_accepted_ask_ends_the_entry_on_the_r
         ]
     )
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(
         adapter,
@@ -1038,7 +1037,7 @@ async def test_an_ask_after_a_refused_ask_in_the_same_response_is_refused_too() 
         ]
     )
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(adapter, question="kenya debt", readings=[])
 
@@ -1063,7 +1062,7 @@ async def test_a_response_that_passes_the_event_cap_ends_the_entry_on_plan_not_r
     refused = {"message": "Constant or current dollars?", "options": [{"label": "unpinned"}]}
     scripted = ScriptedGenai([_calls((PLANNER_ASK, refused), (PLANNER_ASK, refused))])
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(adapter, question="kenya debt", readings=[])
 
@@ -1089,7 +1088,7 @@ async def test_an_accepted_ask_on_the_answer_past_the_event_cap_still_pauses_the
         [_calls((PLANNER_ASK, refused)), _calls((PLANNER_ASK, {"message": "Which years?"}))]
     )
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(adapter, question="kenya debt", readings=[])
 
@@ -1108,7 +1107,7 @@ async def test_a_plan_declared_ready_on_the_answer_past_the_event_cap_answers_th
     refused = {"message": "Constant or current dollars?", "options": [{"label": "unpinned"}]}
     scripted = ScriptedGenai([_calls((PLANNER_ASK, refused)), _calls(*_DECLARE)])
     adapter = _scripted_planner(scripted, compiled_proposals=True)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(
         adapter, question=plan.question, readings=[], prior_plan=plan.model_dump(mode="json")
@@ -1136,7 +1135,7 @@ async def test_an_entry_that_raises_after_an_accepted_ask_leaves_no_ask_waiting(
     monkeypatch.setattr(PlannerAdapter, "_propose", raising)
     scripted = ScriptedGenai([_calls((PLANNER_ASK, {"message": "Which years?"}))])
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(
         cast(PlannerAdapter, handing_back_planner_failures(adapter)),
@@ -1217,7 +1216,7 @@ async def test_a_referral_the_user_decides_ends_the_run_on_the_adapters_own_ask(
     model turn composes it."""
     scripted = ScriptedGenai([_calls(*_DECLARE), _says("never sent")])
     adapter = scripted_planner(scripted, tools=_referring_proposals(referral))
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     output = await harness.run(adapter, question="kenya debt", readings=[])
 
@@ -1252,7 +1251,7 @@ async def test_a_picks_replan_run_as_a_task_still_pauses_on_an_ask_and_resumes(
         tools=use_compiled_proposals,
         on_tool_answered=lambda name, answer: answered.append(name),
     )
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     entry: dict[str, Any] = {
         "question": plan.question,
         "readings": [],
@@ -1276,7 +1275,7 @@ _BRIEF_MARKER = "Context for this question."
 
 def _brief_follows_the_question(request: Any) -> str:
     """The one brief in `request`, after checking it directly follows the
-    turn's question. That is the latest "probe", the message `_AdapterHarness`
+    turn's question. That is the latest "probe", the message `PlannerHarness`
     opens every run on."""
     texts = [
         "".join(part.text or "" for part in content.parts or []) for content in _contents(request)
@@ -1315,7 +1314,7 @@ async def test_a_resumed_ask_and_the_amend_after_it_each_carry_the_brief_once(
         ]
     )
     adapter = _scripted_planner(scripted, compiled_proposals=True)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     paused = await harness.run(
         adapter, question=plan.question, readings=[], prior_plan=plan.model_dump(mode="json")
@@ -1538,7 +1537,7 @@ async def test_a_refusal_on_a_windowed_copy_holds_what_the_fault_names(
     holds nothing, and a `RediscoveryNeeded` holds its spec_id as it names it.
     The payload is the one the executor's `_refusal_shape` builds."""
     scripted = ScriptedGenai([_says("still nothing")])
-    harness = _AdapterHarness(
+    harness = PlannerHarness(
         {
             WINDOWED_PINS_STATE_KEY: [
                 {"spec_id": _WINDOWED_ID, "identity": {}, "windowed_from": SPEC}
@@ -1769,7 +1768,7 @@ async def _first_request_with_readings(
     `refusal` or the user's `amendment`."""
     scripted = ScriptedGenai([_calls(*_DECLARE)])
     adapter = _scripted_planner(scripted, compiled_proposals=True)
-    harness = _AdapterHarness(stored)
+    harness = PlannerHarness(stored)
     await harness.run(
         adapter,
         question=plan.question,
@@ -1922,7 +1921,7 @@ async def test_a_refusal_payload_is_held_with_its_code_until_a_later_search_lift
     runs = 3 if between is not None else 2
     scripted = ScriptedGenai([_says("still nothing")] * runs)
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     refusal = _rediscovery_refusal(SPEC, code)
     if also is not None:
         refusal["also_stopped"] = [_rediscovery_refusal(SPEC, also)]
@@ -2654,7 +2653,7 @@ async def test_an_entry_records_whether_the_users_amendment_opened_it() -> None:
     """An entry carrying the user's amendment says so in state, for `propose_plan`
     to honour a decision they make in it. The next entry without one, a replan
     here, clears it, and a resume inside an entry keeps what the entry recorded."""
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     scripted = ScriptedGenai([_says("Planned.")] * 4)
     adapter = _scripted_planner(scripted)
     recorded = []
@@ -2692,7 +2691,7 @@ async def test_an_entry_records_the_pick_it_replans_for_and_says_it_on_its_own_l
     from the user's amendment. Its refusal carries the sentence the card shows
     under the decision. A resume inside the entry keeps the pick, and the
     next entry without one clears it."""
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     scripted = ScriptedGenai([_says("Planned.")] * 3)
     adapter = _scripted_planner(scripted)
     pick = _PICKED
@@ -2746,7 +2745,7 @@ async def test_an_amendment_still_works_through_the_adapter(
     digest this brief rendered. A brief that lost the prior plan would leave
     the model with no version to name.
     """
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     seeded = _translated_plan(decision, requirement, derived_requirement, version=5).model_dump(
         mode="json"
     )
@@ -3613,7 +3612,7 @@ async def test_a_first_draft_carries_no_skill_an_earlier_plan_read() -> None:
         ]
     )
     adapter = _scripted_planner(scripted, surface=_skill_page_surface())
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
 
     await harness.run(adapter, **entry)
@@ -3653,7 +3652,7 @@ async def test_a_page_stored_with_the_old_tools_call_lines_is_shown_naming_get_s
     }
     scripted = ScriptedGenai([_says("stop")])
     adapter = _scripted_planner(scripted, surface=_skill_page_surface())
-    harness = _AdapterHarness(state)
+    harness = PlannerHarness(state)
 
     await harness.run(
         adapter,
@@ -3702,7 +3701,7 @@ async def test_each_skill_page_text_is_stored_once_across_the_plans_events() -> 
             }
         ),
     )
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
 
     await harness.run(adapter, **entry)
@@ -3745,7 +3744,7 @@ async def test_the_skills_an_entry_shows_survive_a_planner_ask_and_reach_the_nex
         ]
     )
     adapter = _scripted_planner(scripted, surface=_skill_page_surface())
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     entry = {"question": "kenya debt", "readings": _skill_readings("dfo-faq")}
 
     await harness.run(adapter, **entry)
@@ -3824,7 +3823,7 @@ async def test_an_answer_that_resumes_a_run_after_a_translated_proposal_is_read(
         ]
     )
     adapter = _scripted_planner(scripted, surface=surface)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     plan_json = draft.model_dump(mode="json")
 
     paused = await harness.run(adapter, question=draft.question, readings=[], prior_plan=plan_json)
@@ -4031,7 +4030,7 @@ async def test_each_congo_is_settled_by_its_own_answer_and_reaches_search_as_pic
         ]
     )
     adapter = _scripted_planner(scripted, surface=surface)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     assert await harness.run(adapter, question=draft.question, readings=[]) is None
     for pick in (
@@ -4272,8 +4271,8 @@ async def test_two_conversations_on_one_planner_each_report_into_their_own_strea
         surface=_SkillPagesSurface(schemas=[], responses={"search": _NO_DATA_SEARCH_RESPONSE}),
     )
     draft = _gdp_plan(decision, requirement, derived_requirement)
-    harness_a = _AdapterHarness()
-    harness_b = _AdapterHarness()
+    harness_a = PlannerHarness()
+    harness_b = PlannerHarness()
 
     async def _run_a() -> None:
         await harness_a.run(
@@ -4369,7 +4368,7 @@ async def test_a_restart_on_the_amend_edge_is_refused_as_question_fixed(
         [_calls(("propose_plan", {"starts_new_plan": True, "question": "a different question"}))]
     )
     adapter = _scripted_planner(scripted)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     result = await harness.run(
         adapter,
@@ -4400,7 +4399,7 @@ async def test_a_second_turn_on_one_session_clears_the_first_drafts_plan_and_bri
     drafts its own plan. It is not refused for restating no `amends_version`
     against a plan still on record from the first entry.
     """
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     second_proposal = {
         "question": "kenya oda 2023",
         "answer_mode": "computed",
@@ -4458,7 +4457,7 @@ async def test_a_later_first_draft_reads_none_of_the_earlier_plans_alignments(
     """The earlier entry's plan moved its `second` onto a compile. A later
     first-draft entry of the turn clears that plan, and its alignments go with
     it, so they are gone even when the entry records no plan of its own."""
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     # The first entry's declaration, then the later entry's call and the
     # generation its answer asks for.
     scripted = ScriptedGenai([_calls(*_DECLARE), _calls(*_DECLARE), _says("done")])
@@ -4516,7 +4515,7 @@ class _Drafts(NamedTuple):
     plan: Plan
 
 
-async def _assert_stored_as_live(harness: _AdapterHarness) -> None:
+async def _assert_stored_as_live(harness: PlannerHarness) -> None:
     """Every key the last run left in the live state is in the state as the
     turn stores it with the same value. A key the live state holds as `None`
     may be absent from the store."""
@@ -4532,21 +4531,21 @@ async def _assert_stored_as_live(harness: _AdapterHarness) -> None:
     assert lost == {}
 
 
-async def _first_draft_proposes(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _first_draft_proposes(harness: PlannerHarness, drafts: _Drafts) -> None:
     scripted = ScriptedGenai([_calls(("propose_plan", drafts.proposal)), _says("stop")])
     adapter = _scripted_planner(scripted)
     await harness.run(adapter, question="kenya debt", readings=[])
     await _assert_stored_as_live(harness)
 
 
-async def _first_draft_asks(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _first_draft_asks(harness: PlannerHarness, drafts: _Drafts) -> None:
     del drafts
     adapter = _scripted_planner(ScriptedGenai([_calls(_ASK_A_SOURCE)]))
     assert await harness.run(adapter, question="kenya debt", readings=[]) is None
     await _assert_stored_as_live(harness)
 
 
-async def _asks_after_a_referral(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _asks_after_a_referral(harness: PlannerHarness, drafts: _Drafts) -> None:
     async def referring(call: Any) -> dict[str, object]:
         del call
         return dict(_NEEDS_REPAIR)
@@ -4557,7 +4556,7 @@ async def _asks_after_a_referral(harness: _AdapterHarness, drafts: _Drafts) -> N
     await _assert_stored_as_live(harness)
 
 
-async def _resumed_after_an_answer(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _resumed_after_an_answer(harness: PlannerHarness, drafts: _Drafts) -> None:
     scripted = ScriptedGenai(
         [_calls(_ASK_A_SOURCE), _calls(("propose_plan", drafts.proposal)), _says("stop")]
     )
@@ -4567,7 +4566,7 @@ async def _resumed_after_an_answer(harness: _AdapterHarness, drafts: _Drafts) ->
     await _assert_stored_as_live(harness)
 
 
-async def _resumed_proposes_and_asks_again(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _resumed_proposes_and_asks_again(harness: PlannerHarness, drafts: _Drafts) -> None:
     scripted = ScriptedGenai(
         [_calls(_ASK_A_SOURCE), _calls(("propose_plan", drafts.proposal)), _calls(_ASK_A_SOURCE)]
     )
@@ -4580,7 +4579,7 @@ async def _resumed_proposes_and_asks_again(harness: _AdapterHarness, drafts: _Dr
     await _assert_stored_as_live(harness)
 
 
-async def _opened_by_a_card_pick(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _opened_by_a_card_pick(harness: PlannerHarness, drafts: _Drafts) -> None:
     adapter = _scripted_planner(ScriptedGenai([_calls(_ASK_A_SOURCE)]))
     assert (
         await harness.run(
@@ -4595,14 +4594,14 @@ async def _opened_by_a_card_pick(harness: _AdapterHarness, drafts: _Drafts) -> N
     await _assert_stored_as_live(harness)
 
 
-async def _amended(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _amended(harness: PlannerHarness, drafts: _Drafts) -> None:
     await _first_draft_proposes(harness, drafts)
     adapter = _scripted_planner(ScriptedGenai([_says("stop")]))
     await harness.run(adapter, question="kenya debt", readings=[], amendment="one total")
     await _assert_stored_as_live(harness)
 
 
-async def _replanned_on_a_refusal(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _replanned_on_a_refusal(harness: PlannerHarness, drafts: _Drafts) -> None:
     await _first_draft_proposes(harness, drafts)
     adapter = _scripted_planner(ScriptedGenai([_says("stop")]))
     await harness.run(
@@ -4612,7 +4611,7 @@ async def _replanned_on_a_refusal(harness: _AdapterHarness, drafts: _Drafts) -> 
 
 
 async def _replanned_on_a_refusal_earning_a_decline(
-    harness: _AdapterHarness, drafts: _Drafts
+    harness: PlannerHarness, drafts: _Drafts
 ) -> None:
     adapter = _scripted_planner(ScriptedGenai([_says("stop")]))
     await harness.run(
@@ -4625,7 +4624,7 @@ async def _replanned_on_a_refusal_earning_a_decline(
     await _assert_stored_as_live(harness)
 
 
-async def _a_second_first_draft(harness: _AdapterHarness, drafts: _Drafts) -> None:
+async def _a_second_first_draft(harness: PlannerHarness, drafts: _Drafts) -> None:
     await _first_draft_proposes(harness, drafts)
     await _first_draft_proposes(harness, drafts)
 
@@ -4646,7 +4645,7 @@ async def _a_second_first_draft(harness: _AdapterHarness, drafts: _Drafts) -> No
     ],
 )
 async def test_an_entry_leaves_no_session_write_out_of_the_stored_session(
-    scenario: Callable[[_AdapterHarness, _Drafts], Awaitable[None]],
+    scenario: Callable[[PlannerHarness, _Drafts], Awaitable[None]],
     decision: Any,
     requirement: Any,
     derived_requirement: Any,
@@ -4659,7 +4658,7 @@ async def test_an_entry_leaves_no_session_write_out_of_the_stored_session(
         _amendment_proposal(decision, requirement, derived_requirement),
         _translated_plan(decision, requirement, derived_requirement),
     )
-    await scenario(_AdapterHarness(), drafts)
+    await scenario(PlannerHarness(), drafts)
 
 
 async def test_a_sixth_amendment_turn_still_records_its_own_version(
@@ -4681,7 +4680,7 @@ async def test_a_sixth_amendment_turn_still_records_its_own_version(
     1-2-3-4-5-6 across the six turns rather than any turn resetting it at
     version 1.
     """
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     proposal = _amendment_proposal(decision, requirement, derived_requirement)
 
     # The version the recorded plan stands at as each turn opens. Turn 1
@@ -4800,7 +4799,7 @@ async def test_a_refused_loop_leaves_the_last_recorded_version_on_record(
     The four calls before it amend what each recorded (`_amend_step`), so
     the plan on record is the fourth: version 4, still a draft.
     """
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     proposal = _amendment_proposal(decision, requirement, derived_requirement)
     step = _computed(_amend_step(proposal, start_version=1))
     scripted = ScriptedGenai([_calls(("propose_plan", proposal)), step, step, step, step])
@@ -4836,7 +4835,7 @@ async def test_the_round_budget_is_not_reset_on_a_resume_of_the_same_turn(
     would land the fifth call within a fresh 1-2 budget, succeeding
     rather than refusing at all.
     """
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     proposal = _amendment_proposal(decision, requirement, derived_requirement)
 
     # One continuous planner turn: three real `propose_plan` rounds (no
@@ -5064,7 +5063,7 @@ async def _budget_closes_after(
     replies: list[Step] = [_calls(("propose_plan", {})) for _ in translations[1:]]
     scripted = ScriptedGenai([*replies, last_proposal])
     adapter = scripted_planner(scripted, tools=tools)
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
     token = current_turn_budget.set(budget)
     try:
         output = await harness.run(adapter, question="gdp guatemala", readings=[])
@@ -5240,7 +5239,7 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
             schemas=[], responses={"search": _TWO_CANDIDATES_SEARCH_RESPONSE}
         ),
     )
-    harness = _AdapterHarness()
+    harness = PlannerHarness()
 
     token = current_turn_budget.set(_request_budget(model_calls_max=1))
     try:
@@ -5414,7 +5413,7 @@ async def _run_the_planner(
             "window": {"start": 2020, "end": 2024, "source": "requested"},
         }
     )
-    harness = _AdapterHarness({ORCHESTRATOR_SPECS_KEY: {_AID_SPEC: _AID_BLOCK}})
+    harness = PlannerHarness({ORCHESTRATOR_SPECS_KEY: {_AID_SPEC: _AID_BLOCK}})
     await harness.run(
         adapter, question=_LAST_FIVE_YEARS, readings=[reading.model_dump(mode="json")]
     )
@@ -5544,7 +5543,7 @@ async def test_the_brief_marks_each_ask_with_the_parties_it_breaks_down_by(
     scripted = ScriptedGenai([_says("Planned.")])
     adapter = _scripted_planner(scripted)
     asks = ["the total", "Debt service by creditor"]
-    harness = _AdapterHarness(
+    harness = PlannerHarness(
         state={
             ASKS_STATE_KEY: asks,
             ASK_BREAKDOWNS_STATE_KEY: [AskBreakdown(ask=1, by=("creditor",)).model_dump()],
@@ -6469,8 +6468,8 @@ async def test_a_provider_switch_compiles_the_parts_whole_once_a_turn(
                 in {part_pin, US_2023["health_inclusive"]["spec"]["spec_id"]}
             ]
             pick = {"choice_id": plan_display.choice_id(shown, row), "option_id": option_id}
-            async for event in switching(ctx, {"switch": pick}):
-                assert "switch_failed" not in event.output, event.output["switch_failed"]
+            offered = await switching.run(ctx, {"switch": pick})
+            assert "switch_failed" not in offered.output, offered.output["switch_failed"]
             counted.append(len(compiles.calls))
         shown = Plan.model_validate_json(ctx.state["plan"])
         return {

@@ -18,20 +18,13 @@ from harness.scripted import ScriptedSurface
 from harness.studio_store import StudioStore
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from .orchestrator_fakes import (
-    CONVERSATION,
-    NO_ADK,
-    no_turn_specs,
-    orchestrator_app,
-    plan_call,
-    request_text,
-    stream,
-    studio_client,
-    turn_body,
-)
+from .graph_turns import agent_read
+from .scripted_tools import plan_call
+from .studio_routes import orchestrator_app, stream, studio_client, turn_body
 from .test_run_completion import _FlakyPublisher
+from .turn_driver import CONVERSATION, NO_ADK, no_turn_specs
 
-# The principal `orchestrator_fakes.AUTH`'s token names.
+# The principal `tests.studio_routes.AUTH`'s token names.
 PRINCIPAL = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
 
 
@@ -76,7 +69,7 @@ async def test_a_studio_run_left_pending_is_carried_on_from_the_conversation_led
                 "decision": "approve",
             },
         )
-        after_plan = request_text(model.requests[-1])
+        after_plan = agent_read(model.requests[-1])
         body = json.loads(
             next(line for line in after_plan.split("\n") if line.startswith('{"frames"'))
         )
@@ -85,7 +78,7 @@ async def test_a_studio_run_left_pending_is_carried_on_from_the_conversation_led
         publisher.fixed = True
         await stream(client, "/api/studio/turn", turn_body("Is it ready?"))
 
-    next_turn = request_text(model.requests[-1])
+    next_turn = agent_read(model.requests[-1])
     runs = json.loads(next(line for line in next_turn.split("\n") if line.startswith('{"runs"')))
     (resumed,) = runs["runs"]
     assert (resumed["run_id"], resumed["status"]) == (body["run"]["run_id"], "completed")
@@ -130,11 +123,11 @@ async def test_the_default_ledger_keeps_one_conversations_runs_from_another(
                 "decision": "approve",
             },
         )
-        assert '"status": "pending"' in request_text(model.requests[-1])
+        assert '"status": "pending"' in agent_read(model.requests[-1])
 
         publisher.fixed = True
         other = turn_body("Hello", conversation_id="conv_01other000")
         await stream(client, "/api/studio/turn", other)
 
-    assert '{"runs"' not in request_text(model.requests[-1])
+    assert '{"runs"' not in agent_read(model.requests[-1])
     assert len(publisher.frames) == PUBLISH_ATTEMPTS
