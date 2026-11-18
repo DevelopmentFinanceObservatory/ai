@@ -1304,10 +1304,12 @@ def span_level(status: str) -> EventLevel:
     | claim, before streaming      |             |                        |         |             |
     | Request cancelled after its  | none        | `cancelled`            | WARNING |             |
     | claim, before streaming      |             |                        |         |             |
-    | Client gone before the body  | none        | `disconnected`         | WARNING | `cancelled` |
-    | starts (`_ClaimedStream`)    |             |                        |         |             |
-    | Response fails before the    | none        | `failed`               | ERROR   | as last     |
-    | body starts                  |             |                        |         | saved       |
+    | Client gone before the body  | none        | `disconnected`         | WARNING |             |
+    | starts (`_ClaimedStream`),   |             |                        |         |             |
+    | the turn left open           |             |                        |         |             |
+    | Response fails before the    | none        | `failed`               | ERROR   |             |
+    | body starts, the turn left   |             |                        |         |             |
+    | open                         |             |                        |         |             |
     | Span still open when a new   | none        | `orphaned`             | WARNING |             |
     | segment's span moves in      |             |                        |         |             |
     | Paused turn closed by        | none        | `cancelled`            | WARNING |             |

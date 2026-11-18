@@ -1517,27 +1517,33 @@ class StudioRunner:
 
     def _segment_stream(
         self,
-        principal: str,
-        conversation_id: str,
+        claim: _Claim,
         conversation: ConversationState,
-        segment_id: str,
         frames: AsyncGenerator[Any],
         *,
-        hold: _LockHold,
         switch: bool = False,
-    ) -> AsyncGenerator[str]:
-        """The SSE stream of a claimed segment: `frames` under `_locked`,
-        which lets go of `hold`, relayed by `_sse_stream`, both sharing one
-        `_StreamEnding`."""
+        settle: bool = False,
+    ) -> _ClaimedStream:
+        """The SSE response of `claim`'s segment: `frames` under `_locked`,
+        which lets go of the claim's hold, relayed by `_sse_stream`, both
+        sharing one `_StreamEnding`, then, with `settle`, the wait for the
+        early calls of the card it offered (`_settling`)."""
         ending = _StreamEnding()
-        return _sse_stream(
+        stream = _sse_stream(
             self._locked(
-                principal, conversation_id, conversation, segment_id, frames, ending, hold=hold
+                claim.principal,
+                claim.conversation_id,
+                conversation,
+                claim.segment_id,
+                frames,
+                ending,
+                hold=claim.hold,
             ),
             conversation=conversation,
             switch=switch,
             ending=ending,
         )
+        return _ClaimedStream(self._settling(stream) if settle else stream, claim=claim)
 
 
 @dataclass
@@ -1888,6 +1894,7 @@ async def _release_claim(
     segment_id: str | None,
     *,
     cause: BaseException | None = None,
+    gone: bool = False,
 ) -> None:
     """Let go of a request whose stream never started, on every path,
     cancellation included. A claim that never committed gives up its
@@ -1897,7 +1904,9 @@ async def _release_claim(
     and the segment's span, if one opened, ends `cancelled` when `cause`,
     the exception that ended the request, is this task's own cancellation
     (the client gone), and `failed` otherwise, a `CancelledError` an inner
-    task let out among them. Then `hold` lets go of the lock, and any span
+    task let out among them. With `gone`, a client that left before the
+    response's body started (`_ClaimedStream`), it ends `disconnected`.
+    Then `hold` lets go of the lock, and any span
     that ended is exported, whatever the span end raised. It does nothing once
     `hold` has let go: the working copy and the lease are then another
     request's."""
@@ -1907,7 +1916,7 @@ async def _release_claim(
     cancelled = (
         isinstance(cause, asyncio.CancelledError) and task is not None and task.cancelling() > 0
     )
-    status = "cancelled" if cancelled else "failed"
+    status = "disconnected" if gone else "cancelled" if cancelled else "failed"
     ended = False
     try:
         ended = store.drop_draft(principal, conversation_id)
@@ -1944,7 +1953,7 @@ class _Claim:
     """A request's claimed segment: what `_ClaimedStream` lets go of when
     the segment's stream never does."""
 
-    studio: StudioRunner
+    store: StudioStore
     principal: str
     conversation_id: str
     hold: _LockHold
@@ -1952,15 +1961,21 @@ class _Claim:
 
 
 class _ClaimedStream(StreamingResponse):
-    """The SSE response of a claimed segment. Its body,
-    `StudioRunner._segment_stream`, releases the segment and lets go of
-    the request's lock hold as it ends. A body that never starts runs none
-    of that: under ASGI spec 2.3 Starlette cancels the response's send
-    task when the client has already left, possibly before the task pulls
-    the first frame. So once the response ends, this closes the body, in
-    the request task, which runs the ending of a body suspended at a frame,
-    and then ends a claim the body never let go of as `_locked` ends one
-    (`_unstreamed`)."""
+    """The SSE response of a claimed segment
+    (`StudioRunner._segment_stream`). Its body releases the segment and
+    lets go of the request's lock hold as it ends. A body that never starts
+    runs none of that: under ASGI spec 2.3 Starlette cancels the response's
+    send task when the client has already left, possibly before the task
+    pulls the first frame. So once the response ends, this closes the body,
+    in the request task, which runs the ending of a body suspended at a
+    frame, and ends a claim the body never let go of as a failure before
+    the stream starts ends one (`_release_claim`): the segment never ran.
+    The lease is dropped, a pending entry stays resuming under it, no turn
+    line the route added is saved, and the turn stays open for the next
+    `/turn` or the close job to record `abandoned`. The segment's span ends
+    `disconnected` when the client left, and `failed` otherwise."""
+
+    body_iterator: AsyncGenerator[str]
 
     def __init__(self, content: AsyncGenerator[str], *, claim: _Claim) -> None:
         super().__init__(content, media_type=SSE_MEDIA_TYPE)
@@ -1976,48 +1991,31 @@ class _ClaimedStream(StreamingResponse):
             raise
         finally:
             try:
-                if isinstance(self.body_iterator, AsyncGenerator):
-                    await self.body_iterator.aclose()
+                await self.body_iterator.aclose()
             finally:
-                # A response that returns with its body unstarted ended on
-                # the client's disconnect.
-                gone = cause is None or isinstance(
-                    cause, asyncio.CancelledError | ClientDisconnect | OSError
+                claim = self._claim
+                await _release_claim(
+                    claim.store,
+                    claim.principal,
+                    claim.conversation_id,
+                    claim.hold,
+                    claim.segment_id,
+                    cause=cause,
+                    gone=_client_left(cause),
                 )
-                await self._unstreamed(gone=gone)
 
-    async def _unstreamed(self, *, gone: bool) -> None:
-        """End the claim when its stream never started, as `_locked` ends a
-        stream: a client gone (`gone`) closes a turn not paused for an
-        answer as `cancelled`, the release saves the turn and drops the
-        lease, the segment's span ends `disconnected`, or `failed` when the
-        response failed otherwise, the hold lets go and the span is
-        exported. Nothing once the hold has let go."""
-        claim = self._claim
-        if not claim.hold.held:
-            return
-        store = claim.studio.store
-        conversation = store.current(claim.principal, claim.conversation_id)
-        try:
-            if gone and conversation is not None and not conversation.awaiting_answer:
-                conversation.close_turn(
-                    final_text=conversation.turn_final_text, error=ErrorCode.CANCELLED.value
-                )
-            await store.release(claim.principal, claim.conversation_id, claim.segment_id)
-        finally:
-            try:
-                try:
-                    if conversation is not None:
-                        conversation.end_segment_span(
-                            "disconnected" if gone else "failed",
-                            stored=claim.studio._stored_turn(
-                                claim.principal, claim.conversation_id
-                            ),
-                        )
-                finally:
-                    claim.hold.release()
-            finally:
-                await flush_telemetry()
+
+def _client_left(cause: BaseException | None) -> bool:
+    """Whether a response that ended with `cause` (`None` when it returned)
+    ended because the client left. Under ASGI spec 2.3 a response returns
+    once the client's disconnect cancels its send, and under spec 2.4 a
+    send to a gone client raises `ClientDisconnect` or `OSError`. A
+    cancellation is the client's when this task's own cancellation raised
+    it, as `_release_claim` reads it."""
+    if cause is None or isinstance(cause, ClientDisconnect | OSError):
+        return True
+    task = asyncio.current_task()
+    return isinstance(cause, asyncio.CancelledError) and task is not None and task.cancelling() > 0
 
 
 def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRouter:
@@ -2171,7 +2169,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     ),
                 )
             claimed = segment_id
-            claim = _Claim(studio, principal, body.conversation_id, hold, segment_id)
+            claim = _Claim(studio.store, principal, body.conversation_id, hold, segment_id)
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
             if abandoned is not None:
@@ -2208,39 +2206,24 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # model's patch-or-recreate decision, and the platform write.
                 # It streams under the same segment the claim save above
                 # just persisted.
-                return _ClaimedStream(
-                    studio._segment_stream(
-                        principal,
-                        body.conversation_id,
-                        conversation,
-                        segment_id,
-                        edit_frames(
-                            recorder=studio.recorder,
-                            edit_model=studio.edit_model,
-                            conversation=conversation,
-                            component_id=body.component_ref.component_id,
-                            message=body.message,
-                        ),
-                        hold=hold,
+                return studio._segment_stream(
+                    claim,
+                    conversation,
+                    edit_frames(
+                        recorder=studio.recorder,
+                        edit_model=studio.edit_model,
+                        conversation=conversation,
+                        component_id=body.component_ref.component_id,
+                        message=body.message,
                     ),
-                    claim=claim,
                 )
             text = body.message if chip_label is None else f"Count {chip_label}."
             message = types.Content(role="user", parts=[types.Part.from_text(text=text)])
-            return _ClaimedStream(
-                studio._settling(
-                    studio._segment_stream(
-                        principal,
-                        body.conversation_id,
-                        conversation,
-                        segment_id,
-                        studio._frames(
-                            principal=principal, conversation=conversation, message=message
-                        ),
-                        hold=hold,
-                    )
-                ),
-                claim=claim,
+            return studio._segment_stream(
+                claim,
+                conversation,
+                studio._frames(principal=principal, conversation=conversation, message=message),
+                settle=True,
             )
         except BaseException as exc:
             # The stream wrapper normally releases the segment and the lock.
@@ -2291,10 +2274,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             return Response(status_code=204)
         if await studio.store.request_cancel(principal, body.conversation_id):
             return Response(status_code=204)
-        lock = studio.store.lock_for(principal, body.conversation_id)
-        if lock.locked():
+        hold = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
+        if isinstance(hold, JSONResponse):
+            # A request holds the lock: a claim on its way, or a stream.
             return Response(status_code=204)
-        await lock.acquire()
         closed: ClosedTurn | None = None
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
@@ -2335,7 +2318,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 )
                 closed = None
         finally:
-            lock.release()
+            hold.release()
         if closed is not None:
             # The paused turn's trace ends as its record does.
             record_closed_turn_span(body.conversation_id, closed)
@@ -2502,11 +2485,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             raise
 
         # Every failure from here to the stream's start drops the lease the
-        # save above claimed, and releases the lock. The pending entry stays
+        # save above claimed, and releases the lock, and so does a response
+        # whose body never starts (`_ClaimedStream`). The pending entry stays
         # resuming under the dropped segment with the answer recorded, so a
         # retry of the same answer claims at once and resumes. The turn lines
         # added below stay unsaved, and the retry's load reads the row afresh.
-        claim = _Claim(studio, principal, body.conversation_id, hold, segment_id)
+        claim = _Claim(studio.store, principal, body.conversation_id, hold, segment_id)
         try:
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
@@ -2539,17 +2523,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         composition=conversation.composition,
                     )
 
-                return _ClaimedStream(
-                    studio._segment_stream(
-                        principal,
-                        body.conversation_id,
-                        conversation,
-                        segment_id,
-                        _rejected(),
-                        hold=hold,
-                    ),
-                    claim=claim,
-                )
+                return studio._segment_stream(claim, conversation, _rejected())
 
             if pending.kind == "elicitation":
                 # skip dismisses the whole pause; an answer resumes with every
@@ -2625,19 +2599,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 message=message,
                 approving=approving,
             )
-            return _ClaimedStream(
-                studio._settling(
-                    studio._segment_stream(
-                        principal,
-                        body.conversation_id,
-                        conversation,
-                        segment_id,
-                        frames,
-                        hold=hold,
-                        switch=switching,
-                    )
-                ),
-                claim=claim,
+            return studio._segment_stream(
+                claim, conversation, frames, switch=switching, settle=True
             )
         except BaseException as exc:
             await _release_claim(

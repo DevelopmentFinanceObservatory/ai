@@ -91,8 +91,8 @@ Verbs:
   reads `turn_cursors` under its `FOR UPDATE` on the same row, and clears
   the lease. So a turn whose row committed, or waits to commit, before
   that lock is left open, and an insert that waits behind the lock finds
-  the lease gone and opens no turn. Whether the table exists is read once,
-  as the run starts. A block that does not convert is kept as stored, as
+  the lease gone and opens no turn. Whether the table exists is read
+  under the same lock. A block that does not convert is kept as stored, as
   `import` keeps one, and reported. A diverged conversation is
   left alone and listed, and fails the run: its rows lack the turns ADK
   holds, so `--prefer-adk` must take ADK's copy first. A conversation
@@ -1627,9 +1627,6 @@ async def close_open_turns(engine: AsyncEngine, *, apply: bool) -> CloseReport:
     await _check_tables(engine)
     report = CloseReport(apply=apply)
     async with engine.connect() as conn:
-        turn_cursors = (
-            await conn.execute(text("SELECT to_regclass('turn_cursors')"))
-        ).scalar() is not None
         conversations = (
             await conn.execute(
                 text(
@@ -1652,7 +1649,7 @@ async def close_open_turns(engine: AsyncEngine, *, apply: bool) -> CloseReport:
                 engine,
                 principal,
                 conversation_id,
-                pk=pk if turn_cursors else None,
+                pk=pk,
                 leased=leased,
                 apply=apply,
                 report=report,
@@ -1670,7 +1667,7 @@ async def _close_one(
     principal: str,
     conversation_id: str,
     *,
-    pk: int | None,
+    pk: int,
     leased: bool,
     apply: bool,
     report: CloseReport,
@@ -1678,9 +1675,8 @@ async def _close_one(
     """Close one conversation's open ADK turn, if it has one, and note what
     became of it in `report`. The open turn's spec blocks are the ones the
     store's `load` read and converted, through the server's reader
-    (`open_turn_specs`). `pk` is the conversation's row id when the
-    `turn_cursors` table exists, else `None`, and a turn that table holds
-    is left open."""
+    (`open_turn_specs`). `pk` is the conversation's row id. A turn the
+    `turn_cursors` table holds is left open."""
     sessions: set[str] = set()
     bridge = _NoAdk()
     store = StudioStore(engine, turn_specs=open_turn_specs(engine, found=sessions), adk=bridge)
@@ -1699,7 +1695,7 @@ async def _close_one(
     async def not_in_turn_cursors(conn: AsyncConnection, locked: int) -> bool:
         return not await _turn_cursor_exists(conn, locked, turn_index)
 
-    if pk is not None and not apply:
+    if not apply:
         async with engine.connect() as conn:
             if await _turn_cursor_exists(conn, pk, turn_index):
                 report.in_turn_cursors.append(name)
@@ -1717,9 +1713,7 @@ async def _close_one(
     # the lease id alone and would otherwise write over the turn this closes.
     state.segment = None
     try:
-        await store.save(
-            principal, conversation_id, guard=not_in_turn_cursors if pk is not None else None
-        )
+        await store.save(principal, conversation_id, guard=not_in_turn_cursors)
     except SaveRefusedError:
         # Left open, so none of its blocks is closed as stored.
         report.findings.pop(name, None)
@@ -1732,7 +1726,10 @@ async def _close_one(
 
 async def _turn_cursor_exists(conn: AsyncConnection, pk: int, turn_index: int) -> bool:
     """Whether `turn_cursors` holds a row for turn `turn_index` of the
-    conversation whose row id is `pk`."""
+    conversation whose row id is `pk`: never while the table does not
+    exist."""
+    if (await conn.execute(text("SELECT to_regclass('turn_cursors')"))).scalar() is None:
+        return False
     found = await conn.execute(
         text("SELECT 1 FROM turn_cursors WHERE conversation = :pk AND turn_index = :turn_index"),
         {"pk": pk, "turn_index": turn_index},

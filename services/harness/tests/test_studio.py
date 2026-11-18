@@ -9259,20 +9259,14 @@ async def test_a_claim_whose_span_end_raises_still_releases_the_lock(
     assert flushes == ["flush"]
 
 
-@pytest.mark.parametrize("send_fails", [False, True], ids=["client-gone", "send-fails"])
-async def test_a_client_gone_before_the_body_starts_leaves_no_lock_or_lease(
-    send_fails: bool,
+async def _post_with_the_body_unstarted(
+    app: FastAPI, path: str, payload: dict[str, Any], *, send_fails: bool = False
 ) -> None:
-    """Under ASGI spec 2.3 Starlette reads the client's disconnect beside
-    the body. A client already gone ends the response before the body's
-    first frame is pulled, so the stream's own ending never runs. The lock
-    is released and the lease dropped all the same, the turn is recorded
-    `cancelled` as a client gone a frame later records it, and the next
-    `/turn` claims. A response whose first send fails leaves the turn open
-    instead, for the next `/turn` to close."""
-    app = _app(_text("Hello."), _text("Again."))
-    store = app.state.studio.store
-    body = json.dumps(_turn_body("hi")).encode()
+    """POST `payload` to `path` through the app's ASGI callable under spec
+    2.3, as uvicorn serves it, with a client that leaves at once, or, with
+    `send_fails`, stays while the response's first send raises. Either way
+    the response ends before its body is pulled."""
+    body = json.dumps(payload).encode()
     received = 0
 
     async def receive() -> dict[str, Any]:
@@ -9300,8 +9294,8 @@ async def test_a_client_gone_before_the_body_starts_leaves_no_lock_or_lease(
         "http_version": "1.1",
         "method": "POST",
         "scheme": "http",
-        "path": "/api/studio/turn",
-        "raw_path": b"/api/studio/turn",
+        "path": path,
+        "raw_path": path.encode(),
         "query_string": b"",
         "root_path": "",
         "headers": [
@@ -9312,25 +9306,87 @@ async def test_a_client_gone_before_the_body_starts_leaves_no_lock_or_lease(
         "client": ("127.0.0.1", 1),
         "server": ("test", 80),
     }
-
     if send_fails:
         with pytest.raises(RuntimeError, match="the send failed"):
             await asyncio.wait_for(app(scope, receive, send), timeout=10)
     else:
         await asyncio.wait_for(app(scope, receive, send), timeout=10)
-
     assert not any(message.get("body") for message in sent)
+
+
+@pytest.mark.parametrize(
+    ("send_fails", "span"),
+    [
+        pytest.param(False, ("disconnected", "WARNING"), id="client-gone"),
+        pytest.param(True, ("failed", "ERROR"), id="send-fails"),
+    ],
+)
+async def test_a_turn_whose_body_never_starts_ends_as_a_failure_before_the_stream(
+    otlp_spans: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+    send_fails: bool,
+    span: tuple[str, str],
+) -> None:
+    """Under ASGI spec 2.3 Starlette reads the client's disconnect beside
+    the body, so a client already gone ends the response before the body's
+    first frame is pulled, and the segment never runs. It ends as a failure
+    before the stream starts does: the lock is released, the lease dropped
+    and the turn left open, and the next `/turn` claims and records it
+    `abandoned`. The segment's span ends `disconnected` when the client
+    left, and `failed` when the response failed otherwise."""
+    app = _app(_text("Hello."), _text("Again."))
+    store = app.state.studio.store
+    ended = _recording_span_ends(monkeypatch)
+
+    await _post_with_the_body_unstarted(
+        app, "/api/studio/turn", _turn_body("hi"), send_fails=send_fails
+    )
+
+    assert ended == [span]
     assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
     stored = await StudioStore(_engine(), adk=NO_ADK, turn_specs=no_turn_specs).load(
         PRINCIPAL, CONVERSATION
     )
-    assert stored is not None and stored.segment is None
-    assert stored.turn_recorded is not send_fails
-    if not send_fails:
-        assert stored.turns[-1]["error"] == "cancelled"
+    assert stored is not None and stored.segment is None and not stored.turn_recorded
     async with _client(app) as client:
         again = await _stream(client, "/api/studio/turn", _turn_body("again"))
     assert _frame(again, "done")
+    closed = await StudioStore(_engine(), adk=NO_ADK, turn_specs=no_turn_specs).load(
+        PRINCIPAL, CONVERSATION
+    )
+    assert closed is not None and closed.turns[0]["error"] == "abandoned"
+
+
+@pytest.mark.parametrize(
+    ("decision", "last"),
+    [("amend", "plan.proposed"), ("reject", "done")],
+)
+async def test_an_answer_whose_body_never_starts_resumes_on_its_retry(
+    decision: str, last: str
+) -> None:
+    """An answer whose response ends before its body starts drops the lease
+    and keeps the pending entry resuming, with no turn line saved, so the
+    same answer retried resumes the turn as it would have."""
+    app = _app(*_plan("q with forks", *_charts_the_plan()), tool_surface=ScriptedSurface())
+    store = app.state.studio.store
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+    plan = _frame(first, "plan.proposed")
+    answer = _interrupt_body(
+        plan["interrupt_id"], decision, "use commitments" if decision == "amend" else None
+    )
+
+    await _post_with_the_body_unstarted(app, "/api/studio/interrupt", answer)
+
+    assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
+    async with _client(app) as client:
+        retried = await _stream(client, "/api/studio/interrupt", answer)
+    assert _events(retried)[-1] == last
+    stored = await StudioStore(_engine(), adk=NO_ADK, turn_specs=no_turn_specs).load(
+        PRINCIPAL, CONVERSATION
+    )
+    assert stored is not None
+    assert all(turn.get("error") != "cancelled" for turn in stored.turns)
 
 
 async def test_a_request_cancelled_after_it_let_go_leaves_the_next_request_s_claim_alone(
