@@ -20,9 +20,10 @@ Four tools, each declared in `planner.specs` (`planner_tool_specs()` and
 `skill_tool_spec()`) with its body in `planner.tools` or `planner.skills`.
 `harness.planner_adapter.PlannerAdapter` builds the set of specs and the instruction
 the planner serves, on a Pydantic AI agent built by
-`planner.pydantic_agent.planner_agent()`, which `harness.planner_node` runs as a
-function node that yields ADK session events. A tool call reads its steps from
-the session's events through `planner.session.SessionCall`.
+`planner.pydantic_agent.planner_agent()`, which the adapter runs in the turn's
+`planner` node, writing each response and its answers to the turn's transcript.
+A tool call reads its steps from that transcript through
+`planner.session.SessionCall`.
 The tools:
 
 | Tool                | Behaviour                                                                                                                                                                                                                |

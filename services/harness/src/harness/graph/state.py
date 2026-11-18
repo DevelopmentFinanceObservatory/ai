@@ -19,12 +19,9 @@ from collections.abc import (
 )
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Annotated, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NamedTuple
 
 from data_mcp.search_tool import MAX_PARTS
-from google.adk import Context, Event
-from google.adk.events import RequestInput
-from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
 from planner.plan import AskBreakdown, SessionState, scope_unread, stored_plan, with_blocks
 from planner.plan import Plan as PlannerPlan
 from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, model_validator
@@ -33,6 +30,9 @@ from harness.tool_contracts import (
     reading_facts,
 )
 from harness.turn_records import Origin, SearchReading, open_prices
+
+if TYPE_CHECKING:
+    from harness.turn.node import NodeCtx
 
 # The ADK app name every stored conversation's sessions are keyed under.
 AGENT_NAME = "dfo_analyst_graph"
@@ -133,27 +133,13 @@ ORCHESTRATOR_STATUS_FAILURE_KEY = "orchestrator_status_failure"
 ORCHESTRATOR_PLAN_RAN_STATUS = "Reading the plan's results"
 
 
-# The branch the approval and `ask` interrupts are stamped with. No agent runs
-# on it or under it, so ADK's branch filter keeps the interrupt's payload out
-# of every model request; the browser reads the interrupt off the event stream.
-_INTERRUPT_BRANCH = "dfo_interrupts"
-
-
-def interrupt_event(request: RequestInput) -> Event:
-    """`request` as its interrupt event, on `_INTERRUPT_BRANCH`."""
-    event = create_request_input_event(request)
-    event.branch = _INTERRUPT_BRANCH
-    return event
-
-
 class TurnInput(BaseModel):
     """What a turn opens with, fixed for the turn: the user's `message`, the
     canvas and conversation digests as the JSON text the agent reads, and
     the seeds slot, the Search results a "... in Studio" action handed over
     (each seed as `harness.seeds.seeds_slot` keeps it, or the one reference
-    `harness.wire.TurnRequest.seed_spec` also takes). The digests stay text
-    because the turn's inputs are stored as jsonb, which reorders an
-    object's keys, and the agent reads them as the conversation wrote them.
+    `harness.wire.TurnRequest.seed_spec` also takes). The digests are the
+    text the agent reads, as the conversation wrote it.
     The rest of what a turn opens with, which the orchestrator's tools also
     read, is opening state (`turn_budgets`)."""
 
@@ -636,12 +622,6 @@ def conversation_readings(state: SessionState) -> list[dict[str, Any]]:
     ]
 
 
-def state_json(ctx: Context, key: str, default: Any = None) -> Any:
-    """Decode a JSON blob out of session state, `default` when absent."""
-    raw = ctx.state.get(key)
-    return json.loads(raw) if raw else default
-
-
 # What the plan card opens with when the plan the user held was stored in a
 # shape this release does not read, and the question was planned again.
 UNREADABLE_PLAN_NOTE = (
@@ -659,7 +639,7 @@ UNREADABLE_PLAN_UNPLANNED_NOTE = (
 )
 
 
-def readable_plan(ctx: Context, raw: str | None) -> PlannerPlan | None:
+def readable_plan(ctx: NodeCtx[Any], raw: str | None) -> PlannerPlan | None:
     """The plan `raw` holds, `ctx.state["plan"]` as a node read it; `None` when it holds none.
 
     A plan stored in a shape `planner.plan.Plan` rejects is none

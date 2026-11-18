@@ -11,10 +11,13 @@ each of the task's payloads makes. `run_entry` replays them through production c
   recorded envelope through `resolver_digest` and stores the readings, spec blocks and
   warnings as a served turn does (`harness.graph.state.store_search`);
 - its `plan` tool checks the asks and records the hand-off;
-- the graph's `route`, `plan_start` and `planner` nodes, wired as the served workflow
-  wires them (`harness.graph.workflow.planner_entry`), run inside a conversation that
-  holds those spec blocks as `harness.studio` holds a turn's
-  (`planner.plan.current_recorded_identity`), and hand the brief to the real
+- the graph's `plan_start` and `planner` nodes, each holding the turn's spec blocks
+  in its state as the turn's graph wraps it (`harness.graph.workflow.with_specs`),
+  take the action the `plan` call recorded as the `orchestrate` node hands it on, and
+  run as the turn loop runs them (`harness.turn.loop`): the planner's ask pauses the
+  entry and the user's answer, recorded in the turn's transcript, resumes it. They
+  run inside a conversation that holds those spec blocks as `harness.studio` holds a
+  turn's (`planner.plan.current_recorded_identity`), and hand the brief to the real
   `PlannerAdapter`, which renders the planner's first message from that state and runs
   the planner, with production's instruction and tools, each request
   under the `TurnBudget` a served request gets (`harness.turn_budget`).
@@ -64,19 +67,14 @@ from data_mcp.graph_wire import NodesResponse
 from data_mcp.node_lookup import NodeOutcome
 from data_mcp.search_tool import SearchContext
 from data_mcp.skills_client import name_get_skill_in_call_lines
-from google.adk import Event
-from google.adk.agents.run_config import RunConfig, StreamingMode
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService, Session
-from google.adk.workflow import START, Workflow
-from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_response
 from google.genai import Client, types
 from google.genai.client import AsyncClient
 from harness.gemini_agent import RecordingState
 from harness.gemini_wire import model_retry_options
 from harness.graph.interfaces import PlannerModel
-from harness.graph.state import ORCHESTRATOR_SPECS_KEY, GraphState
-from harness.graph.workflow import planner_entry
+from harness.graph.planning import plan_start, planner_node
+from harness.graph.state import ORCHESTRATOR_PENDING_KEY, ORCHESTRATOR_SPECS_KEY, pending_action
+from harness.graph.workflow import with_specs
 from harness.orchestrator_tools import (
     AskedOutput,
     Resolver,
@@ -88,6 +86,10 @@ from harness.scripted import instruction_text
 from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import resolver_digest
+from harness.turn import transcript
+from harness.turn.node import Next, NodeCtx, Pause, StopScope, TurnKey
+from harness.turn.store import AgentRecord
+from harness.turn.transcript import Transcript
 from harness.turn_budget import TurnBudget, current_turn_budget
 from harness.wiring import handing_back_planner_failures
 from orchestrator.call import HANDED_OFF, OrchestratorCall
@@ -99,7 +101,6 @@ from planner.plan import (
     load_plan,
     unstated_period_reductions,
 )
-from planner.settings import AGENT_NAME as PLANNER_AGENT
 from planner.source_reads import read_full_history
 from planner.tool_results import ProblemCode
 from planner.tools import load_pending_ask
@@ -131,8 +132,8 @@ KINDS = (
 # `across_years`.
 PERIOD_REFUSAL = ProblemCode.PERIOD_REDUCTION_UNSTATED.value
 
-_APP = "planner_entry_eval"
-_USER = "eval"
+# The principal an entry's turn runs as.
+_PRINCIPAL = "eval"
 
 
 # --- Tasks ---------------------------------------------------------------------------
@@ -681,14 +682,13 @@ class PlanRecorded(Exception):  # noqa: N818 -- a stop signal, not a fault
 
 class _DropPlanRecorded(logging.Filter):
     """Drops the planner's error log for the eval's own stop, which it reads as a tool
-    failure. The node logs it."""
+    failure. The adapter logs it."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         return not (record.exc_info and isinstance(record.exc_info[1], PlanRecorded))
 
 
-for _logger in ("harness.planner_adapter", "harness.planner_node"):
-    logging.getLogger(_logger).addFilter(_DropPlanRecorded())
+logging.getLogger("harness.planner_adapter").addFilter(_DropPlanRecorded())
 
 
 def quiet_logs() -> None:
@@ -991,8 +991,7 @@ def build_adapter(
     """The adapter `harness.wiring.build_planner` builds, with the probe's translate
     step and the planner's model calls going through `client`.
 
-    The planner, its instruction, its tools and the planner node the adapter runs it in
-    (`harness.planner_node`) are production's own.
+    The planner, its instruction and its tools are production's own.
     """
     return PlannerAdapter(
         settings=Settings(),
@@ -1003,21 +1002,13 @@ def build_adapter(
     )
 
 
-def entry_workflow(planner: PlannerModel) -> Workflow:
-    """The served graph from the orchestrator's `plan` call to the end of the planner's
-    entry (`harness.graph.workflow.planner_entry`), drafting with `planner`."""
-    entry = planner_entry(planner)
-    return Workflow(
-        name="planner_entry", state_schema=GraphState, edges=[(START, entry.route), *entry.edges]
-    )
-
-
 @dataclass(frozen=True)
 class EntryRun:
-    """One finished entry: the planner's events and the user's answers to its asks, what
-    the probe saw, and how it ended."""
+    """One finished entry: its turn's transcript (the user's message, the planner's
+    records, each pause and the user's answer to it), what the probe saw, and how it
+    ended."""
 
-    events: list[Event]
+    records: list[AgentRecord]
     state: dict[str, Any]
     probe: Probe
     inputs: str
@@ -1050,7 +1041,8 @@ async def run_entry(
     planner streams, as a studio turn runs it. `answers` are the user's replies to
     the entry's asks, in order. Each resumes the paused entry, as the studio's
     interrupt route does, in a request of its own with a fresh budget. A live run
-    passes none, so an ask ends it. With `translation`, production's translation
+    passes none, so an ask ends it. Each answer is the reply the studio's interrupt
+    route reads, the user's answer under `result`. With `translation`, production's translation
     runs on the recorded plan over those calls, and `probe.translation` holds its
     answer.
     """
@@ -1073,17 +1065,29 @@ async def run_entry(
         prefix_cache=prefix_cache,
         client=probe.client(client if client is not None else live_client(), edits=edits),
     )
-    sessions = InMemorySessionService()
-    session = await sessions.create_session(app_name=_APP, user_id=_USER, state=state)
+    # The action `plan` recorded, which `orchestrate` takes from the state as the
+    # `plan_start` node's input.
+    action = pending_action(state)
+    state.pop(ORCHESTRATOR_PENDING_KEY, None)
+    if action is None or action.kind != "plan":
+        raise TaskStateError(f"{task.id}: plan recorded {action}")
     # The adapter wrapped as `harness.server.create_app` wraps it.
     planner = handing_back_planner_failures(probe.watch(adapter))
-    runner = Runner(node=entry_workflow(planner), app_name=_APP, session_service=sessions)
-    message = types.Content(role="user", parts=[types.Part.from_text(text=task.question)])
+    ctx = NodeCtx[Any](
+        key=TurnKey(_PRINCIPAL, f"eval-{task.id}", 1),
+        inputs={"message": task.question},
+        state={},
+        specs=dict(state.pop(ORCHESTRATOR_SPECS_KEY, None) or {}),
+        transcript=Transcript([transcript.user_message(task.question)]),
+        emit=lambda event: None,
+        stop=StopScope(),
+    )
+    ctx.state.update(state)
     # The conversation a studio turn runs in, holding the spec blocks the orchestrator's
     # searches returned, as `harness.studio` keeps them, so `propose_plan` and the
     # translation read a pin's identity on record (`planner.plan.recorded_identity`).
-    conversation = ConversationState(conversation_id=session.id)
-    conversation.turn_specs = dict(state.get(ORCHESTRATOR_SPECS_KEY) or {})
+    conversation = ConversationState(conversation_id=ctx.key.conversation_id)
+    conversation.turn_specs = dict(ctx.specs)
     pending = list(answers)
     error: str | None = None
     timed_out = False
@@ -1092,34 +1096,46 @@ async def run_entry(
     settings = Settings()
     budgets: list[TurnBudget] = []
 
+    async def segment(step: Awaitable[Next | Pause]) -> Next | Pause:
+        """One request of the entry: `step` awaited under a fresh budget, then the state
+        stored through JSON, as the turn loop stores it at the node's boundary."""
+        budgets.append(TurnBudget.from_settings(settings))
+        probe.next_request()
+        token = current_turn_budget.set(budgets[-1])
+        identities = current_recorded_identity.set(conversation.recorded_identity)
+        try:
+            return await step
+        finally:
+            current_recorded_identity.reset(identities)
+            current_turn_budget.reset(token)
+            ctx.state = json.loads(json.dumps(ctx.state))
+
     async def drive() -> None:
-        content: types.Content | None = message
-        while content is not None:
-            budgets.append(TurnBudget.from_settings(settings))
-            probe.next_request()
-            token = current_turn_budget.set(budgets[-1])
-            identities = current_recorded_identity.set(conversation.recorded_identity)
-            try:
-                async for _event in runner.run_async(
-                    user_id=_USER,
-                    session_id=session.id,
-                    new_message=content,
-                    run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-                ):
-                    pass
-            finally:
-                current_recorded_identity.reset(identities)
-                current_turn_budget.reset(token)
-            content = None
-            if probe.plan is None and pending:
-                # The ask the entry paused on, under its call id
-                # (`harness.graph.planning`).
-                ask = load_pending_ask((await _session(sessions, session.id)).state)
-                if ask is not None:
-                    content = types.Content(
-                        role="user",
-                        parts=[create_request_input_response(ask.call_id, dict(pending.pop(0)))],
-                    )
+        starting = with_specs(plan_start)
+        drafting = with_specs(planner_node(planner=planner))
+        opened = await starting.run(ctx, action.model_dump(mode="json"))
+        assert isinstance(opened, Next)
+        node_input = opened.output
+        result = await segment(drafting.run(ctx, node_input))
+        rounds = 0
+        while isinstance(result, Pause) and probe.plan is None and pending:
+            rounds += 1
+            interrupt_id = f"int_{rounds}"
+            answer = dict(pending.pop(0)["result"])
+            ctx.transcript.append(
+                transcript.pause(
+                    kind=result.kind,
+                    interrupt_id=interrupt_id,
+                    round=rounds,
+                    payload=result.payload,
+                    message=result.message,
+                )
+            )
+            ctx.transcript.append(
+                transcript.answer(interrupt_id=interrupt_id, round=rounds, value=answer)
+            )
+            assert drafting.resume is not None
+            result = await segment(drafting.resume(ctx, node_input, answer))
 
     # Only this scope's expiry is the eval's timeout: a `TimeoutError` raised inside the
     # entry, such as the model client's own, is an error and is retried.
@@ -1132,10 +1148,9 @@ async def run_entry(
         if not timed_out:
             error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=8)}"[:3000]
     wall_s = time.perf_counter() - started
-    ended = await _session(sessions, session.id)
     return EntryRun(
-        events=_entry_events(ended),
-        state=dict(ended.state),
+        records=list(ctx.transcript.records),
+        state=dict(ctx.state),
         probe=probe,
         inputs=inputs_digest(task, recording),
         budget_closed=next(
@@ -1184,22 +1199,6 @@ async def first_year_gaps(state: Mapping[str, Any], recording: Mapping[str, Any]
     return surface.misses
 
 
-async def _session(sessions: InMemorySessionService, session_id: str) -> Session:
-    session = await sessions.get_session(app_name=_APP, user_id=_USER, session_id=session_id)
-    assert session is not None
-    return session
-
-
-def _entry_events(session: Session) -> list[Event]:
-    """The planner's events, and the user's answers to its asks, which the user authors."""
-    return [
-        event
-        for event in session.events
-        if event.author == PLANNER_AGENT
-        or (event.author == "user" and event.get_function_responses())
-    ]
-
-
 # --- The record of one run -----------------------------------------------------------
 
 # The value of the record field and fingerprint key `planner_runner`, which stored
@@ -1208,25 +1207,32 @@ PLANNER_RUNNER = "pydantic_ai"
 RECORD_SCHEMA = 4
 
 
-def tool_calls(events: Sequence[Event]) -> list[dict[str, Any]]:
-    """Every tool call the planner made, in order, with the response its tool gave. A
-    call with no response is one the entry ended before it answered."""
+def tool_calls(records: Sequence[AgentRecord]) -> list[dict[str, Any]]:
+    """Every tool call the planner made, in order, with the response its tool gave, read
+    off the planner's records in the turn's transcript (`planner.session`). A call with no
+    response is one the entry ended before it answered."""
     calls: list[dict[str, Any]] = []
     by_id: dict[str, dict[str, Any]] = {}
-    for event in events:
-        for call in event.get_function_calls():
-            entry = {
-                "id": call.id,
-                "name": call.name,
-                "args": dict(call.args or {}),
-                "response": None,
-            }
-            calls.append(entry)
-            if call.id is not None:
-                by_id[call.id] = entry
-        for response in event.get_function_responses():
-            if response.id in by_id and by_id[response.id]["response"] is None:
-                by_id[response.id]["response"] = response.response
+    for record in records:
+        if record.agent != "planner":
+            continue
+        for part in record.body.get("parts") or ():
+            call = part.get("function_call")
+            if call is not None:
+                entry = {
+                    "id": call.get("id"),
+                    "name": call["name"],
+                    "args": dict(call.get("args") or {}),
+                    "response": None,
+                }
+                calls.append(entry)
+                if entry["id"] is not None:
+                    by_id[entry["id"]] = entry
+            response = part.get("function_response")
+            if response is not None:
+                answered = by_id.get(response.get("id"))
+                if answered is not None and answered["response"] is None:
+                    answered["response"] = response.get("response")
     return calls
 
 
@@ -1357,7 +1363,7 @@ def entry_record(
     `period_reductions` and `period_reduction` say what the accepted plan does with
     its years.
     """
-    calls = tool_calls(run.events)
+    calls = tool_calls(run.records)
     proposed = proposals(calls, recorded=run.probe.plan_call)
     plan = run.probe.plan
     reductions = period_reductions(plan) if plan else None

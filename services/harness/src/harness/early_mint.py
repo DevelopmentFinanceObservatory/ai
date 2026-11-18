@@ -2,7 +2,7 @@
 
 Approving a card starts its run, and the run's first wait is the mint behind
 each retrieval. `EarlyMints.offer` sends each retrieval's `get_data` when the
-`approve` node offers the card (`harness.graph.planning.approve`), so apis
+`approve` node offers the card (`harness.graph.approve.offer`), so apis
 has the frame, or is building it, by the time the run asks again with the
 same arguments. Every card passes through that offer: a first draft, an
 amendment's or a run's replan, a switch, and a re-offer after a refused
@@ -41,7 +41,7 @@ the revision already started starts nothing. A new revision replaces the
 record, and the replaced set's calls already sent run on. A call still
 waiting for one of its card's slots is withdrawn, unsent and logged
 `withdrawn`, when a newer revision is offered, the card is approved
-(`withdraw`, called from `harness.graph.planning.approve`), or its
+(`withdraw`, called from `harness.graph.approve.decide`), or its
 conversation is evicted past `MAX_CALLERS`: the run then asks for the frames
 itself. Nothing here touches the card,
 the plan or the run ledger. Each call logs one line with its spec_id, the

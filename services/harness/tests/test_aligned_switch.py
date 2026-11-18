@@ -95,6 +95,7 @@ from .planner.test_aligned_identity import (
     _gross_compiles,
     _left_on_net,
 )
+from .planner_host import node_ctx
 from .planner_tools import call_planner_tool
 
 _GRANT_EQUIVALENT = f"spec_{'9' * 32}"
@@ -252,7 +253,7 @@ async def _switch(
     # ends refused; what admission recorded is what these tests read.
     with suppress(SwitchFailedError):
         await switch_module._switched_plan(
-            cast(Any, ctx),
+            node_ctx(state=ctx.state),
             plan,
             choice_id=choice_id(plan, row),
             option_id=option_id,
@@ -530,7 +531,7 @@ async def _switch_provider(
     planner = _RevisingPlanner(cast(ToolSurface, surface))
     with suppress(SwitchFailedError):
         await switch_module._switched_plan(
-            cast(Any, ctx),
+            node_ctx(state=ctx.state),
             plan,
             choice_id=choice_id(plan, row),
             option_id="provider:inclusive",
@@ -631,7 +632,7 @@ async def test_a_compile_two_requirements_pin_switches_only_under_words_they_sha
     surface = _ProviderResubmits()
     planner = _AcceptingPlanner()
     switching = switch_module._switched_plan(
-        cast(Any, ctx),
+        node_ctx(state=ctx.state),
         plan,
         choice_id=choice_id(plan, _provider_row(plan, "bilateral")),
         option_id="provider:inclusive",
@@ -678,7 +679,7 @@ async def test_a_switch_of_a_row_of_a_compile_pinned_directly_posts_from_the_com
     planner = _AcceptingPlanner()
 
     await switch_module._switched_plan(
-        cast(Any, ctx),
+        node_ctx(state=ctx.state),
         plan,
         choice_id=choice_id(plan, _provider_row(plan, "bilateral")),
         option_id="provider:inclusive",
@@ -1217,7 +1218,7 @@ async def test_a_switch_of_a_pin_from_a_warned_search_part_is_honoured(
     # switch ends refused; what admission recorded is what this test reads.
     with definitions_on_record(share.recorded), suppress(SwitchFailedError):
         await switch_module._switched_plan(
-            cast(Any, share.ctx),
+            node_ctx(state=share.ctx.state),
             plan,
             choice_id=choice_id(
                 plan,
@@ -1303,7 +1304,7 @@ async def test_a_switch_on_a_closed_share_moves_both_inputs_to_copies_over_its_p
 
     with definitions_on_record(share.recorded), suppress(SwitchFailedError):
         await switch_module._switched_plan(
-            cast(Any, share.ctx),
+            node_ctx(state=share.ctx.state),
             plan,
             choice_id=choice_id(plan, _provider_row(plan, "health")),
             option_id="provider:inclusive",

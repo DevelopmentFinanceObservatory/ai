@@ -30,7 +30,7 @@ import pytest
 from google.genai import types
 from harness import gemini_wire
 from harness.gemini_agent import GEMINI_PROFILE, tool_not_found
-from harness.planner_node import SKIP_THOUGHT_SIGNATURE
+from harness.planner_adapter import SKIP_THOUGHT_SIGNATURE
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
@@ -383,8 +383,8 @@ def _texts(content: types.Content) -> str | None:
 
 
 async def test_a_responses_calls_run_after_it_is_yielded_and_before_the_next_request() -> None:
-    # A planner tool reads the session's events (`planner.session.SessionCall`), which
-    # `harness.planner_node` appends to as `run_planner` yields. So each call of a
+    # A planner tool reads the turn's transcript (`planner.session.SessionCall`), which
+    # `harness.planner_adapter` appends to as `run_planner` yields. So each call of a
     # response runs once the response is yielded, and no request is sent until every
     # call has answered: Pydantic AI runs no tool while a model request streams.
     yielded: list[PlannerItem] = []

@@ -331,7 +331,9 @@ def switch_failed_offer(
     }
 
 
-async def _unless_stopped(ctx: Context, revision: Awaitable[dict[str, Any]]) -> dict[str, Any]:
+async def _unless_stopped(
+    ctx: NodeCtx[GraphEvent], revision: Awaitable[dict[str, Any]]
+) -> dict[str, Any]:
     """`revision`'s payload, unless the user stops the switch first (`SWITCH_STOP`).
 
     A stopped revision is cancelled and awaited without taking its outcome, so
@@ -950,19 +952,19 @@ def _pin_source(
     return replaced.model_copy(update={"block": block, "earlier_turn": False, "warnings": ()})
 
 
-def _restorable_state(ctx: Context) -> dict[str, Any]:
+def _restorable_state(ctx: NodeCtx[GraphEvent]) -> dict[str, Any]:
     """A copy of the state a switch that fails, is stopped or raises puts back:
     the drafting state (`_DRAFTING_PREFIXES`, less the resolved parts and their times) and
     `_RESTORED_KEYS`."""
-    state = ctx.state.to_dict()
+    state = ctx.state
     kept = {key: value for key, value in state.items() if _drafting(key)}
     kept |= {key: state.get(key, unset) for key, unset in _RESTORED_KEYS.items()}
     return json.loads(json.dumps(kept))
 
 
-def _restore(ctx: Context, before: Mapping[str, Any]) -> None:
+def _restore(ctx: NodeCtx[GraphEvent], before: Mapping[str, Any]) -> None:
     """Put the state back as `before` holds it, clearing any drafting key written since."""
-    for key in ctx.state.to_dict():
+    for key in list(ctx.state):
         if _drafting(key) and key not in before:
             ctx.state[key] = None
     for key, value in before.items():

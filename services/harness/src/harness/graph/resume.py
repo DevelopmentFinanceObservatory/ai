@@ -20,7 +20,7 @@ is the one the turn that admitted it wrote.
 
 A completed run's delivery is decided by `harness.graph.delivery.deliver`, as
 `plan_done` decides it for a run that completes in its own turn:
-`Resumed.acknowledge`, called once the hand-back is in the session, records
+`Resumed.acknowledge`, called once the hand-back is in the turn's cursor, records
 each run whose frames were all read `executor.ledger.Delivered`, and a run
 with a frame left unread is recorded `executor.ledger.Undelivered`, its
 standing carrying `harness.graph.delivery.RESULT_UNDELIVERED`, and is listed again by the next turn
@@ -101,8 +101,8 @@ _RESUMED_LEAD = (
 class Resumed:
     """The runs carried on: `hand_back` is what the agent reads, and
     `acknowledge` records each completed run it delivers `Delivered`. Call
-    it only once the conversation has recorded `hand_back`; a run it could
-    not record is delivered again the next turn."""
+    it only once the turn's cursor holds `hand_back`; a run it could not
+    record is delivered again the next turn."""
 
     hand_back: dict[str, str]
     acknowledge: Callable[[], Awaitable[None]]

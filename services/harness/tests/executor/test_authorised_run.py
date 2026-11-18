@@ -54,10 +54,10 @@ from executor.run import (
     load_submission,
     resume_run,
 )
-from google.adk.errors import StaleSessionError
 from harness.graph.resume import run_resumer
 from harness.graph.state import ORCHESTRATOR_FRAMES_KEY
 from harness.studio_state import SegmentLost
+from harness.studio_store import ConversationStale
 from planner.operations import RetrieveOperation, Translation
 from planner.plan import AnswerMode, DatasetRequirement, Decision, Plan, PlanStatus
 from planner.workflow import SelectedSource, ToolId
@@ -887,7 +887,7 @@ class _TooManyConnectionsError(Exception):
 
 @pytest.mark.parametrize(
     "fault",
-    [StaleSessionError("another writer landed first"), _TooManyConnectionsError("too many")],
+    [ConversationStale("another writer landed first"), _TooManyConnectionsError("too many")],
     ids=["stale", "connect_time"],
 )
 @pytest.mark.parametrize("at", [None, Attempt], ids=["reading_the_submission", "on_an_attempt"])
@@ -923,7 +923,7 @@ async def test_a_transient_ledger_fault_leaves_the_run_unfinished_for_the_next_r
 
 @pytest.mark.parametrize(
     "fault",
-    [StaleSessionError("another writer landed first"), SegmentLost("the segment was taken over")],
+    [ConversationStale("another writer landed first"), SegmentLost("the segment was taken over")],
     ids=["stale", "segment_lost"],
 )
 @pytest.mark.parametrize(
@@ -984,7 +984,7 @@ async def test_a_store_fault_at_admission_is_a_ledger_fault(
     route: str,
 ) -> None:
     alive = InMemoryRunLedger()
-    ledger = _Flaky(alive, StaleSessionError("another writer landed first"), on_admit=True)
+    ledger = _Flaky(alive, ConversationStale("another writer landed first"), on_admit=True)
     plan = approved_plan()
     surface = _surface(real_schemas, manifest())
     publisher = _Publisher(FramePublished(replay_key=REPLAY_KEY))

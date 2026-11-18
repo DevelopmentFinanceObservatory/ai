@@ -2531,13 +2531,6 @@
         }
       },
       "name": "propose_plan"
-    },
-    {
-      "kind": "message",
-      "call_id": null,
-      "args": null,
-      "body": {},
-      "name": null
     }
   ],
   "state": {

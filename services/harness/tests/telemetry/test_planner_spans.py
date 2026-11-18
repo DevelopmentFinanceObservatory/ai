@@ -38,6 +38,7 @@ from planner.specs import PROPOSE_PLAN
 from planner.tool_spec import Parameter, ToolSpec
 
 from ..planner_expectations import expect, expectation_name, shared
+from ..planner_host import KEY
 from ..scripted_genai import Reply, call_part, malformed_call_reply, reply, thought_part
 from ..test_planner_adapter import _translated_plan
 from ..test_planner_node import (
@@ -56,7 +57,7 @@ from ..test_planner_node import (
 )
 
 _SESSION = "conv_01planner_spans"
-# Where a span's conversation is the session the run's workflow ran in.
+# Where a span's conversation is the conversation the entry's turn ran in.
 _THE_SESSION = "<the session>"
 
 # Langfuse's `LangfuseOtelSpanAttributes` names a span carries.
@@ -229,8 +230,7 @@ async def _spans(script: _Script, exporter: InMemorySpanExporter) -> list[Any]:
     exporter.clear()
     await _entry(script)
     spans = sorted(exporter.get_finished_spans(), key=lambda span: span.start_time or 0)
-    (workflow,) = [span for span in spans if span.name.startswith("invoke_workflow")]
-    session = str((workflow.attributes or {})["gen_ai.conversation.id"])
+    session = KEY.conversation_id
     return [
         _seen(span, session)
         for span in spans

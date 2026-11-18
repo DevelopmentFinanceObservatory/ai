@@ -138,10 +138,10 @@ def _offered_candidates(args: dict[str, Any]) -> dict[str, frozenset[str]]:
 
     - the planner's own `PLANNER_ASK` call: `args` is exactly the kwargs the
       model supplied, flat -- `args["candidates"]`, the one question `q1`.
-    - the graph's `ask` node, under `harness.graph`'s `CLARIFY_INTERRUPT`:
-      its `args` hold the whole interrupt request, so the caller's own
-      `payload` nests under `args["payload"]` (`planner.session.session_steps`
-      says how the session records it). Its `questions` each carry their own `id` and
+    - the pause the graph's `ask` node puts to the user: its `args` hold the
+      pause's message and its `payload`, which nests under `args["payload"]`
+      (`planner.session.session_steps` says how the transcript records it).
+      Its `questions` each carry their own `id` and
       `candidates`, whose ids are scoped to that question. A `payload` with
       `candidates` and no `questions` holds the one question `q1`.
     """
@@ -385,27 +385,17 @@ def elected_spec_ids(call: PlannerCall) -> frozenset[str]:
     prices elects the listed reading measuring both, the one the `ask`
     node tells the agent to fetch.
 
-    Every `adk_request_input` call the workflow itself raises (the `ask`
-    node of `harness.graph`, under `CLARIFY_INTERRUPT`) shares the one fixed
-    id `"clarify"` across every question in a session. The planner's own
-    `PLANNER_ASK` calls each get their own id. Pairing by id alone
-    would let a round-2 offer, re-raised under the same id, retroactively
-    read a round-1 answer as electing whatever round 2 happens to also
-    offer. The steps walk the session once, in order, and pair each
-    response with the call whose offer was seen most recently at that
-    point -- the nearest preceding call sharing its id -- rather than
-    building a dict of every call keyed by id first and reading it back
-    after the fact.
+    The steps walk the turn's transcript once, in order, and pair each
+    answer with the call whose offer was seen most recently at that point --
+    the nearest preceding call sharing its id -- so an answer resolves
+    against the offer it answered, whatever a later offer under the same id
+    holds.
 
     The record is read, not kept in a state key: the call carrying its
     offered candidates, and the answer once it arrives, are both in the
-    session's history (`planner.session.session_steps` says how ADK writes
-    them).
-
-    Read across the whole session, not scoped to one invocation: the ask
-    pauses the run, and the answer that resumes it can arrive on a later
-    invocation than the one that asked, so there is no single "this turn"
-    an invocation id could scope this to.
+    turn's transcript (`planner.session.session_steps` says how it holds
+    them), read whole, since the ask pauses the turn and the answer resumes
+    it in a later segment.
     """
     specs = stored_mapping(call.state, ORCHESTRATOR_SPECS_KEY)
     elected: set[str] = set()

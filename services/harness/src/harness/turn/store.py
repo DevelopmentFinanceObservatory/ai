@@ -138,9 +138,9 @@ class Cursor:
     spec_digests: dict[str, str]
 
 
-def _jsonb(value: Any) -> str | None:
-    """`value` as a jsonb parameter: JSON text, or SQL NULL for `None`.
-    Raises `ValueError` for a NaN or an infinity, which jsonb cannot hold,
+def _json(value: Any) -> str | None:
+    """`value` as a json parameter: JSON text, or SQL NULL for `None`.
+    Raises `ValueError` for a NaN or an infinity, which JSON cannot hold,
     and `TypeError` for a value JSON cannot encode, before any statement
     runs."""
     return None if value is None else json.dumps(value, allow_nan=False)
@@ -203,7 +203,7 @@ _HAS_OPEN_TURN = text(
 )
 _APPEND = text(
     "INSERT INTO agent_records (turn, seq, agent, kind, body) "
-    "VALUES (:turn, :seq, :agent, :kind, CAST(:body AS jsonb))"
+    "VALUES (:turn, :seq, :agent, :kind, CAST(:body AS json))"
 )
 
 
@@ -218,7 +218,7 @@ async def _append(conn: AsyncConnection, cursor: Cursor, records: Sequence[Agent
                 "seq": cursor.record_count + offset,
                 "agent": record.agent,
                 "kind": record.kind,
-                "body": _jsonb(record.body),
+                "body": _json(record.body),
             }
             for offset, record in enumerate(records)
         ],
@@ -227,7 +227,7 @@ async def _append(conn: AsyncConnection, cursor: Cursor, records: Sequence[Agent
 
 _UPSERT_SPEC = text(
     "INSERT INTO turn_specs (turn, spec_id, block, digest) "
-    "VALUES (:turn, :spec_id, CAST(:block AS jsonb), :digest) "
+    "VALUES (:turn, :spec_id, CAST(:block AS json), :digest) "
     "ON CONFLICT (turn, spec_id) DO UPDATE SET block = EXCLUDED.block, digest = EXCLUDED.digest"
 )
 
@@ -388,15 +388,15 @@ class TurnStore:
                         "INSERT INTO turn_cursors "
                         "(conversation, turn_index, node, status, inputs, state) VALUES "
                         "(:conversation, :turn_index, :node, 'running', "
-                        "CAST(:inputs AS jsonb), CAST(:state AS jsonb)) "
+                        "CAST(:inputs AS json), CAST(:state AS json)) "
                         f"RETURNING {_COLUMNS}"
                     ),
                     {
                         "conversation": conversation,
                         "turn_index": turn_index,
                         "node": node,
-                        "inputs": _jsonb(inputs),
-                        "state": _jsonb(state),
+                        "inputs": _json(inputs),
+                        "state": _json(state),
                     },
                 )
             ).one()
@@ -500,9 +500,9 @@ class TurnStore:
                 conn,
                 cursor,
                 statuses=(TurnStatus.RUNNING,),
-                sets="node = :node, node_input = CAST(:node_input AS jsonb), "
-                "state = CAST(:state AS jsonb), owed_interrupt_id = NULL",
-                params={"node": node, "node_input": _jsonb(node_input), "state": _jsonb(state)},
+                sets="node = :node, node_input = CAST(:node_input AS json), "
+                "state = CAST(:state AS json), owed_interrupt_id = NULL",
+                params={"node": node, "node_input": _json(node_input), "state": _json(state)},
                 specs=specs,
                 records=records,
             )
@@ -537,16 +537,16 @@ class TurnStore:
                 cursor,
                 statuses=(TurnStatus.RUNNING,),
                 sets="status = 'paused', round = round + 1, node = :node, "
-                "node_input = CAST(:node_input AS jsonb), pause_kind = :kind, "
-                "interrupt_id = :interrupt_id, pause_payload = CAST(:payload AS jsonb), "
-                "state = CAST(:state AS jsonb), owed_interrupt_id = NULL",
+                "node_input = CAST(:node_input AS json), pause_kind = :kind, "
+                "interrupt_id = :interrupt_id, pause_payload = CAST(:payload AS json), "
+                "state = CAST(:state AS json), owed_interrupt_id = NULL",
                 params={
                     "node": node,
-                    "node_input": _jsonb(node_input),
+                    "node_input": _json(node_input),
                     "kind": kind,
                     "interrupt_id": interrupt_id,
-                    "payload": _jsonb(payload),
-                    "state": _jsonb(state),
+                    "payload": _json(payload),
+                    "state": _json(state),
                 },
                 specs=specs,
                 records=records,
@@ -590,13 +590,13 @@ class TurnStore:
             await conn.execute(
                 text(
                     "INSERT INTO turn_answers (turn, interrupt_id, round, answer) "
-                    "VALUES (:turn, :interrupt_id, :round, CAST(:answer AS jsonb))"
+                    "VALUES (:turn, :interrupt_id, :round, CAST(:answer AS json))"
                 ),
                 {
                     "turn": cursor.id,
                     "interrupt_id": interrupt_id,
                     "round": round,
-                    "answer": _jsonb(answer),
+                    "answer": _json(answer),
                 },
             )
             return running
@@ -628,19 +628,19 @@ class TurnStore:
             raise ValueError(f"{status!r} does not close a turn")
         if (status in _ERRORED) != (error is not None):
             raise ValueError(f"a turn closed {status.value} takes an error only when it failed")
-        state_set = ", state = CAST(:state AS jsonb)" if state is not None else ""
+        state_set = ", state = CAST(:state AS json)" if state is not None else ""
         async with self._engine.begin() as conn:
             await self._fence(conn, cursor.conversation, segment_id)
             return await self._swap(
                 conn,
                 cursor,
                 statuses=(TurnStatus.RUNNING, TurnStatus.PAUSED),
-                sets="status = :status, error = CAST(:error AS jsonb), pause_kind = NULL, "
+                sets="status = :status, error = CAST(:error AS json), pause_kind = NULL, "
                 f"interrupt_id = NULL, pause_payload = NULL, owed_interrupt_id = NULL{state_set}",
                 params={
                     "status": status.value,
-                    "error": _jsonb(error),
-                    **({"state": _jsonb(state)} if state is not None else {}),
+                    "error": _json(error),
+                    **({"state": _json(state)} if state is not None else {}),
                 },
                 specs=specs,
                 records=records,

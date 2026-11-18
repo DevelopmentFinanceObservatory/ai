@@ -37,8 +37,8 @@ from harness.studio_store import DATABASE_NOW, StudioStore
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from .orchestrator_fakes import NO_ADK, no_turn_specs
 from .store_clock import StoreClock
+from .turn_driver import NO_ADK, no_turn_specs
 
 PRINCIPAL = "principal"
 CONVERSATION = "conv_01run00000"

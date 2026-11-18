@@ -31,7 +31,6 @@ from compiler.surface import (
     deliver_progress,
 )
 from executor.completion import FramePublished
-from google.adk import Context
 from google.genai import Client, types
 from planner.call import PlannerCall
 from planner.plan import load_plan, plan_revision
@@ -42,12 +41,14 @@ from planner.tools import EndRun, ready_and_end
 from planner.workflow import ToolId
 
 from harness.decision_pick import DecisionPick
+from harness.graph.events import GraphEvent
 from harness.scripted_plan import (
     SCRIPTED_TOOL_SCHEMAS,
     scripted_aggregate_result,
     scripted_manifest,
     scripted_plan,
 )
+from harness.turn.node import NodeCtx
 
 SCRIPTED_SPEC = "spec_" + "f" * 32
 SCRIPTED_CV = "cv_" + "f" * 32
@@ -372,7 +373,7 @@ class ScriptedPlannerModel:
     async def __call__(
         self,
         *,
-        ctx: Context,
+        ctx: NodeCtx[GraphEvent],
         question: str,
         readings: Sequence[Mapping[str, Any]],
         prior_plan: dict[str, Any] | None = None,
@@ -380,15 +381,13 @@ class ScriptedPlannerModel:
         amendment: str | None = None,
         canvas_digest: dict[str, Any] | None = None,
         conversation_digest: dict[str, Any] | None = None,
-        on_progress: Callable[[dict[str, Any]], None] | None = None,
         pick: DecisionPick | None = None,
+        answer: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        # Nothing to report and nothing to run through the workflow's
-        # session: this planner has no model round trips to relay and no
-        # agent to host via `ctx.run_node`. It drafts the same canned plan
-        # whatever the readings name.
-        del ctx, readings, refusal, amendment, canvas_digest, conversation_digest, on_progress
-        del pick
+        # No model runs, so nothing is recorded or emitted, and no ask is
+        # ever answered. It drafts the same canned plan whatever the
+        # readings name.
+        del ctx, readings, refusal, amendment, canvas_digest, conversation_digest, pick, answer
         plan = scripted_plan(question, spec_id=None)
         if prior_plan is not None:
             prior_version = int(prior_plan.get("version", 1))
@@ -403,7 +402,7 @@ class ScriptedPlannerModel:
     async def revise(
         self,
         *,
-        ctx: Context,
+        ctx: NodeCtx[GraphEvent],
         prior_plan: dict[str, Any],
         evidence_requirements: Sequence[Mapping[str, Any]],
         inherits: Mapping[str, str],

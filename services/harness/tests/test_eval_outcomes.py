@@ -44,7 +44,6 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -103,15 +102,16 @@ _TRANSLATOR_CASES = _cases(_TRANSLATOR_DIR / "harness-translator-v1.evalset.json
 
 
 class FakeToolContext:
-    """A minimal stand-in for ADK's `ToolContext`: `.state`, `.function_call_id`
-    and `.session.events` are read (the latter two by `planner.call.
+    """A minimal stand-in for the context a planner tool call runs on
+    (`.planner_tools`): `.state`, `.function_call_id` and `.records` are
+    read (the latter two by `planner.call.
     elected_spec_ids`, which `propose_plan` checks a `resolved_by=user`
     source pin against)."""
 
     def __init__(self) -> None:
         self.state: dict[str, str] = {}
         self.function_call_id = None
-        self.session = SimpleNamespace(events=[])
+        self.records: list[Any] = []
 
 
 def _plan_from(case: dict[str, Any]) -> Plan:

@@ -44,7 +44,7 @@ import itertools
 import json
 import logging
 import re
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, MutableMapping, Sequence
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args, overload
@@ -6921,11 +6921,12 @@ def save_plan(state: SessionState, plan: Plan) -> None:
     state[PLAN_STATE_KEY] = plan.model_dump_json()
 
 
-def clear_plan(state: SessionState) -> None:
-    """Clear the plan session `state` holds, with the alignments that belong to it
-    (`ALIGNMENTS_STATE_KEY`), so the next plan reads none of them."""
+def clear_plan(state: MutableMapping[str, Any]) -> None:
+    """Clear the plan `state` holds and remove the alignments that belong to it
+    (`ALIGNMENTS_STATE_KEY`), so the next plan reads none of them. A state with
+    no alignments holds no such key."""
     state[PLAN_STATE_KEY] = None
-    state[ALIGNMENTS_STATE_KEY] = None
+    state.pop(ALIGNMENTS_STATE_KEY, None)
 
 
 def load_plan_rounds(state: SessionState) -> int:

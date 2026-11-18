@@ -4,7 +4,6 @@ with a scripted model: answer, ask, plan, and what the agent reads after each.""
 from __future__ import annotations
 
 import copy
-import dataclasses
 import json
 import logging
 from pathlib import Path
@@ -13,13 +12,10 @@ from typing import Any, cast
 
 import pytest
 from analysis_mcp import digest as analysis_digest
-from analysis_mcp.digest import render_rank_digest
-from analysis_mcp.engine.rank import run_rank
 from analysis_mcp.execution_identity import current_execution_identity
 from common.materialisation import FrameRef
 from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp import get_data_digest
-from dfo_frame_grammar import Frame
 from executor.completion import PublishFault
 from executor.ledger import InMemoryRunLedger
 from google.adk.events import EventActions
@@ -30,14 +26,8 @@ from google.genai import types
 from harness import plan_display
 from harness.conversation import current_conversation_id
 from harness.graph import execute as execute_module
-from harness.graph import plan_done as plan_done_module
 from harness.graph.plan_done import (
     _DROPPED,
-    HandBack,
-    StepSummary,
-    _ask_status,
-    _partial_result,
-    _stop_causes,
 )
 from harness.graph.state import (
     APPROVE_INTERRUPT,
@@ -50,7 +40,6 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_STATUS_FAILURE_KEY,
-    ORCHESTRATOR_UNAVAILABLE_KEY,
     UNREADABLE_PLAN_NOTE,
     AskOption,
     AskQuestion,
@@ -65,7 +54,7 @@ from harness.sentences import DECLINE_REASONS
 from harness.settings import Settings
 from harness.studio_translate import _RecordingSurface
 from harness.tool_contracts import HarnessCode
-from harness.turn_records import PlanAsk, PlanRecord
+from harness.turn_records import PlanRecord
 from harness.wiring import handing_back_planner_failures
 from planner.call import CallSession
 from planner.plan import (
@@ -88,7 +77,6 @@ from .orchestrator_fakes import (
     ScriptLlm,
     approve_answer,
     call,
-    carries_an_interrupt,
     chart,
     create_request_input_response,
     definite_envelope,
@@ -111,38 +99,12 @@ from .orchestrator_fakes import (
     turn_body,
 )
 from .scripted_genai import ScriptedGenai, reply, text_part
-
-
-class AskingPlanner(ScriptedPlannerModel):
-    """`ScriptedPlannerModel` whose plan answers the brief's first ask with
-    its final step and declines every other ask as `unsupported_ask`."""
-
-    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        plan = Plan.model_validate((await super().__call__(**kwargs))["plan"])
-        asks = load_asks(kwargs["ctx"].state)
-        final = plan.evidence_requirements[-1].id
-        plan = plan.model_copy(
-            update={
-                "asks": asks,
-                "answered": (AskAnswer(ask=0, outputs=(final,)),),
-                "declined": tuple(
-                    Decline(ask=ask, code=UnsupportedOperation.UNSUPPORTED_ASK, ask_ref=number)
-                    for number, ask in enumerate(asks)
-                    if number
-                ),
-            }
-        )
-        return {"plan": plan.model_dump(mode="json"), "summary": {"version": plan.version}}
-
-
-async def _describes(*, tool: str, args: dict[str, Any], on_progress: Any = None) -> Any:
-    assert tool == "describe_frame", tool
-    return {"outcome": "ok", "view": {"dimensions": [{"name": "observationAbout"}]}}
-
-
-# The spec_id `harness.scripted_plan.scripted_plan` retrieves when no search pinned one.
-_SCRIPTED_SPEC = "spec_" + "f" * 32
-
+from .test_plan_path import (
+    SCRIPTED_SPEC,
+    AskingPlanner,
+    RefusingGetDataSurface,
+    describes,
+)
 
 _CONGO = {
     "question": "Which Congo?",
@@ -605,7 +567,7 @@ async def test_a_trailing_hand_back_is_the_one_result_of_its_plan_call():
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
-        executor=_describes,
+        executor=describes,
     )
     await open_session(runner)
     approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
@@ -682,48 +644,6 @@ async def test_a_made_up_tool_name_keeps_adk_answer_and_logs_no_failure(caplog):
     assert not [r for r in caplog.records if r.name == "orchestrator.tool_failures"]
 
 
-async def test_an_approved_plan_runs_and_its_final_frames_come_back_to_the_agent():
-    runner, model = orchestrator_runner(
-        call(
-            "plan",
-            brief="Kenya's debt service since 2015",
-            asks=["Kenya's debt service since 2015"],
-        ),
-        types.Part.from_text(text="Charted."),
-        types.Part.from_text(text="Uganda next."),
-        planner=ScriptedPlannerModel(),
-        tool_surface=ScriptedSurface(),
-        executor=_describes,
-    )
-    await open_session(runner)
-
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    assert approval.id == APPROVE_INTERRUPT
-    revision = approval.args["payload"]["revision"]
-    approve = create_request_input_response(approval.id, {"result": approve_answer(revision)})
-    events = await run_turn(runner, types.Content(role="user", parts=[approve]))
-
-    request = model.requests[-1]
-    (hand_back,) = [c for c in request.contents if _results_of(c, "plan")]
-    assert hand_back.role == "user"
-    (body,) = _results_of(hand_back, "plan")
-    assert body["result"] == "The approved plan ran. Chart its frames and answer."
-    assert body["frames"] and all(f["frame"].startswith("f") for f in body["frames"])
-    assert body["step_summaries"]
-    assert body["plan_record"].startswith(f"Plan {revision[:12]} (approved)")
-    assert not carries_an_interrupt(request)
-    assert not quotes_another_agent(request)
-    session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    assert set(session.state[ORCHESTRATOR_FRAMES_KEY]) == {f["frame"] for f in body["frames"]}
-    assert not [e for e in events if e.error_code]
-
-    follow_up = await run_turn(runner, types.UserContent("And Uganda?"))
-
-    assert not [e for e in follow_up if e.error_code]
-    assert "The approved plan ran" in request_text(model.requests[-1])
-    assert not carries_an_interrupt(model.requests[-1])
-
-
 async def test_a_searched_and_approved_turn_copies_no_large_container_it_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -751,12 +671,12 @@ async def test_a_searched_and_approved_turn_copies_no_large_container_it_reads(
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
-        executor=_describes,
+        executor=describes,
         resolver=CannedSearch(definite_envelope(sentence="Kenya debt service")),
     )
     large: dict[str, Any] = {
         ORCHESTRATOR_FRAMES_KEY: {"f" + "0" * 30: {"ref": {}, "view": {"dimensions": []}}},
-        ORCHESTRATOR_READINGS_KEY: {_SCRIPTED_SPEC: ["sv/1"]},
+        ORCHESTRATOR_READINGS_KEY: {SCRIPTED_SPEC: ["sv/1"]},
         ORCHESTRATOR_PRIOR_LEDGER_KEY: {"readings": [], "spec_ids": [], "warnings": {}},
         ORCHESTRATOR_PLAN_RECORDS_KEY: [],
     }
@@ -771,51 +691,6 @@ async def test_a_searched_and_approved_turn_copies_no_large_container_it_reads(
     assert not [e for e in events if e.error_code]
     assert ORCHESTRATOR_CALLS_KEY in copied
     assert not {*copied} & {*large, ORCHESTRATOR_SPECS_KEY, ORCHESTRATOR_SEARCHES_KEY}
-
-
-@pytest.mark.parametrize("describes", [True, False])
-async def test_the_hand_back_reports_each_ask_with_its_output_status_or_decline(describes: bool):
-    runner, model = orchestrator_runner(
-        call(
-            "plan",
-            brief="Kenya's debt service since 2015, ranked against East Africa",
-            asks=["Kenya's debt service each year", "a ranking of East African countries"],
-        ),
-        types.Part.from_text(text="Answered."),
-        planner=AskingPlanner(),
-        tool_surface=ScriptedSurface(),
-        executor=_describes if describes else _refuses_to_describe,
-    )
-    await open_session(runner)
-
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    approve = create_request_input_response(
-        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
-    )
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
-
-    after_plan = request_text(model.requests[-1])
-    body = json.loads(next(line for line in after_plan.split("\n") if line.startswith('{"frames"')))
-    session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    workflow = Plan.model_validate_json(session.state["plan"]).workflow
-    assert workflow is not None
-    (final_step,) = workflow.terminal_steps
-    output = (
-        {"step": final_step, "status": "data", "frame": body["frames"][0]["frame"]}
-        if describes
-        else {
-            "step": final_step,
-            "status": "not_chartable",
-            "reason": body["frames_not_chartable"][0]["reason"],
-        }
-    )
-    assert body["asks"] == [
-        {"ask": "Kenya's debt service each year", "answered_by": [output]},
-        {
-            "ask": "a ranking of East African countries",
-            "declined": DECLINE_REASONS[UnsupportedOperation.UNSUPPORTED_ASK],
-        },
-    ]
 
 
 class _AmendedPlanner(ScriptedPlannerModel):
@@ -869,7 +744,7 @@ async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_remov
         types.Part.from_text(text="Answered."),
         planner=planner,
         tool_surface=surface,
-        executor=_describes,
+        executor=describes,
     )
     await open_session(runner)
 
@@ -916,429 +791,6 @@ async def test_the_hand_back_reports_an_ask_the_users_amendment_removed_as_remov
         assert 'Not computed: "ODA to Ghana"; "ODA to Kenya".' in body["result"]
 
 
-class _BreakdownRefusingSurface(ScriptedSurface):
-    """`ScriptedSurface` whose `get_data` refuses the breakdown it was asked for,
-    as apis refuses a code system it cannot read."""
-
-    async def call_tool(self, **kwargs: Any) -> ToolCallResult:
-        if kwargs["tool"].name != "get_data":
-            return await super().call_tool(**kwargs)
-        return ToolCallResult(
-            is_error=True,
-            structured_content={
-                "code": "capability_unavailable",
-                "retry_mode": "do_not_retry",
-                "message": "this source cannot be broken down by that code system",
-                "fix": {"pointer": "/breakdown/code_system"},
-            },
-            text="refused",
-        )
-
-
-async def test_a_breakdown_refused_at_run_time_hands_back_a_failed_step_and_ask():
-    runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=["Kenya's debt service"]),
-        types.Part.from_text(text="It could not be computed."),
-        planner=AskingPlanner(),
-        tool_surface=_BreakdownRefusingSurface(),
-        executor=_describes,
-    )
-    await open_session(runner)
-
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    approve = create_request_input_response(
-        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
-    )
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
-
-    after_plan = request_text(model.requests[-1])
-    body = json.loads(next(line for line in after_plan.split("\n") if line.startswith('{"frames"')))
-    assert body["failed_step"]["step_id"] == "retrieve"
-    assert body["failed_step"]["code"] == "capability_unavailable"
-    # The ask's output reads the refused retrieval, so it failed with it.
-    failed = {"status": "failed", "failed_at": "retrieve", "code": "capability_unavailable"}
-    assert body["asks"] == [
-        {"ask": "Kenya's debt service", "answered_by": [{"step": "totals", **failed}]}
-    ]
-    # An output the failed step does not feed, and that never ran, was not run.
-    session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    stopped = _stop_causes(Plan.model_validate_json(session.state["plan"]), "totals")
-    assert stopped == {"totals": "totals"}
-    upstream = PlanAsk(ask="the debt service series", outputs=("retrieve",))
-    assert _ask_status(upstream, {}, {"step_id": "totals"}, stopped)["answered_by"] == [
-        {"step": "retrieve", "status": "not_run"}
-    ]
-
-
-def test_an_ask_answered_in_part_hands_back_its_steps_and_the_part_not_computed() -> None:
-    code = UnsupportedOperation.CALCULATION_OVER_COMBINED
-    ask = PlanAsk(
-        ask="bilateral, imputed and their total",
-        outputs=("joined",),
-        declined=code,
-        not_computed="their total",
-    )
-
-    assert _ask_status(ask, {}, None, {}) == {
-        "ask": "bilateral, imputed and their total",
-        "answered_by": [{"step": "joined", "status": "not_run"}],
-        "not_computed": {"part": "their total", "reason": DECLINE_REASONS[code]},
-    }
-
-
-def _ranking(
-    entities: int,
-    *,
-    limit: int | None = None,
-    label: str = "",
-    years: tuple[str, ...] = ("2023",),
-    warnings: tuple[str, ...] = (),
-) -> StepSummary:
-    """The summary of a rank step over `entities` countries named `label` after
-    their number, as `analysis_mcp` renders its digest, with the row count of
-    the frame it keeps and, under a `limit`, the entries it ranked. Several
-    `years` rank each year on its own. `warnings` are the run's."""
-    frame = Frame.build(
-        role_keys=["observationAbout"],
-        rows=[
-            {
-                "stat_var": "dcid:LifeExpectancy",
-                "observationAbout": f"country/C{number:02d}{label}",
-                "time_period": year,
-                "value": 80.0 - number,
-                "unit": "dcid:Years",
-            }
-            for number in range(entities)
-            for year in years
-        ],
-    )
-    result = run_rank(
-        frame,
-        rank_by=("observationAbout",),
-        aggregation=None,
-        window_start=None,
-        window_end=None,
-        ascending=False,
-        per_period=len(years) > 1,
-        limit=limit,
-    )
-    digest = render_rank_digest(
-        rank_by=("observationAbout",),
-        result=dataclasses.replace(result, warnings=warnings),
-        op_spec_hash="ops_" + "1" * 32,
-        content_version="ocv_" + "1" * 32,
-        execution_identity=current_execution_identity(),
-    )
-    ranked = len(result.entity_ranks) if limit is not None else None
-    return StepSummary(digest, "rank", result.frame.num_rows, ranked)
-
-
-def _handed_back(
-    digest: str,
-    tool: str | None,
-    rows: int | None = None,
-    ranked_before_limit: int | None = None,
-) -> list[str]:
-    """The lines the orchestrator reads of one `tool` step's `digest` in the hand-back."""
-    summary = StepSummary(digest, tool, rows, ranked_before_limit)
-    summaries = HandBack(_refuses_to_describe, summaries=[summary]).listing({}, None)[
-        "step_summaries"
-    ]
-    return summaries[0].split("\n")
-
-
-def _rows_of(digest: str) -> list[str]:
-    return [line for line in digest.split("\n") if line.startswith("  #")]
-
-
-def test_a_ranking_of_twelve_hands_back_its_first_row_its_last_row_and_its_count() -> None:
-    ranking = _ranking(12)
-    rows = _rows_of(ranking.digest)
-
-    handed = _handed_back(*ranking)
-
-    assert len(rows) == 12
-    assert "12 ranked entit(y/ies):" in handed
-    assert [row for row in rows if row in handed] == [rows[0], rows[-1]]
-
-
-def test_a_ranking_of_four_is_handed_back_whole() -> None:
-    ranking = _ranking(4)
-
-    assert _rows_of(ranking.digest) == [
-        line for line in _handed_back(*ranking) if line.startswith("  #")
-    ]
-
-
-@pytest.mark.parametrize("limit", [10, 20], ids=["limit-10", "limit-20"])
-def test_a_limited_ranking_hands_back_every_row_its_frame_keeps_and_no_others(limit: int) -> None:
-    """The digest lists the rows the frame keeps, a `limit` of 20 or fewer of the
-    70 ranked entities, and they are handed back whole."""
-    ranking = _ranking(70, limit=limit)
-    rows = _rows_of(ranking.digest)
-
-    handed = _handed_back(*ranking)
-
-    assert ranking.rows == limit and len(rows) == limit
-    assert f"{limit} ranked entit(y/ies):" in handed
-    assert f"limit {limit} (kept {limit} of 70 ranked entities)" in handed[0]
-    assert _rows_of("\n".join(handed)) == rows
-
-
-@pytest.mark.parametrize("periods", [3, 20], ids=["3-periods", "20-periods"])
-def test_a_limited_ranking_of_each_period_hands_back_its_header_and_closing_lines(
-    periods: int,
-) -> None:
-    """Blocks of 3 rows hold few lines each, yet a line per period would pass the
-    hand-back cap and cut the lines after them."""
-    years = tuple(str(2000 + offset) for offset in range(periods))
-    ranking = _ranking(40, limit=3, years=years, warnings=("the window is sparse",))
-
-    handed = _handed_back(*ranking)
-
-    assert f"kept {3 * periods} of {40 * periods} ranked rows" in handed[0]
-    assert not [line for line in handed if "ranked entit(y/ies)" in line or "#" in line]
-    assert any(line.startswith("unit: ") for line in handed)
-    assert "  - the window is sparse" in handed
-
-
-@pytest.mark.parametrize(
-    ("limit", "kept"), [(None, 70), (24, 24), (30, 30)], ids=["unlimited", "limit-24", "limit-30"]
-)
-def test_a_ranking_whose_frame_keeps_more_rows_than_the_digest_lists_hands_back_no_closing_row(
-    limit: int | None, kept: int
-) -> None:
-    """The digest prints 20 rows. Rank 20 is the last row only of a frame that
-    keeps 20, so only the first row is handed back, with a marker that says
-    how many of the frame's rows the digest lists."""
-    ranking = _ranking(70, limit=limit)
-    rows = _rows_of(ranking.digest)
-
-    handed = _handed_back(*ranking)
-
-    assert ranking.rows == kept and len(rows) == 20
-    assert [row for row in rows if row in handed] == [rows[0]]
-    assert any(f"20 of the frame's {kept} rows" in line for line in handed)
-
-
-def test_a_limited_ranking_over_the_card_cap_hands_back_its_first_and_last_row(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A frame that keeps more rows than a card draws is trimmed even when the
-    digest lists them all (here a card draws 9 and the frame keeps 10)."""
-    monkeypatch.setattr(plan_done_module, "MAX_SERIES_PER_COMPONENT", 9)
-    ranking = _ranking(70, limit=10)
-    rows = _rows_of(ranking.digest)
-
-    handed = _handed_back(*ranking)
-
-    assert [row for row in rows if row in handed] == [rows[0], rows[9]]
-
-
-def test_a_ranking_stored_without_its_limit_is_trimmed_to_its_first_and_last_kept_row() -> None:
-    """A summary stored before `ranked_before_limit` was carried has no value."""
-    ranking = _ranking(70, limit=10)._replace(ranked_before_limit=None)
-    rows = _rows_of(ranking.digest)
-
-    handed = _handed_back(*ranking)
-
-    assert [row for row in rows if row in handed] == [rows[0], rows[9]]
-    assert (
-        StepSummary.of({"tool": "rank", "digest": ranking.digest, "rows": 10}).ranked_before_limit
-        is None
-    )
-
-
-def test_a_limited_ranking_too_long_to_hand_back_whole_is_trimmed_not_cut_mid_row() -> None:
-    ranking = _ranking(70, limit=20, label="x" * 150)
-    rows = _rows_of(ranking.digest)
-
-    handed = _handed_back(*ranking)
-
-    assert sum(len(line) + 1 for line in rows[:20]) > plan_done_module._WHOLE_RANKING_CHARS
-    assert [row for row in rows if row in handed] == [rows[0], rows[19]]
-
-
-@pytest.mark.parametrize("rows", [None, 0], ids=["unknown", "empty"])
-def test_a_ranking_of_unknown_or_empty_frame_hands_back_its_count_and_no_rows(
-    rows: int | None,
-) -> None:
-    ranking = _ranking(12)
-
-    handed = _handed_back(ranking.digest, "rank", rows)
-
-    assert "12 ranked entit(y/ies):" in handed
-    assert _rows_of("\n".join(handed)) == []
-
-
-# The shapes `analysis_mcp.digest` writes for the six other per-entity digests:
-# the digest's opening line, the heading that states the count, one line.
-_COUNT_ONLY_SHAPES = {
-    "aggregate": (
-        "aggregate: sum grouped by reporter",
-        "6 group(s):",
-        "  reporter=dcid:USA [1 row]: 1.0",
-    ),
-    "growth": (
-        "growth: 2020..2023, entity_by reporter",
-        "6 entit(y/ies):",
-        "  reporter=dcid:USA: +10.0% (1 -> 2)",
-    ),
-    "filter": (
-        "filter: 1 predicate(s) applied, 6/6 row(s) kept (0 dropped)",
-        "6 kept row(s):",
-        "  reporter=dcid:USA: 1.0 [Count]",
-    ),
-    "join": (
-        "join: on reporter + time_period, 6 matched key(s) (0 left-only, 0 right-only, dropped)",
-        "6 matched key(s):",
-        "  reporter=dcid:USA [2021]: left=1.0, right=2.0",
-    ),
-    "quotient_of": (
-        "quotient_of: 6 matched period(s), in Count",
-        "6 quotient(s), numerator / denominator, in Count:",
-        "  2020: 1 / 2 = 0.5",
-    ),
-    "share_of": (
-        "share_of: 6 matched period(s), in per cent (Percent)",
-        "6 period share(s):",
-        "  2020: 1 / 2 = 50.000%",
-    ),
-}
-_KEYED_SHARE = (
-    "share_of: 1 key(s), 6 matched (key, period) pair(s), in per cent (Percent)",
-    "reporter=dcid:USA [6 period(s)], first 2020: 50.000%; latest 2025: 50.000%:",
-    "  2020: 1 / 2 = 50.000%",
-)
-
-
-def _entity_digest(shape: tuple[str, str, str], *, lines: int) -> str:
-    opening, heading, line = shape
-    return "\n".join([opening, "", heading, *[line] * lines, "", "unit: Count"])
-
-
-@pytest.mark.parametrize(
-    ("tool", "shape"),
-    [*_COUNT_ONLY_SHAPES.items(), ("share_of", _KEYED_SHARE)],
-    ids=[*_COUNT_ONLY_SHAPES, "keyed share_of"],
-)
-def test_a_per_entity_digest_past_four_lines_hands_back_its_count_and_none_of_its_lines(
-    tool: str, shape: tuple[str, str, str]
-) -> None:
-    _, heading, line = shape
-
-    handed = _handed_back(_entity_digest(shape, lines=5), tool)
-
-    assert heading in handed
-    assert line not in handed
-    assert _handed_back(_entity_digest(shape, lines=4), tool).count(line) == 4
-
-
-@pytest.mark.parametrize("tool", [None, "compare", "get_data"], ids=["no-tool", "compare", "data"])
-def test_a_digest_of_a_step_not_known_to_print_one_line_per_entity_is_handed_back_whole(
-    tool: str | None,
-) -> None:
-    """A summary stored without its tool, as a run paused before the tool was
-    kept leaves it, reads whole."""
-    digest = _entity_digest(_COUNT_ONLY_SHAPES["growth"], lines=9)
-
-    assert _handed_back(digest, tool) == digest.split("\n")
-
-
-async def _refuses_to_describe(*, tool: str, args: dict[str, Any], on_progress: Any = None) -> Any:
-    assert tool == "describe_frame", tool
-    return {
-        "outcome": "refusal",
-        "refusal": {"code": "publish_not_configured", "retry_mode": "do_not_retry"},
-    }
-
-
-class RefusingGetDataSurface(ScriptedSurface):
-    """`ScriptedSurface` whose `get_data` answers the refusal `code` names."""
-
-    def __init__(self, code: str) -> None:
-        super().__init__()
-        self.code = code
-
-    async def call_tool(self, *, tool: Any, arguments: Any, on_progress: Any = None) -> Any:
-        if tool.name != "get_data":
-            return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
-        refusal = {
-            "code": self.code,
-            "retry_mode": "do_not_retry",
-            "fix": {},
-            "message": "this deployment cannot serve the request",
-        }
-        return ToolCallResult(is_error=True, structured_content=refusal, text=refusal["message"])
-
-
-@pytest.mark.parametrize("code", ["capability_unavailable", "member_not_resolvable"])
-async def test_a_step_refused_for_a_missing_capability_closes_the_part_it_served(code: str):
-    """A capability the platform lacks fails any brief and any fetch of the
-    step's data, so the plan call is not given back and the step's spec_id
-    is refused to `fetch`; another refusal leaves both open."""
-    runner, model = orchestrator_runner(
-        call(
-            "plan",
-            brief="Kenya's debt service since 2015",
-            asks=["Kenya's debt service since 2015"],
-        ),
-        types.Part.from_text(text="That part is unavailable."),
-        planner=ScriptedPlannerModel(),
-        tool_surface=RefusingGetDataSurface(code),
-        executor=_describes,
-    )
-    await open_session(runner)
-
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    approve = create_request_input_response(
-        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
-    )
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
-
-    after_plan = request_text(model.requests[-1])
-    body = json.loads(next(line for line in after_plan.split("\n") if line.startswith('{"frames"')))
-    assert body["failed_step"]["code"] == code
-    session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    missing = code == "capability_unavailable"
-    assert bool(session.state[ORCHESTRATOR_CALLS_KEY].get("plan_given_back")) is not missing
-    assert (_SCRIPTED_SPEC in (session.state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {})) is missing
-
-
-async def test_a_plan_whose_frames_cannot_be_described_hands_back_the_reason_not_a_frame():
-    runner, model = orchestrator_runner(
-        call(
-            "plan",
-            brief="Kenya's debt service since 2015",
-            asks=["Kenya's debt service since 2015"],
-        ),
-        types.Part.from_text(text="Here is what the plan computed."),
-        planner=ScriptedPlannerModel(),
-        tool_surface=ScriptedSurface(),
-        executor=_refuses_to_describe,
-    )
-    await open_session(runner)
-
-    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
-    approve = create_request_input_response(
-        approval.id, {"result": approve_answer(approval.args["payload"]["revision"])}
-    )
-    await run_turn(runner, types.Content(role="user", parts=[approve]))
-
-    after_plan = request_text(model.requests[-1])
-    assert "its result cannot be drawn" in after_plan
-    body = json.loads(
-        after_plan.split("Only a frame listed under frames can be charted.\n", 1)[1].split("\n", 1)[
-            0
-        ]
-    )
-    assert body["frames"] == []
-    assert body["frames_not_chartable"] == [
-        {"step": "aggregate", "reason": "this step's data view could not be prepared"}
-    ]
-    assert "publish_not_configured" not in after_plan
-
-
 async def test_an_amendment_redrafts_and_the_amended_plan_runs():
     runner, model = orchestrator_runner(
         call(
@@ -1349,7 +801,7 @@ async def test_an_amendment_redrafts_and_the_amended_plan_runs():
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
-        executor=_describes,
+        executor=describes,
     )
     await open_session(runner)
 
@@ -1429,7 +881,7 @@ async def test_an_answer_to_a_plan_stored_with_member_lists_gets_a_new_plan(
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=surface,
-        executor=_describes,
+        executor=describes,
     )
     await open_session(runner)
     first = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
@@ -1483,7 +935,7 @@ async def test_a_plan_call_drafts_over_an_earlier_plan_stored_with_member_lists(
         ),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
-        executor=_describes,
+        executor=describes,
     )
     await open_session(runner, plan=_UNREADABLE_PLAN)
 
@@ -1529,7 +981,7 @@ async def test_execute_plans_again_when_the_approved_plan_was_stored_with_member
         ),
         planner=ScriptedPlannerModel(),
         tool_surface=surface,
-        executor=_describes,
+        executor=describes,
     )
     await open_session(runner)
     first = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
@@ -1566,7 +1018,7 @@ async def test_the_hand_back_carries_no_record_of_a_plan_stored_with_member_list
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
-        executor=_describes,
+        executor=describes,
     )
     await open_session(runner)
     approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
@@ -1594,7 +1046,7 @@ async def test_approving_a_superseded_revision_retrieves_nothing_and_proposes_ag
         ),
         planner=ScriptedPlannerModel(),
         tool_surface=surface,
-        executor=_describes,
+        executor=describes,
     )
     await open_session(runner)
 
@@ -1698,7 +1150,7 @@ def _rows_led_by_a_wide_step(step_rows: Any) -> Any:
 
 @pytest.mark.parametrize(
     ("prior_spec_ids", "origin"),
-    [([], "translator"), ([_SCRIPTED_SPEC], "search")],
+    [([], "translator"), ([SCRIPTED_SPEC], "search")],
     ids=["found_by_the_translator", "searched_in_an_earlier_turn"],
 )
 async def test_the_plan_record_and_every_reading_reach_the_agent_past_wide_step_arguments(
@@ -1716,7 +1168,7 @@ async def test_the_plan_record_and_every_reading_reach_the_agent_past_wide_step_
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
-        executor=_describes,
+        executor=describes,
     )
     prior = {"readings": [], "spec_ids": prior_spec_ids, "warnings": {}}
     await open_session(runner, **{ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
@@ -1728,10 +1180,10 @@ async def test_the_plan_record_and_every_reading_reach_the_agent_past_wide_step_
 
     after_plan = request_text(model.requests[-1])
     assert f"Plan {revision[:12]} (approved)" in after_plan
-    assert f"({_SCRIPTED_SPEC}, sum)" in after_plan
+    assert f"({SCRIPTED_SPEC}, sum)" in after_plan
     assert "Wide_StatVar_" not in after_plan
     session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    assert session.state[ORCHESTRATOR_READINGS_KEY] == {_SCRIPTED_SPEC: "sum"}
+    assert session.state[ORCHESTRATOR_READINGS_KEY] == {SCRIPTED_SPEC: "sum"}
     (stored,) = session.state[ORCHESTRATOR_PLAN_RECORDS_KEY]
     record = PlanRecord.model_validate(stored)
     assert record.revision == revision
@@ -1778,7 +1230,7 @@ async def test_step_summaries_reach_the_agent_without_frame_references_or_operat
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=_NoisySurface(),
-        executor=_describes,
+        executor=describes,
     )
     await open_session(runner)
 
@@ -1936,7 +1388,7 @@ async def _run_two_asks(
         types.Part.from_text(text="Answered."),
         planner=planner,
         tool_surface=surface,
-        executor=_describes,
+        executor=describes,
         publisher=publisher,
         run_ledger=run_ledger,
     )
@@ -2043,7 +1495,7 @@ async def test_a_failed_plan_hands_back_no_step_that_is_only_read():
         types.Part.from_text(text="It could not be computed."),
         planner=AskingPlanner(),
         tool_surface=_AggregateRefusingSurface(),
-        executor=_describes,
+        executor=describes,
     )
     await open_session(runner)
     approval = single_pause(await run_turn(runner, types.UserContent("Kenya's life expectancy?")))
@@ -2158,22 +1610,6 @@ async def test_a_replanned_run_that_stops_earlier_keeps_the_asks_the_first_run_c
     ]
     assert f"can be charted: {charted}." in text
     assert f"Not computed: {json.dumps(_TWO_ASKS[1])}." in text
-
-
-@pytest.mark.parametrize(
-    ("status", "charted"), [({"status": "data"}, True), ({"status": "empty"}, False)]
-)
-def test_a_partial_result_offers_to_chart_only_frames_that_hold_series(
-    status: dict[str, str], charted: bool
-):
-    asks = [{"ask": "the mean", "answered_by": [{"step": "totals", **status, "frame": "f1"}]}]
-
-    text = _partial_result(asks, frames=True)
-
-    assert ('can be charted: "the mean".' in text) is charted
-    assert (
-        'holds no series or cannot be drawn, as each step\'s status says: "the mean".' in text
-    ) is not charted
 
 
 async def test_a_plain_text_turn_streams_the_agents_answer_over_the_studio_routes(pg_engine):

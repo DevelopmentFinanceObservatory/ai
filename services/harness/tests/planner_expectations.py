@@ -37,7 +37,7 @@ import difflib
 import json
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -225,14 +225,22 @@ def assert_json_equal(produced: Any, stored: Any, *, name: str) -> None:
     pytest.fail(diff or f"{name}: a shared value is named differently", pytrace=False)
 
 
-def expect(name: str, value: Any) -> None:
+def expect(name: str, value: Any, *, unread: Collection[str] = ()) -> None:
     """Assert that `value` equals the stored expectation `name`.
+
+    `unread` names keys of the stored expectation, an object, that `value`
+    leaves out: they stay in the file as stored and are not compared.
 
     With `PLANNER_EXPECTATIONS=write`, write `value` to the file, and fail when
     that, or a `shared` value written for it, changed a file.
     """
     produced = as_json(value)
     path = PLANNER_RUNS / f"{name}.json"
+    if unread and path.exists():
+        stored = json.loads(path.read_text())
+        kept = {key: stored[key] for key in unread if key in stored}
+        produced = {**kept, **produced}
+        produced = {key: produced[key] for key in [*stored, *produced] if key in produced}
     if _WRITING:
         changed = [*_CHANGED]
         _CHANGED.clear()

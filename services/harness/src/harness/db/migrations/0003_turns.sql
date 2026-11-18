@@ -6,6 +6,11 @@
 -- the same transaction (`harness.turn.store.TurnStore`). The lease, the Stop
 -- flag and the frame numbering stay on `conversations`.
 
+-- Every value column is `json`, which keeps the text as written: a node's
+-- input, the state and the transcript hold values a model reads verbatim,
+-- such as a hand-back's fields and the orchestrator's stored history, and
+-- `jsonb` would reorder their objects' keys.
+
 -- One row per turn. `node` is where the turn stands and `node_input` what
 -- that node runs on; `inputs` is fixed when the turn opens; `state` is the
 -- turn-scoped state the nodes share, the orchestrator's stored history
@@ -21,18 +26,18 @@ CREATE TABLE turn_cursors (
     conversation bigint NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
     turn_index integer NOT NULL CHECK (turn_index >= 0),
     node text NOT NULL,
-    node_input jsonb,
+    node_input json,
     status text NOT NULL CHECK (
         status IN ('running', 'paused', 'done', 'failed', 'cancelled', 'abandoned')
     ),
     round integer NOT NULL DEFAULT 0 CHECK (round >= 0),
     pause_kind text,
     interrupt_id text,
-    pause_payload jsonb,
+    pause_payload json,
     owed_interrupt_id text,
-    inputs jsonb NOT NULL,
-    state jsonb NOT NULL,
-    error jsonb,
+    inputs json NOT NULL,
+    state json NOT NULL,
+    error json,
     version bigint NOT NULL DEFAULT 0,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
@@ -61,7 +66,7 @@ CREATE TABLE turn_specs (
     turn bigint NOT NULL REFERENCES turn_cursors (id) ON DELETE CASCADE,
     spec_id text NOT NULL,
     seq bigint GENERATED ALWAYS AS IDENTITY,
-    block jsonb NOT NULL,
+    block json NOT NULL,
     digest text NOT NULL,
     PRIMARY KEY (turn, spec_id)
 );
@@ -73,7 +78,7 @@ CREATE TABLE turn_answers (
     turn bigint NOT NULL REFERENCES turn_cursors (id) ON DELETE CASCADE,
     interrupt_id text NOT NULL,
     round integer NOT NULL CHECK (round >= 1),
-    answer jsonb NOT NULL,
+    answer json NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (turn, round)
 );
@@ -87,6 +92,6 @@ CREATE TABLE agent_records (
     seq integer NOT NULL CHECK (seq >= 0),
     agent text NOT NULL CHECK (agent IN ('loop', 'planner')),
     kind text NOT NULL,
-    body jsonb NOT NULL,
+    body json NOT NULL,
     PRIMARY KEY (turn, seq)
 );

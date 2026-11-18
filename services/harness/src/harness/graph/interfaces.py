@@ -1,20 +1,19 @@
-"""The interfaces the root workflow is built from: the `Executor` its nodes' own
+"""The interfaces the turn graph is built from: the `Executor` its nodes' own
 calls run through, and the `PlannerModel` the `planner` node drafts with.
 """
 
 from __future__ import annotations
 
-from collections.abc import (
-    Callable,
-    Mapping,
-    Sequence,
-)
-from typing import Any, Protocol
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Protocol
 
 from compiler.surface import ProgressCallback
-from google.adk import Context
 
 from harness.decision_pick import DecisionPick
+
+if TYPE_CHECKING:
+    from harness.graph.events import GraphEvent
+    from harness.turn.node import NodeCtx
 
 
 class Executor(Protocol):
@@ -65,8 +64,8 @@ class PlannerModel(Protocol):
     for the same ask can succeed, and `code` names the refusal for a caller
     that tells refusals apart. It returns `{"asked": {"call_id", "args"}}`
     when the planner's run ended on a question for the user, which the node
-    pauses on under `call_id`; the resume calls the planner again with the
-    answer in `ctx.resume_inputs`. The node validates a drafted
+    pauses on; the resume calls the planner again with the user's `answer`
+    to it. The node validates a drafted
     plan itself, so a malformed one fails here rather than at the approve
     gate; a refusal never writes `ctx.state["plan"]`, so whatever plan was
     already there is exactly what this call leaves behind. Where that
@@ -85,18 +84,11 @@ class PlannerModel(Protocol):
     `refused` also carries `reason`, one sentence for the user, as `revise`'s
     does.
 
-    `on_progress`, when given, may be called any number of times before this
-    returns, each call naming one round trip the underlying model pair made
-    (a shape this protocol treats as opaque -- the node only forwards it as
-    an activity update). A planner with nothing to report simply never calls
-    it.
-
-    `ctx` is the planner node's own `Context`, passed through so a planner
-    that hosts its models as a dynamically-scheduled child of this node
-    (`ctx.run_node`) can do so in the graph's own session, rather than
-    building a second `Runner`/session service of its own
-    (`harness.planner_adapter.PlannerAdapter`). A planner with nothing to run
-    through it simply never touches it.
+    `ctx` is the planner node's own `NodeCtx`: a planner that runs a model
+    reads and writes the turn's state through it, appends its run's records
+    to the turn's transcript and emits its run's events
+    (`harness.planner_adapter.PlannerAdapter`). A planner with no model run
+    reads only its state.
 
     `readings` are the search readings of the conversation's earlier turns
     (`ORCHESTRATOR_PRIOR_LEDGER_KEY`) and then this turn's
@@ -107,7 +99,7 @@ class PlannerModel(Protocol):
     async def __call__(
         self,
         *,
-        ctx: Context,
+        ctx: NodeCtx[GraphEvent],
         question: str,
         readings: Sequence[Mapping[str, Any]],
         prior_plan: dict[str, Any] | None = None,
@@ -115,14 +107,14 @@ class PlannerModel(Protocol):
         amendment: str | None = None,
         canvas_digest: dict[str, Any] | None = None,
         conversation_digest: dict[str, Any] | None = None,
-        on_progress: Callable[[dict[str, Any]], None] | None = None,
         pick: DecisionPick | None = None,
+        answer: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
     async def revise(
         self,
         *,
-        ctx: Context,
+        ctx: NodeCtx[GraphEvent],
         prior_plan: dict[str, Any],
         evidence_requirements: Sequence[Mapping[str, Any]],
         inherits: Mapping[str, str],

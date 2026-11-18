@@ -991,7 +991,7 @@ def test_the_replayer_imports_no_model_planner_or_session_code() -> None:
     probe = (
         "import sys, harness.recipe_replay\n"
         "roots = ('planner', 'compiler', 'executor', 'translator', 'orchestrator', "
-        "'google.adk', 'google.genai', 'sqlalchemy', 'asyncpg')\n"
+        "'pydantic_ai', 'google.genai', 'sqlalchemy', 'asyncpg')\n"
         "loaded = sorted(m for m in sys.modules if m.split('.')[0] == 'harness' "
         "or any(m == r or m.startswith(r + '.') for r in roots))\n"
         "print(loaded)"

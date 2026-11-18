@@ -4,7 +4,7 @@ Most tool functions are exercised directly (through `call_planner_tool`) against
 tool context, rather than through a full ADK `Runner` -- what belongs to this
 package is the business logic each tool function runs once ADK decides to call
 it. `_FakeToolContext` carries no `tool_confirmation`: `declare_ready` and
-`end_run_when_ready` gate nothing of their own, so a body that tried to touch it would raise
+`ready_and_end` gate nothing of their own, so a body that tried to touch it would raise
 `AttributeError` here rather than silently working again -- see the tests
 under "Submitting".
 
@@ -27,7 +27,6 @@ import logging
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast, override
 
 import pytest
@@ -45,26 +44,19 @@ from data_mcp.definition_writes import MAX_IDENTITY_BYTES, windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from data_mcp.tool_errors import ToolRefusal, to_tool_result
-from google.adk.events import Event, EventActions, RequestInput
-from google.adk.workflow.utils._workflow_hitl_utils import (
-    create_request_input_event,
-    create_request_input_response,
-)
-from google.genai import types
-from harness.graph.planning import planner_ask_interrupt
 from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_SEARCHES_KEY, store_search
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import card_questions, plan_words, shown_decisions
 from harness.planner_adapter import (
-    _PLANNER_BRANCH,
-    PlannerAdapter,
     _reading_pin_sources,
-    end_run_when_ready,
 )
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.sentences import PlanWords, refusal_reason, refusal_sentence
-from harness.studio_state import _turn_identities
+from harness.studio_state import ConversationState, _turn_identities
+from harness.studio_translate import _RecordingExecutor, _Translator
 from harness.tool_contracts import reading_facts
+from harness.turn import transcript
+from harness.turn.store import AgentRecord
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import RecordedIdentity, SearchReading, _periods
 from planner import source_reads as planner_source_reads
@@ -185,8 +177,6 @@ from planner.records import (
     SourceNameCandidate,
     StatVarReading,
 )
-from planner.session import SessionCall, session_steps
-from planner.settings import AGENT_NAME
 from planner.source_reads import read_full_history, with_source_reads
 from planner.specs import planner_tool_specs
 from planner.tool_results import Outcome, ProblemCode, problem
@@ -197,6 +187,7 @@ from planner.tools import (
     _ask_beside_ask,
     ask_refusal,
     load_pending_ask,
+    ready_and_end,
 )
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, WorkflowStep
 from pydantic import TypeAdapter, ValidationError
@@ -268,10 +259,23 @@ from ..basis_alignment import (
 from ..context_probe import plan_record
 from ..data_mcp_definitions import DataMcpDefinitions
 from ..decision_drafts import drafts
-from ..planner_tools import call_planner_tool, planner_tool_declaration, serve_planner_tool
-from ..session_events import response_event
+from ..planner_tools import (
+    call_planner_tool,
+    end_run_on,
+    planner_tool_declaration,
+    serve_planner_tool,
+    session_call,
+)
+from ..session_events import (
+    merged,
+    model_response,
+    response_event,
+    tool_answers,
+    tool_call,
+    turn_pause,
+    user_answer,
+)
 from ..split_plan import split_draft
-from ..test_studio_translate import _translator as _studio_translator
 from ..test_turn_records import _switchable_scope
 from ..unreachable_surface import unreachable_surface
 
@@ -314,73 +318,45 @@ HANDED_BACK_KINDS = (
 )
 
 
-class _FakeSession:
-    """A minimal stand-in for ADK's `Session`: just `.events`, read through
-    `planner.session.session_steps` by `planner.call.elected_spec_ids` to find
-    what the user actually chose answering `ask_user_question`, and by
-    `planner.call.answered_since_referral` to find whether they answered at
-    all. Empty by default -- a test that needs an election on record populates
-    it with `_ask_event` and `_answer_event`, below, and one that needs an
-    answer or a referral with `_ask_answered_events` and `_hand_back`."""
-
-    def __init__(self) -> None:
-        self.events: list[Any] = []
-
-
 class _FakeToolContext:
-    """A minimal stand-in for ADK's `ToolContext`.
+    """A minimal stand-in for the context a planner tool call runs on
+    (`..planner_tools`).
 
-    `.state` (a plain, mutable mapping), `.session` (`.events` only),
-    `.actions` (where `end_run_when_ready` ends the run), and the call's
-    `.invocation_id`, `.branch` and `.function_call_id` (where `_ask_beside_ask`
-    finds the call among the session's events) are all the planner's tool
-    functions use: none of them gates on a confirmation, so none needs
-    `.tool_confirmation`. A tool body that tried to read it would
-    raise `AttributeError` against this stand-in, which is exactly the
-    regression the tests under "Submitting" rely on.
+    `.state` (a plain, mutable mapping), `.records` (the turn's transcript,
+    read through `planner.session.session_steps` by
+    `planner.call.elected_spec_ids` to find what the user chose answering
+    `ask_user_question`, and by `planner.call.answered_since_referral` to
+    find whether they answered at all), `.run_ended` (where
+    `declare_ready` ends the run) and the call's `.function_call_id` (where
+    `_ask_beside_ask` finds the call among the records) are all the
+    planner's tool functions use. The records are empty by default: a test
+    that needs an election on record adds `_ask_event` and `_answer_event`,
+    below, and one that needs an answer or a referral
+    `_ask_answered_events` and `_hand_back`.
     """
 
     def __init__(self) -> None:
         self.state: dict[str, str] = {}
-        self.actions = EventActions()
-        self.session = _FakeSession()
-        self.invocation_id = "turn-1"
-        self.branch = None
+        self.records: list[AgentRecord] = []
+        self.run_ended = False
         self.function_call_id = "call-1"
 
 
-def _ask_event(candidates: list[dict[str, str]], *, call_id: str = "call-1") -> Any:
-    """A fake session event for `ask_user_question`'s own function call,
-    carrying `candidates` in its `args` and `call_id` in its `id` -- the
-    shape `planner.call.elected_spec_ids` pairs against a matching
-    `_answer_event`'s `id`. A `SimpleNamespace` tree rather than a real
-    `google.adk.events.Event`: `planner.session.session_steps` only ever reads
-    `.content.parts[*].function_call.{id,name,args}` and
-    `.content.parts[*].function_response`, so that is all this (and
-    `_answer_event`, below) build. `function_response` is set to `None`
-    explicitly -- a real ADK `Part` always carries the field, defaulting to
-    `None`, and `session_steps` reads it unconditionally off every part.
-    """
-    call = SimpleNamespace(id=call_id, name=PLANNER_ASK, args={"candidates": candidates})
-    part = SimpleNamespace(function_call=call, function_response=None)
-    return SimpleNamespace(content=SimpleNamespace(parts=[part]))
+def _ask_event(candidates: list[dict[str, str]], *, call_id: str = "call-1") -> AgentRecord:
+    """The model response holding `ask_user_question`'s own call, carrying
+    `candidates` in its `args` and `call_id` in its `id`: the shape
+    `planner.call.elected_spec_ids` pairs against a matching `_answer_event`."""
+    return model_response(tool_call(call_id, PLANNER_ASK, {"candidates": candidates}))
 
 
-def _answer_event(spec_id: str, *, call_id: str = "call-1") -> Any:
-    """A fake session event for the `FunctionResponse` answering `_ask_event`'s
-    call -- same `call_id`, and `response["result"]["spec_id"]` set to what
-    the user chose, the shape `harness.studio`'s `/interrupt` route actually
-    sends (`create_request_input_response`).
-    """
-    response = SimpleNamespace(
-        id=call_id, name=PLANNER_ASK, response={"result": {"spec_id": spec_id}}
-    )
-    part = SimpleNamespace(function_call=None, function_response=response)
-    return SimpleNamespace(content=SimpleNamespace(parts=[part]))
+def _answer_event(spec_id: str, *, call_id: str = "call-1") -> AgentRecord:
+    """The user's answer to `_ask_event`'s call: the pause on it shares the
+    call's id, and the answer is `{"spec_id": ...}`, what the user chose."""
+    return user_answer(call_id, {"spec_id": spec_id})
 
 
-def _referred_event(kind: ReferralKind, requirement_id: str | None) -> Any:
-    """The `propose_plan` event carrying the answer whose translation hands the plan back."""
+def _referred_event(kind: ReferralKind, requirement_id: str | None) -> AgentRecord:
+    """The `propose_plan` answer whose translation hands the plan back."""
     return response_event(
         "propose_plan",
         {
@@ -398,61 +374,58 @@ def _referred_event(kind: ReferralKind, requirement_id: str | None) -> Any:
     )
 
 
-def _ask_response(call_id: str, body: dict[str, Any]) -> Any:
-    """A `FunctionResponse` named `ask_user_question` under `call_id`, carrying `body`."""
-    response = SimpleNamespace(id=call_id, name=PLANNER_ASK, response=body)
-    part = SimpleNamespace(function_call=None, function_response=response)
-    return SimpleNamespace(content=SimpleNamespace(parts=[part]))
+def _ask_response(call_id: str, body: dict[str, Any]) -> AgentRecord:
+    """The answer to the `ask_user_question` call `call_id`: the user's, the
+    `result` of `body`, when `body` holds one, or else the tool's own."""
+    if "result" in body:
+        return user_answer(call_id, body["result"])
+    return tool_answers((call_id, PLANNER_ASK, body))
 
 
-def _event_of(*events: Any) -> Any:
-    """One session event carrying the parts of `events`, as ADK writes the calls of one
-    model response, or the responses of its tools, together."""
-    return SimpleNamespace(
-        content=SimpleNamespace(parts=[part for event in events for part in event.content.parts])
-    )
+def _event_of(*records: AgentRecord) -> AgentRecord:
+    """One record carrying the parts of `records`, as the planner host writes
+    the calls of one model response, or the answers of its tools, together."""
+    return merged(*records)
 
 
 def _ask_answered_events(
     result: Any = "use current prices", *, call_id: str = "ask-1"
-) -> list[Any]:
-    """An `ask_user_question` call that offered no candidates, and the response that
-    answers it with `result`. A user's free-text answer leaves these two events in the
-    session."""
+) -> list[AgentRecord]:
+    """An `ask_user_question` call that offered no candidates, and the user's
+    answer `result` to it. A user's free-text answer leaves these two records
+    in the transcript."""
     return [_ask_event([], call_id=call_id), _ask_response(call_id, {"result": result})]
 
 
-def _clarify_ask_event(*questions: list[dict[str, str]]) -> Event:
-    """A real ADK event for the graph's own `clarify` interrupt
-    (`harness.graph.state.CLARIFY_INTERRUPT`), built through ADK's own
-    `create_request_input_event`: this is the shape `planner.call._offered_candidates`'s
-    `payload` branch reads, distinct from `ask_user`'s flat
-    `args["candidates"]` -- `RequestInput.model_dump` nests the caller's own
-    `payload` under `args["payload"]`. Each argument is one question's
-    candidates, under the ids `q1`, `q2`, ... by position
-    (`harness.graph.state.ask_questions`). Every clarify round shares the
-    fixed interrupt id `"clarify"` (`CLARIFY_INTERRUPT`), which is easy to
-    confuse with `_ask_event`'s per-call id.
-    """
-    return create_request_input_event(
-        RequestInput(
-            interrupt_id="clarify",
-            payload={
-                "questions": [
-                    {"id": f"q{number}", "question": f"Question {number}", "candidates": candidates}
-                    for number, candidates in enumerate(questions, start=1)
-                ]
-            },
-        )
+# The wire id the turn's `ask` pause goes by in these records. The turn loop
+# mints a fresh one for every pause; one id serves every round here, which
+# the pairing by nearest preceding call (`planner.session.session_steps`)
+# reads as the loop's would.
+_ASK_PAUSE_ID = "int_ask"
+
+
+def _clarify_ask_event(*questions: list[dict[str, str]]) -> AgentRecord:
+    """The `ask` pause the graph's own `ask` node puts to the user, its
+    payload `planner.call._offered_candidates` reads, distinct from
+    `ask_user`'s flat `args["candidates"]`: the pause's payload nests under
+    `args["payload"]`. Each argument is one question's candidates, under the
+    ids `q1`, `q2`, ... by position (`harness.graph.state.ask_questions`)."""
+    return turn_pause(
+        "ask",
+        _ASK_PAUSE_ID,
+        {
+            "questions": [
+                {"id": f"q{number}", "question": f"Question {number}", "candidates": candidates}
+                for number, candidates in enumerate(questions, start=1)
+            ]
+        },
     )
 
 
-def _legacy_clarify_ask_event(candidates: list[dict[str, str]]) -> Event:
-    """The `clarify` interrupt of a single question, with one flat list at
+def _legacy_clarify_ask_event(candidates: list[dict[str, str]]) -> AgentRecord:
+    """The `ask` pause of a single question, with one flat list at
     `payload["candidates"]`."""
-    return create_request_input_event(
-        RequestInput(interrupt_id="clarify", payload={"candidates": candidates})
-    )
+    return turn_pause("ask", _ASK_PAUSE_ID, {"candidates": candidates})
 
 
 def _option(spec_id: str) -> dict[str, str]:
@@ -463,20 +436,34 @@ def _option(spec_id: str) -> dict[str, str]:
 _SKIPPED = {"kind": "skipped"}
 
 
-def _clarify_answer_event(*answers: dict[str, str]) -> Event:
-    """A real ADK event answering `_clarify_ask_event`, the shape
-    `harness.studio`'s `/interrupt` route actually sends: one answer per question,
-    by position under `q1`, `q2`, ...
-    (`create_request_input_response(CLARIFY_INTERRUPT, {"result": {"answers": ...}})`)."""
+def _clarify_answer_event(*answers: dict[str, str]) -> AgentRecord:
+    """The user's answer to `_clarify_ask_event`, the shape `harness.studio`'s
+    `/interrupt` route sends: one answer per question, by position under
+    `q1`, `q2`, ..."""
     result = {"answers": {f"q{number}": answer for number, answer in enumerate(answers, start=1)}}
-    part = create_request_input_response("clarify", {"result": result})
-    return Event(content=types.Content(role="user", parts=[part]))
+    return user_answer(_ASK_PAUSE_ID, result)
 
 
-def _legacy_clarify_answer_event(spec_id: str) -> Event:
+def _legacy_clarify_answer_event(spec_id: str) -> AgentRecord:
     """The answer body of a single-question pause: `{"spec_id": ...}`."""
-    part = create_request_input_response("clarify", {"result": {"spec_id": spec_id}})
-    return Event(content=types.Content(role="user", parts=[part]))
+    return user_answer(_ASK_PAUSE_ID, {"spec_id": spec_id})
+
+
+async def _no_executor(*, tool: str, args: dict[str, object]) -> dict[str, object]:
+    raise AssertionError(f"no executor call expected: {tool}({args})")
+
+
+def _studio_translator() -> _Translator:
+    """Studio's translator of one conversation, which runs no plan step.
+
+    `..orchestrator_fakes` is imported here, by the one test reading the
+    translator, so that this module loads apart from Studio's wiring."""
+    from ..orchestrator_fakes import unconnected_store  # noqa: PLC0415 -- see the docstring
+
+    return _Translator(
+        conversation=ConversationState(conversation_id="c1"),
+        recorder=_RecordingExecutor(_no_executor, store=unconnected_store()),
+    )
 
 
 def _show(
@@ -614,10 +601,11 @@ def _translate(
 
 
 def _declare(ctx: _FakeToolContext) -> dict[str, object]:
-    """`end_run_when_ready` over the plan on record, as a proposal whose translation compiled."""
-    return end_run_when_ready(
+    """`ready_and_end` over the plan on record, as a proposal whose translation compiled."""
+    return ready_and_end(
         {"outcome": Outcome.OK.value, "translation": {"outcome": "ok"}},
-        ctx,  # type: ignore[arg-type]
+        session_call(ctx),
+        end_run_on(ctx),
     )
 
 
@@ -684,7 +672,7 @@ async def test_a_proposal_that_compiles_declares_the_plan_ready(
     assert stored is not None
     assert stored.status == PlanStatus.PENDING_APPROVAL
     assert stored.approved_revision is None
-    assert ctx.actions.skip_summarization is True
+    assert ctx.run_ended is True
 
 
 def test_two_plans_differing_only_in_a_reduction_carry_different_revisions(
@@ -731,7 +719,7 @@ def test_a_blocked_plan_is_refused_before_it_reaches_the_summary(
 
     assert result["submission"]["code"] == ProblemCode.WORKFLOW_MISSING.value  # type: ignore[index]
     assert "summary" not in result
-    assert not ctx.actions.skip_summarization
+    assert not ctx.run_ended
 
 
 def test_the_summary_carries_every_warning_the_compiler_let_through(
@@ -771,7 +759,7 @@ def test_a_rejected_plan_is_never_declared_ready(
     assert blocked["action"]["call"] == "propose_plan"
     assert "summary" not in result
     # A refusal leaves the run open, so the model reads it and corrects.
-    assert not ctx.actions.skip_summarization
+    assert not ctx.run_ended
 
 
 @pytest.mark.parametrize(
@@ -834,7 +822,7 @@ async def test_a_translation_that_did_not_compile_declares_nothing(
     }
     assert "summary" not in result
     assert "submission" not in result
-    assert not ctx.actions.skip_summarization
+    assert not ctx.run_ended
     stored = load_plan(ctx.state)
     assert stored is not None
     assert stored.status == PlanStatus.DRAFT
@@ -876,7 +864,7 @@ def _declare_over_a_handed_back_plan(
     dataset, _derived = requirements
     _hand_back(ctx, kind, dataset.id)
     if answered:
-        ctx.session.events.extend(_ask_answered_events())
+        ctx.records.extend(_ask_answered_events())
     return cast("dict[str, Any]", _declare(ctx)["submission"])
 
 
@@ -1585,7 +1573,7 @@ def test_a_sum_of_two_datasets_needs_the_users_decision(
     # says, so a sum of two of them is the planner's to record; any other pair
     # is the user's to decide. The user picked adding them in every row.
     ctx = _FakeToolContext()
-    ctx.session.events.extend(_combination_asked({"spec_id": COMBINE_OPTION}))
+    ctx.records.extend(_combination_asked({"spec_id": COMBINE_OPTION}))
     plan = _sum_of_two_sources(
         ctx,
         datasets=datasets,
@@ -1596,7 +1584,7 @@ def test_a_sum_of_two_datasets_needs_the_users_decision(
     )
 
     result = _combination_unasked(
-        plan, CallSession(SessionCall.of(ctx)), previous=None, sources=_shown_readings(ctx)
+        plan, CallSession(session_call(ctx)), previous=None, sources=_shown_readings(ctx)
     )
 
     if refused:
@@ -1695,13 +1683,12 @@ def _combination_asked(
             )
         ]
     )
-    call = SimpleNamespace(
-        id=call_id,
-        name=PLANNER_ASK,
-        args={"message": "Add them, or show them separately?", "options": offered},
-    )
-    asked = SimpleNamespace(
-        content=SimpleNamespace(parts=[SimpleNamespace(function_call=call, function_response=None)])
+    asked = model_response(
+        tool_call(
+            call_id,
+            PLANNER_ASK,
+            {"message": "Add them, or show them separately?", "options": offered},
+        )
     )
     return [
         *refusals,
@@ -1764,7 +1751,7 @@ def test_a_users_decision_to_combine_two_datasets_needs_their_pick(
     # holds only once the user has picked adding the two from the options a
     # combination ask offers.
     ctx = _FakeToolContext()
-    ctx.session.events.extend(asks)
+    ctx.records.extend(asks)
     plan = _sum_of_two_sources(
         ctx,
         datasets=(DAC2A, IDS),
@@ -1775,7 +1762,7 @@ def test_a_users_decision_to_combine_two_datasets_needs_their_pick(
     )
 
     result = _combination_unasked(
-        plan, CallSession(SessionCall.of(ctx)), previous=None, sources=_shown_readings(ctx)
+        plan, CallSession(session_call(ctx)), previous=None, sources=_shown_readings(ctx)
     )
 
     if traced:
@@ -1795,7 +1782,7 @@ def test_a_pick_to_add_two_datasets_settles_nothing_for_a_sum_over_others(
     # dataset nobody declared is a combination they were never asked about.
     other = "provenance/IMFWorldEconomicOutlook"
     ctx = _FakeToolContext()
-    ctx.session.events.extend(_combination_asked({"spec_id": COMBINE_OPTION}))
+    ctx.records.extend(_combination_asked({"spec_id": COMBINE_OPTION}))
     plan = _sum_of_two_sources(
         ctx,
         datasets=(DAC2A, other),
@@ -1806,7 +1793,7 @@ def test_a_pick_to_add_two_datasets_settles_nothing_for_a_sum_over_others(
     )
 
     result = _combination_unasked(
-        plan, CallSession(SessionCall.of(ctx)), previous=None, sources=_shown_readings(ctx)
+        plan, CallSession(session_call(ctx)), previous=None, sources=_shown_readings(ctx)
     )
 
     assert result is not None
@@ -1825,7 +1812,7 @@ def test_a_refused_combination_ask_leaves_the_refusal_for_the_next_ask() -> None
         "message": "m",
     }
     ctx = _FakeToolContext()
-    ctx.session.events.extend(
+    ctx.records.extend(
         [
             *_combination_asked(call_id="ask-1"),
             _ask_response("ask-1", refused_body),
@@ -1835,7 +1822,7 @@ def test_a_refused_combination_ask_leaves_the_refusal_for_the_next_ask() -> None
         ]
     )
 
-    picks, declined = CallSession(SessionCall.of(ctx)).combination_picks()
+    picks, declined = CallSession(session_call(ctx)).combination_picks()
 
     assert picks == {("net_flows", frozenset(_AID_AND_DEBT)): COMBINE_OPTION}
     assert declined is False
@@ -1854,7 +1841,7 @@ def test_a_response_of_refused_asks_leaves_the_combination_refusal_for_the_next_
     (second,) = _combination_asked(about=None, call_id="ask-2")
     third, answer = _combination_asked({"spec_id": COMBINE_OPTION}, about=None, call_id="ask-3")
     ctx = _FakeToolContext()
-    ctx.session.events = [
+    ctx.records = [
         refusal,
         _event_of(first, second),
         _event_of(_ask_response("ask-1", refused_body), _ask_response("ask-2", refused_body)),
@@ -1863,7 +1850,7 @@ def test_a_response_of_refused_asks_leaves_the_combination_refusal_for_the_next_
         answer,
     ]
 
-    picks, declined = CallSession(SessionCall.of(ctx)).combination_picks()
+    picks, declined = CallSession(session_call(ctx)).combination_picks()
 
     assert picks == {("net_flows", frozenset(_AID_AND_DEBT)): COMBINE_OPTION}
     assert declined is False
@@ -1941,11 +1928,11 @@ def test_a_side_no_pin_names_a_dataset_for_is_a_dataset_of_its_own(
     previous = None
     if route == "pick":
         refusal = _combination_unasked(
-            first, CallSession(SessionCall.of(ctx)), previous=None, sources=_shown_readings(ctx)
+            first, CallSession(session_call(ctx)), previous=None, sources=_shown_readings(ctx)
         )
         assert refusal is not None
         detail = refusal["detail"]
-        ctx.session.events.extend(
+        ctx.records.extend(
             _combination_asked(
                 {"spec_id": COMBINE_OPTION}, about=(detail["requirement_id"], detail["datasets"])
             )
@@ -1954,7 +1941,7 @@ def test_a_side_no_pin_names_a_dataset_for_is_a_dataset_of_its_own(
         previous = first
 
     result = _combination_unasked(
-        plan, CallSession(SessionCall.of(ctx)), previous=previous, sources=_shown_readings(ctx)
+        plan, CallSession(session_call(ctx)), previous=previous, sources=_shown_readings(ctx)
     )
 
     assert (result is not None) is refused
@@ -2033,7 +2020,7 @@ def test_a_sum_carried_from_an_earlier_plan_keeps_its_sum_without_a_new_pick(
     # datasets, one whose decision changed, or one the user has since asked to
     # see separately needs removing or the pick again.
     ctx = _FakeToolContext()
-    ctx.session.events.extend(asks)
+    ctx.records.extend(asks)
     recorded = _sum_of_two_sources(
         ctx,
         datasets=(DAC2A, IDS),
@@ -2053,7 +2040,7 @@ def test_a_sum_carried_from_an_earlier_plan_keeps_its_sum_without_a_new_pick(
 
     result = _combination_unasked(
         plan,
-        CallSession(SessionCall.of(ctx)),
+        CallSession(session_call(ctx)),
         previous=previous_of(recorded),
         sources=_shown_readings(ctx),
     )
@@ -2080,7 +2067,7 @@ def test_propose_plan_refuses_a_patch_summing_two_datasets_on_a_users_source_pic
         pinning_decision=pinning_decision,
         requirement=requirement,
     )
-    ctx.session.events = [
+    ctx.records = [
         _ask_event([{"spec_id": SPEC_GHANA_AID, "label": "aid"}]),
         _answer_event(SPEC_GHANA_AID),
     ]
@@ -2465,7 +2452,7 @@ def _hand_back(ctx: _FakeToolContext, kind: ReferralKind, requirement_id: str) -
     """Record a referral the way the translator does: in session state, and as the
     event the planner receives it on."""
     save_referral(ctx.state, _referral_of(kind, requirement_id))
-    ctx.session.events.append(_referred_event(kind, requirement_id))
+    ctx.records.append(_referred_event(kind, requirement_id))
 
 
 def _recorded_after_a_handed_back_plan(
@@ -2514,7 +2501,7 @@ def test_propose_plan_is_allowed_once_the_user_has_answered(
     decision: DecisionFactory, requirements: RequirementPair, kind: ReferralKind
 ) -> None:
     tools, ctx, _requirement_id = _recorded_after_a_handed_back_plan(decision, requirements, kind)
-    ctx.session.events.extend(_ask_answered_events())
+    ctx.records.extend(_ask_answered_events())
 
     amended = _propose(tools, ctx, decision(rationale="Reconsidered."), ())
 
@@ -2631,7 +2618,7 @@ def test_an_answer_given_before_the_referral_does_not_settle_it(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
-    ctx.session.events.extend(_ask_answered_events())
+    ctx.records.extend(_ask_answered_events())
     dataset, _derived = requirements
     _hand_back(ctx, ReferralKind.REQUIREMENT_UNMEETABLE, dataset.id)
 
@@ -2670,7 +2657,7 @@ def test_an_ask_the_tool_rejected_does_not_settle_the_referral(
     """A rejected `ask_user_question` call comes back as a `FunctionResponse` at once, with
     no user involved and no `result` in its body."""
     tools, ctx = _unsupported_ask_handed_back(decision, requirements)
-    ctx.session.events.extend([_ask_event([], call_id="ask-1"), _ask_response("ask-1", body)])
+    ctx.records.extend([_ask_event([], call_id="ask-1"), _ask_response("ask-1", body)])
 
     refused = _propose(tools, ctx, decision(rationale="Reconsidered."), ())
 
@@ -2686,9 +2673,9 @@ def test_an_answer_to_an_ask_raised_before_the_referral_does_not_settle_it(
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
     dataset, _derived = requirements
-    ctx.session.events.append(_ask_event([], call_id="ask-1"))
+    ctx.records.append(_ask_event([], call_id="ask-1"))
     _hand_back(ctx, ReferralKind.UNSUPPORTED_ASK, dataset.id)
-    ctx.session.events.append(_ask_response("ask-1", {"result": "the second measure"}))
+    ctx.records.append(_ask_response("ask-1", {"result": "the second measure"}))
 
     refused = _propose(tools, ctx, decision(rationale="Reconsidered."), ())
 
@@ -2699,7 +2686,7 @@ def test_an_answer_with_no_call_on_record_does_not_settle_the_referral(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
     tools, ctx = _unsupported_ask_handed_back(decision, requirements)
-    ctx.session.events.append(_ask_response("ask-1", {"result": "use current prices"}))
+    ctx.records.append(_ask_response("ask-1", {"result": "use current prices"}))
 
     refused = _propose(tools, ctx, decision(rationale="Reconsidered."), ())
 
@@ -2726,7 +2713,7 @@ def test_a_result_that_carries_no_answer_does_not_settle_the_referral(
     """A skip is the user declining to choose. The planner may not choose in their place, so
     it ends the turn by telling them what cannot be done."""
     tools, ctx = _unsupported_ask_handed_back(decision, requirements)
-    ctx.session.events.extend(_ask_answered_events(result))
+    ctx.records.extend(_ask_answered_events(result))
 
     refused = _propose(tools, ctx, decision(rationale="Reconsidered."), ())
 
@@ -2742,7 +2729,7 @@ def test_a_real_answer_to_an_ask_raised_after_the_referral_settles_it(
     decision: DecisionFactory, requirements: RequirementPair, result: Any
 ) -> None:
     tools, ctx = _unsupported_ask_handed_back(decision, requirements)
-    ctx.session.events.extend(_ask_answered_events(result))
+    ctx.records.extend(_ask_answered_events(result))
 
     amended = _propose(tools, ctx, decision(rationale="Reconsidered."), ())
 
@@ -2752,10 +2739,10 @@ def test_a_real_answer_to_an_ask_raised_after_the_referral_settles_it(
 def test_an_answer_after_a_referral_counts() -> None:
     """The referral is read off the recording answer's `translation`."""
     ctx = _FakeToolContext()
-    ctx.session.events.append(_referred_event(ReferralKind.UNSUPPORTED_ASK, "gdp"))
-    ctx.session.events.extend(_ask_answered_events())
+    ctx.records.append(_referred_event(ReferralKind.UNSUPPORTED_ASK, "gdp"))
+    ctx.records.extend(_ask_answered_events())
 
-    assert CallSession(SessionCall.of(ctx)).answers_since_referral().answered
+    assert CallSession(session_call(ctx)).answers_since_referral().answered
 
 
 def test_a_refused_proposal_after_the_answer_does_not_take_the_answer_back(
@@ -2766,8 +2753,8 @@ def test_a_refused_proposal_after_the_answer_does_not_take_the_answer_back(
     tools, ctx, _requirement_id = _recorded_after_a_handed_back_plan(
         decision, requirements, ReferralKind.REQUIREMENT_UNMEETABLE
     )
-    ctx.session.events.extend(_ask_answered_events())
-    ctx.session.events.append(
+    ctx.records.extend(_ask_answered_events())
+    ctx.records.append(
         response_event("propose_plan", {"outcome": "invalid_input", "code": "invalid_plan"})
     )
 
@@ -2782,35 +2769,15 @@ def test_a_second_referral_after_a_recorded_proposal_needs_its_own_answer(
     tools, ctx, requirement_id = _recorded_after_a_handed_back_plan(
         decision, requirements, ReferralKind.REQUIREMENT_UNMEETABLE
     )
-    ctx.session.events.extend(_ask_answered_events())
+    ctx.records.extend(_ask_answered_events())
     settled = _propose(tools, ctx, decision(rationale="Reconsidered."), ())
-    ctx.session.events.append(response_event("propose_plan", settled))
+    ctx.records.append(response_event("propose_plan", settled))
     _hand_back(ctx, ReferralKind.REQUIREMENT_UNMEETABLE, requirement_id)
 
     refused = _propose(tools, ctx, decision(rationale="Reconsidered again."), ())
 
     assert settled["outcome"] == Outcome.OK.value, settled
     assert refused["code"] == ProblemCode.REFERRAL_PENDING.value
-
-
-def test_a_referral_does_not_reach_the_next_turn(
-    decision: DecisionFactory, requirements: RequirementPair
-) -> None:
-    """`_persist_durable` mirrors the plan, the round count and the briefed flag, so the
-    session a new turn opens carries no referral for the guard to hold."""
-    tools, ctx, _requirement_id = _recorded_after_a_handed_back_plan(
-        decision, requirements, ReferralKind.REQUIREMENT_UNMEETABLE
-    )
-    next_turn = SimpleNamespace(session=SimpleNamespace(state=ctx.state), state={})
-
-    PlannerAdapter._persist_durable(next_turn)  # type: ignore[arg-type]
-
-    fresh = _FakeToolContext()
-    fresh.state.update(next_turn.state)
-    assert load_referral(fresh.state) is None
-    assert load_plan(fresh.state) is not None
-    amended = _propose(tools, fresh, decision(rationale="Reconsidered."), ())
-    assert amended["outcome"] == Outcome.OK.value, amended
 
 
 def test_propose_plan_rejects_a_decision_whose_chosen_is_not_in_options(
@@ -3577,7 +3544,7 @@ def test_propose_plan_accepts_a_user_election_ask_user_actually_chose(
 ) -> None:
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    ctx.session.events = [
+    ctx.records = [
         _ask_event([{"spec_id": SPEC, "label": "a"}, {"spec_id": POPULATION_SPEC, "label": "b"}]),
         _answer_event(SPEC),
     ]
@@ -3648,7 +3615,7 @@ def test_a_pin_the_user_elects_over_a_stated_source_not_found_replaces_it(
     stated = requirement(source="World Development Indicators")
     _propose(tools, ctx, decision(), (stated, derived_requirement()))
     if picked_before:
-        ctx.session.events[:0] = [
+        ctx.records[:0] = [
             _ask_event([{"spec_id": SPEC, "label": "earlier"}], call_id="earlier"),
             _answer_event(SPEC, call_id="earlier"),
         ]
@@ -3666,8 +3633,8 @@ def test_a_pin_the_user_elects_over_a_stated_source_not_found_replaces_it(
             source_mismatch=source_mismatch,
         ),
     )
-    ctx.session.events.append(_referred_event(ReferralKind.REQUIREMENT_UNMEETABLE, stated.id))
-    ctx.session.events.extend(
+    ctx.records.append(_referred_event(ReferralKind.REQUIREMENT_UNMEETABLE, stated.id))
+    ctx.records.extend(
         [
             _ask_event([{"spec_id": s.spec_id, "label": s.sentence} for s in found]),
             _answer_event(answer),
@@ -4034,7 +4001,7 @@ def test_a_pin_of_an_aid_measure_states_how_the_flow_is_counted(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _show_block(ctx, _FRANCE_KENYA)
-    ctx.session.events = list(events)
+    ctx.records = list(events)
     dataset, derived = requirements
 
     result = call_planner_tool(
@@ -4140,7 +4107,7 @@ def test_a_pick_after_the_plan_pinned_the_measure_makes_its_decision_the_users(
         tool_context=ctx,
     )
     assert first["outcome"] == Outcome.OK.value, first
-    ctx.session.events = _measure_ask_events(_GROSS)
+    ctx.records = _measure_ask_events(_GROSS)
 
     second = call_planner_tool(
         tools["propose_plan"],
@@ -4158,12 +4125,11 @@ def test_a_pick_after_the_plan_pinned_the_measure_makes_its_decision_the_users(
 
 
 def _amendment_events(text: str) -> list[Any]:
-    """The approval card (`harness.graph.APPROVE_INTERRUPT`) and the user's amendment of it."""
-    card = create_request_input_event(RequestInput(interrupt_id="approve", payload={}))
-    answer = create_request_input_response(
-        "approve", {"result": {"approved": None, "amendment": text}}
-    )
-    return [card, Event(content=types.Content(role="user", parts=[answer]))]
+    """The approval card's pause and the user's amendment of it."""
+    return [
+        turn_pause("approve", "int_approve", {}),
+        user_answer("int_approve", {"approved": None, "amendment": text}),
+    ]
 
 
 @pytest.mark.parametrize("amended", [True, False], ids=["amended", "not-amended"])
@@ -4188,7 +4154,7 @@ def test_a_re_pin_to_another_measure_is_the_planners_even_after_an_amendment(
     )
     assert first["outcome"] == Outcome.OK.value, first
     if amended:
-        ctx.session.events = _amendment_events("make it a bar chart")
+        ctx.records = _amendment_events("make it a bar chart")
     re_pinned = dataset.model_copy(update={"source_spec_id": _NET})
 
     second = call_planner_tool(
@@ -6752,7 +6718,7 @@ def test_a_re_pin_to_a_source_a_referral_offered_states_how_the_flow_is_counted(
             ),
         ),
     )
-    ctx.session.events.extend(events)
+    ctx.records.extend(events)
 
     result = call_planner_tool(
         tools["propose_plan"],
@@ -12154,7 +12120,7 @@ def _period_moved(
 
 def _recorded(ctx: _FakeToolContext, answer: dict[str, object]) -> None:
     """Append the response that recorded a plan, as the session holds it."""
-    ctx.session.events = [*ctx.session.events, response_event("propose_plan", answer)]
+    ctx.records = [*ctx.records, response_event("propose_plan", answer)]
 
 
 @pytest.mark.parametrize(
@@ -12261,7 +12227,7 @@ def test_a_user_decision_stands_until_the_user_speaks_again(
     assert kept is not None
     assert kept.version == first["version"]
 
-    ctx.session.events = [*ctx.session.events, *_amendment_events("cover 2010 to 2024")]
+    ctx.records = [*ctx.records, *_amendment_events("cover 2010 to 2024")]
     landed = call_planner_tool(
         tools["propose_plan"], **patches[route], amends_version=first["version"], tool_context=ctx
     )
@@ -12303,13 +12269,9 @@ def test_a_user_decision_restated_and_left_uncited_is_refused_as_dropped(
     assert refused["action"] == {"call": PLANNER_ASK}
 
 
-def _typed(text: str, *, branch: str | None = None) -> Event:
-    """A user-role text event: the user's own message, or the planner adapter's under `branch`."""
-    return Event(
-        author="user",
-        branch=branch,
-        content=types.Content(role="user", parts=[types.Part.from_text(text=text)]),
-    )
+def _typed(text: str) -> AgentRecord:
+    """The user's own message."""
+    return transcript.user_message(text)
 
 
 def test_a_users_choice_of_one_figure_over_every_row_stands_against_a_regrouping(
@@ -12368,7 +12330,6 @@ def test_a_users_choice_of_one_figure_over_every_row_stands_against_a_regrouping
     ("recorded", "after", "lands"),
     [
         (True, lambda version: [_typed("Actually, cover 2010 to 2024.")], True),
-        (True, lambda version: [_typed("Call propose_plan again.", branch=_PLANNER_BRANCH)], False),
         (
             True,
             lambda version: [
@@ -12379,7 +12340,7 @@ def test_a_users_choice_of_one_figure_over_every_row_stands_against_a_regrouping
         ),
         (False, lambda version: [], True),
     ],
-    ids=["user_message", "adapter_message", "amendment_then_retry_echo", "not_recorded_here"],
+    ids=["user_message", "amendment_then_retry_echo", "not_recorded_here"],
 )
 def test_what_counts_as_the_user_speaking_after_the_plan_was_recorded(
     decision: DecisionFactory,
@@ -12406,7 +12367,7 @@ def test_what_counts_as_the_user_speaking_after_the_plan_was_recorded(
     assert first["outcome"] == Outcome.OK.value
     if recorded:
         _recorded(ctx, first)
-    ctx.session.events = [*ctx.session.events, *after(first["version"])]
+    ctx.records = [*ctx.records, *after(first["version"])]
 
     result = call_planner_tool(
         tools["propose_plan"],
@@ -12523,15 +12484,15 @@ def _user_prices(part: str, requirement_id: str, **more: Any) -> dict[str, Any]:
     }
 
 
-def _prices_options_ask(call_id: str = "ask-prices") -> Any:
+def _prices_options_ask(call_id: str = "ask-prices") -> AgentRecord:
     """The planner's `ask_user_question` call offering `PRICES_OPTIONS`, as a prices refusal's action carries them."""
-    call = SimpleNamespace(
-        id=call_id,
-        name=PLANNER_ASK,
-        args={"message": "Go on in current prices?", "options": [dict(o) for o in PRICES_OPTIONS]},
+    return model_response(
+        tool_call(
+            call_id,
+            PLANNER_ASK,
+            {"message": "Go on in current prices?", "options": [dict(o) for o in PRICES_OPTIONS]},
+        )
     )
-    part = SimpleNamespace(function_call=call, function_response=None)
-    return SimpleNamespace(content=SimpleNamespace(parts=[part]))
 
 
 @pytest.mark.parametrize(
@@ -12559,7 +12520,7 @@ def test_constant_prices_the_user_chose_hold_a_plan_that_states_no_unit(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _show_block(ctx, _FRANCE_KENYA)
-    ctx.session.events = _prices_ask_events()
+    ctx.records = _prices_ask_events()
     dataset, derived = requirements
     unpriced = dataset.model_copy(update={"source_spec_id": _GROSS, "unit": None})
 
@@ -12574,8 +12535,8 @@ def test_constant_prices_the_user_chose_hold_a_plan_that_states_no_unit(
     }
     assert load_plan(ctx.state) is None
 
-    ctx.session.events = [
-        *ctx.session.events,
+    ctx.records = [
+        *ctx.records,
         response_event("propose_plan", refused),
         _prices_options_ask(),
         _answer_event(pick, call_id="ask-prices"),
@@ -12791,7 +12752,7 @@ def test_a_later_ask_pricing_another_window_replaces_the_measures_choice(
     }
     ctx = _FakeToolContext()
     _show_blocks(ctx, _FRANCE_KENYA, second)
-    ctx.session.events = [
+    ctx.records = [
         *_prices_ask_events(),
         _clarify_ask_event(_prices_candidates(other)),
         _clarify_answer_event(_option("o1")),
@@ -12800,7 +12761,7 @@ def test_a_later_ask_pricing_another_window_replaces_the_measures_choice(
     held = {other: PricesChoice("current")}
     if not same_measure:
         held[_GROSS] = PricesChoice("constant")
-    assert prices_chosen(SessionCall.of(ctx)) == held
+    assert prices_chosen(session_call(ctx)) == held
 
 
 @pytest.mark.parametrize(
@@ -12820,14 +12781,14 @@ def test_an_answer_to_the_planners_prices_ask_sets_or_releases_the_choice(
     the orchestrator's question, so the planner reads them afresh; a skip
     keeps constant prices, now asked; a pick sets the prices it names."""
     ctx = _FakeToolContext()
-    ctx.session.events = [
+    ctx.records = [
         *_prices_ask_events(),
         _prices_refused_event(_GROSS, asks_user=True),
         _prices_options_ask(),
         _ask_response("ask-prices", {"result": result}),
     ]
 
-    assert prices_chosen(SessionCall.of(ctx)) == held
+    assert prices_chosen(session_call(ctx)) == held
 
 
 def test_a_refused_prices_ask_leaves_the_prices_refusal_for_the_next_ask() -> None:
@@ -12835,7 +12796,7 @@ def test_a_refused_prices_ask_leaves_the_prices_refusal_for_the_next_ask() -> No
     refusal still sends the planner to the user, so the ask that follows is the one
     it binds, and the user's pick of current prices is held."""
     ctx = _FakeToolContext()
-    ctx.session.events = [
+    ctx.records = [
         *_prices_ask_events(),
         _prices_refused_event(_GROSS, asks_user=True),
         _prices_options_ask(),
@@ -12844,7 +12805,7 @@ def test_a_refused_prices_ask_leaves_the_prices_refusal_for_the_next_ask() -> No
         _ask_response("ask-again", {"result": {"spec_id": "prices:current"}}),
     ]
 
-    assert prices_chosen(SessionCall.of(ctx)) == {_GROSS: PricesChoice("current", asked=True)}
+    assert prices_chosen(session_call(ctx)) == {_GROSS: PricesChoice("current", asked=True)}
 
 
 def test_a_response_of_refused_asks_leaves_the_prices_refusal_for_the_next_ask() -> None:
@@ -12853,7 +12814,7 @@ def test_a_response_of_refused_asks_leaves_the_prices_refusal_for_the_next_ask()
     current prices is held."""
     refused_body = {"outcome": Outcome.INVALID_INPUT.value, "message": "m"}
     ctx = _FakeToolContext()
-    ctx.session.events = [
+    ctx.records = [
         *_prices_ask_events(),
         _prices_refused_event(_GROSS, asks_user=True),
         _event_of(_prices_options_ask("ask-1"), _prices_options_ask("ask-2")),
@@ -12863,7 +12824,7 @@ def test_a_response_of_refused_asks_leaves_the_prices_refusal_for_the_next_ask()
         _ask_response("ask-3", {"result": {"spec_id": "prices:current"}}),
     ]
 
-    assert prices_chosen(SessionCall.of(ctx)) == {_GROSS: PricesChoice("current", asked=True)}
+    assert prices_chosen(session_call(ctx)) == {_GROSS: PricesChoice("current", asked=True)}
 
 
 def test_a_refused_ask_beside_a_plan_that_clears_the_prices_refusal_leaves_it_cleared() -> None:
@@ -12871,7 +12832,7 @@ def test_a_refused_ask_beside_a_plan_that_clears_the_prices_refusal_leaves_it_cl
     clears the prices refusal, and the refused ask, which reached nobody, restores nothing,
     so the answer to a later ask offering `PRICES_OPTIONS` binds to no part."""
     ctx = _FakeToolContext()
-    ctx.session.events = [
+    ctx.records = [
         _prices_refused_event(_GROSS, asks_user=True),
         _prices_options_ask("ask-1"),
         _event_of(
@@ -12883,7 +12844,7 @@ def test_a_refused_ask_beside_a_plan_that_clears_the_prices_refusal_leaves_it_cl
         _ask_response("ask-2", {"result": {"spec_id": "prices:current"}}),
     ]
 
-    assert prices_chosen(SessionCall.of(ctx)) == {}
+    assert prices_chosen(session_call(ctx)) == {}
 
 
 def test_a_typed_message_clears_a_pending_prices_refusal() -> None:
@@ -12892,7 +12853,7 @@ def test_a_typed_message_clears_a_pending_prices_refusal() -> None:
     `PRICES_OPTIONS` is no longer bound to the refused part, so its answer
     sets no choice."""
     ctx = _FakeToolContext()
-    ctx.session.events = [
+    ctx.records = [
         *_prices_ask_events(),
         _prices_refused_event(_GROSS, asks_user=True),
         _typed("actually, GDP"),
@@ -12900,7 +12861,7 @@ def test_a_typed_message_clears_a_pending_prices_refusal() -> None:
         _answer_event("prices:current", call_id="ask-prices"),
     ]
 
-    assert prices_chosen(SessionCall.of(ctx)) == {}
+    assert prices_chosen(session_call(ctx)) == {}
 
 
 @pytest.mark.parametrize("asks_user", [True, False], ids=["asked-then-landed", "restated"])
@@ -12913,7 +12874,7 @@ def test_a_landed_plan_clears_a_prices_refusal_so_later_asks_keep_their_picks(
     second part's pick is held."""
     other = "spec_" + "f" * 32
     ctx = _FakeToolContext()
-    ctx.session.events = [
+    ctx.records = [
         *_prices_ask_events(),
         _prices_refused_event(_GROSS, asks_user=asks_user),
         _LANDED,
@@ -12923,7 +12884,7 @@ def test_a_landed_plan_clears_a_prices_refusal_so_later_asks_keep_their_picks(
         _clarify_answer_event(_option("o2")),
     ]
 
-    assert prices_chosen(SessionCall.of(ctx)) == {
+    assert prices_chosen(session_call(ctx)) == {
         _GROSS: PricesChoice("constant"),
         other: PricesChoice("constant"),
     }
@@ -12985,7 +12946,7 @@ def test_constant_prices_a_later_search_found_name_that_series(
     if pinned == _NET:
         _counted_net(later)
     _show_blocks(ctx, _with_provenance(_FRANCE_KENYA, _DAC2A), later)
-    ctx.session.events = _prices_ask_events()
+    ctx.records = _prices_ask_events()
     dataset, derived = requirements
 
     refused = _propose_one(
@@ -13005,7 +12966,7 @@ def test_constant_prices_a_later_search_found_name_that_series(
     )
     assert refused["action"] == {"call": "propose_plan", "needs": ["evidence_requirements"]}
 
-    ctx.session.events = [*ctx.session.events, response_event("propose_plan", refused)]
+    ctx.records = [*ctx.records, response_event("propose_plan", refused)]
     moved = dataset.model_copy(update={"source_spec_id": _CONSTANT_GROSS, "unit": Unit(**unit)})
     landed = _propose_one(tools, ctx, decision(), [moved, derived])
 
@@ -13036,7 +12997,7 @@ async def test_a_part_alignment_moves_is_held_to_the_user_s_prices(
         ),
         warnings=(),
     )
-    ctx.session.events = _prices_ask_events(part=health["spec_id"])
+    ctx.records = _prices_ask_events(part=health["spec_id"])
     extra = [
         DatasetRequirement(
             id="health_stated",
@@ -13127,7 +13088,7 @@ def test_a_direct_pin_of_an_unshown_compile_is_held_to_the_user_s_prices(
         ),
         warnings=(),
     )
-    ctx.session.events = _prices_ask_events()
+    ctx.records = _prices_ask_events()
     dataset, derived = requirements
     direct = dataset.model_copy(update={"source_spec_id": compiled["spec_id"], "unit": None})
 
@@ -13147,7 +13108,7 @@ def test_an_answer_to_another_question_leaves_the_prices_choice_standing(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _show_block(ctx, _FRANCE_KENYA)
-    ctx.session.events = [*_prices_ask_events(), *_measure_ask_events(_GROSS)]
+    ctx.records = [*_prices_ask_events(), *_measure_ask_events(_GROSS)]
     dataset, derived = requirements
 
     refused = _propose_one(
@@ -13170,7 +13131,7 @@ def test_a_constant_unit_with_no_base_year_is_told_the_base_year_its_source_stat
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _show_blocks(ctx, _offering_constant(), _constant_block())
-    ctx.session.events = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
+    ctx.records = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
     dataset, derived = requirements
     stated = dataset.model_dump(mode="json") | {
         "source_spec_id": _CONSTANT_GROSS,
@@ -13221,7 +13182,7 @@ def test_current_prices_on_the_constant_series_get_one_instruction(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _show_blocks(ctx, _offering_constant(), _constant_block())
-    ctx.session.events = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS, pick="o1")
+    ctx.records = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS, pick="o1")
     dataset, derived = requirements
     stated = dataset.model_dump(mode="json") | {"source_spec_id": _CONSTANT_GROSS, "unit": unit}
 
@@ -13247,7 +13208,7 @@ def test_constant_prices_on_the_current_series_name_the_series_the_user_picked(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _show_blocks(ctx, _offering_constant(), _constant_block())
-    ctx.session.events = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
+    ctx.records = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
     dataset, derived = requirements
 
     refused = _propose_one(
@@ -13273,7 +13234,7 @@ def test_a_prices_choice_binds_only_the_part_it_was_asked_about(
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _show_blocks(ctx, _offering_constant(), _constant_block(), _lcu_block())
-    ctx.session.events = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
+    ctx.records = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
     aid = requirement(
         id="oda",
         source_spec_id=_CONSTANT_GROSS,
@@ -13375,7 +13336,7 @@ def test_one_prices_choice_fixes_the_price_basis_alone(
             ),
         },
     )
-    ctx.session.events = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS, pick=pick)
+    ctx.records = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS, pick=pick)
     first, second = (
         requirement(id=rid, source_spec_id=pin, unit=unit)
         for rid, pin, unit in zip(("first", "second"), pins, units, strict=True)
@@ -13403,7 +13364,7 @@ def test_current_prices_for_aid_and_constant_prices_for_gdp_both_hold(
         _priced_block(_GDP_PART, "CurrencyUSD", "USD", offers=(_GDP_CONSTANT,), measured="gdp"),
         _priced_block(_GDP_CONSTANT, "ConstantUSD_2015", "USD", measured="gdp"),
     )
-    ctx.session.events = [
+    ctx.records = [
         _clarify_ask_event(
             _prices_candidates(_GROSS),
             _prices_candidates(_GDP_PART, constant_spec_id=_GDP_CONSTANT),
@@ -13442,7 +13403,7 @@ def test_each_prices_row_of_the_card_names_its_part(
         _priced_block(_GDP_PART, "CurrencyUSD", "USD", offers=(_GDP_CONSTANT,), measured="gdp"),
         _priced_block(_GDP_CONSTANT, "ConstantUSD_2015", "USD", measured="gdp"),
     )
-    ctx.session.events = [
+    ctx.records = [
         _clarify_ask_event(
             _prices_candidates(_GROSS),
             _prices_candidates(_GDP_PART, constant_spec_id=_GDP_CONSTANT),
@@ -13484,7 +13445,7 @@ async def test_constant_prices_restated_with_their_base_year_land_as_the_user_s_
     ctx = _FakeToolContext()
     constant = _constant_block()
     _show_blocks(ctx, _offering_constant(), constant)
-    ctx.session.events = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
+    ctx.records = _prices_ask_events(constant_spec_id=_CONSTANT_GROSS)
     dataset, derived = requirements
     priced = dataset.model_copy(
         update={
@@ -13523,7 +13484,7 @@ def test_a_user_decision_the_user_s_answer_supersedes_goes_with_it(
     ctx = _FakeToolContext()
     _show_block(ctx, _FRANCE_KENYA)
     dataset, derived = requirements
-    ctx.session.events = _measure_ask_events(_GROSS)
+    ctx.records = _measure_ask_events(_GROSS)
     first = call_planner_tool(
         tools["propose_plan"],
         question="q",
@@ -13534,7 +13495,7 @@ def test_a_user_decision_the_user_s_answer_supersedes_goes_with_it(
     )
     assert first["outcome"] == Outcome.OK.value, first
     _recorded(ctx, first)
-    ctx.session.events = [*ctx.session.events, *_measure_ask_events(_NET)]
+    ctx.records = [*ctx.records, *_measure_ask_events(_NET)]
 
     second = call_planner_tool(
         tools["propose_plan"],
@@ -13563,7 +13524,7 @@ def test_an_amendment_at_approval_may_re_pin_a_measure_the_user_picked(
     ctx = _FakeToolContext()
     _show_block(ctx, _FRANCE_KENYA)
     dataset, derived = requirements
-    ctx.session.events = _measure_ask_events(_GROSS)
+    ctx.records = _measure_ask_events(_GROSS)
     first = call_planner_tool(
         tools["propose_plan"],
         question="q",
@@ -13575,7 +13536,7 @@ def test_an_amendment_at_approval_may_re_pin_a_measure_the_user_picked(
     assert first["outcome"] == Outcome.OK.value, first
     _recorded(ctx, first)
     if amended:
-        ctx.session.events = [*ctx.session.events, *_amendment_events("use net disbursements")]
+        ctx.records = [*ctx.records, *_amendment_events("use net disbursements")]
 
     second = call_planner_tool(
         tools["propose_plan"],
@@ -13614,7 +13575,7 @@ def test_the_user_may_drop_the_series_their_decision_fixed(
     assert first["outcome"] == Outcome.OK.value, first
     _recorded(ctx, first)
     if answered:
-        ctx.session.events = [*ctx.session.events, *_amendment_events("drop debt service")]
+        ctx.records = [*ctx.records, *_amendment_events("drop debt service")]
 
     second = call_planner_tool(
         tools["propose_plan"],
@@ -13866,7 +13827,7 @@ def test_propose_plan_accepts_a_user_election_from_the_graphs_clarify_interrupt(
     `planner.call._offered_candidates` reads both."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    ctx.session.events = [
+    ctx.records = [
         _clarify_ask_event(
             [{"spec_id": SPEC, "label": "a"}, {"spec_id": POPULATION_SPEC, "label": "b"}]
         ),
@@ -13893,47 +13854,25 @@ def test_propose_plan_accepts_a_user_election_from_the_graphs_clarify_interrupt(
 
 
 def test_elected_spec_ids_pairs_a_response_with_the_call_that_precedes_it() -> None:
-    """Every clarify round shares the fixed interrupt id `"clarify"`, so
-    pairing a response with its offer means matching it to the call that
-    immediately precedes it. Round one offers {SPEC, POPULATION_SPEC} and
-    the user picks SPEC; round two, sharing the same id, re-offers a
+    """Two `ask` rounds under one wire id: pairing an answer with its offer
+    means matching it to the pause that immediately precedes it. Round one
+    offers {SPEC, POPULATION_SPEC} and the user picks SPEC; round two,
+    sharing the same id, re-offers a
     disjoint set that no longer includes SPEC. The round-one election
     resolves against round one's own offer regardless of round two's later,
     unrelated one.
     """
     other_spec = "spec_" + "d" * 32
-    session = _FakeSession()
-    session.events = [
+    tool_context = _FakeToolContext()
+    tool_context.records = [
         _clarify_ask_event(
             [{"spec_id": SPEC, "label": "a"}, {"spec_id": POPULATION_SPEC, "label": "b"}]
         ),
         _clarify_answer_event(_option(SPEC)),
         _clarify_ask_event([{"spec_id": other_spec, "label": "c"}]),
     ]
-    tool_context = _FakeToolContext()
-    tool_context.session = session
 
-    assert elected_spec_ids(SessionCall.of(tool_context)) == frozenset({SPEC})
-
-
-def test_a_typed_message_is_one_step_whatever_else_its_event_carries() -> None:
-    """A message the user typed is one `message` step. A function part on the
-    same event is not read, so an answer counts only on an event of its own."""
-    answer = _answer_event(SPEC)
-    typed = SimpleNamespace(
-        author="user",
-        branch=None,
-        content=SimpleNamespace(
-            parts=[
-                SimpleNamespace(text="use this one", function_call=None, function_response=None),
-                *answer.content.parts,
-            ]
-        ),
-    )
-
-    steps = session_steps([typed, answer])
-
-    assert [step.kind for step in steps] == ["message", "answer"]
+    assert elected_spec_ids(session_call(tool_context)) == frozenset({SPEC})
 
 
 # --- The declaration ADK builds from a union-typed parameter --------------------------
@@ -17109,7 +17048,7 @@ def test_a_source_the_user_picked_stays_admitted_once_a_copy_reads_its_dataset()
     ctx = _FakeToolContext()
     kind = ReferralKind.SOURCE_NAME_AMBIGUOUS
     save_referral(ctx.state, _referral_of(kind, "aid"))
-    ctx.session.events.extend(
+    ctx.records.extend(
         [
             _referred_event(kind, "aid"),
             _ask_event([{"spec_id": "provenance/a", "label": "A"}]),
@@ -17744,7 +17683,7 @@ def test_prior_translator_provider_sources_remain_summable(decision, pinning_dec
     )
     assert (
         _combination_unasked(
-            plan, CallSession(SessionCall.of(ctx)), previous=None, sources=_shown_readings(ctx)
+            plan, CallSession(session_call(ctx)), previous=None, sources=_shown_readings(ctx)
         )
         is None
     )
@@ -17758,7 +17697,7 @@ def test_chosen_source_reference_is_bound_to_its_requirement(decision, requireme
     )
     ctx = _FakeToolContext()
     save_referral(ctx.state, _referral_of(ReferralKind.SOURCE_NAME_AMBIGUOUS, dataset.id))
-    ctx.session.events.extend(
+    ctx.records.extend(
         [
             _referred_event(ReferralKind.SOURCE_NAME_AMBIGUOUS, dataset.id),
             _ask_event([{"spec_id": "provenance/a", "label": "A"}]),
@@ -17771,7 +17710,7 @@ def test_chosen_source_reference_is_bound_to_its_requirement(decision, requireme
     changed = plan.model_copy(update={"evidence_requirements": (modified,)})
     assert (
         _source_ref_unpicked(
-            changed, load_referral(ctx.state), CallSession(SessionCall.of(ctx)), None
+            changed, load_referral(ctx.state), CallSession(session_call(ctx)), None
         )
         is None
     ) == (target == dataset.id)
@@ -17780,14 +17719,14 @@ def test_chosen_source_reference_is_bound_to_its_requirement(decision, requireme
     )
     assert (
         _source_ref_unpicked(
-            changed_wording, load_referral(ctx.state), CallSession(SessionCall.of(ctx)), None
+            changed_wording, load_referral(ctx.state), CallSession(session_call(ctx)), None
         )
         is not None
     )
     ctx.state.pop("translator:referral")
     assert (
         _source_ref_unpicked(
-            changed, load_referral(ctx.state), CallSession(SessionCall.of(ctx)), None
+            changed, load_referral(ctx.state), CallSession(session_call(ctx)), None
         )
         is not None
     )
@@ -17815,7 +17754,7 @@ def test_a_code_held_by_several_publishers_takes_the_picked_one_as_its_source(
             update={"ambiguous_sources": (group.model_copy(update={"text": "DT.TDS.DEGG.CD"}),)}
         ),
     )
-    ctx.session.events.extend(
+    ctx.records.extend(
         [
             _referred_event(ReferralKind.SOURCE_NAME_AMBIGUOUS, dataset.id),
             _ask_event([{"spec_id": "provenance/a", "label": "a"}]),
@@ -17829,7 +17768,7 @@ def test_a_code_held_by_several_publishers_takes_the_picked_one_as_its_source(
         question="question", decisions=[decision()], evidence_requirements=[repaired, derived]
     )
     assert (
-        _source_ref_unpicked(plan, load_referral(ctx.state), CallSession(SessionCall.of(ctx)), None)
+        _source_ref_unpicked(plan, load_referral(ctx.state), CallSession(session_call(ctx)), None)
         is None
     ) == valid
 
@@ -18104,9 +18043,7 @@ def test_an_entity_node_must_be_the_one_the_user_picked_for_it(
     dataset, derived = requirements
     ctx = _FakeToolContext()
     save_referral(ctx.state, _congo_both_ends(dataset.id))
-    ctx.session.events.extend(
-        [_referred_event(ReferralKind.ENTITY_NAME_AMBIGUOUS, dataset.id), *events]
-    )
+    ctx.records.extend([_referred_event(ReferralKind.ENTITY_NAME_AMBIGUOUS, dataset.id), *events])
     entities = tuple(
         Entity(name="Congo", role=role, dcid=f"country/{code}") for role, code in stated.items()
     )
@@ -18117,7 +18054,7 @@ def test_an_entity_node_must_be_the_one_the_user_picked_for_it(
     )
 
     refusal = _entity_dcid_unpicked(
-        plan, load_referral(ctx.state), CallSession(SessionCall.of(ctx)), None
+        plan, load_referral(ctx.state), CallSession(session_call(ctx)), None
     )
 
     assert (refusal is None) == valid
@@ -18141,11 +18078,15 @@ def test_an_ask_in_the_proposals_own_response_is_not_an_unanswered_pick(
     dataset, derived = requirements
     ctx: Any = _FakeToolContext()
     save_referral(ctx.state, _congo_both_ends(dataset.id))
-    ask = _congo_ask("donor", call_id="a1").content.parts[0].function_call
-    ctx.session.events.extend(
+    ask = tool_call(
+        "a1",
+        PLANNER_ASK,
+        _congo_ask("donor", call_id="a1").body["parts"][0]["function_call"]["args"],
+    )
+    ctx.records.extend(
         [
             _referred_event(ReferralKind.ENTITY_NAME_AMBIGUOUS, dataset.id),
-            _model_response(ask, SimpleNamespace(id="plan", name="propose_plan", args={})),
+            model_response(ask, tool_call("plan", "propose_plan", {})),
         ]
     )
     ctx.function_call_id = serving
@@ -18161,7 +18102,7 @@ def test_an_ask_in_the_proposals_own_response_is_not_an_unanswered_pick(
     )
 
     refusal = _entity_dcid_unpicked(
-        plan, load_referral(ctx.state), CallSession(SessionCall.of(ctx)), None
+        plan, load_referral(ctx.state), CallSession(session_call(ctx)), None
     )
 
     assert (refusal is None) is valid
@@ -18190,27 +18131,18 @@ def _assert_asked(result: Any, ctx: Any) -> None:
     assert result == ASK_ACCEPTED
     asked = load_pending_ask(ctx.state)
     assert asked is not None and asked.call_id == ctx.function_call_id
-    assert ctx.actions.skip_summarization is True
+    assert ctx.run_ended is True
 
 
 def test_a_call_reads_the_session_events_once() -> None:
     """Every reader of a call's steps shares one pass over the events, the refused-ask scan
     included."""
     ctx: Any = _FakeToolContext()
-    ctx.session.events.extend(_ask_answered_events())
-    call = SessionCall.of(ctx)
+    ctx.records.extend(_ask_answered_events())
+    call = session_call(ctx)
 
     assert call.steps() is call.steps()
     assert [step.kind for step in call.steps()] == ["call", "answer"]
-
-
-def _model_response(*calls: Any) -> Any:
-    """A fake session event holding one model response's `calls`, as ADK writes them together."""
-    return SimpleNamespace(
-        content=SimpleNamespace(
-            parts=[SimpleNamespace(function_call=call, function_response=None) for call in calls]
-        ),
-    )
 
 
 @pytest.mark.parametrize("second_runs_first", [False, True], ids=["in-order", "second-first"])
@@ -18237,11 +18169,11 @@ def test_an_ask_after_the_first_ask_of_a_response_is_refused(
         "message": "Which Congo?",
         "candidates": picks if first_accepted else [{"spec_id": "unrelated", "label": "Other"}],
     }
-    ctx.session.events.append(
-        _model_response(
-            SimpleNamespace(id="first", name=PLANNER_ASK, args=first_args),
-            SimpleNamespace(id="plan", name="propose_plan", args={}),
-            SimpleNamespace(id="second", name=PLANNER_ASK, args={"message": "Which years?"}),
+    ctx.records.append(
+        model_response(
+            tool_call("first", PLANNER_ASK, first_args),
+            tool_call("plan", "propose_plan", {}),
+            tool_call("second", PLANNER_ASK, {"message": "Which years?"}),
         )
     )
 
@@ -18270,10 +18202,8 @@ def test_an_ask_after_the_first_ask_of_a_response_is_refused(
 
 def _plan_write_response(ctx: Any, *names: str) -> None:
     """Put one model response calling `names` in `ctx`, as ids `call-0`, `call-1`, ..."""
-    ctx.session.events.append(
-        _model_response(
-            *(SimpleNamespace(id=f"call-{i}", name=name, args={}) for i, name in enumerate(names))
-        )
+    ctx.records.append(
+        model_response(*(tool_call(f"call-{i}", name, {}) for i, name in enumerate(names)))
     )
 
 
@@ -18389,41 +18319,11 @@ def test_a_proposal_beside_an_ask_is_not_refused(
     assert result["outcome"] == Outcome.OK.value
 
 
-@pytest.mark.parametrize("author", [AGENT_NAME, "another_planner"])
-def test_an_ask_beside_an_ask_stays_refused_when_an_interrupt_holds_its_id(author: str) -> None:
-    """The graph's planner node pauses on an accepted ask with an interrupt call
-    under the ask's own id. On a replayed invocation that event can be the latest
-    one holding the served ask's id. The interrupt is a separate event from the
-    model's response. The ask is the response's second and is refused, whatever the
-    agent that wrote the response is named."""
-    ctx: Any = _FakeToolContext()
-    response = _model_response(
-        SimpleNamespace(id="first", name=PLANNER_ASK, args={"message": "Which?"}),
-        SimpleNamespace(id="second", name=PLANNER_ASK, args={"message": "Which years?"}),
-    )
-    response.author = author
-    ctx.session.events.extend(
-        [
-            response,
-            planner_ask_interrupt({"call_id": "second", "args": {"message": "Which years?"}}),
-        ]
-    )
-    ctx.function_call_id = "second"
-
-    second = call_planner_tool(
-        _tools_by_name()[PLANNER_ASK], tool_context=ctx, message="Which years?"
-    )
-
-    assert second["code"] == ProblemCode.INVALID_ARGUMENTS.value
-
-
 def test_an_ask_after_an_answered_ask_of_an_earlier_response_is_the_first_of_its_own() -> None:
     """The user answered an earlier run's ask, so this run's one ask reaches them."""
     ctx: Any = _FakeToolContext()
-    ctx.session.events.extend(_ask_answered_events(call_id="ask-1"))
-    ctx.session.events.append(
-        _model_response(SimpleNamespace(id="call-1", name=PLANNER_ASK, args={"message": "Which?"}))
-    )
+    ctx.records.extend(_ask_answered_events(call_id="ask-1"))
+    ctx.records.append(model_response(tool_call("call-1", PLANNER_ASK, {"message": "Which?"})))
 
     _assert_asked(
         call_planner_tool(_tools_by_name()[PLANNER_ASK], tool_context=ctx, message="Which?"), ctx
@@ -18434,15 +18334,11 @@ def test_an_ask_after_an_accepted_ask_nobody_answered_is_the_first_of_its_own_re
     """An earlier response's ask was accepted and its answer never came. The ask of a
     later response is the only ask of its own response, so it reaches the user."""
     ctx: Any = _FakeToolContext()
-    ctx.session.events.extend(
+    ctx.records.extend(
         [
-            _model_response(
-                SimpleNamespace(id="ask-1", name=PLANNER_ASK, args={"message": "Which?"})
-            ),
+            model_response(tool_call("ask-1", PLANNER_ASK, {"message": "Which?"})),
             _ask_response("ask-1", dict(ASK_ACCEPTED)),
-            _model_response(
-                SimpleNamespace(id="ask-2", name=PLANNER_ASK, args={"message": "Which?"})
-            ),
+            model_response(tool_call("ask-2", PLANNER_ASK, {"message": "Which?"})),
         ]
     )
     ctx.function_call_id = "ask-2"
@@ -18455,14 +18351,14 @@ def test_an_ask_after_an_accepted_ask_nobody_answered_is_the_first_of_its_own_re
 def test_an_ask_with_no_call_id_is_in_no_response_and_is_not_refused_beside_another() -> None:
     """`response_calls` is empty for a call with no id, so no earlier ask is found."""
     ctx: Any = _FakeToolContext()
-    ctx.session.events.append(
-        _model_response(
-            SimpleNamespace(id="first", name=PLANNER_ASK, args={"message": "Which?"}),
-            SimpleNamespace(id=None, name=PLANNER_ASK, args={"message": "Which years?"}),
+    ctx.records.append(
+        model_response(
+            tool_call("first", PLANNER_ASK, {"message": "Which?"}),
+            tool_call(None, PLANNER_ASK, {"message": "Which years?"}),
         )
     )
     ctx.function_call_id = None
-    call = SessionCall.of(cast(Any, ctx))
+    call = session_call(cast(Any, ctx))
 
     assert call.response_calls() == ()
     assert _ask_beside_ask(call) is None
@@ -18518,16 +18414,16 @@ def test_an_entity_answer_on_a_history_copy_binds_its_origin(
         {"spec_id": candidate["pick"], "label": candidate["label"]}
         for candidate in readings[0]["candidates"]
     ]
-    ctx.session.events.extend(
+    ctx.records.extend(
         [_referred_event(referral.kind, str(shown["requirement_id"])), _ask_event(candidates)]
     )
     if answer == "skip":
-        ctx.session.events.append(_ask_response("call-1", {"result": {"skip": True}}))
+        ctx.records.append(_ask_response("call-1", {"result": {"skip": True}}))
     elif answer is not None:
-        ctx.session.events.append(_answer_event(candidates[0]["spec_id"]))
+        ctx.records.append(_answer_event(candidates[0]["spec_id"]))
     if referred_again:
         save_referral(ctx.state, _congo_both_ends("debt"))
-        ctx.session.events.append(_referred_event(referral.kind, "debt"))
+        ctx.records.append(_referred_event(referral.kind, "debt"))
     entities = (
         Entity(name="Congo", role="donor", dcid=f"country/{stated}"),
         Entity(name="Congo", role="recipient"),
@@ -18542,7 +18438,7 @@ def test_an_entity_answer_on_a_history_copy_binds_its_origin(
             )
         }
     )
-    view = CallSession(SessionCall.of(ctx))
+    view = CallSession(session_call(ctx))
 
     refusal = _entity_dcid_unpicked(
         plan, submission_service._authored_referral(view, draft), view, draft
@@ -18622,16 +18518,16 @@ def test_a_group_restated_by_its_name_counts_as_its_candidate(
     dataset, derived = requirements
     ctx = _FakeToolContext()
     save_referral(ctx.state, _central_africa(dataset.id))
-    ctx.session.events.append(_referred_event(ReferralKind.ENTITY_NAME_AMBIGUOUS, dataset.id))
+    ctx.records.append(_referred_event(ReferralKind.ENTITY_NAME_AMBIGUOUS, dataset.id))
     if answer is not None:
-        ctx.session.events.append(
+        ctx.records.append(
             _ask_event(
                 [{"spec_id": pick, "label": pick} for pick in (_PICK_UN, _PICK_AU)],
                 call_id="a1",
             )
         )
     if answer:
-        ctx.session.events.append(_answer_event(answer, call_id="a1"))
+        ctx.records.append(_answer_event(answer, call_id="a1"))
     plan = Plan(
         question="question",
         decisions=[decision()],
@@ -18640,7 +18536,7 @@ def test_a_group_restated_by_its_name_counts_as_its_candidate(
     referral = load_referral(ctx.state)
 
     refusal = _entity_dcid_unoffered(plan, referral, None) or _entity_dcid_unpicked(
-        plan, referral, CallSession(SessionCall.of(ctx)), None
+        plan, referral, CallSession(session_call(ctx)), None
     )
 
     assert (refusal is None) == valid
@@ -18707,8 +18603,7 @@ def test_an_entity_referral_leaves_a_kept_pin_as_it_is(
     )
 
     assert (
-        _choice_not_offered(plan, load_referral(ctx.state), CallSession(SessionCall.of(ctx)))
-        is None
+        _choice_not_offered(plan, load_referral(ctx.state), CallSession(session_call(ctx))) is None
     )
 
 

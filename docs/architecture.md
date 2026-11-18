@@ -36,9 +36,9 @@ It holds the plan at the user's approval, ships inside `harness` as a sibling
 top-level module, and knows nothing about execution. The DFO Studio runs the
 modules described below, adapted for its workflow by
 `harness.planner_adapter.PlannerAdapter`. The planner is a Pydantic AI agent that
-runs inside the function node `harness.planner_node`. Its model calls go
-through `planner.model` over `harness.gemini_wire`, and the node yields each response and tool
-answer as an ADK session event (`harness.planner_events`). The adapter builds the
+runs inside the turn's `planner` node (`harness.graph.planning`). Its model calls go
+through `planner.model` over `harness.gemini_wire`, and the adapter writes each response and
+its tools' answers to the turn's transcript (`planner.session`). The adapter builds the
 tool specs and the instruction the agent serves.
 
 The plan-approve-execute workflow spans four top-level modules beside it,

@@ -32,6 +32,7 @@ from data_mcp.definition_store import (
 from data_mcp.definition_store import set_store as set_definition_store
 from data_mcp.server import mcp as data_mcp
 from data_mcp.settings import Settings as DataMcpSettings
+from executor.ledger import InMemoryRunLedger
 from fastmcp import Client
 from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY, ORCHESTRATOR_SPECS_KEY
 from harness.mcp_client import _refusal_outcome
@@ -43,8 +44,9 @@ from translator.discovery import resolved_spec
 
 from .data_mcp_definitions import DataMcpDefinitions, GroupsSearchStub, SearchStub
 from .graph_turns import agent_read, opening_graph, opening_nodes, visited
+from .plan_turns import approve_answer, plan_nodes
 from .scripted_genai import ScriptedGenai, Step, reply, text_part
-from .scripted_tools import ask_user_call, fetch_call, scripted_orchestrator
+from .scripted_tools import ask_user_call, fetch_call, plan_call, scripted_orchestrator
 from .turn_driver import SegmentRun, TurnDriver, scripted_models
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -802,6 +804,58 @@ async def test_a_seeded_turn_takes_its_seeds_once_across_a_pause(
     assert "seed" not in visited(resumed.events)
     assert [step for tool, step in steps.recorded if tool == SEED_STEP_TOOL] == ["seeds"]
     model = turn.model
+    assert agent_read(model.requests[-1]).count(_SEEDED) == 1
+    for request in (model.requests[0], model.requests[-1]):
+        texts = ["".join(p.text or "" for p in c.parts or []) for c in request.content_list]
+        assert _SEEDED in texts[texts.index(_QUESTION) + 1]
+    assert resumed.outcome is Outcome.DONE
+    assert len(model.requests) == len(model.replies)
+
+
+class _Describes(_Steps):
+    """`_Steps` that answers the `describe_frame` calls an approved plan's run makes."""
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], **_: Any) -> Any:
+        assert tool == "describe_frame", tool
+        return {"outcome": "ok", "view": {"dimensions": [{"name": "observationAbout"}]}}
+
+
+async def test_a_seeded_turn_takes_its_seeds_once_across_a_plan_approval(
+    definition_store: InMemoryDefinitionStore, pg_engine: AsyncEngine
+) -> None:
+    """A seeded turn that pauses on a plan's approval resumes without running
+    `seed` again: one hand-back and one set of its steps across the turn,
+    which then completes. The hand-back follows the user's question in every
+    request, the resumed one included."""
+    del definition_store
+    steps = _Describes()
+    surface = DataMcpDefinitions(served=[_KENYA])
+    models = scripted_models(
+        orchestrator=[
+            reply(plan_call("rank donors of education aid to Kenya")),
+            reply(text_part("Here are the donors.")),
+        ]
+    )
+    nodes = plan_nodes(
+        scripted_orchestrator(executor=steps, definition_surface=surface),
+        models,
+        run_ledger=InMemoryRunLedger(),
+        tool_surface=ScriptedSurface(),
+        executor=steps,
+        definition_surface=surface,
+    )
+    driver = TurnDriver(pg_engine, graph=opening_graph(nodes))
+
+    paused = await driver.turn(
+        _QUESTION, inputs={"seeds": _seeds([_KENYA])}, state={"surface": "studio"}
+    )
+    card = paused.pause
+    assert card.kind == "approve"
+    resumed = await driver.answer(approve_answer(card.payload["revision"]), to=card)
+
+    assert "seed" not in visited(resumed.events)
+    assert [step for tool, step in steps.recorded if tool == SEED_STEP_TOOL] == ["seeds"]
+    model = models.orchestrator
     assert agent_read(model.requests[-1]).count(_SEEDED) == 1
     for request in (model.requests[0], model.requests[-1]):
         texts = ["".join(p.text or "" for p in c.parts or []) for c in request.content_list]

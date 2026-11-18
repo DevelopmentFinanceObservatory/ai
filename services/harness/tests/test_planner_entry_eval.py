@@ -510,7 +510,7 @@ def test_a_refusal_the_entry_ended_on_wins_over_an_ask_left_on_record(
     probe = entry.Probe()
     probe.refused_code = refused_code
     run = entry.EntryRun(
-        events=[],
+        records=[],
         state={PENDING_ASK_STATE_KEY: {"call_id": "c1", "args": {"message": "Which years?"}}},
         probe=probe,
         inputs="",

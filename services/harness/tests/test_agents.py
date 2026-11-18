@@ -99,7 +99,7 @@ async def test_creates_a_planner_whose_propose_plan_translates_without_a_tool_of
 
     assert "propose_plan" in names
     assert "translate" not in names
-    assert "dfo_planner" in {event.author for event in await harness.events()}
+    assert any(record.agent == "planner" for record in await harness.records())
 
 
 async def test_the_planner_reads_skills_through_the_surface_translation_gets() -> None:
@@ -115,9 +115,7 @@ async def test_the_planner_reads_skills_through_the_surface_translation_gets() -
     answer = await call_planner_tool(
         tools["get_skill"],
         skill_id="dfo-faq",
-        tool_context=SimpleNamespace(
-            state={}, session=SimpleNamespace(events=[]), function_call_id=None
-        ),
+        tool_context=SimpleNamespace(state={}, records=[], function_call_id=None),
     )
 
     assert answer == "# DFO FAQ\n"

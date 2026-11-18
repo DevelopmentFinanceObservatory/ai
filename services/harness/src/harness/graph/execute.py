@@ -4,13 +4,9 @@ outcome onto the node's `ok` and `replan` edges.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import (
-    AsyncIterator,
-    Callable,
     Collection,
-    Coroutine,
     Mapping,
 )
 from dataclasses import dataclass
@@ -44,15 +40,12 @@ from executor.outcomes import RunOutcome as ExecutionOutcome
 from executor.run import (
     FetchSeriesStats,
     LabelRefs,
-    StepProgressCallback,
     execute_approved_plan,
 )
-from google.adk import Context, Event
 from planner.plan import Plan as PlannerPlan
 from planner.plan import SessionState, aligned_pins, plan_revision, windowed_origins
 
 from harness import plan_display
-from harness.conversation import conversation_of
 from harness.graph.answer import (
     answer_frames,
     answer_notes,
@@ -61,16 +54,17 @@ from harness.graph.answer import (
     presentable_steps,
     store_run_plan,
 )
+from harness.graph.events import GraphEvent, StepProgress
 from harness.graph.plan_done import StepSummary, authored_report
 from harness.graph.state import (
     ORCHESTRATOR_ALIGNED_SERVED_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
-    STEP_PROGRESS_KEY,
     readable_plan,
     stored_sequence,
 )
 from harness.scope_choices import served_facts
+from harness.turn.node import Next, Node, NodeCtx, TurnKey
 from harness.turn_records import SearchReading
 
 logger = logging.getLogger(__name__)
@@ -251,73 +245,6 @@ def _refusal_shape(
 
 
 @dataclass(frozen=True)
-class _StepReport:
-    """One progress report, tagged with the step it describes."""
-
-    step_id: str
-    report: ProgressReport
-
-
-class _ReportRelay:
-    """Holds the latest progress report per step, for one reader to drain.
-
-    `put` replaces any report still pending for the same step rather than
-    queueing another one, so a producer faster than the reader grows this
-    at most one entry per distinct step, never per report -- only the
-    latest report says where a step is now. `latest` wakes whenever there
-    is something pending, yields it as one batch, and returns once
-    `finish` has been called and nothing is left to deliver.
-    """
-
-    def __init__(self) -> None:
-        self._pending: dict[str, _StepReport] = {}
-        self._ready = asyncio.Event()
-        self._finished = False
-
-    def put(self, step_id: str, progress: ProgressReport) -> None:
-        self._pending[step_id] = _StepReport(step_id=step_id, report=progress)
-        self._ready.set()
-
-    def finish(self) -> None:
-        self._finished = True
-        self._ready.set()
-
-    async def latest(self) -> AsyncIterator[_StepReport]:
-        while True:
-            await self._ready.wait()
-            self._ready.clear()
-            pending, self._pending = self._pending, {}
-            for item in pending.values():
-                yield item
-            if self._finished and not self._pending:
-                return
-
-
-def _start_relayed[T](
-    call: Callable[[StepProgressCallback], Coroutine[Any, Any, T]],
-) -> tuple[asyncio.Task[T], _ReportRelay]:
-    """Run `call` as its own task, relaying its progress reports.
-
-    A node awaiting a long call directly could yield nothing until the call
-    returns; run as a task, the call reports while the node relays
-    (`_ReportRelay.latest`). The relay is told the task finished, however it
-    finishes, so `latest` always returns. The caller awaits the task for its
-    result and stops it (`_stop`) if the node exits first.
-    """
-    relay = _ReportRelay()
-    task = asyncio.create_task(call(relay.put))
-    task.add_done_callback(lambda _: relay.finish())
-    return task, relay
-
-
-async def _stop(task: asyncio.Task[Any]) -> None:
-    """Cancel `task` if it is still running, and wait until it has stopped."""
-    if not task.done():
-        task.cancel()
-        await asyncio.wait({task})
-
-
-@dataclass(frozen=True)
 class _CardPlace:
     """Where a step sits on the plan card: its row's 1-based `position` among
     `count` rows, the row's `description`, and whether its result answers
@@ -350,27 +277,30 @@ def _card_places(plan: PlannerPlan) -> dict[str, _CardPlace]:
     }
 
 
-def _step_progress_event(report: _StepReport, *, tool: str, place: _CardPlace | None) -> Event:
-    """A relayed progress report as its own event, carried on `custom_metadata`,
-    with the step's `place` on the plan card, each of its fields `None` for
-    a step the card does not show.
-
-    Never on `output`: a node run may set `output` once (`_node_runner.py`'s
-    `ctx.output`), and the node's result needs it.
-    """
-    return Event(
-        custom_metadata={
-            STEP_PROGRESS_KEY: {
-                "step_id": report.step_id,
-                "tool": tool,
-                "message": report.report.message,
-                "position": place.position if place else None,
-                "count": place.count if place else None,
-                "description": place.description if place else None,
-                "gives_answer": place.gives_answer if place else None,
-            }
-        }
+def _step_progress(
+    step_id: str, report: ProgressReport, *, tool: str, place: _CardPlace | None
+) -> StepProgress:
+    """Step `step_id`'s progress report, with its `place` on the plan card,
+    each row field `None` for a step the card does not show."""
+    return StepProgress(
+        step_id=step_id,
+        tool=tool,
+        message=report.message,
+        position=place.position if place else None,
+        count=place.count if place else None,
+        description=place.description if place else None,
+        gives_answer=place.gives_answer if place else None,
     )
+
+
+def ledger_conversation(key: TurnKey) -> str:
+    """The conversation id a turn's runs are admitted under
+    (`executor.ledger.idempotency_key`): the principal and the conversation,
+    as the studio names the conversation to its tools
+    (`harness.conversation.current_conversation_id`). Every turn of the
+    conversation names the same one, so a later turn executing the same
+    revision carries the run on."""
+    return f"{key.principal}/{key.conversation_id}"
 
 
 def _mark_masked_step_failed(
@@ -513,19 +443,19 @@ def execute_node(
     max_concurrent_steps: int,
     fetch_series_stats: FetchSeriesStats,
     label_refs: LabelRefs,
-) -> Callable[[Context, Any], AsyncIterator[Any]]:
+) -> Node[GraphEvent]:
     """The `execute` node, running the approved plan against `tool_surface`
     as a run of `run_ledger`, its derived results published through
     `publisher`."""
 
-    async def execute(ctx: Context, node_input: Any) -> AsyncIterator[Any]:
+    async def execute(ctx: NodeCtx[GraphEvent], node_input: Any) -> Next:
         """Run the approved plan's compiled workflow through the tool surface.
 
         `execute_approved_plan` owns the run: its admission to `run_ledger`
         under the user's approval of the revision (the turn's user approved it
-        at `approve`), keyed on the conversation
-        (`harness.conversation.conversation_of`) so a later turn executing
-        the same revision carries the run on; per-step retry, the
+        at `approve`), keyed on the conversation (`ledger_conversation`) so a
+        later turn executing the same revision, or this node run again after
+        a crash, carries the run on; per-step retry, the
         per-capability transport policy, the checks that turn a step's own
         declared shape into a refusal, and the completion gate. This node only
         reads what came back and maps it onto the graph's two outgoing edges.
@@ -586,11 +516,9 @@ def execute_node(
         `outcome.also_stopped`, in case a raw call had already succeeded
         before a post-call check refused it (`_mark_masked_step_failed`).
 
-        The run goes on as its own task (`_start_relayed`) while this node
-        relays each step's progress reports as their own events
-        (`_step_progress_event`), one per report as it arrives. The task is
-        awaited last, so its exceptions propagate here, and cancelled if the
-        node exits first (a stop or a disconnect closing the stream).
+        Each step's progress report is emitted as it arrives
+        (`StepProgress`). A Stop or a disconnect that cancels the node
+        cancels the run with it.
 
         A plan stored in a shape this release does not read
         (`readable_plan`) runs nothing and spends no replan: it routes
@@ -600,14 +528,13 @@ def execute_node(
         del node_input
         if tool_surface is None:
             raise RuntimeError(
-                "the execute node has no tool surface: create_root_workflow(tool_surface=...) "
+                "the execute node has no tool surface: execute_node(tool_surface=...) "
                 "was not given one, so the approved plan cannot be run"
             )
         plan = readable_plan(ctx, ctx.state["plan"])
         if plan is None:
             # Nothing to run, and no replan is spent on it.
-            yield Event(output={"unreadable_plan": True}, route="replan")
-            return
+            return Next("replan", {"unreadable_plan": True})
         tools = {step.id: step.tool.name for step in plan.workflow.steps} if plan.workflow else {}
         try:
             places = _card_places(plan)
@@ -616,37 +543,32 @@ def execute_node(
             logger.exception("execute: no plan card places for plan version %s", plan.version)
             places = {}
         await store_run_plan(run_ledger, revision=plan_revision(plan), plan=plan)
-        task, relay = _start_relayed(
-            lambda on_progress: execute_approved_plan(
+
+        def on_progress(step_id: str, report: ProgressReport) -> None:
+            ctx.emit(
+                _step_progress(
+                    step_id, report, tool=tools.get(step_id, ""), place=places.get(step_id)
+                )
+            )
+
+        try:
+            finished, outcome = await execute_approved_plan(
                 plan,
                 surface=tool_surface,
                 ledger=run_ledger,
                 publisher=publisher,
-                approver=ctx.user_id,
-                conversation_id=conversation_of(ctx.session.id),
+                approver=ctx.key.principal,
+                conversation_id=ledger_conversation(ctx.key),
                 max_concurrent_steps=max_concurrent_steps,
                 fetch_series_stats=fetch_series_stats,
                 label_refs=label_refs,
                 on_progress=on_progress,
             )
-        )
-        try:
-            async for report in relay.latest():
-                yield _step_progress_event(
-                    report, tool=tools.get(report.step_id, ""), place=places.get(report.step_id)
-                )
-            finished, outcome = await task
         except LedgerUnavailableError as exc:
             if exc.run_id is not None:
                 # The run started and is unfinished: the plan is executing.
                 ctx.state["plan"] = plan.start_execution().model_dump_json()
-            yield Event(
-                output=_without_figures(plan.version, run=unrecorded_hand_back(exc.run_id)),
-                route="ok",
-            )
-            return
-        finally:
-            await _stop(task)
+            return Next("ok", _without_figures(plan.version, run=unrecorded_hand_back(exc.run_id)))
         ctx.state["plan"] = finished.model_dump_json()
         record_served_scopes(ctx.state, tool_surface, outcome)
         workflow = plan.workflow
@@ -666,16 +588,15 @@ def execute_node(
                     published=published,
                 )
         except LedgerUnavailableError as exc:
-            yield Event(
-                output=_without_figures(finished.version, run=unrecorded_hand_back(exc.run_id)),
-                route="ok",
+            return Next(
+                "ok", _without_figures(finished.version, run=unrecorded_hand_back(exc.run_id))
             )
-            return
         if isinstance(outcome, Accepted):
             step_order = {record.step_id: index for index, record in enumerate(outcome.steps)}
             answers = answer_frames(outcome, published=published)
-            yield Event(
-                output={
+            return Next(
+                "ok",
+                {
                     "frame_refs": [frame.presented.model_dump() for frame in answers.values()],
                     # Parallel to frame_refs above: which plan step (id and
                     # tool) produced each ref, the pair the store holds its
@@ -703,9 +624,7 @@ def execute_node(
                     ),
                     **({"run": run_hand_back(run)} if run is not None else {}),
                 },
-                route="ok",
             )
-            return
         _mark_masked_step_failed(tool_surface, outcome, tools=tools)
         if isinstance(outcome, Refused) and outcome.refusal in (
             RefusalKind.NOT_APPROVED,
@@ -733,11 +652,11 @@ def execute_node(
             if finished.asks:
                 refusal["computed_asks"] = _computed_asks(finished, answers)
             output: dict[str, Any] = {"refusal": refusal, "plan_version": finished.version}
-            yield Event(output=output, route="replan")
-            return
+            return Next("replan", output)
         presentable = presentable_steps(outcome)
-        yield Event(
-            output={
+        return Next(
+            "ok",
+            {
                 "frame_refs": [step.presented_ref.model_dump() for step in presentable],
                 # Parallel to frame_refs above: which plan step (id and tool)
                 # produced each ref, the pair the store holds its frame under
@@ -762,7 +681,6 @@ def execute_node(
                 "stat_var_totals": answer_notes(tool_surface, outcome, plan=finished),
                 "failed_step": _failed_step(outcome),
             },
-            route="ok",
         )
 
-    return execute
+    return Node(run=execute)

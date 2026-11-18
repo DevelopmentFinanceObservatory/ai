@@ -1,7 +1,7 @@
 """When a completed run's result counts as delivered.
 
 A completed run is delivered once a hand-back listing its frames is in the
-conversation's session and every frame of it was read: described, or refused
+turn's cursor and every frame of it was read: described, or refused
 `do_not_retry`, which a later turn would meet again (`frame_read`). `deliver`
 decides it for every route that hands a completed run back: `plan_done` for a
 run that completes in its own turn, and `harness.graph.resume` for one carried
@@ -38,7 +38,7 @@ RESULT_UNDELIVERED = "result_undelivered"
 class Delivery:
     """A completed run's delivery: `standing` holds the fields its standing
     gains, and `acknowledge` records it `Delivered`, to be called once the
-    session holds the hand-back."""
+    turn's cursor holds the hand-back."""
 
     standing: dict[str, str]
     acknowledge: Callable[[], Awaitable[None]]

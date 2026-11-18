@@ -5,8 +5,8 @@ from __future__ import annotations
 from common.settings import BaseServiceSettings
 from google.genai import types
 
-# The name the planner runs under: the author and branch of its events in the
-# session (`harness.planner_events`) and the name of its agent's spans.
+# The name the planner runs under: the name of its agent and its spans, and
+# the agent its usage is logged under.
 AGENT_NAME = "dfo_planner"
 
 # The concrete version `common.settings.BaseServiceSettings.model_name`'s floating
