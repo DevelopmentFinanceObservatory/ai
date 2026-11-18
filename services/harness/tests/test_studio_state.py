@@ -2860,7 +2860,7 @@ async def test_a_card_the_turn_lands_is_written_onto_the_canvas_as_stored(new_st
 
 
 def _card_lineage(component_id: str, *, count: int | None) -> CardLineage:
-    """A card drawn on frame `ops_f` resting on two retrievals, asked for as `ops_asked`."""
+    """A card drawn on frame `ops_f` resting on two retrievals."""
     return CardLineage(
         component_id=component_id,
         frame=("ops_f", "ocv_f"),
@@ -2869,7 +2869,6 @@ def _card_lineage(component_id: str, *, count: int | None) -> CardLineage:
             ProvenanceInput("spec_b", "cv_b", {"trace": {"resolved_stat_vars": [{"ref": "x"}]}}),
         ),
         stat_var_count=count,
-        requested=("ops_asked", "ocv_asked"),
     )
 
 
@@ -2885,8 +2884,7 @@ def _landing(component_id: str) -> Callable[[ConversationState], Any]:
 
 async def test_a_cards_lineage_commits_with_it_once_and_any_instance_reads_it(new_store) -> None:
     """The lineage of a card's frame commits in the card's own write. Another
-    instance reads it by the card, by the frame it was drawn from and by the
-    frame its write named. A later write of the same card, a revise or a
+    instance reads it by the card and by the frame it was drawn from. A later write of the same card, a revise or a
     retried commit, leaves the first lineage stored."""
     store_a = new_store()
     await _claimed(store_a)
@@ -2905,7 +2903,6 @@ async def test_a_cards_lineage_commits_with_it_once_and_any_instance_reads_it(ne
     read = store_b.card_lineage
     assert await read("principal", CONVERSATION, component_id="cmp_two") == first
     assert await read("principal", CONVERSATION, frame=("ops_f", "ocv_f")) == first
-    assert await read("principal", CONVERSATION, frame=("ops_asked", "ocv_asked")) == first
     assert await read("principal", CONVERSATION, component_id="cmp_other") is None
     assert await read("principal", CONVERSATION, frame=("ops_g", "ocv_g")) is None
     with pytest.raises(LookupError):
@@ -2934,17 +2931,15 @@ async def test_a_card_write_stores_its_lineage_only_when_it_wrote_the_cards_bloc
 async def test_a_card_lineage_read_prefers_the_cards_own_row_then_its_frame_then_the_latest(
     new_store,
 ) -> None:
-    """One read: the card's own row over a row on the frame, a row drawn from
-    the frame over one whose write named it, and the latest of equals."""
+    """One read: the card's own row over a row on the frame, the latest of
+    equals, and nothing for a frame no row was drawn from."""
     store = new_store()
     await _claimed(store)
-    frame, other, named = ("ops_f", "ocv_f"), ("ops_o", "ocv_o"), ("ops_n", "ocv_n")
+    frame, other = ("ops_f", "ocv_f"), ("ops_o", "ocv_o")
     rows = [
-        dataclasses.replace(_card_lineage("cmp_own", count=1), frame=other, requested=named),
-        dataclasses.replace(_card_lineage("cmp_drawn", count=2), requested=None),
-        dataclasses.replace(_card_lineage("cmp_later", count=3), requested=None),
-        # Written last, and only named the frame.
-        dataclasses.replace(_card_lineage("cmp_named", count=4), frame=other, requested=frame),
+        dataclasses.replace(_card_lineage("cmp_own", count=1), frame=other),
+        _card_lineage("cmp_drawn", count=2),
+        _card_lineage("cmp_later", count=3),
     ]
     for lineage in rows:
         await store.change_canvas(
@@ -2958,7 +2953,7 @@ async def test_a_card_lineage_read_prefers_the_cards_own_row_then_its_frame_then
     assert await found(component_id="cmp_own", frame=frame) == "cmp_own"
     assert await found(frame=frame) == "cmp_later"
     assert await found(component_id="cmp_none", frame=frame) == "cmp_later"
-    assert await found(frame=named) == "cmp_own"
+    assert await found(frame=("ops_n", "ocv_n")) is None
 
 
 @pytest.mark.parametrize("fault", ["nan-in-a-manifest", "insert-refused"])

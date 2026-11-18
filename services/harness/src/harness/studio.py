@@ -71,10 +71,12 @@ from harness.conversation import (
 )
 from harness.decision_pick import is_decision_choice
 from harness.early_mint import EarlyMints
+from harness.graph.approve import cancel_offered
 from harness.graph.events import GraphEvent, StepProgress
 from harness.graph.interfaces import Executor
 from harness.graph.state import (
     APPLY_CHOICE_STATE_KEY,
+    APPROVE_PAUSE,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     TurnInput,
 )
@@ -107,6 +109,7 @@ from harness.studio_state import (
     renew_lease_now,
 )
 from harness.studio_store import (
+    SEQ_BLOCK,
     ConversationExists,
     ConversationStale,
     StopPending,
@@ -1211,7 +1214,8 @@ async def _stop_turn_at(
     then stays open with a Stop live, so the next claimant closes it
     (`_act_on_stop`) and no later turn carries its runs on. A turn closed
     here ran no segment of its own, so its trace ends on a closing span
-    (`_record_closed`).
+    (`_record_closed`). A turn paused on a plan card has the card's early
+    retrievals cancelled (`harness.graph.approve.cancel_offered`).
 
     Raises:
         _ClaimLost: the claim lost to another request, the lease was taken
@@ -1250,6 +1254,17 @@ async def _stop_turn_at(
             )
     finally:
         await studio.store.drop_lease(principal, conversation_id, segment_id)
+    if (
+        studio.early_mints is not None
+        and cursor.pause is not None
+        and cursor.pause.kind == APPROVE_PAUSE
+    ):
+        # The plan card the turn paused on fetches nothing more for it.
+        cancel_offered(
+            studio.early_mints,
+            cursor.state,
+            conversation=ledger_conversation_id(principal, conversation_id),
+        )
     await _record_closed(conversation_id, closed)
     return None
 
@@ -1579,7 +1594,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 turn_user_message=user_message,
             )
             try:
-                segment_id = await studio.store.claim_turn_lease(principal, body.conversation_id)
+                lease = await studio.store.claim_turn_lease(principal, body.conversation_id)
             except SegmentBusy as exc:
                 return await _unclaimed(
                     studio.store,
@@ -1615,7 +1630,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     ),
                     turn=begun,
                 )
-            claimed = segment_id
+            claimed = segment_id = lease.segment_id
             # Under the lease, the turn begins on the conversation and the
             # turn left open as stored. A turn still open, paused on a
             # question or left running by the lapsed segment, is closed
@@ -1624,9 +1639,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # is recorded as its cursor holds it, as `StudioStore.load`
             # records one with no lease live. A turn the tables record as
             # open with no cursor closes on what the conversation holds.
-            # Every change is made on a working copy, which the save swaps
-            # into the live state once it commits.
-            await studio.store.load(principal, body.conversation_id)
+            # The conversation is read again only when the row moved since
+            # the load (`TurnLease.moved`). Every change is made on a working
+            # copy, which the save swaps into the live state once it commits,
+            # with the new turn's frame numbers reserved.
+            if lease.moved:
+                await studio.store.load(principal, body.conversation_id)
             work = studio.store.draft(principal, body.conversation_id)
             left_open = await studio.turns.open_cursor(principal, body.conversation_id)
             if left_open is not None:
@@ -1634,9 +1652,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     keep_turn_records(work, left_open.state)
                 await abandon(studio.turns, left_open, segment_id=segment_id)
             elif work.turn_index and not work.turn_recorded:
-                closed = await studio.turns.turn_at(
-                    principal, body.conversation_id, work.turn_index
-                )
+                closed = await studio.turns.turn_at(lease.conversation, work.turn_index)
                 if closed is not None:
                     keep_turn_records(work, closed.state)
                     work.close_turn(final_text="", error=closed_turn_error(closed))
@@ -1655,7 +1671,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # The record's `spec_id` is the reading the `seed` node compiles,
                 # set once the chip applies, so the chip's own origin stays out.
                 work.turn_applied_choice = pick.model_dump(include={"choice_id", "option_id"})
-            await studio.store.save(principal, body.conversation_id, work)
+            await studio.store.save(principal, body.conversation_id, work, seq_reserved=SEQ_BLOCK)
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
             if abandoned is not None:

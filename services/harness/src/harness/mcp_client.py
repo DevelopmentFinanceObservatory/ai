@@ -615,11 +615,10 @@ class _Assembled:
 
 @dataclasses.dataclass(frozen=True)
 class _Restore:
-    """What `McpExecutor._restore_card_lineage` found before a write: the
-    complete frame the write named, whether the write commits its card's
-    lineage, and the frame the read ran for, when one ran for a frame."""
+    """What `McpExecutor._restore_card_lineage` found before a write: whether
+    the write commits its card's lineage, and the frame the read ran for,
+    when one ran for a frame."""
 
-    named: tuple[str, str] | None
     carry: bool
     read: tuple[str, str] | None = None
 
@@ -835,7 +834,6 @@ class McpExecutor:
             hint = _complete_frame({"frame_ref": args.get(CARD_FRAME_KEY)})
             args = {key: value for key, value in args.items() if key != CARD_FRAME_KEY}
             restored = await self._restore_card_lineage(args, hint=hint)
-            named = restored.named
             try:
                 admitted = await self._admitted_write(args)
             except CardWithheld as withheld:
@@ -848,11 +846,7 @@ class McpExecutor:
             )
             card = outcome.pop(CARD_LINEAGE_KEY, None)
             if card is not None and restored.carry:
-                outcome[CARD_LINEAGE_KEY] = (
-                    dataclasses.replace(card, requested=named)
-                    if named is not None and named != card.frame
-                    else card
-                )
+                outcome[CARD_LINEAGE_KEY] = card
             if admitted.stored_card is not None and outcome.get("outcome") == "ok":
                 return _held_to_its_resolved_periods(admitted.stored_card, outcome)
             return outcome
@@ -956,15 +950,15 @@ class McpExecutor:
         """Put back the stored lineage a `write_component` reads when the store
         does not hold it, before the write is sent, so the rolling-card rules
         (`_admitted_write`) and the card's assembly (`_assemble_component`)
-        read it from the store. Returns the frame the write named, when it
-        names a complete `(spec_id, content_version)` pair, whether the write
-        is to commit its card's lineage, and the frame a read ran for.
+        read it from the store. Returns whether the write is to commit its
+        card's lineage, and the frame a read ran for: the frame the write
+        named, when it names a complete `(spec_id, content_version)` pair.
 
         A create names its frame in its intent, and a revise through `hint`,
         the frame a caller read from the card's stored intent. A named frame
         the store holds reads nothing. Otherwise one read
         (`_read_card_lineage`) finds the revised card's own lineage, else that
-        of a card drawn from the named frame or whose write named it. A create
+        of a card drawn from the named frame. A create
         on a bare `spec_` id reads nothing here; its frame is looked up once
         the platform has resolved it (`_drawn`).
 
@@ -979,18 +973,18 @@ class McpExecutor:
         named = hint if revise else _complete_frame(args.get("intent"))
         key = current_conversation_key.get()
         if self._card_lineages is None or key is None:
-            return _Restore(named=named, carry=not revise)
+            return _Restore(carry=not revise)
         if named is not None and self._holds(named):
-            return _Restore(named=named, carry=not revise)
+            return _Restore(carry=not revise)
         if not revise and named is None:
-            return _Restore(named=None, carry=True)
+            return _Restore(carry=True)
         card = await self._read_card_lineage(
             key, component_id=component_id if revise else None, frame=named
         )
         if card is not None:
             self._provenance.restore(conversation=current_conversation_id.get(), card=card)
         own_row = revise and card is not None and card.component_id == component_id
-        return _Restore(named=named, carry=not own_row, read=named)
+        return _Restore(carry=not own_row, read=named)
 
     def _holds(self, frame: tuple[str | None, str | None]) -> bool:
         """Whether the store holds `frame`'s lineage in this conversation."""

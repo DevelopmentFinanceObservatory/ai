@@ -68,20 +68,42 @@ def offer(
     between the commit and the offer offers nothing, and the run then asks
     for its frames itself. The answer reaches `decide`, which makes no offer.
     A Stop that closes the turn once the pause committed cancels the
-    retrievals the offer started (`EarlyMints.cancel`), so nothing fetches
-    for the closed turn.
+    retrievals the offer started (`cancel_offered`), so nothing fetches for
+    the closed turn: a cut inside the pausing segment through
+    `NodeCtx.on_cut_close`, a Stop on the turn paused here through
+    `harness.studio`'s close of a stopped turn.
     """
     if early_mints is not None:
-        offered = stored_plan(ctx.state.get("plan"), state_key="plan")
-        if offered is not None and offered.status is PlanStatus.PENDING_APPROVAL:
+        offered = _offered(ctx.state)
+        if offered is not None:
             conversation = current_conversation_id.get()
+            state = ctx.state
 
             async def start_retrievals() -> None:
                 early_mints.offer(offered)
 
             ctx.after_commit(start_retrievals)
-            ctx.on_cut_close(lambda: early_mints.cancel(offered, conversation=conversation))
+            ctx.on_cut_close(lambda: cancel_offered(early_mints, state, conversation=conversation))
     return Pause(kind=APPROVE_PAUSE, payload=node_input, message=APPROVE_MESSAGE)
+
+
+def _offered(state: Mapping[str, Any]) -> Plan | None:
+    """The plan card a turn's `state` holds pending approval, the card
+    `offer` offers, or `None`."""
+    offered = stored_plan(state.get("plan"), state_key="plan")
+    if offered is None or offered.status is not PlanStatus.PENDING_APPROVAL:
+        return None
+    return offered
+
+
+def cancel_offered(early_mints: EarlyMints, state: Mapping[str, Any], *, conversation: str) -> None:
+    """Cancel the early retrievals of the plan card the turn's `state`
+    holds pending approval in `conversation` (`EarlyMints.cancel`), once a
+    Stop closed the turn paused on it. A no-op when the state holds no such
+    card."""
+    offered = _offered(state)
+    if offered is not None:
+        early_mints.cancel(offered, conversation=conversation)
 
 
 def decide(
