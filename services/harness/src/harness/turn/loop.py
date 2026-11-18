@@ -572,8 +572,17 @@ async def run_segment[E](
     `cursor` must be read after the caller claimed the lease; `drive`
     refuses one another write has moved since (`CursorStale`).
 
-    Cancelling the caller cancels the node and leaves the cursor as last
-    written, for a later segment to take over.
+    The node's work tells the two cuts apart through the scope: a Stop marks
+    it (`StopScope.mark_turn_stopped`) before cancelling the node, so the
+    work ends what it started (an executor run is recorded failed), and a
+    lost lease leaves it unmarked, so that work is left for the instance
+    that holds the lease now.
+
+    Cancelling the caller (a client that left) cancels the node with the
+    scope unmarked and leaves the cursor as last written, for a later
+    segment to take over: the conversation's next `/turn`, which abandons
+    the turn and carries its unfinished runs on, or a retried `/interrupt`,
+    which runs the node at the cursor again.
 
     Raises:
         What `drive` raises, except `SegmentLost`, which ends the segment
@@ -598,6 +607,8 @@ async def run_segment[E](
     ended: list[Outcome] = []
 
     def end(outcome: Outcome) -> None:
+        if outcome is Outcome.CANCELLED:
+            stop.mark_turn_stopped()
         if task.cancel():
             ended.append(outcome)
 

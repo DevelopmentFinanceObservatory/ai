@@ -517,8 +517,11 @@ def execute_node(
         before a post-call check refused it (`_mark_masked_step_failed`).
 
         Each step's progress report is emitted as it arrives
-        (`StepProgress`). A Stop or a disconnect that cancels the node
-        cancels the run with it.
+        (`StepProgress`). A Stop that cancels the node ends the run with
+        it, recorded failed (`StopScope.turn_stopped`). A client that left,
+        or a lost lease, cancels the node and leaves the run unfinished:
+        the conversation's next turn carries it on (`harness.graph.resume`),
+        as does this node run again from the cursor.
 
         A plan stored in a shape this release does not read
         (`readable_plan`) runs nothing and spends no replan: it routes
@@ -563,6 +566,7 @@ def execute_node(
                 fetch_series_stats=fetch_series_stats,
                 label_refs=label_refs,
                 on_progress=on_progress,
+                cancel_ends_run=lambda: ctx.stop.turn_stopped,
             )
         except LedgerUnavailableError as exc:
             if exc.run_id is not None:

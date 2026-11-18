@@ -560,11 +560,11 @@ def create_app(
             prefix_cache=prefix_cache,
         )
 
+    # Runs are kept in the conversation's `runs` table, and a run completes
+    # once its derived results are published with their replay recipes.
+    run_ledger = StudioRunLedger(store)
+
     def create_graph(recorder: Any, surface_recorder: Any) -> Graph[GraphEvent]:
-        # Runs are kept in the conversation's `runs` table, and a run
-        # completes once its derived results are published with their
-        # replay recipes.
-        run_ledger = StudioRunLedger(store)
         # The orchestrator's tools run through the same recorder and
         # recording surface as the `execute` node, so their steps and cards
         # reach the wire.
@@ -619,6 +619,7 @@ def create_app(
         executor=executor,
         store=store,
         turns=TurnStore(engine),
+        run_ledger=run_ledger,
         edit_model=GeminiEdit(
             model_name=resolved_settings.model_name,
             timeout_s=resolved_settings.turn_model_time_s,

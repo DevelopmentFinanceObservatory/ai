@@ -712,21 +712,32 @@ def test_a_turn_exports_its_request_and_response_on_the_root_observation_alone(
 
 @pytest.mark.parametrize(
     ("error", "level", "status_message"),
-    [(None, None, None), ("cancelled", "ERROR", "cancelled")],
-    ids=["clean", "error"],
+    [
+        (None, None, None),
+        ("cancelled", "ERROR", "cancelled"),
+        ("disconnected", "WARNING", "disconnected"),
+    ],
+    ids=["clean", "error", "warning"],
 )
 def test_a_turn_closed_with_an_error_exports_its_root_at_level_error(
     fake_langfuse: FakeLangfuse, error: str | None, level: str | None, status_message: str | None
 ) -> None:
-    """A turn ended with an error code marks the root observation `ERROR`,
-    naming the code; a clean turn leaves the root at the default level."""
+    """A turn ended with an error code marks the root observation at the
+    level asked for, `ERROR` by default, naming the code; a clean turn
+    leaves the root at the default level."""
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
     handle = start_turn_span("tr_export0019")
     with use_turn_span(handle):
         _child_span("generate_content gemini-x")
-    end_turn_span(handle, request="q", response="a", error=error)
+    end_turn_span(
+        handle,
+        request="q",
+        response="a",
+        error=error,
+        **({"level": level} if level == "WARNING" else {}),
+    )
     get_client().flush()
 
     marks = {

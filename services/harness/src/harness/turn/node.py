@@ -64,10 +64,15 @@ class StopScope:
 
     While a node holds the scope open, the first Stop sets the event `open`
     yielded, and the node goes on along its own edge. Any Stop while no
-    scope is open, or once the open scope's event is set, ends the turn."""
+    scope is open, or once the open scope's event is set, ends the turn:
+    the loop marks it (`mark_turn_stopped`) before it cancels the node, so
+    work the cancellation reaches tells a Stop (`turn_stopped`) from a
+    client that left or a lost lease, which leave the turn for a later
+    segment to carry on."""
 
     def __init__(self) -> None:
         self._event: asyncio.Event | None = None
+        self._turn_stopped = False
 
     @contextlib.asynccontextmanager
     async def open(self) -> AsyncIterator[asyncio.Event]:
@@ -90,6 +95,16 @@ class StopScope:
             return False
         self._event.set()
         return True
+
+    def mark_turn_stopped(self) -> None:
+        """Record that a Stop ends the turn; the loop then cancels the node."""
+        self._turn_stopped = True
+
+    @property
+    def turn_stopped(self) -> bool:
+        """Whether a Stop ended the turn. A node's cancellation with this
+        unset is not the user's: the client left or the lease was lost."""
+        return self._turn_stopped
 
 
 @dataclass

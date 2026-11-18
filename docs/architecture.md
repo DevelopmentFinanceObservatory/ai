@@ -227,8 +227,10 @@ span layout, under which Langfuse prices each model call twice and shows each
 One studio turn is one trace. `ConversationState.begin_turn` opens a `turn`
 span whose trace id is derived from the turn's wire `trace_id`, and
 `close_turn` ends it, so it stays open across a pause for approval, including
-when the client disconnects at the pause (a disconnect while the turn runs ends
-it as cancelled). The `/turn` stream and the `/interrupt` stream that resumes
+when the client disconnects at the pause. A disconnect while the turn runs
+leaves the turn open for the next request to carry on and ends this instance's
+`turn` span at level `WARNING` as `disconnected`; the segment that carries the
+turn on opens a `turn` span on the same trace. The `/turn` stream and the `/interrupt` stream that resumes
 the turn are separate requests, and each runs inside that span
 (`ConversationState.in_turn_span`), so the
 resumed segment's ADK, MCP and `record_event` spans nest under the same `turn`

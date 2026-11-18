@@ -528,6 +528,8 @@ def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) 
         )
         planner = handing_back_planner_failures(adapter)
 
+    run_ledger = InMemoryRunLedger()
+
     def create_graph(recorder: Any, surface_recorder: Any) -> Graph[GraphEvent]:
         tools = build_orchestrator_tools(
             resolver=resolver, executor=recorder, surface=surface_recorder
@@ -544,7 +546,7 @@ def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) 
             tool_surface=surface_recorder,
             definition_surface=surface,
             publisher=scripted_publish_result,
-            run_ledger=InMemoryRunLedger(),
+            run_ledger=run_ledger,
             max_concurrent_steps=settings.executor_max_concurrent_steps,
             fetch_series_stats=scripted_fetch_series_stats,
             label_refs=no_label_refs,
@@ -555,6 +557,7 @@ def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) 
         executor=LoggingExecutor(log=log),
         store=StudioStore(engine, adk=_NoAdk(), turn_specs=_no_turn_specs),
         turns=TurnStore(engine),
+        run_ledger=run_ledger,
         tool_surface=surface,
     )
     app = FastAPI()

@@ -502,6 +502,18 @@ def _is_transient(exc: Exception) -> bool:
 # return promptly.
 type StepProgressCallback = Callable[[str, ProgressReport], None]
 
+# Read when a run's computation is cancelled: whether the cancellation ends
+# the run, which is then recorded failed (`cancelled`). `False` leaves the run
+# unfinished, as a process that died mid-run does, for a later call to carry
+# on. The caller that cancels decides, so it answers from what it knew when it
+# cancelled: a turn's Stop ends the run, a client that left does not.
+type CancelEndsRun = Callable[[], bool]
+
+
+def every_cancel_ends_run() -> bool:
+    """`CancelEndsRun` for a caller whose every cancellation ends the run."""
+    return True
+
 
 async def default_fetch_series_stats(manifest: Manifest) -> pa.Table | None:
     """The table `evidence_from_manifest` keeps as `RetrievalEvidence.series`.
@@ -733,6 +745,7 @@ class _Runtime:
     label_refs: LabelRefs
     on_progress: StepProgressCallback | None
     publisher: ResultPublisher | None
+    cancel_ends_run: CancelEndsRun
 
 
 async def execute_authorised(
@@ -750,6 +763,7 @@ async def execute_authorised(
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
     label_refs: LabelRefs = default_label_refs,
     on_progress: StepProgressCallback | None = None,
+    cancel_ends_run: CancelEndsRun = every_cancel_ends_run,
 ) -> RunOutcome:
     """Run `submission` under `authorisation`, a plan's approval, as one run of `ledger`.
 
@@ -767,8 +781,9 @@ async def execute_authorised(
     (`executor.completion.publish_results`); a stopped one is recorded failed.
 
     `sleep`, `jitter`, `max_concurrent_steps`, `fetch_series_stats`,
-    `label_refs` and `on_progress` are `execute_approved_plan`'s own. With no
-    `publisher`, a run with a derived result stays `publishing`.
+    `label_refs`, `on_progress` and `cancel_ends_run` are
+    `execute_approved_plan`'s own. With no `publisher`, a run with a derived
+    result stays `publishing`.
 
     `authorisation` must approve the work `submission` is: its approved
     revision is `submission.revision`. One that names other work admits no run.
@@ -799,6 +814,7 @@ async def execute_authorised(
         label_refs=label_refs,
         on_progress=on_progress,
         publisher=publisher,
+        cancel_ends_run=cancel_ends_run,
     )
     if (authorised := authorisation.approved_revision) != submission.revision:
         return Refused(
@@ -870,6 +886,7 @@ async def resume_run(
     max_concurrent_steps: int = 4,
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
     label_refs: LabelRefs = default_label_refs,
+    cancel_ends_run: CancelEndsRun = every_cancel_ends_run,
 ) -> RunOutcome:
     """Carry an unfinished `run` of `ledger` on from `submission`, the one
     stored with it (`load_submission`), as `execute_authorised` carries on a
@@ -884,6 +901,7 @@ async def resume_run(
         label_refs=label_refs,
         on_progress=None,
         publisher=publisher,
+        cancel_ends_run=cancel_ends_run,
     )
     return await _carry_out(run, submission, ledger=ledger, runtime=runtime, resumed=True)
 
@@ -909,11 +927,13 @@ async def _carry_out(
     was admitted before this call, so driving it carries it on (`_drive`).
 
     A waiter cancelled leaves the run going on for the caller driving it. A
-    driver cancelled fails a computation it was running (`_abandoned`),
-    whether or not another caller waits on it, and each waiter then takes
-    the run from the ledger as a driver would: a run failed with no outcome
-    answers `RUN_ABANDONED`, and one the driver left unfinished, cancelled
-    before or after its computation, is carried on by the waiter."""
+    driver cancelled fails a computation it was running (`_abandoned`) when
+    its `cancel_ends_run` says the cancellation ends the run, whether or not
+    another caller waits on it, and each waiter then takes the run from the
+    ledger as a driver would: a run failed with no outcome answers
+    `RUN_ABANDONED`, and one the driver left unfinished, cancelled before or
+    after its computation or by a cancellation that does not end the run, is
+    carried on by the waiter."""
     while (in_flight := _IN_FLIGHT.get(run.run_id)) is not None:
         await asyncio.wait((in_flight,))
         if not in_flight.cancelled():
@@ -960,6 +980,10 @@ async def _drive(
             progress; the run is left unfinished, never failed for it.
         RunAbandonedError: a defect stopped the computation; the run is
             recorded failed (`_abandoned`).
+
+    A cancellation of the computation records the run failed when
+    `runtime.cancel_ends_run` says it ends the run, and otherwise leaves it
+    unfinished for a later turn to carry on (`harness.graph.resume`).
     """
     if resumed and run.status not in TERMINAL_STATUSES:
         run = await record_change(ledger, run.run_id, Resume())
@@ -997,6 +1021,10 @@ async def _drive(
     try:
         outcome = await _run_workflow(submission, run_id=run.run_id, ledger=ledger, runtime=runtime)
     except LedgerUnavailableError:
+        raise
+    except asyncio.CancelledError as exc:
+        if runtime.cancel_ends_run():
+            await _abandoned(run.run_id, exc, ledger=ledger)
         raise
     except BaseException as exc:
         await _abandoned(run.run_id, exc, ledger=ledger)
@@ -1043,12 +1071,13 @@ def _recorded_outcome(raw: JsonValue, *, workflow: Workflow) -> RunOutcome:
 
 async def _abandoned(run_id: str, exc: BaseException, *, ledger: RunLedger) -> None:
     """Record run `run_id` failed by `exc`, which ends its computation with no
-    outcome: the turn running it was cancelled, or a defect raised. Only a
-    process that died mid-run, or a ledger that could not record the run's
-    progress (`LedgerUnavailableError`, which `_drive` never passes here),
-    leaves a run unfinished for the next turn to carry on; a failed run is
-    never carried on, and submitting its work again admits a new run. A
-    write that fails here is logged, so `exc` still propagates."""
+    outcome: a cancellation that ends the run (`CancelEndsRun`), or a defect
+    raised. A process that died mid-run, a cancellation that does not end the
+    run, or a ledger that could not record the run's progress
+    (`LedgerUnavailableError`, which `_drive` never passes here) leaves a run
+    unfinished for the next turn to carry on; a failed run is never carried
+    on, and submitting its work again admits a new run. A write that fails
+    here is logged, so `exc` still propagates."""
     cancelled = isinstance(exc, asyncio.CancelledError)
     code = ExecutorCode.CANCELLED if cancelled else ExecutorCode.INTERNAL_ERROR
     reason = "the turn running it was cancelled" if cancelled else f"{type(exc).__name__}: {exc}"
@@ -1088,6 +1117,7 @@ async def execute_approved_plan(
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
     label_refs: LabelRefs = default_label_refs,
     on_progress: StepProgressCallback | None = None,
+    cancel_ends_run: CancelEndsRun = every_cancel_ends_run,
 ) -> tuple[Plan, RunOutcome]:
     """Run an approved plan through `execute_authorised` and record the run in its status.
 
@@ -1125,6 +1155,10 @@ async def execute_approved_plan(
     `on_progress` hears a report with no message as each step starts, every
     progress report a step's tool call sends, and a report naming the next
     attempt each time a step is retried, tagged with the step's id.
+    `cancel_ends_run` is read when the run's computation is cancelled: a
+    cancellation it says ends the run records the run failed (`cancelled`),
+    and any other leaves the run unfinished, for executing the revision again
+    or `resume_run` to carry on. Every cancellation ends the run by default.
 
     Returns:
         The plan as the run left it, or unchanged when it could not start,
@@ -1190,6 +1224,7 @@ async def execute_approved_plan(
         fetch_series_stats=fetch_series_stats,
         label_refs=label_refs,
         on_progress=on_progress,
+        cancel_ends_run=cancel_ends_run,
     )
     run = None
     if outcome.run_id is not None:
@@ -1341,6 +1376,7 @@ async def read_anchors(
         label_refs=no_label_refs,
         on_progress=None,
         publisher=None,
+        cancel_ends_run=every_cancel_ends_run,
     )
     submission = Submission.model_construct(
         revision=revision, workflow=workflow, requirements=tuple(requirements)

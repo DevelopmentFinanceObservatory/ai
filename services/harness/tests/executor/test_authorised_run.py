@@ -1280,6 +1280,54 @@ async def test_a_cancelled_driver_hands_its_waiter_the_abandoned_run_not_its_can
     assert _tools(surface) == ["get_data"]
 
 
+async def test_a_cancellation_that_does_not_end_the_run_leaves_it_for_its_waiter_to_carry_on(
+    approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
+) -> None:
+    """A driver cancelled while its `cancel_ends_run` says no, as a client
+    that left is, records nothing: the run stays unfinished, and the waiter
+    carries it on to its outcome."""
+    plan = approved_plan()
+    submission = _submission(plan)
+    authorisation = _approval(plan, submission.source_policy(), expires_at=datetime.now(UTC) + HOUR)
+    ledger = InMemoryRunLedger()
+    surface = ScriptedSurface(
+        schemas=real_schemas,
+        responses={"get_data": [ok(manifest()), ok(manifest())], "aggregate": [ok(RESULT_FRAME)]},
+        delays={"get_data": 3600},
+    )
+
+    def submit(*, ends: bool) -> asyncio.Task[Any]:
+        return asyncio.create_task(
+            execute_authorised(
+                submission,
+                authorisation=authorisation,
+                idempotency_key=idempotency_key(caller="u", conversation_id="c", task="t"),
+                ledger=ledger,
+                surface=surface,
+                publisher=None,
+                cancel_ends_run=lambda: ends,
+            )
+        )
+
+    driver = submit(ends=False)
+    while not surface.calls:
+        await asyncio.sleep(0)
+    waiter = submit(ends=True)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    surface.delays.clear()
+    driver.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await driver
+
+    outcome = await asyncio.wait_for(waiter, timeout=5)
+
+    assert isinstance(outcome, Accepted), outcome
+    run = await ledger.get(outcome.run_id or "")
+    assert run is not None and run.failure is None
+    assert _tools(surface) == ["get_data", "get_data", "aggregate"]
+
+
 def _jsonb(value: Any) -> Any:
     """`value` with every object's keys in the order Postgres `jsonb` keeps
     them: shorter keys first, then by bytes."""

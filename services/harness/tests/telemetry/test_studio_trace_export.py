@@ -465,11 +465,12 @@ async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_
     assert "error" not in record
 
 
-async def test_a_client_that_leaves_while_the_turn_runs_ends_the_turn_span_as_cancelled(
+async def test_a_client_that_leaves_while_the_turn_runs_ends_the_turn_span_as_disconnected(
     fake_langfuse: Any,
 ) -> None:
-    """A turn that has not paused is closed by the disconnect: the `turn` span
-    ends once and the record carries the cancellation."""
+    """A turn that has not paused stays open past the disconnect, for the
+    next request to carry on, and this instance's `turn` span ends once, at
+    level `WARNING` as `disconnected`; nothing is recorded."""
     init_telemetry(service_name="harness")
     conversation = ConversationState(conversation_id=CONVERSATION)
     conversation.begin_turn()
@@ -501,5 +502,9 @@ async def test_a_client_that_leaves_while_the_turn_runs_ends_the_turn_span_as_ca
     (call,) = [span for span in spans if span.name == MODEL_CALL]
     assert turn.end_time_unix_nano > 0
     assert call.parent_span_id == turn.span_id
-    assert conversation.turn_recorded
-    assert conversation.turns == [{"user": "q", "assistant": "", "error": "cancelled"}]
+    assert (
+        _attribute(turn, "langfuse.observation.level"),
+        _attribute(turn, "langfuse.observation.status_message"),
+    ) == ("WARNING", "disconnected")
+    assert not conversation.turn_recorded
+    assert conversation.turns == []

@@ -34,8 +34,11 @@ first time; anything the run ledger's store raises is
 which is logged and leaves the run as it is, for the next turn to carry on
 until the resume bound (`executor.ledger.MAX_PUBLICATION_RESUMES`,
 `MAX_PENDING_AGE`) ends it; any other exception is logged and the run
-recorded failed (`resume_failed`), so no later turn tries it again. The
-`seed` node calls this, as the turn's first node.
+recorded failed (`resume_failed`), so no later turn tries it again. A Stop
+that cancels the turn while a run is carried on ends the run, recorded
+failed; a client that left leaves it unfinished for the turn after
+(`harness.turn.node.StopScope.turn_stopped`). The `seed` node calls this, as
+the turn's first node.
 """
 
 from __future__ import annotations
@@ -190,6 +193,7 @@ def run_resumer(
             max_concurrent_steps=max_concurrent_steps,
             fetch_series_stats=fetch_series_stats,
             label_refs=label_refs,
+            cancel_ends_run=lambda: ctx.stop.turn_stopped,
         )
         async with store_faults(run.run_id):
             finished = await run_ledger.get(run.run_id)

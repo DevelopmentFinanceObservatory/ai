@@ -3636,10 +3636,10 @@ async def test_closing_the_sse_stream_unwinds_the_segment_generator() -> None:
     await asyncio.wait_for(closed.wait(), timeout=2)
 
 
-async def test_a_cancelled_response_task_records_the_turn_and_unwinds_the_segment() -> None:
+async def test_a_cancelled_response_task_leaves_the_turn_open_and_unwinds_the_segment() -> None:
     """What a client disconnect becomes inside the process: uvicorn cancels
     the response task. The stream must close the segment generator and
-    record the turn as cancelled on its way out."""
+    leave the turn open, unrecorded, for the next request to carry on."""
     closed = asyncio.Event()
 
     async def segment():
@@ -3669,9 +3669,8 @@ async def test_a_cancelled_response_task_records_the_turn_and_unwinds_the_segmen
         await task
 
     await asyncio.wait_for(closed.wait(), timeout=2)
-    assert conversation.turns == [
-        {"user": "kenya oda 2023", "assistant": "one", "error": "cancelled"}
-    ]
+    assert not conversation.turn_recorded
+    assert conversation.turns == []
 
 
 async def test_unwinding_under_a_cancelled_response_cancels_the_segment_once() -> None:
@@ -3763,7 +3762,12 @@ async def test_a_client_that_leaves_a_paused_turn_keeps_it_open_and_resumable(ho
 
 
 @pytest.mark.parametrize("how", ["cancel", "close"])
-async def test_a_client_that_leaves_a_running_turn_records_it_as_cancelled(how: str) -> None:
+async def test_a_client_that_leaves_a_running_turn_leaves_it_open_for_the_next_turn(
+    how: str,
+) -> None:
+    """The turn runs: a disconnect records nothing and ends this instance's
+    telemetry span; the next `begin_turn` abandons the turn, as it does a
+    turn a crash left."""
     conversation = ConversationState(conversation_id=CONVERSATION)
     conversation.begin_turn()
     conversation.turn_user_message = "kenya oda 2023"
@@ -3771,9 +3775,12 @@ async def test_a_client_that_leaves_a_running_turn_records_it_as_cancelled(how: 
     await _lose_the_client_while_parked(conversation, how=how, paused=False)
 
     assert not conversation.awaiting_answer
-    assert conversation.turn_recorded
-    assert conversation.turns == [{"user": "kenya oda 2023", "assistant": "", "error": "cancelled"}]
+    assert not conversation.turn_recorded
+    assert conversation.turns == []
     assert conversation._telemetry_span is None
+
+    conversation.begin_turn()
+    assert conversation.turns == [{"user": "kenya oda 2023", "assistant": "", "error": "abandoned"}]
 
 
 # NOTE: the transport half of a disconnect cannot be driven in-process --

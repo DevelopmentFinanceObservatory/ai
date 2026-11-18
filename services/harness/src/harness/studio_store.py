@@ -1593,7 +1593,9 @@ class StudioStore:
         self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0
     ) -> None:
         """The end-of-segment save: drop this segment's still-resuming
-        pending entries, clear the segment if it is still ours, then
+        pending entries, unless the stream stopped reading it while it ran
+        (`ConversationState.unfinished_segment`), so a retry of the same
+        answer carries the turn on; clear the segment if it is still ours; then
         `checkpoint`. Runs to the end even when the caller is cancelled
         (`_run_to_completion`), since it runs in a `finally` on
         client-disconnect and generator-finaliser paths, where a disconnect
@@ -1629,7 +1631,8 @@ class StudioStore:
         """`release`'s save, run as its own task."""
         try:
             async with asyncio.timeout(timeout):
-                state.drop_resuming(segment_id)
+                if state.unfinished_segment != segment_id:
+                    state.drop_resuming(segment_id)
                 if state.segment is not None and state.segment.id == segment_id:
                     state.segment = None
                 try:

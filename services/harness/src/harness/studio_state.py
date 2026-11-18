@@ -464,6 +464,12 @@ class ConversationState:
     # (`POST /api/studio/cancel`) or a lease another instance took reaches
     # the stream without waiting for the next beat (`renew_lease_now`).
     renew_now: asyncio.Event | None = None
+    # The segment this instance's stream stopped reading while the segment
+    # still ran (`StudioRunner._frames`): its client left, or a frame's save
+    # ended the stream. `StudioStore.release` keeps the pending entries
+    # resuming under it, as a crash leaves them, so a retry of the same
+    # answer carries the turn on. Not durable.
+    unfinished_segment: str | None = None
     # The current turn's auto-add preference (delta 11); reset per turn.
     auto_add: bool = True
     # Digest entries for every component this conversation streamed,
@@ -992,8 +998,8 @@ class ConversationState:
         still answer. A paused turn keeps its telemetry span open until the
         resumed segment ends it, `/cancel` closes it, or the next `begin_turn`
         abandons it. Excludes an entry already resuming under a segment: a
-        disconnect mid-resume closes the turn as cancelled rather than
-        looking paused for `/interrupt` to answer again."""
+        turn whose client left mid-resume runs, and a retry of the same
+        answer carries it on."""
         return any(p.resuming_segment is None for p in self.pending.values())
 
     def mark_approved_sent(self, segment_id: str) -> None:
@@ -1006,8 +1012,9 @@ class ConversationState:
     def drop_resuming(self, segment_id: str) -> None:
         """Remove every pending entry marked as resuming under
         `segment_id`. Called at that segment's end, win or lose (done,
-        stream-fatal error, cancel, disconnect, reject). Only a crash
-        leaves a resuming entry behind, for the next segment to retry."""
+        stream-fatal error, cancel, reject). A crash, and a client that
+        left while the segment ran, leave a resuming entry behind, for a
+        retry of the same answer to carry the turn on."""
         self.pending = {
             interrupt_id: p
             for interrupt_id, p in self.pending.items()
@@ -1068,12 +1075,32 @@ class ConversationState:
         )
         self._telemetry_span = None
 
+    def end_turn_span_left(self) -> None:
+        """End the turn's telemetry span, when this instance holds one and
+        the turn is neither recorded nor paused, at level `WARNING` with
+        status `disconnected`, without recording the turn: its client left
+        while it ran. The turn stays open for the next request, which
+        abandons it (`begin_turn`) or carries it on in a span of its own on
+        the same `trace_id` (`ensure_turn_span`), so a client that never
+        returns leaves no span open on this instance."""
+        if self.turn_recorded or self.awaiting_answer:
+            return
+        end_turn_span(
+            self._telemetry_span,
+            request=self.turn_user_message,
+            response=self.turn_final_text,
+            error="disconnected",
+            level="WARNING",
+        )
+        self._telemetry_span = None
+
     def ensure_turn_span(self) -> None:
         """Open a turn span on this conversation's `trace_id` when it holds
         none. `begin_turn` opens the span for the instance that starts a
         turn; an instance that resumes a paused turn through `/interrupt`
         after loading it fresh from storage holds no span, since
-        `_telemetry_span` is process-local and never persists, so the
+        `_telemetry_span` is process-local and never persists, and nor does
+        one whose client left the turn (`end_turn_span_left`), so the
         resumed segment would otherwise export on no trace. A no-op once
         the instance already holds a span."""
         if self._telemetry_span is None:

@@ -123,11 +123,14 @@ Models: `TurnRequest`, `InterruptResponse`, `CompositionMutation`,
   the stream within one heartbeat interval (5 s). Idempotent; returns
   204\. The aborted stream, if still open, ends with a stream-fatal `error`
   frame whose code is `cancelled` (a studio-side addition to the error
-  grammar); no `done` follows. Client disconnect (closing the SSE
-  response) also aborts the running segment when the server observes it
-  (the ASGI server cancels the response task), but a dropped connection
-  is not reliably observable through proxies, so `cancel` is the
-  dependable path.
+  grammar); no `done` follows. A Stop also ends a calculation the turn
+  is running, so no later turn carries it on. Client disconnect (closing
+  the SSE response) stops the running segment when the server observes it
+  (the ASGI server cancels the response task) but leaves the turn and its
+  calculations unfinished: the next `turn.request` carries an unfinished
+  calculation on and lists its results, and a retried
+  `interrupt.response` with the same answer carries the turn on where it
+  stopped. To end the work rather than leave it, send `cancel`.
 - **`composition.mutate`** applies canvas operations
   (`add | reorder | remove | pin | unpin | set_layout_hints | set_card_meta`) and returns the new manifest. `add` (delta 11) appends a
   block for a component this conversation already streamed (the server
@@ -669,7 +672,8 @@ Fixture values that are samples:
    intent cannot hold; harness-owned, never sent to the platform.
 1. `POST /api/studio/cancel` aborts the in-flight segment, reaching one
    running on any instance within one heartbeat interval; the stream ends
-   with error code `cancelled`. Client disconnect aborts too.
+   with error code `cancelled`. Client disconnect stops the stream and
+   leaves the turn for the next request to carry on.
 1. `message.delta` / `message.complete` text is GitHub-flavored Markdown;
    render it, don't escape it.
 1. (folded into delta 11.)

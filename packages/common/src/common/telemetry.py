@@ -603,15 +603,18 @@ def end_turn_span(
     request: Any = None,
     response: Any = None,
     error: str | None = None,
+    level: Literal["ERROR", "WARNING"] = "ERROR",
 ) -> None:
     """Close a span opened by `start_turn_span`. A no-op for `None`.
 
     On Langfuse, `request` and `response` become the input and output of the
     turn's observation, which is the trace's root, so they are the trace's
     overall input and output and what an evaluator on that observation reads.
-    An `error` (a machine-readable code, never exception text) makes the
-    observation's level `ERROR` with `error` as its status message. Off
-    Langfuse all three are ignored.
+    An `error` (a machine-readable code, never exception text) sets the
+    observation's level to `level`, `ERROR` by default, with `error` as its
+    status message; `WARNING` marks an ending that is no failure, such as a
+    client that left a turn a later request carries on. Off Langfuse all of
+    these are ignored.
 
     Callable from any asyncio task: the span's scope is exited in the context
     it was entered in. Swallows any error from closing it, since telemetry
@@ -624,7 +627,7 @@ def end_turn_span(
             handle.observation.update(
                 input=request,
                 output=response,
-                level="ERROR" if error else None,
+                level=level if error else None,
                 status_message=error or None,
             )
         except Exception:
