@@ -561,15 +561,16 @@ async def _sse_stream(
     with no `plan.proposed`: a Stop never leaves a stream open. Once that
     frame passes, the deadline is met, so a slow unwind after it leaves the
     paused turn open.
-    `"segment_lost"` (this stream's segment lease was taken over, or this
-    instance's renewal or a store write could not reach the database
-    before the lease's deadline) yields a stream-fatal
-    `transient_unavailable` frame without closing the turn. Another
-    instance now owns the segment, or may claim it once its lease lapses,
-    and may still complete it. Either way the segment
-    generator is closed, unwinding the ADK run.
+    `"segment_lost"` (this stream's segment lease was taken over: the
+    heartbeat's renewal, a card removal or the run ledger found it so) and
+    `"database_unavailable"` (the heartbeat's renewals or a card removal
+    could not reach the database before the lease's deadline) each yield a
+    stream-fatal `transient_unavailable` frame without closing the turn.
+    Another instance now owns the segment, or may claim it once its lease
+    lapses, and may still complete it. Either way the segment generator is
+    closed, unwinding the ADK run.
 
-    A Stop, a `segment_lost` transient-unavailable frame, or a stream-fatal
+    A Stop, a lost segment's transient-unavailable frame, or a stream-fatal
     `error` frame from `frames`, first closes every Activity line the
     stream left open (`_OpenSteps`) with a `failed` frame, since no step
     will report on THIS stream again -- a resumed segment reports the same
@@ -659,11 +660,19 @@ async def _sse_stream(
                                     conversation.cancel_reason = None
                                     cancel_wait = asyncio.ensure_future(armed_cancel.wait())
                                     continue
-                                await _unwind(next_frame)
-                                if conversation.cancel_reason in (
+                                lost = conversation.cancel_reason in (
                                     "segment_lost",
                                     "database_unavailable",
-                                ):
+                                )
+                                if not lost:
+                                    # Closed before the segment unwinds, so
+                                    # its release saves the turn as stopped.
+                                    conversation.close_turn(
+                                        final_text=conversation.turn_final_text,
+                                        error=ErrorCode.CANCELLED.value,
+                                    )
+                                await _unwind(next_frame)
+                                if lost:
                                     # Another instance took the segment over,
                                     # or this one could not reach the database
                                     # before the lease's deadline.
@@ -673,10 +682,6 @@ async def _sse_stream(
                                         yield _sse_data(closing)
                                     yield _sse_data(segment_lost_frame(conversation))
                                     return
-                                conversation.close_turn(
-                                    final_text=conversation.turn_final_text,
-                                    error=ErrorCode.CANCELLED.value,
-                                )
                                 stopped = failure_sentence(
                                     ErrorCode.CANCELLED, RetryMode.DO_NOT_RETRY
                                 )
@@ -999,7 +1004,7 @@ class StudioRunner:
         as this stream runs. A `renew` that reports `"cancelled"` (a Stop,
         from any instance) or `"lost"` (another instance's claim outlived
         this one's TTL) ends the stream by arming `conversation.cancel_event`
-        with that reason. `_sse_stream`'s cancel branch turns it into the
+        with `"cancelled"` or `"segment_lost"`. `_sse_stream`'s cancel branch turns it into the
         matching frame, one mechanism for every kind of mid-stream stop.
 
         On a stream running a plan-card switch whose Stop has not come yet
@@ -1009,17 +1014,15 @@ class StudioRunner:
         (`_sse_stream`), and a second one, from any instance, sets the flag
         again and ends the stream.
 
-        A `renew` call that raises is retried every interval until the
-        lease's deadline (`StudioStore.lease_deadline`, on this instance's
-        own clock, anchored just before the read or renewal that set the
-        lease's expiry), then also ends the stream as lost: an instance this
-        deaf to its own renewal cannot be trusted to still own the segment,
-        even though nothing else has claimed it yet. The turn stays as
-        stored, its lease lapses by its TTL, and a retry resumes it or
-        closes it as `ConversationState.begin_turn` does. A span on one clock
-        leaves the gap between this clock and the database's, which decides
-        the lease, out of the deadline. The store's writes stop retrying at
-        the same deadline.
+        A `renew` call that raises is retried every interval until the lease's deadline
+        (`StudioStore.lease_deadline`, on this instance's own clock, anchored just before the read
+        or renewal that set the lease's expiry), then ends the stream with the reason
+        `"database_unavailable"`: an instance this deaf to its own renewal cannot be trusted to
+        still own the segment, even though nothing else has claimed it yet. The turn stays as
+        stored, its lease lapses by its TTL, and a retry resumes it or closes it as
+        `ConversationState.begin_turn` does. A span on one clock leaves the gap between this clock
+        and the database's, which decides the lease, out of the deadline. The store's writes stop
+        retrying at the same deadline.
         """
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL_S)
@@ -1075,10 +1078,11 @@ class StudioRunner:
         segment, or a database unreachable until the lease's deadline, ends
         the stream the same way, and any other failure there is
         logged alone. A card's canvas write in `frames` that loses the
-        segment, or cannot reach the database, ends the stream the same way
-        too. Each loss is handed to `report` (`stream_loss`) before its frame
-        goes out. This is the one interception point for every route this
-        runs under (`/turn`, its edit-card branch, and `/interrupt`)."""
+        segment, or cannot reach the database, ends `frames` with the same
+        frame, which is relayed, its number reserved first, like any other.
+        Each loss is handed to `report` (`stream_loss`) before its frame goes
+        out. This is the one interception point for every route this runs
+        under (`/turn`, its edit-card branch, and `/interrupt`)."""
 
         def failed(what: str, exc: Exception) -> ErrorFrame:
             _log_save_failure(what, conversation, segment_id, exc)
@@ -1086,43 +1090,45 @@ class StudioRunner:
                 report(stream_loss(exc))
             return _checkpoint_failed_frame(conversation, exc)
 
-        try:
-            async for frame in frames:
+        async def relayed() -> AsyncGenerator[Any]:
+            try:
+                async for frame in frames:
+                    yield frame
+            except (SegmentLost, DatabaseUnavailable) as exc:
+                yield failed("card write", exc)
+
+        async for frame in relayed():
+            try:
+                await self.store.reserve_frames(principal, conversation_id, segment_id)
+            except Exception as exc:
+                yield failed("frame reservation", exc)
+                return
+            event = getattr(frame, "event", None)
+            outgoing = frame
+            if event in _CHECKPOINT_BEFORE_EVENTS:
+                conversation.drop_resuming(segment_id)
                 try:
-                    await self.store.reserve_frames(principal, conversation_id, segment_id)
+                    await self.store.checkpoint(principal, conversation_id, segment_id)
                 except Exception as exc:
-                    yield failed("frame reservation", exc)
+                    yield failed("checkpoint", exc)
                     return
-                event = getattr(frame, "event", None)
-                outgoing = frame
-                if event in _CHECKPOINT_BEFORE_EVENTS:
-                    conversation.drop_resuming(segment_id)
-                    try:
-                        await self.store.checkpoint(principal, conversation_id, segment_id)
-                    except Exception as exc:
-                        yield failed("checkpoint", exc)
+                if event == "done":
+                    outgoing = frame.model_copy(update={"composition": conversation.composition})
+            yield outgoing
+            if event == "plan.approved":
+                # Saved once sent, so a retry of the same answer after this
+                # segment dies does not send it again. A crash before the
+                # save sends it twice, which beats never.
+                conversation.mark_approved_sent(segment_id)
+                try:
+                    await self.store.checkpoint(principal, conversation_id, segment_id)
+                except Exception as exc:
+                    if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
+                        yield failed("checkpoint after plan.approved", exc)
                         return
-                    if event == "done":
-                        outgoing = frame.model_copy(
-                            update={"composition": conversation.composition}
-                        )
-                yield outgoing
-                if event == "plan.approved":
-                    # Saved once sent, so a retry of the same answer after this
-                    # segment dies does not send it again. A crash before the
-                    # save sends it twice, which beats never.
-                    conversation.mark_approved_sent(segment_id)
-                    try:
-                        await self.store.checkpoint(principal, conversation_id, segment_id)
-                    except Exception as exc:
-                        if isinstance(exc, (SegmentLost, DatabaseUnavailable)):
-                            yield failed("checkpoint after plan.approved", exc)
-                            return
-                        _log_save_failure(
-                            "checkpoint after plan.approved", conversation, segment_id, exc
-                        )
-        except (SegmentLost, DatabaseUnavailable) as exc:
-            yield failed("card write", exc)
+                    _log_save_failure(
+                        "checkpoint after plan.approved", conversation, segment_id, exc
+                    )
 
     async def _locked(
         self,
@@ -1153,18 +1159,19 @@ class StudioRunner:
         `StudioStore.release`), and still could not strand the lock, since
         releasing it does not depend on the release call having succeeded.
 
-        The segment's span ends here, with the first ending any path
-        reported: a save in `_checkpointed` that lost the segment, a loss
-        `_end_stream` armed (`conversation.cancel_reason`: the heartbeat, a
-        card removal, the run ledger), else the release's own. The release
-        runs as a task of its own, so its ending is read from the task even
-        when this generator is cancelled while it waits.
+        The segment's span ends here (`segment_span_status`), from how the
+        release ended and the first loss the stream met: one a save in
+        `_checkpointed` reported, else one `_end_stream` armed
+        (`conversation.cancel_reason`: the heartbeat, a card removal, the
+        run ledger). The release's save runs as one task
+        (`StudioStore.start_release`), so its ending is read from the task
+        even when this generator is cancelled while it waits.
         """
-        ending: SegmentEnding | None = None
+        loss: StreamLoss | None = None
 
-        def report(loss: StreamLoss) -> None:
-            nonlocal ending
-            ending = ending or loss
+        def report(reported: StreamLoss) -> None:
+            nonlocal loss
+            loss = loss or reported
 
         heartbeat = asyncio.ensure_future(
             self._heartbeat(principal, conversation_id, segment_id, conversation)
@@ -1178,10 +1185,9 @@ class StudioRunner:
             try:
                 await _unwind(heartbeat)
             finally:
-                release = asyncio.ensure_future(
-                    self.store.release(principal, conversation_id, segment_id)
-                )
+                release: asyncio.Future[SegmentEnding] | None = None
                 try:
+                    release = self.store.start_release(principal, conversation_id, segment_id)
                     await _run_to_completion(release)
                 finally:
                     # The segment ends here on this instance, and its span
@@ -1190,14 +1196,20 @@ class StudioRunner:
                     armed = conversation.cancel_reason
                     if armed in ("segment_lost", "database_unavailable"):
                         report(armed)
-                    conversation.end_segment_span(ending or _released(release))
+                    conversation.end_segment_span(_released(release), loss)
                     conversation.lock.release()
 
 
-def _released(release: asyncio.Future[SegmentEnding]) -> SegmentEnding:
-    """How `StudioStore.release`'s task ended the segment: its result, or
-    `failed` when it did not return one."""
-    if release.done() and not release.cancelled() and release.exception() is None:
+def _released(release: asyncio.Future[SegmentEnding] | None) -> SegmentEnding:
+    """How the release's task (`StudioStore.start_release`) ended the
+    segment: its result, or `failed` when it never started or did not
+    return one."""
+    if (
+        release is not None
+        and release.done()
+        and not release.cancelled()
+        and release.exception() is None
+    ):
         return release.result()
     return "failed"
 

@@ -1042,15 +1042,11 @@ class ConversationState:
         """Reset per-turn wire state. Abandons any pending interrupt: a fresh
         turn.request on a paused conversation ends the pause, and the paused
         ADK invocation stays parked in its own per-turn session. Returns the
-        previous turn when it was paused and this closed it as `abandoned`,
-        for the caller to record its span once the new turn's claim commits
-        (`record_closed_turn_span`). A turn that was not paused ended its
-        last segment's span with that segment, and gets none."""
-        abandoned = (
-            ClosedTurn(self.trace_id, self.turn_user_message, "abandoned")
-            if self.awaiting_answer
-            else None
-        )
+        previous turn when this closed it as `abandoned`, whatever state it
+        was left in, for the caller to record its closing span once the new
+        turn's claim commits (`record_closed_turn_span`)."""
+        previous = ClosedTurn(self.trace_id, self.turn_user_message, "abandoned")
+        abandoned = None
         self.turn_index += 1
         self.seq = 0
         self.trace_id = _wire_id("tr")
@@ -1062,6 +1058,7 @@ class ConversationState:
             # pause, or a death no code path recorded). Its record keeps
             # what was asked, with the error marked as abandoned.
             self.close_turn(final_text=self.turn_final_text, error="abandoned")
+            abandoned = previous
         self.turn_user_message = ""
         self.turn_user_words = ""
         self.turn_final_text = ""
@@ -1075,7 +1072,7 @@ class ConversationState:
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
         return abandoned
 
-    def end_segment_span(self, ending: SegmentEnding) -> bool:
+    def end_segment_span(self, ending: SegmentEnding, loss: StreamLoss | None = None) -> bool:
         """End this instance's span for the turn's segment, once, as the
         segment ended (`segment_span_status`), with the turn's message and,
         once the turn is recorded, its reply as the span's input and output.
@@ -1084,7 +1081,7 @@ class ConversationState:
         if span is None:
             return False
         self._telemetry_span = None
-        status, level = segment_span_status(self, ending)
+        status, level = segment_span_status(self, ending, loss)
         end_turn_span(
             span,
             request=self.turn_user_message,
@@ -1177,12 +1174,13 @@ def make_canvas_cards(store: StudioStore) -> Any:
 # deadline (`database_unavailable`).
 type StreamLoss = Literal["segment_lost", "database_unavailable"]
 
-# How a segment ended on this instance: its release saved the turn
-# (`saved`), the stream lost its segment (`StreamLoss`), the release could
-# not save or the segment failed before streaming (`failed`), the request
-# was cancelled before streaming (`cancelled`), or the claim never committed
-# (`not_started`).
-type SegmentEnding = Literal["saved", "failed", "cancelled", "not_started"] | StreamLoss
+# How a segment ended on this instance, as `segment_span_status` reads it:
+# its release saved the turn (`saved`), its release met a lost segment
+# (`StreamLoss`), its release failed otherwise or the request failed before
+# streaming (`failed`), the request was cancelled before streaming
+# (`cancelled`), the claim never committed (`not_started`), or its span was
+# still open when a new segment's span moved in (`orphaned`).
+type SegmentEnding = Literal["saved", "failed", "cancelled", "not_started", "orphaned"] | StreamLoss
 
 # The span statuses that are not failures, and the level each ends at.
 _SPAN_STATUS_LEVELS: dict[str, EventLevel] = {
@@ -1192,39 +1190,66 @@ _SPAN_STATUS_LEVELS: dict[str, EventLevel] = {
     "segment_lost": "WARNING",
     "database_unavailable": "WARNING",
     "not_started": "WARNING",
+    "orphaned": "WARNING",
 }
 
 
 def stream_loss(exc: SegmentLost | DatabaseUnavailable) -> StreamLoss:
     """How a lost segment or an unreachable database that ends a stream
     ends its segment. Every place that ends a stream for either cause names
-    it through this, so one cause gives one status."""
+    it through this or arms the same literal, so one cause gives one
+    status."""
     return "segment_lost" if isinstance(exc, SegmentLost) else "database_unavailable"
 
 
-def segment_span_status(state: ConversationState, ending: SegmentEnding) -> tuple[str, EventLevel]:
-    """The status and level a segment's span ends with. A release that
-    saved names how the turn stood: recorded (`done`, or the error code the
-    record names, `cancelled` among them), or paused on an answer
-    (`paused`); a turn left neither is `failed`. Any other ending names
-    itself. A failure, which is any status not in `_SPAN_STATUS_LEVELS`, is
-    at level `ERROR`."""
-    status: str = ending
-    if ending == "saved":
-        if state.turn_recorded and state.turns:
-            status = state.turns[-1].get("error") or "done"
-        elif state.awaiting_answer:
-            status = "paused"
-        else:
-            status = "failed"
+def segment_span_status(
+    state: ConversationState, ending: SegmentEnding, loss: StreamLoss | None = None
+) -> tuple[str, EventLevel]:
+    """The status and level a segment's span ends with, given how the
+    segment ended (`ending`) and the first loss its stream met (`loss`).
+
+    Every span on a turn's trace, with its status and level:
+
+    | How it ended                                              | Status                 | Level   |
+    |-----------------------------------------------------------|------------------------|---------|
+    | Release saved a recorded turn with no error               | `done`                 | DEFAULT |
+    | Release saved a turn recorded with an error code: a Stop  | the code               | WARNING |
+    | or a client gone mid-stream (`cancelled`)                 |                        |         |
+    | Release saved a turn recorded with any other code, such   | the code               | ERROR   |
+    | as `state_not_saved` or a model failure's                 |                        |         |
+    | Release saved a paused turn                               | `paused`               | DEFAULT |
+    | Release saved neither, or nothing, after the stream lost  | `segment_lost`         | WARNING |
+    | its segment to another instance (heartbeat, checkpoint,   |                        |         |
+    | frame reservation, card write, run ledger, release)       |                        |         |
+    | The same, to a database it could not reach (heartbeat,    | `database_unavailable` | WARNING |
+    | checkpoint, frame reservation, card write or removal,     |                        |         |
+    | release)                                                  |                        |         |
+    | Release saved neither with no loss, or failed otherwise   | `failed`               | ERROR   |
+    | Claim refused before its save committed (`drop_draft`)    | `not_started`          | WARNING |
+    | Request failed after its claim, before streaming          | `failed`               | ERROR   |
+    | Request cancelled after its claim, before streaming       | `cancelled`            | WARNING |
+    | Span still open when a new segment's span moved in        | `orphaned`             | WARNING |
+    | Paused turn closed by `/cancel` (zero-length span,        | `cancelled`            | WARNING |
+    | `record_closed_turn_span`)                                |                        |         |
+    | Unrecorded turn closed by the next `/turn`, however it    | `abandoned`            | WARNING |
+    | was left (zero-length span, `record_closed_turn_span`)    |                        |         |
+
+    A status not in `_SPAN_STATUS_LEVELS` is a failure, at level `ERROR`."""
+    status: str
+    if ending == "saved" and state.turn_recorded and state.turns:
+        status = state.turns[-1].get("error") or "done"
+    elif ending == "saved" and state.awaiting_answer:
+        status = "paused"
+    else:
+        status = loss or ("failed" if ending == "saved" else ending)
     return status, _SPAN_STATUS_LEVELS.get(status, "ERROR")
 
 
 @dataclass(frozen=True)
 class ClosedTurn:
-    """A paused turn closed with no segment of it running: its trace id,
-    the user's message, and the status it closed with (`cancelled` by
-    `/cancel`, `abandoned` by the next turn's `begin_turn`)."""
+    """A turn closed with no segment of it running: its trace id, the
+    user's message, and the status it closed with (`cancelled` by `/cancel`
+    of a paused turn, `abandoned` by the next turn's `begin_turn`)."""
 
     trace_id: str
     user_message: str

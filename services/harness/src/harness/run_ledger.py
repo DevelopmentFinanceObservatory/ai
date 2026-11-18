@@ -53,7 +53,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from harness.conversation import current_conversation_key
-from harness.studio_state import SegmentLost, _end_stream, stream_loss
+from harness.studio_state import SegmentLost, _end_stream
 from harness.studio_store import StudioStore
 from harness.tool_contracts import HarnessCode
 
@@ -121,10 +121,10 @@ class StudioRunLedger:
         try:
             async with self._store.fenced(*self._segment()) as held:
                 yield held
-        except SegmentLost as exc:
+        except SegmentLost:
             conversation = self._store.current(*key) if key is not None else None
             if conversation is not None:
-                _end_stream(conversation, stream_loss(exc))
+                _end_stream(conversation, "segment_lost")
             raise
 
     async def _column(self, column: str, run_id: str) -> Any:

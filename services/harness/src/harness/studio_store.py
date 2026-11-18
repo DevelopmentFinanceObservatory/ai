@@ -235,8 +235,11 @@ def _assign_changed(
     (`_shallow_copy`), that changed since `base`, the snapshot taken with
     the copy: a container that compares unequal, any other value that is
     not the same object. A field `live` changed meanwhile and `work` did not
-    keeps `live`'s value."""
+    keeps `live`'s value. The telemetry span is not assigned: it moves from
+    a working copy to the live state only in `StudioStore._take_draft`."""
     for f in dataclasses.fields(ConversationState):
+        if f.name == "_telemetry_span":
+            continue
         value = getattr(work, f.name)
         before = getattr(base, f.name)
         if value != before if isinstance(value, _CONTAINERS) else value is not before:
@@ -876,8 +879,9 @@ class StudioStore:
         that saves nothing (`drop_draft`), the live state stays as loaded.
         The copy is one level deep (`_shallow_copy`), with each pending
         interrupt copied too, since an answer is marked on its entry. The
-        copy's telemetry span is the one its own turn opens; a span on the
-        live state stays the live state's to end."""
+        copy starts with no telemetry span; a `begin_turn` on it opens the
+        span of the segment its claim starts, which the save hands to the
+        live state."""
         entry = self._runtime[(principal, conversation_id)]
         assert entry.state is not None
         work = _shallow_copy(entry.state)
@@ -1165,8 +1169,11 @@ class StudioStore:
     def _take_draft(entry: _RuntimeEntry, state: ConversationState) -> None:
         """Assign each field the working copy `state` changed since `draft`
         took it to the live state, once its save committed. Nothing when
-        `state` is the live state itself. A turn the copy began
-        (`begin_turn`) brings the span of the segment its claim starts."""
+        `state` is the live state itself. A span the copy opened
+        (`begin_turn`), the span of the segment its claim starts, then moves
+        to the live state. A span the live state still holds at that moment
+        breaks the rule that every segment ends its own span before the lock
+        is free; it is logged and ended `orphaned` first."""
         if entry.draft is None or entry.draft[0] is not state:
             return
         work, base = entry.draft
@@ -1174,6 +1181,17 @@ class StudioStore:
         live = entry.state
         assert live is not None
         _assign_changed(live, work, base)
+        if work._telemetry_span is None:
+            return
+        if live._telemetry_span is not None:
+            logger.warning(
+                "studio store: conversation %s still held a segment span when a new "
+                "segment claimed it; ending it as orphaned",
+                live.conversation_id,
+            )
+            live.end_segment_span("orphaned")
+        live._telemetry_span = work._telemetry_span
+        work._telemetry_span = None
 
     async def reserve_frames(self, principal: str, conversation_id: str, segment_id: str) -> None:
         """Keep the frame numbers the live stream sends inside its
@@ -1603,14 +1621,28 @@ class StudioStore:
         the timeout above) is logged, each as what it is, and swallowed. The
         segment then expires by its own TTL, which is what makes it safe to
         give up here. Returns how the segment ended (`SegmentEnding`), which
-        names the status its span ends with. A caller that must know it even
-        when cancelled runs this as a task of its own and reads the task's
-        result (`harness.studio.StudioRunner._locked`).
+        names the status its span ends with.
         """
+        return await _run_to_completion(
+            self.start_release(principal, conversation_id, segment_id, timeout=timeout)
+        )
+
+    def start_release(
+        self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0
+    ) -> asyncio.Future[SegmentEnding]:
+        """`release`'s save, started as a task of its own and returned, for a
+        caller that must read how the segment ended even when it is
+        cancelled while it waits: it awaits the task through
+        `_run_to_completion` and reads the task's result
+        (`harness.studio.StudioRunner._locked`). A conversation this instance
+        holds no state for has nothing to save, and its future is already
+        done with `saved`."""
         entry = self._runtime.get((principal, conversation_id))
         if entry is None or entry.state is None:
-            return "saved"
-        return await _run_to_completion(
+            done: asyncio.Future[SegmentEnding] = asyncio.get_running_loop().create_future()
+            done.set_result("saved")
+            return done
+        return asyncio.ensure_future(
             self._save_release(entry.state, principal, conversation_id, segment_id, timeout=timeout)
         )
 

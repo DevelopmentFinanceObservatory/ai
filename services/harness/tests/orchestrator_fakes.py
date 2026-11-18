@@ -52,7 +52,7 @@ from harness.scripted import (
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.settings import Settings
 from harness.studio import StudioRunner, create_studio_router
-from harness.studio_state import make_recall_part
+from harness.studio_state import make_recall_part, make_remove_cards
 from harness.studio_store import StudioStore
 from harness.studio_translate import _node_name
 from harness.tool_contracts import ResolverError, resolver_digest
@@ -504,6 +504,7 @@ def orchestrator_app(
                 executor=recorder,
                 surface=surface_recorder,
                 recall_part=make_recall_part(store),
+                remove_cards=make_remove_cards(store),
             ),
         ).model_copy(update={"model": model})
         return create_root_workflow(
