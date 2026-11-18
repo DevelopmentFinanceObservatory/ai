@@ -26,10 +26,9 @@ import re
 import uuid
 from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from common.telemetry import EventLevel, end_turn_span, start_turn_span, use_turn_span
 from compiler.sources import alternative_definitions, source_from_spec_block
@@ -553,6 +552,11 @@ class ConversationState:
     # as `changed_from` for a choice that holds another label now.
     turn_choice_baseline: dict[str, str] = field(default_factory=dict)
     turn_recorded: bool = False
+    # Whether `close_turn` recorded the turn during the segment this
+    # instance claimed last (`StudioStore.claim_segment` resets it). That
+    # segment's own ending is then decided, and a Stop read after it changes
+    # nothing (`harness.studio._StreamEnding.stop_applies`). Not durable.
+    segment_closed_turn: bool = field(default=False, compare=False)
     # This instance's telemetry span for the turn's current segment, on the
     # turn's `trace_id`: opened by `begin_turn` or `open_segment_span`, and
     # ended once when the segment ends on this instance (`end_segment_span`),
@@ -844,7 +848,10 @@ class ConversationState:
         basis_line: str | None = None,
     ) -> None:
         """Append the turn's record, once -- the resume protocol can end a
-        turn from more than one code path. The segment's telemetry span ends
+        turn from more than one code path -- and mark the running segment as
+        the one that recorded it (`segment_closed_turn`). A turn recorded
+        with an `error` drops its pending interrupts: no pause is left to
+        answer, so `/interrupt` answers 404. The segment's telemetry span ends
         when the segment does (`end_segment_span`), with the record's
         message and reply as its input and output.
 
@@ -857,6 +864,9 @@ class ConversationState:
         if self.turn_recorded:
             return
         self.turn_recorded = True
+        self.segment_closed_turn = True
+        if error:
+            self.pending.clear()
         record: dict[str, Any] = {
             "user": self.turn_user_message,
             "assistant": final_text,
@@ -1204,6 +1214,7 @@ def make_canvas_cards(store: StudioStore) -> Any:
 # (`segment_lost`), or the database stayed unreachable until the lease's
 # deadline (`database_unavailable`).
 type StreamLoss = Literal["segment_lost", "database_unavailable"]
+STREAM_LOSSES: tuple[StreamLoss, ...] = get_args(StreamLoss.__value__)
 
 # The span statuses that are not failures, and the level each ends at
 # (`span_level`).
@@ -1272,7 +1283,14 @@ def span_level(status: str) -> EventLevel:
     |                              |             |                        |         | when        |
     |                              |             |                        |         | unsaved     |
     | Frames end cancelled, the    | error       | `failed`               | ERROR   | the code    |
-    | segment's task uncancelled   |             |                        |         |             |
+    | segment's task uncancelled,  |             |                        |         |             |
+    | no ending frame sent (a      |             |                        |         |             |
+    | pause left unsent included)  |             |                        |         |             |
+    | The same, `done` recorded    | error       | `failed`               | ERROR   | `done`      |
+    | and unsent, release saves    |             |                        |         |             |
+    | The same after the pause     | pause       | `paused`               | DEFAULT | `paused`    |
+    | frame                        |             |                        |         |             |
+    | The same after `done`        | `done`      | `done`                 | DEFAULT | `done`      |
     | Client gone mid-run, while   | none        | `disconnected`         | WARNING | `cancelled` |
     | waiting or at a frame        |             |                        |         |             |
     | Client gone after the pause  | pause       | `paused`               | DEFAULT | `paused`    |
@@ -1296,32 +1314,6 @@ def span_level(status: str) -> EventLevel:
     | (`record_closed_turn_span`)  |             |                        |         |             |
     """
     return _SPAN_STATUS_LEVELS.get(status, "ERROR")
-
-
-@dataclass
-class EndingMark:
-    """Whether the running segment's own frames have decided how its stream
-    ends: they closed the turn on their way to `done` or a stream-fatal
-    frame. Set by `mark_segment_ending` and nowhere else, and read by
-    `harness.studio.StudioRunner._locked`, which ignores a Stop once it is
-    set."""
-
-    decided: bool = False
-
-
-# The running segment's `EndingMark`, set by `harness.studio.StudioRunner._locked`
-# for the frames it pulls.
-segment_ending: ContextVar[EndingMark | None] = ContextVar("segment_ending", default=None)
-
-
-def mark_segment_ending() -> None:
-    """Record that the running segment's frames decided how its stream
-    ends (`EndingMark`). Called where they close the turn: the translator's
-    finish, `harness.studio_translate._stream_fatal`, an Edit Card stream's
-    close, a rejected plan's stream, and a segment whose frames failed."""
-    mark = segment_ending.get()
-    if mark is not None:
-        mark.decided = True
 
 
 def stream_loss(exc: SegmentLost | DatabaseUnavailable) -> StreamLoss:

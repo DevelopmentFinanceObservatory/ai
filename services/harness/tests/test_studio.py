@@ -9964,35 +9964,33 @@ async def test_a_stop_read_as_the_client_leaves_an_unsent_pause_closes_the_turn(
     assert not conversation.awaiting_answer
 
 
-async def test_a_stop_ends_a_resumed_segment_of_a_turn_already_recorded(
-    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The graph failed after the pause frame, so the turn is recorded while
-    its plan stays answerable. `/interrupt` resumes it, and a Stop mid-step
-    still ends that segment on `cancelled`: its own frames decided no
-    ending."""
-    hanging = _HangingSurface()
-    app = _app(*_plan(), tool_surface=hanging)
-    store = app.state.studio.store
-    async with _client(app) as client:
-        plan = _frame(await _stream(client, "/api/studio/turn", _turn_body("q")), "plan.proposed")
-        live = store.current(PRINCIPAL, CONVERSATION)
-        assert live is not None
-        live.close_turn(final_text="", error="capability_unavailable")
-        await store.save(PRINCIPAL, CONVERSATION)
-        assert live.turn_recorded and live.awaiting_answer
-        ended = _recording_span_ends(monkeypatch)
-        resumed = asyncio.ensure_future(
-            _stream(
-                client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
-            )
-        )
-        await asyncio.wait_for(hanging.entered.wait(), timeout=5)
-        await client.post("/api/studio/cancel", json=_cancel_body(), headers=AUTH)
-        frames = await asyncio.wait_for(resumed, timeout=5)
+async def test_a_turn_that_fails_after_its_plan_leaves_no_plan_to_answer() -> None:
+    """The graph fails after the plan frame went out. The turn is recorded
+    with the error and its plan is gone with it: the answer is a 404, as
+    for any closed turn, and the next `/turn` streams."""
+    app = _app(*_plan(), _text("Next."))
+    studio = app.state.studio
+    real_run = studio.runner.run_async
 
-    assert _ending_frame(frames) == "cancelled"
-    assert ended == [("cancelled", "WARNING")]
+    async def fails_after_the_plan(**kwargs: Any) -> Any:
+        async for event in real_run(**kwargs):
+            yield event
+        raise RuntimeError("the graph failed after the plan")
+
+    async with _client(app) as client:
+        studio.runner.run_async = fails_after_the_plan
+        first = await _stream(client, "/api/studio/turn", _turn_body("q"))
+        studio.runner.run_async = real_run
+        assert _events(first)[-2:] == ["plan.proposed", "error"]
+        answer = await client.post(
+            "/api/studio/interrupt",
+            json=_interrupt_body(_frame(first, "plan.proposed")["interrupt_id"], "approve"),
+            headers=AUTH,
+        )
+        assert answer.status_code == 404
+        second = await _stream(client, "/api/studio/turn", _turn_body("next"))
+
+    assert _events(second)[-1] == "done"
 
 
 async def test_a_stop_taken_holds_when_the_frames_record_the_turn_as_they_unwind(
@@ -10010,7 +10008,6 @@ async def test_a_stop_taken_holds_when_the_frames_record_the_turn_as_they_unwind
             await asyncio.Event().wait()
         finally:
             conversation.close_turn(final_text="one")
-            studio_state_module.mark_segment_ending()
 
     stream = _segment_sse(studio, conversation, segment_id, segment(), heartbeat_seconds=0.02)
     sent = [await anext(stream)]
@@ -10028,17 +10025,16 @@ async def test_a_stop_taken_holds_when_the_frames_record_the_turn_as_they_unwind
 @pytest.mark.parametrize(
     ("before", "frames", "status", "stored"),
     [
-        pytest.param("done", ["done"], "done", "done", id="after-done"),
+        pytest.param("nothing", ["error"], "failed", "capability_unavailable", id="nothing-sent"),
         pytest.param(
-            "pause",
-            ["plan.proposed", "error"],
-            "failed",
-            "cancelled",
-            id="after-a-pause-frame",
+            "pause", ["error"], "failed", "capability_unavailable", id="a-pause-left-unsent"
         ),
+        pytest.param("done", ["error"], "failed", "done", id="done-recorded-unsent"),
+        pytest.param("pause", ["plan.proposed"], "paused", "paused", id="after-a-pause-frame"),
+        pytest.param("done", ["done"], "done", "done", id="after-done"),
     ],
 )
-async def test_frames_that_end_cancelled_follow_the_ending_already_sent(
+async def test_frames_that_end_cancelled_follow_the_span_table(
     otlp_spans: InMemorySpanExporter,
     monkeypatch: pytest.MonkeyPatch,
     before: str,
@@ -10046,29 +10042,36 @@ async def test_frames_that_end_cancelled_follow_the_ending_already_sent(
     status: str,
     stored: str,
 ) -> None:
-    """The frames end with a cancellation of their own after an ending
-    frame went out. After `done`, nothing more is sent and the span keeps
-    `done`. After a pause frame, the turn closes as a Stop closes it, with
-    no interrupt left to answer, before the stream-fatal frame."""
+    """The frames end with a cancellation of their own, the segment's task
+    uncancelled, after recording `before` and sending `frames[:-1]`, or
+    `frames` when it ends on what they sent (`span_level`'s table). An
+    ending frame sent stands, and nothing follows it. Otherwise a
+    stream-fatal frame closes the turn, with no plan left to answer, or
+    follows a `done` already recorded."""
     studio, conversation, segment_id = await _claimed_segment()
     ended = _recording_span_ends(monkeypatch)
+    sends = frames[0] != "error"
 
     async def segment() -> Any:
         if before == "done":
             conversation.close_turn(final_text="Hello.")
-            yield Done(event="done", seq=conversation.next_seq(), trace_id=conversation.trace_id)
-        else:
+            if sends:
+                yield Done(
+                    event="done", seq=conversation.next_seq(), trace_id=conversation.trace_id
+                )
+        elif before == "pause":
             conversation.pending["int_1"] = _PendingInterrupt(adk_id="adk_1", kind="plan")
-            yield PlanProposed(
-                event="plan.proposed",
-                seq=conversation.next_seq(),
-                interrupt_id="int_1",
-                plan_version_id="plan_1",
-                version=1,
-                title="Research plan",
-                steps=[],
-                actions=[],
-            )
+            if sends:
+                yield PlanProposed(
+                    event="plan.proposed",
+                    seq=conversation.next_seq(),
+                    interrupt_id="int_1",
+                    plan_version_id="plan_1",
+                    version=1,
+                    title="Research plan",
+                    steps=[],
+                    actions=[],
+                )
         raise asyncio.CancelledError
 
     sent = _data_frames(
@@ -10078,7 +10081,7 @@ async def test_frames_that_end_cancelled_follow_the_ending_already_sent(
     assert [frame["event"] for frame in sent] == frames
     assert ended[-1][0] == status
     assert studio.store.stored_turn("u_a", CONVERSATION) == stored
-    assert not conversation.awaiting_answer
+    assert conversation.awaiting_answer == (status == "paused")
 
 
 async def test_an_offered_loss_frame_keeps_blocking_a_stop_when_withdrawn() -> None:
@@ -10099,11 +10102,12 @@ async def test_an_offered_loss_frame_keeps_blocking_a_stop_when_withdrawn() -> N
     ending.offer(frame, "segment_lost")
     ending.withdraw()
     ending.read_stop("cancelled")
-    assert not ending.stop_applies()
+    conversation = ConversationState(conversation_id=CONVERSATION)
+    assert not ending.stop_applies(conversation)
 
     ending.offer(frame, "transient_unavailable")
     ending.withdraw()
-    assert ending.stop_applies()
+    assert ending.stop_applies(conversation)
 
 
 async def test_a_stop_ends_the_stream_on_its_frame_when_closing_the_frames_raises(

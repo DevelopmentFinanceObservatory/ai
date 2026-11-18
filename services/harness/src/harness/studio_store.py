@@ -195,6 +195,7 @@ _PROCESS_LOCAL_FIELDS = frozenset(
         "switch_stop",
         "_telemetry_span",
         "_removal_unreported",
+        "segment_closed_turn",
         "turn_specs",
         "turn_specs_settled",
     }
@@ -1094,6 +1095,7 @@ class StudioStore:
         live = target.segment
         if live is not None and live.expires_at > entry.read_at:
             raise SegmentBusy(retry_after_seconds=math.ceil(live.expires_at - entry.read_at))
+        target.segment_closed_turn = False
         segment = Segment(
             id=_wire_id("seg"), owner=_OWNER_ID, expires_at=entry.read_at + SEGMENT_TTL_S
         )
