@@ -221,20 +221,21 @@ appears as one output message per chunk, and a thought summary appears as
 unlabelled text. Everything above is sent unmasked. `LANGFUSE_SAMPLE_RATE`
 and a Langfuse `mask` function limit it.
 
-One studio turn is one trace. `ConversationState.begin_turn` opens a `turn`
-span whose trace id is derived from the turn's wire `trace_id`, and
-`close_turn` ends it, so it stays open across a pause for approval, including
-when the client disconnects at the pause. A disconnect while the turn runs
-leaves the turn open for the next request to carry on and ends this instance's
-`turn` span at level `WARNING` as `disconnected`; the segment that carries the
-turn on opens a `turn` span on the same trace. The `/turn` stream and the `/interrupt` stream that resumes
-the turn are separate requests, and each runs inside that span
-(`ConversationState.in_turn_span`), so the
-resumed segment's agent, MCP and `record_event` spans nest under the same `turn`
-span. `close_turn` gives the `turn` span the user's message as its input and
-the closing text as its output, which Langfuse shows as the trace's input and
-output. A turn closed with an error code (`cancelled`, `abandoned`, and the
-like) ends at level `ERROR` with that code as its status message.
+One studio turn is one trace, and each segment of the turn adds a `turn` span
+to it. The trace id is derived from the turn's wire `trace_id`. A segment's
+owner (`harness.studio_stream.own_segment`) opens the span when it starts and
+ends it once, when the stream ends. The `/turn` stream and the `/interrupt`
+stream that resumes the turn are separate requests, so a turn that pauses has
+one span per segment, and each segment's agent, MCP and `record_event` spans
+nest under its own `turn` span on the shared trace. The span's status is the
+way the stream ended (`done`, `paused`, `failed`, `unclosed`, `cancelled`,
+`left` for a client that went while the turn ran, `lost`, or `unsaved`), with
+`dfo.saved` and `dfo.client_gone` as attributes. A turn the client leaves
+stays open for the next request to carry on. The span takes the turn's user
+message as its input and the reply as its output, which Langfuse shows as the
+trace's input and output. `done` and `paused` end at the default level,
+`failed`, `unclosed` and `unsaved` at `ERROR`, and `cancelled`, `left` and
+`lost` at `WARNING`.
 
 Every studio stream calls `common.telemetry.flush_telemetry` before its
 response ends, so queued spans export while the request still has CPU.

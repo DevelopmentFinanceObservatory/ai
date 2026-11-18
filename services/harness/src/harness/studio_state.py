@@ -12,7 +12,7 @@ composition changes: `_apply_operations` for the user's mutations,
 mechanism that keeps at most one instance streaming a conversation at a
 time: `StudioStore.claim_segment` takes it, `renew` pushes its TTL forward,
 `checkpoint` writes the rest of the conversation's state to storage
-mid-stream (and at end of segment, through `release`), and
+mid-stream (and at end of segment, in `close_segment`'s one transaction), and
 `request_cancel` signals it from any instance. See `Segment`,
 `SegmentBusy`, `SegmentLost` and `DatabaseUnavailable`.
 """
@@ -444,7 +444,8 @@ class ConversationState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     turn_index: int = 0
     # The next frame number. A segment's claim sets it to the start of the
-    # block it reserved (`StudioStore.save`), and checkpoints store it.
+    # block it reserved (`StudioStore.claim_segment`), and the stream's
+    # writes store it.
     seq: int = 0
     trace_id: str = ""
     pending: dict[str, _PendingInterrupt] = field(default_factory=dict)
@@ -453,7 +454,7 @@ class ConversationState:
     composition: CompositionManifest | None = None
     # The durable lease on this conversation's active stream. None when no
     # segment is live. Set by `claim_segment`, refreshed by `renew`,
-    # cleared by `release`; a `checkpoint` writes whatever value it holds
+    # cleared by `close_segment`; a `checkpoint` writes whatever value it holds
     # like any other durable field.
     segment: Segment | None = None
     # Set while a stream runs on this instance: setting it makes the

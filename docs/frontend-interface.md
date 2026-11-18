@@ -378,7 +378,9 @@ The server stops the conversation's active stream and returns HTTP 204.
 The active stream may be running on a different server instance than the
 one that answers this request; the server finds it there too and stops
 it within about 5 seconds. The stopped stream ends with an `error` frame
-whose code is `cancelled`. A stream running a plan-card `switch` is the
+whose code is `cancelled`; it is the stream's only ending frame, so a Stop
+that lands as the turn pauses ends the stream on `cancelled` with no
+`plan.proposed` or `elicitation.request` before it. A stream running a plan-card `switch` is the
 exception: `/cancel` stops the switch, and the stream ends on a
 `plan.proposed` re-offering the unchanged plan with a fresh
 `interrupt_id` and `switch_failed.code` `switch_cancelled`. Keep reading
@@ -628,7 +630,7 @@ the answer before it starts resuming, so retrying the identical body is
 safe. While the resumed stream from your first attempt is still running,
 on any instance, the retry answers 409 `transient_unavailable` with
 `retry_after_seconds`; once that stream is gone, the retry resumes the
-turn again on a fresh stream, whose `seq` starts in the 256-number block
+turn again on a fresh stream, whose `seq` starts in a block of 2^20 numbers
 after every block the dead stream reserved, so above anything it sent.
 Retrying with a different
 decision, payload or answers than the one that actually resumed answers 409

@@ -1130,7 +1130,7 @@ async def _stop_open_turn(
     turn, the lease on record is cleared: it has lapsed, since
     `request_cancel` found no live segment and the save refuses if one went
     live since, and clearing it fences out a stream still running under it,
-    whose checkpoint is fenced on the lease id alone.
+    whose writes are fenced on the lease id alone.
 
     Raises:
         _ClaimLost: another request claimed the conversation, or moved its
@@ -1297,7 +1297,7 @@ async def _unclaimed(
 
 
 # How long, by wall time, `/cancel` waits on a lock held with no live lease
-# (a request before its claim save, or a stream after its release) before it
+# (a request before its claim save, or a stream after its closing write) before it
 # answers a retryable 503.
 CANCEL_LOCK_WAIT_S = 5.0
 
@@ -1658,8 +1658,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         names the turn that lease holds, the row's turn index
         (`harness.studio_store.StopState`), and is live until that turn
         closes, whatever the status; no write marks it read. The holder of
-        the lease acts on it: its heartbeat while it drives the turn, the
-        release of its lease once the drive has returned. When the holder
+        the lease acts on it: its heartbeat while it drives the turn, its
+        closing write (`StudioStore.close_segment`) once the drive has
+        returned. Every stream ends on one frame, sent after that write, so a
+        Stop the closing write acts on ends the stream on `cancelled` alone.
+        When the holder
         cannot, the next claim does: a claim that starts or resumes work
         refuses while a Stop is live for the open turn (`StopPending`), so
         `/turn` and `/interrupt` first close that turn `cancelled` under a
@@ -1676,17 +1679,16 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         | Lease live, a node running | heartbeat | `cancelled` | `cancelled` frame |
         | Lease live, `StopScope` armed, first Stop | the scope; the re-offer's pause write records it taken | paused on the re-offered plan | `plan.proposed`, whose card can be answered |
         | The same, a second Stop before the pause write | heartbeat | `cancelled` | `cancelled` frame |
-        | The same, a second Stop after the pause write, lease not yet released | the release, under the lease it keeps | `cancelled`, pending cleared | `cancelled` frame after `plan.proposed` |
-        | The scope took the first Stop, then the client left before the pause write | the release, under the lease it keeps | `cancelled` | nothing more |
+        | The same, a second Stop after the pause write, before the closing write | the closing write | `cancelled`, pending cleared | `cancelled` frame in place of `plan.proposed` |
+        | The scope took the first Stop, then the client left before the pause write | the closing write | `cancelled` | nothing more |
         | The scope took the first Stop, and the pause write failed | the drive, which closes the turn on the failure | `failed` | `error` frame |
-        | The scope took the first Stop, and its node ended the turn or left on an edge that is not a stop edge, or the node after it did not pause | the drive, in place of that write; when that close fails, the release or the next claimant | `cancelled` | `cancelled` frame |
+        | The scope took the first Stop, and its node ended the turn or left on an edge that is not a stop edge, or the node after it did not pause | the drive, in place of that write; when that close fails, the closing write or the next claimant | `cancelled` | `cancelled` frame |
         | Lease live, pause committed, the drive in after-commit work | heartbeat, `_settle` | `cancelled` | `cancelled` frame |
-        | Lease live, the segment returned paused, lease not yet released | the release, under the lease it keeps | `cancelled`, pending cleared | `cancelled` frame after the pause frame, while the stream is open; another request meanwhile answers 409 |
-        | Lease live, turn closed, lease not yet released | nobody: the close ended the Stop | unchanged | nothing more |
+        | Lease live, the segment returned paused, before the closing write | the closing write | `cancelled`, pending cleared | `cancelled` frame in place of the pause frame |
+        | Lease live, turn closed, before the closing write | nobody: the close ended the Stop | unchanged | nothing more |
         | `/turn` claimed, before it abandons the turn left open | the new turn's heartbeat | the old turn `abandoned`, the new `cancelled` | `cancelled` frame |
         | Lease live, an Edit Card stream | its heartbeat | no turn is open | `cancelled` frame |
-        | The release kept the lease and closing failed, such as ending the turn's runs | the next claimant, as the lease is dropped | `cancelled` | `cancelled` frame; the next `/turn` streams, an `/interrupt` answers 404 |
-        | The release's write failed or timed out | the next claimant, once the lease lapses | `cancelled` | nothing more; the next `/turn` streams, an `/interrupt` answers 404 |
+        | The closing write failed or timed out, such as when ending the turn's runs fails | the next claimant, once the lease lapses (up to the lease's 45 s expiry; a request before then answers a retryable 409) | `cancelled` | `cancelled` frame when the work ended on the Stop, `transient_unavailable` when it had paused; the next `/turn` streams, an `/interrupt` answers 404 |
         | The same, and the next `/turn`'s close of the turn is refused | the `/turn` retried after its 409 | `cancelled` | nothing more; that `/turn` answers a retryable 409 and starts nothing, and its retry streams |
         | A lapsed lease, after the next claimant's check and before its claim save | that claimant, whose save refuses | `cancelled` | nothing more; that `/turn` answers a retryable 409 and its retry streams, an `/interrupt` answers 404 |
         | No live lease, turn paused | this route, under the lock | `cancelled`, pending cleared | 204 |
@@ -1707,13 +1709,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         beat; another instance's reads it within `HEARTBEAT_INTERVAL_S`. A
         Stop that commits after the segment's last renewal is read by the
         segment's closing write under the row lock, which closes an open
-        turn `cancelled` in the same transaction
-        (`StudioStore.close_segment`). This route answers 204 without
-        waiting for either.
+        turn `cancelled` in the same transaction. This route answers 204
+        without waiting for either.
 
         A request on this instance that holds the lock with no lease live (a
         `/turn` or `/interrupt` before its claim save, or a stream after its
-        release) is waited on: the Stop is recorded once the claim lands,
+        closing write) is waited on: the Stop is recorded once the claim lands,
         or taken under the lock once it is free, and a retryable 503 is
         answered after `CANCEL_LOCK_WAIT_S` of wall time.
 
@@ -1765,7 +1766,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 continue
             # No live lease: take the lock, or, while a request on this
             # instance holds it (a `/turn` or `/interrupt` before its claim
-            # save, or a stream after its release), wait for its claim to
+            # save, or a stream after its closing write), wait for its claim to
             # commit or for the lock, then decide again. Past the deadline
             # a free lock is still taken.
             if await _lock_or_claim(lock, claimed, timeout=deadline - loop.time()):

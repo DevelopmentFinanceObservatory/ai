@@ -711,9 +711,10 @@ async def run_segment[E](
     to (a switch's offer, `Node.stop_edges`); a turn that leaves another
     way, ends, or goes further without it closes `cancelled` (`drive`).
     Until then the Stop stays live, and a client that leaves first leaves
-    it to the release of the lease. Any other Stop cancels the node, leaves
-    no task of the segment running, and closes the turn `cancelled`. One a renewal reads after the drive
-    finished is left to the segment's closing write, which acts on a Stop
+    it to the segment's closing write. Any other Stop cancels the node,
+    leaves no task of the segment running, and closes the turn `cancelled`.
+    One a renewal reads after the drive finished is left to the segment's
+    closing write, which acts on a Stop
     still live (`StudioStore.close_segment`). A renewal that finds the lease
     taken, or that keeps failing until the lease's deadline
     (`StudioStore.lease_deadline`, dated from the claim or the last renewal
@@ -785,7 +786,7 @@ async def run_segment[E](
                 continue
             if task.done():
                 # The turn's last write landed before this renewal read the
-                # Stop: the release of the lease acts on it.
+                # Stop: the segment's closing write acts on it.
                 return
             end(Outcome.CANCELLED)
             return

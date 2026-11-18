@@ -69,12 +69,13 @@ conversation's row is claimed by `/turn` and by `/interrupt`'s
 resume, expires 45 s after it is last renewed, and is renewed by its
 owner every 5 s; a second stream on a live segment gets the 409
 `TRANSIENT_UNAVAILABLE` below with `retry_after_seconds` set to the
-lease's remaining time. The owning instance checkpoints the full
-conversation state into its row before any frame that says "paused"
-(`plan.proposed`, `elicitation.request`) or "done" leaves the wire; a
-checkpoint that fails ends the stream with a stream-fatal
+lease's remaining time. The owning instance saves the full conversation
+state into its row, and clears the lease, in one write before any frame
+that says "paused" (`plan.proposed`, `elicitation.request`) or "done"
+leaves the wire; a write that fails ends the stream with a stream-fatal
 `transient_unavailable` error in that frame's place, so any success
-frame the client sees already matches the stored conversation. The
+frame the client sees already matches the stored conversation. Every
+stream ends on exactly one ending frame, which is its last. The
 database is a deployment setting (`DATABASE_URL` or the `SESSION_STORE_*`
 family, see `services/harness/README.md`). The harness refuses to start
 without it. A stalled owner that lost its segment can no longer write the
@@ -122,10 +123,13 @@ Models: `TurnRequest`, `InterruptResponse`, `CompositionMutation`,
   the stream within one heartbeat interval (5 s). Idempotent; returns
   204\. The aborted stream, if still open, ends with a stream-fatal `error`
   frame whose code is `cancelled` (a studio-side addition to the error
-  grammar); no `done` follows. A Stop also ends a calculation the turn
+  grammar); no `done` follows. A Stop that lands after the turn's pause
+  was stored but before the stream ended ends the stream on `cancelled`
+  alone, with no `plan.proposed` or `elicitation.request` before it. A Stop also ends a calculation the turn
   is running, so no later turn carries it on. Client disconnect (closing
   the SSE response) stops the running segment when the server observes it
-  (the ASGI server cancels the response task) but leaves the turn and its
+  (the response's ASGI call ends and the stream's owner cancels the work)
+  but leaves the turn and its
   calculations unfinished: the next `turn.request` carries an unfinished
   calculation on and lists its results, and a retried
   `interrupt.response` with the same answer carries the turn on where it
@@ -210,11 +214,11 @@ resume itself retries.
 ### `seq` (delta 2)
 
 `seq` increases **per turn**, across resumed segments. Each segment of a
-turn reserves a block of 256 numbers (a new turn numbers from 0), and a
-resumed segment, whether it follows a pause or a dead stream, starts in
-the block after every one reserved before. The first frame after a resume
-therefore carries a number past the paused segment's last, with a gap
-between them. Gaps are legal, and `seq` always orders frames. Use it for
+turn reserves a block of 1,048,576 numbers (2^20) when it is claimed (a
+new turn numbers from 0), and a resumed segment, whether it follows a
+pause or a dead stream, starts in the block after every one reserved
+before. The first frame after a resume therefore carries a number past
+the paused segment's last, with a gap between them. Gaps are legal, and `seq` always orders frames. Use it for
 ordering only.
 
 ### Heartbeats (delta 3)
