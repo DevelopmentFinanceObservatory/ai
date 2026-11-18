@@ -9,10 +9,10 @@ from typing import Any
 import httpx2
 import pytest
 from data_mcp import client_holder, node_lookup
+from data_mcp.dcid import DCID_MAX_LENGTH
 from data_mcp.describe_tool import (
     DESCRIBE_ID_CAP,
     _cap_and_grammar_refusal,
-    _strip_dcid_prefix,
     describe,
 )
 from data_mcp.server import mcp
@@ -128,7 +128,7 @@ def test_cap_and_grammar_refusal_rejects_an_over_cap_ids_list() -> None:
 # 4. A malformed id refuses request_invalid and issues no upstream request.
 
 
-@pytest.mark.parametrize("malformed", ["", "a b", "/leading"])
+@pytest.mark.parametrize("malformed", ["", "a b", "/leading", "a" * (DCID_MAX_LENGTH + 1)])
 async def test_malformed_id_refuses_request_invalid_with_no_upstream_call(
     malformed: str,
 ) -> None:
@@ -379,13 +379,6 @@ def test_docstring_says_ids_not_dcids_per_call() -> None:
 
 # 17. A leading `dcid:` prefix is stripped before grammar validation and
 # dispatch, matching the exact form `get_data`'s own errors quote.
-
-
-def test_strip_dcid_prefix_removes_only_the_leading_prefix() -> None:
-    assert _strip_dcid_prefix(["dcid:sdg/DC_TOF_HLTHL", "country/JPN"]) == [
-        "sdg/DC_TOF_HLTHL",
-        "country/JPN",
-    ]
 
 
 async def test_leading_dcid_prefix_is_stripped_before_dispatch() -> None:

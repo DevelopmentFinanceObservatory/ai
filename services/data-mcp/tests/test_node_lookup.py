@@ -13,6 +13,7 @@ import httpx2
 import pytest
 from data_mcp import client_holder, node_lookup
 from data_mcp.client import UpstreamClient
+from data_mcp.dcid import bare_dcid
 from data_mcp.errors import UpstreamError
 from data_mcp.graph_wire import (
     Constraint,
@@ -168,6 +169,34 @@ async def test_more_dcids_than_one_batch_takes_split_into_batches_of_fifty() -> 
 
     assert sorted(len(batch) for batch in requests) == [20, 50, 50]
     assert list(outcomes) == dcids
+
+
+@pytest.mark.parametrize(
+    ("refs", "posted"),
+    [
+        pytest.param(
+            ["country/KEN", "humanitarian aid", "dcid:country/DEU", "country/DEU", "a" * 513],
+            [["country/KEN", "country/DEU"]],
+            id="mixed",
+        ),
+        pytest.param(["humanitarian aid"], [], id="none-is-a-dcid"),
+    ],
+)
+async def test_refs_that_are_not_dcids_are_never_posted_and_answer_not_held(
+    refs: list[str], posted: list[list[str]]
+) -> None:
+    requests: list[list[str]] = []
+
+    outcomes = await _describe(_batch_handler(_country, requests), refs)
+
+    assert requests == posted
+    assert list(outcomes) == refs
+    sent = {dcid for batch in posted for dcid in batch}
+    for ref in refs:
+        if bare_dcid(ref) in sent:
+            assert isinstance(outcomes[ref], CountryNode)
+        else:
+            assert outcomes[ref] == NotHeldEntry(ref=ref, status="not_held")
 
 
 # 5. Request path, method, body and span template.

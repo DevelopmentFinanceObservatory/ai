@@ -445,12 +445,12 @@ Sleep = Callable[[float], Awaitable[None]]
 # already supplies its own `surface`/`executor`/`resolver` in place of the real ones.
 FetchSeriesStats = Callable[[Manifest], Awaitable[pa.Table | None]]
 
-# The names the graph gives each of some entity refs, keyed by ref; a ref it
-# names none for is absent. Injectable as `FetchSeriesStats` is. One that
+# The names the graph gives each of some entity dcids, keyed by dcid (the entity
+# ref without its `dcid:` marker); a dcid it names none for is absent. Injectable as `FetchSeriesStats` is. One that
 # raises or runs past its deadline names nothing (`_series_labels`).
 LabelRefs = Callable[[Sequence[str]], Awaitable[Mapping[str, str]]]
 
-# The most entity refs one evidence check asks names for: two requests of
+# The most entity dcids one evidence check asks names for: two requests of
 # `describe_nodes`' 50. The largest short series' come first
 # (`unlabelled_series_refs`), and an answer names three of them.
 LABELLED_REFS = 100
@@ -590,8 +590,8 @@ async def default_fetch_series_stats(manifest: Manifest) -> pa.Table | None:
 
 
 async def default_label_refs(refs: Sequence[str]) -> Mapping[str, str]:
-    """The names the graph gives `refs`, through `data_mcp.node_lookup.describe_nodes`:
-    `execute_approved_plan`'s default `label_refs`."""
+    """The names the graph gives `refs`, through `data_mcp.node_lookup.describe_nodes`, keyed
+    by the ref as given: `execute_approved_plan`'s default `label_refs`."""
     nodes = await describe_nodes(refs)
     return {ref: label for ref, node in nodes.items() if (label := getattr(node, "label", None))}
 
