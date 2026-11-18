@@ -103,7 +103,7 @@ from harness.studio_store import (
     StudioStore,
     _deserialize_pending,
 )
-from harness.studio_stream import Finish, WorkEnd, ending
+from harness.studio_stream import Finish, LockHold, WorkEnd, ending
 from harness.studio_translate import (
     STREAM_RETRY_AFTER_S,
     _RecordingExecutor,
@@ -8783,8 +8783,8 @@ async def test_the_lock_is_held_from_the_route_not_from_the_first_frame() -> Non
     store = StudioStore(_engine())
 
     first = await _acquire_or_conflict(store, "u_a", CONVERSATION)
-    assert isinstance(first, asyncio.Lock)
-    assert first.locked()
+    assert isinstance(first, LockHold)
+    assert first.lock.locked()
 
     second = await _acquire_or_conflict(store, "u_a", CONVERSATION)
     assert isinstance(second, JSONResponse)
@@ -8792,12 +8792,12 @@ async def test_the_lock_is_held_from_the_route_not_from_the_first_frame() -> Non
     assert json.loads(second.body)["error"] == "transient_unavailable"
 
     other = await _acquire_or_conflict(store, "u_a", "conv_01test0009")
-    assert isinstance(other, asyncio.Lock)
-    assert other is not first
+    assert isinstance(other, LockHold)
+    assert other.lock is not first.lock
 
     first.release()
     third = await _acquire_or_conflict(store, "u_a", CONVERSATION)
-    assert third is first
+    assert isinstance(third, LockHold) and third.lock is first.lock
 
 
 # --- conversation history: turn records and digest ----------------------------
@@ -9970,6 +9970,133 @@ async def test_a_request_cancelled_while_it_drops_its_claim_still_releases_the_l
     assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
     stored = await store.load(PRINCIPAL, CONVERSATION)
     assert stored is not None and stored.segment is None
+
+
+async def test_a_claim_whose_span_end_raises_still_releases_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/turn` claims, then its turn cannot be opened. Recording the span of
+    the claim it lets go of raises; the lock is released all the same."""
+    app = _app(_text("Hello."))
+    studio = app.state.studio
+
+    async def unavailable(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the turn cannot be opened")
+
+    def broken_record(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("telemetry is down")
+
+    monkeypatch.setattr(studio.turns, "open_turn", unavailable)
+    monkeypatch.setattr(studio_module, "record_unstreamed_span", broken_record)
+
+    with pytest.raises(RuntimeError, match="telemetry is down"):
+        await _turn_endpoint(studio)(
+            TurnRequest.model_validate(_turn_body("hi")), authorization=AUTH["Authorization"]
+        )
+
+    assert not studio.store.lock_for(PRINCIPAL, CONVERSATION).locked()
+
+
+async def test_a_request_cancelled_after_it_let_go_leaves_the_next_request_s_claim_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `/turn` refused as busy lets go of the lock, then waits on the
+    export of the span it recorded. Request B takes the lock and a working
+    copy, and A is cancelled during that export: B keeps both."""
+    app = _app(_text("Hello."))
+    studio = app.state.studio
+    store = studio.store
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("hi"))
+    other = StudioStore(_engine())
+    await other.load(PRINCIPAL, CONVERSATION)
+    await other.claim_turn_lease(PRINCIPAL, CONVERSATION)
+    flushing = asyncio.Event()
+
+    async def held_flush() -> None:
+        # Only A's first export waits; a second release by A returns.
+        if not flushing.is_set():
+            flushing.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(studio_module, "flush_telemetry", held_flush)
+    request_a = asyncio.ensure_future(
+        _turn_endpoint(studio)(
+            TurnRequest.model_validate(_turn_body("again")), authorization=AUTH["Authorization"]
+        )
+    )
+    await asyncio.wait_for(flushing.wait(), timeout=5)
+    lock = store.lock_for(PRINCIPAL, CONVERSATION)
+    assert not lock.locked()
+    await lock.acquire()
+    work_b = store.draft(PRINCIPAL, CONVERSATION)
+
+    request_a.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request_a
+
+    assert lock.locked()
+    draft = store._runtime[(PRINCIPAL, CONVERSATION)].draft
+    assert draft is not None and draft[0] is work_b
+
+
+async def test_a_turn_whose_body_never_starts_leaves_no_lock_or_lease() -> None:
+    """Under ASGI spec 2.3 Starlette reads the client's disconnect beside
+    the body, so a client already gone ends the response before the body's
+    first frame is pulled. The segment's owner runs as a task of its own
+    and still ends the segment: the lock is released, the lease cleared and
+    the turn left open, and the next `/turn`, on another instance, claims
+    and records it `abandoned`."""
+    app = _app(search_call("aid to Kenya"), resolver=_HangingResolver())
+    store = app.state.studio.store
+    body = json.dumps(_turn_body("hi")).encode()
+    received = 0
+
+    async def receive() -> dict[str, Any]:
+        nonlocal received
+        received += 1
+        if received == 1:
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        # A server's send yields to the loop, where the disconnect's
+        # cancellation lands before the body is pulled.
+        await asyncio.sleep(0)
+        sent.append(message)
+
+    path = "/api/studio/turn"
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"authorization", AUTH["Authorization"].encode()),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": ("127.0.0.1", 1),
+        "server": ("test", 80),
+    }
+    await asyncio.wait_for(app(scope, receive, send), timeout=10)
+
+    assert not any(message.get("body") for message in sent)
+    assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
+    stored = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert stored is not None and stored.segment is None and not stored.turn_recorded
+    async with _client(_app(_text("Again."))) as client:
+        again = await _stream(client, "/api/studio/turn", _turn_body("again"))
+    assert _frame(again, "done")
+    closed = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert closed is not None and closed.turns[0]["error"] == "abandoned"
 
 
 async def test_a_pause_frame_is_not_sent_when_its_closing_write_fails() -> None:

@@ -36,8 +36,8 @@ request cancels. For its segment it alone:
   once (`ending`);
 - forgets this instance's copy of the conversation when the closing write
   did not commit as far as it knows, or was not made, so the next request
-  reads the row (`StudioStore.evict`), and then frees the conversation's
-  local lock;
+  reads the row (`StudioStore.evict`), and then lets go of the request's
+  hold on the conversation's local lock (`LockHold`);
 - puts the closing frames on the channel: a `failed` line for every Activity
   line the stream left open when it ends on an `error` frame, then the
   ending frame, then the channel's end. The ending frame goes out after the
@@ -483,6 +483,25 @@ class _Events[E]:
         return self._arrived.wait()
 
 
+class LockHold:
+    """One request's hold on its conversation's process-local lock
+    (`harness.studio_store.StudioStore.lock_for`), taken by the route and
+    handed to the stream's owner with the segment. Whoever holds it lets go
+    through `release`, once: a later call does nothing, so a request that
+    let go never releases the lock another request took since.
+    `asyncio.Lock.locked()` says only that someone holds it."""
+
+    def __init__(self, lock: asyncio.Lock) -> None:
+        self.lock = lock
+        self.held = True
+
+    def release(self) -> None:
+        """Let go of the lock, unless this hold already has."""
+        if self.held:
+            self.held = False
+            self.lock.release()
+
+
 class _Gone:
     """The client left while the drive runs."""
 
@@ -779,11 +798,13 @@ async def own_segment[E, R](
     segment_id: str,
     channel: Channel,
     gone: asyncio.Event,
+    hold: LockHold,
     settle: Callable[[], Awaitable[bool]] | None = None,
 ) -> None:
-    """Own the segment `segment_id` of `conversation`, whose lease and local
-    lock the caller holds, to its end (module docstring), putting its frames
-    on `channel` and reading `gone`, the client-gone flag.
+    """Own the segment `segment_id` of `conversation`, whose lease the
+    caller holds, and `hold`, its hold on the conversation's local lock, to
+    its end (module docstring), putting its frames on `channel` and reading
+    `gone`, the client-gone flag.
 
     `settle`, when given, runs once the channel has ended and the span is
     exported. It is a wait that keeps the request open, and so its CPU, for
@@ -821,8 +842,7 @@ async def own_segment[E, R](
             segment_id,
         )
     finally:
-        if conversation.lock.locked():
-            conversation.lock.release()
+        hold.release()
         for frame in frames:
             channel.put_nowait(frame)
         channel.put_nowait(None)
@@ -883,11 +903,13 @@ def open_stream[E, R](
     principal: str,
     conversation_id: str,
     segment_id: str,
+    hold: LockHold,
     settle: Callable[[], Awaitable[bool]] | None = None,
 ) -> StudioStream:
     """Start the owner of the claimed segment `segment_id` (`own_segment`)
     and return the response that relays it. The caller holds the segment's
-    lease and the conversation's local lock, and hands both to the owner."""
+    lease and `hold` on the conversation's local lock, and hands both to the
+    owner, so it must not let go of either once this returns."""
     channel: Channel = asyncio.Queue()
     gone = asyncio.Event()
     owner = owners.start(
@@ -900,6 +922,7 @@ def open_stream[E, R](
             segment_id=segment_id,
             channel=channel,
             gone=gone,
+            hold=hold,
             settle=settle,
         )
     )
