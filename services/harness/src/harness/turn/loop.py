@@ -236,8 +236,8 @@ async def _close_on_taken_stop(
     committed (its acknowledgement lost), so the turn is read again as
     stored, as `_settle` does: a turn the store closed keeps that outcome.
     One still open, or one that cannot be read, is logged and left running
-    with the Stop live, for the release of the lease to close
-    (`StudioStore.release`); the segment ends `unclosed`, and emits no
+    with the Stop live, for the segment's closing write to close
+    (`StudioStore.close_segment`); the segment ends `unclosed`, and emits no
     `TurnFailed`."""
     try:
         segment.cursor = await store.finish(
@@ -713,8 +713,8 @@ async def run_segment[E](
     Until then the Stop stays live, and a client that leaves first leaves
     it to the release of the lease. Any other Stop cancels the node, leaves
     no task of the segment running, and closes the turn `cancelled`. One a renewal reads after the drive
-    finished is left to the release of the lease, which acts on a Stop
-    still live (`StudioStore.release`). A renewal that finds the lease
+    finished is left to the segment's closing write, which acts on a Stop
+    still live (`StudioStore.close_segment`). A renewal that finds the lease
     taken, or that keeps failing until the lease's deadline
     (`StudioStore.lease_deadline`, dated from the claim or the last renewal
     that landed), cancels the node and ends the segment `lost` without

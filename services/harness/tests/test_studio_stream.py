@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -44,8 +45,13 @@ from typing import Any
 import pytest
 from harness import studio_stream
 from harness.fatal_codes import wire_error
-from harness.studio_state import ConversationState, SegmentLost, _PendingInterrupt
-from harness.studio_store import SegmentClose, closed_turn_error
+from harness.studio_state import (
+    ConversationState,
+    DatabaseUnavailable,
+    SegmentLost,
+    _PendingInterrupt,
+)
+from harness.studio_store import SegmentClose, Snapshot, closed_turn_error
 from harness.studio_stream import (
     Finish,
     Status,
@@ -63,6 +69,7 @@ from harness.wire import (
     Done,
     ErrorCode,
     ErrorFrame,
+    MessageDelta,
     PlanApproved,
     PlanProposed,
     RetryMode,
@@ -71,6 +78,8 @@ from harness.wire import (
 )
 from pydantic import BaseModel
 from starlette.types import Message
+
+from .failure_text import classed_sentence, is_user_sentence
 
 PRINCIPAL = "principal"
 CONVERSATION = "conversation"
@@ -863,3 +872,247 @@ async def test_the_owner_ends_a_present_clients_stream_on_the_pause_it_saved(
     # stored, with the span `paused`.
     assert not await _one(Case(Script.PAUSES, frozenset(), None, Fault.NONE), spans)
     assert spans.ended[0][0] == Status.PAUSED.value
+
+
+# --- the frames that end a stream, the save after `plan.approved`, keepalives ---
+
+
+class _ScriptedWork:
+    """Work that sends `frames`, waiting for `between` after the first when
+    given, and returns `outcome`."""
+
+    def __init__(
+        self,
+        frames: list[BaseModel],
+        outcome: Outcome,
+        *,
+        between: asyncio.Event | None = None,
+    ) -> None:
+        self._frames = frames
+        self._outcome = outcome
+        self._between = between
+
+    async def run(self, send: Callable[[BaseModel], None]) -> Outcome:
+        first, *rest = self._frames
+        send(first)
+        if self._between is not None:
+            await self._between.wait()
+        for frame in rest:
+            send(frame)
+        return self._outcome
+
+    def fatal(self, error: BaseException) -> ErrorFrame:
+        raise AssertionError("the work does not fail") from error
+
+
+class _LandingStore:
+    """The owner's writes, each landing, except a save after `plan.approved`
+    that raises `failure`. `saved` is set once that save has run."""
+
+    def __init__(self, failure: Exception | None = None) -> None:
+        self._failure = failure
+        self.saved = asyncio.Event()
+
+    def snapshot(self, principal: str, conversation_id: str) -> Snapshot:
+        return {}
+
+    async def checkpoint(
+        self, principal: str, conversation_id: str, segment_id: str, snapshot: Snapshot
+    ) -> None:
+        self.saved.set()
+        if self._failure is not None:
+            raise self._failure
+
+    async def close_segment(
+        self, principal: str, conversation_id: str, segment_id: str
+    ) -> SegmentClose:
+        return SegmentClose.SAVED
+
+    def evict(self, principal: str, conversation_id: str) -> None:
+        return None
+
+
+async def _owned(
+    work: _ScriptedWork, conversation: ConversationState, store: _LandingStore
+) -> list[dict[str, Any]]:
+    """Run the owner over `work` to its end; the frames it put on the
+    channel, as the wire carries them."""
+    channel: studio_stream.Channel = asyncio.Queue()
+    await own_segment(
+        work,
+        store=store,
+        conversation=conversation,
+        principal=PRINCIPAL,
+        conversation_id=CONVERSATION,
+        segment_id=SEGMENT,
+        channel=channel,
+        gone=asyncio.Event(),
+    )
+    frames: list[dict[str, Any]] = []
+    while (frame := channel.get_nowait()) is not None:
+        frames.append(json.loads(frame.model_dump_json(exclude_none=True)))
+    return frames
+
+
+def _running(conversation: ConversationState, step_id: str, **fields: Any) -> ActivityStep:
+    return ActivityStep(
+        event="activity.step",
+        seq=conversation.next_seq(),
+        step_id=step_id,
+        label="Fetch the data",
+        status=StepStatus.RUNNING,
+        **{"tool": "get_data", **fields},
+    )
+
+
+@pytest.mark.parametrize("outcome", [Outcome.CANCELLED, Outcome.FAILED, Outcome.LOST], ids=str)
+async def test_a_stream_ending_on_an_error_closes_the_activity_lines_it_left_open(
+    spans: Spans, outcome: Outcome
+) -> None:
+    """A Stop, a failed turn and a lost lease each end the stream mid-step on
+    an `error` frame. Studio would show the step's line pending for good,
+    since nothing reports on its `step_id` on this stream again, so the
+    owner closes it as failed first, on the error's own sentence. A line
+    already timed stays as sent, `seq` keeps rising, and a lost lease
+    leaves the turn open for the instance that holds it now."""
+    conversation = ConversationState(conversation_id=CONVERSATION, trace_id="tr")
+    conversation.begin_turn()
+    sent: list[BaseModel] = [
+        _running(conversation, "s0"),
+        _running(conversation, "s1", tool="propose_plan", duration_ms=5),
+    ]
+    if outcome is Outcome.FAILED:
+        conversation.close_turn(final_text="", error=ErrorCode.TRANSIENT_UNAVAILABLE.value)
+        sent.append(
+            ErrorFrame(
+                event="error",
+                seq=conversation.next_seq(),
+                error=ToolError(
+                    error=ErrorCode.TRANSIENT_UNAVAILABLE,
+                    retry=RetryMode.RETRY_AFTER_DELAY,
+                    detail="The fetch did not finish.",
+                    retry_after_seconds=30,
+                ),
+            )
+        )
+
+    frames = await _owned(_ScriptedWork(sent, outcome), conversation, _LandingStore())
+
+    assert [(f["event"], f.get("step_id"), f.get("status")) for f in frames] == [
+        ("activity.step", "s0", "running"),
+        ("activity.step", "s1", "running"),
+        ("activity.step", "s0", "failed"),
+        ("error", None, None),
+    ]
+    closed, error = frames[2], frames[3]["error"]
+    assert closed["detail"] == error["detail"]
+    assert closed["duration_ms"] >= 0
+    assert [f["seq"] for f in frames] == sorted({f["seq"] for f in frames})
+    match outcome:
+        case Outcome.CANCELLED:
+            assert error["error"] == "cancelled"
+            assert closed["detail"] == classed_sentence("cancelled", "do_not_retry")
+        case Outcome.LOST:
+            assert error["error"] == "transient_unavailable"
+            assert closed["detail"] == classed_sentence(
+                "transient_unavailable", "retry_after_delay"
+            )
+            assert not conversation.turn_recorded
+        case _:
+            assert closed["detail"] == "The fetch did not finish."
+    if outcome is not Outcome.FAILED:
+        assert is_user_sentence(closed["detail"])
+
+
+@pytest.mark.parametrize(
+    ("failure", "events", "status", "logged"),
+    [
+        pytest.param(
+            SegmentLost("taken over"),
+            ["plan.approved", "error"],
+            Status.LOST,
+            (logging.WARNING, False),
+            id="segment-lost",
+        ),
+        pytest.param(
+            DatabaseUnavailable("unreachable"),
+            ["plan.approved", "error"],
+            Status.LOST,
+            (logging.WARNING, False),
+            id="database-unavailable",
+        ),
+        pytest.param(
+            RuntimeError("a bug"),
+            ["plan.approved", "message.delta", "done"],
+            Status.DONE,
+            (logging.ERROR, True),
+            id="other-failure",
+        ),
+    ],
+)
+async def test_a_save_after_plan_approved_that_loses_the_lease_ends_the_stream(
+    spans: Spans,
+    caplog: pytest.LogCaptureFixture,
+    failure: Exception,
+    events: list[str],
+    status: Status,
+    logged: tuple[int, bool],
+) -> None:
+    """The save after `plan.approved` fails. A lost lease, or a database
+    unreachable until the lease's deadline, ends the stream on the transient
+    frame, logged as a warning, since another instance may own the
+    conversation now. Any other failure is logged as an error with its
+    traceback, and the stream goes on to its end."""
+    conversation = ConversationState(conversation_id=CONVERSATION, trace_id="tr")
+    conversation.begin_turn()
+    store = _LandingStore(failure)
+    approved = PlanApproved(
+        event="plan.approved",
+        seq=conversation.next_seq(),
+        plan_version_id="pv",
+        version=1,
+        title="t",
+        steps=[],
+        choices=[],
+    )
+    delta = MessageDelta(event="message.delta", seq=conversation.next_seq(), text="next")
+    conversation.close_turn(final_text="next")
+    done = Done(event="done", seq=conversation.next_seq(), trace_id="tr")
+    work = _ScriptedWork([approved, delta, done], Outcome.DONE, between=store.saved)
+
+    with caplog.at_level(logging.WARNING, logger=studio_stream.__name__):
+        frames = await _owned(work, conversation, store)
+
+    assert [frame["event"] for frame in frames] == events
+    if status is Status.LOST:
+        assert frames[-1]["error"]["error"] == "transient_unavailable"
+    assert [error for error, _ in spans.ended] == [status.value]
+    assert [(r.levelno, r.exc_info is not None) for r in caplog.records] == [logged]
+
+
+async def test_the_response_sends_keepalive_comments_while_the_next_frame_is_slow() -> None:
+    """The response sends `: ka` comment lines while the next frame is slow.
+    They are SSE comments outside the frame sequence and carry no `seq`, and
+    the first frame goes out undelayed."""
+    channel: studio_stream.Channel = asyncio.Queue()
+
+    async def owner() -> None:
+        channel.put_nowait(MessageDelta(event="message.delta", seq=0, text="one"))
+        await asyncio.sleep(0.12)
+        channel.put_nowait(MessageDelta(event="message.delta", seq=1, text="two"))
+        channel.put_nowait(None)
+
+    response = StudioStream(
+        channel=channel,
+        owner=asyncio.create_task(owner()),
+        gone=asyncio.Event(),
+        keepalive_s=0.05,
+    )
+    lines = [str(line) async for line in response.body_iterator]
+
+    assert [line for line in lines if line.startswith("data: ")] == [
+        line for line in lines if not line.startswith(": ka")
+    ]
+    assert len([line for line in lines if line.startswith("data: ")]) == 2
+    assert [line for line in lines if line.startswith(": ka")]
+    assert lines[0].startswith("data: ")

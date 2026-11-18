@@ -102,11 +102,11 @@ async def edit_frames(
 ) -> AsyncGenerator[Any]:
     """The Edit Card route: no resolve, no plan.
 
-    Failures serialise INTO the stream as a stream-fatal error frame,
-    exactly like `_frames` -- a malformed model draft must not kill the
-    transport with no error frame. A lost segment or an unreachable database
-    propagates, and the stream relaying this ends on it
-    (`StudioRunner._checkpointed`).
+    Failures serialise INTO the stream as a stream-fatal error frame, as
+    they do in a turn: a malformed model draft must not kill the transport
+    with no error frame. A lost segment or an unreachable database
+    propagates, and the stream ends with its lease lost
+    (`harness.studio._EditWork`).
     """
     try:
         async for frame in _edit_flow(
@@ -120,8 +120,8 @@ async def edit_frames(
     except (SegmentLost, DatabaseUnavailable):
         # The card's write fenced out by another instance's takeover, or one
         # that could not reach the database before the lease's deadline
-        # (`StudioStore.change_canvas`), ends the stream where every save
-        # that loses the segment does (`StudioRunner._checkpointed`).
+        # (`StudioStore.change_canvas`), ends the stream as a lost lease
+        # does (`harness.studio._EditWork`).
         raise
     except Exception as exc:
         logger.exception("studio edit turn failed (trace_id=%s)", conversation.trace_id)

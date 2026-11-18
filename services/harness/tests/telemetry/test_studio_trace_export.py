@@ -3,8 +3,8 @@
 The real Langfuse SDK, tracer provider, span filter and Studio routes run; only
 the Langfuse server is fake (`fake_langfuse`). These tests cover the parts an
 in-memory span exporter cannot see: which spans the export filter keeps, how a
-response that is torn down mid-stream ends the turn's telemetry, and the parent
-chain of a turn that pauses for approval and resumes.
+client that leaves mid-stream ends the turn's telemetry, and the parent chain
+of a turn that pauses for approval and resumes.
 """
 
 from __future__ import annotations
@@ -12,13 +12,9 @@ from __future__ import annotations
 import asyncio
 import gc
 import hashlib
-import inspect
 import json
-import logging
-import sys
-from collections.abc import AsyncGenerator, Callable, Iterator
-from contextlib import contextmanager, suppress
-from types import AsyncGeneratorType
+from collections.abc import Callable
+from contextlib import suppress
 from typing import Any
 
 import httpx2
@@ -26,14 +22,17 @@ import pytest
 from common.telemetry import init_telemetry
 from google.genai import types
 from harness.scripted import ScriptedExecutor, ScriptedSurface
-from harness.studio import SSE_MEDIA_TYPE, StudioRunner, _sse_stream
+from harness.studio import StudioRunner
 from harness.studio_state import ConversationState
-from harness.wire import MessageDelta
+from harness.studio_store import SegmentClose, Snapshot
+from harness.studio_stream import Channel, own_segment
+from harness.turn.loop import Outcome
+from harness.wire import ErrorFrame, MessageDelta
 from langfuse import Langfuse
 from opentelemetry import trace
 from opentelemetry.proto.trace.v1.trace_pb2 import Span
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
-from starlette.responses import StreamingResponse
 
 from ..scripted_tools import plan_call
 from ..studio_routes import orchestrator_app
@@ -42,8 +41,8 @@ CONVERSATION = "conv_trace_export_01"
 AUTH = {"Authorization": "Bearer test"}
 QUESTION = "comprehensive overview of life expectancy in Kenya"
 ANSWER = "Life expectancy in Kenya rose."
-# The name of the stand-in for a model call span in the tests that drive
-# `_sse_stream` with a scripted segment.
+# The name of the stand-in for a model call span in the test that drives a
+# stream's owner with scripted work.
 MODEL_CALL = "generate_content gemini-x"
 
 
@@ -77,124 +76,6 @@ async def _until(condition: Callable[[], bool], *, seconds: float = 15.0) -> Non
             pytest.fail("timed out waiting for the stream to finish unwinding")
         gc.collect()
         await asyncio.sleep(0.05)
-
-
-# --- a response torn down while the stream sits at a frame ------------------------
-
-
-@contextmanager
-def _abandoned_streams() -> Iterator[Callable[[], list[AsyncGeneratorType]]]:
-    """Yield a function returning the response generators the event loop has
-    taken over for closing: a generator dropped while suspended is handed to
-    the loop, which closes it later on a task of its own. The loop takes over
-    only the response's outermost generator, `_sse_stream`. Only generators
-    first iterated inside the block are seen."""
-    hooks = sys.get_asyncgen_hooks()
-    handed_over: list[AsyncGeneratorType] = []
-
-    def finalizer(generator: AsyncGeneratorType) -> None:
-        handed_over.append(generator)
-        assert hooks.finalizer is not None
-        hooks.finalizer(generator)
-
-    sys.set_asyncgen_hooks(firstiter=hooks.firstiter, finalizer=finalizer)
-    try:
-        yield lambda: [g for g in handed_over if g.ag_code is _sse_stream.__code__]
-    finally:
-        sys.set_asyncgen_hooks(firstiter=hooks.firstiter, finalizer=hooks.finalizer)
-
-
-async def _abandon_a_response_at_its_second_frame(
-    conversation: ConversationState, *, how: str
-) -> None:
-    """Serve a stream whose `send` never completes for the second frame, then
-    tear the response down: `how="cancel"` cancels the response task (ASGI
-    spec 2.4 and later, where Starlette does nothing else), `how="disconnect"`
-    delivers `http.disconnect` (earlier spec versions, where Starlette cancels
-    the streaming task itself). The stream generator is left suspended at its
-    second `yield`; nothing here closes it, so the event loop does."""
-
-    async def segment() -> AsyncGenerator[MessageDelta]:
-        try:
-            with trace.get_tracer("test.segment").start_as_current_span(MODEL_CALL) as span:
-                span.set_attribute("gen_ai.operation.name", "generate_content")
-            yield MessageDelta(event="message.delta", seq=0, text="one")
-            conversation.close_turn(final_text="one")
-            yield MessageDelta(event="message.delta", seq=1, text="two")
-        finally:
-            # The segment's end, as `StudioRunner._locked` ends it.
-            conversation.end_segment_span("saved")
-
-    response = StreamingResponse(
-        _sse_stream(segment(), conversation=conversation), media_type=SSE_MEDIA_TYPE
-    )
-    disconnect = asyncio.Event()
-    second_frame_sent = asyncio.Event()
-    never = asyncio.Event()
-    chunks = 0
-
-    async def receive() -> dict[str, Any]:
-        await disconnect.wait()
-        return {"type": "http.disconnect"}
-
-    async def send(message: dict[str, Any]) -> None:
-        nonlocal chunks
-        if message["type"] == "http.response.body" and message.get("more_body"):
-            chunks += 1
-            if chunks == 2:
-                second_frame_sent.set()
-                await never.wait()  # the client's socket stops draining
-
-    spec_version = "2.4" if how == "cancel" else "2.3"
-    task = asyncio.create_task(
-        response({"type": "http", "asgi": {"spec_version": spec_version}}, receive, send)
-    )
-    await asyncio.wait_for(second_frame_sent.wait(), timeout=15)
-    if how == "cancel":
-        task.cancel()
-    else:
-        disconnect.set()
-    done, _ = await asyncio.wait({task}, timeout=15)
-    assert done, "the response task did not end"
-
-
-@pytest.mark.parametrize("how", ["cancel", "disconnect"])
-async def test_a_response_torn_down_at_a_frame_still_exports_the_turn_once_and_cleanly(
-    fake_langfuse: Any, caplog: pytest.LogCaptureFixture, how: str
-) -> None:
-    """The response task ends while the stream generator sits at a `yield`, so
-    the event loop closes it later in a context of its own. The turn span,
-    ended by the segment, is exported by the flush in the generator's
-    `finally`, and leaving the telemetry scope there does not make
-    OpenTelemetry log a failed detach."""
-    init_telemetry(service_name="harness")
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    conversation.begin_turn()
-    conversation.open_segment_span()
-    conversation.turn_user_message = "q"
-
-    with (
-        caplog.at_level(logging.ERROR, logger="opentelemetry.context"),
-        _abandoned_streams() as (abandoned),
-    ):
-        await _abandon_a_response_at_its_second_frame(conversation, how=how)
-        # The turn span reaches the wire from the flush inside the generator's
-        # `finally`, before the scope exit that would log a failed detach, so
-        # the log is read once the generator has finished closing.
-        await _until(
-            lambda: any(
-                inspect.getasyncgenstate(generator) == inspect.AGEN_CLOSED
-                for generator in abandoned()
-            )
-        )
-        await _until(lambda: any(span.name == "turn" for span in fake_langfuse.spans()))
-
-    spans = fake_langfuse.spans()
-    (turn,) = [span for span in spans if span.name == "turn"]
-    (call,) = [span for span in spans if span.name == MODEL_CALL]
-    assert turn.end_time_unix_nano > 0
-    assert call.parent_span_id == turn.span_id
-    assert [r for r in caplog.records if r.name == "opentelemetry.context"] == []
 
 
 # --- a turn that pauses for approval and resumes ---------------------------------
@@ -441,42 +322,75 @@ async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_
     assert "error" not in record
 
 
-async def test_a_client_that_leaves_while_the_turn_runs_ends_the_turn_span_as_disconnected(
+class _SlowWork:
+    """Work that makes a model call, sends one frame, then waits on a slow
+    tool call."""
+
+    def __init__(self, conversation: ConversationState) -> None:
+        self._conversation = conversation
+        self.running = asyncio.Event()
+
+    async def run(self, send: Callable[[BaseModel], None]) -> Outcome:
+        with trace.get_tracer("test.segment").start_as_current_span(MODEL_CALL) as span:
+            span.set_attribute("gen_ai.operation.name", "generate_content")
+        send(MessageDelta(event="message.delta", seq=self._conversation.next_seq(), text="one"))
+        self.running.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    def fatal(self, error: BaseException) -> ErrorFrame:
+        raise AssertionError("the work never fails") from error
+
+
+class _SavingStore:
+    """The owner's writes, each landing."""
+
+    def snapshot(self, principal: str, conversation_id: str) -> Snapshot:
+        return {}
+
+    async def checkpoint(
+        self, principal: str, conversation_id: str, segment_id: str, snapshot: Snapshot
+    ) -> None:
+        return None
+
+    async def close_segment(
+        self, principal: str, conversation_id: str, segment_id: str
+    ) -> SegmentClose:
+        return SegmentClose.SAVED
+
+    def evict(self, principal: str, conversation_id: str) -> None:
+        return None
+
+
+async def test_a_client_that_leaves_while_the_turn_runs_ends_the_turn_span_as_left(
     fake_langfuse: Any,
 ) -> None:
-    """A turn that has not paused stays open past the disconnect, for the
-    next request to carry on, and the segment's `turn` span ends once, at
-    level `WARNING` as `disconnected`, as `StudioRunner._locked` ends a
-    stream that sent no ending frame; nothing is recorded."""
+    """A turn that has not paused stays open past the client's leaving, for
+    the next request to carry on, and the segment's `turn` span ends once,
+    at level `WARNING` as `left`, with the model call under it and
+    `dfo.client_gone` set; nothing is recorded."""
     init_telemetry(service_name="harness")
     conversation = ConversationState(conversation_id=CONVERSATION)
     conversation.begin_turn()
-    conversation.open_segment_span()
     conversation.turn_user_message = "q"
-    running = asyncio.Event()
-
-    async def segment() -> AsyncGenerator[MessageDelta]:
-        try:
-            with trace.get_tracer("test.segment").start_as_current_span(MODEL_CALL) as span:
-                span.set_attribute("gen_ai.operation.name", "generate_content")
-            yield MessageDelta(event="message.delta", seq=0, text="one")
-            running.set()
-            await asyncio.Event().wait()  # a slow tool call
-            yield MessageDelta(event="message.delta", seq=1, text="two")
-        finally:
-            # The segment's end, as `StudioRunner._locked` ends it.
-            conversation.end_segment_span("disconnected")
-
-    async def consume() -> None:
-        async for _ in _sse_stream(segment(), conversation=conversation, heartbeat_seconds=15):
-            pass
-
-    task = asyncio.create_task(consume())
-    await asyncio.wait_for(running.wait(), timeout=15)
-    await asyncio.sleep(0.05)  # the stream is parked at its wait for the next frame
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    work = _SlowWork(conversation)
+    channel: Channel = asyncio.Queue()
+    gone = asyncio.Event()
+    owner = asyncio.create_task(
+        own_segment(
+            work,
+            store=_SavingStore(),
+            conversation=conversation,
+            principal="u_a",
+            conversation_id=CONVERSATION,
+            segment_id="seg_1",
+            channel=channel,
+            gone=gone,
+        )
+    )
+    await asyncio.wait_for(work.running.wait(), timeout=15)
+    gone.set()
+    await asyncio.wait_for(owner, timeout=15)
     await _until(lambda: any(span.name == "turn" for span in fake_langfuse.spans()))
 
     spans = fake_langfuse.spans()
@@ -487,6 +401,7 @@ async def test_a_client_that_leaves_while_the_turn_runs_ends_the_turn_span_as_di
     assert (
         _attribute(turn, "langfuse.observation.level"),
         _attribute(turn, "langfuse.observation.status_message"),
-    ) == ("WARNING", "disconnected")
+        _attribute(turn, "dfo.client_gone"),
+    ) == ("WARNING", "left", "true")
     assert not conversation.turn_recorded
     assert conversation.turns == []

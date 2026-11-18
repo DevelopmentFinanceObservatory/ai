@@ -23,9 +23,8 @@ import asyncio
 import copy
 import hashlib
 import json
-import logging
 import time
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, tzinfo
@@ -33,7 +32,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import anyio
 import harness.graph.approve as approve_module
 import harness.graph.execute as execute_module
 import harness.graph.switch as switch_module
@@ -86,9 +84,6 @@ from harness.sentences import FAILURE_CLASS, StopCode, refusal_sentence
 from harness.settings import Settings
 from harness.studio import (
     _acquire_or_conflict,
-    _sse_stream,
-    _Stopped,
-    _unwind,
     create_studio_router,
 )
 from harness.studio_edit import _canvas_is_behind
@@ -97,7 +92,6 @@ from harness.studio_state import (
     DatabaseUnavailable,
     SegmentLost,
     _PendingChoice,
-    _PendingInterrupt,
     _PendingOption,
 )
 from harness.studio_store import (
@@ -122,22 +116,12 @@ from harness.turn_records import SearchReading
 from harness.wire import (
     MAX_SEED_SPEC_BYTES,
     MAX_TURN_REQUEST_BYTES,
-    ActivityStep,
     ComponentType,
     CompositionActor,
     CompositionBlock,
-    Done,
-    ErrorCode,
-    ErrorFrame,
     InterruptResponse,
-    MessageDelta,
-    PlanApproved,
     PlanDecision,
     PlanDecisionOption,
-    PlanProposed,
-    RetryMode,
-    StepStatus,
-    ToolError,
     TurnRequest,
 )
 from mcp import MCPError
@@ -1256,383 +1240,6 @@ async def test_a_paused_segment_s_span_ends_paused_and_the_answer_opens_its_own(
     assert exported_at_flush == [[trace_id], [trace_id, trace_id]]
 
 
-async def test_a_release_that_times_out_ends_the_segment_s_span(
-    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The release's save hangs past its timeout, so nothing is saved; the
-    segment's span ends `failed` all the same, and the lock is released."""
-    studio = _app().state.studio
-    store = studio.store
-    conversation = await store.create("u_a", CONVERSATION)
-    await conversation.lock.acquire()
-    segment_id = store.claim_segment("u_a", CONVERSATION)
-    await store.save("u_a", CONVERSATION)
-    conversation.open_segment_span()
-    ended = _recording_span_ends(monkeypatch)
-    real_release = store.release
-
-    async def hanging_checkpoint(*args: Any, **kwargs: Any) -> None:
-        await asyncio.Event().wait()
-
-    async def quick_release(*args: Any, **kwargs: Any) -> bool:
-        return await real_release(*args, timeout=0.05)
-
-    store.checkpoint = hanging_checkpoint  # type: ignore[method-assign]
-    store.release = quick_release  # type: ignore[method-assign]
-
-    async def frames() -> Any:
-        yield MessageDelta(event="message.delta", seq=0, text="one")
-
-    async for _ in studio._locked("u_a", CONVERSATION, conversation, segment_id, frames()):
-        pass
-
-    assert ended == [("failed", "ERROR")]
-    assert not conversation.lock.locked()
-
-
-async def test_a_release_whose_caller_is_cancelled_still_reads_what_it_saved(
-    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The client leaves while the release of a segment whose frames ran
-    out is saving. The save lands, and the span's `dfo.stored` is the turn
-    as that save left it, although the cancellation reaches the stream as
-    the release returns."""
-    studio = _app().state.studio
-    store = studio.store
-    conversation = await store.create("u_a", CONVERSATION)
-    await conversation.lock.acquire()
-    segment_id = store.claim_segment("u_a", CONVERSATION)
-    await store.save("u_a", CONVERSATION)
-    conversation.open_segment_span()
-    ended = _recording_span_ends(monkeypatch)
-    real_checkpoint = store.checkpoint
-    saving, proceed = asyncio.Event(), asyncio.Event()
-
-    async def slow_checkpoint(*args: Any, **kwargs: Any) -> None:
-        saving.set()
-        await proceed.wait()
-        await real_checkpoint(*args, **kwargs)
-
-    store.checkpoint = slow_checkpoint  # type: ignore[method-assign]
-
-    async def frames() -> Any:
-        conversation.close_turn(final_text="Hello.")
-        yield MessageDelta(event="message.delta", seq=0, text="Hello.")
-
-    async def stream() -> None:
-        async for _ in studio._locked("u_a", CONVERSATION, conversation, segment_id, frames()):
-            pass
-
-    task = asyncio.ensure_future(stream())
-    await asyncio.wait_for(saving.wait(), timeout=5)
-    task.cancel()
-    proceed.set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert ended == [("failed", "ERROR")]
-    (span,) = [span for span in otlp_spans.get_finished_spans() if span.name == "turn"]
-    assert (span.attributes or {}).get("dfo.stored") == "done"
-    assert not conversation.lock.locked()
-
-
-async def test_a_stored_turn_that_cannot_be_read_still_ends_the_segment_s_span(
-    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Reading how the turn was stored fails as the segment ends. The span
-    still ends, without `dfo.stored`, and the lock frees."""
-    studio = _app().state.studio
-    conversation = await studio.store.create("u_a", CONVERSATION)
-    await conversation.lock.acquire()
-    segment_id = studio.store.claim_segment("u_a", CONVERSATION)
-    await studio.store.save("u_a", CONVERSATION)
-    conversation.open_segment_span()
-    ended = _recording_span_ends(monkeypatch)
-
-    def unreadable(*args: Any) -> str:
-        raise RuntimeError("a baseline that does not parse")
-
-    studio.store.stored_turn = unreadable  # type: ignore[method-assign]
-
-    async def one_frame() -> Any:
-        yield MessageDelta(event="message.delta", seq=0, text="one")
-
-    async for _ in studio._locked("u_a", CONVERSATION, conversation, segment_id, one_frame()):
-        pass
-
-    assert ended == [("failed", "ERROR")]
-    (span,) = [span for span in otlp_spans.get_finished_spans() if span.name == "turn"]
-    assert "dfo.stored" not in (span.attributes or {})
-    assert not conversation.lock.locked()
-
-
-async def test_the_stored_turn_reads_what_the_live_turn_status_reads() -> None:
-    """`StudioStore.stored_turn` reads the turn from the baseline through the
-    same rule as the live state's `turn_status`, and reads a pending entry
-    with no `resuming_segment` as the deserialiser does, as awaiting."""
-    store = _app().state.studio.store
-    conversation = await store.create("u_a", CONVERSATION)
-    conversation.begin_turn()
-    conversation.pending["int_1"] = _PendingInterrupt(adk_id="adk_1", kind="plan")
-    await store.save("u_a", CONVERSATION)
-    assert store.stored_turn("u_a", CONVERSATION) == conversation.turn_status == "paused"
-
-    baseline = store._runtime[("u_a", CONVERSATION)].baseline
-    del baseline[studio_store_module._KEY_PENDING]["int_1"]["resuming_segment"]
-    assert store.stored_turn("u_a", CONVERSATION) == "paused"
-
-    conversation.close_turn(final_text="Hello.")
-    await store.save("u_a", CONVERSATION)
-    assert store.stored_turn("u_a", CONVERSATION) == conversation.turn_status == "done"
-
-
-async def test_a_stream_fatal_frame_names_the_span_by_its_own_code(
-    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The turn is recorded with no error, then the segment fails before
-    `done` and sends a stream-fatal error frame. The span ends with the
-    frame's own code at error level, whatever the record says."""
-    studio, conversation, segment_id = await _claimed_segment()
-    ended = _recording_span_ends(monkeypatch)
-
-    async def segment() -> Any:
-        conversation.close_turn(final_text="Hello.")
-        yield ErrorFrame(
-            event="error",
-            seq=conversation.next_seq(),
-            error=ToolError(
-                error=ErrorCode.CAPABILITY_UNAVAILABLE,
-                retry=RetryMode.DO_NOT_RETRY,
-                detail="The model failed.",
-            ),
-        )
-
-    [chunk async for chunk in _segment_sse(studio, conversation, segment_id, segment())]
-
-    assert ended == [("capability_unavailable", "ERROR")]
-
-
-async def test_a_stop_after_done_leaves_the_stream_ended_on_done(
-    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A Stop reaches the stream after its `done` went out, as an Edit Card
-    stream's heartbeat can report one before the frames end. The stream
-    sends nothing more: the turn stays ended, and the span says `done`."""
-    studio, conversation, segment_id = await _claimed_segment()
-    ended = _recording_span_ends(monkeypatch)
-
-    async def segment() -> Any:
-        conversation.close_turn(final_text="Hello.")
-        yield Done(event="done", seq=conversation.next_seq(), trace_id=conversation.trace_id)
-        yield _Stopped("cancelled")
-
-    sent = _data_frames(
-        [chunk async for chunk in _segment_sse(studio, conversation, segment_id, segment())]
-    )
-
-    assert [frame["event"] for frame in sent] == ["done"]
-    assert ended == [("done", "DEFAULT")]
-    assert conversation.turns[-1].get("error") is None
-
-
-async def test_frames_that_end_cancelled_on_their_own_end_the_stream_as_failed(
-    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The segment's frames end with a cancellation nothing in the stream
-    asked for (a future cancelled under them). That is a failure of the
-    frames: the turn closes on a stream-fatal frame, and the span ends
-    `failed`, with the client still connected."""
-    studio, conversation, segment_id = await _claimed_segment()
-    ended = _recording_span_ends(monkeypatch)
-
-    async def segment() -> Any:
-        yield MessageDelta(event="message.delta", seq=conversation.next_seq(), text="one")
-        raise asyncio.CancelledError
-
-    frames = _data_frames(
-        [chunk async for chunk in _segment_sse(studio, conversation, segment_id, segment())]
-    )
-
-    assert [frame["event"] for frame in frames] == ["message.delta", "error"]
-    assert ended == [("failed", "ERROR")]
-    assert conversation.turn_recorded
-    assert studio.store.stored_turn("u_a", CONVERSATION) == frames[-1]["error"]["error"]
-
-
-@pytest.mark.parametrize(
-    ("before", "frames", "status", "stored"),
-    [
-        pytest.param("nothing", ["error"], "failed", "capability_unavailable", id="nothing-sent"),
-        pytest.param(
-            "pause", ["error"], "failed", "capability_unavailable", id="a-pause-left-unsent"
-        ),
-        pytest.param("done", ["error"], "failed", "done", id="done-recorded-unsent"),
-        pytest.param("pause", ["plan.proposed"], "paused", "paused", id="after-a-pause-frame"),
-        pytest.param("done", ["done"], "done", "done", id="after-done"),
-    ],
-)
-async def test_frames_that_end_cancelled_follow_the_span_table(
-    otlp_spans: InMemorySpanExporter,
-    monkeypatch: pytest.MonkeyPatch,
-    before: str,
-    frames: list[str],
-    status: str,
-    stored: str,
-) -> None:
-    """The frames end with a cancellation of their own, the segment's task
-    uncancelled, after recording `before` and sending `frames[:-1]`, or
-    `frames` when it ends on what they sent (`span_level`'s table). An
-    ending frame sent stands, and nothing follows it. Otherwise a
-    stream-fatal frame closes the turn, with no plan left to answer, or
-    follows a `done` already recorded."""
-    studio, conversation, segment_id = await _claimed_segment()
-    ended = _recording_span_ends(monkeypatch)
-    sends = frames[0] != "error"
-
-    async def segment() -> Any:
-        if before == "done":
-            conversation.close_turn(final_text="Hello.")
-            if sends:
-                yield Done(
-                    event="done", seq=conversation.next_seq(), trace_id=conversation.trace_id
-                )
-        elif before == "pause":
-            conversation.pending["int_1"] = _PendingInterrupt(adk_id="adk_1", kind="plan")
-            if sends:
-                yield PlanProposed(
-                    event="plan.proposed",
-                    seq=conversation.next_seq(),
-                    interrupt_id="int_1",
-                    plan_version_id="plan_1",
-                    version=1,
-                    title="Research plan",
-                    steps=[],
-                    actions=[],
-                )
-        raise asyncio.CancelledError
-
-    sent = _data_frames(
-        [chunk async for chunk in _segment_sse(studio, conversation, segment_id, segment())]
-    )
-
-    assert [frame["event"] for frame in sent] == frames
-    assert ended[-1][0] == status
-    assert studio.store.stored_turn("u_a", CONVERSATION) == stored
-    assert conversation.awaiting_answer == (status == "paused")
-
-
-async def test_a_segment_task_that_ends_cancelled_ends_the_stream_cleanly() -> None:
-    """The frames' task ends cancelled without the response being
-    cancelled. The stream ends there, as a stream whose frames ran out."""
-
-    async def segment() -> Any:
-        yield MessageDelta(event="message.delta", seq=0, text="one")
-        raise asyncio.CancelledError
-
-    sent = [chunk async for chunk in _sse_stream(segment())]
-
-    assert [frame["event"] for frame in _data_frames(sent)] == ["message.delta"]
-
-
-async def test_a_client_leaving_at_a_frame_closes_the_frames_before_the_release() -> None:
-    """The consumer closes `_locked` at a frame's yield. The segment's frames
-    are closed first, so their `finally` (`_frames`' drain of this
-    conversation's recorded steps) runs in the stream's own context before
-    the release starts and while the conversation lock is still held."""
-    studio = _app().state.studio
-    store = studio.store
-    conversation = await store.create("u_a", CONVERSATION)
-    await conversation.lock.acquire()
-    segment_id = store.claim_segment("u_a", CONVERSATION)
-    await store.save("u_a", CONVERSATION)
-    order: list[tuple[str, bool]] = []
-    real_release = store.release
-
-    async def release(*args: Any, **kwargs: Any) -> bool:
-        order.append(("release", conversation.lock.locked()))
-        return await real_release(*args, **kwargs)
-
-    store.release = release  # type: ignore[method-assign]
-
-    async def frames() -> Any:
-        try:
-            yield MessageDelta(event="message.delta", seq=0, text="one")
-            await asyncio.Event().wait()
-        finally:
-            order.append(("frames closed", conversation.lock.locked()))
-
-    stream = studio._locked("u_a", CONVERSATION, conversation, segment_id, frames())
-    await anext(stream)
-    await stream.aclose()
-
-    assert order == [("frames closed", True), ("release", True)]
-    assert not conversation.lock.locked()
-
-
-async def test_a_client_leaving_ends_the_segment_when_closing_its_frames_raises(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The consumer closes `_locked` at a frame's yield, and the segment's
-    frames raise as they are closed. The close's exception is logged and
-    dropped, so the client's leaving goes on: the segment is released and
-    the lock frees."""
-    studio = _app().state.studio
-    store = studio.store
-    conversation = await store.create("u_a", CONVERSATION)
-    await conversation.lock.acquire()
-    segment_id = store.claim_segment("u_a", CONVERSATION)
-    await store.save("u_a", CONVERSATION)
-
-    async def frames() -> Any:
-        try:
-            yield MessageDelta(event="message.delta", seq=0, text="one")
-            yield MessageDelta(event="message.delta", seq=1, text="two")
-        finally:
-            raise RuntimeError("cleanup failed")
-
-    stream = studio._locked("u_a", CONVERSATION, conversation, segment_id, frames())
-    with caplog.at_level("ERROR", logger="harness.studio"):
-        await anext(stream)
-        await stream.aclose()
-
-    assert any("closing" in record.getMessage() for record in caplog.records)
-    assert not conversation.lock.locked()
-    stored = await StudioStore(_engine()).load("u_a", CONVERSATION)
-    assert stored is not None and stored.segment is None
-
-
-async def test_a_failed_checkpoint_closes_the_frames_it_relayed() -> None:
-    """The checkpoint before `done` fails, so the relay stops there. The
-    segment's frames are closed as it stops, in the stream's own context,
-    and their `finally` has run before the error frame's stream ends."""
-    studio = _app().state.studio
-    conversation = await studio.store.create("u_a", CONVERSATION)
-    segment_id = studio.store.claim_segment("u_a", CONVERSATION)
-    closed: list[str] = []
-
-    async def failing(*args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("a lock timeout")
-
-    studio.store.checkpoint = failing  # type: ignore[method-assign]
-
-    async def frames() -> Any:
-        try:
-            yield Done(event="done", seq=0, trace_id="trace")
-            yield MessageDelta(event="message.delta", seq=1, text="never relayed")
-        finally:
-            closed.append("closed")
-
-    sent = [
-        frame.event
-        for frame in await _relayed(
-            studio, conversation, segment_id, frames(), studio_module._StreamEnding()
-        )
-    ]
-
-    assert sent == ["error"]
-    assert closed == ["closed"]
-
-
 @pytest.mark.parametrize("stopped", [False, True], ids=["rejected", "stopped"])
 async def test_a_rejected_plan_s_stream_ends_its_span_and_reads_a_stop(
     otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch, stopped: bool
@@ -2391,6 +1998,80 @@ async def _plan_rejected(
         )
 
 
+async def _edit_ends(
+    app: FastAPI, resolver: Any, monkeypatch: pytest.MonkeyPatch
+) -> list[dict[str, Any]]:
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        return await _stream(client, "/api/studio/turn", _edit_body("rename it"))
+
+
+async def _edit_stopped(
+    app: FastAPI, resolver: Any, monkeypatch: pytest.MonkeyPatch
+) -> list[dict[str, Any]]:
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        streaming = asyncio.ensure_future(
+            _stream(client, "/api/studio/turn", _edit_body("rename it"))
+        )
+        await asyncio.wait_for(app.state.studio.edit_model.entered.wait(), timeout=5)
+        await _post_stop(client)
+        return await asyncio.wait_for(streaming, timeout=5)
+
+
+async def _edit_heartbeat_raises(
+    app: FastAPI, resolver: Any, monkeypatch: pytest.MonkeyPatch
+) -> list[dict[str, Any]]:
+    studio = app.state.studio
+
+    async def broken(*args: Any, **kwargs: Any) -> None:
+        await studio.edit_model.entered.wait()
+        raise RuntimeError("the heartbeat failed")
+
+    monkeypatch.setattr(studio, "_heartbeat", broken)
+    return await _edit_ends(app, resolver, monkeypatch)
+
+
+async def _edit_left(
+    app: FastAPI, resolver: Any, monkeypatch: pytest.MonkeyPatch
+) -> list[dict[str, Any]]:
+    studio = app.state.studio
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+    response = await _turn_endpoint(studio)(
+        TurnRequest.model_validate(_edit_body("rename it")), authorization=AUTH["Authorization"]
+    )
+    return await _leave(response, lambda frames: False, studio.edit_model.entered)
+
+
+class _FailingEditModel:
+    """An edit model whose draft breaks the edit's rules."""
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        raise ValueError("the edit drafted both a patch and a recreate")
+
+
+def _edit_app(finish: Finish) -> dict[str, Any]:
+    """The search, executor and edit model of an Edit Card driver's app: a
+    card turn draws the card the edit then reads, and an edit that ends
+    `done` writes it."""
+    results = [*_card_results(write_token=WRITE_TOKEN), _described(), _VIEW]
+    edit_model: Any = _HangingEditModel()
+    if finish is Finish.DONE:
+        revised = {
+            **COMPONENT,
+            "revision": 2,
+            "fact_summary": {**COMPONENT["fact_summary"], "revision": 2},
+        }
+        results.append({"outcome": "ok", "frame_refs": [], "component": revised})
+        edit_model = ScriptedEditModel(
+            {"text": "Renamed the card.", "patch": {"title": "Aid to Kenya"}, "recreate": None}
+        )
+    elif finish is Finish.FAILED:
+        edit_model = _FailingEditModel()
+    return {"resolver": _search(), "executor": ScriptedExecutor(results), "edit_model": edit_model}
+
+
 # Each way a route's work ends: its driver, the app's script, the resolver
 # its search waits on (`None` for the default), the tool surface its plan
 # steps call, and how many closing writes its driver lets through before
@@ -2422,6 +2103,11 @@ _WORK_ENDS: dict[tuple[str, Finish], tuple[Any, tuple[types.Part, ...], bool, An
     ),
     ("resume", Finish.LEFT): (_plan_approved_then_left, _PLAN_SCRIPT, False, _HangingSurface, 1),
     ("reject", Finish.DONE): (_plan_rejected, tuple(_plan()), False, ScriptedSurface, 1),
+    ("edit", Finish.DONE): (_edit_ends, tuple(_card()), False, None, 1),
+    ("edit", Finish.FAILED): (_edit_ends, tuple(_card()), False, None, 1),
+    ("edit", Finish.CANCELLED): (_edit_stopped, tuple(_card()), False, None, 1),
+    ("edit", Finish.UNCLOSED): (_edit_heartbeat_raises, tuple(_card()), False, None, 1),
+    ("edit", Finish.LEFT): (_edit_left, tuple(_card()), False, None, 1),
 }
 
 
@@ -2510,8 +2196,16 @@ def _endings(route: str, finish: Finish) -> list[Any]:
     """The cells of `finish`'s row of the ending table `route` reaches, as
     `(route, finish, close, wire, cursor, recorded)`. A resume whose work
     raises does so before its segment runs, so its turn stays paused where
-    `/turn`'s stays running."""
+    `/turn`'s stays running. An Edit Card stream opens no turn on the loop,
+    so the only cursor is the card turn's before it, `done`, and its closing
+    write never finds a Stop live for a turn with no cursor."""
     paused = route == "resume" and finish is Finish.UNCLOSED
+    if route == "edit":
+        return [
+            (route, finish, close, wire, "done", recorded)
+            for close, wire, _, recorded in _ENDINGS_BY_FINISH[finish]
+            if close is not _STOPPED
+        ]
     return [
         (
             route,
@@ -2541,6 +2235,12 @@ def _endings(route: str, finish: Finish) -> list[Any]:
             for row in _endings("resume", finish)
         ),
         *_endings("reject", Finish.DONE),
+        *(
+            row
+            for finish in Finish
+            if ("edit", finish) in _WORK_ENDS
+            for row in _endings("edit", finish)
+        ),
     ],
     ids=str,
 )
@@ -2562,7 +2262,13 @@ async def test_every_ending_this_route_reaches_holds_on_the_real_store(
     and the lease cleared exactly when the write committed."""
     drive, script, hangs, surface, after = _WORK_ENDS[route, finish]
     resolver = _HangingResolver() if hangs else None
-    app = _app(*script, resolver=resolver, tool_surface=surface() if surface is not None else None)
+    kwargs: dict[str, Any] = {
+        "resolver": resolver,
+        "tool_surface": surface() if surface is not None else None,
+    }
+    if route == "edit":
+        kwargs |= _edit_app(finish)
+    app = _app(*script, **kwargs)
     results = _close_on_the_database(app.state.studio.store, close, after=after)
     ended = _recording_span_ends(monkeypatch)
 
@@ -2823,9 +2529,10 @@ async def test_a_turn_closed_without_a_stream_of_its_own_ends_its_spans_as_the_t
     drive: Callable[[pytest.MonkeyPatch], Any],
     spans: list[tuple[str, str]],
 ) -> None:
-    """Every span a row's requests end has the status and level
-    `studio_state.span_level`'s table gives that way of closing, in the
-    order they end, and each is exported once."""
+    """Every span a row's requests end has the status and level of that
+    way of closing (`record_unstreamed_span`, `record_closed_turn_span`, or
+    the stream's owner), in the order they end, and each is exported
+    once."""
     ended = _recording_span_ends(monkeypatch)
     await drive(monkeypatch)
     assert ended == spans
@@ -3139,180 +2846,6 @@ async def test_planner_lines_and_plan_step_lines_never_share_a_step_id_across_an
     assert len(planner_lines) == 1
     assert len(step_lines) == len(plan["steps"]) == 2
     assert planner_lines.isdisjoint(step_lines)
-
-
-def _running_line(seq: int) -> ActivityStep:
-    return ActivityStep(
-        event="activity.step",
-        seq=seq,
-        step_id=f"s{seq}",
-        label="Fetch the data",
-        status=StepStatus.RUNNING,
-        tool="get_data",
-        detail=_POLLING,
-    )
-
-
-def _data_frames(chunks: list[str]) -> list[dict[str, Any]]:
-    return [json.loads(chunk[len("data: ") :]) for chunk in chunks if chunk.startswith("data: ")]
-
-
-async def _relayed(
-    studio: Any,
-    conversation: ConversationState,
-    segment_id: str,
-    frames: AsyncGenerator[Any],
-    ending: Any,
-) -> list[Any]:
-    """Every frame `_checkpointed` relays, each recorded as sent, as
-    `_sse_stream` records it."""
-    sent = []
-    async for frame in studio._checkpointed(
-        "u_a", CONVERSATION, segment_id, conversation, frames, ending=ending
-    ):
-        ending.sent(frame)
-        sent.append(frame)
-    return sent
-
-
-async def _claimed_segment(*, seq: int = 0) -> tuple[Any, ConversationState, str]:
-    """A conversation whose turn has begun at `seq`, with a segment claimed
-    and saved, its lock held and its span open, as the Edit Card route
-    leaves it before streaming."""
-    studio = _app().state.studio
-    conversation = await studio.store.create("u_a", CONVERSATION)
-    conversation.begin_turn()
-    await conversation.lock.acquire()
-    segment_id = studio.store.claim_segment("u_a", CONVERSATION)
-    await studio.store.save("u_a", CONVERSATION)
-    conversation.open_segment_span()
-    conversation.seq = seq
-    return studio, conversation, segment_id
-
-
-def _segment_sse(
-    studio: Any,
-    conversation: ConversationState,
-    segment_id: str,
-    frames: AsyncGenerator[Any],
-    **kwargs: Any,
-) -> AsyncGenerator[str]:
-    """`frames` streamed as a claimed segment's are: `_sse_stream` over
-    `StudioRunner._locked`, sharing one `_StreamEnding`."""
-    ending = studio_module._StreamEnding()
-    return _sse_stream(
-        studio._locked("u_a", CONVERSATION, conversation, segment_id, frames, ending=ending),
-        conversation=conversation,
-        ending=ending,
-        **kwargs,
-    )
-
-
-async def test_a_stop_closes_the_activity_lines_its_stream_left_running() -> None:
-    """A Stop ends the stream mid-step. The step's line would otherwise stay
-    pending in Studio, so the stream closes it as failed before the
-    `cancelled` error frame. A planner line, already timed, stays as sent."""
-    planner_line = ActivityStep(
-        event="activity.step",
-        seq=1,
-        step_id="s1",
-        label="planner: propose_plan",
-        status=StepStatus.RUNNING,
-        tool="propose_plan",
-        duration_ms=5,
-    )
-
-    async def segment():
-        yield _running_line(0)
-        yield planner_line
-        yield _Stopped("cancelled")  # the step's call was still waiting
-
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    conversation.begin_turn()
-    conversation.seq = 2
-    frames = _data_frames(
-        [chunk async for chunk in _sse_stream(segment(), conversation=conversation)]
-    )
-    assert [(f["event"], f.get("step_id"), f.get("status")) for f in frames] == [
-        ("activity.step", "s0", "running"),
-        ("activity.step", "s1", "running"),
-        ("activity.step", "s0", "failed"),
-        ("error", None, None),
-    ]
-    assert frames[2]["detail"] == frames[3]["error"]["detail"]
-    assert frames[2]["detail"] == classed_sentence("cancelled", "do_not_retry")
-    assert is_user_sentence(frames[2]["detail"])
-    assert frames[2]["duration_ms"] >= 0
-    assert frames[3]["error"]["error"] == "cancelled"
-    assert [f["seq"] for f in frames] == sorted({f["seq"] for f in frames})
-
-
-async def test_a_stream_fatal_error_closes_the_activity_lines_left_running_first() -> None:
-    """A turn that fails mid-step (a fetch's MCP timeout, say) ends on an
-    `error` frame with its step's line still open; the stream closes the
-    line first, and the error frame keeps `seq` rising."""
-
-    async def segment():
-        yield _running_line(0)
-        yield ErrorFrame(
-            event="error",
-            seq=1,
-            error=ToolError(
-                error=ErrorCode.TRANSIENT_UNAVAILABLE,
-                retry=RetryMode.RETRY_AFTER_DELAY,
-                detail="The fetch did not finish.",
-                retry_after_seconds=30,
-            ),
-        )
-
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    conversation.begin_turn()
-    conversation.seq = 2
-    frames = _data_frames(
-        [chunk async for chunk in _sse_stream(segment(), conversation=conversation)]
-    )
-
-    assert [(f["event"], f.get("step_id"), f.get("status")) for f in frames] == [
-        ("activity.step", "s0", "running"),
-        ("activity.step", "s0", "failed"),
-        ("error", None, None),
-    ]
-    # The line closes on the reason the turn ended for.
-    assert frames[1]["detail"] == frames[2]["error"]["detail"]
-    assert [f["seq"] for f in frames] == [0, 2, 3]
-
-
-async def test_a_segment_lost_closes_the_activity_lines_its_stream_left_running() -> None:
-    """A takeover ends the stream mid-step, same as a Stop: the step's line
-    would otherwise stay pending forever in Studio, since website
-    matches a later frame to an already-open line by `step_id` and patches
-    it in place -- nothing ever resends this step's frame on THIS stream.
-    The stream closes the line as failed before the stream-fatal
-    `transient_unavailable` frame, and leaves the turn itself open, since
-    the instance that took the segment over may still finish it."""
-
-    async def segment():
-        yield _running_line(0)
-        yield _Stopped("segment_lost")  # the step's call was still waiting
-
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    conversation.begin_turn()
-    conversation.seq = 1
-    frames = _data_frames(
-        [chunk async for chunk in _sse_stream(segment(), conversation=conversation)]
-    )
-    assert [(f["event"], f.get("step_id"), f.get("status")) for f in frames] == [
-        ("activity.step", "s0", "running"),
-        ("activity.step", "s0", "failed"),
-        ("error", None, None),
-    ]
-    assert frames[1]["detail"] == frames[2]["error"]["detail"]
-    assert frames[1]["detail"] == classed_sentence("transient_unavailable", "retry_after_delay")
-    assert is_user_sentence(frames[1]["detail"])
-    assert frames[1]["duration_ms"] >= 0
-    assert frames[2]["error"]["error"] == "transient_unavailable"
-    assert [f["seq"] for f in frames] == sorted({f["seq"] for f in frames})
-    assert conversation.turn_recorded is False  # the turn stays open for the takeover to finish
 
 
 async def test_an_approval_the_approve_node_refuses_sends_no_approved_plan(
@@ -3915,7 +3448,6 @@ async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claim
         assert (live.turn_index, live.turn_recorded, live.segment) == (1, False, None)
         store.claim_segment(PRINCIPAL, CONVERSATION)  # not refused as busy
         assert _turn_spans(otlp_spans) == 1
-        assert live._telemetry_span is None
         first_trace = live.trace_id
         stored = await store.load(PRINCIPAL, CONVERSATION)
         assert stored is not None and stored.segment is None
@@ -4364,11 +3896,12 @@ async def test_answering_a_plan_interrupt_is_a_422_binding_error() -> None:
     assert "approve" in body["fix"]
 
 
-async def _noop_release(*args: Any, **kwargs: Any) -> None:
-    """Stands in for `StudioStore.release`: a crashed instance's segment
-    lease and resuming pending entries are never cleared or dropped --
-    exactly what a real crash leaves behind, since nothing runs a
+async def _never_closed(*args: Any, **kwargs: Any) -> SegmentClose:
+    """Stands in for `StudioStore.close_segment`: a crashed instance's
+    segment lease and resuming pending entries are never cleared or dropped
+    -- exactly what a real crash leaves behind, since nothing runs a
     process's `finally` blocks when it dies."""
+    return SegmentClose.FAILED
 
 
 async def _never_written(*args: Any, **kwargs: Any) -> Any:
@@ -4390,9 +3923,9 @@ async def _crash_leaves_no_stop() -> None:
 
 def _dies_on_a_stop(app: FastAPI) -> None:
     """Stand `app`'s instance in for one that dies as a Stop reaches it:
-    neither its segment's release nor its turn's close is written
-    (`_noop_release`, `_never_written`)."""
-    app.state.studio.store.release = _noop_release
+    neither its segment's closing write nor its turn's close is written
+    (`_never_closed`, `_never_written`)."""
+    app.state.studio.store.close_segment = _never_closed
     app.state.studio.turns.finish = _never_written
 
 
@@ -4401,7 +3934,7 @@ async def _approve_plan_then_hang(
 ) -> _HangingSurface:
     """Start `/interrupt approve`'s resume stream, let it reach its first
     (scripted) plan step, and abandon it there: `POST /cancel` ends the
-    stream without ever persisting the segment's release or the turn's
+    stream without ever persisting the segment's closing write or the turn's
     close (`_dies_on_a_stop`), standing in for a crash between
     `/interrupt`'s save and the resumed segment's own checkpoint. Returns once the abandoned stream's
     `error` frame has been read off the wire."""
@@ -5401,28 +4934,6 @@ async def test_a_write_component_timeout_is_never_advised_a_retry() -> None:
     assert is_user_sentence(error["detail"])
 
 
-# --- heartbeats (delta 3) -------------------------------------------------------
-
-
-async def test_heartbeat_comments_fill_gaps_between_frames() -> None:
-    """`_sse_stream` emits `: ka` comment lines while the next frame is slow,
-    and the comments carry no seq: they are SSE comments outside the frame
-    sequence."""
-
-    async def slow_frames():
-        yield MessageDelta(event="message.delta", seq=0, text="one")
-        await asyncio.sleep(0.12)
-        yield MessageDelta(event="message.delta", seq=1, text="two")
-
-    lines = [line async for line in _sse_stream(slow_frames(), heartbeat_seconds=0.05)]
-
-    data_lines = [line for line in lines if line.startswith("data: ")]
-    heartbeats = [line for line in lines if line.startswith(": ka")]
-    assert len(data_lines) == 2
-    assert len(heartbeats) >= 1
-    assert lines[0].startswith("data: ")  # the first frame was not delayed
-
-
 # --- cancel (delta 14) ----------------------------------------------------------
 
 
@@ -5467,265 +4978,6 @@ async def test_cancelling_an_idle_conversation_is_a_no_op_204() -> None:
             headers=AUTH,
         )
     assert response.status_code == 204
-
-
-async def test_closing_the_sse_stream_unwinds_the_segment_generator() -> None:
-    """Unit level: closing the transport generator unwinds the segment
-    generator. (Transport-level disconnect is pinned separately below.)"""
-    closed = asyncio.Event()
-
-    async def segment():
-        try:
-            yield MessageDelta(event="message.delta", seq=0, text="one")
-            await asyncio.Event().wait()  # hang like a slow tool call
-        finally:
-            closed.set()
-
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    stream = _sse_stream(segment(), conversation=conversation)
-    first = await anext(stream)
-    assert first.startswith("data: ")
-    await stream.aclose()
-
-    await asyncio.wait_for(closed.wait(), timeout=2)
-
-
-async def test_a_cancelled_response_task_leaves_the_turn_open_and_unwinds_the_segment() -> None:
-    """What a client disconnect becomes inside the process: uvicorn cancels
-    the response task. The stream must close the segment generator and
-    leave the turn open, unrecorded, for the next request to carry on."""
-    closed = asyncio.Event()
-
-    async def segment():
-        try:
-            yield MessageDelta(event="message.delta", seq=0, text="one")
-            await asyncio.Event().wait()  # hang like a slow tool call
-        finally:
-            closed.set()
-
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    conversation.begin_turn()
-    conversation.turn_user_message = "kenya oda 2023"
-    conversation.turn_final_text = "one"
-    received: list[str] = []
-
-    async def consume() -> None:
-        async for chunk in _sse_stream(
-            segment(), conversation=conversation, heartbeat_seconds=0.02
-        ):
-            received.append(chunk)  # noqa: PERF401 -- observed one chunk at a time
-
-    task = asyncio.ensure_future(consume())
-    while not received:  # the first frame is out; the stream is parked at a heartbeat wait
-        await asyncio.sleep(0.01)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    await asyncio.wait_for(closed.wait(), timeout=2)
-    assert not conversation.turn_recorded
-    assert conversation.turns == []
-
-
-async def test_unwinding_under_a_cancelled_response_cancels_the_segment_once() -> None:
-    """A response task whose anyio scope is cancelled (Starlette's task group
-    once the response is cancelled) is re-cancelled on every loop iteration.
-    `_unwind` cancels the segment task once and keeps those re-cancellations
-    away from it, so the segment's own cleanup runs to the end."""
-    cleanup_cancels = 0
-    cleaned_up = False
-
-    async def segment() -> None:
-        nonlocal cleanup_cancels, cleaned_up
-        try:
-            await asyncio.Event().wait()  # a slow tool call
-        finally:
-            try:
-                await asyncio.sleep(0.05)  # the ledger release and connection close
-            except asyncio.CancelledError:
-                cleanup_cancels += 1
-                raise
-            cleaned_up = True
-
-    pending = asyncio.ensure_future(segment())
-    await asyncio.sleep(0)  # the segment is parked in its slow call
-    with anyio.CancelScope() as scope:
-        scope.cancel()
-        await _unwind(pending)
-
-    assert cleanup_cancels == 0
-    assert cleaned_up
-
-
-async def _lose_the_client_while_parked(
-    conversation: ConversationState, *, how: str, paused: bool
-) -> None:
-    """Park `_sse_stream` after one frame with the segment idle, then take the
-    client away: `how="cancel"` cancels the consumer while the stream awaits its
-    next frame; `how="close"` closes the stream at a heartbeat `yield`. When
-    `paused`, the conversation holds a pending plan interrupt, as it does once
-    `plan.proposed` has been emitted."""
-    if paused:
-        conversation.pending["int_01"] = _PendingInterrupt(
-            adk_id="adk_1", kind="plan", plan_version=1, plan_revision="rev_1"
-        )
-
-    async def segment():
-        yield MessageDelta(event="message.delta", seq=0, text="one")
-        await asyncio.Event().wait()  # the run has not drained yet
-
-    stream = _sse_stream(segment(), conversation=conversation, heartbeat_seconds=0.02)
-    assert (await anext(stream)).startswith("data: ")
-    if how == "close":
-        assert (await anext(stream)).startswith(": ka")
-        await stream.aclose()
-        return
-
-    async def consume() -> None:
-        async for _ in stream:
-            pass
-
-    task = asyncio.ensure_future(consume())
-    await asyncio.sleep(0.01)  # parked at the heartbeat wait
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-
-@pytest.mark.parametrize("how", ["cancel", "close"])
-async def test_a_client_that_leaves_a_paused_turn_keeps_it_open_and_resumable(how: str) -> None:
-    """The turn is waiting on `/interrupt`: a disconnect records nothing and
-    leaves the pending interrupt and the telemetry span in place; the next
-    `begin_turn` abandons it exactly as it does for a client that read the
-    stream to the end."""
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    conversation.begin_turn()
-    conversation.turn_user_message = "kenya oda 2023"
-    span = conversation._telemetry_span
-
-    await _lose_the_client_while_parked(conversation, how=how, paused=True)
-
-    assert conversation.awaiting_answer
-    assert not conversation.turn_recorded
-    assert conversation.turns == []
-    assert conversation._telemetry_span is span
-
-    conversation.begin_turn()
-    assert conversation.turns == [{"user": "kenya oda 2023", "assistant": "", "error": "abandoned"}]
-    assert not conversation.awaiting_answer
-
-
-@pytest.mark.parametrize("how", ["cancel", "close"])
-async def test_a_client_that_leaves_a_running_turn_leaves_it_open_for_the_next_turn(
-    how: str,
-) -> None:
-    """The turn runs: a disconnect records nothing and ends this instance's
-    telemetry span; the next `begin_turn` abandons the turn, as it does a
-    turn a crash left."""
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    conversation.begin_turn()
-    conversation.turn_user_message = "kenya oda 2023"
-
-    await _lose_the_client_while_parked(conversation, how=how, paused=False)
-
-    assert not conversation.awaiting_answer
-    assert not conversation.turn_recorded
-    assert conversation.turns == []
-    assert conversation._telemetry_span is None
-
-    conversation.begin_turn()
-    assert conversation.turns == [{"user": "kenya oda 2023", "assistant": "", "error": "abandoned"}]
-
-
-# NOTE: the transport half of a disconnect cannot be driven in-process --
-# httpx2's ASGITransport runs the app to completion and never delivers
-# http.disconnect, so a route-level test would hang (verified). The process
-# half -- uvicorn cancelling the response task -- is the test above. The
-# RELIABLE cancellation path either way is POST /api/studio/cancel (delta 14).
-
-
-async def test_a_client_that_leaves_at_the_pause_frame_still_releases_the_segment() -> None:
-    """The client closes its `/turn` stream right after `plan.proposed`, while
-    the segment's end-of-segment save (`StudioStore.release`) is still on its
-    read. Starlette, as uvicorn runs it, cancels the response on
-    `http.disconnect`, and the stream cancels the segment task under that
-    save. The save still lands, so the ledger holds no live segment and the
-    `/interrupt` that answers the plan streams at once."""
-    store = StudioStore(
-        _engine(),
-    )
-    app = _app(*_plan(), store=store)
-    releasing = asyncio.Event()
-    real_release = store.release
-    real_transaction = store._transaction
-
-    async def release(*args: Any, **kwargs: Any) -> None:
-        releasing.set()
-        await real_release(*args, **kwargs)
-
-    @asynccontextmanager
-    async def transaction() -> Any:
-        if releasing.is_set():
-            await asyncio.sleep(0.05)  # the save's read is in flight at the disconnect
-        async with real_transaction() as conn:
-            yield conn
-
-    store.release = release  # type: ignore[method-assign]
-    store._transaction = transaction  # type: ignore[method-assign]
-
-    body = json.dumps(_turn_body()).encode()
-    request_sent = False
-    chunks: list[bytes] = []
-
-    async def receive() -> dict[str, Any]:
-        nonlocal request_sent
-        if not request_sent:
-            request_sent = True
-            return {"type": "http.request", "body": body, "more_body": False}
-        await releasing.wait()
-        return {"type": "http.disconnect"}
-
-    async def send(message: dict[str, Any]) -> None:
-        if message["type"] == "http.response.body":
-            chunks.append(message.get("body", b""))
-
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0"},
-        "http_version": "1.1",
-        "method": "POST",
-        "scheme": "http",
-        "path": "/api/studio/turn",
-        "raw_path": b"/api/studio/turn",
-        "query_string": b"",
-        "root_path": "",
-        "headers": [
-            (b"content-type", b"application/json"),
-            (b"content-length", str(len(body)).encode()),
-            (b"authorization", AUTH["Authorization"].encode()),
-        ],
-        "client": ("127.0.0.1", 50000),
-        "server": ("studio.test", 80),
-    }
-    await asyncio.wait_for(app(scope, receive, send), timeout=10)
-
-    first = [
-        json.loads(line[len("data: ") :])
-        for line in b"".join(chunks).decode().splitlines()
-        if line.startswith("data: ")
-    ]
-    plan = _frame(first, "plan.proposed")
-    ledger = await StudioStore(
-        _engine(),
-    ).load(PRINCIPAL, CONVERSATION)
-    assert ledger is not None
-    assert ledger.segment is None
-
-    async with _client(app) as client:
-        second = await _stream(
-            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
-        )
-    assert _events(second)[-1] == "done"
 
 
 # --- the Edit Card route (component_ref intent=edit) ----------------------------
@@ -7629,9 +6881,8 @@ async def _stop_live() -> bool:
 class _StopReaders:
     """Who acted on each Stop: the heartbeat (renewals reporting a new live
     stop id, `_StopsTaken`), whether it ended the turn or a node's
-    `StopScope` took it; the end of the segment (a `/turn` stream's closing
-    write closing the turn, `StudioStore.close_segment`, or an `/interrupt`
-    stream closing it under the lease its release kept, `_close_on_stop`);
+    `StopScope` took it; the end of the segment, counted as `release` (the
+    stream's closing write closing the turn, `StudioStore.close_segment`);
     a claimant that found the Stop live and closed its turn
     (`_act_on_stop`); or `/cancel` under the lock (`_stop_open_turn`)."""
 
@@ -7640,14 +6891,8 @@ class _StopReaders:
         self.heartbeat = _StopsTaken(store)
         self.counts = {"release": 0, "claim": 0, "cancel": 0}
         close_segment = store.close_segment
-        close_on_stop = studio_module._close_on_stop
         act_on_stop = studio_module._act_on_stop
         stop_open = studio_module._stop_open_turn
-
-        async def counted_close(*args: Any, **kwargs: Any) -> bool:
-            closed = await close_on_stop(*args, **kwargs)
-            self.counts["release"] += closed
-            return closed
 
         async def counted_close_segment(*args: Any, **kwargs: Any) -> SegmentClose:
             result = await close_segment(*args, **kwargs)
@@ -7664,7 +6909,6 @@ class _StopReaders:
             self.counts["cancel"] += 1
             return await stop_open(*args, **kwargs)
 
-        monkeypatch.setattr(studio_module, "_close_on_stop", counted_close)
         monkeypatch.setattr(store, "close_segment", counted_close_segment)
         monkeypatch.setattr(studio_module, "_act_on_stop", counted_claim)
         monkeypatch.setattr(studio_module, "_stop_open_turn", counted_cancel)
@@ -9245,26 +8489,6 @@ async def test_the_lock_is_held_from_the_route_not_from_the_first_frame() -> Non
     assert third is first
 
 
-async def test_closing_at_a_heartbeat_unwinds_cleanly() -> None:
-    """Regression: aclose() during a heartbeat yield raised GeneratorExit at
-    a point that skipped the unwind, leaving the source 'already running'."""
-    closed = asyncio.Event()
-
-    async def segment():
-        try:
-            await asyncio.Event().wait()  # hang BEFORE any frame
-            yield None
-        finally:
-            closed.set()
-
-    conversation = ConversationState(conversation_id=CONVERSATION)
-    stream = _sse_stream(segment(), conversation=conversation, heartbeat_seconds=0.02)
-    first = await anext(stream)
-    assert first.startswith(": ka")
-    await stream.aclose()
-    await asyncio.wait_for(closed.wait(), timeout=2)
-
-
 # --- conversation history: turn records and digest ----------------------------
 
 
@@ -10437,73 +9661,6 @@ async def test_a_request_cancelled_while_it_drops_its_claim_still_releases_the_l
     assert stored is not None and stored.segment is None
 
 
-async def test_a_release_failure_does_not_strand_the_local_lock() -> None:
-    """`StudioRunner._locked`'s nested finally releases the conversation
-    lock even when the store's own release call raises (`StudioStore.release`
-    never does in practice; this pins the guarantee independently of that
-    contract) -- the exception propagates, but the lock still releases."""
-    studio = _app().state.studio
-    conversation = await studio.store.create("u_a", CONVERSATION)
-    await conversation.lock.acquire()
-    segment_id = studio.store.claim_segment("u_a", CONVERSATION)
-    await studio.store.save("u_a", CONVERSATION)
-
-    async def broken_release(*args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("db is down")
-
-    studio.store.release = broken_release  # type: ignore[method-assign]
-
-    async def one_frame() -> Any:
-        yield MessageDelta(event="message.delta", seq=0, text="one")
-
-    with pytest.raises(RuntimeError):
-        async for _ in studio._locked(
-            "u_a", CONVERSATION, conversation, segment_id, one_frame(), renewing=True
-        ):
-            pass
-
-    assert not conversation.lock.locked()
-
-
-async def test_a_heartbeat_exception_does_not_strand_the_local_lock() -> None:
-    """`StudioRunner._locked`'s nested finally releases the conversation
-    lock even when `_unwind(heartbeat)` re-raises a non-cancel exception
-    from the heartbeat task (`_heartbeat` catches only `renew`'s own
-    exceptions; one from `_end_stream` or `store.now()` reaches `_unwind`
-    unhandled) -- the exception propagates, but both the segment and the
-    lock still release."""
-    studio = _app().state.studio
-    conversation = await studio.store.create("u_a", CONVERSATION)
-    await conversation.lock.acquire()
-    segment_id = studio.store.claim_segment("u_a", CONVERSATION)
-    await studio.store.save("u_a", CONVERSATION)
-
-    started = asyncio.Event()
-
-    async def broken_heartbeat(*args: Any, **kwargs: Any) -> None:
-        started.set()
-        raise RuntimeError("heartbeat exploded")
-
-    studio._heartbeat = broken_heartbeat  # type: ignore[method-assign]
-
-    async def one_frame() -> Any:
-        yield MessageDelta(event="message.delta", seq=0, text="one")
-        # Let the heartbeat task actually run and raise before `_locked`'s
-        # finally reaches `_unwind`: `started.set()` and the raise below it
-        # are the same uninterrupted step, so once this wait returns the
-        # task is already done with `RuntimeError`, not merely scheduled.
-        await started.wait()
-
-    with pytest.raises(RuntimeError, match="heartbeat exploded"):
-        async for _ in studio._locked(
-            "u_a", CONVERSATION, conversation, segment_id, one_frame(), renewing=True
-        ):
-            pass
-
-    assert not conversation.lock.locked()
-    assert studio.store.current("u_a", CONVERSATION).segment is None
-
-
 async def test_a_pause_frame_is_not_sent_when_its_closing_write_fails() -> None:
     """When the closing write after the pause fails, the stream ends with
     the transient frame and the client never receives `plan.proposed`."""
@@ -10544,165 +9701,6 @@ async def test_a_stream_that_lost_its_segment_ends_its_span_as_lost(
     assert (error["error"], error["retry"]) == ("transient_unavailable", "retry_after_delay")
     assert ended == [("lost", "WARNING")]
     assert exported_at_flush == [1]
-
-
-@pytest.mark.parametrize("write", ["reserve_frames", "checkpoint"])
-@pytest.mark.parametrize(
-    ("failure", "loss"),
-    [
-        pytest.param(SegmentLost("taken over"), "segment_lost", id="segment-lost"),
-        pytest.param(
-            DatabaseUnavailable("unreachable"), "database_unavailable", id="database-unavailable"
-        ),
-    ],
-)
-async def test_a_lost_segment_at_a_save_ends_the_stream_as_the_heartbeat_does(
-    caplog: pytest.LogCaptureFixture, write: str, failure: Exception, loss: str
-) -> None:
-    """A frame-number reservation or a checkpoint that finds the segment
-    lost, or the database unreachable until the lease's deadline, ends the
-    stream with the frame a heartbeat that cannot renew sends, reports the
-    loss by its cause, logs a warning, and leaves the turn as stored."""
-    ending = studio_module._StreamEnding()
-    studio = _app().state.studio
-    conversation = await studio.store.create("u_a", CONVERSATION)
-    segment_id = studio.store.claim_segment("u_a", CONVERSATION)
-
-    async def failing(*args: Any, **kwargs: Any) -> None:
-        raise failure
-
-    setattr(studio.store, write, failing)
-
-    async def frames() -> Any:
-        yield Done(event="done", seq=0, trace_id="trace")
-
-    with caplog.at_level("WARNING"):
-        sent = await _relayed(studio, conversation, segment_id, frames(), ending)
-
-    assert ending.status == loss
-    assert [
-        (
-            frame.event,
-            frame.error.error.value,
-            frame.error.retry.value,
-            frame.error.retry_after_seconds,
-        )
-        for frame in sent
-    ] == [("error", "transient_unavailable", "retry_after_delay", STREAM_RETRY_AFTER_S)]
-    assert not conversation.turn_recorded
-    assert [r.levelno for r in caplog.records] == [logging.WARNING]
-
-
-@pytest.mark.parametrize("reservation_fails", [False, True], ids=["reserved", "unreserved"])
-async def test_a_card_write_that_loses_the_segment_reserves_its_frame_s_number(
-    caplog: pytest.LogCaptureFixture, reservation_fails: bool
-) -> None:
-    """A card write in the relayed frames finds the database unreachable. Its
-    stream-fatal frame goes out like any other, once its number lies inside
-    the segment's reservation, and the loss is logged once and names the
-    stream's ending by its cause. When that reservation finds the database
-    unreachable too, the card write's frame still goes out alone, and the
-    reservation's own failure is logged beside the loss."""
-    studio = _app().state.studio
-    conversation = await studio.store.create("u_a", CONVERSATION)
-    segment_id = studio.store.claim_segment("u_a", CONVERSATION)
-    reserved: list[int] = []
-
-    async def reserve(*args: Any, **kwargs: Any) -> None:
-        reserved.append(conversation.seq)
-        if reservation_fails:
-            raise DatabaseUnavailable("unreachable")
-
-    studio.store.reserve_frames = reserve  # type: ignore[method-assign]
-
-    async def frames() -> Any:
-        raise DatabaseUnavailable("unreachable")
-        yield  # pragma: no cover
-
-    ending = studio_module._StreamEnding()
-    with caplog.at_level("WARNING", logger="harness.studio"):
-        sent = await _relayed(studio, conversation, segment_id, frames(), ending)
-
-    assert [(frame.seq, frame.error.error.value) for frame in sent] == [
-        (0, "transient_unavailable")
-    ]
-    assert reserved == [1]
-    assert ending.status == "database_unavailable"
-    assert [record.getMessage().split(" ")[1] for record in caplog.records] == (
-        ["card", "frame"] if reservation_fails else ["card"]
-    )
-
-
-@pytest.mark.parametrize(
-    ("failure", "relayed", "logged", "reported"),
-    [
-        pytest.param(
-            SegmentLost("taken over"),
-            ["plan.approved", "error"],
-            (logging.WARNING, False),
-            "segment_lost",
-            id="segment-lost",
-        ),
-        pytest.param(
-            DatabaseUnavailable("unreachable"),
-            ["plan.approved", "error"],
-            (logging.WARNING, False),
-            "database_unavailable",
-            id="database-unavailable",
-        ),
-        pytest.param(
-            RuntimeError("a bug"),
-            ["plan.approved", "message.delta"],
-            (logging.ERROR, True),
-            None,
-            id="other-failure",
-        ),
-    ],
-)
-async def test_a_lost_segment_after_plan_approved_ends_the_stream(
-    caplog: pytest.LogCaptureFixture,
-    failure: Exception,
-    relayed: list[str],
-    logged: tuple[int, bool],
-    reported: str | None,
-) -> None:
-    """The save after `plan.approved` is sent fails. A lost segment ends the stream
-    with a stream-fatal error frame, as at every other checkpoint, since another
-    instance now owns the conversation, and is reported by its cause; any other
-    failure is logged and the stream goes on, logged as an error."""
-    ending = studio_module._StreamEnding()
-    studio = _app().state.studio
-    conversation = await studio.store.create("u_a", CONVERSATION)
-    segment_id = studio.store.claim_segment("u_a", CONVERSATION)
-
-    async def failing_checkpoint(*args: Any, **kwargs: Any) -> None:
-        raise failure
-
-    studio.store.checkpoint = failing_checkpoint  # type: ignore[method-assign]
-
-    async def frames() -> Any:
-        yield PlanApproved(
-            event="plan.approved",
-            seq=0,
-            plan_version_id="plan_1",
-            version=1,
-            title="Research plan",
-            steps=[],
-            choices=[],
-        )
-        yield MessageDelta(event="message.delta", seq=1, text="next")
-
-    with caplog.at_level("WARNING", logger="harness.studio"):
-        sent = [
-            frame.event
-            for frame in await _relayed(studio, conversation, segment_id, frames(), ending)
-        ]
-
-    assert sent == relayed
-    assert ending.status == reported
-    # A lost segment is a warning; any other fault, which the stream goes on
-    # past, is an error with its traceback.
-    assert [(r.levelno, r.exc_info is not None) for r in caplog.records] == [logged]
 
 
 @pytest.mark.parametrize(
@@ -10784,7 +9782,9 @@ async def test_an_edited_card_fenced_out_by_a_takeover_ends_the_turn_as_transien
 
     error = _frame(frames, "error")["error"]
     assert (error["error"], error["retry"]) == ("transient_unavailable", "retry_after_delay")
-    assert not store.current(PRINCIPAL, CONVERSATION).turn_recorded
+    stored = await store.load(PRINCIPAL, CONVERSATION)
+    assert stored is not None
+    assert not stored.turn_recorded
     assert not [r for r in caplog.records if "studio edit turn failed" in r.getMessage()]
 
 

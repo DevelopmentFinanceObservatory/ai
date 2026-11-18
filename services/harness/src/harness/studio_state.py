@@ -25,12 +25,11 @@ import logging
 import re
 import uuid
 from collections.abc import Iterable, Mapping
-from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal
 
-from common.telemetry import EventLevel, end_turn_span, start_turn_span, use_turn_span
+from common.telemetry import end_turn_span, start_turn_span
 from compiler.sources import alternative_definitions, source_from_spec_block
 from data_mcp.definition_store.identity import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
@@ -380,7 +379,7 @@ class _PendingInterrupt:
     # None for an elicitation and a plan paused before cards were kept.
     card: PlanProposed | None = None
     # Whether a stream resuming this plan interrupt with an approval sent its
-    # `plan.approved` frame (`StudioRunner._checkpointed`), so a retry resuming
+    # `plan.approved` frame (`harness.studio_stream`), so a retry resuming
     # the same answer sends it only when the dead attempt did not.
     approved_sent: bool = False
 
@@ -390,8 +389,8 @@ class _PendingInterrupt:
 # owner blocks the conversation for at most that long before another
 # instance can take over.
 SEGMENT_TTL_S = 45
-# How often `StudioRunner._locked`'s heartbeat task renews the live
-# segment, well inside the TTL so a slow renewal still lands before it
+# How often a stream's heartbeat renews the live segment's lease
+# (`harness.turn.loop.run_segment`, `harness.studio.StudioRunner._heartbeat`), well inside the TTL so a slow renewal still lands before it
 # lapses.
 HEARTBEAT_INTERVAL_S = 5
 
@@ -416,7 +415,7 @@ class SegmentLost(Exception):  # noqa: N818 -- named for the wire condition, not
 
 class DatabaseUnavailable(Exception):  # noqa: N818 -- named for the condition the stream reports
     """Raised by `StudioStore`'s retried writes (`checkpoint`,
-    `change_canvas`, `reserve_frames`) when the database stayed unreachable
+    `change_canvas`) when the database stayed unreachable
     until the lease's deadline. The stream ends as a lost segment does,
     leaving the turn as stored, since no close could be saved either."""
 
@@ -462,12 +461,6 @@ class ConversationState:
     # (`POST /api/studio/cancel`) or a lease another instance took reaches
     # the stream without waiting for the next beat (`renew_lease_now`).
     renew_now: asyncio.Event | None = None
-    # The segment this instance's stream stopped reading while the segment
-    # still ran (`StudioRunner._frames`): its client left, or a frame's save
-    # ended the stream. `StudioStore.release` keeps the pending entries
-    # resuming under it, as a crash leaves them, so a retry of the same
-    # answer carries the turn on. Not durable.
-    unfinished_segment: str | None = None
     # The current turn's auto-add preference (delta 11); reset per turn.
     auto_add: bool = True
     # Digest entries for every component this conversation streamed,
@@ -539,14 +532,6 @@ class ConversationState:
     # as `changed_from` for a choice that holds another label now.
     turn_choice_baseline: dict[str, str] = field(default_factory=dict)
     turn_recorded: bool = False
-    # This instance's telemetry span for the turn's current Edit Card
-    # segment, on the turn's `trace_id`. `open_segment_span` opens
-    # it, and
-    # `end_segment_span` ends it once when the segment ends on this instance,
-    # so no span outlives the segment. Streams make it current with
-    # `in_turn_span`.
-    # Excluded from repr so a log of the state doesn't dump SDK internals.
-    _telemetry_span: Any = field(default=None, repr=False, compare=False)
     # Whether a `remove_cards` of this turn changed the canvas since the
     # stream last reported one (`take_unreported_removal`). Not durable.
     # Reset by `begin_turn`.
@@ -833,9 +818,9 @@ class ConversationState:
         """Append the turn's record, once -- the resume protocol can end a
         turn from more than one code path. A turn recorded with an `error`
         drops its pending interrupts: no pause is left to answer, so
-        `/interrupt` answers 404. The segment's telemetry span ends
-        when the segment does (`end_segment_span`), with the record's
-        message and reply as its input and output.
+        `/interrupt` answers 404. The segment's telemetry span takes the
+        record's message and reply as its input and output when the
+        segment ends (`harness.studio_stream`).
 
         `match_notes` (`harness.turn_records.loose_match_notes`) and
         `basis_line` (`harness.turn_records.basis_line`) are the text the code
@@ -995,16 +980,7 @@ class ConversationState:
         still answer. Excludes an entry already resuming under a segment: a
         turn whose client left mid-resume runs, and a retry of the same
         answer carries it on."""
-        return awaiting_answer(p.resuming_segment for p in self.pending.values())
-
-    @property
-    def turn_status(self) -> str:
-        """How the current turn stands (`turn_status`)."""
-        return turn_status(
-            recorded=self.turn_recorded,
-            record=self.turns[-1] if self.turns else None,
-            awaiting=self.awaiting_answer,
-        )
+        return any(p.resuming_segment is None for p in self.pending.values())
 
     def mark_approved_sent(self, segment_id: str) -> None:
         """Record that the stream of `segment_id` sent `plan.approved` for the
@@ -1040,8 +1016,7 @@ class ConversationState:
         was left in, for the caller to record its closing span once the new
         turn's claim commits (`record_closed_turn_span`). It opens no span:
         the owner of the segment the claim starts opens that segment's
-        (`harness.studio_stream`), and an Edit Card stream opens its own
-        (`open_segment_span`)."""
+        (`harness.studio_stream`)."""
         previous = ClosedTurn(self.trace_id, self.turn_user_message, "abandoned")
         abandoned = None
         self.turn_index += 1
@@ -1066,59 +1041,6 @@ class ConversationState:
         self.turn_applied_choice = None
         self.turn_recorded = False
         return abandoned
-
-    def end_segment_span(self, status: str, *, stored: str | None = None) -> bool:
-        """End this instance's span for the turn's segment, once, with
-        `status` at the level `span_level` gives it, and the turn's message
-        and, once the turn is recorded, its reply as the span's input and
-        output. `stored`, the turn as this instance last saved it
-        (`harness.studio_store.StudioStore.stored_turn`), goes on the span as
-        `dfo.stored`. Returns whether a span was open to end, for the caller
-        to flush.
-        """
-        span = self._telemetry_span
-        if span is None:
-            return False
-        self._telemetry_span = None
-        end_turn_span(
-            span,
-            request=self.turn_user_message,
-            response=_recorded_reply(self.turns[-1]) if self.turn_recorded and self.turns else None,
-            error=status,
-            level=span_level(status),
-            attributes={"dfo.stored": stored} if stored is not None else None,
-        )
-        return True
-
-    def end_leftover_span(self) -> None:
-        """End a span this state still holds as `orphaned`, logged as the
-        breach it is: every segment ends its own span before the
-        conversation's lock is free, so a new segment's span should find
-        none. Called before a new segment's span takes its place, while the
-        state still holds the turn the leftover was opened for."""
-        if self._telemetry_span is None:
-            return
-        logger.warning(
-            "studio: conversation %s still held a segment span when a new segment "
-            "claimed it; ending it as orphaned",
-            self.conversation_id,
-        )
-        self.end_segment_span("orphaned")
-
-    def open_segment_span(self) -> None:
-        """Open a span for the segment about to run, on this conversation's
-        `trace_id`, ending any span still held first (`end_leftover_span`).
-        The Edit Card stream opens its own here once its claim commits."""
-        self.end_leftover_span()
-        self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
-
-    def in_turn_span(self) -> AbstractContextManager[None]:
-        """Make this segment's telemetry span current for a `with` block.
-        Every stream that runs graph or executor work for the turn (the
-        `/turn` stream and the `/interrupt` stream that resumes it) enters
-        its own segment's span, and every segment's span is on the turn's
-        trace. A no-op when telemetry is off or the span has ended."""
-        return use_turn_span(self._telemetry_span)
 
     def next_seq(self) -> int:
         value = self.seq
@@ -1189,149 +1111,6 @@ def renew_lease_now(conversation: ConversationState) -> None:
         conversation.renew_now.set()
 
 
-# How a stream lost its segment: another instance took it over
-# (`segment_lost`), or the database stayed unreachable until the lease's
-# deadline (`database_unavailable`).
-type StreamLoss = Literal["segment_lost", "database_unavailable"]
-STREAM_LOSSES: tuple[StreamLoss, ...] = get_args(StreamLoss.__value__)
-
-# The span statuses that are not failures, and the level each ends at
-# (`span_level`).
-_SPAN_STATUS_LEVELS: dict[str, EventLevel] = {
-    "done": "DEFAULT",
-    "paused": "DEFAULT",
-    "cancelled": "WARNING",
-    "segment_lost": "WARNING",
-    "database_unavailable": "WARNING",
-    "disconnected": "WARNING",
-    "not_started": "WARNING",
-    "orphaned": "WARNING",
-}
-
-
-def span_level(status: str) -> EventLevel:
-    """The level a span with `status` ends at: the one
-    `_SPAN_STATUS_LEVELS` gives, and `ERROR` for any other status, which is
-    a failure.
-
-    Every span on a turn's trace carries its status, level and `stored`
-    (`ConversationState.end_segment_span`). A segment's status is the cause
-    of the last ending frame its stream sent, in the turn record's
-    vocabulary (`harness.studio.StudioRunner._locked`). `stored` is the turn
-    as this instance last saved it (`StudioStore.stored_turn`), read after
-    its release ran, whether or not the release saved. A release's own
-    outcome is only logged. `lost` and `unclosed` are the turn loop's
-    segment outcomes (`harness.turn.loop.Outcome`).
-
-    | Case                        | Last ending | status                  | level   | stored       |
-    |                             | frame       |                         |         |              |
-    |-----------------------------|-------------|-------------------------|---------|--------------|
-    | Turn ends                   | `done`      | `done`                  | DEFAULT | `done`       |
-    | Turn pauses, the first Stop | pause       | `paused`                | DEFAULT | `paused`     |
-    | a `StopScope` took included |             |                         |         |              |
-    | Checkpoint before the pause | transient   | `database_unavailable`  | WARNING | `paused`     |
-    | frame raises                |             |                         |         |              |
-    | `DatabaseUnavailable`,      |             |                         |         |              |
-    | release saves               |             |                         |         |              |
-    | The same before `done`,     | transient   | `database_unavailable`  | WARNING | `done`       |
-    | release saves               |             |                         |         |              |
-    | The same with `SegmentLost` | transient   | `segment_lost`          | WARNING | as last      |
-    |                             |             |                         |         | saved        |
-    | A card write cannot reach   | transient   | `database_unavailable`  | WARNING | `open`       |
-    | the database                |             |                         |         |              |
-    | Heartbeat finds the lease   | transient   | `segment_lost`          | WARNING | `open`       |
-    | taken, or cannot renew it   |             |                         |         |              |
-    | before the deadline         |             |                         |         |              |
-    | (`lost`)                    |             |                         |         |              |
-    | Another instance abandoned  | transient   | `segment_lost`          | WARNING | as last      |
-    | the turn once it took the   |             |                         |         | saved        |
-    | lapsed lease                |             |                         |         |              |
-    | `done` sent, release fails  | `done`      | `done`                  | DEFAULT | `done`       |
-    | `done` sent, a Stop before  | `done`      | `done`                  | DEFAULT | `done`       |
-    | the release (the close      |             |                         |         |              |
-    | ended it)                   |             |                         |         |              |
-    | `done` sent, then a Stop    | `done`      | `done`                  | DEFAULT | `done`       |
-    | read by an Edit Card        |             |                         |         |              |
-    | stream's heartbeat          |             |                         |         |              |
-    | `done` recorded, its        | transient   | `transient_unavailable` | ERROR   | `done`       |
-    | checkpoint fails, release   |             |                         |         |              |
-    | saves                       |             |                         |         |              |
-    | Stop mid-run, release saves | `cancelled` | `cancelled`             | WARNING | `cancelled`  |
-    | Stop mid-run, release fails | `cancelled` | `cancelled`             | WARNING | `open`       |
-    | A taken Stop whose close    | `cancelled` | `cancelled`             | WARNING | `cancelled`  |
-    | could not be written        |             |                         |         |              |
-    | (`unclosed`)                |             |                         |         |              |
-    | Stop the release acts on:   | pause or    | `cancelled`             | WARNING | `cancelled`, |
-    | the segment returned        | error, then |                         |         | or as last   |
-    | paused, or a failed turn's  | `cancelled` |                         |         | saved when   |
-    | close went unwritten        |             |                         |         | the close    |
-    |                             |             |                         |         | fails        |
-    | Turn fails (a node's or the | error       | the frame's error code  | ERROR   | the code, or |
-    | segment's fault,            |             |                         |         | `open` when  |
-    | `state_not_saved`)          |             |                         |         | unsaved      |
-    | Frames end cancelled, the   | error       | `failed`                | ERROR   | the code     |
-    | segment's task uncancelled, |             |                         |         |              |
-    | no ending frame sent (a     |             |                         |         |              |
-    | pause left unsent included) |             |                         |         |              |
-    | The same, `done` recorded   | error       | `failed`                | ERROR   | `done`       |
-    | and unsent, release saves   |             |                         |         |              |
-    | The same after the pause    | pause       | `paused`                | DEFAULT | `paused`     |
-    | frame                       |             |                         |         |              |
-    | The same after `done`       | `done`      | `done`                  | DEFAULT | `done`       |
-    | Client gone mid-run, while  | none        | `disconnected`          | WARNING | `open`       |
-    | waiting or at a frame       |             |                         |         |              |
-    | Client gone after the pause | pause       | `paused`                | DEFAULT | `paused`     |
-    | frame                       |             |                         |         |              |
-    | Frames run out with no      | none        | `failed`                | ERROR   | as last      |
-    | ending frame                |             |                         |         | saved        |
-    | Claim refused before its    | none        | `not_started`           | WARNING |              |
-    | save committed              |             |                         |         |              |
-    | (`StudioStore.drop_draft`)  |             |                         |         |              |
-    | Answer refused after its    | none        | `not_started`           | WARNING |              |
-    | claim committed: the turn   |             |                         |         |              |
-    | moved, or the answer's save |             |                         |         |              |
-    | lost                        |             |                         |         |              |
-    | Request failed after its    | none        | `failed`                | ERROR   |              |
-    | claim, before streaming     |             |                         |         |              |
-    | Request cancelled after its | none        | `cancelled`             | WARNING |              |
-    | claim, before streaming     |             |                         |         |              |
-    | Span still open when a new  | none        | `orphaned`              | WARNING |              |
-    | segment's span moves in     |             |                         |         |              |
-    | Open turn closed by         | none        | `cancelled`             | WARNING |              |
-    | `/cancel`, or by the next   |             |                         |         |              |
-    | claimant on a live Stop     |             |                         |         |              |
-    | (`record_closed_turn_span`) |             |                         |         |              |
-    | Unrecorded turn closed by   | none        | `abandoned`             | WARNING |              |
-    | the next `/turn`            |             |                         |         |              |
-    | (`record_closed_turn_span`) |             |                         |         |              |
-    """
-    return _SPAN_STATUS_LEVELS.get(status, "ERROR")
-
-
-def stream_loss(exc: SegmentLost | DatabaseUnavailable) -> StreamLoss:
-    """How a lost segment or an unreachable database that ends a stream
-    ends its segment. Every place that ends a stream for either cause names
-    it through this, so one cause gives one status."""
-    return "segment_lost" if isinstance(exc, SegmentLost) else "database_unavailable"
-
-
-def awaiting_answer(resuming_segments: Iterable[str | None]) -> bool:
-    """Whether a turn whose pending interrupts are resuming under
-    `resuming_segments` awaits an answer: one of them is resuming under
-    none (`ConversationState.awaiting_answer`)."""
-    return any(segment is None for segment in resuming_segments)
-
-
-def turn_status(*, recorded: bool, record: Mapping[str, Any] | None, awaiting: bool) -> str:
-    """How a turn stands: `done` or the error code its `record` names once
-    `recorded`, `paused` while it is `awaiting` an answer, and `open`
-    otherwise. Read from the live state (`ConversationState.turn_status`)
-    and from the store's baseline (`StudioStore.stored_turn`)."""
-    if recorded and record is not None:
-        return record.get("error") or "done"
-    return "paused" if awaiting else "open"
-
-
 @dataclass(frozen=True)
 class ClosedTurn:
     """A turn closed with no segment of it running: its trace id, the
@@ -1355,20 +1134,25 @@ def record_closed_turn_span(conversation_id: str, turn: ClosedTurn) -> None:
     )
 
 
+# How a request that let go of its claim before its stream started let go
+# (`record_unstreamed_span`).
+type UnstreamedStatus = Literal["not_started", "failed", "cancelled"]
+
+
 def record_unstreamed_span(
-    conversation_id: str, *, trace_id: str, user_message: str, status: str
+    conversation_id: str, *, trace_id: str, user_message: str, status: UnstreamedStatus
 ) -> None:
-    """Record a zero-length span on `trace_id`, with `status` at the level
-    `span_level` gives it and `user_message` as its input, for a `/turn`
-    request that let go of its claim before its stream started: refused
-    before its claim save committed (`not_started`), or failed (`failed`) or
-    cancelled (`cancelled`) after it. A stream's own span is its owner's
-    (`harness.studio_stream`)."""
+    """Record a zero-length span on `trace_id`, with `status` and
+    `user_message` as its input, for a request that let go of its claim
+    before its stream started: refused before or after its claim save
+    committed (`not_started`, level `WARNING`), or failed (`failed`, level
+    `ERROR`) or cancelled (`cancelled`, level `WARNING`) after it. A
+    stream's own span is its owner's (`harness.studio_stream`)."""
     end_turn_span(
         start_turn_span(trace_id, session_id=conversation_id),
         request=user_message,
         error=status,
-        level=span_level(status),
+        level="ERROR" if status == "failed" else "WARNING",
     )
 
 

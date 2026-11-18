@@ -128,7 +128,9 @@ async def test_a_run_and_its_key_survive_into_a_fresh_store_over_the_same_servic
     await ledger.record(run.run_id, Seal(INPUTS, retrievals=RETRIEVALS))
     await ledger.store_plan("rev-1", "the plan")
     await ledger.store_plan("rev-1", "another plan")
-    await store.release(PRINCIPAL, CONVERSATION, store.current(PRINCIPAL, CONVERSATION).segment.id)
+    await store.close_segment(
+        PRINCIPAL, CONVERSATION, store.current(PRINCIPAL, CONVERSATION).segment.id
+    )
 
     fresh = StudioRunLedger(await _streaming_store(pg_engine, [START]))
 
