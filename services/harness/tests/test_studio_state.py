@@ -42,7 +42,6 @@ from harness import studio_state, studio_store
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.conversation import current_conversation_key
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY
-from harness.session_store import adk_turn_specs
 from harness.studio_state import (
     CANVAS_DIGEST_MAX_BYTES,
     CONVERSATION_DIGEST_MAX_BYTES,
@@ -72,10 +71,11 @@ from harness.wire import (
 from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from . import drawn_cards
-from .orchestrator_fakes import NO_ADK
+from .orchestrator_fakes import NO_ADK, session_turn_specs
 from .resolved_revision import resolved_revision
 from .store_clock import StoreClock
 from .test_turn_records import _scoped_part, _top_donors
@@ -417,7 +417,7 @@ def test_a_drawn_card_is_listed_while_the_canvas_holds_the_revision_it_was_drawn
     assert listed() == ["cmp_two"]
 
     applied = studio_state._apply_operations(
-        state, state.composition, [AddOp(op=MutationOp.ADD, component_id="cmp_one")]
+        state.components, state.composition, [AddOp(op=MutationOp.ADD, component_id="cmp_one")]
     )
     assert isinstance(applied, tuple)
     state.composition = _next_manifest(state.composition, applied[0], actor=CompositionActor.USER)
@@ -1030,7 +1030,7 @@ def test_a_component_id_a_type_and_a_title_of_any_size_are_cut_to_their_caps():
     """The digest's maximum holds for every field of a block.
 
     The id and the type come from the platform and the title from an edit the
-    model wrote (`studio_edit._revised_frames` stores `patch["title"]` as given),
+    model wrote (`studio_edit._record_revision` stores `patch["title"]` as given),
     so none of the three can be assumed short.
     """
     huge_id = "cmp_" + "i" * BIG
@@ -1787,7 +1787,7 @@ def new_store(
         return StudioStore(
             pg_engine,
             adk=NO_ADK,
-            turn_specs=adk_turn_specs(turn_sessions, app_name="app"),
+            turn_specs=session_turn_specs(turn_sessions, app_name="app"),
             **(clock.store_kwargs if clock is not None else {}),
         )
 
@@ -1936,7 +1936,9 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
     await store_a.mutate_composition(
         "principal",
         CONVERSATION,
-        lambda manifest: _next_manifest(manifest, [block], actor=CompositionActor.MODEL),
+        lambda manifest, _components: _next_manifest(
+            manifest, [block], actor=CompositionActor.MODEL
+        ),
     )
 
     await store_a.save("principal", CONVERSATION)
@@ -2105,12 +2107,12 @@ async def test_instances_whose_clocks_disagree_agree_on_a_lease_by_the_databases
     store_a = StudioStore(
         pg_engine,
         adk=NO_ADK,
-        turn_specs=adk_turn_specs(turn_sessions, app_name="app"),
+        turn_specs=session_turn_specs(turn_sessions, app_name="app"),
     )
     store_b = StudioStore(
         pg_engine,
         adk=NO_ADK,
-        turn_specs=adk_turn_specs(turn_sessions, app_name="app"),
+        turn_specs=session_turn_specs(turn_sessions, app_name="app"),
         clock=lambda: time.time() + 86_400,
     )
     await store_a.create("principal", CONVERSATION)
@@ -2369,7 +2371,7 @@ async def test_checkpoint_raises_segment_lost_when_the_ledger_is_gone(new_store,
 
 
 def _one_block_manifest(
-    manifest: CompositionManifest | None, *, component_id: str = "cmp_one"
+    manifest: CompositionManifest | None, _components: object, *, component_id: str = "cmp_one"
 ) -> CompositionManifest:
     block = CompositionBlock(
         component_id=component_id, revision=1, type=ComponentType.LINE_CHART, title="One"
@@ -2383,7 +2385,7 @@ async def test_mutate_composition_writes_the_returned_manifest(new_store) -> Non
     state = store.current("principal", CONVERSATION)
     await store.mutate_composition("principal", CONVERSATION, _one_block_manifest)
 
-    def mutate(manifest: CompositionManifest | None) -> CompositionManifest:
+    def mutate(manifest: CompositionManifest | None, _components: object) -> CompositionManifest:
         assert manifest is not None
         pinned = manifest.blocks[0].model_copy(update={"pinned": True})
         return _next_manifest(manifest, [pinned], actor=CompositionActor.USER)
@@ -2412,12 +2414,16 @@ async def test_a_card_the_turn_lands_is_written_onto_the_canvas_as_stored(new_st
     await store_a.mutate_composition("principal", CONVERSATION, _one_block_manifest)
     await store_b.load("principal", CONVERSATION)
 
-    def pin(manifest: CompositionManifest | None) -> CompositionManifest:
+    def pin(manifest: CompositionManifest | None, _components: object) -> CompositionManifest:
         assert manifest is not None
         pinned = manifest.blocks[0].model_copy(update={"pinned": True})
         return _next_manifest(manifest, [pinned], actor=CompositionActor.USER)
 
     await store_b.mutate_composition("principal", CONVERSATION, pin)
+
+    # The create's write token reaches the live state before the card lands
+    # (`_RecordingExecutor._keep_write_token`).
+    state_a.write_tokens["cmp_two"] = "token-two"
 
     landed = await store_a.change_canvas(
         "principal", CONVERSATION, lambda work: land_component(work, _CARD)
@@ -2429,6 +2435,10 @@ async def test_a_card_the_turn_lands_is_written_onto_the_canvas_as_stored(new_st
     assert reloaded.composition.blocks[0].pinned is True
     assert state_a.composition == reloaded.composition
     assert "cmp_two" in state_a.components
+    # The card's digest entry, write token and turn line commit with its block.
+    assert reloaded.components == state_a.components
+    assert reloaded.write_tokens == {"cmp_two": "token-two"}
+    assert reloaded.turn_components == state_a.turn_components
 
 
 async def test_a_stream_whose_segment_was_taken_over_lands_no_card(new_store, clock) -> None:
@@ -2479,6 +2489,158 @@ async def test_a_canvas_write_that_fails_leaves_the_live_state_as_it_was(new_sto
     assert state.turn_components == []
 
 
+def _dropping_connection(store: StudioStore, *, acknowledged: bool) -> list[int]:
+    """Make the next transaction `store` opens fail as a dropped connection
+    does: before its commit, or after it with the acknowledgement lost.
+    Returns a list counting the faults raised."""
+    real_transaction = store._transaction
+    faults: list[int] = []
+
+    def fault() -> OperationalError:
+        faults.append(1)
+        return OperationalError("COMMIT", {}, ConnectionResetError("connection reset"))
+
+    @asynccontextmanager
+    async def dropping() -> Any:
+        async with real_transaction() as conn:
+            yield conn
+            if not faults and not acknowledged:
+                raise fault()
+        if not faults and acknowledged:
+            raise fault()
+
+    store._transaction = dropping
+    return faults
+
+
+@pytest.mark.parametrize("acknowledged", [False, True], ids=["before-commit", "lost-ack"])
+async def test_a_card_write_that_meets_a_dropped_connection_lands_the_card_once(
+    new_store, monkeypatch, acknowledged: bool
+) -> None:
+    """A dropped connection during a card's write is retried. A retry after a
+    commit whose acknowledgement was lost reads the block that commit wrote,
+    so the card still has one block and one turn line."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    faults = _dropping_connection(store, acknowledged=acknowledged)
+
+    landed = await store.change_canvas(
+        "principal", CONVERSATION, lambda work: land_component(work, _CARD)
+    )
+
+    assert faults == [1]
+    assert landed == "created"
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_two"]
+    assert reloaded.composition == state.composition
+    assert [line["component_id"] for line in reloaded.turn_components] == ["cmp_two"]
+    assert reloaded.turn_components == state.turn_components
+
+
+async def test_a_release_whose_commit_lost_its_acknowledgement_is_recorded_as_saved(
+    new_store, monkeypatch, caplog
+) -> None:
+    """The retry finds the lease the lost commit cleared. The store records
+    the write as made, with the row's version, and warns of no takeover."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn()
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    state.turn_final_text = "the segment's last words"
+    faults = _dropping_connection(store, acknowledged=True)
+
+    with caplog.at_level(logging.INFO, logger=studio_store.__name__):
+        await store.release("principal", CONVERSATION, segment_id)
+
+    assert faults == [1]
+    assert [r.levelno for r in caplog.records if r.levelno >= logging.WARNING] == [logging.WARNING]
+    async with store.engine.connect() as conn:
+        version = (await conn.execute(text("SELECT version FROM conversations"))).scalar_one()
+    assert store._runtime[("principal", CONVERSATION)].version == version
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert (reloaded.segment, reloaded.turn_final_text) == (None, "the segment's last words")
+
+
+async def test_a_frame_reservation_that_meets_a_dropped_connection_is_retried(
+    new_store, monkeypatch
+) -> None:
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn()
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    state.seq = SEQ_BLOCK - 10
+    faults = _dropping_connection(store, acknowledged=False)
+
+    await store.reserve_frames("principal", CONVERSATION, segment_id)
+
+    assert faults == [1]
+    async with store.engine.connect() as conn:
+        reserved = (await conn.execute(text("SELECT seq_reserved FROM conversations"))).scalar_one()
+    assert reserved == 2 * SEQ_BLOCK - 10
+
+
+async def test_a_card_write_failing_past_the_lease_deadline_reports_the_segment_lost(
+    new_store, clock
+) -> None:
+    """A write that keeps failing stops retrying at the lease's deadline, ten
+    seconds before the lease dated from the claim's load would lapse: past
+    it, another instance may claim the conversation."""
+    store = new_store(clock=clock)
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    deadline = store.lease_deadline("principal", CONVERSATION)
+    assert deadline == clock.at + studio_state.SEGMENT_TTL_S - studio_store.LEASE_MARGIN_S
+    await clock.set(deadline)
+
+    async def dropped(*args: Any, **kwargs: Any) -> None:
+        raise OperationalError("UPDATE", {}, ConnectionResetError("connection reset"))
+
+    store._write_composition = dropped
+
+    with pytest.raises(SegmentLost):
+        await store.change_canvas(
+            "principal", CONVERSATION, lambda work: land_component(work, _CARD)
+        )
+
+    assert state.components == {}
+    assert state.composition is None
+
+
+async def test_a_removal_fenced_out_by_a_takeover_ends_the_stream(new_store, clock) -> None:
+    """`remove_cards` runs inside a model's tool call, where a raise would
+    reach the model as a failed call. A removal another instance's claim
+    fenced out ends the stream as lost before it propagates."""
+    store_a = new_store(clock=clock)
+    state_a = await store_a.create("principal", CONVERSATION)
+    store_a.claim_segment("principal", CONVERSATION)
+    await store_a.save("principal", CONVERSATION)
+    await store_a.change_canvas("principal", CONVERSATION, lambda work: land_component(work, _CARD))
+    await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+    store_b = new_store(clock=clock)
+    await store_b.load("principal", CONVERSATION)
+    store_b.claim_segment("principal", CONVERSATION)
+    await store_b.save("principal", CONVERSATION)
+    state_a.cancel_event = asyncio.Event()
+    remove = studio_state.make_remove_cards(store_a)
+    token = current_conversation_key.set(("principal", CONVERSATION))
+    try:
+        with pytest.raises(SegmentLost):
+            await remove(component_ids=["cmp_two"], all_cards=False)
+    finally:
+        current_conversation_key.reset(token)
+
+    assert state_a.cancel_event.is_set()
+    assert state_a.cancel_reason == "segment_lost"
+
+
 async def test_mutate_composition_no_op_returns_the_same_manifest_without_appending(
     new_store,
 ) -> None:
@@ -2497,7 +2659,9 @@ async def test_mutate_composition_no_op_returns_the_same_manifest_without_append
 
     store._write_composition = counting_write
 
-    result = await store.mutate_composition("principal", CONVERSATION, lambda manifest: manifest)
+    result = await store.mutate_composition(
+        "principal", CONVERSATION, lambda manifest, _components: manifest
+    )
 
     assert calls == 0
     assert result is state.composition
@@ -2508,7 +2672,9 @@ async def test_mutate_composition_refusal_returns_it_without_appending(new_store
     await store.create("principal", CONVERSATION)
     refusal = JSONResponse(status_code=404, content={"error": "not_found"})
 
-    result = await store.mutate_composition("principal", CONVERSATION, lambda manifest: refusal)
+    result = await store.mutate_composition(
+        "principal", CONVERSATION, lambda manifest, _components: refusal
+    )
 
     assert result is refusal
 
@@ -2576,6 +2742,27 @@ async def test_a_cancelled_segment_write_still_lands_then_reraises_the_cancel(
     else:
         assert reloaded.segment is not None
         assert reloaded.segment.expires_at == clock.at + studio_state.SEGMENT_TTL_S
+
+
+async def test_a_write_whose_caller_is_cancelled_ends_in_the_cancellation_whatever_it_raises():
+    """The heartbeat is cancelled while its renewal is still running, and
+    the renewal then fails: the caller still gets its cancellation, so the
+    heartbeat stops and the stream finishes unwinding."""
+    started, proceed = asyncio.Event(), asyncio.Event()
+
+    async def failing() -> None:
+        started.set()
+        await proceed.wait()
+        raise TimeoutError("the renewal timed out")
+
+    caller = asyncio.ensure_future(studio_store._run_to_completion(failing()))
+    await started.wait()
+    caller.cancel()
+    await asyncio.sleep(0)
+    proceed.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await caller
 
 
 async def test_release_never_raises_on_a_db_error(new_store) -> None:

@@ -65,12 +65,13 @@ Verbs:
   `--verify` writes nothing and compares, for every ledger session, the
   conversation as ADK's state loads (`_apply_delta` over the mapped keys)
   with `StudioStore.load` from the tables, the canvas included, and the
-  run-ledger items with the run rows. Both sides take the open turn's spec
-  blocks from its turn session, read by SQL. A conversation whose ADK
-  state moved since the job imported it while its rows did not (the
-  previous release still serving), and one whose rows moved since,
-  written by the release that reads the tables, are each listed and not
-  compared; one where both moved is a conflict, listed, not compared, and
+  run-ledger items with the run rows, its lease's cancel flag left out.
+  Both sides take the open turn's spec blocks from its turn session
+  through the reader the server serves (`open_turn_specs`). A conversation
+  whose ADK state moved since the job imported it while its rows did not
+  (the previous release still serving), and one whose rows moved since,
+  written by the release that reads the tables (one written while verify
+  compares it included), are each listed and not compared; one where both moved is a conflict, listed, not compared, and
   fails the verify.
 - `close-open-turns`: closes, in the tables, every open turn that holds no
   live lease and ran on ADK (its turn session `{conversation_id}#t{n}`
@@ -93,7 +94,9 @@ path, so a turn the previous release served after the last `--apply` is in
 the tables before the next request reads them. It refuses a diverged
 conversation with `harness.studio_store.ConversationHeld`. A conversation
 whose ledger session the copy refuses is served as the tables hold it, and
-started afresh by its next turn when they do not hold it.
+started afresh by its next turn when they do not hold it. `open_turn_specs`
+is the `turn_specs` reader the server gives `StudioStore`: it reads an open
+turn's spec blocks converted as `import` converts them.
 
 Without `--apply` nothing is written to the conversation tables. Only
 `import` migrates, so `--verify` and `close-open-turns` also run from an
@@ -154,6 +157,7 @@ from harness.studio_store import (
     ConversationHeld,
     ConversationStale,
     StudioStore,
+    TurnSpecs,
     _apply_delta,
     _delta_write,
     _DeltaWrite,
@@ -605,6 +609,27 @@ async def _read_turn_session(
     return _TurnSpecs(specs=dict(specs), blocks=blocks, size=row[1])
 
 
+def open_turn_specs(engine: AsyncEngine) -> TurnSpecs:
+    """`StudioStore`'s `turn_specs` reader over `engine`: the spec blocks the
+    turn session `session_id` (app `dfo_analyst_graph`) holds, read by SQL
+    and converted as the import converts them (`_convert_blocks`). Empty
+    when the session holds none or does not exist. The server serves Studio
+    through it, and `--verify` and `close-open-turns` read open turns
+    through it, so the gate checks the blocks the serving release loads."""
+
+    async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
+        turn = await _turn_session_specs(engine, principal, session_id)
+        return turn.specs if turn is not None else {}
+
+    return turn_specs
+
+
+def _converted_specs(session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
+    """`specs`, the spec blocks turn session `session_id` holds, converted
+    (`_convert_blocks`); a block that does not convert is kept as it is."""
+    return dict(_convert_blocks(specs, session_id, Blocks()))
+
+
 async def _find_row(conn: AsyncConnection, names: dict[str, str], *, lock: bool) -> int | None:
     """The id of the conversation `names` holds the `principal` and
     `conversation_id` of, None when no row holds it. With `lock`, the row is
@@ -665,17 +690,22 @@ async def _lease_live(conn: AsyncConnection, pk: int) -> bool:
     )
 
 
+# The lease field neither the rows' digest nor `--verify`'s comparison
+# reads. A Stop sent to this release on a stream the previous release runs
+# sets it on the lease a copy brought across; the flag never reaches that
+# stream, and the next copy replaces it with ADK's, so it is no write the
+# tables would lose.
+_UNCOMPARED_LEASE_FIELD = "cancel"
+
+
 async def _stored_digest(conn: AsyncConnection, pk: int) -> str:
     """A digest of every row the tables hold for the conversation, its lease
-    included bar its cancel flag. A Stop sent to this release on a stream
-    the previous release runs sets the flag on the lease a copy brought
-    across; the flag never reaches that stream, and the next copy replaces
-    it with ADK's, so it is no write the tables would lose."""
+    included bar `_UNCOMPARED_LEASE_FIELD`."""
     conversation = (
         await conn.execute(
             text(
-                "SELECT to_jsonb(c) - 'id' - 'created_at' - 'updated_at' - 'lease_cancel' "
-                "FROM conversations c WHERE id = :pk"
+                "SELECT to_jsonb(c) - 'id' - 'created_at' - 'updated_at' "
+                f"- 'lease_{_UNCOMPARED_LEASE_FIELD}' FROM conversations c WHERE id = :pk"
             ),
             {"pk": pk},
         )
@@ -1128,11 +1158,12 @@ def reimport_on_access(engine: AsyncEngine) -> AdkBridge:
     turns on ADK.
 
     `AdkBridge.moved` says whether ADK's ledger session for a conversation moved
-    since it was last copied or refused (`_ADK_MOVED`), so a `/turn` can tell
-    a per-turn session the previous release just created from a leftover one.
-    `AdkBridge.take_copy` copies one conversation from ADK over whatever the
-    tables hold (`_import_one` with `prefer_adk` and `force`); a ledger the
-    copy refuses leaves the rows as they are.
+    since it was last copied or refused, or the conversation is diverged
+    (`_ADK_MOVED`), so a `/turn` can tell a per-turn session the previous
+    release just created from a leftover one. `AdkBridge.convert_specs`
+    converts the spec blocks a turn session holds as the import does
+    (`_converted_specs`), for a stream that resumes a turn the previous
+    release opened.
 
     Before each load it reads the conversation's ledger session against
     what was last copied of it (`_ADK_MOVED`). When ADK holds no ledger
@@ -1178,23 +1209,16 @@ class _AdkOnAccess:
 
     async def moved(self, principal: str, conversation_id: str) -> bool:
         row = await self._lookup(principal, conversation_id)
-        return (
-            row is not None
-            and not row.current
-            and self._refused.get((principal, conversation_id)) != row.update_time
+        if row is None:
+            return False
+        # A conflict another instance recorded leaves `current` true at ADK's
+        # latest `update_time`, though ADK moved after this instance's load.
+        return row.diverged or (
+            not row.current and self._refused.get((principal, conversation_id)) != row.update_time
         )
 
-    async def take_copy(self, principal: str, conversation_id: str) -> None:
-        copy = await _import_one(
-            self._engine,
-            principal,
-            conversation_id,
-            apply=True,
-            prefer_adk=frozenset({f"{principal}/{conversation_id}"}),
-            force=True,
-        )
-        if copy is not None and copy.outcome in ("imported", "reimported"):
-            self._refused.pop((principal, conversation_id), None)
+    def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
+        return _converted_specs(session_id, specs)
 
     async def reimport(self, principal: str, conversation_id: str) -> None:
         row = await self._lookup(principal, conversation_id)
@@ -1250,28 +1274,29 @@ class _NoAdk:
         del principal, conversation_id
         return False
 
-    async def take_copy(self, principal: str, conversation_id: str) -> None:
-        del principal, conversation_id
+    def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
+        return _converted_specs(session_id, specs)
 
 
 def _store(engine: AsyncEngine) -> StudioStore:
-    """A store over the tables whose read of an open turn's spec blocks is the
-    job's own (`_turn_session_specs`), so `load` and the job convert them one
-    way, and whose `load` reads the tables as they stand. A store keeps every
-    conversation it loads, so the job builds one per conversation."""
-
-    async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
-        turn = await _turn_session_specs(engine, principal, session_id)
-        return turn.specs if turn is not None else {}
-
-    return StudioStore(engine, turn_specs=turn_specs, adk=_NoAdk())
+    """A store over the tables that reads an open turn's spec blocks through
+    the reader the server serves (`open_turn_specs`), and whose `load` reads
+    the tables as they stand. A store keeps every conversation it loads, so
+    the job builds one per conversation."""
+    return StudioStore(engine, turn_specs=open_turn_specs(engine), adk=_NoAdk())
 
 
 def _conversation_view(state: ConversationState) -> dict[str, Any]:
-    """Every durable field of `state`, its canvas, the order of its
-    components, and the open turn's spec blocks, as JSON."""
+    """Every durable field of `state`, its lease bar
+    `_UNCOMPARED_LEASE_FIELD`, its canvas, the order of its components, and
+    the open turn's spec blocks, as JSON."""
+    durable = _serialize_durable(state)
+    if (segment := durable[_KEY_SEGMENT]) is not None:
+        durable[_KEY_SEGMENT] = {
+            key: value for key, value in segment.items() if key != _UNCOMPARED_LEASE_FIELD
+        }
     return {
-        **_serialize_durable(state),
+        **durable,
         "composition": state.composition.model_dump(mode="json") if state.composition else None,
         "component order": list(state.components),
         "open turn spec blocks": state.turn_specs,
@@ -1321,10 +1346,10 @@ async def _stored_runs(engine: AsyncEngine, principal: str, conversation_id: str
 
 
 async def _read_turn_specs(engine: AsyncEngine, principal: str, state: ConversationState) -> None:
-    """Set the open turn's spec blocks on `state` from its turn session."""
+    """Set the open turn's spec blocks on `state` from its turn session,
+    through the reader `StudioStore.load` uses (`open_turn_specs`)."""
     if state.turn_index and not state.turn_recorded:
-        turn = await _turn_session_specs(engine, principal, state.session_id)
-        state.turn_specs = turn.specs if turn is not None else {}
+        state.turn_specs = await open_turn_specs(engine)(principal, state.session_id)
 
 
 async def _adk_view(engine: AsyncEngine, session: _Session) -> dict[str, Any]:
@@ -1438,29 +1463,32 @@ async def verify(engine: AsyncEngine) -> VerifyReport:
     async for session in _ledger_sessions(engine, await _ledger_keys(engine)):
         report.total += 1
         side = await _tables_side(engine, session)
+        if side == "as imported" and (differences := await _differences(engine, session)):
+            # A write the serving release commits between the classification
+            # and the compared reads shows as a difference; the rows' digest,
+            # read again, tells it from one.
+            side = await _tables_side(engine, session)
+            if side == "as imported":
+                report.differences[session.name] = differences
         if side == "moved on adk":
             report.moved_on_adk.append(session.name)
-            continue
-        if side == "written":
+        elif side == "written":
             report.written_since_import.append(session.name)
-            continue
-        if side == "conflict":
+        elif side == "conflict":
             report.conflicts.append(session.name)
-            continue
-        old_kind, old = await _outcome(_adk_view(engine, session))
-        new_kind, new = await _outcome(_table_view(engine, session))
-        if new_kind == "view" and new is None:
-            report.differences[session.name] = ["not in the tables"]
-        elif old_kind != new_kind or old_kind == "raises":
-            if old != new:
-                report.differences[session.name] = [f"ADK load {old_kind}, tables load {new_kind}"]
-        else:
-            keys = sorted(
-                key for key in old.keys() | new.keys() if old.get(key, ...) != new.get(key, ...)
-            )
-            if keys:
-                report.differences[session.name] = keys
     return report
+
+
+async def _differences(engine: AsyncEngine, session: _Session) -> list[str]:
+    """What differs between the conversation as ADK's state loads and as the
+    tables load: the keys whose values differ, or how the loads failed."""
+    old_kind, old = await _outcome(_adk_view(engine, session))
+    new_kind, new = await _outcome(_table_view(engine, session))
+    if new_kind == "view" and new is None:
+        return ["not in the tables"]
+    if old_kind != new_kind or old_kind == "raises":
+        return [f"ADK load {old_kind}, tables load {new_kind}"] if old != new else []
+    return sorted(key for key in old.keys() | new.keys() if old.get(key, ...) != new.get(key, ...))
 
 
 @dataclass

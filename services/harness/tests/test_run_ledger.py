@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
@@ -164,7 +163,7 @@ async def test_a_completed_run_stays_unfinished_until_its_delivery_is_recorded(
 
 
 async def test_run_items_stay_out_of_conversation_state_and_survive_its_saves(
-    pg_engine, caplog
+    pg_engine,
 ) -> None:
     store = await _streaming_store(pg_engine, [START])
     ledger = StudioRunLedger(store)
@@ -172,13 +171,15 @@ async def test_run_items_stay_out_of_conversation_state_and_survive_its_saves(
     state = store.current(PRINCIPAL, CONVERSATION)
     segment_id = state.segment.id
 
-    with caplog.at_level(logging.WARNING, logger=studio_store.__name__):
-        state.turn_final_text = "answered"
-        await store.save(PRINCIPAL, CONVERSATION)
-        await store.checkpoint(PRINCIPAL, CONVERSATION, segment_id)
-        await _store(pg_engine).load(PRINCIPAL, CONVERSATION)
+    state.turn_final_text = "answered"
+    await store.save(PRINCIPAL, CONVERSATION)
+    await store.checkpoint(PRINCIPAL, CONVERSATION, segment_id)
 
-    assert not [r for r in caplog.records if "unknown state key" in r.getMessage()]
+    async with pg_engine.connect() as conn:
+        stored_keys = (
+            await conn.execute(text("SELECT turn_state FROM conversations"))
+        ).scalar_one()
+    assert set(stored_keys) <= studio_store._SCALAR_KEYS
     assert await ledger.get(run.run_id) == run
 
 
@@ -195,10 +196,16 @@ async def test_a_writer_fenced_out_by_a_takeover_cannot_record_publication(
 
     await clock.advance(studio_state.SEGMENT_TTL_S + 1)  # A's segment has expired
     await _streaming_store(service, clock)  # B takes the conversation over
+    streaming = store_a.current(PRINCIPAL, CONVERSATION)
+    streaming.cancel_event = asyncio.Event()
 
     with pytest.raises(SegmentLost):
         await ledger_a.record(run.run_id, Published(DERIVED, "rpk_1"))
 
+    # A's stream ends as lost, since the graph reports the ledger's failure
+    # to the model as data and would otherwise run on.
+    assert streaming.cancel_event.is_set()
+    assert streaming.cancel_reason == "segment_lost"
     recorded = await StudioRunLedger(_store(service)).get(run.run_id)
     assert recorded.status is RunStatus.PUBLISHING
     assert recorded.results[0].replay_key is None
@@ -253,6 +260,57 @@ async def test_an_admission_racing_another_decides_against_the_other_writers_run
         assert admission.resumed
         assert admission.run.run_id == other.run_id
         assert [run.run_id for run in await ledger.unfinished()] == [other.run_id]
+    finally:
+        await second.dispose()
+
+
+async def test_an_admission_waiting_while_another_replaces_a_failed_run_resumes_the_new_one(
+    pg_engine: AsyncEngine,
+) -> None:
+    """The key's run failed. Another instance admits the key again: it locks
+    the key, this admission waits on it, and it moves the key to a new run
+    and commits. This one then finds the new run and resumes it."""
+    second = await _another_engine(pg_engine)
+    try:
+        store = await _streaming_store(pg_engine, [START])
+        ledger = StudioRunLedger(store)
+        failed = (await ledger.admit(_candidate(), submission=SUBMISSION)).run
+        await _store_run_item(
+            store, failed.run_id, {**failed.model_dump(mode="json"), "status": "failed"}
+        )
+        other = _candidate()
+        segment_id = store.current(PRINCIPAL, CONVERSATION).segment.id
+        other_store = _store(second, clock=lambda: START)
+        async with other_store.fenced(PRINCIPAL, CONVERSATION, segment_id) as (conn, pk):
+            key = {"pk": pk, "key": other.idempotency_key}
+            await conn.execute(
+                text(
+                    "SELECT run_id FROM run_keys "
+                    "WHERE conversation = :pk AND idempotency_key = :key FOR UPDATE"
+                ),
+                key,
+            )
+            admitting = asyncio.ensure_future(ledger.admit(_candidate(), submission=SUBMISSION))
+            await asyncio.sleep(0.2)
+            assert not admitting.done()  # waiting on the locked key row
+            await conn.execute(
+                text(
+                    "INSERT INTO runs (conversation, run_id, record) "
+                    "VALUES (:pk, :run_id, CAST(:record AS jsonb))"
+                ),
+                {"pk": pk, "run_id": other.run_id, "record": other.model_dump_json()},
+            )
+            await conn.execute(
+                text(
+                    "UPDATE run_keys SET run_id = :run_id "
+                    "WHERE conversation = :pk AND idempotency_key = :key"
+                ),
+                {**key, "run_id": other.run_id},
+            )
+
+        admission = await asyncio.wait_for(admitting, timeout=5)
+
+        assert (admission.resumed, admission.run.run_id) == (True, other.run_id)
     finally:
         await second.dispose()
 

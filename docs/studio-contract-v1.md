@@ -629,7 +629,8 @@ Fixture values that are samples:
 - Static fixtures (one per frame/request):
   `services/harness/tests/wire_fixtures/studio/`
 - To run a conversation yourself:
-  `uv run --env-file .env harness-server` then
+  `just studio-live` (it runs the harness on the local Postgres `just pg-up`
+  starts, unless `.env` sets `DATABASE_URL`) then
   a local (untracked) `test_scripts/studio_client.py` on the dev machine;
   any SSE client following the resume protocol above reproduces them
 

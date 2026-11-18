@@ -20,7 +20,7 @@ spec_id registers when `harness.scripted.ScriptedExecutor` answers it.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -36,8 +36,9 @@ from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
 from google.adk.sessions import BaseSessionService, InMemorySessionService
+from google.adk.sessions.base_session_service import GetSessionConfig
 from google.genai import types
-from harness.graph.state import AGENT_NAME, frame_id_for
+from harness.graph.state import AGENT_NAME, ORCHESTRATOR_SPECS_KEY, frame_id_for
 from harness.graph.workflow import create_root_workflow
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.planner_adapter import PlannerAdapterError
@@ -49,7 +50,6 @@ from harness.scripted import (
     scripted_publish_result,
 )
 from harness.scripted_plan import scripted_fetch_series_stats
-from harness.session_store import adk_turn_specs
 from harness.settings import Settings
 from harness.studio import StudioRunner, create_studio_router
 from harness.studio_state import make_recall_part
@@ -402,11 +402,31 @@ class _NoAdk:
         del principal, conversation_id
         return False
 
-    async def take_copy(self, principal: str, conversation_id: str) -> None:
-        del principal, conversation_id
+    def convert_specs(self, session_id: str, specs: dict[str, Any]) -> dict[str, Any]:
+        del session_id
+        return specs
 
 
 NO_ADK = _NoAdk()
+
+
+def session_turn_specs(
+    service: BaseSessionService, *, app_name: str
+) -> Callable[[str, str], Awaitable[dict[str, Any]]]:
+    """A `StudioStore` `turn_specs` reader over `service`, for a test whose
+    turn sessions live in a session service rather than in ADK's tables:
+    the spec blocks turn session `session_id` holds, as stored."""
+
+    async def turn_specs(principal: str, session_id: str) -> dict[str, Any]:
+        session = await service.get_session(
+            app_name=app_name,
+            user_id=principal,
+            session_id=session_id,
+            config=GetSessionConfig(num_recent_events=0),
+        )
+        return dict((session.state.get(ORCHESTRATOR_SPECS_KEY) or {}) if session else {})
+
+    return turn_specs
 
 
 def unconnected_store() -> StudioStore:
@@ -469,7 +489,7 @@ def orchestrator_app(
         store = StudioStore(
             engine,
             adk=NO_ADK,
-            turn_specs=adk_turn_specs(session_service, app_name=AGENT_NAME),
+            turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
         )
     resolved_settings = settings or Settings()
     model = ScriptLlm(script=list(script))

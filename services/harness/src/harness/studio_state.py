@@ -204,12 +204,14 @@ def _wire_id(prefix: str) -> str:
 
 
 def _apply_operations(
-    conversation: ConversationState,
+    components: Mapping[str, dict[str, Any]],
     manifest: CompositionManifest | None,
     operations: list[Any],
 ) -> JSONResponse | tuple[list[CompositionBlock], Any]:
     """Apply mutations to LOCAL copies; the first invalid operation refuses
-    the whole request with nothing applied (mutations are transactional)."""
+    the whole request with nothing applied (mutations are transactional).
+    `components` is the conversation's digest entries by component id, the
+    cards an add may put back."""
     blocks = [block.model_copy(deep=True) for block in manifest.blocks] if manifest else []
     layout_hints = manifest.layout_hints if manifest else None
     for operation in operations:
@@ -219,7 +221,7 @@ def _apply_operations(
         if isinstance(operation, AddOp):
             # Delta 11: append a block for a component this conversation
             # already streamed; the server rebuilds it from its digest.
-            entry = conversation.components.get(operation.component_id)
+            entry = components.get(operation.component_id)
             if entry is None:
                 return _tool_error_response(
                     ToolError(
@@ -1136,19 +1138,38 @@ def make_canvas_cards(store: StudioStore) -> Any:
     return canvas_cards
 
 
+def _end_stream(conversation: ConversationState, reason: str) -> None:
+    """Arm `conversation.cancel_event` with `reason`, read back by
+    `harness.studio._sse_stream`'s cancel branch to pick the frame. A no-op
+    when no stream is currently armed to receive it (the segment ended some
+    other way in the gap between the caller's check and this call)."""
+    conversation.cancel_reason = reason
+    if conversation.cancel_event is not None:
+        conversation.cancel_event.set()
+
+
 def make_remove_cards(store: StudioStore) -> Any:
     """The orchestrator's `remove_cards` function, bound to a store and resolved
     to the conversation at CALL time, as `make_recall_part` is. The removal
     is written as it happens, on the canvas as stored
-    (`StudioStore.change_canvas`)."""
+    (`StudioStore.change_canvas`).
+
+    A `SegmentLost` there ends the stream (`_end_stream`) before it
+    propagates: raised inside the tool, it would reach the model as a
+    failed call and the turn would run on without the lease."""
 
     async def remove(*, component_ids: list[str], all_cards: bool) -> tuple[list[str], list[str]]:
         key = current_conversation_key.get()
-        if key is None or store.current(*key) is None:
+        conversation = store.current(*key) if key is not None else None
+        if key is None or conversation is None:
             return [], list(component_ids)
-        return await store.change_canvas(
-            *key, lambda work: remove_cards(work, component_ids, all_cards=all_cards)
-        )
+        try:
+            return await store.change_canvas(
+                *key, lambda work: remove_cards(work, component_ids, all_cards=all_cards)
+            )
+        except SegmentLost:
+            _end_stream(conversation, "segment_lost")
+            raise
 
     return remove
 
@@ -1660,6 +1681,11 @@ def land_component(
     the digest entry resolved one (`_digest_shows`' `time`). `close_turn`
     folds it into `conversation.turns`, in landing order, where the
     conversation digest reads it.
+
+    A canvas that already holds the component's block gets no second one
+    and the return is still `"created"`: the store retries a write whose
+    commit landed but whose acknowledgement was lost, and the retry reads
+    the canvas that commit wrote.
     """
     entry = _digest_entry(component)
     if intent is not None:
@@ -1677,6 +1703,8 @@ def land_component(
     if not conversation.auto_add:
         return "held"
     previous = conversation.composition
+    if _block_index(previous, component["component_id"]) is not None:
+        return "created"
     blocks = [block.model_copy(deep=True) for block in previous.blocks] if previous else []
     blocks.append(
         CompositionBlock(
@@ -1727,17 +1755,19 @@ def _replace_block(
     """Swap the named card's block for `component`, in place, keeping the
     block's `pinned` flag.
 
-    True iff a block was replaced. A card that was never composed
-    (auto_add=false, or removed since) has no block to swap: the caller's
-    component still streams as component.created, but must not sneak onto
-    the canvas here. The Edit Card route's recreate (`harness.studio_edit`)
+    True iff the canvas shows `component` in the slot: a block was
+    replaced, or a commit of the same swap already replaced it. A card that
+    was never composed (auto_add=false, or removed since) has no block to
+    swap: the caller's component still streams as component.created, but
+    must not sneak onto the canvas here. The Edit Card route's recreate (`harness.studio_edit`)
     names the existing component_id whose slot the new component takes
     over, inside the store's canvas write.
     """
     previous = conversation.composition
     index = _block_index(previous, old_component_id)
     if previous is None or index is None:
-        return False
+        # A retried write whose first commit landed reads the swap done.
+        return _block_index(previous, component["component_id"]) is not None
     blocks = [block.model_copy(deep=True) for block in previous.blocks]
     blocks[index] = CompositionBlock(
         component_id=component["component_id"],

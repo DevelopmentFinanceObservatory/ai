@@ -82,11 +82,11 @@ from harness.settings import Settings
 from harness.studio_edit import edit_frames
 from harness.studio_state import (
     HEARTBEAT_INTERVAL_S,
-    SEGMENT_TTL_S,
     ConversationState,
     SegmentBusy,
     SegmentLost,
     _apply_operations,
+    _end_stream,
     _next_manifest,
     _PendingInterrupt,
     _PendingQuestion,
@@ -736,19 +736,22 @@ async def _sse_stream(
             await flush_telemetry()
 
 
-def _keep_turn_records(conversation: ConversationState, event: Event) -> None:
+def _keep_turn_records(conversation: ConversationState, event: Event, store: StudioStore) -> None:
     """Keep the plan records, search readings, spec blocks and applied chip
     `event` writes to the turn's session state, for `ConversationState.close_turn` to store
     with the turn. Each key holds the turn's whole value, so the latest
     write replaces. The blocks stay in process (`turn_specs`) until the turn
-    closes."""
+    closes, converted as `load` reads them (`StudioStore.adk_convert_specs`):
+    a turn the previous release opened holds blocks in the form it stored."""
     delta = event.actions.state_delta
     if ORCHESTRATOR_PLAN_RECORDS_KEY in delta:
         conversation.turn_plans = list(delta[ORCHESTRATOR_PLAN_RECORDS_KEY])
     if ORCHESTRATOR_SEARCHES_KEY in delta:
         conversation.turn_readings = list(delta[ORCHESTRATOR_SEARCHES_KEY])
     if ORCHESTRATOR_SPECS_KEY in delta:
-        conversation.turn_specs = dict(delta[ORCHESTRATOR_SPECS_KEY])
+        conversation.turn_specs = store.adk_convert_specs(
+            conversation.session_id, dict(delta[ORCHESTRATOR_SPECS_KEY])
+        )
     if ORCHESTRATOR_APPLIED_KEY in delta:
         conversation.turn_applied_choice = dict(delta[ORCHESTRATOR_APPLIED_KEY])
 
@@ -777,16 +780,6 @@ async def _unwind(pending: asyncio.Future[Any]) -> None:
 # frame apart buys nothing (`ElicitationRequest`'s and `PlanProposed`'s own
 # frame carries no `message.complete` of its own).
 _CHECKPOINT_BEFORE_EVENTS = frozenset({"plan.proposed", "elicitation.request", "done"})
-
-
-def _end_stream(conversation: ConversationState, reason: str) -> None:
-    """Arm `conversation.cancel_event` with `reason`, read back by
-    `_sse_stream`'s cancel branch to pick the frame. A no-op when no stream
-    is currently armed to receive it (the segment ended some other way in
-    the gap between the heartbeat's check and this call)."""
-    conversation.cancel_reason = reason
-    if conversation.cancel_event is not None:
-        conversation.cancel_event.set()
 
 
 # ---------------------------------------------------------------------------
@@ -876,8 +869,11 @@ class StudioRunner:
         because the claim is a compare-and-swap. An instance still running on
         ADK sessions can: if ADK's ledger session moved since the load, the
         session may be its live one, so nothing is deleted and
-        `ConversationStale` asks the caller to take ADK's copy of the
-        conversation and answer a retryable 409."""
+        `ConversationStale` asks the caller to let go of its claim and answer
+        a retryable 409. Both revisions then hold a claim on the conversation:
+        the retry's load finds it changed on both sides and refuses it as
+        diverged (`harness.adk_import.reimport_on_access`) until an operator
+        takes ADK's copy."""
         session_service = self.runner.session_service
         try:
             await session_service.create_session(
@@ -940,7 +936,7 @@ class StudioRunner:
                 )
             ) as events:
                 async for event in events:
-                    _keep_turn_records(conversation, event)
+                    _keep_turn_records(conversation, event, self.store)
                     for frame in await translator.translate(event):
                         yield frame
             for frame in await translator.finish():
@@ -1003,22 +999,20 @@ class StudioRunner:
         (`_sse_stream`), and a second one, from any instance, sets the flag
         again and ends the stream.
 
-        A `renew` call that raises is retried every interval until 10
-        seconds of the segment's life are left, counted on this instance's
-        own clock (`StudioStore.now`) from the last renewal that landed (the
-        claim, when none has), then also ends the stream as lost: an
-        instance this deaf to its own renewal cannot be trusted to still own
-        the segment, even though nothing else has claimed it yet. A span on
-        one clock leaves the gap between this clock and the database's,
-        which decides the lease, out of the deadline.
+        A `renew` call that raises is retried every interval until the
+        lease's deadline (`StudioStore.lease_deadline`, on this instance's
+        own clock, anchored just before the read or renewal that set the
+        lease's expiry), then also ends the stream as lost: an instance this
+        deaf to its own renewal cannot be trusted to still own the segment,
+        even though nothing else has claimed it yet. A span on one clock
+        leaves the gap between this clock and the database's, which decides
+        the lease, out of the deadline. The store's writes stop retrying at
+        the same deadline.
         """
-        # The claim landed just before this heartbeat started.
-        renewed_at = self.store.now()
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL_S)
             stop = conversation.switch_stop
             switching = stop is not None and not stop.is_set()
-            attempted_at = self.store.now()
             try:
                 result = await self.store.renew(
                     principal, conversation_id, segment_id, consume_cancel=switching
@@ -1032,12 +1026,10 @@ class StudioRunner:
                 segment = conversation.segment
                 if segment is None or segment.id != segment_id:
                     return
-                if self.store.now() < renewed_at + SEGMENT_TTL_S - 10:
+                if self.store.now() < self.store.lease_deadline(principal, conversation_id):
                     continue
                 _end_stream(conversation, "segment_lost")
                 return
-            if result != "lost":
-                renewed_at = attempted_at
             if result == "ok":
                 continue
             _end_stream(conversation, "cancelled" if result == "cancelled" else "segment_lost")
@@ -1225,7 +1217,25 @@ class _BoundedRequest(Request):
         return self._body
 
 
-class _BoundedTurnRoute(APIRoute):
+class _StudioRoute(APIRoute):
+    """Every Studio route: a conversation `StudioStore.load` refuses as held
+    (`ConversationHeld`), wherever the route meets it, answers
+    `_held_response()`. A route lets go of its lock before the refusal
+    leaves it, as for any other failure."""
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handler = super().get_route_handler()
+
+        async def held_answered(request: Request) -> Response:
+            try:
+                return await handler(request)
+            except ConversationHeld:
+                return _held_response()
+
+        return held_answered
+
+
+class _BoundedTurnRoute(_StudioRoute):
     """The `/turn` route, whose body is read through `_BoundedRequest`, so a
     request past the size cap is refused before FastAPI parses it. Each seed
     is checked on its own (`harness.seeds.seeds_slot`) and refused in its own
@@ -1309,8 +1319,26 @@ async def _acquire_or_conflict(
     return lock
 
 
+async def _abandon_claim(
+    store: StudioStore,
+    principal: str,
+    conversation_id: str,
+    segment_id: str | None,
+    lock: asyncio.Lock,
+) -> None:
+    """Let go of a claim whose stream never started: drop `segment_id`'s
+    lease when there is one (`StudioStore.drop_lease`, which runs to the end
+    under cancellation), then release `lock` whatever the drop raised, a
+    cancellation of the request included."""
+    try:
+        if segment_id is not None:
+            await store.drop_lease(principal, conversation_id, segment_id)
+    finally:
+        lock.release()
+
+
 def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRouter:
-    router = APIRouter(prefix="/api/studio")
+    router = APIRouter(prefix="/api/studio", route_class=_StudioRoute)
 
     async def turn(  # noqa: PLR0911 -- one distinct refusal per claim guard the route enforces
         body: TurnRequest, authorization: str | None = Header(default=None)
@@ -1323,11 +1351,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         # every failure before the stream starts releases.
         claimed: str | None = None
         try:
-            try:
-                conversation = await studio.store.load(principal, body.conversation_id)
-            except ConversationHeld:
-                lock.release()
-                return _held_response()
+            conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
                 if body.component_ref is not None or body.apply_choice is not None:
                     # The client refers to state (a card to edit or to follow
@@ -1502,14 +1526,14 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 )
             except ConversationStale:
                 # An instance still running on ADK sessions moved the
-                # conversation since the load. This request's claim is a
-                # phantom: nothing has streamed. ADK's copy replaces the rows,
-                # so that instance's live lease is in them, `drop_lease`
-                # matches nothing, and the retry meets a busy 409 with no
-                # conflict recorded.
-                await studio.store.adk_take_copy(principal, body.conversation_id)
-                await studio.store.drop_lease(principal, body.conversation_id, segment_id)
-                lock.release()
+                # conversation since the load. This request's claim stays in
+                # the rows with nothing streamed, so the retry's load finds
+                # the conversation changed on both sides and holds it
+                # (`_ensure_session`).
+                claimed = None
+                await _abandon_claim(
+                    studio.store, principal, body.conversation_id, segment_id, lock
+                )
                 return _streaming_conflict_response(
                     "another request is streaming on this conversation"
                 )
@@ -1537,11 +1561,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # a failure before the response starts streaming drops the lease
             # and releases the lock here. The claim save already covers
             # `begin_turn`'s effects, so the turn stays open and the next
-            # `/turn` closes it as `begin_turn` closes any open turn.
-            if claimed is not None:
-                await studio.store.drop_lease(principal, body.conversation_id, claimed)
+            # `/turn` closes it as `begin_turn` closes any open turn. A path
+            # above that let go of the lock itself cleared `claimed` first.
             if lock.locked():
-                lock.release()
+                await _abandon_claim(studio.store, principal, body.conversation_id, claimed, lock)
             raise
 
     router.add_api_route("/turn", turn, methods=["POST"], route_class_override=_BoundedTurnRoute)
@@ -1585,10 +1608,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             return Response(status_code=204)
         await lock.acquire()
         try:
-            try:
-                conversation = await studio.store.load(principal, body.conversation_id)
-            except ConversationHeld:
-                return _held_response()
+            conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
                 return Response(status_code=204)
             closed_here = False
@@ -1639,11 +1659,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         if isinstance(lock, JSONResponse):
             return lock
         try:
-            try:
-                conversation = await studio.store.load(principal, body.conversation_id)
-            except ConversationHeld:
-                lock.release()
-                return _held_response()
+            conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
                 lock.release()
                 return _unknown_conversation_response(body.conversation_id)
@@ -1910,8 +1926,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 media_type=SSE_MEDIA_TYPE,
             )
         except BaseException:
-            await studio.store.drop_lease(principal, body.conversation_id, segment_id)
-            lock.release()
+            await _abandon_claim(studio.store, principal, body.conversation_id, segment_id, lock)
             raise
 
     @router.post("/composition")
@@ -1920,36 +1935,18 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
     ) -> Response:
         # Routed through the composition lock, not the turn lock: a canvas
         # edit must land while a turn streams on the same conversation. The
-        # turn writes each of its own canvas changes under the same row
-        # lock (`StudioStore.change_canvas`), so neither overwrites the
-        # other. The composition lock also serialises two same-instance
-        # `/composition` calls, so they read-mutate-write in turn rather
-        # than interleaving.
+        # turn writes each of its own card changes under the same row lock
+        # (`StudioStore.change_canvas`), so neither overwrites the other, and
+        # each card it lands commits its digest entry with its block, so the
+        # rows this route reads hold every card a stream has landed. The
+        # composition lock also serialises two same-instance `/composition`
+        # calls, so they read-mutate-write in turn rather than interleaving.
         principal = principal_for(authorization, settings=settings)
-        turn_lock = studio.store.lock_for(principal, body.conversation_id)
         async with studio.store.composition_lock_for(principal, body.conversation_id):
-            if turn_lock.locked():
-                # A stream holds the turn lock: `entry.state` carries its
-                # unsaved turn fields (turn_components, turn_user_message,
-                # ...), so this reads it live rather than reloading over
-                # them. The composition manifest itself is never read off
-                # `conversation` here. `mutate_composition` below reads it
-                # straight from the store, so this choice
-                # only decides which snapshot of the conversation's OTHER
-                # fields (`.components`, read by `_apply_operations` below)
-                # the route sees.
-                conversation = studio.store.current(principal, body.conversation_id)
-            else:
-                try:
-                    conversation = await studio.store.load(principal, body.conversation_id)
-                except ConversationHeld:
-                    return _held_response()
-            if conversation is None:
-                return _unknown_conversation_response(body.conversation_id)
 
             def mutate(
-                manifest: CompositionManifest | None,
-            ) -> CompositionManifest | None | JSONResponse:
+                manifest: CompositionManifest | None, components: dict[str, dict[str, Any]]
+            ) -> CompositionManifest | JSONResponse:
                 refusal = _composition_refusal(manifest, body)
                 if refusal is not None:
                     return refusal
@@ -1958,7 +1955,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # after every operation validated. A refused op must not
                 # leave a half-applied canvas behind (mutations are
                 # transactional).
-                applied = _apply_operations(conversation, manifest, body.operations)
+                applied = _apply_operations(components, manifest, body.operations)
                 if isinstance(applied, JSONResponse):
                     return applied
                 blocks, layout_hints = applied
@@ -1978,9 +1975,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 )
 
             result = await studio.store.mutate_composition(principal, body.conversation_id, mutate)
+            if result is None:
+                return _unknown_conversation_response(body.conversation_id)
             if isinstance(result, JSONResponse):
                 return result
-            assert result is not None  # every non-refusal `mutate` return here is a manifest
             return JSONResponse(content=json.loads(result.model_dump_json(exclude_none=True)))
 
     return router

@@ -832,7 +832,7 @@ async def test_lifespan_startup_prepare_tables_honors_the_configured_connect_tim
     budget is zeroed so the first timeout exhausts it immediately -- the
     retry behaviour itself is covered directly, against
     `_prepare_tables_with_retries`, below."""
-    monkeypatch.setattr(server_module, "_PREPARE_TABLES_RETRY_BUDGET_S", 0.0)
+    monkeypatch.setattr(server_module, "_STARTUP_DB_RETRY_BUDGET_S", 0.0)
     original_prepare_tables = DatabaseSessionService.prepare_tables
 
     async def slow_prepare_tables(self: DatabaseSessionService) -> None:
@@ -944,6 +944,32 @@ async def test_a_slow_migration_is_not_cut_short(
     await server_module._apply_migrations_with_retries(cast(AsyncEngine, object()), budget_s=0.0)
 
     assert attempts == [1]
+
+
+async def test_the_migration_step_gets_what_the_first_step_left_of_one_startup_deadline(
+    monkeypatch: pytest.MonkeyPatch, pg_database_url: str
+) -> None:
+    budgets: list[float] = []
+
+    async def slow_prepare(*_: Any, **__: Any) -> None:
+        await asyncio.sleep(0.3)
+
+    async def stop_at_migrations(engine: object, *, budget_s: float) -> None:
+        budgets.append(budget_s)
+        raise RuntimeError("startup stops here")
+
+    monkeypatch.setattr(server_module, "_STARTUP_DB_RETRY_BUDGET_S", 10.0)
+    monkeypatch.setattr(server_module, "_prepare_tables_with_retries", slow_prepare)
+    monkeypatch.setattr(server_module, "_apply_migrations_with_retries", stop_at_migrations)
+    app = create_app(settings=Settings(database_url=pg_database_url))
+
+    with pytest.raises(BaseException) as excinfo:
+        async with _running_lifespan(app):
+            pass
+
+    assert excinfo.group_contains(RuntimeError, match="startup stops here")
+    (budget,) = budgets
+    assert budget <= 9.7
 
 
 async def _preflight(app: FastAPI, origin: str) -> httpx2.Response:
