@@ -14,6 +14,11 @@
 --   lease_*              the lease on the conversation's active stream.
 --                        Claimed by a turn-state write, renewed and
 --                        cancelled by single conditional updates.
+--   canvas_writes        the ids of the canvas changes
+--                        (StudioStore.change_canvas) written under the
+--                        current lease, each in its change's transaction. A
+--                        claim empties it. A retried change that finds its
+--                        own id here landed on an earlier attempt.
 
 CREATE TABLE conversations (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -28,6 +33,7 @@ CREATE TABLE conversations (
     -- disagree still agree on when a lease lapses.
     lease_expires_at double precision,
     lease_cancel boolean NOT NULL DEFAULT false,
+    canvas_writes jsonb NOT NULL DEFAULT '[]'::jsonb,
     -- Frame numbering for the open turn, beside the lease. seq_next is the
     -- next frame number the open segment will send, as of the last save;
     -- seq_reserved is the end of the numbers the turn's segments have

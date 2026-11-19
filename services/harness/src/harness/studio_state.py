@@ -11,8 +11,8 @@ composition changes: `_apply_operations` for the user's mutations,
 `Segment` is a durable lease on a conversation's active stream, the
 mechanism that keeps at most one instance streaming a conversation at a
 time: `StudioStore.claim_segment` takes it, `renew` pushes its TTL forward,
-`checkpoint` writes the rest of the conversation's state to storage
-mid-stream (and at end of segment, in `close_segment`'s one transaction), and
+`close_segment` writes the rest of the conversation's state to storage
+at end of segment in one transaction, and
 `request_cancel` signals it from any instance. See `Segment`,
 `SegmentBusy`, `SegmentLost` and `DatabaseUnavailable`.
 """
@@ -65,6 +65,7 @@ from harness.wire import (
     RetryMode,
     SetCardMetaOp,
     SetLayoutHintsOp,
+    StudioFrame,
     ToolError,
 )
 
@@ -361,7 +362,7 @@ class _PendingInterrupt:
     step_labels: dict[str, str] = field(default_factory=dict)
     # Set by `/interrupt` to the id of the segment resuming this interrupt,
     # instead of deleting the entry outright: a crash between the answer
-    # being appended and the resumed segment's own checkpoint leaves a
+    # being appended and the resumed segment's own closing write leaves a
     # durable, retryable record. Cleared by `ConversationState.drop_resuming`
     # once that segment ends, win or lose; a crashed segment leaves it set,
     # and the same answer resumes again on a fresh segment.
@@ -378,16 +379,19 @@ class _PendingInterrupt:
     # refused stale answer gets back (`PlanRevisionStaleError.current_plan`).
     # None for an elicitation and a plan paused before cards were kept.
     card: PlanProposed | None = None
-    # Whether a stream resuming this plan interrupt with an approval sent its
-    # `plan.approved` frame (`harness.studio_stream`), so a retry resuming
-    # the same answer sends it only when the dead attempt did not.
-    approved_sent: bool = False
     # The run the save that recorded this plan interrupt's approval admitted
     # and left for `execute` to compute, `admitted` or `running`
     # (`harness.studio._approval_admission`); None when it admitted none or
     # the key named a finished run. A retry resuming the same answer names
     # it to `approve` as the first did.
     admitted_run: str | None = None
+    # Every frame the pause was sent as, in order, its card or questions
+    # last: a plan's refusal note and `plan.versioned` come first. A replay
+    # of the pause to a client that never read it sends these again under
+    # fresh `seq`s (`harness.studio_translate._Translator._interrupt_frames`),
+    # so it mints, supersedes and versions nothing. Empty for an entry
+    # stored before the frames were kept, which a replay translates afresh.
+    frames: tuple[StudioFrame, ...] = ()
 
 
 # A conversation's active stream may run on any instance; this is the
@@ -414,14 +418,14 @@ class SegmentBusy(Exception):  # noqa: N818 -- named for the wire 409, not an er
 
 
 class SegmentLost(Exception):  # noqa: N818 -- named for the wire condition, not an error kind
-    """Raised by `StudioStore.checkpoint` when the stored live segment is
-    no longer the one this call is checkpointing on behalf of. Another
+    """Raised by `StudioStore`'s fenced writes (`change_canvas`) when the
+    stored live segment is no longer the one the call writes on behalf of. Another
     instance took over after this one's TTL lapsed."""
 
 
 class DatabaseUnavailable(Exception):  # noqa: N818 -- named for the condition the stream reports
-    """Raised by `StudioStore`'s retried writes (`checkpoint`,
-    `change_canvas`) when the database stayed unreachable
+    """Raised by `StudioStore`'s retried write
+    (`change_canvas`) when the database stayed unreachable
     until the lease's deadline. The stream ends as a lost segment does,
     leaving the turn as stored, since no close could be saved either."""
 
@@ -431,7 +435,7 @@ class Segment:
     """One durable claim on a conversation's active stream, the lease
     columns of its stored row. `id` is the fencing token
     `StudioStore.claim_segment` mints; every later write on behalf of this
-    segment (`renew`, `checkpoint`) is fenced against it, never against
+    segment (`renew`, `change_canvas`) is fenced against it, never against
     `owner`. `owner` is the claiming instance's id, carried for logs only.
     `expires_at` is a wall-clock epoch second past which the claim is dead
     and takeable. The Stop requests made of the conversation live in columns
@@ -460,8 +464,7 @@ class ConversationState:
     composition: CompositionManifest | None = None
     # The durable lease on this conversation's active stream. None when no
     # segment is live. Set by `claim_segment`, refreshed by `renew`,
-    # cleared by `close_segment`; a `checkpoint` writes whatever value it holds
-    # like any other durable field.
+    # cleared by `close_segment`.
     segment: Segment | None = None
     # Set while a stream runs on this instance. Setting it makes the
     # stream's heartbeat renew the lease at once, so a Stop posted here
@@ -989,13 +992,6 @@ class ConversationState:
         answer carries it on."""
         return any(p.resuming_segment is None for p in self.pending.values())
 
-    def mark_approved_sent(self, segment_id: str) -> None:
-        """Record that the stream of `segment_id` sent `plan.approved` for the
-        interrupt it resumes (`_PendingInterrupt.approved_sent`)."""
-        for p in self.pending.values():
-            if p.resuming_segment == segment_id:
-                p.approved_sent = True
-
     def drop_resuming(self, segment_id: str) -> None:
         """Remove every pending entry marked as resuming under
         `segment_id`. Called at that segment's end, win or lose (done,
@@ -1181,13 +1177,7 @@ def make_remove_cards(store: StudioStore) -> Any:
     """The orchestrator's `remove_cards` function, bound to a store and resolved
     to the conversation at CALL time, as `make_recall_part` is. The removal
     is written as it happens, on the canvas as stored
-    (`StudioStore.change_canvas`).
-
-    The store retries a write whose commit landed but whose acknowledgement
-    was lost, and that retry reads a canvas the cards are already off. A
-    card an earlier attempt took off, which the canvas no longer shows, is
-    reported removed and marks the removal as unreported, so the model and
-    the stream learn what the commit did.
+    (`StudioStore.change_canvas`), which runs it once per committed write.
 
     A `SegmentLost` or `DatabaseUnavailable` there has the stream renew its
     lease at once (`renew_lease_now`) before it propagates. Raised inside
@@ -1200,16 +1190,9 @@ def make_remove_cards(store: StudioStore) -> Any:
         conversation = store.current(*key) if key is not None else None
         if key is None or conversation is None:
             return [], list(component_ids)
-        earlier: list[str] = []
 
         def change(work: ConversationState) -> tuple[list[str], list[str]]:
-            shown = _block_ids(work.composition)
-            removed, missing = remove_cards(work, component_ids, all_cards=all_cards)
-            landed = [cid for cid in earlier if cid not in shown]
-            if landed:
-                work._removal_unreported = True
-            earlier[:] = landed + [cid for cid in removed if cid not in landed]
-            return list(earlier), missing
+            return remove_cards(work, component_ids, all_cards=all_cards)
 
         try:
             return await store.change_canvas(*key, change)
@@ -1733,9 +1716,8 @@ def land_component(
     conversation digest reads it.
 
     A canvas that already holds the component's block gets no second one
-    and the return is `"created"`. The store retries a write whose commit
-    landed but whose acknowledgement was lost, and the retry reads the
-    canvas that commit wrote.
+    and the return is `"created"`. `StudioStore.change_canvas` runs it once
+    per committed write.
     """
     entry = _digest_entry(component)
     if intent is not None:
@@ -1806,7 +1788,7 @@ def _replace_block(
     block's `pinned` flag.
 
     True iff the canvas shows `component` in the slot: a block was
-    replaced, or a commit of the same swap already replaced it. A card that
+    replaced, or the canvas already held `component`'s block. A card that
     was never composed (auto_add=false, or removed since) has no block to
     swap. The caller's component still streams as component.created and is
     not added to the canvas here. The Edit Card route's recreate
@@ -1816,7 +1798,7 @@ def _replace_block(
     previous = conversation.composition
     index = _block_index(previous, old_component_id)
     if previous is None or index is None:
-        # A retried write whose first commit landed reads the swap done.
+        # A canvas that already shows the new block reads the swap done.
         return _block_index(previous, component["component_id"]) is not None
     blocks = [block.model_copy(deep=True) for block in previous.blocks]
     blocks[index] = CompositionBlock(

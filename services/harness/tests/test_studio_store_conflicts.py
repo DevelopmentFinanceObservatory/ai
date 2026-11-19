@@ -2,8 +2,8 @@
 
 Each instance is a `StudioStore` over an engine of its own (its own pool of
 two connections, as a deployed instance has), all on one Postgres schema
-(the `pg_engine` fixture's). A heartbeat renewal, a checkpoint, a canvas
-edit, a cancel and run-ledger writes on one conversation all commit, and
+(the `pg_engine` fixture's). A heartbeat renewal, a fenced card write, a
+canvas edit, a cancel and run-ledger writes on one conversation all commit, and
 none retries or is refused. Two claims on one turn state still conflict.
 """
 
@@ -17,7 +17,7 @@ import pytest
 from executor.ledger import PlanApproval, SourcePolicy, Start, idempotency_key, new_run
 from harness.conversation import current_conversation_key
 from harness.run_ledger import StudioRunLedger
-from harness.studio_state import _next_manifest, _PendingInterrupt
+from harness.studio_state import ConversationState, _next_manifest
 from harness.studio_store import ConversationStale, Renewal, StudioStore
 from harness.wire import ComponentType, CompositionActor, CompositionBlock, CompositionManifest
 from sqlalchemy import text
@@ -63,6 +63,14 @@ def _adding(component_id: str):
     return mutate
 
 
+def _final_text(text: str):
+    def change(conversation: ConversationState) -> bool:
+        conversation.turn_final_text = text
+        return True
+
+    return change
+
+
 def _candidate(task: str):
     at = datetime.now(UTC)
     return new_run(
@@ -80,12 +88,13 @@ def _candidate(task: str):
     )
 
 
-async def test_heartbeat_checkpoint_canvas_cancel_and_runs_commit_side_by_side(
+async def test_heartbeat_canvas_cancel_and_runs_commit_side_by_side(
     engines: list[AsyncEngine],
 ) -> None:
-    """Instance A streams: it renews its lease, checkpoints and writes runs.
-    Instance B edits the canvas and instance C presses Stop, over and over,
-    at the same time. Every write lands; nothing raises."""
+    """Instance A streams: it renews its lease, writes runs and makes the
+    turn's fenced card write (`change_canvas`). Instance B edits the canvas
+    and instance C presses Stop, over and over, at the same time. Every
+    write lands; nothing raises."""
     owner, editor, stopper = (_store(engine) for engine in engines)
     state = await owner.create(PRINCIPAL, CONVERSATION)
     segment_id = owner.claim_segment(PRINCIPAL, CONVERSATION)
@@ -101,10 +110,7 @@ async def test_heartbeat_checkpoint_canvas_cancel_and_runs_commit_side_by_side(
         token = current_conversation_key.set((PRINCIPAL, CONVERSATION))
         try:
             for index in range(ROUNDS):
-                state.pending = {"i1": _PendingInterrupt(adk_id=f"answer {index}", kind="plan")}
-                await owner.checkpoint(
-                    PRINCIPAL, CONVERSATION, segment_id, owner.snapshot(PRINCIPAL, CONVERSATION)
-                )
+                await owner.change_canvas(PRINCIPAL, CONVERSATION, _final_text(f"round {index}"))
                 run = await ledger.admit(_candidate(f"t{index}"), submission={})
                 await ledger.record(run.run.run_id, Start())
         finally:
@@ -129,7 +135,7 @@ async def test_heartbeat_checkpoint_canvas_cancel_and_runs_commit_side_by_side(
     assert [block.component_id for block in reloaded.composition.blocks] == [
         f"cmp_{index:03d}" for index in range(ROUNDS)
     ]
-    assert reloaded.pending["i1"].adk_id == f"answer {ROUNDS - 1}"
+    assert reloaded.turn_final_text == f"round {ROUNDS - 1}"
     assert reloaded.segment is not None and reloaded.segment.id == segment_id
     async with engines[0].connect() as conn:
         stop_id = (await conn.execute(text("SELECT stop_id FROM conversations"))).scalar_one()

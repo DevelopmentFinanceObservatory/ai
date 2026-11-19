@@ -130,18 +130,24 @@ from harness.studio_translate import (
     recorded_fatal,
 )
 from harness.turn import transcript as entries
-from harness.turn.events import TurnEvent, TurnFailed
+from harness.turn.events import Paused, TurnEvent, TurnFailed
 from harness.turn.loop import (
     Answer,
     Graph,
     Outcome,
     Segment,
-    abandon,
+    abandon_on,
     reject,
     run_segment,
     stop_turn,
 )
-from harness.turn.store import Cursor, CursorStale, TurnStatus, TurnStore
+from harness.turn.store import (
+    Cursor,
+    CursorStale,
+    TurnStatus,
+    TurnStore,
+    open_turn_on,
+)
 from harness.turn_budget import start_turn_budget
 from harness.turn_records import CHIP_STALE_NOTE, stored_choice
 from harness.wire import (
@@ -384,6 +390,79 @@ def _chip_label(conversation: ConversationState, pick: ApplyChoice) -> str | JSO
     )
 
 
+def _turn_refusal_or_chip(
+    conversation: ConversationState, body: TurnRequest
+) -> JSONResponse | str | None:
+    """The refusal of `body` on `conversation`, else the label of the option
+    its chip moves to (`_chip_label`), or `None` when it applies no chip. A
+    follow-up about a card the conversation does not hold is refused 404:
+    it would run as a plain turn with no card in view."""
+    ref = body.component_ref
+    if (
+        ref is not None
+        and ref.intent is ComponentRefIntent.FOLLOW_UP
+        and ref.component_id not in conversation.components
+    ):
+        return _tool_error_response(
+            ToolError(
+                error=ErrorCode.NOT_FOUND,
+                retry=RetryMode.DO_NOT_RETRY,
+                detail=(
+                    "This card is not part of this conversation, so the agent "
+                    "cannot answer about it. Ask again without the card."
+                ),
+                pointer="/component_ref/component_id",
+            ),
+            status_code=404,
+        )
+    if body.apply_choice is None:
+        return None
+    return _chip_label(conversation, body.apply_choice)
+
+
+def _turn_opening(
+    conversation: ConversationState, body: TurnRequest, chip_label: str | None
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """What the turn `body` begins on `conversation`, the working copy the
+    begin-turn save stores, opens its cursor with: its inputs, its state and
+    the user's text its transcript starts on."""
+    focus = (
+        body.component_ref.component_id
+        if body.component_ref is not None
+        and body.component_ref.intent is ComponentRefIntent.FOLLOW_UP
+        else None
+    )
+    # The agent reads the canvas through `recall` and starts from
+    # counts. The digests are the JSON text the agent reads.
+    digest = conversation.canvas_summary_state(focus=focus)
+    history = conversation.conversation_digest_state()
+    seeds: list[Any] | dict[str, Any] | None = None
+    if isinstance(body.seed_spec, list):
+        # Each seed as the `seed` node takes it, or the refusal its
+        # step fails with: no posted Spec block enters the turn.
+        seeds = seeds_slot(body.seed_spec)
+    elif body.seed_spec is not None:
+        # One reference, the reserved shape: `graph.seed` reports it unused.
+        seeds = body.seed_spec.model_dump(mode="json")
+    text = body.message if chip_label is None else f"Count {chip_label}."
+    inputs = TurnInput(
+        message=text,
+        canvas_digest=json.dumps(digest) if digest else None,
+        conversation_digest=json.dumps(history) if history else None,
+        seeds=seeds,
+    )
+    state: dict[str, Any] = {"surface": body.surface.value}
+    # The orchestrator's planner renders the earlier turns' readings;
+    # their blocks stay in the conversation (`current_earlier_block`).
+    ledger = conversation.prior_ledger_state()
+    if ledger:
+        state[ORCHESTRATOR_PRIOR_LEDGER_KEY] = ledger
+    if body.apply_choice is not None:
+        # `graph.seed` applies the chip, and the turn neither searches nor plans.
+        state[APPLY_CHOICE_STATE_KEY] = body.apply_choice.model_dump(mode="json")
+    return inputs.model_dump(mode="json"), state, text
+
+
 def _current_plan(pending_by_id: dict[str, _PendingInterrupt]) -> _PendingInterrupt | None:
     """The plan pause awaiting an answer, or `None`: the latest plan entry
     no segment is resuming."""
@@ -460,6 +539,31 @@ def _answered_lines(pending: _PendingInterrupt, answers: dict[str, ElicitationAn
         if said:
             lines.append(said if len(pending.questions) == 1 else f"{question.question} {said}")
     return lines
+
+
+def _answer_turn_lines(
+    pending: _PendingInterrupt, body: InterruptResponse
+) -> list[tuple[str, bool]]:
+    """The lines an answer adds to the turn's record, each with whether the
+    user wrote it (`ConversationState.add_to_turn`): an elicitation's
+    answers, a switch's choice, an amendment. The record must carry them or
+    the next turn's digest shows only the un-refined ask. A switch's line
+    names an option's label, which Search would read as scope the user
+    stated, so it is no user's words. An approval, a rejection and a skip
+    add none."""
+    if pending.kind == "elicitation":
+        if body.decision is InterruptDecision.SKIP:
+            return []
+        return [(line, True) for line in _answered_lines(pending, _given_answers(pending, body))]
+    match body.decision:
+        case InterruptDecision.SWITCH:
+            assert body.choice_id is not None and body.option_id is not None
+            label = pending.choices[body.choice_id].options[body.option_id].label
+            verb = "use" if is_decision_choice(body.choice_id) else "count"
+            return [(f"{verb} {label}", False)]
+        case InterruptDecision.AMEND:
+            return [(str(body.payload), True)]
+    return []
 
 
 def _composition_refusal(
@@ -634,7 +738,9 @@ class _SegmentWork:
     and runs its first segment; `/interrupt` gives `answer`, the answer to
     the turn's open pause (`None` when a retry carries on a running turn),
     and `approving`, the plan card a first answer approves, which
-    `plan.approved` states once the graph takes the approval.
+    `plan.approved` states once the graph takes the approval. With
+    `replay`, the segment runs no node: it emits the pause the paused
+    cursor holds and ends `paused` (`_replay_pause`).
 
     While it runs, `conversation.renew_now` is the segment's, so a Stop
     posted on this instance reaches its heartbeat at once
@@ -664,6 +770,7 @@ class _SegmentWork:
         segment_id: str,
         answer: Answer | None = None,
         approving: PlanProposed | None = None,
+        replay: bool = False,
     ) -> None:
         self._runner = runner
         self._principal = principal
@@ -671,6 +778,7 @@ class _SegmentWork:
         self._cursor = cursor
         self._segment_id = segment_id
         self._answer = answer
+        self._replay = replay
         self._translator = _Translator(
             conversation=conversation,
             recorder=runner.recorder,
@@ -700,6 +808,20 @@ class _SegmentWork:
         def recorded(event: GraphEvent | TurnEvent) -> None:
             emit(marks.recorded(event), key=event_key(event))
 
+        if self._replay:
+            # The pause the cursor holds, as the segment that wrote it
+            # emitted it, with no node run.
+            pause = self._cursor.pause
+            assert pause is not None
+            recorded(
+                Paused(
+                    kind=pause.kind,
+                    interrupt_id=pause.interrupt_id,
+                    round=pause.round,
+                    payload=pause.payload,
+                )
+            )
+            return Segment(cursor=self._cursor, outcome=Outcome.PAUSED)
         return await run_segment(
             runner.turns,
             runner.store,
@@ -1400,6 +1522,94 @@ def _approval_admission(
     return admit
 
 
+async def _replays_later_pause(
+    turns: TurnStore,
+    cursor: Cursor | None,
+    interrupt_id: str,
+    requested_answer: dict[str, Any],
+) -> bool:
+    """Whether an `/interrupt` answering `interrupt_id` with
+    `requested_answer` is a retry of the answer that resumed the turn, which
+    then paused again on a later question, `cursor`'s open pause: the turn
+    accepted an answer to `interrupt_id` at an earlier round than that
+    pause, and the client sent it as `requested_answer`
+    (`TurnStore.answered`). The stored answer decides it whether or not the
+    conversation still holds the answered entry, which the closing write
+    that stored the later pause drops."""
+    if (
+        cursor is None
+        or cursor.status is not TurnStatus.PAUSED
+        or cursor.pause is None
+        or cursor.pause.interrupt_id == interrupt_id
+    ):
+        return False
+    accepted = await turns.answered(cursor, interrupt_id=interrupt_id)
+    return (
+        accepted is not None
+        and accepted.round < cursor.pause.round
+        and accepted.request == requested_answer
+    )
+
+
+async def _replay_pause(
+    studio: StudioRunner,
+    *,
+    principal: str,
+    conversation_id: str,
+    interrupt_id: str,
+    work: ConversationState,
+    cursor: Cursor,
+    segment_id: str,
+    hold: LockHold,
+    settings: Settings,
+    turn: ConversationState | None,
+) -> Response:
+    """Stream the later pause the paused `cursor` holds to a retry of the
+    answer to `interrupt_id` (`_replays_later_pause`), under the segment
+    `segment_id` the retry claimed, with no node run. The answered entry,
+    when the conversation still holds it, is marked resuming under
+    `segment_id` and saved first, so the stream's closing write drops it
+    and stores the replayed pause's entry, which the next answer answers. A
+    closing write that fails, or a client that leaves, keeps the entry
+    resuming, for the same retry to replay the pause again."""
+    if (answered := work.pending.get(interrupt_id)) is not None:
+        answered.resuming_segment = segment_id
+    try:
+        await studio.store.save(principal, conversation_id, work)
+    except ConversationStale:
+        await _release_claim(studio.store, principal, conversation_id, hold, segment_id, turn=turn)
+        return _tool_error_response(
+            ToolError(
+                error=ErrorCode.EDIT_CONFLICT,
+                retry=RetryMode.REFRESH_THEN_RETRY,
+                detail="the conversation changed before this answer was saved",
+                fix="reload the conversation and answer what it now shows",
+            ),
+            status_code=409,
+        )
+    conversation = studio.store.current(principal, conversation_id)
+    assert conversation is not None
+    _set_turn_context(principal, conversation_id, conversation, settings)
+    # The segment's owner takes the lease and the lock hold from here on.
+    return open_stream(
+        _SegmentWork(
+            studio,
+            principal=principal,
+            conversation=conversation,
+            cursor=cursor,
+            segment_id=segment_id,
+            replay=True,
+        ),
+        owners=studio.owners,
+        store=studio.store,
+        conversation=conversation,
+        principal=principal,
+        conversation_id=conversation_id,
+        segment_id=segment_id,
+        hold=hold,
+    )
+
+
 async def _unclaimed(
     store: StudioStore,
     principal: str,
@@ -1531,33 +1741,14 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     )
                 conversation = await studio.store.load(principal, body.conversation_id)
                 assert conversation is not None
-            if (
-                body.component_ref is not None
-                and body.component_ref.intent is ComponentRefIntent.FOLLOW_UP
-                and body.component_ref.component_id not in conversation.components
-            ):
-                # A follow-up about a card this conversation never stored
-                # would run as a plain turn with no card in view.
+            # Checked again on the conversation reloaded under the claim
+            # below, which is what the turn begins on.
+            checked = _turn_refusal_or_chip(conversation, body)
+            if isinstance(checked, JSONResponse):
                 hold.release()
-                return _tool_error_response(
-                    ToolError(
-                        error=ErrorCode.NOT_FOUND,
-                        retry=RetryMode.DO_NOT_RETRY,
-                        detail=(
-                            "This card is not part of this conversation, so the agent "
-                            "cannot answer about it. Ask again without the card."
-                        ),
-                        pointer="/component_ref/component_id",
-                    ),
-                    status_code=404,
-                )
-            chip_label: str | None = None
-            if (pick := body.apply_choice) is not None:
-                label = _chip_label(conversation, pick)
-                if isinstance(label, JSONResponse):
-                    hold.release()
-                    return label
-                chip_label = label
+                return checked
+            chip_label = checked
+            pick = body.apply_choice
             user_message = body.message if pick is None else f"count {chip_label}"
             # The claim: the lease, written alone (`StudioStore.claim_turn_lease`),
             # before the turn opens and before the SSE response starts. A
@@ -1632,11 +1823,22 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # frame numbers reserved.
             await studio.store.load(principal, body.conversation_id)
             work = studio.store.draft(principal, body.conversation_id)
+            # The card and the chip are checked on the conversation as
+            # reloaded: a turn on another instance between the first load
+            # and the claim can answer anew, which makes the chip stale, or
+            # drop the card a follow-up names.
+            checked = _turn_refusal_or_chip(work, body)
+            if isinstance(checked, JSONResponse):
+                await _release_claim(
+                    studio.store, principal, body.conversation_id, hold, claimed, turn=begun
+                )
+                return checked
+            chip_label = checked
+            user_message = body.message if pick is None else f"count {chip_label}"
             left_open = await studio.turns.open_cursor(principal, body.conversation_id)
             if left_open is not None:
                 if not work.turn_recorded:
                     keep_turn_records(work, left_open.state)
-                await abandon(studio.turns, left_open, segment_id=segment_id)
             elif work.turn_index and not work.turn_recorded:
                 closed = await studio.turns.turn_at(lease.conversation, work.turn_index)
                 if closed is not None:
@@ -1657,7 +1859,42 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # The record's `spec_id` is the reading the `seed` node compiles,
                 # set once the chip applies, so the chip's own origin stays out.
                 work.turn_applied_choice = pick.model_dump(include={"choice_id", "option_id"})
-            await studio.store.save(principal, body.conversation_id, work, seq_reserved=SEQ_BLOCK)
+            editing = (
+                body.component_ref is not None
+                and body.component_ref.intent is ComponentRefIntent.EDIT
+            )
+            opening = None if editing else _turn_opening(work, body, chip_label)
+            opened: list[Cursor] = []
+
+            async def begin_turn(conn: AsyncConnection, pk: int) -> None:
+                # The turn left open closes `abandoned` and the new turn
+                # opens (the Edit Card route opens none) in the save's
+                # transaction, so a save that fails leaves the turn left
+                # open as it stood, its pause still answerable.
+                if left_open is not None:
+                    await abandon_on(conn, left_open, segment_id=segment_id)
+                if opening is not None:
+                    inputs, state, text = opening
+                    opened.append(
+                        await open_turn_on(
+                            conn,
+                            pk,
+                            segment_id=segment_id,
+                            turn_index=work.turn_index,
+                            node=studio.graph.start,
+                            inputs=inputs,
+                            state=state,
+                            records=[entries.user_message(text)],
+                        )
+                    )
+
+            await studio.store.save(
+                principal,
+                body.conversation_id,
+                work,
+                alongside=begin_turn,
+                seq_reserved=SEQ_BLOCK,
+            )
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
             if abandoned is not None:
@@ -1666,10 +1903,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # span.
                 record_closed_turn_span(body.conversation_id, abandoned)
             _set_turn_context(principal, body.conversation_id, conversation, settings)
-            if (
-                body.component_ref is not None
-                and body.component_ref.intent is ComponentRefIntent.EDIT
-            ):
+            if body.component_ref is not None and editing:
                 # The Edit Card route bypasses the graph entirely: no
                 # resolve, no plan, no turn on the loop, just the card, the
                 # model's patch-or-recreate decision, and the platform write.
@@ -1692,50 +1926,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     segment_id=segment_id,
                     hold=hold,
                 )
-            focus = (
-                body.component_ref.component_id
-                if body.component_ref is not None
-                and body.component_ref.intent is ComponentRefIntent.FOLLOW_UP
-                else None
-            )
-            # The agent reads the canvas through `recall` and starts from
-            # counts. The digests are the JSON text the agent reads.
-            digest = conversation.canvas_summary_state(focus=focus)
-            history = conversation.conversation_digest_state()
-            seeds: list[Any] | dict[str, Any] | None = None
-            if isinstance(body.seed_spec, list):
-                # Each seed as the `seed` node takes it, or the refusal its
-                # step fails with: no posted Spec block enters the turn.
-                seeds = seeds_slot(body.seed_spec)
-            elif body.seed_spec is not None:
-                # One reference, the reserved shape: `graph.seed` reports it unused.
-                seeds = body.seed_spec.model_dump(mode="json")
-            text = body.message if chip_label is None else f"Count {chip_label}."
-            inputs = TurnInput(
-                message=text,
-                canvas_digest=json.dumps(digest) if digest else None,
-                conversation_digest=json.dumps(history) if history else None,
-                seeds=seeds,
-            )
-            state: dict[str, Any] = {"surface": body.surface.value}
-            # The orchestrator's planner renders the earlier turns' readings;
-            # their blocks stay in the conversation (`current_earlier_block`).
-            ledger = conversation.prior_ledger_state()
-            if ledger:
-                state[ORCHESTRATOR_PRIOR_LEDGER_KEY] = ledger
-            if body.apply_choice is not None:
-                # `graph.seed` applies the chip, and the turn neither searches nor plans.
-                state[APPLY_CHOICE_STATE_KEY] = body.apply_choice.model_dump(mode="json")
-            cursor = await studio.turns.open_turn(
-                principal,
-                body.conversation_id,
-                segment_id=segment_id,
-                turn_index=conversation.turn_index,
-                node=studio.graph.start,
-                inputs=inputs.model_dump(mode="json"),
-                state=state,
-                records=[entries.user_message(text)],
-            )
+            (cursor,) = opened
             # The segment's owner takes the lease and the lock hold from here on.
             return open_stream(
                 _SegmentWork(
@@ -1758,11 +1949,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # The stream's owner releases the segment and lets go of the
             # lock hold. A failure before the owner starts releases them
             # here (`_release_claim`), which does nothing once a refusal
-            # above let go of the hold. Before the claim commits, nothing is
-            # saved. After it, the lease is dropped and an unsaved working
-            # copy is given up. A turn the claim's holder abandoned, saved
-            # or opened stays as written, and the next `/turn` closes what
-            # is open as it closes any open turn.
+            # above let go of the hold. A failure after the lease's claim
+            # drops the lease. One before the begin-turn save commits also
+            # gives up the unsaved working copy, and leaves the turn left
+            # open as it stood, its pause answerable. Once that save
+            # commits, the abandoned turn and the opened one stay as
+            # written, and the next `/turn` closes the open one as it closes
+            # any open turn.
             await _release_claim(
                 studio.store,
                 principal,
@@ -1948,17 +2141,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     hold,
                     _no_pending_interrupt_response(body.interrupt_id),
                 )
-            pending = conversation.pending.get(body.interrupt_id)
-            refusal = _interrupt_refusal(conversation.pending, body)
-            if refusal is not None:
-                hold.release()
-                return refusal
-            assert pending is not None  # narrowed by _interrupt_refusal
-            # Every change up to the claim save is made on a working copy,
-            # which the save swaps into the live state once it commits. A
-            # request that claims nothing leaves the live state as loaded.
-            work = studio.store.draft(principal, body.conversation_id)
-            pending = work.pending[body.interrupt_id]
             requested_answer: dict[str, Any] = {
                 "decision": body.decision.value,
                 "payload": body.payload,
@@ -1976,17 +2158,34 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     "choice_id": body.choice_id,
                     "option_id": body.option_id,
                 }
-            resuming = pending.resuming_segment is not None
             # The answer reaches the paused node's `resume`. A retry of an
             # answer the turn already took finds the turn running and carries
             # it on from its cursor, when the node owes the answer its
             # `resume` or the turn is past it. A retried rejection finds
-            # the turn already closed. Anything else answers no pause, and is
-            # refused before the save below records an approval of it or
-            # marks it resuming.
+            # the turn already closed. A retry that finds the turn paused
+            # again on a later question replays that question
+            # (`_replays_later_pause`). Anything else answers no pause, and
+            # is refused before the save records an approval of it or marks
+            # it resuming.
             cursor = await studio.turns.open_cursor(principal, body.conversation_id)
+            replaying = await _replays_later_pause(
+                studio.turns, cursor, body.interrupt_id, requested_answer
+            )
+            if not replaying:
+                refusal = _interrupt_refusal(conversation.pending, body)
+                if refusal is not None:
+                    hold.release()
+                    return refusal
+            # Every change up to the claim save is made on a working copy,
+            # which the save swaps into the live state once it commits. A
+            # request that claims nothing leaves the live state as loaded.
+            work = studio.store.draft(principal, body.conversation_id)
+            # Only a replay can find the entry gone (`_replays_later_pause`).
+            pending = work.pending.get(body.interrupt_id)
+            resuming = pending is not None and pending.resuming_segment is not None
             paused_here = (
-                cursor is not None
+                pending is not None
+                and cursor is not None
                 and cursor.status is TurnStatus.PAUSED
                 and cursor.pause is not None
                 and cursor.pause.interrupt_id == pending.adk_id
@@ -1995,7 +2194,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 body.decision is InterruptDecision.REJECT
                 or (cursor is not None and cursor.status is TurnStatus.RUNNING)
             )
-            if not (paused_here or retried):
+            answerable = paused_here or retried or replaying
+            if not (answerable or resuming):
                 return await _unclaimed(
                     studio.store,
                     principal,
@@ -2023,10 +2223,21 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         retry_after_seconds=exc.retry_after_seconds,
                     ),
                 )
-            if resuming and pending.answer != requested_answer:
+            if not answerable:
+                # A retry of an answer that resumed the turn is refused only
+                # once no segment resuming it is live: while one is, it is
+                # answered 409 above, as for any retry.
+                return await _unclaimed(
+                    studio.store,
+                    principal,
+                    body.conversation_id,
+                    hold,
+                    _no_pending_interrupt_response(body.interrupt_id),
+                )
+            if pending is not None and resuming and pending.answer != requested_answer:
                 # The claim above only succeeds once the earlier resume's
-                # segment has expired (its owner died before reaching a
-                # checkpoint) or was dropped (it failed before its stream
+                # segment has expired (its owner died before reaching its
+                # closing write) or was dropped (it failed before its stream
                 # started), so this is a genuinely dead attempt, and
                 # this request's answer does not match what actually
                 # resumed it. Refused for good: a live segment above would
@@ -2089,8 +2300,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         # save above claimed, and releases the lock. It drops only the lease.
         # Once the answer is saved below, the pending entry stays resuming
         # under the dropped segment with the answer recorded, so a retry of
-        # the same answer claims at once and resumes. The turn lines added
-        # below stay unsaved, and the retry's load reads the row afresh.
+        # the same answer claims at once and resumes, with the answer's turn
+        # lines saved beside it.
         try:
             # The read above only gated the claim. A segment whose lease
             # lapsed can still write the turn until the claim commits, so
@@ -2114,6 +2325,20 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 )
             cursor = claimed
             work = studio.store.draft(principal, body.conversation_id)
+            if replaying:
+                assert cursor is not None
+                return await _replay_pause(
+                    studio,
+                    principal=principal,
+                    conversation_id=body.conversation_id,
+                    interrupt_id=body.interrupt_id,
+                    work=work,
+                    cursor=cursor,
+                    segment_id=segment_id,
+                    hold=hold,
+                    settings=settings,
+                    turn=claiming,
+                )
             pending = work.pending[body.interrupt_id]
             admission: Callable[[AsyncConnection, int], Awaitable[None]] | None = None
             # A switch revises the plan and approves nothing, so it leaves
@@ -2165,6 +2390,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # owner drops it in that write on every ending but a client
             # that left (`harness.studio_stream`). A client that left, or a
             # crash, leaves it for this same retry path to pick back up.
+            if not resuming:
+                # The answer's lines commit with the answer, so every
+                # resumed segment, and a replay of the pause it reaches, finds
+                # them stored. A retry resuming the same answer adds none.
+                for line, user_words in _answer_turn_lines(pending, body):
+                    work.add_to_turn(line, user_words=user_words)
             pending.answer = requested_answer
             pending.resuming_segment = segment_id
             if body.decision is InterruptDecision.SWITCH and pending.card is not None:
@@ -2249,10 +2480,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                             for question in pending.questions
                         }
                     }
-                    # The turn's history record must carry the answers or the
-                    # next turn's digest shows only the un-refined ask.
-                    for line in _answered_lines(pending, given):
-                        conversation.add_to_turn(line, user_words=True)
             elif body.decision is InterruptDecision.APPROVE:
                 # The plan is keyed on its revision hash (`plan_revision`), and
                 # the approval dated by the record of its first answer, so a
@@ -2276,30 +2503,21 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # The graph's `switch` node revises the plan in code and offers
                 # it again; a planner decision's switch (`is_decision_choice`)
                 # replans with the pick held (`harness.decision_pick`). The
-                # turn's history record carries the choice.
+                # turn's history record carries the choice (`_answer_turn_lines`).
                 assert body.choice_id is not None and body.option_id is not None
                 answer = {
                     "approved": None,
                     "switch": {"choice_id": body.choice_id, "option_id": body.option_id},
                 }
-                label = pending.choices[body.choice_id].options[body.option_id].label
-                verb = "use" if is_decision_choice(body.choice_id) else "count"
-                conversation.add_to_turn(f"{verb} {label}", user_words=False)
             else:  # amend: a stated non-approval routes the graph to the planner
                 answer = {"approved": None, "amendment": body.payload}
-                # An amendment refines the question, so the turn's history record
-                # carries it.
-                conversation.add_to_turn(str(body.payload), user_words=True)
             # The user's words as amended, so a search after the resume reads the
             # refined ask and no switch's label.
             _set_turn_context(principal, body.conversation_id, conversation, settings)
-            # The approved plan goes out once per interrupt: a retry resuming
-            # the same answer sends it only when the dead attempt did not.
-            approving = (
-                pending.card
-                if body.decision is InterruptDecision.APPROVE and not pending.approved_sent
-                else None
-            )
+            # The approved plan goes out when the graph's `approve` node takes
+            # the approval. A retry finds that node run already when the dead
+            # attempt's write of it committed, and sends none.
+            approving = pending.card if body.decision is InterruptDecision.APPROVE else None
             # The segment's owner takes the lease and the lock hold from here on.
             return open_stream(
                 _SegmentWork(
@@ -2309,7 +2527,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     cursor=cursor,
                     segment_id=segment_id,
                     answer=(
-                        Answer(interrupt_id=pending.adk_id, round=cursor.pause.round, value=answer)
+                        Answer(
+                            interrupt_id=pending.adk_id,
+                            round=cursor.pause.round,
+                            value=answer,
+                            request=requested_answer,
+                        )
                         if paused_here and cursor.pause is not None
                         else None
                     ),

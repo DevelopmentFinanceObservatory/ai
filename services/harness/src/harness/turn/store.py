@@ -263,6 +263,16 @@ class OwedAnswer:
 
 
 @dataclass(frozen=True)
+class AcceptedAnswer:
+    """An answer the turn accepted (`TurnStore.answered`): the `round` of
+    the pause it answered, and `request`, the answer as the client sent it
+    (`None` when the writer recorded none)."""
+
+    round: int
+    request: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
 class Cursor:
     """One turn as last read or written. `id` keys the turn's answers and
     records; `conversation` is the `conversations` row's id; `record_count`
@@ -728,8 +738,7 @@ class TurnStore:
         state: dict[str, Any],
         records: Sequence[AgentRecord] = (),
     ) -> Cursor:
-        """Open turn `turn_index` running at `node` with no node input and
-        with `state`, which holds no spec blocks yet, and append `records`.
+        """Open turn `turn_index` in a transaction of its own (`open_turn_on`).
 
         Raises:
             SegmentLost: `segment_id` does not hold the conversation's lease.
@@ -751,30 +760,16 @@ class TurnStore:
                 raise SegmentLost(
                     f"segment {segment_id!r} does not hold {conversation_id!r}'s lease"
                 )
-            if (await conn.execute(_HAS_OPEN_TURN, {"conversation": conversation})).first():
-                raise TurnAlreadyOpen(f"conversation {conversation_id!r} has an open turn")
-            row = (
-                await conn.execute(
-                    text(
-                        "INSERT INTO turn_cursors "
-                        "(conversation, turn_index, node, status, inputs, state, written_by) "
-                        "VALUES (:conversation, :turn_index, :node, 'running', "
-                        "CAST(:inputs AS json), CAST(:state AS json), :written_by) "
-                        f"RETURNING {_COLUMNS}"
-                    ),
-                    {
-                        "conversation": conversation,
-                        "turn_index": turn_index,
-                        "node": node,
-                        "inputs": _json(inputs),
-                        "state": _json(_split(state)[0]),
-                        "written_by": segment_id,
-                    },
-                )
-            ).one()
-            cursor = _cursor(row, 0, _NO_SPECS)
-            await _append(conn, cursor, records)
-            return _cursor(row, len(records), _NO_SPECS)
+            return await open_turn_on(
+                conn,
+                conversation,
+                segment_id=segment_id,
+                turn_index=turn_index,
+                node=node,
+                inputs=inputs,
+                state=state,
+                records=records,
+            )
 
     async def open_cursor(self, principal: str, conversation_id: str) -> Cursor | None:
         """The conversation's open (running or paused) turn, or `None`."""
@@ -1028,6 +1023,22 @@ class TurnStore:
                 )
             ).scalar_one_or_none()
 
+    async def answered(self, cursor: Cursor, *, interrupt_id: str) -> AcceptedAnswer | None:
+        """The answer the turn accepted to its pause `interrupt_id`, or
+        `None` when it accepted none. Each pause has an `interrupt_id` of its
+        own, so it names at most one answer."""
+        async with self._engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT round, request FROM turn_answers WHERE turn = :turn "
+                        "AND interrupt_id = :interrupt_id"
+                    ),
+                    {"turn": cursor.id, "interrupt_id": interrupt_id},
+                )
+            ).first()
+        return None if row is None else AcceptedAnswer(round=row.round, request=row.request)
+
     async def advance(
         self,
         cursor: Cursor,
@@ -1133,10 +1144,13 @@ class TurnStore:
         interrupt_id: str,
         round: int,
         answer: dict[str, Any],
+        request: dict[str, Any] | None = None,
         records: Sequence[AgentRecord] = (),
     ) -> Cursor:
         """Accept `answer` to the open pause `(interrupt_id, round)` and set
         the turn running at the node it paused at, appending `records`.
+        `request`, the answer as the client sent it, is stored beside
+        `answer` (`answered`).
         The returned cursor's `owed` names the pause until the next write
         moves the cursor.
 
@@ -1161,14 +1175,16 @@ class TurnStore:
             )
             await conn.execute(
                 text(
-                    "INSERT INTO turn_answers (turn, interrupt_id, round, answer) "
-                    "VALUES (:turn, :interrupt_id, :round, CAST(:answer AS json))"
+                    "INSERT INTO turn_answers (turn, interrupt_id, round, answer, request) "
+                    "VALUES (:turn, :interrupt_id, :round, CAST(:answer AS json), "
+                    "CAST(:request AS json))"
                 ),
                 {
                     "turn": cursor.id,
                     "interrupt_id": interrupt_id,
                     "round": round,
                     "answer": _json(answer),
+                    "request": _json(request),
                 },
             )
         return running
@@ -1257,6 +1273,56 @@ async def finish_on(
     if status is TurnStatus.CANCELLED:
         await end_unfinished(conn, cursor.conversation, now=now)
     return closed
+
+
+async def open_turn_on(
+    conn: AsyncConnection,
+    conversation: int,
+    *,
+    segment_id: str,
+    turn_index: int,
+    node: str,
+    inputs: dict[str, Any],
+    state: dict[str, Any],
+    records: Sequence[AgentRecord] = (),
+) -> Cursor:
+    """Open turn `turn_index` of the `conversations` row `conversation` on
+    `conn`, in the caller's transaction, running at `node` with no node
+    input and with `state`, which holds no spec blocks yet, and append
+    `records`. `TurnStore.open_turn` runs it in a transaction of its own;
+    `/turn` (`harness.studio`) runs it in the transaction of the save that
+    begins the turn, after the close of the turn left open (`finish_on`).
+
+    Raises:
+        SegmentLost: `segment_id` does not hold the conversation's lease.
+        TurnAlreadyOpen: the conversation has an open turn. Close it
+            (`ABANDONED`) first.
+    """
+    await _fence(conn, conversation, segment_id)
+    if (await conn.execute(_HAS_OPEN_TURN, {"conversation": conversation})).first():
+        raise TurnAlreadyOpen(f"conversation row {conversation} has an open turn")
+    row = (
+        await conn.execute(
+            text(
+                "INSERT INTO turn_cursors "
+                "(conversation, turn_index, node, status, inputs, state, written_by) "
+                "VALUES (:conversation, :turn_index, :node, 'running', "
+                "CAST(:inputs AS json), CAST(:state AS json), :written_by) "
+                f"RETURNING {_COLUMNS}"
+            ),
+            {
+                "conversation": conversation,
+                "turn_index": turn_index,
+                "node": node,
+                "inputs": _json(inputs),
+                "state": _json(_split(state)[0]),
+                "written_by": segment_id,
+            },
+        )
+    ).one()
+    cursor = _cursor(row, 0, _NO_SPECS)
+    await _append(conn, cursor, records)
+    return _cursor(row, len(records), _NO_SPECS)
 
 
 async def cursor_at(conn: AsyncConnection, conversation: int, turn_index: int) -> Cursor | None:

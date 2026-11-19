@@ -14,8 +14,6 @@ different groups never conflict:
 - `save` writes the turn state compare-and-swapped on the row's `version`
   (`ConversationStale` when another instance moved it, or holds a live
   lease).
-- `checkpoint` writes the turn state fenced on the segment (`SegmentLost`
-  when another instance holds the lease).
 - `close_segment` is a stream's closing write: fenced on the segment, it
   stores the turn state and clears the lease, and closes the turn
   `cancelled`, record and cursor, when a Stop is live for it, in one
@@ -23,7 +21,8 @@ different groups never conflict:
 - `load` records a turn whose cursor closed while its record stayed open,
   with the error its stream told the client (`closed_turn_error`),
   compare-and-swapped on `version` and only while no lease is live.
-- `change_canvas` is a checkpoint with a card change applied: each card
+- `change_canvas` is a write fenced on the segment (`SegmentLost` when
+  another instance holds the lease) with a card change applied: each card
   the turn lands, holds, swaps, revises or removes commits with its canvas
   block, every other changed durable field and a drawn card's frame lineage
   (`conversation_card_lineage`, read back by `card_lineage`) in one
@@ -50,7 +49,7 @@ canvas as stored. Lease expiry is compared against the database's clock in
 SQL, so instances whose clocks disagree agree on when a lease lapses.
 
 Each write is one transaction. The writes a live stream makes between its
-renewals (`checkpoint`, `change_canvas`) retry a transient database fault
+renewals (`change_canvas`) retry a transient database fault
 until the lease's deadline (`StudioStore.lease_deadline`), then raise
 `DatabaseUnavailable`. The other writes do not retry. The run ledger
 (`harness.run_ledger`) writes inside `fenced`.
@@ -80,7 +79,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, NamedTuple
 
 from compiler.surface import transient
 from executor.ledger import RunStatus
@@ -115,7 +114,7 @@ from harness.studio_state import (
 )
 from harness.tool_contracts import HarnessCode
 from harness.turn.store import CLOSED, Cursor, TurnStatus, cursor_at, finish_on
-from harness.wire import CompositionManifest, ErrorCode, PlanProposed
+from harness.wire import STUDIO_FRAME_ADAPTER, CompositionManifest, ErrorCode, PlanProposed
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +123,7 @@ logger = logging.getLogger(__name__)
 _OWNER_ID = uuid.uuid4().hex[:12]
 
 # A conversation's durable fields as one flat map, the shape `save` and
-# `checkpoint` diff against the last stored snapshot. The scalar keys live in
+# `change_canvas` diff against the last stored snapshot. The scalar keys live in
 # `conversations.turn_state`, `composition` and `segment` in their own
 # columns, and each per-item key in a row of its own table.
 _KEY_TURN_INDEX = "turn_index"
@@ -275,7 +274,7 @@ async def run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
 
 def _changed_since(full: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
     """The subset of `full` that `baseline` either lacks or holds a
-    different value for. `save` and `checkpoint` both diff a freshly
+    different value for. `save` and `change_canvas` both diff a freshly
     serialised state against a baseline this way."""
     return {
         key: value for key, value in full.items() if baseline.get(key, _NO_BASELINE_VALUE) != value
@@ -347,9 +346,14 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                 else None
             ),
             "card_new_plan": bool(p.card and p.card.new_plan),
-            "approved_sent": p.approved_sent,
             # Written only when set: an entry with no admitted run has no key.
             **({"admitted_run": p.admitted_run} if p.admitted_run is not None else {}),
+            # Written only when set, as the wire sends each frame.
+            **(
+                {"frames": [frame.model_dump(mode="json", exclude_none=True) for frame in p.frames]}
+                if p.frames
+                else {}
+            ),
         }
         for interrupt_id, p in pending.items()
     }
@@ -382,8 +386,10 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
             if entry.get("card")
             else None
         ),
-        approved_sent=bool(entry.get("approved_sent")),
         admitted_run=entry.get("admitted_run"),
+        frames=tuple(
+            STUDIO_FRAME_ADAPTER.validate_python(frame) for frame in entry.get("frames") or ()
+        ),
     )
     if "questions" in entry:
         pending.questions = tuple(
@@ -412,8 +418,7 @@ def _deserialize_pending(data: dict[str, Any]) -> dict[str, _PendingInterrupt]:
     return {interrupt_id: _deserialize_entry(entry) for interrupt_id, entry in data.items()}
 
 
-# Durable fields as `_serialize_durable` serialises them, by key: what
-# `StudioStore.snapshot` hands out and `StudioStore.checkpoint` writes.
+# Durable fields as `_serialize_durable` serialises them, by key.
 type Snapshot = dict[str, Any]
 
 
@@ -695,7 +700,7 @@ def _jsonb(value: Any) -> str | None:
 
 _CONVERSATION_COLUMNS = (
     "id, version, turn_state, composition, lease_segment_id, lease_owner, "
-    "lease_expires_at, stop_id, stop_turn, lease_cancel, seq_next, seq_reserved, "
+    "lease_expires_at, stop_id, stop_turn, lease_cancel, seq_next, seq_reserved, canvas_writes, "
     f"{_TURN_INDEX_SQL} AS turn_index"
 )
 
@@ -799,7 +804,7 @@ def _check_column(key: str, value: Any, kind: type | tuple[type, ...]) -> None:
         raise TypeError(f"{key} is of type {type(value).__name__}")
 
 
-def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
+def _delta_write(delta: dict[str, Any], *, lease_clock: str | None = None) -> _DeltaWrite:
     """The statements that write `delta`'s flat keys. A write of the lease
     columns stamps a pending Stop (`_STAMP_STOP`). Raises on a value the
     columns cannot hold (a `seq` that is not an integer, a segment without
@@ -807,7 +812,9 @@ def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
     is not a number, a write token that is not a string, a value
     `json.dumps` refuses) and on a key no column or row holds, so a caller
     that builds the statements without running them learns what running
-    them would refuse."""
+    them would refuse. Given `lease_clock`, an SQL expression for the
+    database clock, a segment's expiry is written as `SEGMENT_TTL_S` past
+    that clock's reading at the write, in place of the segment's own."""
     sets = ["version = version + 1", "updated_at = now()"]
     params: dict[str, Any] = {}
     scalars = {key: value for key, value in delta.items() if key in _SCALAR_KEYS}
@@ -824,16 +831,21 @@ def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
             _check_column("segment id", segment.id, str)
             _check_column("segment owner", segment.owner, str)
             _check_column("segment expiry", segment.expires_at, (int, float))
+        clocked = segment is not None and lease_clock is not None
+        expires = f"{lease_clock} + :ttl" if clocked else ":expires_at"
         sets.append(
             "lease_segment_id = :segment_id, lease_owner = :owner, "
-            f"lease_expires_at = :expires_at, {_STAMP_STOP}"
+            f"lease_expires_at = {expires}, {_STAMP_STOP}"
         )
         params |= {
             "minted": _wire_id("stop"),
             "segment_id": segment.id if segment else None,
             "owner": segment.owner if segment else None,
-            "expires_at": segment.expires_at if segment else None,
         }
+        if clocked:
+            params["ttl"] = SEGMENT_TTL_S
+        else:
+            params["expires_at"] = segment.expires_at if segment else None
     rows: dict[str, list[dict[str, Any]]] = {}
     for key, value in delta.items():
         if key in _SCALAR_KEYS or key in (_KEY_SEQ, _KEY_SEGMENT):
@@ -854,27 +866,57 @@ def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
     return _DeltaWrite(sets=tuple(sets), params=params, rows=rows)
 
 
-async def _write_delta(conn: AsyncConnection, pk: int, delta: dict[str, Any]) -> int:
-    """Write `delta`'s flat keys to their columns and rows, bump the turn
-    state's version, and return the new version. The caller holds the row
-    lock and decided the write is allowed."""
-    return await _run_delta_write(conn, pk, _delta_write(delta))
+class _Written(NamedTuple):
+    """The row's turn-state version and lease expiry after a delta write."""
+
+    version: int
+    lease_expires_at: float | None
 
 
-async def _run_delta_write(conn: AsyncConnection, pk: int, write: _DeltaWrite) -> int:
+@dataclass(eq=False)
+class _CanvasWrite:
+    """One `change_canvas` call's write id and what its latest attempt to
+    reach the write computed (`_fenced_save`): the working copy and the live
+    snapshot taken with it, the changed durable keys and `change`'s result.
+    The id is minted once per call and kept across its retries. An attempt
+    that raised after it queued its write leaves the write pending on the
+    runtime entry until the next fenced write resolves it from the row's
+    `canvas_writes`: `landed` once the row holds the id, so the call's retry
+    returns `result` and runs `change` no second time."""
+
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    work: ConversationState | None = None
+    base: ConversationState | None = None
+    changed: dict[str, Any] = field(default_factory=dict)
+    result: Any = None
+    landed: bool = False
+
+
+async def _write_delta(
+    conn: AsyncConnection, pk: int, delta: dict[str, Any], *, lease_clock: str | None = None
+) -> _Written:
+    """Write `delta`'s flat keys to their columns and rows (`_delta_write`),
+    bump the turn state's version, and return the new version and the
+    stored lease expiry. The caller holds the row lock and decided the
+    write is allowed."""
+    return await _run_delta_write(conn, pk, _delta_write(delta, lease_clock=lease_clock))
+
+
+async def _run_delta_write(conn: AsyncConnection, pk: int, write: _DeltaWrite) -> _Written:
     """Run `write`'s statements on row `pk` and return the row's new
-    version (`_write_delta`)."""
-    version = (
+    version and lease expiry (`_write_delta`)."""
+    written = (
         await conn.execute(
             text(
-                f"UPDATE conversations SET {', '.join(write.sets)} WHERE id = :pk RETURNING version"
+                f"UPDATE conversations SET {', '.join(write.sets)} WHERE id = :pk "
+                "RETURNING version, lease_expires_at"
             ),
             {**write.params, "pk": pk},
         )
-    ).scalar_one()
+    ).one()
     for prefix, rows in write.rows.items():
         await conn.execute(_ITEM_TABLES[prefix].upsert(), [{**row, "pk": pk} for row in rows])
-    return version
+    return _Written(written.version, written.lease_expires_at)
 
 
 _INSERT_CARD_LINEAGE = text(
@@ -982,8 +1024,8 @@ class _RuntimeEntry:
     `claim_segment` compares the loaded lease against, and `read_stamp` this
     instance's own clock just before that read. `lease_stamp` is this
     instance's clock just before the read or renewal that set the held
-    lease's expiry: the claim's `read_stamp`, then each renewal's start, the
-    anchor of `StudioStore.lease_deadline`. `held` is the segment
+    lease's expiry: the start of the save that wrote the claim, then each
+    renewal's start, the anchor of `StudioStore.lease_deadline`. `held` is the segment
     this instance claimed and has not yet released, the one lease its own
     saves may write under. `seq_reserved` is the stored end of the frame
     numbers reserved for the conversation's segments (`claim_segment`),
@@ -998,7 +1040,9 @@ class _RuntimeEntry:
     shared `state` object, separate from `lock` since a canvas edit must
     land while a turn streams. `write_lock` serialises this instance's own
     writes on the conversation, so two of them never interleave their
-    `state`/`baseline` updates.
+    `state`/`baseline` updates. `canvas_pending` holds the canvas writes
+    whose attempt raised once it had queued its write, so their commit is
+    unknown; the next fenced write resolves them (`_fenced_save`).
     """
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -1016,13 +1060,14 @@ class _RuntimeEntry:
     baseline: dict[str, Any] = field(default_factory=dict)
     draft: tuple[ConversationState, ConversationState] | None = None
     claimed: asyncio.Event = field(default_factory=asyncio.Event)
+    canvas_pending: list[_CanvasWrite] = field(default_factory=list)
 
 
 class StudioStore:
     """Conversation state, keyed (principal, conversation_id), stored in the
     harness's tables over `engine` (module docstring).
 
-    `claim_segment`/`renew`/`checkpoint`/`request_cancel` are the segment
+    `claim_segment`/`renew`/`request_cancel` are the segment
     lease API: together they keep at most one instance streaming a
     conversation at a time.
 
@@ -1145,17 +1190,26 @@ class StudioStore:
         delta: dict[str, Any],
         *,
         seq_reserved: int | None = None,
-    ) -> int:
+        claim: bool = False,
+    ) -> _Written:
         """Write `delta` to the turn state, the canvas, the lease and the item
         rows, and `seq_reserved` when given, and return the row's new version
-        (`_write_delta`)."""
-        version = await _write_delta(conn, pk, delta)
+        and lease expiry (`_write_delta`). With `claim`, the segment `delta`
+        carries expires `SEGMENT_TTL_S` past the database clock's reading at
+        this write, and the canvas write ids recorded under earlier leases
+        (`_CanvasWrite`) are cleared."""
+        written = await _write_delta(conn, pk, delta, lease_clock=self._time_sql if claim else None)
+        if claim:
+            await conn.execute(
+                text("UPDATE conversations SET canvas_writes = '[]'::jsonb WHERE id = :pk"),
+                {"pk": pk},
+            )
         if seq_reserved is not None:
             await conn.execute(
                 text("UPDATE conversations SET seq_reserved = :reserved WHERE id = :pk"),
                 {"pk": pk, "reserved": seq_reserved},
             )
-        return version
+        return written
 
     async def _write_composition(
         self, conn: AsyncConnection, pk: int, composition: dict[str, Any] | None
@@ -1301,7 +1355,7 @@ class StudioStore:
                 or (lease is not None and lease.expires_at > row.db_now)
             ):
                 return None
-            stored = await self._write(conn, pk, delta)
+            stored = (await self._write(conn, pk, delta)).version
         logger.info(
             "studio store: conversation %s's turn %s was closed %s with its record open; "
             "recorded it %s",
@@ -1320,8 +1374,11 @@ class StudioStore:
         `load` must have run first). Raises
         `SegmentBusy` when the loaded lease had not lapsed by the database
         clock's reading taken with the load. Otherwise writes a fresh segment
-        into that state, expiring `SEGMENT_TTL_S` after that reading, and
-        returns its id.
+        into that state and returns its id. The expiry it holds,
+        `SEGMENT_TTL_S` after that reading, stands until the claim save
+        writes the stored one, `SEGMENT_TTL_S` after the database clock's
+        reading at that write, so time spent between the load and the save
+        does not come off the lease.
 
         The claim also reserves the segment's frame numbers, one block of
         `SEQ_BLOCK`, and starts the state's `seq` there. For a turn
@@ -1350,7 +1407,8 @@ class StudioStore:
 
     async def claim_turn_lease(self, principal: str, conversation_id: str) -> TurnLease:
         """Claim the conversation's lease for a new turn and write the lease
-        alone, under the row lock. The turn state, its version and the frame
+        alone, under the row lock, emptying the canvas write ids recorded
+        under earlier leases (`_CanvasWrite`). The turn state, its version and the frame
         numbers reserved are left as stored, so a lapsed segment that wrote
         them since this instance's `load` does not refuse the claim, and a
         request that fails after the claim leaves the open turn's
@@ -1391,10 +1449,12 @@ class StudioStore:
                         text(
                             "UPDATE conversations SET lease_segment_id = :segment_id, "
                             "lease_owner = :owner, "
-                            f"lease_expires_at = {self._time_sql} + :ttl "
+                            f"lease_expires_at = {self._time_sql} + :ttl, {_STAMP_STOP}, "
+                            "canvas_writes = '[]'::jsonb "
                             "WHERE id = :pk RETURNING lease_expires_at"
                         ),
                         {
+                            "minted": _wire_id("stop"),
                             "pk": entry.pk,
                             "segment_id": segment_id,
                             "owner": _OWNER_ID,
@@ -1430,7 +1490,7 @@ class StudioStore:
         written, and a save with nothing changed writes nothing.
 
         Raises `ConversationStale` when another instance's claim, save or
-        checkpoint moved the version since this instance last read or wrote
+        card write moved the version since this instance last read or wrote
         it, or when the stored lease is live on the database clock and is
         neither the segment this save claims nor the one this instance
         holds: a claim over a live lease (a renewal does not move the
@@ -1462,6 +1522,11 @@ class StudioStore:
         reserves, written with the fields it changes: `/turn`'s save that opens a turn on a
         lease `claim_turn_lease` claimed reserves the new turn's `0` to
         `SEQ_BLOCK`.
+
+        A save that persists `claim_segment`'s claim writes its expiry as
+        `SEGMENT_TTL_S` past the database clock's reading at the write and
+        sets the state's segment to the expiry stored, and the lease deadline
+        (`lease_deadline`) counts from the save's start.
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.pk is not None and entry.state is not None
@@ -1473,6 +1538,10 @@ class StudioStore:
                 return
             claimed = _deserialize_segment(delta.get(_KEY_SEGMENT))
             reserved = entry.claimed_reserved if claimed is not None else seq_reserved
+            # A segment `claim_segment` claimed, which reserved its frame
+            # numbers; its expiry is set at the write.
+            claiming = claimed is not None and entry.claimed_reserved is not None
+            stamp = self._clock()
             async with self._transaction() as conn:
                 row = (await conn.execute(self._lock_conversation, {"pk": entry.pk})).first()
                 if row is None or row.version != entry.version:
@@ -1491,13 +1560,19 @@ class StudioStore:
                 if alongside is not None:
                     await alongside(conn, entry.pk)
                     delta = _changed_since(_serialize_durable(target), entry.baseline)
-                version = (
-                    await self._write(conn, entry.pk, delta, seq_reserved=reserved)
+                written = (
+                    await self._write(conn, entry.pk, delta, seq_reserved=reserved, claim=claiming)
                     if delta
-                    else row.version
+                    else _Written(row.version, row.lease_expires_at)
                 )
-            entry.version = version
+            entry.version = written.version
             entry.baseline.update(delta)
+            if claimed is not None and claiming:
+                assert written.lease_expires_at is not None
+                claimed = dataclasses.replace(claimed, expires_at=written.lease_expires_at)
+                target.segment = claimed
+                entry.baseline[_KEY_SEGMENT] = _serialize_segment(claimed)
+                entry.lease_stamp = stamp
             self._take_draft(entry, target)
             if claimed is not None:
                 entry.held = claimed.id
@@ -1599,7 +1674,7 @@ class StudioStore:
         landed: Callable[[T], bool] = bool,
     ) -> T:
         """The write of a card change the turn makes: each card it lands,
-        holds, swaps, revises or removes. A checkpoint of the whole
+        holds, swaps, revises or removes. A write of the whole
         conversation, fenced on the segment the live state holds, with
         `change` applied: the canvas `change` produces and every durable
         field `change` changed commit in one transaction (`_fenced_save`),
@@ -1622,8 +1697,11 @@ class StudioStore:
         one level deep. The fields `change` changed are assigned to the live
         state only once the write has committed, so a write that fails
         leaves the live state as it was. A transient database fault is
-        retried until the lease's deadline (`_retrying`). Returns what
-        `change` returns.
+        retried until the lease's deadline (`_retrying`). The call's write id
+        (`_CanvasWrite`), kept across its retries, commits with the write, so
+        a retry after a commit whose acknowledgement was lost applies
+        `change` no second time and returns what the attempt that committed
+        returned. Returns what `change` returns.
         """
         entry = self._runtime[(principal, conversation_id)]
         state = entry.state
@@ -1632,11 +1710,18 @@ class StudioStore:
         if segment_id is None:
             raise SegmentLost(f"conversation {conversation_id!r} holds no segment")
         row = _card_lineage_row(lineage) if lineage is not None else None
+        write = _CanvasWrite()
         return await self._retrying(
             entry,
             conversation_id,
             lambda: self._fenced_save(
-                entry, conversation_id, segment_id, change, lineage_row=row, landed=landed
+                entry,
+                conversation_id,
+                segment_id,
+                change,
+                lineage_row=row,
+                landed=landed,
+                write=write,
             ),
         )
 
@@ -1684,11 +1769,11 @@ class StudioStore:
         segment_id: str,
         change: Callable[[ConversationState], T],
         *,
-        snapshot: Callable[[], Snapshot] | None = None,
         lineage_row: Mapping[str, Any] | None = None,
         landed: Callable[[T], bool] = bool,
+        write: _CanvasWrite | None = None,
     ) -> T:
-        """`checkpoint` and `change_canvas`'s one write. Under the row lock
+        """`change_canvas`'s one write. Under the row lock
         and fenced on `segment_id`, run `change` on a one-level copy of the live
         state holding the canvas as stored, then write the copy's canvas when
         `change` replaced it, and the durable keys below whose value differs
@@ -1698,13 +1783,23 @@ class StudioStore:
         written keys in the baseline and the version, and assign the canvas
         read back and each field `change` changed to the live state.
 
-        Without `snapshot` (`change_canvas`'s) the durable keys are those
-        `change` changed on the copy. A field the stream's owner changed
-        since the last write waits for the owner's own write, whichever task
-        makes this one. With `snapshot` (`checkpoint`'s) they are what it
-        gives under the row lock. Either way a field the live stream changes
+        The durable keys are those `change` changed on the copy. A field the
+        stream's owner changed since the last write waits for the owner's
+        own write, whichever task makes this one. A field the live stream changes
         during the write keeps its new value, which differs from the
-        baseline and goes out with a later write."""
+        baseline and goes out with a later write.
+
+        Given `write`, a canvas change's (`change_canvas`), the write also
+        records `write.id` in the row's `canvas_writes`. The attempt's copy,
+        changed keys and result are kept on `write`, and `write` is queued on
+        `entry.canvas_pending` before the commit and taken off once the
+        commit is acknowledged. Every fenced write first resolves the
+        pending ones from the locked row (`_resolve_canvas_writes`), before
+        it copies the live state, so no write builds on a live state that
+        lacks a commit whose acknowledgement was lost. A `write` resolved as
+        landed returns its kept result, and `change` does not run again. A
+        claim empties `canvas_writes`, so an id found there is this
+        lease's."""
         state = entry.state
         assert entry.pk is not None and state is not None
         async with entry.write_lock:
@@ -1712,22 +1807,23 @@ class StudioStore:
                 row = (await conn.execute(self._lock_conversation, {"pk": entry.pk})).first()
                 if row is None:
                     raise SegmentLost(f"conversation {conversation_id!r} is no longer stored")
+                stored = (
+                    CompositionManifest.model_validate(row.composition) if row.composition else None
+                )
+                if entry.canvas_pending:
+                    await self._resolve_canvas_writes(conn, entry, state, row, stored)
+                if write is not None and write.landed:
+                    return write.result
                 fenced = _row_segment(row)
                 if fenced is None or fenced.id != segment_id:
                     raise SegmentLost(
                         f"conversation {conversation_id!r} segment {segment_id!r} is not the lease"
                     )
-                stored = (
-                    CompositionManifest.model_validate(row.composition) if row.composition else None
-                )
                 base = _shallow_copy(state)
                 work = _shallow_copy(state)
                 work.composition = stored
                 result = change(work)
-                if snapshot is not None:
-                    durable = snapshot()
-                else:
-                    durable = _changed_since(_serialize_durable(work), _serialize_durable(base))
+                durable = _changed_since(_serialize_durable(work), _serialize_durable(base))
                 changed = _changed_since(durable, entry.baseline)
                 if work.composition is not stored:
                     await self._write_composition(
@@ -1737,13 +1833,84 @@ class StudioStore:
                         if work.composition is not None
                         else None,
                     )
-                version = await self._write(conn, entry.pk, changed) if changed else row.version
+                version = (
+                    (await self._write(conn, entry.pk, changed)).version if changed else row.version
+                )
                 if lineage_row is not None and landed(result):
                     await _insert_card_lineage(conn, entry.pk, lineage_row)
+                if write is not None:
+                    await conn.execute(
+                        text(
+                            "UPDATE conversations SET canvas_writes = canvas_writes"
+                            " || to_jsonb(CAST(:write_id AS text)) WHERE id = :pk"
+                        ),
+                        {"pk": entry.pk, "write_id": write.id},
+                    )
+                    write.work, write.base, write.changed = work, base, changed
+                    write.result = result
+                    entry.canvas_pending.append(write)
+            if write is not None and write in entry.canvas_pending:
+                entry.canvas_pending.remove(write)
             entry.version = version
             entry.baseline.update(changed)
             _assign_changed(state, work, base)
             return result
+
+    async def _resolve_canvas_writes(
+        self,
+        conn: AsyncConnection,
+        entry: _RuntimeEntry,
+        state: ConversationState,
+        row: Any,
+        stored: CompositionManifest | None,
+    ) -> None:
+        """Settle each write on `entry.canvas_pending` against `row`, the
+        conversation's row as locked by the caller (`_fenced_save`), and
+        empty the list.
+
+        A write whose id the row's `canvas_writes` holds committed. The row
+        holds that commit and every later one, so the live state reloads
+        from it the durable keys the write's `change` changed, the baseline
+        reloads the keys the write wrote, the version and the canvas are the
+        row's, and the write is marked `landed`. A process-local field
+        `change` set (`ConversationState._removal_unreported`) is set on the
+        live state. A write whose id the row lacks did not commit: it is
+        dropped, and its call's retry runs `change` again on a fresh copy."""
+        pending, entry.canvas_pending = entry.canvas_pending, []
+        landed = [write for write in pending if write.id in row.canvas_writes]
+        for write in pending:
+            if write.id not in row.canvas_writes:
+                write.work = write.base = None
+                write.changed = {}
+        if not landed:
+            return
+        flat = _row_flat(row)
+        for prefix, items in _ITEM_TABLES.items():
+            for ident, value in await conn.execute(items.select(), {"pk": row.id}):
+                flat[f"{prefix}{ident}"] = value
+        for write in landed:
+            assert write.work is not None and write.base is not None
+            logger.info(
+                "studio store: conversation %s canvas write %s was saved by an attempt "
+                "whose acknowledgement was lost",
+                state.conversation_id,
+                write.id,
+            )
+            before = _serialize_durable(write.base)
+            owned = {
+                key
+                for key, value in _serialize_durable(write.work).items()
+                if before.get(key, _NO_BASELINE_VALUE) != value and key in flat
+            }
+            _apply_delta(state, {key: flat[key] for key in owned})
+            entry.baseline.update({key: flat[key] for key in write.changed if key in flat})
+            for name in _PROCESS_LOCAL_FIELDS:
+                value = getattr(write.work, name)
+                if value != getattr(write.base, name):
+                    setattr(state, name, value)
+            write.landed = True
+        entry.version = row.version
+        state.composition = stored
 
     async def renew(
         self,
@@ -1756,8 +1923,7 @@ class StudioStore:
         """Push `segment_id`'s expiry to `SEGMENT_TTL_S` past the database
         clock's reading in one conditional update of the lease columns, which
         never disturbs whatever the live stream is doing to `entry.state` and
-        never writes the rest of the conversation. That is `checkpoint`'s
-        job.
+        never writes the rest of the conversation.
 
         `Renewal.held` is `False` when the stored segment is no longer
         `segment_id` (another instance took over after this one's TTL
@@ -1827,60 +1993,6 @@ class StudioStore:
         if live is not None and live.segment is not None and live.segment.id == segment.id:
             live.segment = segment
 
-    def snapshot(self, principal: str, conversation_id: str) -> Snapshot:
-        """The field `checkpoint` writes of this instance's live state of
-        `conversation_id`, serialised now. It holds the pending interrupts,
-        whose `approved_sent` the save after `plan.approved` exists to
-        store."""
-        entry = self._runtime[(principal, conversation_id)]
-        assert entry.state is not None
-        return {_KEY_PENDING: _json_safe(_serialize_pending(entry.state.pending))}
-
-    async def checkpoint(
-        self,
-        principal: str,
-        conversation_id: str,
-        segment_id: str,
-        snapshot: Snapshot,
-    ) -> None:
-        """The save of a streaming segment: the keys of `snapshot`, taken by
-        `snapshot` at the point the caller saves, that differ from what this
-        instance last stored, fenced on `segment_id`. The live state may
-        have moved on since the snapshot, and the write holds none of that.
-        A key whose stored value another write (a card's, which commits the
-        live state's changed fields) moved since this call began is left
-        out of every attempt, so no retry writes an older value over it.
-
-        Under the row lock, it raises `SegmentLost` and writes nothing when
-        the stored lease is not `segment_id` (another instance's claim
-        outlived this one's TTL). The diff is computed once the row is locked, with
-        no await between it and the write (`_fenced_save`, the write
-        `change_canvas` shares). While the lease is held, this stream is the
-        turn state's one writer (`save` refuses every other), so the diff is
-        written as it stands. The live canvas is read back from the row, so
-        a `/composition` edit another instance made since this one last
-        wrote the canvas reaches the stream's next frame. A transient
-        database fault is retried until the lease's deadline (`_retrying`).
-        """
-        entry = self._runtime[(principal, conversation_id)]
-        assert entry.pk is not None and entry.state is not None
-        stored = {key: entry.baseline.get(key, _NO_BASELINE_VALUE) for key in snapshot}
-
-        def unmoved() -> Snapshot:
-            return {
-                key: value
-                for key, value in snapshot.items()
-                if entry.baseline.get(key, _NO_BASELINE_VALUE) == stored[key]
-            }
-
-        await self._retrying(
-            entry,
-            conversation_id,
-            lambda: self._fenced_save(
-                entry, conversation_id, segment_id, lambda _work: None, snapshot=unmoved
-            ),
-        )
-
     async def close_segment(
         self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0
     ) -> SegmentClose:
@@ -1888,7 +2000,7 @@ class StudioStore:
         transaction, under the row lock and fenced on `segment_id`, that
         stores this instance's changed durable fields (the turn's record,
         the pending interrupts and `seq_next` among them) and clears the
-        lease. The canvas is read back from the row, as `checkpoint` reads
+        lease. The canvas is read back from the row, as `change_canvas` reads
         it, since every card commits as it lands.
 
         When a Stop is live for the open turn as the locked row and its
@@ -2000,7 +2112,9 @@ class StudioStore:
                         final_text=work.turn_final_text, error=ErrorCode.CANCELLED.value
                     )
             changed = _changed_since(_serialize_durable(work), entry.baseline)
-            version = await self._write(conn, entry.pk, changed) if changed else row.version
+            version = (
+                (await self._write(conn, entry.pk, changed)).version if changed else row.version
+            )
         entry.version = version
         entry.baseline.update(changed)
         _assign_changed(state, work, base)

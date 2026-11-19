@@ -38,6 +38,7 @@ from typing import override
 import uvicorn
 from fastapi import APIRouter, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
+from harness.server import GRACEFUL_SHUTDOWN_S
 from harness.studio_relay import Channel, StudioStream
 from harness.studio_stream import LiveOwners
 from pydantic import BaseModel
@@ -55,6 +56,7 @@ class Script:
     closing write (`close_s`) and sends `done`. Before frame
     `slow_write_at` it makes a mid-stream write of `slow_write_s`.
     `frames=None` runs until the client leaves. `frame_bytes` pads each frame.
+    After its last frame the owner waits for `hold` to be set, when given.
     """
 
     frames: int | None
@@ -63,6 +65,7 @@ class Script:
     slow_write_at: int | None = None
     slow_write_s: float = 0.0
     frame_bytes: int = 0
+    hold: asyncio.Event | None = None
 
 
 class _Frame(BaseModel):
@@ -104,6 +107,8 @@ async def _owner(script: Script, *, channel: Channel, gone: asyncio.Event, probe
                 break
             channel.put_nowait(_Frame(event="frame", n=n, pad="x" * script.frame_bytes))
             n += 1
+        if script.hold is not None and outcome == "done":
+            await script.hold.wait()
         log.append(f"closing:{outcome}")
         await asyncio.sleep(script.close_s)
         log.append("closed")
@@ -223,10 +228,11 @@ class _Server(uvicorn.Server):
 
 @contextlib.asynccontextmanager
 async def _serving(
-    stage: Stage, *, timeout_graceful_shutdown: int | None = None
+    stage: Stage, *, timeout_graceful_shutdown: int = GRACEFUL_SHUTDOWN_S
 ) -> AsyncIterator[tuple[uvicorn.Server, int]]:
     """uvicorn on a free loopback port with `harness.server.main`'s
-    configuration, which leaves every option but host and port at its default."""
+    configuration: its graceful-shutdown timeout and every other option at its
+    default."""
     config = uvicorn.Config(
         _app(stage),
         host="127.0.0.1",
@@ -386,21 +392,42 @@ async def test_the_client_closes_during_a_slow_owner_write() -> None:
 
 
 async def test_a_graceful_shutdown_lets_the_stream_end() -> None:
-    # With no graceful-shutdown timeout, as deployed, uvicorn waits for the
-    # open stream, so the client receives every frame and `done`.
-    stage = Stage(script=Script(frames=10, interval_s=0.05))
+    # A stream that ends inside the graceful-shutdown timeout, as deployed
+    # (`GRACEFUL_SHUTDOWN_S`), is waited for, so the client receives every
+    # frame and `done`.
+    # The owner ends on an event the test sets right after `should_exit`, so
+    # the end has no timing of its own to race the bound.
+    hold = asyncio.Event()
+    stage = Stage(script=Script(frames=1, hold=hold))
     async with _serving(stage) as (server, port):
         client = await _Client.connect(port)
         client.post_turn()
         await client.headers()
         await client.chunk()
         server.should_exit = True
+        hold.set()
         chunks = await client.body()
         await _returned(stage.probe)
         await client.close()
     assert json.loads(chunks[-1].removeprefix(b"data: "))["event"] == "done"
     assert stage.probe.exit == "returned"
     _assert_owner_finished(stage.probe, outcome="done")
+
+
+async def test_a_stream_that_outlasts_the_deployed_timeout_is_cut_and_closed_as_left() -> None:
+    # The stream has no end of its own, so only uvicorn's bound after SIGTERM
+    # (`GRACEFUL_SHUTDOWN_S`) ends it: the response is cancelled, the owner
+    # cuts its turn and finishes its closing write, all before `serve` returns.
+    stage = Stage(script=Script(frames=None, interval_s=0.05))
+    async with _serving(stage) as (server, port):
+        client = await _Client.connect(port)
+        client.post_turn()
+        await client.headers()
+        await client.chunk()
+        server.should_exit = True
+    await _returned(stage.probe)
+    await client.close()
+    _assert_owner_finished(stage.probe, outcome="left")
 
 
 async def test_a_shutdown_past_its_timeout_cancels_the_response_and_not_the_owner() -> None:

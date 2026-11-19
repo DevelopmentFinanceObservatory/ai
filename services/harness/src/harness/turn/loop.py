@@ -39,8 +39,8 @@ beat.
 
 A turn no segment runs is closed without running its node: `stop_turn` closes it `cancelled` on a
 Stop that found no live segment (the turn paused, or left running by a segment whose lease lapsed),
-`reject` closes a paused turn `done` on the user's reject of its open pause, and `abandon` closes an
-open turn `abandoned` when the conversation's next turn opens.
+`reject` closes a paused turn `done` on the user's reject of its open pause, and `abandon_on` closes
+an open turn `abandoned` in the transaction that opens the conversation's next turn.
 """
 
 from __future__ import annotations
@@ -51,6 +51,7 @@ import copy
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, override
 
@@ -71,11 +72,14 @@ from harness.turn.store import (
     TurnStatus,
     TurnStore,
     WriteNotEncoded,
+    finish_on,
     require_open_pause,
 )
 from harness.turn.transcript import Transcript
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncConnection
+
     from harness.studio_store import StudioStore
 
 logger = logging.getLogger(__name__)
@@ -143,11 +147,13 @@ class Outcome(StrEnum):
 @dataclass(frozen=True)
 class Answer:
     """The user's answer `value` to the turn's open pause `(interrupt_id,
-    round)`."""
+    round)`, and `request`, the answer as the client sent it, which the
+    turn records beside it (`TurnStore.record_answer`)."""
 
     interrupt_id: str
     round: int
     value: dict[str, Any]
+    request: dict[str, Any] | None = None
 
 
 @dataclass
@@ -777,6 +783,7 @@ async def _enter[E](
                     interrupt_id=answer.interrupt_id,
                     round=answer.round,
                     answer=answer.value,
+                    request=answer.request,
                     records=transcript.take(),
                 )
             )
@@ -1127,25 +1134,36 @@ async def reject(store: TurnStore, cursor: Cursor, *, segment_id: str, answer: A
     )
 
 
-async def abandon(store: TurnStore, cursor: Cursor, *, segment_id: str) -> Cursor:
+def _abandoned(cursor: Cursor) -> dict[str, Any]:
+    """The error a turn closed `abandoned` at `cursor` records: a
+    `TurnAbandoned` at the node it stands at."""
+    left = TurnAbandoned(
+        f"turn {cursor.turn_index} was left {cursor.status.value} at {cursor.node!r} "
+        "when the next turn opened"
+    )
+    return failure(cursor.node, left)
+
+
+async def abandon_on(conn: AsyncConnection, cursor: Cursor, *, segment_id: str) -> Cursor:
     """Close the open turn at `cursor` `abandoned` without running its node,
-    writing under `segment_id`, the conversation lease the caller claimed to
-    open the conversation's next turn. Its error is a `TurnAbandoned` at the
-    node it stands at. A paused turn's pause is dropped.
+    on `conn`, in the caller's transaction (`finish_on`), writing under
+    `segment_id`, the conversation lease the caller claimed to open the
+    conversation's next turn. Its error is a `TurnAbandoned` at the node it
+    stands at. A paused turn's pause is dropped. `/turn` (`harness.studio`)
+    runs it in the transaction of the save that begins the next turn.
 
     Raises:
         SegmentLost: `segment_id` does not hold the conversation's lease.
         CursorStale: another writer moved the cursor, or closed the turn.
     """
-    left = TurnAbandoned(
-        f"turn {cursor.turn_index} was left {cursor.status.value} at {cursor.node!r} "
-        "when the next turn opened"
-    )
-    return await store.finish(
+    return await finish_on(
+        conn,
         cursor,
         segment_id=segment_id,
         status=TurnStatus.ABANDONED,
-        error=failure(cursor.node, left),
+        # Read only by a close `cancelled`.
+        now=datetime.now(UTC),
+        error=_abandoned(cursor),
     )
 
 

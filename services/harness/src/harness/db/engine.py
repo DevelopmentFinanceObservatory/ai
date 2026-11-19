@@ -38,14 +38,14 @@ logger = logging.getLogger(__name__)
 # SQLAlchemy an async engine.
 _CONNECTOR_DRIVER = "asyncpg"
 
-# The pool of `DatabaseHandle.lineage_engine`: four connections and no
+# The pool of `DatabaseHandle.lineage_engine`: three connections and no
 # overflow, for the card lineage reads and the turn frame lineage restores of
 # the turns that resume at once. A read that finds it busy waits at most
 # `pool_timeout`, inside its caller's budget
 # (`harness.mcp_client._LINEAGE_READ_BUDGET_S` and
 # `harness.turn.store._FRAME_LINEAGE_READ_BUDGET_S`, 2 s each), which lets
 # the caller go on without it.
-_LINEAGE_POOL: dict[str, Any] = {"pool_size": 4, "max_overflow": 0, "pool_timeout": 1.5}
+_LINEAGE_POOL: dict[str, Any] = {"pool_size": 3, "max_overflow": 0, "pool_timeout": 1.5}
 
 # asyncpg's bound on each statement over the lineage engine, cleanup's
 # rollback included, so a read the caller abandoned on a stalled statement
@@ -58,7 +58,7 @@ class DatabaseHandle:
     """The engines plus their async teardown.
 
     `engine` holds the session store's pool. `lineage_engine` is a pool of
-    four connections, no overflow, on the same settings, for the best-effort
+    three connections, no overflow, on the same settings, for the best-effort
     lineage reads: a card's (`StudioStore.card_lineage`) and a resuming
     turn's frames' (`harness.turn.store.TurnStore.restore_frame_lineage`), so
     those reads never take a connection the lease renewals, cursor writes and
@@ -129,8 +129,11 @@ def build_database(*, settings: Settings) -> DatabaseHandle | None:
     if settings.database_url is not None:
         logger.info("Using the database at DATABASE_URL")
         # `pool_pre_ping` drops a connection the server closed while it sat in
-        # the pool.
-        engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+        # the pool. `hide_parameters` keeps bound values (a turn's transcript)
+        # out of the errors a failed statement raises, and so out of the logs.
+        engine = create_async_engine(
+            settings.database_url, pool_pre_ping=True, hide_parameters=True
+        )
         lineage_engine = build_lineage_engine(settings.database_url)
 
         async def aclose_url() -> None:
@@ -144,17 +147,22 @@ def build_database(*, settings: Settings) -> DatabaseHandle | None:
 def build_lineage_engine(
     url: str, *, async_creator: Callable[[], Awaitable[Any]] | None = None
 ) -> AsyncEngine:
-    """The engine of `DatabaseHandle.lineage_engine` over `url`: one pooled
-    connection, no overflow, a bounded checkout wait and a bounded statement
+    """The engine of `DatabaseHandle.lineage_engine` over `url`: a pool of
+    three connections, no overflow, a bounded checkout wait and a bounded statement
     (`_LINEAGE_POOL`, `_LINEAGE_COMMAND_TIMEOUT_S`). With `async_creator`,
     which then sets the statement bound itself, connections come from it."""
     if async_creator is not None:
         return create_async_engine(
-            url, async_creator=async_creator, pool_pre_ping=True, **_LINEAGE_POOL
+            url,
+            async_creator=async_creator,
+            pool_pre_ping=True,
+            hide_parameters=True,
+            **_LINEAGE_POOL,
         )
     return create_async_engine(
         url,
         pool_pre_ping=True,
+        hide_parameters=True,
         connect_args={"command_timeout": _LINEAGE_COMMAND_TIMEOUT_S},
         **_LINEAGE_POOL,
     )
@@ -186,6 +194,7 @@ def _build_connector_backed_database(*, settings: Settings) -> DatabaseHandle:
         pool_size=settings.session_store_pool_size,
         max_overflow=settings.session_store_max_overflow,
         pool_pre_ping=True,
+        hide_parameters=True,
     )
     lineage_engine = build_lineage_engine(
         "postgresql+asyncpg://",

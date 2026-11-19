@@ -6,11 +6,18 @@ Each store write is one transaction that locks the conversation row before
 it reads any Stop state, so the store's behaviours are the serial orders of
 its writes. `test_every_sequence_of_stop_writes_keeps_the_invariants` runs
 every sequence of up to `DEPTH` operations from a turn that is streaming,
-and asserts five invariants at each step that could break one:
+and every sequence of up to `LAPSED_STOP_DEPTH` of the operations a Stop
+on a lapsed lease needs to reach the next turn, and asserts six invariants
+at each step that could break one:
 
 - no claim that starts or resumes work commits while a Stop is live;
 - a close `cancelled` leaves no `admitted` or `running` run;
 - a close `cancelled` closes the turn the Stop names (`stop_turn`);
+- a Stop names no turn later than the one the conversation was on when it
+  was requested, so a Stop sent after a turn's cursor closed is not read as
+  the next turn's. The one exception is a Stop requested on a `/turn`'s
+  lease between its claim and the save that begins its turn: that Stop
+  names the turn the save opens (`World.cancel`);
 - a closing write that cleared the lease leaves no live Stop;
 - a closing write that saved, or closed the turn on a Stop, leaves the
   conversation's record and the turn's cursor agreeing on whether the
@@ -32,18 +39,31 @@ from typing import Any
 import pytest
 from harness import studio_state
 from harness.studio_state import SegmentBusy, SegmentLost
-from harness.studio_store import ConversationStale, SegmentClose, StopState, StudioStore
-from harness.turn.store import CLOSED, Cursor, CursorStale, TurnStatus, TurnStore
+from harness.studio_store import (
+    SEQ_BLOCK,
+    ConversationStale,
+    SegmentClose,
+    StopState,
+    StudioStore,
+)
+from harness.turn.loop import abandon_on
+from harness.turn.store import CLOSED, Cursor, CursorStale, TurnStatus, TurnStore, open_turn_on
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from .store_clock import StoreClock
 from .test_turn_store import ADMITTED_RUN
 
 PRINCIPAL = "user-1"
 CONVERSATION = "conv-1"
-# The longest sequence the search runs.
+# The longest sequence the search over every operation runs.
 DEPTH = 5
+# Six operations carry a Stop on a lapsed lease into the next turn (cancel,
+# done, lapse, claim, open, renew), which `claim_turn_lease` must stamp with
+# the turn it names. The search at that depth runs those operations only,
+# since six of all twelve takes twice as long and finds nothing more.
+LAPSED_STOP = ("cancel", "done", "lapse", "claim", "open", "renew")
+LAPSED_STOP_DEPTH = 6
 _START = 1_000.0
 
 
@@ -89,8 +109,9 @@ class World:
     """One conversation, the stores that stand for its instances, and what
     the instance streaming it holds: `holder`, the store that claimed the
     lease `segment_id`; `acting`, set when that claim acts on a Stop;
-    `to_open`, set while the turn it claimed has no cursor yet; and
-    `reported`, the Stop its last renewal reported live."""
+    `to_open`, set while the turn it claimed has not begun; `reported`, the
+    Stop its last renewal reported live; and `requested_at`, the latest turn
+    the last Stop request may name."""
 
     def __init__(self, engine: AsyncEngine, clock: StoreClock) -> None:
         self.engine = engine
@@ -101,6 +122,7 @@ class World:
         self.acting = False
         self.to_open = False
         self.reported: str | None = None
+        self.requested_at: int | None = None
 
     def instance(self) -> StudioStore:
         return StudioStore(self.engine, **self.clock.store_kwargs)
@@ -111,23 +133,31 @@ class World:
         async with self.engine.begin() as conn:
             await conn.execute(text("DELETE FROM conversations"))
         await self.clock.set(_START)
+        self.requested_at = None
         store = self.instance()
         await store.create(PRINCIPAL, CONVERSATION)
         await self._claim(store, begin=True)
         await self.open()
 
     async def _claim(self, store: StudioStore, *, begin: bool, stopping: bool = False) -> bool:
-        """Claim the conversation on `store` as the routes do, beginning the
-        next turn when `begin`. Returns whether the claim save committed."""
-        work = store.draft(PRINCIPAL, CONVERSATION)
+        """Claim the conversation on `store` as the routes do: `/turn`'s
+        lease alone when `begin`, which `open` then begins the turn under, and
+        otherwise `/interrupt`'s claim save. Returns whether the claim
+        committed."""
         if begin:
-            work.begin_turn()
-        try:
-            segment_id = store.claim_segment(PRINCIPAL, CONVERSATION, work)
-            await store.save(PRINCIPAL, CONVERSATION, work, stopping=stopping)
-        except (SegmentBusy, ConversationStale):
-            store.drop_draft(PRINCIPAL, CONVERSATION)
-            return False
+            try:
+                lease = await store.claim_turn_lease(PRINCIPAL, CONVERSATION)
+            except (SegmentBusy, ConversationStale):
+                return False
+            segment_id = lease.segment_id
+        else:
+            work = store.draft(PRINCIPAL, CONVERSATION)
+            try:
+                segment_id = store.claim_segment(PRINCIPAL, CONVERSATION, work)
+                await store.save(PRINCIPAL, CONVERSATION, work, stopping=stopping)
+            except (SegmentBusy, ConversationStale):
+                store.drop_draft(PRINCIPAL, CONVERSATION)
+                return False
         self.holder, self.segment_id = store, segment_id
         self.acting, self.to_open, self.reported = stopping, begin, None
         return True
@@ -181,10 +211,26 @@ class World:
     # --- the operations -------------------------------------------------
 
     async def cancel(self) -> None:
-        await self.instance().request_cancel(PRINCIPAL, CONVERSATION)
+        """A Stop request. One that lands on a `/turn`'s lease before the
+        save that begins its turn is stamped by that turn's writes, so it
+        may name the turn the save opens, one past the row's."""
+        if await self.instance().request_cancel(PRINCIPAL, CONVERSATION):
+            row = await self._row()
+            beginning = self.to_open and row.lease_segment_id == self.segment_id
+            self.requested_at = row.turn_index + (1 if beginning else 0)
+
+    async def check_stop_turn(self) -> None:
+        """A Stop names a turn no later than the one its request may name
+        (`cancel`), whichever write stamped it."""
+        stop_turn = (await self._row()).stop_turn
+        assert stop_turn is None or (
+            self.requested_at is not None and stop_turn <= self.requested_at
+        ), "a Stop sent before a turn began names that turn"
 
     async def renew(self) -> None:
-        if self.holder is None or self.segment_id is None:
+        """The holder's heartbeat, which `/turn` starts with the stream, once
+        the save that begins its turn has committed."""
+        if self.holder is None or self.segment_id is None or self.to_open:
             return
         renewal = await self.holder.renew(PRINCIPAL, CONVERSATION, self.segment_id)
         if not renewal.held:
@@ -318,33 +364,42 @@ class World:
         await self._claim(store, begin=False, stopping=True)
 
     async def open(self) -> None:
-        """The holder abandons the turn left open and opens the one it
-        claimed, which admits a run."""
+        """The save that begins the turn the holder claimed, as `/turn`
+        makes it: in one transaction it abandons the turn left open, opens
+        the claimed one and moves the row to it. The opened turn then admits
+        a run."""
         if self.holder is None or not self.to_open or self.segment_id is None:
             return
-        try:
-            left = await self._open_cursor()
+        store, segment_id = self.holder, self.segment_id
+        await store.load(PRINCIPAL, CONVERSATION)
+        work = store.draft(PRINCIPAL, CONVERSATION)
+        left = await self._open_cursor()
+        work.begin_turn()
+
+        async def begin(conn: AsyncConnection, pk: int) -> None:
             if left is not None:
-                await self.turns.finish(
-                    left,
-                    segment_id=self.segment_id,
-                    status=TurnStatus.ABANDONED,
-                    error={"type": "abandoned", "message": "a new turn began"},
-                )
-            row = await self._row()
-            await self.turns.open_turn(
-                PRINCIPAL,
-                CONVERSATION,
-                segment_id=self.segment_id,
-                turn_index=row.turn_index,
+                await abandon_on(conn, left, segment_id=segment_id)
+            await open_turn_on(
+                conn,
+                pk,
+                segment_id=segment_id,
+                turn_index=work.turn_index,
                 node="seed",
                 inputs={},
                 state={},
             )
-        except SegmentLost:
+
+        try:
+            await store.save(PRINCIPAL, CONVERSATION, work, alongside=begin, seq_reserved=SEQ_BLOCK)
+        except (SegmentLost, ConversationStale):
+            store.drop_draft(PRINCIPAL, CONVERSATION)
             self.holder = None
             return
+        except CursorStale:
+            store.drop_draft(PRINCIPAL, CONVERSATION)
+            raise
         self.to_open = False
+        row = await self._row()
         async with self.engine.begin() as conn:
             await conn.execute(
                 text(
@@ -437,22 +492,33 @@ async def _run(world: World, sequence: tuple[str, ...]) -> tuple[Any, ...]:
             pass
         except AssertionError as exc:
             raise AssertionError(f"after {sequence[: step + 1]}: {exc}") from exc
+        try:
+            await world.check_stop_turn()
+        except AssertionError as exc:
+            raise AssertionError(f"after {sequence[: step + 1]}: {exc}") from exc
     return await world.state()
 
 
-async def test_every_sequence_of_stop_writes_keeps_the_invariants(pg_engine: AsyncEngine) -> None:
-    """Breadth first over every sequence of up to `DEPTH` operations, each
-    state extended once (module docstring). Slow because it replays each
-    sequence from an empty table: several thousand short transactions."""
+@pytest.mark.parametrize(
+    ("operations", "depth"),
+    [(tuple(_OPERATIONS), DEPTH), (LAPSED_STOP, LAPSED_STOP_DEPTH)],
+    ids=["every-operation", "lapsed-stop"],
+)
+async def test_every_sequence_of_stop_writes_keeps_the_invariants(
+    pg_engine: AsyncEngine, operations: tuple[str, ...], depth: int
+) -> None:
+    """Breadth first over every sequence of up to `depth` of `operations`,
+    each state extended once (module docstring).
+    Slow: each sequence replays from an empty table, thousands of short transactions."""
     world = World(pg_engine, await StoreClock.start(pg_engine, at=_START))
     frontier = {await _run(world, ()): ()}
     seen = set(frontier)
     # The operations that changed a state, so none is a no-op throughout.
     moved: set[str] = set()
-    for _ in range(DEPTH):
+    for _ in range(depth):
         reached: dict[tuple[Any, ...], tuple[str, ...]] = {}
         for before, sequence in frontier.items():
-            for name in _OPERATIONS:
+            for name in operations:
                 extended = (*sequence, name)
                 state = await _run(world, extended)
                 if state != before:
@@ -462,4 +528,4 @@ async def test_every_sequence_of_stop_writes_keeps_the_invariants(pg_engine: Asy
                     reached[state] = extended
         frontier = reached
 
-    assert moved == set(_OPERATIONS)
+    assert moved == set(operations)

@@ -55,7 +55,7 @@ from harness.live_refresh import build_live_refresh, create_live_refresh_router
 from harness.mcp_client import McpExecutor, McpResolver
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.planner_adapter import content_on_spans
-from harness.prefix_cache import PrefixCache
+from harness.prefix_cache import PrefixCache, gemini_model_name
 from harness.provenance import ProvenanceStore
 from harness.run_ledger import StudioRunLedger
 from harness.settings import (
@@ -243,9 +243,9 @@ async def _retry_startup_step(
 
 class _MigrationRefusedError(RuntimeError):
     """A migration raised a SQLSTATE beginning `DFA`, its own refusal to run
-    against this database (`0005_rename_adk_tables.sql`). The database does not
-    change by waiting. The message leads with the SQLSTATE, which
-    deploy/README.md lists with each refusal's manual step."""
+    against this database (`0003_turns.sql` and `0005_rename_adk_tables.sql`).
+    The database does not change by waiting. The message leads with the
+    SQLSTATE, which deploy/README.md lists with each refusal's manual step."""
 
     def __init__(self, sqlstate: str, message: str) -> None:
         super().__init__(f"{sqlstate}: {message}")
@@ -420,6 +420,7 @@ def create_app(
     # planner reads as it is built (`harness.planner_adapter.PlannerAdapter`).
     init_telemetry(service_name=SERVICE_NAME)
     resolved_settings = settings or Settings()
+    model_name = resolved_model_name(resolved_settings.model_name)
 
     # Every mounted `FastMCP(...)` already carries a `BearerTokenVerifier`:
     # the three singletons from import time (see `common.auth`'s own module
@@ -555,7 +556,7 @@ def create_app(
     def model() -> GoogleModel:
         # One per orchestrator run, on the turn's budget (`harness.turn_budget`).
         return orchestrator_model(
-            resolved_settings.model_name,
+            model_name,
             client=genai_client(),
             budget=current_turn_budget.get(),
             prefix_cache=prefix_cache,
@@ -626,7 +627,7 @@ def create_app(
             lineage_engine=database.lineage_engine,
         ),
         edit_model=GeminiEdit(
-            model_name=resolved_settings.model_name,
+            model_name=model_name,
             timeout_s=resolved_settings.turn_model_time_s,
         ),
         tool_surface=tool_surface,
@@ -676,10 +677,56 @@ def create_app(
     return app
 
 
+class ModelNameRefusedError(RuntimeError):
+    """`MODEL_NAME` names no model the Gemini developer API serves."""
+
+
+def resolved_model_name(name: str) -> str:
+    """`name` as the Gemini developer API is sent it: any `Gemini:` class
+    prefix dropped (`harness.prefix_cache.gemini_model_name`), so the
+    orchestrator and Edit Card call one model under one name.
+
+    A leading `models/` is dropped, so `models/gemini-3.8-flash` names the
+    same model as its bare name.
+
+    Raises:
+        ModelNameRefusedError: `name` names no Gemini model, names none after its
+            `Gemini:` prefix, or is a Vertex AI resource path, which the
+            developer API serves no model under.
+    """
+    resolved = gemini_model_name(name.removeprefix("models/"))
+    if resolved is not None:
+        resolved = resolved.removeprefix("models/")
+    if not resolved:
+        raise ModelNameRefusedError(f"MODEL_NAME {name!r} names no Gemini model.")
+    if resolved.startswith("projects/"):
+        raise ModelNameRefusedError(
+            f"MODEL_NAME {name!r} is a Vertex AI resource path, and the harness runs on "
+            "the Gemini developer API, which serves no model by that name. Name the "
+            "model as the developer API does: models/... or its bare name, with an "
+            "optional Gemini: prefix."
+        )
+    return resolved
+
+
+# Seconds `uvicorn` waits for open responses after SIGTERM before it cancels
+# them, which makes each stream's owner cut its turn and write its close.
+# Cloud Run sends SIGKILL 10 s after SIGTERM, and the lifespan shutdown starts
+# only once the drain ends: 1 s drain + up to `SHUTDOWN_WAIT_S` (7 s) for the
+# owners' closing writes + about 0.5 s to close the engines = 8.5 s, which
+# leaves 1.5 s of margin.
+GRACEFUL_SHUTDOWN_S = 1
+
+
 def main() -> None:
     """Entry point for the `harness-server` console script."""
     settings = Settings()
-    uvicorn.run(create_app(settings=settings), host="0.0.0.0", port=settings.port)
+    uvicorn.run(
+        create_app(settings=settings),
+        host="0.0.0.0",
+        port=settings.port,
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_S,
+    )
 
 
 if __name__ == "__main__":

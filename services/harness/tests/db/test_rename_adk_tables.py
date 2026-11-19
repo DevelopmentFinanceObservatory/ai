@@ -99,33 +99,11 @@ _ADK_ROWS = (
 )
 
 
-# `adk_ledger_imports.kept_tables` as the import job's release adds it to
-# 0002. A no-op once this tree's 0002 holds the column.
-_KEPT_TABLES = (
-    "ALTER TABLE adk_ledger_imports ADD COLUMN IF NOT EXISTS kept_tables boolean NOT NULL "
-    "DEFAULT false"
-)
-
-
-def _every_migration(tmp_path: Path) -> Path:
-    """A copy of every migration, its 0002 carrying `_KEPT_TABLES`, for a run
-    that applies 0001 to 0005 at once."""
-    directory = tmp_path / "every"
-    directory.mkdir()
-    for path in MIGRATIONS_DIR.glob("*.sql"):
-        shutil.copy(path, directory / path.name)
-    ledger = directory / "0002_adk_ledger_imports.sql"
-    if "kept_tables" not in ledger.read_text():
-        ledger.write_text(f"{ledger.read_text()}\n{_KEPT_TABLES};\n")
-    return directory
-
-
 async def _migrate_through_0004(engine: AsyncEngine, tmp_path: Path) -> None:
     for path in MIGRATIONS_DIR.glob("*.sql"):
         if path.name < _MIGRATION:
             shutil.copy(path, tmp_path / path.name)
     await apply_pending(engine, directory=tmp_path)
-    await _execute(engine, _KEPT_TABLES)
 
 
 async def _execute(engine: AsyncEngine, *statements: str) -> None:
@@ -403,13 +381,14 @@ async def test_the_dfa02_message_names_the_first_ten_of_more_ledger_sessions(
 
 
 async def test_one_run_from_no_harness_migration_refuses_unimported_ledger_sessions(
-    pg_empty_engine: AsyncEngine, tmp_path: Path
+    pg_empty_engine: AsyncEngine,
 ) -> None:
-    """0001 to 0005 apply in one run, so 0002's empty ledger refuses."""
+    """0001 to 0005 apply in one run, so 0002's empty ledger clears nothing and
+    0003's gate refuses before 0005 runs."""
     await _execute(pg_empty_engine, *_ADK_V1_DDL, _session("c1"))
 
     with pytest.raises(asyncpg.PostgresError) as refusal:
-        await apply_pending(pg_empty_engine, directory=_every_migration(tmp_path))
+        await apply_pending(pg_empty_engine)
 
     assert refusal.value.sqlstate == "DFA02"
     assert "adk_archive_sessions" not in await _tables(pg_empty_engine)
@@ -488,8 +467,7 @@ async def test_a_name_already_taken_or_too_long_refuses_and_renames_nothing(
     try:
         # A schema first on `search_path` takes the bookkeeping table too, so
         # the shadowed run applies 0001 to 0005 there.
-        directory = _every_migration(tmp_path) if shadow else MIGRATIONS_DIR
-        await _refused(engine, "DFA04", schema=schema, directory=directory)
+        await _refused(engine, "DFA04", schema=schema)
     finally:
         if shadow:
             await engine.dispose()
@@ -501,13 +479,12 @@ async def _refused(
     sqlstate: str,
     *,
     schema: str | None = None,
-    directory: Path = MIGRATIONS_DIR,
 ) -> str:
     """0005 raises `sqlstate` and renames nothing in `schema`, the engine's
     current schema by default. Returns the error's message."""
     before = await _tables(engine, schema)
     with pytest.raises(asyncpg.PostgresError) as refusal:
-        await apply_pending(engine, directory=directory)
+        await apply_pending(engine)
     assert refusal.value.sqlstate == sqlstate
     assert await _tables(engine, schema) == before
     return str(refusal.value)

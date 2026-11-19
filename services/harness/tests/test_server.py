@@ -30,6 +30,7 @@ from harness.settings import (
     PRESENTATION_MCP_MOUNT_PATH,
     Settings,
 )
+from harness.studio_stream import SHUTDOWN_WAIT_S
 from harness.studio_translate import _RecordingSurface
 from mcp import MCPError
 from mcp.shared._httpx_utils import McpHttpClientFactory
@@ -945,6 +946,78 @@ def test_cors_origins_setting_parses_a_comma_separated_env_value() -> None:
     assert Settings(studio_cors_origins="").studio_cors_origins == []  # type: ignore[arg-type]
 
 
+# Cloud Run's gap between SIGTERM and SIGKILL.
+CLOUD_RUN_SIGKILL_AFTER_S = 10.0
+
+
+@pytest.mark.parametrize(
+    ("name", "resolved"),
+    [
+        ("gemini-3.8-flash", "gemini-3.8-flash"),
+        ("Gemini:gemini-3.8-flash", "gemini-3.8-flash"),
+        ("gemini:gemini-3.8-flash", "gemini-3.8-flash"),
+        ("models/gemini-3.8-flash", "gemini-3.8-flash"),
+        ("Gemini:models/gemini-3.8-flash", "gemini-3.8-flash"),
+    ],
+)
+def test_the_model_name_is_resolved_to_the_one_the_developer_api_is_sent(
+    name: str, resolved: str
+) -> None:
+    assert server_module.resolved_model_name(name) == resolved
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "projects/p/locations/l/publishers/google/models/gemini-3.8-flash",
+        "Gemini:projects/p/locations/l/publishers/google/models/gemini-3.8-flash",
+        "claude-sonnet-5-5",
+        "Other:gemini-3.8-flash",
+        "Gemini:",
+        "Gemini:models/",
+    ],
+)
+def test_a_model_name_the_developer_api_cannot_serve_refuses_startup(
+    name: str, pg_database_url: str
+) -> None:
+    with pytest.raises(server_module.ModelNameRefusedError):
+        create_app(settings=Settings(database_url=pg_database_url, model_name=name))
+
+
+def test_create_app_gives_the_orchestrator_and_edit_card_one_resolved_model_name(
+    pg_database_url: str,
+) -> None:
+    app = create_app(
+        settings=Settings(database_url=pg_database_url, model_name="Gemini:gemini-3.8-flash")
+    )
+
+    assert app.state.studio.edit_model.model_name == "gemini-3.8-flash"
+
+
+def test_main_bounds_the_request_drain_so_the_owners_close_before_sigkill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cloud Run sends SIGKILL 10 s after SIGTERM. Uvicorn's drain, the wait
+    for the stream owners' closing writes and the engine close fit inside it,
+    with a second to spare."""
+    passed: dict[str, Any] = {}
+
+    def fake_app(*, settings: Settings) -> object:
+        return object()
+
+    monkeypatch.setattr(server_module, "create_app", fake_app)
+    monkeypatch.setattr(server_module.uvicorn, "run", lambda app, **kwargs: passed.update(kwargs))
+    monkeypatch.setattr(server_module, "Settings", lambda: Settings(database_url=None))
+
+    server_module.main()
+
+    engine_close_s = 0.5
+    assert (
+        passed["timeout_graceful_shutdown"] + SHUTDOWN_WAIT_S + engine_close_s
+        <= CLOUD_RUN_SIGKILL_AFTER_S - 1.0
+    )
+
+
 def _postgres_error(sqlstate: str | None) -> asyncpg.PostgresError:
     error = asyncpg.PostgresError("failed")
     error.sqlstate = sqlstate
@@ -970,6 +1043,41 @@ async def test_a_migration_refusal_is_fatal_at_once(monkeypatch: pytest.MonkeyPa
     assert attempts == [1]
     assert refusal.value.sqlstate == "DFA04"
     assert refusal.value.__cause__ is not None
+
+
+async def test_an_uncleared_adk_ledger_session_refuses_startup_with_nothing_applied(
+    pg_empty_engine: AsyncEngine,
+) -> None:
+    """0003's cutover gate (DFA02) stops startup at the first attempt while an
+    ADK ledger session was never imported, and the run applies no migration."""
+    async with pg_empty_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE sessions (app_name varchar(128) NOT NULL, "
+                "user_id varchar(128) NOT NULL, id varchar(128) NOT NULL, state jsonb NOT NULL, "
+                "create_time timestamp NOT NULL, update_time timestamp NOT NULL)"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO sessions VALUES ('dfo_analyst_graph.ledger', 'p', 'c1', '{}', "
+                "now(), now())"
+            )
+        )
+    now, sleep = _fake_clock_and_sleep()
+
+    with pytest.raises(server_module._MigrationRefusedError) as refusal:
+        await server_module._apply_migrations_with_retries(
+            pg_empty_engine, budget_s=60.0, sleep=sleep, now=now
+        )
+
+    assert refusal.value.sqlstate == "DFA02"
+    async with pg_empty_engine.connect() as conn:
+        applied = (
+            await conn.execute(text("SELECT count(*) FROM harness_schema_migrations"))
+        ).scalar()
+        conversations = (await conn.execute(text("SELECT to_regclass('conversations')"))).scalar()
+    assert (applied, conversations) == (0, None)
 
 
 async def test_any_other_migration_database_error_retries_until_the_budget_ends(
