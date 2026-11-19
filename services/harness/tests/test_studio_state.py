@@ -193,7 +193,8 @@ async def test_a_turn_whose_record_build_raises_keeps_a_minimal_record(
     `begin_turn`'s abandoned close, keeps a minimal record naming no sources
     and the turn's trace id, whose save writes its line and outcome, and
     leaves nothing open, so the turn is built once and the conversation goes
-    on."""
+    on. The record keeps the close's own code: none for a clean close,
+    `abandoned` for the abandoned one."""
     written = _spy_outcomes(monkeypatch)
     builds: list[str] = []
 
@@ -214,17 +215,19 @@ async def test_a_turn_whose_record_build_raises_keeps_a_minimal_record(
         state.begin_turn()
         await store.save("principal", CONVERSATION)
 
-    error = "abandoned"
+    error = None if closed_by == "close_turn" else "abandoned"
     assistant = "done" if closed_by == "close_turn" else ""
     record = state.turns[0]
-    assert {key: record[key] for key in ("turn", "user", "assistant", "error", "trace_id")} == {
+    assert {key: record.get(key) for key in ("turn", "user", "assistant", "error", "trace_id")} == {
         "turn": 1,
         "user": "aid to kenya",
         "assistant": assistant,
         "error": error,
         "trace_id": turn_1_trace_id,
     }
-    assert set(record) == {"turn", "user", "assistant", "error", "trace_id", "usage"}
+    assert set(record) == {"turn", "user", "assistant", "trace_id", "usage"} | (
+        {"error"} if error else set()
+    )
     assert builds == ["built"]
     assert [(w["trace_id"], w["error"]) for w in written] == [(turn_1_trace_id, error)]
     assert [(line["trace_id"], line["error"]) for line in _turn_log_lines(caplog)] == [
@@ -2401,6 +2404,48 @@ async def test_checkpoint_consumes_composition_ops_by_prefix_not_the_whole_list(
     assert len(state._composition_ops) == 1
     assert state._composition_ops[0].keywords["component_id"] == "cmp_two"
     assert [b.component_id for b in state.composition.blocks] == ["cmp_one", "cmp_two"]
+
+
+@pytest.mark.parametrize("method", ["checkpoint", "save"])
+async def test_a_cancelled_append_that_commits_never_replays_its_ops(tmp_path, method: str) -> None:
+    """A Stop that cancels a checkpoint or save while its append is in flight
+    lets the append commit, and the bookkeeping of what it committed (the
+    baseline, the folded composition ops) lands with it. The next checkpoint
+    appends no composition, so no card is drawn twice."""
+    service = _database_service(tmp_path)
+    store = StudioStore(service, app_name="app")
+    await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    state = store.current("principal", CONVERSATION)
+    land_component(state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1})
+
+    real_append_event = service.append_event
+    appending = asyncio.Event()
+    appended: list[set[str]] = []
+
+    async def slow_append_event(session: Any, event: Any) -> Any:
+        appending.set()
+        await asyncio.sleep(0.05)
+        appended.append(set(event.actions.state_delta))
+        return await real_append_event(session, event)
+
+    service.append_event = slow_append_event
+    if method == "checkpoint":
+        writing = asyncio.ensure_future(store.checkpoint("principal", CONVERSATION, segment_id))
+    else:
+        writing = asyncio.ensure_future(store.save("principal", CONVERSATION))
+    await appending.wait()
+    writing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await writing
+
+    assert state._composition_ops == []
+    await store.checkpoint("principal", CONVERSATION, segment_id)
+
+    assert [studio_state._KEY_COMPOSITION in keys for keys in appended] == [True]
+    reloaded = await StudioStore(service, app_name="app").load("principal", CONVERSATION)
+    assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_one"]
 
 
 async def test_checkpoint_warns_when_a_key_changed_on_both_sides(

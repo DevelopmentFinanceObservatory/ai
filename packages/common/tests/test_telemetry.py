@@ -3,6 +3,7 @@ import contextvars
 import logging
 import os
 import threading
+import time
 from typing import Any
 from unittest.mock import MagicMock, call
 
@@ -751,6 +752,36 @@ async def test_flush_telemetry_waits_for_a_flush_already_running(monkeypatch):
     await asyncio.wait_for(waiting, timeout=5)
 
     assert fake_client.flush.call_count == 2
+    assert not telemetry._flush_running
+
+
+async def test_flush_telemetry_wakes_each_caller_within_two_passes_under_steady_load(
+    monkeypatch,
+):
+    """Under a flush request every half pass, each caller wakes once the first
+    pass that started after it ends, well inside two pass lengths, whatever
+    arrives later, and no wake-up is left behind. Passes are 0.1 s, so the
+    test takes about a second."""
+    telemetry._backend = "langfuse"
+    pass_seconds = 0.1
+    monkeypatch.setattr(telemetry, "_flush_backend", lambda: time.sleep(pass_seconds))
+
+    async def timed_flush() -> float:
+        started = time.monotonic()
+        await flush_telemetry(timeout_seconds=3)
+        return time.monotonic() - started
+
+    calls = []
+    for _ in range(16):
+        calls.append(asyncio.ensure_future(timed_flush()))
+        await asyncio.sleep(pass_seconds / 2)
+    waits = await asyncio.gather(*calls)
+
+    assert max(waits) < 2.5 * pass_seconds, waits
+    for thread in threading.enumerate():
+        if thread.name == telemetry._FLUSH_THREAD_NAME:
+            thread.join(timeout=5)
+    assert telemetry._flush_waiters == []
     assert not telemetry._flush_running
 
 

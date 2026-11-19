@@ -714,14 +714,18 @@ async def _sse_stream(
                                     # unwind, before the segment's release
                                     # save (`StudioRunner._locked`), so the
                                     # save commits the `cancelled` record with
-                                    # the specs the unwind noted.
-                                    stopped_turn = conversation.cancel_reason != "segment_lost"
-                                    conversation.stopping = stopped_turn
+                                    # the specs the unwind noted. A takeover the
+                                    # heartbeat records during the unwind wins
+                                    # over the Stop, so the reason is read again
+                                    # once the unwind is over.
+                                    conversation.stopping = (
+                                        conversation.cancel_reason != "segment_lost"
+                                    )
                                     try:
                                         await _unwind(next_frame)
                                     finally:
                                         conversation.stopping = False
-                                    if not stopped_turn:
+                                    if conversation.cancel_reason == "segment_lost":
                                         # Another instance took the segment over.
                                         lost = failure_sentence(
                                             ErrorCode.TRANSIENT_UNAVAILABLE,
@@ -1197,7 +1201,9 @@ class StudioRunner:
         `_unwind` re-raises that exception once they have run. A stream a
         Stop ends (`ConversationState.stopping`) closes the turn as
         `cancelled` between the two, once the frames have unwound, so the
-        release save commits the record with every spec the unwind noted. A DB error
+        release save commits the record with every spec the unwind noted,
+        unless the heartbeat found the segment lost meanwhile. A close that
+        raises still reaches both releases. A DB error
         `store.release` cannot itself raise (it never does; see
         `StudioStore.release`), and still could not strand the lock, since
         releasing it does not depend on the release call having succeeded.
@@ -1214,13 +1220,17 @@ class StudioRunner:
             try:
                 await _unwind(heartbeat)
             finally:
-                if conversation.stopping:
-                    conversation.close_turn(
-                        final_text=conversation.turn_final_text,
-                        error=ErrorCode.CANCELLED.value,
-                    )
                 try:
-                    await self.store.release(principal, conversation_id, segment_id)
+                    try:
+                        # A takeover recorded during the unwind leaves the turn
+                        # open for the instance that took it.
+                        if conversation.stopping and conversation.cancel_reason != "segment_lost":
+                            conversation.close_turn(
+                                final_text=conversation.turn_final_text,
+                                error=ErrorCode.CANCELLED.value,
+                            )
+                    finally:
+                        await self.store.release(principal, conversation_id, segment_id)
                 finally:
                     conversation.lock.release()
 
@@ -1361,9 +1371,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         lock = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
         if isinstance(lock, JSONResponse):
             return lock
-        # Whether the claim save ran. A line it wrote, an abandoned turn's
-        # close, has no stream to export it on a 409 or a failure after it.
-        claimed = False
+        # Whether the claim save may have written a line. A line it wrote, an
+        # abandoned turn's close, has no stream to export it on a 409 or a
+        # failure after it.
+        claim_wrote_line = False
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
@@ -1490,8 +1501,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # after it; the segment it also claimed simply expires by its
             # own TTL.
             try:
-                claimed = True
-                await studio.store.save(principal, body.conversation_id)
+                # Unknown until the save returns, so a save that raises counts.
+                claim_wrote_line = True
+                claim_wrote_line = await studio.store.save(principal, body.conversation_id)
             except StaleSessionError:
                 lock.release()
                 return _streaming_conflict_response(
@@ -1560,7 +1572,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 )
             except AlreadyExistsError:
                 lock.release()
-                await flush_telemetry()
+                if claim_wrote_line:
+                    await flush_telemetry()
                 return _streaming_conflict_response(
                     "another request is streaming on this conversation"
                 )
@@ -1592,7 +1605,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # alongside it, which simply expires by its own TTL.
             if lock.locked():
                 lock.release()
-            if claimed:
+            if claim_wrote_line:
                 await flush_telemetry()
             raise
 

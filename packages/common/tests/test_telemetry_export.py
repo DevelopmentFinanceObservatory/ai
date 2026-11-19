@@ -52,6 +52,7 @@ from opentelemetry.proto.trace.v1.trace_pb2 import Span
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.sdk.trace.sampling import ALWAYS_OFF
 
 _PROJECTS_BODY = {
     "data": [
@@ -338,6 +339,33 @@ async def test_an_early_mint_under_an_ended_inner_span_roots_only_once_its_segme
     ]
 
 
+async def test_an_early_mint_after_a_segment_the_sampler_dropped_opens_no_root(
+    isolated_telemetry,
+) -> None:
+    """A segment the sampler dropped records nothing and counts as live, so a
+    mint that ends after it opens no root, which would be dropped too."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider(sampler=ALWAYS_OFF)
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    telemetry._backend = "otel"
+    segment_ended = asyncio.Event()
+    rooted: list[bool] = []
+
+    async def late_mint() -> None:
+        await segment_ended.wait()
+        with root_if_span_ended("turn.early_mint") as opened:
+            rooted.append(opened)
+
+    with turn_segment("tr_export0025"):
+        mint = asyncio.ensure_future(late_mint())
+    segment_ended.set()
+    await mint
+
+    assert rooted == [False]
+    assert exporter.get_finished_spans() == ()
+
+
 async def test_a_turn_continued_in_a_second_task_exports_as_one_trace(
     fake_langfuse: FakeLangfuse, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -512,7 +540,12 @@ async def test_a_flush_requested_during_a_running_one_is_served_before_it_finish
     assert "second_call" not in {span.name for span in fake_langfuse.spans()}
 
     leave_window.set()
+    # The first caller wakes when its pass ends; the second pass, which the
+    # withdrawn second caller asked for, still runs before the thread ends.
     await asyncio.wait_for(running, timeout=30)
+    for thread in threading.enumerate():
+        if thread.name == telemetry._FLUSH_THREAD_NAME:
+            await asyncio.to_thread(thread.join, 30)
 
     assert "second_call" in {span.name for span in fake_langfuse.spans()}
     assert len(passes) == 2
@@ -874,7 +907,8 @@ def test_a_turn_closed_with_an_error_exports_its_outcome_at_level_error(
     """A turn ended with an error code marks the outcome observation `ERROR`,
     naming the code in its status message and its `dfo.turn_error` metadata.
     A clean turn leaves it at the default level with no `dfo.turn_error`. A
-    pause says so in `dfo.turn_status`, which a close leaves out."""
+    pause is a `turn.pause` observation, never a `turn`, and says so in
+    `dfo.turn_status` too, which a close leaves out."""
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
@@ -893,7 +927,7 @@ def test_a_turn_closed_with_an_error_exports_its_outcome_at_level_error(
         for span in fake_langfuse.spans()
     }
     assert marks == {
-        "turn": (level, status_message, error, status),
+        "turn.pause" if paused else "turn": (level, status_message, error, status),
         "turn.segment": (None, None, None, None),
         "generate_content gemini-x": (None, None, None, None),
     }

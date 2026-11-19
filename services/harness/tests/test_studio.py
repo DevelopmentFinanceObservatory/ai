@@ -20,6 +20,7 @@ single-use (delta 7); the composition manifest is server-owned with
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
@@ -69,6 +70,7 @@ from data_mcp.settings import Settings as DataMcpSettings
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from google.adk import Context
+from google.adk.errors.already_exists_error import AlreadyExistsError
 from google.adk.events import Event, EventActions
 from google.adk.models.llm_response import LlmResponse
 from google.adk.sessions import BaseSessionService, DatabaseSessionService, InMemorySessionService
@@ -1160,8 +1162,8 @@ async def test_a_turn_paused_for_approval_exports_as_one_trace(
 ) -> None:
     """`/turn` and the `/interrupt` that resumes it are separate requests on
     separate tasks, each inside a `turn.segment` of its own. On the plain OTLP
-    backend too, both segments and the two `turn` outcomes, the pause's and
-    the close's, whose `dfo.external_id` is the turn's wire `trace_id`, share
+    backend too, both segments and the two outcomes, the pause's `turn.pause`
+    and the close's `turn`, whose `dfo.external_id` is the turn's wire `trace_id`, share
     one trace, and the spans and events made in the search of the first
     segment and in the executor of the resumed one sit below the segments."""
 
@@ -1193,7 +1195,7 @@ async def test_a_turn_paused_for_approval_exports_as_one_trace(
         )
 
     spans = list(otlp_spans.get_finished_spans())
-    turns = [span for span in spans if span.name == "turn"]
+    turns = [span for span in spans if span.name in {"turn", "turn.pause"}]
     trace_id = _frame(second, "done")["trace_id"]
     assert [(turn.attributes or {})["dfo.external_id"] for turn in turns] == [trace_id] * 2
     assert {span.context.trace_id for span in spans} == {turns[0].context.trace_id}
@@ -1203,7 +1205,12 @@ async def test_a_turn_paused_for_approval_exports_as_one_trace(
     # The two segments and the outcomes are the only roots, each under a
     # synthetic remote parent. The probes of both segments sit below them.
     roots = [span for span in spans if span.parent is None or span.parent.is_remote]
-    assert sorted(span.name for span in roots) == ["turn", "turn", "turn.segment", "turn.segment"]
+    assert sorted(span.name for span in roots) == [
+        "turn",
+        "turn.pause",
+        "turn.segment",
+        "turn.segment",
+    ]
     assert all(span.parent is not None for span in roots)
     assert [event.name for event in executor_probes[-1].events] == ["executor.probed"]
 
@@ -1232,9 +1239,9 @@ async def test_every_stream_flushes_telemetry_before_the_response_ends(
 async def test_stopping_a_paused_turn_ends_its_span_and_flushes_after_it(
     otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The stream that pauses a turn exports the pause's `turn` outcome, and
-    `/cancel`, with no stream left, flushes once the save that closes the
-    turn has written the close's."""
+    """The stream that pauses a turn exports the pause's `turn.pause`
+    outcome, and `/cancel`, with no stream left, flushes once the save that
+    closes the turn has written the close's `turn`."""
     finished_at_flush: list[list[str]] = []
 
     async def flush() -> None:
@@ -1245,7 +1252,8 @@ async def test_stopping_a_paused_turn_ends_its_span_and_flushes_after_it(
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         assert len(finished_at_flush) == 1  # the stream that paused
-        assert finished_at_flush[0].count("turn") == 1
+        assert finished_at_flush[0].count("turn.pause") == 1
+        assert finished_at_flush[0].count("turn") == 0
 
         cancel = await client.post(
             "/api/studio/cancel",
@@ -1255,7 +1263,7 @@ async def test_stopping_a_paused_turn_ends_its_span_and_flushes_after_it(
 
     assert cancel.status_code == 204
     assert len(finished_at_flush) == 2
-    assert finished_at_flush[1].count("turn") == 2
+    assert finished_at_flush[1].count("turn") == 1
 
 
 async def test_a_turn_that_abandons_a_pause_streams_before_a_slow_flush_ends(
@@ -1304,6 +1312,29 @@ async def test_a_turn_that_abandons_a_pause_streams_before_a_slow_flush_ends(
     finally:
         release.set()
     await asyncio.wait_for(response, timeout=15)
+
+
+async def test_a_409_whose_claim_save_wrote_no_line_flushes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `/turn` whose turn session already exists answers 409. Its claim save
+    closed no turn, so no line waits on an export and the 409 awaits none."""
+    flushes: list[str] = []
+
+    async def flush() -> None:
+        flushes.append("flush")
+
+    async def session_exists(**_: Any) -> None:
+        raise AlreadyExistsError("the turn's session exists")
+
+    monkeypatch.setattr(studio_module, "flush_telemetry", flush)
+    app = _app()
+    app.state.studio._ensure_session = session_exists
+    async with _client(app) as client:
+        response = await client.post("/api/studio/turn", json=_turn_body("q"), headers=AUTH)
+
+    assert response.status_code == 409
+    assert flushes == []
 
 
 async def test_cancelling_an_idle_conversation_flushes_nothing(
@@ -3525,6 +3556,88 @@ async def test_cancel_aborts_a_streaming_turn_with_a_cancelled_error_frame() -> 
     assert _events(frames)[-1] == "error"
     assert _frame(frames, "error")["error"]["error"] == "cancelled"
     assert "done" not in _events(frames)
+
+
+async def test_a_stop_whose_close_raises_still_releases_the_segment_and_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop's close of the turn as `cancelled` that raises in
+    `StudioRunner._locked` still releases the segment in the ledger and the
+    conversation's lock, so the next `/turn` is not refused."""
+    real_close_turn = studio_state_module.ConversationState.close_turn
+    raised: list[str] = []
+
+    def close_turn_raising_once(self: Any, **kwargs: Any) -> None:
+        if not raised and kwargs.get("error") == "cancelled":
+            raised.append("close")
+            raise RuntimeError("the close could not be built")
+        real_close_turn(self, **kwargs)
+
+    monkeypatch.setattr(
+        studio_state_module.ConversationState, "close_turn", close_turn_raising_once
+    )
+    app = _app(*_card(), resolver=_HangingResolver())
+    studio = app.state.studio
+
+    async def _armed() -> None:
+        while not any(
+            entry.state is not None and entry.state.cancel_event is not None
+            for entry in studio.store._runtime.values()
+        ):
+            await asyncio.sleep(0.01)
+
+    async with _client(app) as client:
+        stream_task = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
+        await asyncio.wait_for(_armed(), timeout=5)
+        await client.post(
+            "/api/studio/cancel",
+            json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
+            headers=AUTH,
+        )
+        with contextlib.suppress(RuntimeError):
+            await asyncio.wait_for(stream_task, timeout=5)
+
+    assert raised == ["close"]
+    state = studio.store.current(PRINCIPAL, CONVERSATION)
+    assert not state.lock.locked()
+    reloaded = await StudioStore(studio.store._session_service, app_name=AGENT_NAME).load(
+        PRINCIPAL, CONVERSATION
+    )
+    assert reloaded is not None and reloaded.segment is None
+
+
+async def test_a_takeover_found_while_a_stop_unwinds_ends_the_stream_as_lost() -> None:
+    """A heartbeat that finds the segment lost while a Stop's frames unwind
+    wins over the Stop: the stream ends with `transient_unavailable`, and the
+    turn stays open for the instance that took it over."""
+    studio_holder: list[Any] = []
+
+    class _LostOnUnwindResolver(_HangingResolver):
+        async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            try:
+                return await super().__call__(**kwargs)
+            except asyncio.CancelledError:
+                state = studio_holder[0].store.current(PRINCIPAL, CONVERSATION)
+                state.cancel_reason = "segment_lost"
+                raise
+
+    resolver = _LostOnUnwindResolver()
+    app = _app(*_card(), resolver=resolver)
+    studio = app.state.studio
+    studio_holder.append(studio)
+
+    async with _client(app) as client:
+        stream_task = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
+        await asyncio.wait_for(resolver.entered.wait(), timeout=5)
+        await client.post(
+            "/api/studio/cancel",
+            json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
+            headers=AUTH,
+        )
+        frames = await asyncio.wait_for(stream_task, timeout=5)
+
+    assert _frame(frames, "error")["error"]["error"] == "transient_unavailable"
+    assert studio.store.current(PRINCIPAL, CONVERSATION).turns == []
 
 
 async def test_cancelling_an_idle_conversation_is_a_no_op_204() -> None:

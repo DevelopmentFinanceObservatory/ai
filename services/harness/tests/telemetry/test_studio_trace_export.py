@@ -443,12 +443,26 @@ async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
     `turn.segment` span of its own request, and no span is open once either
     response has ended, the pause included. Each segment's `invoke_workflow`
     span is a child of its own `turn.segment`, and every span on the wire has
-    its parent on the wire too, except the two segments and the two `turn`
-    outcomes, the pause's and the close's, each a root under the synthetic
-    parent the SDK creates for a seeded trace id. Every exported span is the
-    SDK's own or carries `gen_ai.*` attributes. The close's `turn` carries the
-    question and the answer as its input and output."""
-    second = await _approve_a_planned_turn(after_each=quiescence.assert_quiescent)
+    its parent on the wire too, except the two segments, the pause's
+    `turn.pause` and the close's `turn`, each a root under the synthetic
+    parent the SDK creates for a seeded trace id. The pause exports no `turn`,
+    so only a close is a `turn` to a reader that sees names alone. Every
+    exported span is the SDK's own or carries `gen_ai.*` attributes. The
+    close's `turn` carries the question and the answer as its input and
+    output."""
+    outcomes_after_each: list[list[str]] = []
+
+    def after_each() -> None:
+        quiescence.assert_quiescent()
+        outcomes_after_each.append(
+            sorted(
+                span.name for span in quiescence.fake.spans() if span.name in {"turn", "turn.pause"}
+            )
+        )
+
+    second = await _approve_a_planned_turn(after_each=after_each)
+
+    assert outcomes_after_each == [["turn.pause"], ["turn", "turn.pause"]]
 
     scoped = quiescence.fake.scoped_spans()
     spans = [span for _, span in scoped]
@@ -463,7 +477,12 @@ async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
         span.span_id for span in segments
     )
     roots = _spans_with_an_unexported_parent(spans)
-    assert sorted(span.name for span in roots) == ["turn", "turn", "turn.segment", "turn.segment"]
+    assert sorted(span.name for span in roots) == [
+        "turn",
+        "turn.pause",
+        "turn.segment",
+        "turn.segment",
+    ]
     assert all(_attribute(span, "langfuse.internal.is_app_root") is True for span in roots)
     assert _attribute(turn, "langfuse.observation.input") == QUESTION
     assert _attribute(turn, "langfuse.observation.output")

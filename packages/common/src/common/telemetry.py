@@ -100,10 +100,14 @@ FLUSH_TIMEOUT_SECONDS = 3.0
 _MAX_EVENT_STR_CHARS = 500
 _MAX_EVENT_METADATA_ITEMS = 32
 
-# The name of the observation `record_turn_outcome` writes, and the Langfuse
-# trace name every span of a turn carries, on the server side of its MCP calls
-# too.
+# The name of the observation `record_turn_outcome` writes for a close, and the
+# Langfuse trace name every span of a turn carries, on the server side of its
+# MCP calls too.
 TURN_SPAN_NAME = "turn"
+# The name of the observation `record_turn_outcome` writes for a pause. A reader
+# that sees names and no metadata, as the Langfuse BigQuery export does, tells a
+# pause from a close by it.
+TURN_PAUSE_NAME = "turn.pause"
 # The name of the span `turn_segment` opens for each request's share of a turn.
 TURN_SEGMENT_NAME = "turn.segment"
 
@@ -140,9 +144,10 @@ _event_failure_warned = False
 # Single-flight state for `flush_telemetry`, guarded by `_flush_lock`:
 # `_flush_running` is true while a flush thread owns the backend,
 # `_flush_pending` records that a call found it running, and `_flush_waiters`
-# holds what each waiting call is told once the thread finishes. The thread
-# checks `_flush_pending` and clears `_flush_running` in one locked step, so a
-# call is either seen by the running thread or starts its own flush.
+# holds the wake-up of each call no export pass has yet started for. Each pass
+# takes the waiters registered before it starts and wakes them when it ends.
+# The thread checks `_flush_pending` and clears `_flush_running` in one locked
+# step, so a call is either seen by the running thread or starts its own flush.
 _flush_lock = threading.Lock()
 _flush_running = False
 _flush_pending = False
@@ -534,10 +539,10 @@ def record_turn_outcome(
     error: str | None = None,
     paused: bool = False,
 ) -> None:
-    """Write how the unit of work identified by `external_id` ended, or that
-    it paused for the user (`paused`), as one zero-duration `TURN_SPAN_NAME`
-    observation on its trace (the trace `turn_segment` writes to), opened and
-    ended in this call.
+    """Write how the unit of work identified by `external_id` ended as one
+    zero-duration `TURN_SPAN_NAME` observation on its trace (the trace
+    `turn_segment` writes to), or that it paused for the user (`paused`) as
+    one `TURN_PAUSE_NAME` observation, opened and ended in this call.
 
     On Langfuse `request` and `response` are the observation's input and
     output, what an evaluator filtered on the name `turn` reads. An `error`
@@ -547,10 +552,12 @@ def record_turn_outcome(
     no `dfo.turn_error`. A pause holds `dfo.turn_status` `paused`, and a close
     holds no `dfo.turn_status`. `session_id`, `user_id` and `tags` mean what
     they do for `turn_segment`. Off Langfuse the observation is a plain span
-    with the `dfo.external_id` attribute, and the other arguments are ignored.
+    with the `dfo.external_id` attribute, and the arguments other than
+    `paused` are ignored.
 
     Each call writes its own observation, so a unit of work that paused before
-    it closed holds one for each, and a reader picks one by rule. Callable from any
+    it closed holds a `TURN_PAUSE_NAME` for each pause and a `TURN_SPAN_NAME`
+    for each close, and a reader picks one close by rule. Callable from any
     task, inside a segment or outside one. A no-op when telemetry never came
     up. Never raises.
     """
@@ -559,7 +566,7 @@ def record_turn_outcome(
         metadata["dfo.turn_status"] = "paused"
     handle = _start_turn_span(
         external_id,
-        name=TURN_SPAN_NAME,
+        name=TURN_PAUSE_NAME if paused else TURN_SPAN_NAME,
         session_id=session_id,
         user_id=user_id,
         tags=tags,
@@ -578,7 +585,9 @@ def root_if_span_ended(name: str) -> Iterator[bool]:
     A task started inside a `turn_segment` keeps the segment's context after
     the segment's request ended, as an early mint does (`harness.early_mint`),
     and the root gives what it records a live parent that a flush exports.
-    The test reads the segment span the context holds. A mint offered under an
+    The test reads the segment span the context holds, and a segment the
+    sampler dropped counts as live, so a turn it does not export gets no root
+    and no flush. A mint offered under an
     inner span that ended while the segment runs records under the live
     segment (`record_event`), which its request flushes. The root takes the
     trace id of the segment and, from its context, the session, user and tags
@@ -596,7 +605,14 @@ def root_if_span_ended(name: str) -> Iterator[bool]:
         if not isinstance(segment, trace.Span):
             segment = trace.INVALID_SPAN
         context = segment.get_span_context()
-        if _backend is not None and context.is_valid and not segment.is_recording():
+        # A segment the sampler dropped is live and records nothing, so only a
+        # sampled one that stopped recording has ended.
+        if (
+            _backend is not None
+            and context.is_valid
+            and context.trace_flags.sampled
+            and not segment.is_recording()
+        ):
             call_meta = turn_call_meta()
             session = call_meta.get(SESSION_META_KEY)
             user = call_meta.get(USER_META_KEY)
@@ -1098,7 +1114,9 @@ async def flush_telemetry(*, timeout_seconds: float = FLUSH_TIMEOUT_SECONDS) -> 
     hangs cannot pile up threads. A call that finds one running marks that it
     wants one and waits, within the same bound, for that thread, which flushes
     again before it finishes, so spans queued after its export started still
-    go out.
+    go out. Each call wakes when the first export pass that started after it
+    ends, so under a steady stream of calls each waits at most about two
+    passes, and a call that stops waiting takes its wake-up back.
     """
     if _backend is None:
         return
@@ -1119,6 +1137,9 @@ async def flush_telemetry(*, timeout_seconds: float = FLUSH_TIMEOUT_SECONDS) -> 
             "export finishes in the background",
             timeout_seconds,
         )
+    finally:
+        with _flush_lock, suppress(ValueError):  # a pass already took it
+            _flush_waiters.remove(wake)
 
 
 def start_telemetry_flush() -> None:
@@ -1131,10 +1152,11 @@ def start_telemetry_flush() -> None:
 
 def _start_flush(on_done: Callable[[], None] | None) -> bool:
     """Have `flush_telemetry`'s single-flight flush thread run, start it when
-    none runs, and say whether a thread will call `on_done` when it finishes.
-    A call that finds one running marks that it wants one, and that thread
-    calls `on_done` after its last pass. `False` only when no thread could be
-    started."""
+    none runs, and say whether a thread will call `on_done`. A call that finds
+    one running marks that it wants another pass. Each pass takes the
+    `on_done` callbacks registered before it starts and calls them when it
+    ends, so a callback runs after the first full pass that follows its
+    registration. `False` only when no thread could be started."""
     global _flush_running, _flush_pending  # noqa: PLW0603 -- single-flight state
     with _flush_lock:
         if on_done is not None:
@@ -1147,23 +1169,22 @@ def _start_flush(on_done: Callable[[], None] | None) -> bool:
 
     def flush_off_the_loop() -> None:
         global _flush_running, _flush_pending  # noqa: PLW0603 -- single-flight state
-        waiters: list[Callable[[], None]] = []
-        try:
-            while True:
-                try:
-                    _flush_backend()
-                except Exception:
-                    logger.warning("telemetry flush failed", exc_info=True)
-                with _flush_lock:
-                    if not _flush_pending:
-                        _flush_running = False
-                        waiters = _flush_waiters[:]
-                        _flush_waiters.clear()
-                        return
-                    _flush_pending = False
-        finally:
-            for waiter in waiters:
-                waiter()
+        while True:
+            with _flush_lock:
+                waiters = _flush_waiters[:]
+                _flush_waiters.clear()
+                _flush_pending = False
+            try:
+                _flush_backend()
+            except Exception:
+                logger.warning("telemetry flush failed", exc_info=True)
+            finally:
+                for waiter in waiters:
+                    waiter()
+            with _flush_lock:
+                if not _flush_pending:
+                    _flush_running = False
+                    return
 
     try:
         threading.Thread(target=flush_off_the_loop, name=_FLUSH_THREAD_NAME, daemon=True).start()

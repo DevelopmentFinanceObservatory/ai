@@ -931,8 +931,8 @@ class ConversationState:
         writes the turn's `TURN_LOG_EVENT` line and `turn` outcome once the
         save that commits the record lands (`StudioStore`), names this turn
         even after `begin_turn` has moved on. A record that cannot be built is
-        replaced by a minimal one (`turn`, `user`, `assistant`, `error`, the
-        close's own code or `abandoned`, `trace_id` and `usage`).
+        replaced by a minimal one (`turn`, `user`, `assistant`, the close's
+        own `error` code when it has one, `trace_id` and `usage`).
 
         `match_notes` (`harness.turn_records.loose_match_notes`) and
         `basis_line` (`harness.turn_records.basis_line`) are the text the code
@@ -950,8 +950,8 @@ class ConversationState:
         except Exception as exc:
             # A record that cannot be built must not leave the turn open, since
             # every later turn would try to close it again and fail the same
-            # way. The minimal record names no sources.
-            error = error or "abandoned"
+            # way. The minimal record names no sources and keeps the close's
+            # own code, so a turn that ended cleanly is not marked abandoned.
             logger.warning(
                 "studio turn: the record of turn %d of conversation %s could not be built "
                 "(%s); a minimal record with error=%s is kept",
@@ -966,8 +966,9 @@ class ConversationState:
                 "turn": len(self.turns) + 1,
                 "user": self.turn_user_message,
                 "assistant": final_text,
-                "error": error,
             }
+            if error:
+                record["error"] = error
         record["trace_id"] = self.trace_id
         record["usage"] = dataclasses.asdict(self.turn_usage)
         self.turns.append(record)
@@ -1639,8 +1640,9 @@ def _turn_usage(value: Any, *, trace_id: str | None) -> TurnUsage:
 
 @dataclass(frozen=True, slots=True)
 class _TurnLine:
-    """One `TURN_LOG_EVENT` line and `turn` outcome: a turn's close
-    (`status` `closed`) or a pause of it for the user (`paused`)."""
+    """One `TURN_LOG_EVENT` line and its outcome observation: a turn's close
+    (`status` `closed`, a `turn` observation) or a pause of it for the user
+    (`paused`, a `turn.pause` observation)."""
 
     status: Literal["closed", "paused"]
     trace_id: str
@@ -1720,7 +1722,8 @@ def _write_turn_line(conversation_id: str, line: _TurnLine) -> None:
     """Write `line`: its `TURN_LOG_EVENT` log line, with the turn's identity,
     status, when it began, the deployed revision, its error code, and the
     specs it fetched and drew, as JSON fields (`common.logging.JSON_FIELDS`)
-    and in the message. It then writes the line's `turn` outcome observation
+    and in the message. It then writes the line's outcome observation, a
+    `turn` for a close and a `turn.pause` for a pause
     (`common.telemetry.record_turn_outcome`)."""
     usage = line.usage
     release = deploy_release()
@@ -1986,7 +1989,7 @@ class StudioStore:
         entry.state.segment = segment
         return segment.id
 
-    async def save(self, principal: str, conversation_id: str) -> None:
+    async def save(self, principal: str, conversation_id: str) -> bool:
         """Append this instance's changed durable fields as one ledger
         event, through the one `Session` object this runtime entry holds.
         Only the keys whose serialised value changed since the last load
@@ -2007,7 +2010,8 @@ class StudioStore:
         (`_append_committing`), and the save then starts the export of their
         outcomes without waiting for it (`start_telemetry_flush`), so a claim
         save adds no export time before its stream's first frame. A route that
-        ends with no stream awaits `flush_telemetry` itself. A turn record the
+        ends with no stream awaits `flush_telemetry` itself when the save
+        says it wrote a line, which is what it returns. A turn record the
         ledger already holds is never overwritten, and the ledger's is kept in
         `entry.state` too.
         """
@@ -2023,16 +2027,25 @@ class StudioStore:
                 _apply_delta(entry.state, held)
                 entry.baseline.update(held)
             if not delta:
-                return
+                return False
             ops_folded = len(entry.state._composition_ops) if _KEY_COMPOSITION in delta else 0
+            state = entry.state
+
+            def committed() -> None:
+                entry.baseline.update(delta)
+                if ops_folded:
+                    del state._composition_ops[:ops_folded]
+
             wrote = await self._append_committing(
-                entry.session, delta, conversation_id=conversation_id, state=entry.state
+                entry.session,
+                delta,
+                conversation_id=conversation_id,
+                state=state,
+                on_committed=committed,
             )
-            entry.baseline.update(delta)
-            if ops_folded:
-                del entry.state._composition_ops[:ops_folded]
         if wrote:
             start_telemetry_flush()
+        return wrote
 
     async def _append_committing(
         self,
@@ -2041,14 +2054,18 @@ class StudioStore:
         *,
         conversation_id: str,
         state: ConversationState,
+        on_committed: Callable[[], None],
     ) -> bool:
-        """Append `delta` to `session`, then write the `TURN_LOG_EVENT` line
-        and `turn` outcome of each turn close and pause the append committed
+        """Append `delta` to `session`, run `on_committed` (the caller's
+        bookkeeping of what the append committed: its baseline, the
+        composition ops it folded), then write the `TURN_LOG_EVENT` line and
+        outcome observation of each turn close and pause the append committed
         (`_committed_lines`), and say whether it wrote any. The lines are read
-        before the append, off the state `delta` was taken from, and written
-        with no await after it lands. Both run in one task to the end
-        (`_run_to_completion`), so a cancel of the caller cannot land the
-        append without its lines. An append that raises writes none. A stale
+        before the append, off the state `delta` was taken from, and the rest
+        runs with no await after it lands. All of it runs in one task to the
+        end (`_run_to_completion`), so a cancel of the caller cannot land the
+        append without its bookkeeping and lines, and a later save never
+        replays a committed op. An append that raises runs neither. A stale
         one committed nothing, and the next turn closes a turn left open as
         `abandoned`."""
         lines = _committed_lines(delta, ledger=session.state, state=state)
@@ -2056,6 +2073,7 @@ class StudioStore:
         async def append() -> None:
             event = Event(author="studio", actions=EventActions(state_delta=delta))
             await self._session_service.append_event(session, event)
+            on_committed()
             for line in lines:
                 _write_turn_line(conversation_id, line)
 
@@ -2344,17 +2362,30 @@ class StudioStore:
                     entry.state,
                     {key: value for key, value in changed.items() if key != _KEY_COMPOSITION},
                 )
+                state = entry.state
+
+                def committed(
+                    session: Session = session,
+                    changed: dict[str, Any] = changed,
+                    ops_folded: int = ops_folded,
+                    state: ConversationState = state,
+                ) -> None:
+                    entry.session = session
+                    entry.baseline.update(changed)
+                    if ops_folded:
+                        del state._composition_ops[:ops_folded]
+
                 try:
                     await self._append_committing(
-                        session, changed, conversation_id=conversation_id, state=entry.state
+                        session,
+                        changed,
+                        conversation_id=conversation_id,
+                        state=state,
+                        on_committed=committed,
                     )
                 except StaleSessionError as exc:
                     last_error = exc
                     continue
-                entry.session = session
-                entry.baseline.update(changed)
-                if ops_folded:
-                    del entry.state._composition_ops[:ops_folded]
                 return
         assert last_error is not None
         raise last_error

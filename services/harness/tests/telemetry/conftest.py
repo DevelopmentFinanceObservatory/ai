@@ -250,12 +250,12 @@ class Quiescence:
 
     def outcomes(self, status: str = "closed") -> list[tuple[str | None, str | None]]:
         """`(wire trace id, error)` of every exported `turn` observation of a
-        close, or with `status="paused"` of a pause."""
+        close, or with `status="paused"` of every `turn.pause` observation."""
+        name = telemetry.TURN_PAUSE_NAME if status == "paused" else telemetry.TURN_SPAN_NAME
         return [
             (_metadata(span, "dfo.external_id"), _metadata(span, "dfo.turn_error"))
             for span in self.fake.spans()
-            if span.name == telemetry.TURN_SPAN_NAME
-            and (_metadata(span, "dfo.turn_status") or "closed") == status
+            if span.name == name and (_metadata(span, "dfo.turn_status") or "closed") == status
         ]
 
     def lines(self, status: str = "closed") -> list[tuple[str | None, str | None]]:
