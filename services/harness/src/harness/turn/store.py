@@ -212,7 +212,7 @@ class WriteNotEncoded(ValueError):  # noqa: N818 -- names the write's state, as 
     """A write's value JSON cannot hold: a NaN or an infinity
     (`executor.ledger.NonFiniteJsonError`), or a value JSON cannot encode,
     which is the cause. Values are encoded only while a write builds its
-    parameters, before or inside its transaction, so the transaction ends
+    parameters, before its transaction commits, so the transaction ends
     without committing and the write stored nothing."""
 
 
@@ -616,6 +616,11 @@ async def _swap(
 # Waits for a write in flight to the turn's cursor row (`settled_turn`).
 _SETTLE = text("SELECT 1 FROM turn_cursors WHERE id = :id FOR SHARE")
 
+# The longest `settled_turn` waits for the turn's row lock, and the longest
+# each of its statements runs. A write whose connection dropped before its
+# COMMIT reached the server can hold the lock until the server notices.
+SETTLE_TIMEOUT_S = 2.0
+
 
 class TurnStore:
     """The turn cursor API over `engine` (module docstring). Every write
@@ -804,11 +809,19 @@ class TurnStore:
         is in flight has committed or rolled back: the read first takes the
         `turn_cursors` row `FOR SHARE`, which waits for such a write's row
         lock, then reads the turn in a statement that sees what it committed.
+        The wait for the lock and each statement are bounded at
+        `SETTLE_TIMEOUT_S` (`lock_timeout`, `statement_timeout`), so a lock
+        an orphaned transaction holds fails the read.
 
         Raises:
             LookupError: no turn has that id.
+            sqlalchemy.exc.DBAPIError: the lock or a statement ran past
+                `SETTLE_TIMEOUT_S`, or the database failed the read.
         """
+        bound = round(SETTLE_TIMEOUT_S * 1000)
         async with self._engine.begin() as conn:
+            await conn.exec_driver_sql(f"SET LOCAL lock_timeout = {bound}")
+            await conn.exec_driver_sql(f"SET LOCAL statement_timeout = {bound}")
             await conn.execute(_SETTLE, {"id": turn_id})
             cursor = await _read_cursor(conn, "t.id = :id", {"id": turn_id})
         if cursor is None:
