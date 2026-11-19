@@ -50,7 +50,7 @@ import contextlib
 import copy
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, override
 
@@ -152,20 +152,27 @@ class Answer:
 
 @dataclass
 class _Owed:
-    """The work after its commit that the node `node` asked for
-    (`NodeCtx.after_commit`), which runs at most once: `ran` is set when it
-    starts (`_after_commit`)."""
+    """The works after its commit that the node `node` asked for
+    (`NodeCtx.after_commit`), each run at most once: `started` counts the
+    works, in order, that have started. The write before them holds the
+    node's outcome, and a crash between the two loses the works the same
+    way."""
 
     ctx: NodeCtx[Any]
     node: str
-    ran: bool = False
+    started: int = 0
 
     async def run(self) -> None:
-        """Run the work unless it has started already."""
-        if self.ran:
-            return
-        self.ran = True
-        await _after_commit(self.ctx, self.node)
+        """Run, in order, each work that has not started yet. A failure is
+        logged and the next work runs."""
+        works = self.ctx.committed
+        while self.started < len(works):
+            work = works[self.started]
+            self.started += 1
+            try:
+                await work()
+            except Exception:
+                logger.exception("turn node %s: work after its commit failed", self.node)
 
 
 @dataclass(frozen=True)
@@ -179,7 +186,7 @@ class _Writing:
     version: int
     following: str | None
     segment_id: str
-    owed: _Owed
+    owed: _Owed = field(compare=False, hash=False)
 
     def committed(self, stored: Cursor) -> bool:
         """Whether `stored`, the turn as read back, holds this write: the
@@ -258,11 +265,15 @@ async def _close_on_error(
     `_NOT_THE_TURNS` names may still have committed, its acknowledgement
     lost, so the turn is read back (`_read_back`). A close that committed
     ends as one that returned. A turn another write closed ends on its
-    stored outcome, with `error` reported. A turn still open, or one that
-    cannot be read, is left as last written, running or paused, for a Stop
-    or the conversation's next turn to close: the segment ends `unclosed`
-    and `error` is reported. The close and the read are steps of `drive`
-    (`_step`), so a cut pending raises it, which the segment settles on."""
+    stored outcome, with `error` reported all the same: the node failed,
+    whoever closed the turn, while a write that raised and finds the turn
+    closed by another reports nothing, since no node failed
+    (`_after_failed_write`, `_settle_answer`). A turn still open, or one
+    that cannot be read, is left as last written, running or paused, for a
+    Stop or the conversation's next turn to close: the segment ends
+    `unclosed` and `error` is reported. The close and the read are steps of
+    `drive` (`_step`), so a cut pending raises it, which the segment settles
+    on."""
     try:
         segment.cursor = await _step(
             store.finish(
@@ -365,8 +376,8 @@ async def _read_back(
     then: Callable[[Cursor], Awaitable[None]] | None = None,
     reraising: bool = False,
 ) -> tuple[_Landed, Cursor | None]:
-    """Read the turn back after the write `what`, made from `before`,
-    raised `error`, once any write to it still in flight has settled
+    """Read the turn back after the write `what`, made from `before`, raised
+    `error`, once any write to it still in flight has settled
     (`TurnStore.settled_turn`, bounded at `SETTLE_TIMEOUT_S`), and say what
     the write left with the turn as stored (`None` when it cannot be read).
     `holds` tells whether the stored turn holds the write. When it does,
@@ -375,8 +386,8 @@ async def _read_back(
     `drive` (`_step`), so a cut pending raises it once the read and `then`
     return. The write's failure is logged as a warning before the read, and
     the outcome after it, with `error`'s traceback when the turn does not
-    carry on as written, unless the caller raises `error` again
-    (`reraising`), which logs it there."""
+    carry on as written, unless the caller logs it (`reraising`), whether it
+    raises it again or not."""
     logger.warning("turn %s: %s raised %r; reading the turn back", key, what, error)
 
     async def read() -> Cursor:
@@ -430,15 +441,38 @@ def _closes(before: Cursor, *, segment_id: str, status: TurnStatus) -> Callable[
     return holds
 
 
-async def _after_commit(ctx: NodeCtx[Any], node: str) -> None:
-    """Run the node's `after_commit` work. A failure is logged. The write
-    before it holds the node's outcome, and a crash between the two loses
-    the work the same way."""
-    for work in ctx.committed:
-        try:
-            await work()
-        except Exception:
-            logger.exception("turn node %s: work after its commit failed", node)
+# The longest the commit's owed work `_settle` starts may run, and the
+# tasks running it, each held until it ends (`pending_owed_work`).
+OWED_WORK_TIMEOUT_S = 30.0
+_OWED_WORK: set[asyncio.Task[None]] = set()
+
+
+def pending_owed_work() -> frozenset[asyncio.Task[None]]:
+    """The tasks running a committed write's owed work that a cut segment
+    left behind (`_settle`), for the app's shutdown to wait on."""
+    return frozenset(_OWED_WORK)
+
+
+def _start_owed(owed: _Owed, key: TurnKey) -> None:
+    """Run the works of `owed` not yet started in a task of their own,
+    bounded at `OWED_WORK_TIMEOUT_S` and held in `_OWED_WORK` until it ends,
+    when any exception it ended on, a cancellation included, is logged."""
+
+    async def bounded() -> None:
+        async with asyncio.timeout(OWED_WORK_TIMEOUT_S):
+            await owed.run()
+
+    task = asyncio.create_task(bounded(), name=f"owed work of turn {key} node {owed.node}")
+    _OWED_WORK.add(task)
+
+    def ended(done: asyncio.Task[None]) -> None:
+        _OWED_WORK.discard(done)
+        if done.cancelled():
+            logger.error("turn %s: the owed work of node %s was cancelled", key, owed.node)
+        elif (error := done.exception()) is not None:
+            logger.error("turn %s: the owed work of node %s failed", key, owed.node, exc_info=error)
+
+    task.add_done_callback(ended)
 
 
 async def _commit_boundary(
@@ -461,8 +495,8 @@ async def _commit_boundary(
     that caught a cut and returned still runs the work its commit is owed
     before the cut is raised again, and a cut during that work leaves
     `segment` holding the cursor the write committed. A cut that ends the
-    write before the work starts leaves it to `_settle`, which runs it once
-    it finds the write committed."""
+    write before every work started leaves them to `_settle`, which starts
+    those not yet started once it finds the write committed."""
     written = await _write_boundary(
         store,
         cursor,
@@ -498,7 +532,7 @@ async def _after_failed_write(
     once (`_close_on_error`). Any other write may have committed and lost
     its acknowledgement, so the turn is read back (`_read_back`). A turn
     that holds the write (`_Writing.committed`) takes the stored cursor and
-    runs the node's work after the commit (`_after_commit`) in the same step
+    runs the node's work after the commit (`_Writing.owed`) in the same step
     as the read, as a write that returned does (`_commit_boundary`), and
     `True` is returned for `drive` to report the boundary and go on. The
     lineage generations a committed write stores are not recorded on the
@@ -506,11 +540,12 @@ async def _after_failed_write(
     rows again, at the same generations. A turn at the version the write
     started from holds no write, and is closed `failed` from the cursor as
     read. A turn another writer closed ends the segment on the stored
-    outcome, with nothing emitted, as `_close_on_taken_stop` does. A read
-    back that fails, or an open turn another write moved, is left as
-    stored: the segment ends `unclosed` and reports `error`, as when a close
-    cannot be written. A cut pending raises with `segment.writing` still
-    held, which the segment settles on."""
+    outcome and reports nothing, since the node did not fail; a node's own
+    failure is reported whoever closed the turn (`_close_on_error`). A read
+    back that fails, or an open turn another write moved, is left as stored:
+    the segment ends `unclosed` and reports `error`, as when a close cannot
+    be written. A cut pending raises with `segment.writing` still held,
+    which the segment settles on."""
     writing = segment.writing
     assert writing is not None
 
@@ -810,8 +845,9 @@ def _settle_answer(
 
     Raises:
         _Closes: the answer did not commit (`failed`).
-        _Ends: the turn was closed by another write, moved by one, or could
-            not be read.
+        _Ends: the turn was closed by another write, which reports nothing
+            since no node failed, or was moved by one, or could not be read,
+            which reports `error`.
     """
     landed, stored = read_back
     if stored is not None:
@@ -1149,18 +1185,20 @@ async def _settle(
     acknowledgement was awaited, during the node's work after the commit, or
     after it. A Stop's close that raises is read back (`_read_back`): a turn
     it, or another write, closed takes the stored outcome; any other raises
-    the close's error. A write of the segment's that committed has its
-    node's work after the commit (`_Writing.owed`) run here, before its
-    event, when the cut came before that work started, as `_commit_boundary`
-    would have run it."""
+    the close's error. A write of the segment's that committed has the works
+    its commit is owed (`_Writing.owed`) that had not started when the cut
+    came started here in a task of their own (`_start_owed`), bounded at
+    `OWED_WORK_TIMEOUT_S`, without waiting for them, so a Stop's close goes
+    on at once. A write another segment's later write moved past before the
+    read back is not found committed, so its owed work is dropped; the
+    conversation's next turn lists the hand-back it would have acknowledged
+    again."""
     stored = await store.settled_turn(segment.cursor.id)
     writing, segment.writing = segment.writing, None
     reported = writing.reports if writing is not None and writing.committed(stored) else None
     if reported is not None:
         assert writing is not None
-        # The cut ended `drive`'s task, not this one; the shield keeps the
-        # work going if the caller is cancelled while it runs.
-        await asyncio.shield(writing.owed.run())
+        _start_owed(writing.owed, key)
     if isinstance(reported, NodeDone):
         emit(reported)
     if stored.status in CLOSED:
@@ -1181,7 +1219,7 @@ async def _settle(
     except _NOT_THE_TURNS:
         raise
     except Exception as exc:
-        _, closed = await _read_back(
+        landed, closed = await _read_back(
             store,
             stored,
             key=key,
@@ -1192,6 +1230,14 @@ async def _settle(
         )
         if closed is None or closed.status not in CLOSED:
             raise
+        # `_read_back` left the traceback to a caller that raises again.
+        logger.log(
+            logging.WARNING if landed is _Landed.COMMITTED else logging.ERROR,
+            "turn %s: closing the stopped turn failed; the turn is %s",
+            key,
+            landed.value,
+            exc_info=exc,
+        )
         segment.cursor, segment.outcome = closed, Outcome(closed.status.value)
 
 
@@ -1224,9 +1270,11 @@ async def run_segment[E](
     way, ends, or goes further without it closes `cancelled` (`drive`).
     Until then the Stop stays live, and a client that leaves first leaves
     it to the segment's closing write. Any other Stop cancels the node,
-    leaves no task of the segment running, and closes the turn `cancelled`.
-    One a renewal reads after the drive finished is left to the segment's
-    closing write, which acts on a Stop still live
+    leaves no task of the segment running but the work a committed write is
+    owed, which belongs to the commit and runs on, bounded (`_settle`,
+    `pending_owed_work`), and closes the turn `cancelled`. One a renewal
+    reads after the drive finished is left to the segment's closing write,
+    which acts on a Stop still live
     (`StudioStore.close_segment`). A renewal that finds the lease
     taken, or that keeps failing until the lease's deadline
     (`StudioStore.lease_deadline`, dated from the claim or the last renewal

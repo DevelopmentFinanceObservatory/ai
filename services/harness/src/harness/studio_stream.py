@@ -103,7 +103,7 @@ from harness.studio_state import (
 )
 from harness.studio_store import SegmentClose, Snapshot
 from harness.studio_translate import SEGMENT_LOST_DETAIL, STREAM_RETRY_AFTER_S
-from harness.turn.loop import Outcome
+from harness.turn.loop import Outcome, pending_owed_work
 from harness.wire import (
     ActivityStep,
     Done,
@@ -881,14 +881,25 @@ class LiveOwners:
         return task
 
     async def wait(self, *, timeout: float = SHUTDOWN_WAIT_S) -> None:
-        """Wait up to `timeout` seconds for every running owner, and log
-        those that outlast it."""
-        if not self._running:
-            return
-        _, running = await asyncio.wait(set(self._running), timeout=timeout)
+        """Wait up to `timeout` seconds for every running owner, and for the
+        owed work of a committed write a cut segment left running
+        (`harness.turn.loop.pending_owed_work`), and log those that outlast
+        it."""
+        # Owners first: an owner settling a cut starts owed work as it ends,
+        # so the owed work is read once the owners are done.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        running: set[asyncio.Task[Any]] = set()
+        if self._running:
+            _, running = await asyncio.wait(set(self._running), timeout=timeout)
+        owed = pending_owed_work()
+        if owed:
+            _, late = await asyncio.wait(owed, timeout=max(0.0, deadline - loop.time()))
+            running |= late
         if running:
             logger.error(
-                "studio stream: %d stream owner(s) still running at shutdown after %ss",
+                "studio stream: %d stream owner(s) or owed work still running at shutdown "
+                "after %ss",
                 len(running),
                 timeout,
             )
