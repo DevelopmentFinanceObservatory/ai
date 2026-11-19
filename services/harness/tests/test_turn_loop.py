@@ -1030,6 +1030,69 @@ async def test_a_boundary_write_whose_lineage_the_database_refuses_closes_the_tu
         assert (await conn.execute(text("SELECT count(*) FROM turn_frame_lineage"))).scalar() == 0
 
 
+@pytest.mark.parametrize("cut", ["during", "after"])
+async def test_a_cut_at_the_restore_leaves_no_kept_entry(
+    pg_engine: AsyncEngine, clock: StoreClock, monkeypatch: pytest.MonkeyPatch, cut: str
+) -> None:
+    """A cut that lands while the restore waits on its read, or that is
+    pending when the restore returns, still ends the segment, so the frames
+    the restore kept do not stay exempt from the provenance store's bound."""
+    provenance = ProvenanceStore()
+    scope = ledger_conversation_id(PRINCIPAL, CONVERSATION)
+    frame = {"spec_id": "spec_a", "content_version": "cv_a"}
+    store = TurnStore(
+        pg_engine, lineage=FrameLineage(source=provenance, frame_keys=frame_store_keys)
+    )
+    lease = await _instance(pg_engine, clock)
+    segment_id = await _claim(lease)
+
+    async def work(ctx: NodeCtx, node_input: Any) -> Pause:
+        provenance.put(conversation=scope, manifest={}, **frame)
+        ctx.state[ORCHESTRATOR_FRAMES_KEY] = {"frame_a": {"ref": frame}}
+        return Pause(kind="ask", payload={})
+
+    async def resume(ctx: NodeCtx, node_input: Any, answer: dict[str, Any]) -> Next:
+        raise AssertionError("the node ran past the cut")
+
+    graph = Graph(start="work", nodes={"work": Node(run=work, resume=resume)}, edges={})
+    paused = await _segment(
+        store, lease, await _open(store, segment_id, graph), segment_id, graph, []
+    )
+    assert paused.outcome is Outcome.PAUSED
+    restore = TurnStore._restore
+    reading = asyncio.Event()
+
+    async def _stalls(self: TurnStore, turn: int, keys: Any) -> list[Any]:
+        reading.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def _cut_on_return(self: TurnStore, cursor: Cursor, segment: Any) -> None:
+        await restore(self, cursor, segment)
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+
+    if cut == "during":
+        monkeypatch.setattr(TurnStore, "_frame_lineage", _stalls)
+    else:
+        monkeypatch.setattr(TurnStore, "_restore", _cut_on_return)
+    answer = Answer(
+        interrupt_id=paused.cursor.pause.interrupt_id, round=paused.cursor.pause.round, value={}
+    )
+    resumed = asyncio.create_task(
+        _segment(store, lease, paused.cursor, segment_id, graph, [], answer=answer)
+    )
+    if cut == "during":
+        await asyncio.wait_for(reading.wait(), 5)
+        assert scope in provenance._kept
+        resumed.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(resumed, 10)
+
+    assert scope not in provenance._kept
+
+
 async def test_a_segments_frames_count_against_the_provenance_bound_once_it_ends(
     pg_engine: AsyncEngine, clock: StoreClock, monkeypatch: pytest.MonkeyPatch
 ) -> None:

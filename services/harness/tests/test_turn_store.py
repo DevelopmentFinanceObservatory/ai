@@ -3,13 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-from collections import OrderedDict
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import harness.graph.state as graph_state
 import harness.provenance as provenance_module
 import pytest
 from executor.ledger import PlanApproval, SourcePolicy, new_run
@@ -737,10 +735,12 @@ def _keeping(engine: AsyncEngine, provenance: ProvenanceStore) -> TurnStore:
 
 
 async def _segment(store: TurnStore, cursor: Cursor) -> SegmentLineage:
-    """Start a segment of `cursor`'s turn on `store`, as the turn loop does
-    (`TurnStore.restore_frame_lineage`)."""
-    segment = await store.restore_frame_lineage(cursor, lineage_scope=_SCOPE)
+    """Start a segment of `cursor`'s turn on `store` and restore its frame
+    lineage, as the turn loop does (`TurnStore.start_segment`,
+    `TurnStore.restore_frame_lineage`)."""
+    segment = store.start_segment(lineage_scope=_SCOPE)
     assert segment is not None
+    await store.restore_frame_lineage(cursor, segment)
     return segment
 
 
@@ -810,7 +810,7 @@ async def _restored(engine: AsyncEngine) -> tuple[ProvenanceStore, TurnStore]:
     other = _keeping(engine, fresh)
     cursor = await other.open_cursor(PRINCIPAL, CONVERSATION)
     assert cursor is not None
-    await other.restore_frame_lineage(cursor, lineage_scope=_SCOPE)
+    await _segment(other, cursor)
     return fresh, other
 
 
@@ -1015,7 +1015,6 @@ async def test_a_malformed_frames_entry_names_no_frame_and_the_turn_goes_on(
     provenance = ProvenanceStore()
     _held(provenance, 1)
     store = _keeping(pg_engine, provenance)
-    monkeypatch.setattr(graph_state, "_warned_frame_shapes", OrderedDict())
     opened, seg = await _opened(store, provenance)
     if isinstance(frames, dict):
         state = {ORCHESTRATOR_FRAMES_KEY: {**frames, "frame_0": {"ref": _key(1)}}}
@@ -1092,7 +1091,7 @@ async def test_a_frame_key_holding_a_nul_gets_no_row_and_is_never_read(
 
     monkeypatch.setattr(TurnStore, "_frame_lineage", recorded)
     fresh = ProvenanceStore()
-    await _keeping(pg_engine, fresh).restore_frame_lineage(advanced, lineage_scope=_SCOPE)
+    await _segment(_keeping(pg_engine, fresh), advanced)
     assert reads == [[("spec_1", "cv_1")]]
     assert fresh.get(conversation=_SCOPE, **_key(1)) is not None
 
@@ -1163,7 +1162,7 @@ async def test_a_frame_lineage_read_that_fails_or_stalls_restores_nothing_and_re
     monkeypatch.setattr(other, "_frame_lineage", _read)
     monkeypatch.setattr(turn_store, "_FRAME_LINEAGE_READ_BUDGET_S", 0.05)
 
-    await asyncio.wait_for(other.restore_frame_lineage(advanced, lineage_scope=_SCOPE), 5)
+    await asyncio.wait_for(_segment(other, advanced), 5)
 
     assert fresh.get(conversation=_SCOPE, **_key(1)) is None
 
@@ -1197,12 +1196,13 @@ async def test_a_burst_of_other_turns_mid_segment_keeps_the_segments_frames(
     ]
 
 
+@pytest.mark.parametrize("second_names", ["nothing", "the same frame"])
 async def test_a_second_segment_keeping_nothing_leaves_the_first_segments_frames_kept(
-    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, second_names: str
 ) -> None:
     """Each running segment keeps its own frames: a second segment of the
-    conversation that names none, and then ends, takes nothing of the first
-    segment's kept set."""
+    conversation that names none, or the same frame, and then ends, takes
+    nothing of the first segment's kept set."""
     await _conversation(pg_engine)
     provenance = ProvenanceStore()
     _held(provenance, 1)
@@ -1210,7 +1210,8 @@ async def test_a_second_segment_keeping_nothing_leaves_the_first_segments_frames
     opened, first = await _opened(store, provenance)
     advanced = await _advance(first, store, opened, _frames({"ref": _key(1)}))
 
-    second = await _segment(store, replace(advanced, state={}))
+    second_state = {} if second_names == "nothing" else _frames({"ref": _key(1)})
+    second = await _segment(store, replace(advanced, state=second_state))
     store.end_segment(second)
     monkeypatch.setattr(provenance_module, "_MAX_MANIFESTS_PER_CONVERSATION", 1)
     for n in (4, 5):
@@ -1220,36 +1221,6 @@ async def test_a_second_segment_keeping_nothing_leaves_the_first_segments_frames
     store.end_segment(first)
     _held(provenance, 6)
     assert provenance.get(conversation=_SCOPE, **_key(1)) is None
-
-
-async def test_a_cut_during_the_restore_leaves_no_kept_entry(
-    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A cancellation while the restore waits on its read ends the segment
-    it started, so the frames it kept do not stay exempt."""
-    await _conversation(pg_engine)
-    provenance = ProvenanceStore()
-    _held(provenance, 1)
-    store = _keeping(pg_engine, provenance)
-    opened, seg = await _opened(store, provenance)
-    advanced = await _advance(seg, store, opened, _frames({"ref": _key(1)}))
-    store.end_segment(seg)
-    reading = asyncio.Event()
-
-    async def _stalls(self: TurnStore, turn: int, keys: Any) -> list[Any]:
-        reading.set()
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
-
-    monkeypatch.setattr(TurnStore, "_frame_lineage", _stalls)
-    restore = asyncio.create_task(store.restore_frame_lineage(advanced, lineage_scope=_SCOPE))
-    await asyncio.wait_for(reading.wait(), 5)
-    assert _SCOPE in provenance._kept
-    restore.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await restore
-
-    assert _SCOPE not in provenance._kept
 
 
 @pytest.mark.parametrize("frames", ["none", "named-without-rows"])
