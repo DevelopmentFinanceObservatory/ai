@@ -16,6 +16,7 @@ from executor.ledger import (
     Complete,
     Delivered,
     ManifestEntry,
+    NonFiniteJsonError,
     PlanApproval,
     Published,
     Publishing,
@@ -100,6 +101,11 @@ def _candidate() -> RunRecord:
         ),
         now=at,
     )
+
+
+def _other_candidate() -> RunRecord:
+    """A candidate under a key `_candidate` does not hold, so it admits a new run."""
+    return _candidate().model_copy(update={"idempotency_key": "another-key"})
 
 
 async def _streaming_store(service: Any, clock: list[float] | StoreClock) -> StudioStore:
@@ -366,6 +372,49 @@ async def _stored_record(store: StudioStore, run_id: str) -> dict[str, Any]:
             )
         ).scalar_one()
     return json.loads(record) if isinstance(record, str) else record
+
+
+NON_FINITE = [float("nan"), float("inf"), float("-inf")]
+
+
+@pytest.mark.parametrize("bad", NON_FINITE, ids=["nan", "inf", "-inf"])
+@pytest.mark.parametrize("site", ["submission", "plan", "retrievals"])
+async def test_a_non_finite_float_is_refused_before_any_row_is_written(
+    pg_engine, site: str, bad: float
+) -> None:
+    store = await _streaming_store(pg_engine, [START])
+    ledger = StudioRunLedger(store)
+    run = (await ledger.admit(_candidate(), submission=SUBMISSION)).run
+    await ledger.record(run.run_id, Start())
+
+    with pytest.raises(NonFiniteJsonError):
+        if site == "submission":
+            await ledger.admit(_other_candidate(), submission={"value": bad})
+        elif site == "plan":
+            await ledger.store_plan("rev-1", {"value": bad})
+        else:
+            await ledger.record(run.run_id, Seal(INPUTS, retrievals=({"value": bad},)))
+
+    after = await ledger.get(run.run_id)
+    assert after is not None and after.manifest is None
+    assert await ledger.retrievals(run.run_id) is None
+    assert await ledger.plan("rev-1") is None
+    assert await ledger.unfinished() == (after,)
+
+
+@pytest.mark.parametrize("bad", NON_FINITE, ids=["nan", "inf", "-inf"])
+@pytest.mark.parametrize(
+    "delta",
+    [
+        pytest.param(lambda bad: {"trace_id": bad}, id="scalar"),
+        pytest.param(lambda bad: {"component:c1": {"value": bad}}, id="item row"),
+    ],
+)
+def test_the_studio_store_refuses_a_non_finite_float_before_building_a_statement(
+    delta: Callable[[float], dict[str, Any]], bad: float
+) -> None:
+    with pytest.raises(NonFiniteJsonError):
+        studio_store._delta_write(delta(bad))
 
 
 async def test_a_run_another_release_stored_with_more_keys_is_read_and_carried_on(
