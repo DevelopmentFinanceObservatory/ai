@@ -495,9 +495,9 @@ def frame_store_ref(entry: Mapping[str, Any]) -> dict[str, Any]:
     return entry["ref"]
 
 
-# The malformed frames shapes `frame_store_keys` has warned of, least
-# recently seen dropped past `_MAX_WARNED_FRAME_SHAPES`, so a state read at
-# every boundary write warns once.
+# The conversations and malformed frames shapes `frame_store_keys` has warned
+# of, least recently seen dropped past `_MAX_WARNED_FRAME_SHAPES`, so a state
+# read at every boundary write warns once per conversation.
 _warned_frame_shapes: OrderedDict[tuple[str, ...], None] = OrderedDict()
 _MAX_WARNED_FRAME_SHAPES = 256
 
@@ -512,18 +512,20 @@ def _warn_frame_shape_once(shape: tuple[str, ...], message: str, *args: Any) -> 
     logger.warning(message, *args)
 
 
-def frame_store_keys(state: Mapping[str, Any]) -> list[FrameKey]:
+def frame_store_keys(state: Mapping[str, Any], scope: str) -> list[FrameKey]:
     """The lineage store keys of the frames in `state`
     (`ORCHESTRATOR_FRAMES_KEY`): each entry's `ref` and `store_ref`, in order
     and each once, which the turn store keeps the lineage of
     (`harness.turn.store.FrameLineage`). A pair with a member missing names
     no key, and so does a frames value or entry that is not a mapping, which
-    is logged once per malformed shape (`_warn_frame_shape_once`)."""
+    is logged once per conversation `scope` and malformed shape
+    (`_warn_frame_shape_once`)."""
     frames = state.get(ORCHESTRATOR_FRAMES_KEY) or {}
     if not isinstance(frames, Mapping):
         _warn_frame_shape_once(
-            ("container", type(frames).__name__),
-            "the state's %s is a %s, not a mapping; it names no frame",
+            (scope, "container", type(frames).__name__),
+            "conversation %s: the state's %s is a %s, not a mapping; it names no frame",
+            scope,
             ORCHESTRATOR_FRAMES_KEY,
             type(frames).__name__,
         )
@@ -541,8 +543,10 @@ def frame_store_keys(state: Mapping[str, Any]) -> list[FrameKey]:
                     keys[(spec_id, content_version)] = None
     if skipped:
         _warn_frame_shape_once(
-            ("entries", *skipped),
-            "the state's %s holds %d frame entries that are not mappings (%s); they name no frame",
+            (scope, "entries", *skipped),
+            "conversation %s: the state's %s holds %d frame entries that are not "
+            "mappings (%s); they name no frame",
+            scope,
             ORCHESTRATOR_FRAMES_KEY,
             len(skipped),
             ", ".join(skipped),
