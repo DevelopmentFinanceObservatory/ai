@@ -208,7 +208,7 @@ class World:
                 payload={},
                 state={},
                 stop_taken_id=taken,
-                lineage_scope=None,
+                lineage=None,
             )
         except SegmentLost:
             self.holder = None

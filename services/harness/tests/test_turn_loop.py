@@ -1053,7 +1053,7 @@ async def test_a_cursor_moved_since_it_was_read_runs_no_node(
             node="work",
             node_input="moved",
             state={},
-            lineage_scope=None,
+            lineage=None,
         )
     else:
         read = await store.turn(

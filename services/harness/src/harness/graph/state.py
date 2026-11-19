@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import (
     Mapping,
     Sequence,
@@ -34,6 +35,8 @@ from harness.turn_records import Origin, SearchReading, open_prices
 
 if TYPE_CHECKING:
     from harness.turn.node import NodeCtx
+
+logger = logging.getLogger(__name__)
 
 # The kind of the pause the `approve` node puts the plan card to the user
 # under, read by `harness.studio_translate` to tell the plan card from a
@@ -496,9 +499,21 @@ def frame_store_keys(state: Mapping[str, Any]) -> list[FrameKey]:
     (`ORCHESTRATOR_FRAMES_KEY`): each entry's `ref` and `store_ref`, in order
     and each once, which the turn store keeps the lineage of
     (`harness.turn.store.FrameLineage`). A pair with a member missing names
-    no key."""
+    no key, and so does a frames value or entry that is not a mapping, which
+    is logged once per call."""
     keys: dict[FrameKey, None] = {}
-    for entry in (state.get(ORCHESTRATOR_FRAMES_KEY) or {}).values():
+    frames = state.get(ORCHESTRATOR_FRAMES_KEY) or {}
+    entries = list(frames.values()) if isinstance(frames, Mapping) else [frames]
+    malformed = [entry for entry in entries if not isinstance(entry, Mapping)]
+    if malformed:
+        logger.warning(
+            "the state's %s holds %d frame entries that are not mappings; they name no frame",
+            ORCHESTRATOR_FRAMES_KEY,
+            len(malformed),
+        )
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
         for ref in (entry.get("ref"), entry.get("store_ref")):
             if isinstance(ref, Mapping):
                 spec_id, content_version = ref.get("spec_id"), ref.get("content_version")

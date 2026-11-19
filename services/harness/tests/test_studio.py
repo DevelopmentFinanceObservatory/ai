@@ -4343,7 +4343,7 @@ async def test_a_turn_claimed_over_a_lapsed_segment_records_its_last_write(
                     node="plan",
                     node_input=None,
                     state=turn_state(checkpoint),
-                    lineage_scope=None,
+                    lineage=None,
                 )
                 last["checkpoint"] = checkpoint
                 state_a.turn_final_text = f"written by A at {checkpoint}"

@@ -74,6 +74,7 @@ from harness.turn.store import (
     Cursor,
     CursorStale,
     PauseNotOpen,
+    SegmentLineage,
     TurnStatus,
     TurnStore,
     require_open_pause,
@@ -315,6 +316,7 @@ async def _commit_boundary(
     interrupt_id: str,
     ctx: NodeCtx[Any],
     segment: Segment,
+    lineage: SegmentLineage | None,
 ) -> Cursor:
     """Write the boundary after `node` (`_write_boundary`), hold the written
     cursor on `segment`, then run the node's work after the commit
@@ -332,6 +334,7 @@ async def _commit_boundary(
         following=following,
         interrupt_id=interrupt_id,
         ctx=ctx,
+        lineage=lineage,
     )
     segment.cursor = written
     await _after_commit(ctx, node)
@@ -371,11 +374,13 @@ async def _write_boundary(
     following: str | None,
     interrupt_id: str,
     ctx: NodeCtx[Any],
+    lineage: SegmentLineage | None,
 ) -> Cursor:
     """The write that records `node`'s `result`: a pause under
     `interrupt_id`, the turn's end, or the move to `following`. A pause
     records the Stop the turn's `StopScope` took (`StopScope.taken`), which
-    ends that Stop."""
+    ends that Stop. A pause or move writes the frame lineage of the
+    segment's `lineage`."""
     if isinstance(result, Pause):
         ctx.transcript.append(
             entries.pause(
@@ -397,7 +402,7 @@ async def _write_boundary(
             state=ctx.state,
             records=ctx.transcript.take(),
             stop_taken_id=ctx.stop.taken,
-            lineage_scope=_lineage_scope(ctx.key),
+            lineage=lineage,
         )
     if following == END:
         return await store.finish(
@@ -415,7 +420,7 @@ async def _write_boundary(
         node_input=result.output,
         state=ctx.state,
         records=ctx.transcript.take(),
-        lineage_scope=_lineage_scope(ctx.key),
+        lineage=lineage,
     )
 
 
@@ -548,7 +553,8 @@ async def drive[E](
     turn goes on, and before its node runs, the lineage of each frame the
     turn names is brought into step with its rows, best effort
     (`TurnStore.restore_frame_lineage`), so an answer the turn refuses or a
-    turn that closes does not wait for that read.
+    turn that closes does not wait for that read. The restore's
+    `SegmentLineage` goes to each of the segment's pause and move writes.
 
     A write that fails for any reason but those `_NOT_THE_TURNS` names (a
     value JSON cannot hold, a database error) closes the turn `failed` at
@@ -606,7 +612,7 @@ async def drive[E](
     except _Closes as closing:
         return await close(closing.status, node, closing.error)
     cursor = segment.cursor
-    await _step(store.restore_frame_lineage(cursor, lineage_scope=_lineage_scope(key)))
+    lineage = await _step(store.restore_frame_lineage(cursor, lineage_scope=_lineage_scope(key)))
 
     while True:
         # The node works on a copy, so whatever it changes in place, the
@@ -676,6 +682,7 @@ async def drive[E](
                     interrupt_id=interrupt_id,
                     ctx=ctx,
                     segment=segment,
+                    lineage=lineage,
                 )
             )
         except _NOT_THE_TURNS:
