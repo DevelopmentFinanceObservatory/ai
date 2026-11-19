@@ -8,9 +8,8 @@ one place a composition changes: `_apply_operations` for the user's
 mutations, `_next_manifest` for every new revision.
 
 Every durable field of a conversation, everything but the identity field
-`conversation_id` and the process-local `lock`, `cancel_event`,
-`cancel_reason`, `switch_stop`, `_telemetry_span` and `_composition_ops`, lives in a
-per-conversation ADK "ledger" session, the same session service the runner
+`conversation_id` and the process-local fields `_PROCESS_LOCAL_FIELDS` names,
+lives in a per-conversation ADK "ledger" session, the same session service the runner
 already uses, keyed `(app_name, user_id=principal,
 session_id=conversation_id)`. Any instance can load a conversation's ledger
 and continue it; `StudioStore` keeps only runtime objects and each
@@ -47,8 +46,15 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from common.telemetry import end_turn_span, start_turn_span, use_turn_span
+from common.logging import JSON_FIELDS
+from common.telemetry import (
+    deploy_release,
+    record_turn_outcome,
+    start_telemetry_flush,
+    turn_segment,
+)
 from compiler.sources import alternative_definitions, source_from_spec_block
+from compiler.surface import SpecUse
 from data_mcp.definition_store.identity import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
 from executor.ledger import RunStatus
@@ -473,6 +479,50 @@ def _deserialize_segment(value: Any) -> Segment | None:
     )
 
 
+# The message, and the `event` field, of the log line `StudioStore` writes
+# for each turn close and each pause a ledger append commits.
+TURN_LOG_EVENT = "studio.turn"
+
+
+@dataclass
+class TurnUsage:
+    """Who asked the current turn and which specs it used, for its
+    `TURN_LOG_EVENT` line and its telemetry spans.
+
+    `caller` is the `conversation:` caller the harness's MCP clients send for
+    the conversation (`harness.conversation.current_conversation_caller`).
+    `account` is the website's digest of a signed-in account, `visitor` the
+    website's `ip:` caller, and `surface` the turn's `harness.wire.Surface`
+    value; each is `None` when the request named none. `fetched_specs` holds
+    each spec a foreground `get_data` call retrieved and `drawn_specs` each
+    spec a card drawn this turn rests on, once each, in the order first used
+    (`compiler.surface.current_spec_uses`). `trace_id` is the turn's
+    `ConversationState.trace_id`, so a stored usage naming another turn's
+    reads as unset (`_turn_usage`). `started_at` is when `begin_turn` began the
+    turn, as an ISO 8601 UTC timestamp, so a turn closed days later still
+    counts on the day it ran.
+    """
+
+    trace_id: str | None = None
+    started_at: str | None = None
+    caller: str | None = None
+    account: str | None = None
+    visitor: str | None = None
+    surface: str | None = None
+    fetched_specs: list[str] = field(default_factory=list)
+    drawn_specs: list[str] = field(default_factory=list)
+
+    @property
+    def user_id(self) -> str | None:
+        """The Langfuse user of the turn: the account, else the visitor."""
+        return self.account or self.visitor
+
+    @property
+    def tags(self) -> list[str]:
+        """The Langfuse tags of the turn: its surface, when it names one."""
+        return [self.surface] if self.surface else []
+
+
 @dataclass
 class ConversationState:
     """Wire bookkeeping for one (principal, conversation_id) pair."""
@@ -576,11 +626,8 @@ class ConversationState:
     # as `changed_from` for a choice that holds another label now.
     turn_choice_baseline: dict[str, str] = field(default_factory=dict)
     turn_recorded: bool = False
-    # The current turn's telemetry root span, opened by `begin_turn` on the
-    # freshly minted `trace_id`, kept open across a pause for approval, and
-    # closed by `close_turn`. Streams make it current with `in_turn_span`.
-    # Excluded from repr so a log of the state doesn't dump SDK internals.
-    _telemetry_span: Any = field(default=None, repr=False, compare=False)
+    # Who asked the current turn and the specs it used; set by `begin_turn`.
+    turn_usage: TurnUsage = field(default_factory=TurnUsage)
     # This turn's composition mutations, in order, each a pure function of
     # the manifest before it to the manifest after (`land_component`,
     # `_replace_block`). Not durable: replayed against a freshly reloaded
@@ -595,6 +642,10 @@ class ConversationState:
     # stream last reported one (`take_unreported_removal`). Not durable.
     # Reset by `begin_turn`.
     _removal_unreported: bool = field(default=False, repr=False, compare=False)
+    # Set while a Stop ends the running stream. `StudioRunner._locked` then
+    # closes the turn as `cancelled` once the stream's frames have unwound,
+    # before its release save. Not durable.
+    stopping: bool = field(default=False, repr=False, compare=False)
 
     def take_unreported_removal(self) -> bool:
         """Whether `remove_cards` changed the canvas since the last call: the
@@ -875,9 +926,13 @@ class ConversationState:
         basis_line: str | None = None,
     ) -> None:
         """Append the turn's record, once -- the resume protocol can end a
-        turn from more than one code path. The turn's telemetry span ends
-        with the user's message and the reply as its input and output, and
-        at level `ERROR` naming the `error` code when there is one.
+        turn from more than one code path. The record names the turn's
+        `trace_id` and its `usage` as they stand at the close, so the store, which
+        writes the turn's `TURN_LOG_EVENT` line and `turn` outcome once the
+        save that commits the record lands (`StudioStore`), names this turn
+        even after `begin_turn` has moved on. A record that cannot be built is
+        replaced by a minimal one (`turn`, `user`, `assistant`, `error`, the
+        close's own code or `abandoned`, `trace_id` and `usage`).
 
         `match_notes` (`harness.turn_records.loose_match_notes`) and
         `basis_line` (`harness.turn_records.basis_line`) are the text the code
@@ -887,15 +942,48 @@ class ConversationState:
         answer alone, and that model has no text of the code's own to copy."""
         if self.turn_recorded:
             return
+        record: dict[str, Any]
+        try:
+            record = self._turn_record(
+                final_text=final_text, error=error, match_notes=match_notes, basis_line=basis_line
+            )
+        except Exception as exc:
+            # A record that cannot be built must not leave the turn open, since
+            # every later turn would try to close it again and fail the same
+            # way. The minimal record names no sources.
+            error = error or "abandoned"
+            logger.warning(
+                "studio turn: the record of turn %d of conversation %s could not be built "
+                "(%s); a minimal record with error=%s is kept",
+                len(self.turns) + 1,
+                self.conversation_id,
+                type(exc).__name__,
+                error,
+                exc_info=True,
+            )
+            record = {
+                # The turn's number as the digest counts turns.
+                "turn": len(self.turns) + 1,
+                "user": self.turn_user_message,
+                "assistant": final_text,
+                "error": error,
+            }
+        record["trace_id"] = self.trace_id
+        record["usage"] = dataclasses.asdict(self.turn_usage)
+        self.turns.append(record)
+        # Only once a record is appended, the minimal one included.
         self.turn_recorded = True
-        appended = [text for text in (match_notes, basis_line) if text]
-        end_turn_span(
-            self._telemetry_span,
-            request=self.turn_user_message,
-            response="\n\n".join([final_text, *appended]) if appended else final_text,
-            error=error,
-        )
-        self._telemetry_span = None
+
+    def _turn_record(
+        self,
+        *,
+        final_text: str,
+        error: str | None,
+        match_notes: str | None,
+        basis_line: str | None,
+    ) -> dict[str, Any]:
+        """The turn's full record, which `close_turn` appends. May raise, on a
+        stored plan record that no longer validates, say."""
         record: dict[str, Any] = {
             "user": self.turn_user_message,
             "assistant": final_text,
@@ -948,7 +1036,27 @@ class ConversationState:
                 spec_id: recorded.model_dump(mode="json")
                 for spec_id, recorded in identities.items()
             }
-        self.turns.append(record)
+        return record
+
+    def take_identity(
+        self, *, account: str | None, visitor: str | None, caller: str | None
+    ) -> None:
+        """Fill in who asks the turn where it recorded no one: `caller` for a
+        turn with no caller, and `account` and `visitor` for a turn that names
+        neither, which the turn's later segments and its outcome observation
+        then name as their user (`TurnUsage.user_id`)."""
+        usage = self.turn_usage
+        if usage.caller is None:
+            usage.caller = caller
+        if usage.account is not None or usage.visitor is not None:
+            return
+        usage.account, usage.visitor = account, visitor
+
+    def note_spec_use(self, use: SpecUse, spec_id: str) -> None:
+        """Add `spec_id` to the turn's `fetched_specs` or `drawn_specs`, once."""
+        specs = self.turn_usage.fetched_specs if use == "fetched" else self.turn_usage.drawn_specs
+        if spec_id not in specs:
+            specs.append(spec_id)
 
     def recorded_identity(self, spec_id: str) -> RecordedIdentity | None:
         """The identity `spec_id` hashes from, as this turn or an earlier one
@@ -1040,9 +1148,9 @@ class ConversationState:
     @property
     def awaiting_answer(self) -> bool:
         """Whether the turn is paused on an interrupt that `/interrupt` can
-        still answer. A paused turn keeps its telemetry span open until the
-        resumed segment ends it, `/cancel` closes it, or the next `begin_turn`
-        abandons it. Excludes an entry already resuming under a segment: a
+        still answer. A paused turn stays open, with no span held, until the
+        resumed segment closes it, `/cancel` closes it, or the next
+        `begin_turn` abandons it. Excludes an entry already resuming under a segment: a
         disconnect mid-resume closes the turn as cancelled rather than
         looking paused for `/interrupt` to answer again."""
         return any(p.resuming_segment is None for p in self.pending.values())
@@ -1080,13 +1188,15 @@ class ConversationState:
         self.latest_plan_version = None
         self.turn_choice_baseline = {}
 
-    def begin_turn(self) -> None:
+    def begin_turn(self, usage: TurnUsage | None = None) -> None:
         """Reset per-turn wire state. Abandons any pending interrupt: a fresh
         turn.request on a paused conversation ends the pause, and the paused
-        ADK invocation stays parked in its own per-turn session."""
+        ADK invocation stays parked in its own per-turn session. `usage`
+        names who asks the new turn, which the previous turn's record, if it
+        is closed here, does not take. That record rides the new turn's
+        claim save, whose commit writes its line (`StudioStore`)."""
         self.turn_index += 1
         self.seq = 0
-        self.trace_id = _wire_id("tr")
         self.pending.clear()
         self.start_plan_lineage()
         self._composition_ops = []
@@ -1094,8 +1204,10 @@ class ConversationState:
         if self.turn_index > 1 and not self.turn_recorded:
             # The previous turn never reached a terminal frame (an abandoned
             # pause, or a death no code path recorded). Its record keeps
-            # what was asked, with the error marked as abandoned.
+            # what was asked, with the error marked as abandoned. It closes
+            # before the new trace id is minted, so it names its own.
             self.close_turn(final_text=self.turn_final_text, error="abandoned")
+        self.trace_id = _wire_id("tr")
         self.turn_user_message = ""
         self.turn_user_words = ""
         self.turn_final_text = ""
@@ -1105,26 +1217,24 @@ class ConversationState:
         self.turn_specs = {}
         self.turn_applied_choice = None
         self.turn_recorded = False
-        self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
+        self.turn_usage = usage if usage is not None else TurnUsage()
+        self.turn_usage.trace_id = self.trace_id
+        self.turn_usage.started_at = datetime.now(UTC).isoformat()
 
-    def ensure_turn_span(self) -> None:
-        """Open a turn span on this conversation's `trace_id` when it holds
-        none. `begin_turn` opens the span for the instance that starts a
-        turn; an instance that resumes a paused turn through `/interrupt`
-        after loading it fresh from the ledger holds no span, since
-        `_telemetry_span` is process-local and never persists, so the
-        resumed segment would otherwise export on no trace. A no-op once
-        the instance already holds a span."""
-        if self._telemetry_span is None:
-            self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
-
-    def in_turn_span(self) -> AbstractContextManager[None]:
-        """Make this turn's telemetry span current for a `with` block. Every
-        stream that runs graph or executor work for the turn (the `/turn`
-        stream and the `/interrupt` stream that resumes it) enters this, so
-        their spans and events share the one `turn` span and its trace. A
-        no-op when telemetry is off or the turn's span has closed."""
-        return use_turn_span(self._telemetry_span)
+    def segment_span(self) -> AbstractContextManager[None]:
+        """Run a `with` block inside one `turn.segment` span on this turn's
+        trace (`common.telemetry.turn_segment`), opened on entry and ended on
+        exit. Every stream that runs graph or executor work for the turn (the
+        `/turn` stream and each `/interrupt` stream that resumes it, on any
+        instance) enters its own, so their spans and events share the turn's
+        trace and no span outlives its request. A no-op when telemetry is
+        off."""
+        return turn_segment(
+            self.trace_id,
+            session_id=self.conversation_id,
+            user_id=self.turn_usage.user_id,
+            tags=self.turn_usage.tags,
+        )
 
     def next_seq(self) -> int:
         value = self.seq
@@ -1160,6 +1270,7 @@ _KEY_TURN_PLANS = "studio:turn_plans"
 _KEY_TURN_READINGS = "studio:turn_readings"
 _KEY_TURN_APPLIED_CHOICE = "studio:turn_applied_choice"
 _KEY_TURN_CHOICE_BASELINE = "studio:turn_choice_baseline"
+_KEY_TURN_USAGE = "studio:turn_usage"
 
 # `StudioStore.checkpoint`'s fetch-merge-append cycles, capping how long a
 # conversation under sustained contention retries before it raises.
@@ -1237,8 +1348,10 @@ _RUN_ITEM_PREFIXES = (
 # `StudioStore.append_run_items`' fetch-fence-append cycles.
 _RUN_ITEMS_RETRY_ATTEMPTS = 3
 
-# Identity, the six process-local runtime objects, and the turn's spec
-# blocks (`turn_specs`, read back from the turn's own ADK session by
+# Identity, the process-local runtime objects (the lock, the cancel and
+# switch-stop state, the pending composition ops and removal flag, and the
+# Stop flag), and the turn's spec blocks
+# (`turn_specs`, read back from the turn's own ADK session by
 # `StudioStore.load`), which `_serialize_durable`/`_apply_delta` skip.
 _PROCESS_LOCAL_FIELDS = frozenset(
     {
@@ -1247,9 +1360,9 @@ _PROCESS_LOCAL_FIELDS = frozenset(
         "cancel_event",
         "cancel_reason",
         "switch_stop",
-        "_telemetry_span",
         "_composition_ops",
         "_removal_unreported",
+        "stopping",
         "turn_specs",
     }
 )
@@ -1401,6 +1514,7 @@ def _serialize_durable(state: ConversationState) -> dict[str, Any]:
         _KEY_TURN_READINGS: state.turn_readings,
         _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
         _KEY_TURN_CHOICE_BASELINE: state.turn_choice_baseline,
+        _KEY_TURN_USAGE: dataclasses.asdict(state.turn_usage),
     }
     for index, turn in enumerate(state.turns):
         data[f"{_TURN_ITEM_PREFIX}{index:04d}"] = turn
@@ -1470,6 +1584,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_applied_choice = dict(value) if value else None
         elif key == _KEY_TURN_CHOICE_BASELINE:
             state.turn_choice_baseline = dict(value or {})
+        elif key == _KEY_TURN_USAGE:
+            pass  # after the loop, once `trace_id` holds its value from this delta
         elif key.startswith(_TURN_ITEM_PREFIX):
             _set_list_item(state.turns, int(key.removeprefix(_TURN_ITEM_PREFIX)), value)
         elif key.startswith(_COMPONENT_ITEM_PREFIX):
@@ -1483,6 +1599,171 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             pass  # the run ledger's, read through `StudioStore.run_items`
         else:
             logger.warning("studio ledger: ignoring unknown state key %r", key)
+    if _KEY_TURN_USAGE in delta:
+        state.turn_usage = _turn_usage(delta[_KEY_TURN_USAGE], trace_id=state.trace_id)
+    elif state.turn_usage.trace_id != state.trace_id:
+        # A ledger written before turns kept a usage, or a delta that moved
+        # the trace id alone, leaves the turn an empty usage of its own, which
+        # `take_identity` and `note_spec_use` can fill and a save keeps.
+        state.turn_usage = TurnUsage(trace_id=state.trace_id)
+
+
+def _turn_usage(value: Any, *, trace_id: str | None) -> TurnUsage:
+    """The `TurnUsage` of the turn `trace_id` a ledger's `studio:turn_usage`
+    holds. A value that is not an object, or names another turn's trace id,
+    reads as unset, as a member of the wrong type does. An instance that
+    writes no usage leaves an earlier turn's in the ledger."""
+    stored = value if isinstance(value, dict) else {}
+    if stored.get("trace_id") != trace_id:
+        stored = {}
+
+    def text(key: str) -> str | None:
+        item = stored.get(key)
+        return item if isinstance(item, str) else None
+
+    def specs(key: str) -> list[str]:
+        items = stored.get(key)
+        return [item for item in items if isinstance(item, str)] if isinstance(items, list) else []
+
+    return TurnUsage(
+        trace_id=trace_id,
+        started_at=text("started_at"),
+        caller=text("caller"),
+        account=text("account"),
+        visitor=text("visitor"),
+        surface=text("surface"),
+        fetched_specs=specs("fetched_specs"),
+        drawn_specs=specs("drawn_specs"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _TurnLine:
+    """One `TURN_LOG_EVENT` line and `turn` outcome: a turn's close
+    (`status` `closed`) or a pause of it for the user (`paused`)."""
+
+    status: Literal["closed", "paused"]
+    trace_id: str
+    usage: TurnUsage
+    request: str
+    response: str
+    error: str | None = None
+
+
+def _closed_line(record: dict[str, Any]) -> _TurnLine:
+    """The line of the turn whose record is `record`
+    (`ConversationState.close_turn`): its reply is the answer with the code's
+    match notes and basis line after it."""
+    stored = record.get("usage")
+    stored = stored if isinstance(stored, dict) else {}
+    appended = [record[key] for key in ("match_notes", "basis_line") if record.get(key)]
+    return _TurnLine(
+        status="closed",
+        trace_id=str(record.get("trace_id")),
+        usage=_turn_usage(stored, trace_id=stored.get("trace_id")),
+        request=record["user"],
+        response="\n\n".join([record["assistant"], *appended]),
+        error=record.get("error"),
+    )
+
+
+def _paused_line(state: ConversationState) -> _TurnLine:
+    """The line of `state`'s open turn, paused for the user, with the text it
+    streamed so far as its reply."""
+    usage = state.turn_usage
+    return _TurnLine(
+        status="paused",
+        trace_id=state.trace_id,
+        usage=_turn_usage(dataclasses.asdict(usage), trace_id=usage.trace_id),
+        request=state.turn_user_message,
+        response=state.turn_final_text,
+    )
+
+
+def _committed_lines(
+    delta: dict[str, Any], *, ledger: Mapping[str, Any], state: ConversationState
+) -> list[_TurnLine]:
+    """The lines a ledger append of `delta` onto `ledger` commits: one for
+    each turn record it adds, and one for a pause when it adds an interrupt
+    the turn waits on (`ConversationState.pending`) and the turn stays open.
+    A turn closed in the same append as its last pause writes its close
+    alone."""
+    lines = [_closed_line(delta[key]) for key in sorted(delta) if key.startswith(_TURN_ITEM_PREFIX)]
+    if _KEY_PENDING in delta and not state.turn_recorded:
+        added = set(delta[_KEY_PENDING] or {}) - set(ledger.get(_KEY_PENDING) or {})
+        if added:
+            lines.append(_paused_line(state))
+    return lines
+
+
+def _keep_ledger_turns(
+    delta: dict[str, Any], *, ledger: Mapping[str, Any], conversation_id: str
+) -> dict[str, Any]:
+    """The turn records of `delta` that would overwrite one `ledger` holds,
+    taken out of `delta` and returned. A turn record commits once, so its
+    line is written once."""
+    held = {
+        key: ledger[key] for key in delta if key.startswith(_TURN_ITEM_PREFIX) and key in ledger
+    }
+    for key in held:
+        del delta[key]
+    if held:
+        logger.warning(
+            "studio ledger: conversation %s already holds turn records %s; the ledger's are kept",
+            conversation_id,
+            sorted(held),
+        )
+    return held
+
+
+def _write_turn_line(conversation_id: str, line: _TurnLine) -> None:
+    """Write `line`: its `TURN_LOG_EVENT` log line, with the turn's identity,
+    status, when it began, the deployed revision, its error code, and the
+    specs it fetched and drew, as JSON fields (`common.logging.JSON_FIELDS`)
+    and in the message. It then writes the line's `turn` outcome observation
+    (`common.telemetry.record_turn_outcome`)."""
+    usage = line.usage
+    release = deploy_release()
+    logger.info(
+        "%s trace_id=%s status=%s caller=%s account=%s visitor=%s release=%s error=%s "
+        "fetched_specs=%d drawn_specs=%d",
+        TURN_LOG_EVENT,
+        line.trace_id,
+        line.status,
+        usage.caller,
+        usage.account,
+        usage.visitor,
+        release,
+        line.error,
+        len(usage.fetched_specs),
+        len(usage.drawn_specs),
+        extra={
+            JSON_FIELDS: {
+                "event": TURN_LOG_EVENT,
+                "trace_id": line.trace_id,
+                "status": line.status,
+                "started_at": usage.started_at,
+                "caller": usage.caller,
+                "account": usage.account,
+                "visitor": usage.visitor,
+                "surface": usage.surface,
+                "release": release,
+                "error": line.error,
+                "fetched_specs": list(usage.fetched_specs),
+                "drawn_specs": list(usage.drawn_specs),
+            }
+        },
+    )
+    record_turn_outcome(
+        line.trace_id,
+        session_id=conversation_id,
+        user_id=usage.user_id,
+        tags=usage.tags,
+        request=line.request,
+        response=line.response,
+        error=line.error,
+        paused=line.status == "paused",
+    )
 
 
 def _deserialize_durable(conversation_id: str, ledger_state: dict[str, Any]) -> ConversationState:
@@ -1507,8 +1788,8 @@ class _RuntimeEntry:
     so a `StaleSessionError` means another instance, or this conversation's
     lock-free `/composition` route, wrote first. `state` is the
     `ConversationState` this instance keeps live between requests; `load`
-    refreshes its durable fields in place, so `lock`, `cancel_event` and
-    `_telemetry_span` keep their identity across a reload. `baseline` is
+    refreshes its durable fields in place, so `lock` and `cancel_event`
+    keep their identity across a reload. `baseline` is
     the last full durable snapshot known to be in the ledger, the reference
     a save diffs against for a delta-only append. `composition_lock`
     serializes same-instance `/composition` calls on the shared `state`
@@ -1648,6 +1929,7 @@ class StudioStore:
             return None
         entry.session = session
         durable = _deserialize_durable(conversation_id, session.state)
+        held = entry.state.turn_usage if entry.state is not None else None
         if entry.state is None:
             durable.lock = entry.lock
             entry.state = durable
@@ -1656,22 +1938,35 @@ class StudioStore:
                 if f.name not in _PROCESS_LOCAL_FIELDS:
                     setattr(entry.state, f.name, getattr(durable, f.name))
         entry.baseline = _serialize_durable(entry.state)
+        if held is not None and held.trace_id == entry.state.trace_id:
+            # Specs the turn noted after its last save, during a pause, say,
+            # are this process's alone. A turn this instance holds keeps them.
+            for spec_id in held.fetched_specs:
+                entry.state.note_spec_use("fetched", spec_id)
+            for spec_id in held.drawn_specs:
+                entry.state.note_spec_use("drawn", spec_id)
         if entry.state.turn_index and not entry.state.turn_recorded:
-            entry.state.turn_specs = await self._turn_specs(principal, entry.state.session_id)
+            turn_state = await self._turn_session_state(principal, entry.state.session_id)
+            entry.state.turn_specs = dict(turn_state.get(ORCHESTRATOR_SPECS_KEY) or {})
+            usage = entry.state.turn_usage
+            if usage.surface is None and isinstance(surface := turn_state.get("surface"), str):
+                # A turn whose ledger recorded no usage still names the
+                # surface it was asked from in its own session.
+                usage.surface = surface
         return entry.state
 
-    async def _turn_specs(self, principal: str, session_id: str) -> dict[str, Any]:
-        """The spec blocks the open turn's own ADK session holds
+    async def _turn_session_state(self, principal: str, session_id: str) -> dict[str, Any]:
+        """The state the open turn's own ADK session holds: the spec blocks
         (`ORCHESTRATOR_SPECS_KEY`), for `ConversationState.close_turn` to keep
-        those of the sources its plans used. Empty when the session holds
-        none or does not exist yet."""
+        those of the sources its plans used, and the turn's `surface`. Empty
+        when the session does not exist yet."""
         session = await self._session_service.get_session(
             app_name=self._turn_app_name,
             user_id=principal,
             session_id=session_id,
             config=GetSessionConfig(num_recent_events=0),
         )
-        return dict((session.state.get(ORCHESTRATOR_SPECS_KEY) or {}) if session else {})
+        return dict(session.state) if session else {}
 
     def claim_segment(self, principal: str, conversation_id: str) -> str:
         """Claim a fresh segment on the LIVE state already loaded on this
@@ -1707,20 +2002,65 @@ class StudioStore:
         into its delta, the `_composition_ops` recorded for it are
         consumed (by prefix, since more may accumulate while this call
         awaits the append) once the append lands.
+
+        The append writes the line of each turn close and pause it commits
+        (`_append_committing`), and the save then starts the export of their
+        outcomes without waiting for it (`start_telemetry_flush`), so a claim
+        save adds no export time before its stream's first frame. A route that
+        ends with no stream awaits `flush_telemetry` itself. A turn record the
+        ledger already holds is never overwritten, and the ledger's is kept in
+        `entry.state` too.
         """
         entry = self._runtime[(principal, conversation_id)]
         assert entry.session is not None and entry.state is not None
         async with entry.write_lock:
             full = _serialize_durable(entry.state)
             delta = _changed_since(full, entry.baseline)
+            held = _keep_ledger_turns(
+                delta, ledger=entry.session.state, conversation_id=conversation_id
+            )
+            if held:
+                _apply_delta(entry.state, held)
+                entry.baseline.update(held)
             if not delta:
                 return
             ops_folded = len(entry.state._composition_ops) if _KEY_COMPOSITION in delta else 0
-            event = Event(author="studio", actions=EventActions(state_delta=delta))
-            await self._session_service.append_event(entry.session, event)
+            wrote = await self._append_committing(
+                entry.session, delta, conversation_id=conversation_id, state=entry.state
+            )
             entry.baseline.update(delta)
             if ops_folded:
                 del entry.state._composition_ops[:ops_folded]
+        if wrote:
+            start_telemetry_flush()
+
+    async def _append_committing(
+        self,
+        session: Session,
+        delta: dict[str, Any],
+        *,
+        conversation_id: str,
+        state: ConversationState,
+    ) -> bool:
+        """Append `delta` to `session`, then write the `TURN_LOG_EVENT` line
+        and `turn` outcome of each turn close and pause the append committed
+        (`_committed_lines`), and say whether it wrote any. The lines are read
+        before the append, off the state `delta` was taken from, and written
+        with no await after it lands. Both run in one task to the end
+        (`_run_to_completion`), so a cancel of the caller cannot land the
+        append without its lines. An append that raises writes none. A stale
+        one committed nothing, and the next turn closes a turn left open as
+        `abandoned`."""
+        lines = _committed_lines(delta, ledger=session.state, state=state)
+
+        async def append() -> None:
+            event = Event(author="studio", actions=EventActions(state_delta=delta))
+            await self._session_service.append_event(session, event)
+            for line in lines:
+                _write_turn_line(conversation_id, line)
+
+        await _run_to_completion(append())
+        return bool(lines)
 
     async def mutate_composition(
         self,
@@ -1937,6 +2277,11 @@ class StudioStore:
         the ops folded into it are consumed by prefix. More may have
         accumulated meanwhile, and those stay for the next checkpoint.
 
+        The append writes the line of each turn close and pause it commits
+        (`_append_committing`), and the stream that runs the checkpoint exports
+        their outcomes as it ends. A turn record the ledger already holds is
+        never overwritten, and the ledger's is kept.
+
         Retries `_CHECKPOINT_RETRY_ATTEMPTS` times on `StaleSessionError`
         (re-fencing and re-fetching each time); a retry that stays stale
         re-raises the last one.
@@ -1958,6 +2303,7 @@ class StudioStore:
                     )
                 original_baseline = entry.baseline
                 changed = _changed_since(_serialize_durable(entry.state), original_baseline)
+                _keep_ledger_turns(changed, ledger=session.state, conversation_id=conversation_id)
                 ops = list(entry.state._composition_ops)
                 ops_folded = len(ops)
                 reloaded = _deserialize_durable(conversation_id, session.state)
@@ -1998,9 +2344,10 @@ class StudioStore:
                     entry.state,
                     {key: value for key, value in changed.items() if key != _KEY_COMPOSITION},
                 )
-                event = Event(author="studio", actions=EventActions(state_delta=changed))
                 try:
-                    await self._session_service.append_event(session, event)
+                    await self._append_committing(
+                        session, changed, conversation_id=conversation_id, state=entry.state
+                    )
                 except StaleSessionError as exc:
                     last_error = exc
                     continue
