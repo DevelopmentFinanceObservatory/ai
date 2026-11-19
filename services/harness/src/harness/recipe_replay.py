@@ -87,6 +87,7 @@ from analysis_mcp.identity import (
     op_spec_hash_for,
 )
 from analysis_mcp.op_spec import OpSpecAdapter
+from common.caller import shared_work_context
 from common.live_apis import FramePair, LiveApisClient, LiveApisError
 from common.materialisation import (
     FrameExpired,
@@ -622,7 +623,11 @@ class _Replay:
             return self.root_frames[node["root"]]
         key = rfc8785.dumps(node).decode()
         if key not in self._nodes:
-            self._nodes[key] = asyncio.create_task(self._derived(node))
+            # Every slot reaching the node joins this task, so its in-process
+            # dfo-apis calls name no supplied caller or turn.
+            self._nodes[key] = asyncio.create_task(
+                self._derived(node), context=shared_work_context()
+            )
         return await self._nodes[key]
 
     async def _derived(self, node: Mapping[str, Any]) -> _Frame:

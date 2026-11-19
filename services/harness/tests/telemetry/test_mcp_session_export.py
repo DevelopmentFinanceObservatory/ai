@@ -118,7 +118,9 @@ async def composed_app(
     own clients' transports pointed at it in process."""
     app = create_app(settings=Settings(mcp_api_token=TOKEN))
 
-    def transport(url: str, *, caller: str | None, auth: str | None) -> StreamableHttpTransport:
+    def transport(
+        url: str, *, caller: str | None, auth: str | None, turn: str | None = None
+    ) -> StreamableHttpTransport:
         parts = urllib.parse.urlparse(url)
         return _asgi_transport(app, parts.path, caller=caller, host=parts.hostname or "")
 

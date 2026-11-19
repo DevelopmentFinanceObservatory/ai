@@ -364,16 +364,17 @@ class _ExternalCallBudget(Middleware):
 
 class _RequestLog(Middleware):
     """Runs each tool call, resource read and resource listing in a recorded span,
-    and logs one line for it: the tool, the outcome, the protocol revision, the caller, the trace
-    id, the user agent, and the host fields. Logs one line for each initialize request
-    too, with the same fields.
+    and logs one line for it: the tool, the outcome, the protocol revision, the
+    caller, the trace id, the user agent, and the host fields. Logs one line for
+    each initialize request too, with the same fields.
 
-    `user_agent` is the request's whole `User-Agent` (`common.caller.current_user_agent`,
-    cut to 256 characters), as a JSON string, or `None`. Every request
-    carries it, so it names the client on the calls of a stateless session that
-    log no `clientInfo`; the initialize line pairs it with `clientInfo`. It is the last field
-    on both lines, because the log parser in dfo-infra matches `client=` straight after the
-    caller and absorbs everything after `client_version=` as a tail.
+    `user_agent` is the request's whole `User-Agent`
+    (`common.caller.current_user_agent`, cut to 256 characters), as a JSON
+    string, or `None`. Every request carries it, so it names the client on the
+    calls of a stateless session that log no `clientInfo`. The initialize line
+    pairs it with `clientInfo`. It is the last field on both lines, because the
+    log parser in dfo-infra matches `client=` straight after the caller and
+    absorbs everything after `client_version=` as a tail.
 
     The host fields name the client (`clientInfo`'s name and version) and say
     what it declared about drawing MCP Apps views. `views` is

@@ -1,23 +1,33 @@
-"""One held MCP `Client` per caller, and the transport that names the caller.
+"""One held MCP `Client` per caller and turn, and the transport that names them.
 
 Every MCP call the harness makes carries its caller in the `x-dfo-caller`
 header (`common.caller`): `conversation:<digest>` for a call made inside a
-studio conversation, none outside one. A header is fixed when the transport
-is built, so a client belongs to one caller. `CallerClients` holds one
-client per caller and is the one registry both call paths use:
+studio conversation, none outside one. A call made inside a Studio turn also
+carries the turn's wire trace id in the `x-dfo-turn` header, which the MCP
+servers forward to dfo-apis (`common.caller.vouched_caller_headers`). A header
+is fixed when the transport is built, so a client belongs to one caller and
+one turn (`CallerTurn`): a client kept into the next turn would name the
+turn before it on every call. `CallerClients` holds one client per caller
+and turn and is the one registry both call paths use:
 `harness.mcp_client` (`search`, `get_data`, `describe` and the presentation
 tools) and `compiler.surface.McpSurface` (the analysis verbs and the
 translator's discovery calls). This module lives in `compiler` because
 `harness` imports `compiler` and not the reverse; which caller is current is
 a function the harness passes in.
 
-A held client for a whole conversation is the reuse `fastmcp.Client` is
-built for (its docstring: "efficient session reuse in any scenario with
-nested or concurrent client usage"), and it saves the connect round trips a
-fresh client pays on every call.
+A held client for a whole turn is the reuse `fastmcp.Client` is built for
+(its docstring: "efficient session reuse in any scenario with nested or
+concurrent client usage"), and it saves the connect round trips a fresh
+client pays on every call. A turn pays one connect per server it calls.
 
-Nothing in this process observes a conversation ending, so the registry is
-an LRU bounded at `MAX_CALLERS` held clients, the same bound
+The registry tracks each caller's latest turn: the newest turn `get()` has
+seen for it, among the last `RECENT_TURNS`. A turn id is random, so the order
+`get()` first sees turns in is the only order there is. The latest turn's
+connect retires the caller's clients of older turns. A connect for an older
+turn, such as an early mint the turn before queued and sent late, retires
+nothing, so it never cuts the latest turn's client. Nothing in this process
+observes a conversation ending, so the registry is also an LRU bounded at
+`MAX_CALLERS` held clients, the same bound
 `harness.provenance.ProvenanceStore` puts on its conversation buckets.
 
 ADK can dispatch a turn's tool calls concurrently, so two calls can be in
@@ -34,10 +44,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Callable
+from typing import NamedTuple
 
-from common.caller import CALLER_HEADER
+from common.caller import CALLER_HEADER, TURN_HEADER
 from common.mcp_telemetry import is_loopback_url
 from common.telemetry import turn_call_meta
 from fastmcp import Client
@@ -47,14 +58,36 @@ logger = logging.getLogger(__name__)
 
 MAX_CALLERS = 256
 
+# The turns a caller's order is kept for. A call from a turn older than these
+# counts as a new turn. An early mint is withdrawn once its card is approved or
+# replaced, so none outlives one later turn, let alone this many.
+RECENT_TURNS = 8
 
-def caller_transport(url: str, *, caller: str | None, auth: str | None) -> StreamableHttpTransport:
-    """A streamable-HTTP transport to `url` that sends `caller` on every request.
+
+class CallerTurn(NamedTuple):
+    """Whom an MCP call is made for: the caller, and the Studio turn it serves.
+
+    `caller=None` is a call outside any conversation. `turn=None` is a call
+    outside any Studio turn.
+    """
+
+    caller: str | None
+    turn: str | None = None
+
+
+def caller_transport(
+    url: str, *, caller: str | None, auth: str | None, turn: str | None = None
+) -> StreamableHttpTransport:
+    """A streamable-HTTP transport to `url` that sends `caller` and `turn` on
+    every request.
 
     `caller=None` sends no `x-dfo-caller` header, which the server reads as
-    no caller. `auth` is the bearer token, `None` when the gate is disabled.
+    no caller, and `turn=None` no `x-dfo-turn` header. `auth` is the bearer
+    token, `None` when the gate is disabled.
     """
     headers = {CALLER_HEADER: caller} if caller is not None else {}
+    if turn is not None:
+        headers[TURN_HEADER] = turn
     return StreamableHttpTransport(url, headers=headers, auth=auth)
 
 
@@ -75,7 +108,8 @@ def session_call_meta(client: Client) -> dict[str, str]:
 
 
 class _HeldClient:
-    """One caller's held client and the bookkeeping that guards its teardown.
+    """One caller and turn's held client and the bookkeeping that guards its
+    teardown.
 
     `in_flight` counts the calls between `CallerClients.get` and
     `CallerClients.release` on this client; while it is above zero nothing
@@ -85,7 +119,7 @@ class _HeldClient:
 
     __slots__ = ("caller", "client", "discarded", "in_flight")
 
-    def __init__(self, client: Client, *, caller: str | None) -> None:
+    def __init__(self, client: Client, *, caller: CallerTurn) -> None:
         self.client = client
         self.caller = caller
         self.in_flight = 0
@@ -93,27 +127,31 @@ class _HeldClient:
 
 
 class CallerClients:
-    """One connected `Client` per caller, opened on first use and held until
-    `aclose` or LRU eviction.
+    """One connected `Client` per caller and turn, opened on first use and held
+    until a later turn of the caller connects, `aclose`, or LRU eviction.
 
-    `factory` builds the client for a caller; it runs at most once per
-    caller while that caller's client is held. `caller` returns the current
-    caller, and is read on every `get()`.
+    `factory` builds the client for a `CallerTurn`; it runs at most once per
+    caller and turn while that client is held. `caller` returns the current
+    `CallerTurn`, and is read on every `get()`.
     """
 
     def __init__(
-        self, factory: Callable[[str | None], Client], *, caller: Callable[[], str | None]
+        self, factory: Callable[[CallerTurn], Client], *, caller: Callable[[], CallerTurn]
     ) -> None:
         self._factory = factory
         self._caller = caller
         # Least recently used first; `get()` moves a caller to the end.
-        self._clients: OrderedDict[str | None, _HeldClient] = OrderedDict()
-        # The connect in progress for each caller that has no held client yet.
-        self._connecting: dict[str | None, asyncio.Task[None]] = {}
+        self._clients: OrderedDict[CallerTurn, _HeldClient] = OrderedDict()
+        # The connect in progress for each caller and turn that has no held
+        # client yet.
+        self._connecting: dict[CallerTurn, asyncio.Task[None]] = {}
         # A held client stays here, keyed by `id(client)`, after `discard()`
         # or eviction removes it from `_clients`, so a straggling `release()`
         # still finds it even when its caller already holds a fresh client.
         self._by_client_id: dict[int, _HeldClient] = {}
+        # Each caller's last `RECENT_TURNS` turns in the order `get()` first saw
+        # them, the latest last; least recently used caller first.
+        self._turns: OrderedDict[str | None, deque[str | None]] = OrderedDict()
         self._lock = asyncio.Lock()
 
     async def get(self) -> Client:
@@ -126,6 +164,8 @@ class CallerClients:
         `get()` tries again.
         """
         caller = self._caller()
+        async with self._lock:
+            self._note_turn_locked(caller)
         while True:
             async with self._lock:
                 held = self._clients.get(caller)
@@ -143,11 +183,33 @@ class CallerClients:
             # discarded in between.
             await asyncio.shield(connecting)
 
-    async def _connect(self, caller: str | None) -> None:
+    def _note_turn_locked(self, caller: CallerTurn) -> None:
+        """Record `caller.turn` as its caller's latest turn when it is one the
+        caller's recent turns do not hold. Runs with `_lock` held."""
+        turns = self._turns.get(caller.caller)
+        if turns is None:
+            turns = self._turns[caller.caller] = deque(maxlen=RECENT_TURNS)
+        self._turns.move_to_end(caller.caller)
+        if caller.turn not in turns:
+            turns.append(caller.turn)
+        while len(self._turns) > MAX_CALLERS:
+            self._turns.popitem(last=False)
+
+    def _is_latest_locked(self, caller: CallerTurn) -> bool:
+        """Whether `caller.turn` is its caller's latest turn. A caller whose turns
+        were dropped past `MAX_CALLERS` counts its turn as latest. Runs with
+        `_lock` held."""
+        turns = self._turns.get(caller.caller)
+        return not turns or turns[-1] == caller.turn
+
+    async def _connect(self, caller: CallerTurn) -> None:
         """Connect `caller`'s client and hold it, evicting past `MAX_CALLERS`.
+        When `caller.turn` is its caller's latest turn, the caller's clients of
+        older turns are retired.
 
         The client becomes held in the same step that retires the connect,
-        so a waiter always finds one or the other.
+        so a waiter always finds one or the other. A retired client is
+        disconnected once its last in-flight call releases it.
         """
         try:
             client = self._factory(caller)
@@ -161,6 +223,15 @@ class CallerClients:
             held = _HeldClient(client, caller=caller)
             self._clients[caller] = held
             self._by_client_id[id(client)] = held
+            superseded = (
+                [key for key in self._clients if key.caller == caller.caller and key != caller]
+                if self._is_latest_locked(caller)
+                else []
+            )
+            for key in superseded:
+                retired = self._clients.pop(key)
+                if self._mark_discarded_locked(retired):
+                    to_disconnect.append(retired)
             while len(self._clients) > MAX_CALLERS:
                 evicted_caller, evicted = self._clients.popitem(last=False)
                 logger.warning(

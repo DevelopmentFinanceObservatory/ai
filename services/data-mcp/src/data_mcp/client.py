@@ -271,8 +271,9 @@ class UpstreamClient:
         For an `ip:` caller the website named, they are `x-dfo-caller-principal`,
         `x-dfo-caller`, `x-dfo-surface: mcp`, and `x-dfo-user-agent`, the whole
         User-Agent clipped to 256 characters. For a harness `conversation:`
-        caller they are the principal and the caller alone. Empty otherwise, and
-        dfo-apis counts the call against this service.
+        caller they are the principal, the caller, and the Studio turn's id as
+        `x-dfo-turn` when the harness names one. Empty otherwise, and dfo-apis
+        counts the call against this service.
         """
         return vouched_caller_headers(self._caller_principal)
 

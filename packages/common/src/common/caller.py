@@ -14,7 +14,15 @@ revision a server builds a connection per request, so FastMCP's
 `current_caller` reads the header from `fastmcp.server.dependencies.
 get_http_request`, and finds no caller outside an HTTP request. An in-memory
 client carries no headers at all, so `supplied_caller` stands in for the
-header in tests that drive a server that way.
+header in tests that drive a server that way. `set_supplied_caller` names
+the caller for code that calls dfo-apis outside any MCP request.
+
+A Studio turn also names itself, in the `x-dfo-turn` header: the turn's wire
+trace id, `tr_` and 16 hex characters. `current_turn` reads it as
+`current_caller` reads the caller, and `set_supplied_turn` stands in for it
+outside any MCP request. `vouched_caller_headers` forwards it to dfo-apis
+beside a `conversation:` caller, so dfo-apis logs each delivery with the turn
+that caused it.
 """
 
 from __future__ import annotations
@@ -23,7 +31,7 @@ import hashlib
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import Context, ContextVar, copy_context
 
 CALLER_HEADER = "x-dfo-caller"
 
@@ -31,6 +39,13 @@ CALLER_HEADER = "x-dfo-caller"
 # dfo-apis shares with its first-party callers, which vouches for the caller it
 # names (`dfo_platform.caller.resolve_caller`).
 CALLER_PRINCIPAL_HEADER = "x-dfo-caller-principal"
+
+# Sent beside `CALLER_HEADER` for a `CONVERSATION_CALLER`: the Studio turn the
+# call serves, by its wire trace id (`current_turn`).
+TURN_HEADER = "x-dfo-turn"
+
+# The form of a turn id: the trace id `harness.studio_state` mints per turn.
+TURN = re.compile(r"tr_[0-9a-f]{16}")
 
 # The form of a caller the website named by its client's address.
 ADDRESS_CALLER = re.compile(r"ip:[0-9a-f]{32}")
@@ -67,6 +82,7 @@ _CONVERSATION_DIGEST_CHARS = 32
 ANONYMOUS_WRITER = "anonymous"
 
 _supplied: ContextVar[str | None] = ContextVar("supplied_caller", default=None)
+_supplied_turn: ContextVar[str | None] = ContextVar("supplied_turn", default=None)
 
 
 def current_caller() -> str | None:
@@ -93,6 +109,27 @@ def current_caller() -> str | None:
         return None
     caller = values[0].strip()
     return caller if 0 < len(caller) <= MAX_CALLER_CHARS else None
+
+
+def current_turn() -> str | None:
+    """The Studio turn the current MCP request serves, or `None` when it names none.
+
+    A turn set with `set_supplied_turn` wins over the header. Either counts only
+    in the `TURN` form, and a repeated header counts as none, so the value is
+    always a valid header value.
+    """
+    turn = _supplied_turn.get()
+    if turn is None:
+        from fastmcp.server.dependencies import get_http_request  # noqa: PLC0415
+
+        try:
+            values = get_http_request().headers.getlist(TURN_HEADER)
+        except RuntimeError:  # no HTTP request in flight
+            return None
+        if len(values) != 1:
+            return None
+        turn = values[0].strip()
+    return turn if TURN.fullmatch(turn) else None
 
 
 def current_user_agent() -> str | None:
@@ -123,10 +160,11 @@ def vouched_caller_headers(principal: str | None) -> dict[str, str]:
     `CALLER_PRINCIPAL_HEADER`, `CALLER_HEADER`, `SURFACE_HEADER` as
     `MCP_SURFACE`, and `USER_AGENT_HEADER` when `current_user_agent` finds one.
     dfo-apis counts that client's allowance. For a `CONVERSATION_CALLER` from the
-    harness: `CALLER_PRINCIPAL_HEADER` and `CALLER_HEADER` alone, with no surface
-    and no user agent, since dfo-apis reads Studio from the caller's prefix and
-    the User-Agent is the harness's own. Empty otherwise, and
-    dfo-apis counts the call against this service.
+    harness: `CALLER_PRINCIPAL_HEADER` and `CALLER_HEADER`, and `TURN_HEADER`
+    when `current_turn` names the turn, with no surface and no user agent, since
+    dfo-apis reads Studio from the caller's prefix and the User-Agent is the
+    harness's own. Empty otherwise, and dfo-apis counts the call against this
+    service.
     """
     caller = current_caller()
     if principal is None or caller is None:
@@ -136,7 +174,10 @@ def vouched_caller_headers(principal: str | None) -> dict[str, str]:
         headers[SURFACE_HEADER] = MCP_SURFACE
         if (user_agent := current_user_agent()) is not None:
             headers[USER_AGENT_HEADER] = user_agent
-    elif not CONVERSATION_CALLER.fullmatch(caller):
+    elif CONVERSATION_CALLER.fullmatch(caller):
+        if (turn := current_turn()) is not None:
+            headers[TURN_HEADER] = turn
+    else:
         return {}
     return headers
 
@@ -158,6 +199,44 @@ def conversation_caller(conversation: str) -> str:
     """
     digest = hashlib.sha256(conversation.encode()).hexdigest()
     return f"conversation:{digest[:_CONVERSATION_DIGEST_CHARS]}"
+
+
+def set_supplied_caller(caller: str | None) -> None:
+    """Make `current_caller` return `caller` for the rest of the current context,
+    header or not. `None` hands the caller back to the header.
+
+    For a process that calls dfo-apis for a caller outside any MCP request: the
+    harness names a Studio turn's conversation this way, so the dfo-apis calls
+    its graph makes in process (`vouched_caller_headers`) carry the caller its
+    MCP calls name. Set it in a request's own context, which every task the
+    request spawns copies.
+    """
+    _supplied.set(caller)
+
+
+def set_supplied_turn(turn: str | None) -> None:
+    """Make `current_turn` return `turn` for the rest of the current context,
+    header or not. `None` hands the turn back to the header.
+
+    The turn's counterpart of `set_supplied_caller`: the harness names a Studio
+    turn this way beside its conversation, so the dfo-apis calls its graph makes
+    in process carry the turn its MCP calls name.
+    """
+    _supplied_turn.set(turn)
+
+
+def shared_work_context() -> Context:
+    """A copy of the current context with no supplied caller and no supplied turn.
+
+    For a task several requests join, such as a replay two conversations both
+    wait on: run it in this context (`asyncio.create_task(..., context=...)`) so
+    the dfo-apis calls it makes name neither the conversation nor the turn that
+    happened to start it.
+    """
+    context = copy_context()
+    context.run(_supplied.set, None)
+    context.run(_supplied_turn.set, None)
+    return context
 
 
 @contextmanager

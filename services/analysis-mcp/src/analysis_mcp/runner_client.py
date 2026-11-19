@@ -66,9 +66,9 @@ that name its caller (`common.caller.vouched_caller_headers`), which hold when
 this process has the caller principal. For an `ip:` caller the website named,
 they are `x-dfo-caller-principal`, `x-dfo-caller`, `x-dfo-surface: mcp`, and
 `x-dfo-user-agent`, the whole User-Agent clipped to 256 characters. For a
-harness `conversation:` caller they are the principal and the caller alone.
-dfo-apis resolves them as it does the website's own calls
-(`dfo_platform.caller.resolve_caller`).
+harness `conversation:` caller they are the principal, the caller, and the
+Studio turn's id as `x-dfo-turn` when the harness names one. dfo-apis resolves
+them as it does the website's own calls (`dfo_platform.caller.resolve_caller`).
 """
 
 from __future__ import annotations

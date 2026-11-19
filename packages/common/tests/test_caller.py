@@ -17,11 +17,15 @@ from common.caller import (
     MAX_CALLER_CHARS,
     MAX_USER_AGENT_CHARS,
     SURFACE_HEADER,
+    TURN_HEADER,
     USER_AGENT_HEADER,
     conversation_caller,
     current_caller,
+    current_turn,
     current_user_agent,
     current_writer,
+    set_supplied_caller,
+    set_supplied_turn,
     supplied_caller,
     vouched_caller_headers,
 )
@@ -240,3 +244,42 @@ def test_the_vouched_headers_name_an_address_or_conversation_caller(
     }
     with set_http_request(Request(scope)):
         assert vouched_caller_headers(principal) == sent
+
+
+_TURN = "tr_" + "0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    ("caller", "turns", "sent_turn"),
+    [
+        (_CONVERSATION, [_TURN], _TURN),
+        (_ADDRESS, [_TURN], None),
+        (_CONVERSATION, [], None),
+        (_CONVERSATION, ["tr_" + "0123456789ABCDEF"], None),
+        (_CONVERSATION, [_TURN, _TURN], None),
+    ],
+    ids=["studio-turn", "address-caller", "no-turn", "malformed", "repeated"],
+)
+def test_the_vouched_headers_name_a_conversations_turn(
+    caller: str, turns: list[str], sent_turn: str | None
+) -> None:
+    """A Studio turn reaches dfo-apis beside its `conversation:` caller only,
+    and only in the form the harness mints."""
+    headers = [(CALLER_HEADER, caller), *((TURN_HEADER, turn) for turn in turns)]
+    scope = {"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers]}
+    with set_http_request(Request(scope)):
+        assert vouched_caller_headers("p").get(TURN_HEADER) == sent_turn
+
+
+async def test_a_supplied_turn_names_an_in_process_call() -> None:
+    """Outside any MCP request the supplied caller and turn stand in for the
+    headers, as the harness's graph calls dfo-apis in process."""
+    assert current_turn() is None
+    set_supplied_caller(_CONVERSATION)
+    set_supplied_turn(_TURN)
+
+    assert vouched_caller_headers("p") == {
+        CALLER_PRINCIPAL_HEADER: "p",
+        CALLER_HEADER: _CONVERSATION,
+        TURN_HEADER: _TURN,
+    }
