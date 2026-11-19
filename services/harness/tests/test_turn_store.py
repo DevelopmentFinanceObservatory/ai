@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+from collections import OrderedDict
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import harness.graph.state as graph_state
 import harness.provenance as provenance_module
 import pytest
 from executor.ledger import PlanApproval, SourcePolicy, new_run
@@ -1001,7 +1003,10 @@ async def test_a_named_frame_with_no_row_is_dropped_and_not_stored_again(
     ids=["entry-not-a-mapping", "frames-not-a-mapping"],
 )
 async def test_a_malformed_frames_entry_names_no_frame_and_the_turn_goes_on(
-    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture, frames: Any
+    pg_engine: AsyncEngine,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    frames: Any,
 ) -> None:
     """A frames value or entry that is not a mapping names no key: the
     restore and the write both go on, logged, and the write stores the
@@ -1010,6 +1015,7 @@ async def test_a_malformed_frames_entry_names_no_frame_and_the_turn_goes_on(
     provenance = ProvenanceStore()
     _held(provenance, 1)
     store = _keeping(pg_engine, provenance)
+    monkeypatch.setattr(graph_state, "_warned_frame_shapes", OrderedDict())
     opened, seg = await _opened(store, provenance)
     if isinstance(frames, dict):
         state = {ORCHESTRATOR_FRAMES_KEY: {**frames, "frame_0": {"ref": _key(1)}}}
@@ -1022,7 +1028,7 @@ async def test_a_malformed_frames_entry_names_no_frame_and_the_turn_goes_on(
     assert advanced.status is TurnStatus.RUNNING
     rows = [row[:2] for row in await _lineage_rows(pg_engine)]
     assert rows == ([("spec_1", "cv_1")] if isinstance(frames, dict) else [])
-    assert any("not mappings" in record.getMessage() for record in caplog.records)
+    assert any("mapping" in record.getMessage() for record in caplog.records)
     assert not any("restore failed" in record.getMessage() for record in caplog.records)
 
 
@@ -1178,6 +1184,55 @@ async def test_a_burst_of_other_turns_mid_segment_keeps_the_segments_frames(
 
     await _advance(seg, store, opened, _frames({"ref": _key(1)}))
 
+    assert [row[:2] for row in await _lineage_rows(pg_engine)] == [("spec_1", "cv_1")]
+
+
+@pytest.mark.parametrize("frames", ["none", "named-without-rows"])
+async def test_a_segment_that_keeps_no_frame_records_no_kept_entry(
+    pg_engine: AsyncEngine, frames: str
+) -> None:
+    """A chat-only segment, or one whose named frames have no rows, gives the
+    provenance store no bucket, so it records no kept entry either."""
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    store = _keeping(pg_engine, provenance)
+    opened = await _open(store)
+    if frames == "named-without-rows":
+        opened = replace(opened, state=_frames({"ref": _key(1)}))
+
+    segment = await _segment(store, opened)
+    if frames == "named-without-rows":
+        store.end_segment(segment)
+
+    assert _SCOPE not in provenance._kept
+
+
+async def test_a_superseded_segments_write_leaves_the_live_segments_kept_frames(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Segment A's lease lapses and segment B of the same process takes the
+    turn and keeps its frame. A's write, which the cursor refuses, changes
+    nothing of B's kept set, so B's frame outlives the bound."""
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    _held(provenance, 1)
+    store = _keeping(pg_engine, provenance)
+    opened, seg_a = await _opened(store, provenance)
+    named = _frames({"ref": _key(1)})
+    paused = await _pause(seg_a, store, opened, named, interrupt_id="i")
+    seg_b = await _segment(store, paused)
+    resumed = await store.record_answer(
+        paused, segment_id=SEGMENT, interrupt_id="i", round=1, answer={}
+    )
+
+    with pytest.raises(CursorStale):
+        await _advance(seg_a, store, paused, _frames({"ref": _key(9)}))
+    monkeypatch.setattr(provenance_module, "_MAX_MANIFESTS_PER_CONVERSATION", 2)
+    for n in (4, 5, 6):
+        _held(provenance, n)
+
+    assert provenance.get(conversation=_SCOPE, **_key(1)) is not None
+    await _advance(seg_b, store, resumed, named)
     assert [row[:2] for row in await _lineage_rows(pg_engine)] == [("spec_1", "cv_1")]
 
 

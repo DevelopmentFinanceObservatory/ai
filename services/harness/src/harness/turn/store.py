@@ -143,10 +143,14 @@ class SegmentLineage:
     (`since`), before which no entry is written unless a read confirmed it,
     and for each key the source's generation (`ProvenanceStore.held`) of the
     lineage the segment committed (a row, or the delete of one whose lineage
-    failed its check) or read back (`written`)."""
+    failed its check) or read back (`written`). `token` is the segment's
+    place in the order the source started segments in
+    (`ProvenanceStore.segment_token`), which its kept frames are recorded
+    under (`ProvenanceStore.keep`)."""
 
     scope: str
     since: int
+    token: int
     written: dict[FrameKey, int] = field(default_factory=dict)
 
 
@@ -617,10 +621,10 @@ class TurnStore:
         write = _LineageWrite()
         if self._lineage is None or segment is None:
             return write
-        source, scope, known = self._lineage.source, segment.scope, segment
+        source, scope = self._lineage.source, segment.scope
         turn_index = cursor.turn_index
         named = list(dict.fromkeys(self._lineage.frame_keys(state)))
-        source.keep(conversation=scope, keys=named)
+        source.keep(conversation=scope, keys=named, token=segment.token)
         for key in named:
             spec_id, content_version = key
             held = source.held(conversation=scope, spec_id=spec_id, content_version=content_version)
@@ -629,7 +633,7 @@ class TurnStore:
             lineage, count, generation = held
             # An entry from before the restore point that no read confirmed
             # can be older than the turn's row, so it is never written.
-            if generation <= known.since or known.written.get(key) == generation:
+            if generation <= segment.since or segment.written.get(key) == generation:
                 continue
             write.generations[key] = generation
             if not _text_key(key):
@@ -801,7 +805,10 @@ class TurnStore:
         without `lineage` or `lineage_scope`: the segment writes no lineage."""
         if self._lineage is None or lineage_scope is None:
             return None
-        segment = SegmentLineage(scope=lineage_scope, since=self._lineage.source.last_generation())
+        source = self._lineage.source
+        segment = SegmentLineage(
+            scope=lineage_scope, since=source.last_generation(), token=source.segment_token()
+        )
         try:
             await self._restore(cursor, segment)
         except Exception:
@@ -811,12 +818,20 @@ class TurnStore:
             )
         return segment
 
+    def end_segment(self, segment: SegmentLineage | None) -> None:
+        """End `segment`: the frames it kept outside the source's
+        per-conversation bound become evictable again
+        (`ProvenanceStore.release`), unless a later segment of the
+        conversation has kept its own since."""
+        if self._lineage is not None and segment is not None:
+            self._lineage.source.release(conversation=segment.scope, token=segment.token)
+
     async def _restore(self, cursor: Cursor, segment: SegmentLineage) -> None:
         """The read and restore of `restore_frame_lineage`, into `segment`."""
         assert self._lineage is not None
         source, scope = self._lineage.source, segment.scope
         named = list(dict.fromkeys(self._lineage.frame_keys(cursor.state)))
-        source.keep(conversation=scope, keys=named)
+        source.keep(conversation=scope, keys=named, token=segment.token)
         readable = [key for key in named if _text_key(key)]
         if not readable:
             return

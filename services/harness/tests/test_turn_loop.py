@@ -12,6 +12,7 @@ import contextlib
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import harness.provenance as provenance_module
 import pytest
 from harness.conversation import ledger_conversation_id
 from harness.graph.state import ORCHESTRATOR_FRAMES_KEY, frame_store_keys
@@ -1027,6 +1028,38 @@ async def test_a_boundary_write_whose_lineage_the_database_refuses_closes_the_tu
     assert segment.cursor.status is TurnStatus.FAILED
     async with pg_engine.connect() as conn:
         assert (await conn.execute(text("SELECT count(*) FROM turn_frame_lineage"))).scalar() == 0
+
+
+async def test_a_segments_frames_count_against_the_provenance_bound_once_it_ends(
+    pg_engine: AsyncEngine, clock: StoreClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The frames a segment named stay outside the provenance store's
+    per-conversation bound only while it runs: once it pauses, later stores
+    in the conversation evict them like any other entry."""
+    provenance = ProvenanceStore()
+    scope = ledger_conversation_id(PRINCIPAL, CONVERSATION)
+    frame = {"spec_id": "spec_a", "content_version": "cv_a"}
+    store = TurnStore(
+        pg_engine, lineage=FrameLineage(source=provenance, frame_keys=frame_store_keys)
+    )
+    lease = await _instance(pg_engine, clock)
+    segment_id = await _claim(lease)
+
+    async def work(ctx: NodeCtx, node_input: Any) -> Pause:
+        provenance.put(conversation=scope, manifest={}, **frame)
+        ctx.state[ORCHESTRATOR_FRAMES_KEY] = {"frame_a": {"ref": frame}}
+        return Pause(kind="ask", payload={})
+
+    graph = Graph(start="work", nodes={"work": Node(run=work)}, edges={})
+    segment = await _segment(
+        store, lease, await _open(store, segment_id, graph), segment_id, graph, []
+    )
+    assert segment.outcome is Outcome.PAUSED
+    monkeypatch.setattr(provenance_module, "_MAX_MANIFESTS_PER_CONVERSATION", 1)
+    for n in (1, 2):
+        provenance.put(conversation=scope, manifest={}, spec_id=f"spec_{n}", content_version="cv")
+
+    assert provenance.get(conversation=scope, **frame) is None
 
 
 @pytest.mark.parametrize("since", ["moved", "closed"])

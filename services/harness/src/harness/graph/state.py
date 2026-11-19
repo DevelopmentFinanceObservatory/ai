@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections import OrderedDict
 from collections.abc import (
     Mapping,
     Sequence,
@@ -494,31 +495,58 @@ def frame_store_ref(entry: Mapping[str, Any]) -> dict[str, Any]:
     return entry["ref"]
 
 
+# The malformed frames shapes `frame_store_keys` has warned of, least
+# recently seen dropped past `_MAX_WARNED_FRAME_SHAPES`, so a state read at
+# every boundary write warns once.
+_warned_frame_shapes: OrderedDict[tuple[str, ...], None] = OrderedDict()
+_MAX_WARNED_FRAME_SHAPES = 256
+
+
+def _warn_frame_shape_once(shape: tuple[str, ...], message: str, *args: Any) -> None:
+    if shape in _warned_frame_shapes:
+        _warned_frame_shapes.move_to_end(shape)
+        return
+    _warned_frame_shapes[shape] = None
+    while len(_warned_frame_shapes) > _MAX_WARNED_FRAME_SHAPES:
+        _warned_frame_shapes.popitem(last=False)
+    logger.warning(message, *args)
+
+
 def frame_store_keys(state: Mapping[str, Any]) -> list[FrameKey]:
     """The lineage store keys of the frames in `state`
     (`ORCHESTRATOR_FRAMES_KEY`): each entry's `ref` and `store_ref`, in order
     and each once, which the turn store keeps the lineage of
     (`harness.turn.store.FrameLineage`). A pair with a member missing names
     no key, and so does a frames value or entry that is not a mapping, which
-    is logged once per call."""
-    keys: dict[FrameKey, None] = {}
+    is logged once per malformed shape (`_warn_frame_shape_once`)."""
     frames = state.get(ORCHESTRATOR_FRAMES_KEY) or {}
-    entries = list(frames.values()) if isinstance(frames, Mapping) else [frames]
-    malformed = [entry for entry in entries if not isinstance(entry, Mapping)]
-    if malformed:
-        logger.warning(
-            "the state's %s holds %d frame entries that are not mappings; they name no frame",
+    if not isinstance(frames, Mapping):
+        _warn_frame_shape_once(
+            ("container", type(frames).__name__),
+            "the state's %s is a %s, not a mapping; it names no frame",
             ORCHESTRATOR_FRAMES_KEY,
-            len(malformed),
+            type(frames).__name__,
         )
-    for entry in entries:
+        return []
+    keys: dict[FrameKey, None] = {}
+    skipped: list[str] = []
+    for frame_id, entry in frames.items():
         if not isinstance(entry, Mapping):
+            skipped.append(f"{frame_id}:{type(entry).__name__}")
             continue
         for ref in (entry.get("ref"), entry.get("store_ref")):
             if isinstance(ref, Mapping):
                 spec_id, content_version = ref.get("spec_id"), ref.get("content_version")
                 if isinstance(spec_id, str) and isinstance(content_version, str):
                     keys[(spec_id, content_version)] = None
+    if skipped:
+        _warn_frame_shape_once(
+            ("entries", *skipped),
+            "the state's %s holds %d frame entries that are not mappings (%s); they name no frame",
+            ORCHESTRATOR_FRAMES_KEY,
+            len(skipped),
+            ", ".join(skipped),
+        )
     return list(keys)
 
 

@@ -554,7 +554,8 @@ async def drive[E](
     turn names is brought into step with its rows, best effort
     (`TurnStore.restore_frame_lineage`), so an answer the turn refuses or a
     turn that closes does not wait for that read. The restore's
-    `SegmentLineage` goes to each of the segment's pause and move writes.
+    `SegmentLineage` goes to each of the segment's pause and move writes, and
+    the segment ends it however it returns (`TurnStore.end_segment`).
 
     A write that fails for any reason but those `_NOT_THE_TURNS` names (a
     value JSON cannot hold, a database error) closes the turn `failed` at
@@ -614,98 +615,104 @@ async def drive[E](
     cursor = segment.cursor
     lineage = await _step(store.restore_frame_lineage(cursor, lineage_scope=_lineage_scope(key)))
 
-    while True:
-        # The node works on a copy, so whatever it changes in place, the
-        # cursor keeps the state as stored until a write stores the node's.
-        ctx = NodeCtx[E](
-            key=key,
-            inputs=cursor.inputs,
-            state=copy.deepcopy(cursor.state),
-            transcript=transcript,
-            emit=emit,
-            stop=stop,
-        )
-        taken_before = stop.taken
-        try:
-            if owed is not None and target.resume is not None:
-                result = await _step(target.resume(ctx, node_input, owed))
-            else:
-                result = await _step(target.run(ctx, node_input))
-            following = _following(graph, node, result)
-        except Exception as exc:
-            logger.exception("turn %s: node %s failed", key, node)
-            return await close(TurnStatus.FAILED, node, exc)
-        owed = None
-        if (
-            stop.taken is not None
-            and not isinstance(result, Pause)
-            and (
-                stop.taken == taken_before
-                or following == END
-                or result.label not in target.stop_edges
+    # The segment's kept frames stop being exempt from the provenance
+    # store's bound when it ends, however it ends (`TurnStore.end_segment`).
+    try:
+        while True:
+            # The node works on a copy, so whatever it changes in place, the
+            # cursor keeps the state as stored until a write stores the node's.
+            ctx = NodeCtx[E](
+                key=key,
+                inputs=cursor.inputs,
+                state=copy.deepcopy(cursor.state),
+                transcript=transcript,
+                emit=emit,
+                stop=stop,
             )
-        ):
-            # The scope's Stop is recorded by a pause of the node that took it
-            # or of the node one of its stop edges leads to. A turn that
-            # leaves another way, ends, or goes past that node is stopped.
-            return await _close_on_taken_stop(store, segment, key=key, segment_id=segment_id)
-
-        interrupt_id = _wire_id("int")
-        if isinstance(result, Pause):
-            segment.pausing = Paused(
-                kind=result.kind,
-                interrupt_id=interrupt_id,
-                round=cursor.round + 1,
-                payload=result.payload,
-                message=result.message,
-            )
-        else:
-            assert following is not None
-            segment.moving = _Moving(
-                done=NodeDone(node=node, label=result.label, output=result.output),
-                version=cursor.version,
-                following=following,
-                segment_id=segment_id,
-            )
-        # A cut that lands from the write on is settled on the turn as
-        # stored, which reports the boundary a write committed (`_settle`).
-        try:
-            cursor = segment.cursor = await _step(
-                _commit_boundary(
-                    store,
-                    cursor,
-                    segment_id=segment_id,
-                    node=node,
-                    node_input=node_input,
-                    result=result,
-                    following=following,
-                    interrupt_id=interrupt_id,
-                    ctx=ctx,
-                    segment=segment,
-                    lineage=lineage,
+            taken_before = stop.taken
+            try:
+                if owed is not None and target.resume is not None:
+                    result = await _step(target.resume(ctx, node_input, owed))
+                else:
+                    result = await _step(target.run(ctx, node_input))
+                following = _following(graph, node, result)
+            except Exception as exc:
+                logger.exception("turn %s: node %s failed", key, node)
+                return await close(TurnStatus.FAILED, node, exc)
+            owed = None
+            if (
+                stop.taken is not None
+                and not isinstance(result, Pause)
+                and (
+                    stop.taken == taken_before
+                    or following == END
+                    or result.label not in target.stop_edges
                 )
-            )
-        except _NOT_THE_TURNS:
-            raise
-        except Exception as exc:
-            segment.pausing, segment.moving = None, None
-            logger.exception("turn %s: the write after node %s failed", key, node)
-            return await close(TurnStatus.FAILED, node, exc)
+            ):
+                # The scope's Stop is recorded by a pause of the node that took it
+                # or of the node one of its stop edges leads to. A turn that
+                # leaves another way, ends, or goes past that node is stopped.
+                return await _close_on_taken_stop(store, segment, key=key, segment_id=segment_id)
 
-        if segment.pausing is not None:
-            segment.outcome = Outcome.PAUSED
-            emit(segment.pausing)
-            segment.pausing = None
-            return segment
-        assert segment.moving is not None
-        emit(segment.moving.done)
-        segment.moving = None
-        if following == END:
-            segment.outcome = Outcome.DONE
-            return segment
-        assert following is not None
-        # The next node takes its input as stored, as a rerun reads it back.
-        node, node_input, target = following, cursor.node_input, graph.nodes[following]
+            interrupt_id = _wire_id("int")
+            if isinstance(result, Pause):
+                segment.pausing = Paused(
+                    kind=result.kind,
+                    interrupt_id=interrupt_id,
+                    round=cursor.round + 1,
+                    payload=result.payload,
+                    message=result.message,
+                )
+            else:
+                assert following is not None
+                segment.moving = _Moving(
+                    done=NodeDone(node=node, label=result.label, output=result.output),
+                    version=cursor.version,
+                    following=following,
+                    segment_id=segment_id,
+                )
+            # A cut that lands from the write on is settled on the turn as
+            # stored, which reports the boundary a write committed (`_settle`).
+            try:
+                cursor = segment.cursor = await _step(
+                    _commit_boundary(
+                        store,
+                        cursor,
+                        segment_id=segment_id,
+                        node=node,
+                        node_input=node_input,
+                        result=result,
+                        following=following,
+                        interrupt_id=interrupt_id,
+                        ctx=ctx,
+                        segment=segment,
+                        lineage=lineage,
+                    )
+                )
+            except _NOT_THE_TURNS:
+                raise
+            except Exception as exc:
+                segment.pausing, segment.moving = None, None
+                logger.exception("turn %s: the write after node %s failed", key, node)
+                return await close(TurnStatus.FAILED, node, exc)
+
+            if segment.pausing is not None:
+                segment.outcome = Outcome.PAUSED
+                emit(segment.pausing)
+                segment.pausing = None
+                return segment
+            assert segment.moving is not None
+            emit(segment.moving.done)
+            segment.moving = None
+            if following == END:
+                segment.outcome = Outcome.DONE
+                return segment
+            assert following is not None
+            # The next node takes its input as stored, as a rerun reads it back.
+            node, node_input, target = following, cursor.node_input, graph.nodes[following]
+
+    finally:
+        store.end_segment(lineage)
 
 
 async def stop_turn(store: TurnStore, cursor: Cursor, *, segment_id: str) -> Cursor:
