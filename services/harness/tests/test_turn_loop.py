@@ -983,7 +983,6 @@ async def test_a_boundary_write_whose_lineage_the_database_refuses_closes_the_tu
     provenance = ProvenanceStore()
     scope = ledger_conversation_id(PRINCIPAL, CONVERSATION)
     frame = {"spec_id": "spec_a", "content_version": "cv_a"}
-    provenance.put(conversation=scope, manifest={}, **frame)
     store = TurnStore(
         pg_engine, lineage=FrameLineage(source=provenance, frame_keys=frame_store_keys)
     )
@@ -1004,6 +1003,8 @@ async def test_a_boundary_write_whose_lineage_the_database_refuses_closes_the_tu
         )
 
     async def work(ctx: NodeCtx, node_input: Any) -> Next:
+        # The node's fetch stores the frame's lineage, as `fetch` does.
+        provenance.put(conversation=scope, manifest={}, **frame)
         ctx.state[ORCHESTRATOR_FRAMES_KEY] = {"frame_a": {"ref": frame}}
         return Next("next")
 
