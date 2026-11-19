@@ -7,6 +7,8 @@ from google.cloud.sql.connector import IPTypes
 from harness.db import engine as engine_module
 from harness.db.engine import build_database
 from harness.settings import Settings
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 
 class _FakeConnector:
@@ -143,7 +145,8 @@ async def test_connector_backend_builds_the_connector_only_once_across_pooled_co
 )
 async def test_lineage_reads_get_a_pool_of_their_own(settings: Settings, fake_connector) -> None:
     """The lineage engine shares no pool with the session store's engine, and
-    holds four connections with no overflow."""
+    holds three connections with no overflow, so four instances hold at
+    most 4 x (2 + 3) = 20 connections."""
     database = build_database(settings=settings)
     assert database is not None
 
@@ -151,9 +154,11 @@ async def test_lineage_reads_get_a_pool_of_their_own(settings: Settings, fake_co
     assert database.lineage_engine.pool is not database.engine.pool
     # `size` and `_max_overflow` are on the `AsyncAdaptedQueuePool` the
     # engine builds, not on the `Pool` it is typed as.
-    assert database.lineage_engine.pool.size() == 4  # type: ignore[attr-defined]
+    assert database.lineage_engine.pool.size() == 3  # type: ignore[attr-defined]
     assert database.lineage_engine.pool._max_overflow == 0  # type: ignore[attr-defined]
     assert database.lineage_engine.pool.timeout() == 1.5  # type: ignore[attr-defined]
+    assert database.engine.sync_engine.hide_parameters
+    assert database.lineage_engine.sync_engine.hide_parameters
 
     await database.aclose()
 
@@ -174,4 +179,25 @@ async def test_the_connector_backed_lineage_engine_bounds_each_statement(fake_co
             pass
 
     assert fake_connector.connect_calls[-1]["command_timeout"] == 3.0
+    await database.aclose()
+
+
+async def test_a_failed_statement_leaves_its_bound_values_out_of_the_error(
+    pg_database_url: str,
+) -> None:
+    """The error of a failed write, as the turn loop logs it, carries no bound
+    value, so a turn's transcript stays out of the logs."""
+    planted = "PLANTED-TRANSCRIPT-TEXT"
+    database = build_database(settings=Settings(database_url=pg_database_url))
+    assert database is not None
+
+    with pytest.raises(DBAPIError) as raised:
+        async with database.engine.begin() as connection:
+            await connection.execute(
+                text("insert into no_such_table (body) values (:body)"), {"body": planted}
+            )
+
+    assert planted not in repr(raised.value)
+    assert planted not in str(raised.value)
+
     await database.aclose()

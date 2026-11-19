@@ -94,12 +94,16 @@ CREATE TABLE turn_specs (
 
 -- An accepted answer to one pause, inserted in the transaction that moves
 -- the turn from paused to running. The primary key holds one answer per
--- pause round, whatever its interrupt id.
+-- pause round, whatever its interrupt id. `answer` is what the paused
+-- node's resume reads; `request` is the answer as the client sent it (its
+-- decision and payload), which tells a retry of the same answer apart from
+-- another answer once the conversation no longer holds the pause.
 CREATE TABLE turn_answers (
     turn bigint NOT NULL REFERENCES turn_cursors (id) ON DELETE CASCADE,
     interrupt_id text NOT NULL,
     round integer NOT NULL CHECK (round >= 1),
     answer json NOT NULL,
+    request json,
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (turn, round)
 );

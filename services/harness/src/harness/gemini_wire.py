@@ -246,8 +246,14 @@ class GeminiStream:
                 if span.is_recording():
                     span.set_attribute(_ERROR, type(exc).__name__)
                 raise
+            unsent = relay.closing is not None and not relay.closing.sent and spent is None
             if span.is_recording():
-                span.set_attribute(_FINISH_REASON, relay.finish_reason or "none")
+                if unsent:
+                    # Nothing went to the model on any attempt, so the span is no
+                    # generation.
+                    span.set_attribute(_OBSERVATION_TYPE, "span")
+                else:
+                    span.set_attribute(_FINISH_REASON, relay.finish_reason or "none")
             usage = relay.usage
             spent = _added(spent, usage)
             _record_usage(span, spent)

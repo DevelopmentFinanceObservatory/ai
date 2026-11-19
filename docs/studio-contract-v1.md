@@ -206,6 +206,11 @@ segment is still live answers 409 `transient_unavailable` with
 that segment's lease has expired resumes the turn again, on a fresh
 stream whose `seq` starts in a block of numbers past every one the dead
 stream could have sent, so it never repeats a `seq` the dead stream sent.
+When the turn had already paused again on a later question before the
+resumed stream was lost, the retry's stream sends that question
+(`plan.proposed` or `elicitation.request`, with the later pause's own
+`interrupt_id`) and runs nothing again, and the client answers it as it
+answers any pause.
 Retrying with a DIFFERENT decision, payload or answers than the one that actually resumed answers 409
 `edit_conflict`. The approval record for a plan interrupt is appended
 once per `interrupt_id`, on its first answer, however many times the

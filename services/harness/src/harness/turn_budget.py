@@ -48,7 +48,7 @@ import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -155,11 +155,13 @@ class Closing:
     """The end of a call the bound `code` closed: its sentence as the model's
     final text. `after_text` says the call had already streamed answer text,
     so a reader that streams shows the sentence as a paragraph of its own
-    (`shown`)."""
+    (`shown`). `sent` says the call had been sent: false for a call the bound
+    closed before it sent anything."""
 
     code: StopCode
     sentence: str
     after_text: bool
+    sent: bool = True
 
     @property
     def shown(self) -> str:
@@ -190,7 +192,7 @@ async def bounded_by(
 
     if (spent := budget.spent_bound()) is not None:
         budget.close(spent)
-        yield _closing(spent, after_text=False)
+        yield replace(_closing(spent, after_text=False), sent=False)
         return
     budget.model_calls += 1
     span = trace.get_current_span()

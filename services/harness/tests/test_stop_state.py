@@ -6,11 +6,14 @@ Each store write is one transaction that locks the conversation row before
 it reads any Stop state, so the store's behaviours are the serial orders of
 its writes. `test_every_sequence_of_stop_writes_keeps_the_invariants` runs
 every sequence of up to `DEPTH` operations from a turn that is streaming,
-and asserts five invariants at each step that could break one:
+and asserts six invariants at each step that could break one:
 
 - no claim that starts or resumes work commits while a Stop is live;
 - a close `cancelled` leaves no `admitted` or `running` run;
 - a close `cancelled` closes the turn the Stop names (`stop_turn`);
+- a Stop names no turn later than the one the conversation was on when it
+  was requested, so a Stop sent after a turn's cursor closed is not read as
+  the next turn's;
 - a closing write that cleared the lease leaves no live Stop;
 - a closing write that saved, or closed the turn on a Stop, leaves the
   conversation's record and the turn's cursor agreeing on whether the
@@ -32,7 +35,13 @@ from typing import Any
 import pytest
 from harness import studio_state
 from harness.studio_state import SegmentBusy, SegmentLost
-from harness.studio_store import ConversationStale, SegmentClose, StopState, StudioStore
+from harness.studio_store import (
+    SEQ_BLOCK,
+    ConversationStale,
+    SegmentClose,
+    StopState,
+    StudioStore,
+)
 from harness.turn.store import CLOSED, Cursor, CursorStale, TurnStatus, TurnStore
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -101,6 +110,7 @@ class World:
         self.acting = False
         self.to_open = False
         self.reported: str | None = None
+        self.requested_at: int | None = None
 
     def instance(self) -> StudioStore:
         return StudioStore(self.engine, **self.clock.store_kwargs)
@@ -111,6 +121,7 @@ class World:
         async with self.engine.begin() as conn:
             await conn.execute(text("DELETE FROM conversations"))
         await self.clock.set(_START)
+        self.requested_at = None
         store = self.instance()
         await store.create(PRINCIPAL, CONVERSATION)
         await self._claim(store, begin=True)
@@ -119,15 +130,24 @@ class World:
     async def _claim(self, store: StudioStore, *, begin: bool, stopping: bool = False) -> bool:
         """Claim the conversation on `store` as the routes do, beginning the
         next turn when `begin`. Returns whether the claim save committed."""
-        work = store.draft(PRINCIPAL, CONVERSATION)
         if begin:
+            try:
+                lease = await store.claim_turn_lease(PRINCIPAL, CONVERSATION)
+            except (SegmentBusy, ConversationStale):
+                return False
+            segment_id = lease.segment_id
+            await store.load(PRINCIPAL, CONVERSATION)
+            work = store.draft(PRINCIPAL, CONVERSATION)
             work.begin_turn()
-        try:
-            segment_id = store.claim_segment(PRINCIPAL, CONVERSATION, work)
-            await store.save(PRINCIPAL, CONVERSATION, work, stopping=stopping)
-        except (SegmentBusy, ConversationStale):
-            store.drop_draft(PRINCIPAL, CONVERSATION)
-            return False
+            await store.save(PRINCIPAL, CONVERSATION, work, seq_reserved=SEQ_BLOCK)
+        else:
+            work = store.draft(PRINCIPAL, CONVERSATION)
+            try:
+                segment_id = store.claim_segment(PRINCIPAL, CONVERSATION, work)
+                await store.save(PRINCIPAL, CONVERSATION, work, stopping=stopping)
+            except (SegmentBusy, ConversationStale):
+                store.drop_draft(PRINCIPAL, CONVERSATION)
+                return False
         self.holder, self.segment_id = store, segment_id
         self.acting, self.to_open, self.reported = stopping, begin, None
         return True
@@ -181,7 +201,16 @@ class World:
     # --- the operations -------------------------------------------------
 
     async def cancel(self) -> None:
-        await self.instance().request_cancel(PRINCIPAL, CONVERSATION)
+        if await self.instance().request_cancel(PRINCIPAL, CONVERSATION):
+            self.requested_at = (await self._row()).turn_index
+
+    async def check_stop_turn(self) -> None:
+        """A Stop names a turn no later than the one the conversation was on
+        when the request landed, whichever write stamped it."""
+        stop_turn = (await self._row()).stop_turn
+        assert stop_turn is None or (
+            self.requested_at is not None and stop_turn <= self.requested_at
+        ), "a Stop sent before a turn began names that turn"
 
     async def renew(self) -> None:
         if self.holder is None or self.segment_id is None:
@@ -435,6 +464,10 @@ async def _run(world: World, sequence: tuple[str, ...]) -> tuple[Any, ...]:
         except CursorStale:
             # The holder's view of the cursor moved under another writer.
             pass
+        except AssertionError as exc:
+            raise AssertionError(f"after {sequence[: step + 1]}: {exc}") from exc
+        try:
+            await world.check_stop_turn()
         except AssertionError as exc:
             raise AssertionError(f"after {sequence[: step + 1]}: {exc}") from exc
     return await world.state()

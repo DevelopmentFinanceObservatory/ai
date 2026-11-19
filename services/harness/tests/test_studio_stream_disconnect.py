@@ -38,6 +38,7 @@ from typing import override
 import uvicorn
 from fastapi import APIRouter, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
+from harness.server import GRACEFUL_SHUTDOWN_S
 from harness.studio_relay import Channel, StudioStream
 from harness.studio_stream import LiveOwners
 from pydantic import BaseModel
@@ -223,10 +224,11 @@ class _Server(uvicorn.Server):
 
 @contextlib.asynccontextmanager
 async def _serving(
-    stage: Stage, *, timeout_graceful_shutdown: int | None = None
+    stage: Stage, *, timeout_graceful_shutdown: int = GRACEFUL_SHUTDOWN_S
 ) -> AsyncIterator[tuple[uvicorn.Server, int]]:
     """uvicorn on a free loopback port with `harness.server.main`'s
-    configuration, which leaves every option but host and port at its default."""
+    configuration: its graceful-shutdown timeout and every other option at its
+    default."""
     config = uvicorn.Config(
         _app(stage),
         host="127.0.0.1",
@@ -386,8 +388,9 @@ async def test_the_client_closes_during_a_slow_owner_write() -> None:
 
 
 async def test_a_graceful_shutdown_lets_the_stream_end() -> None:
-    # With no graceful-shutdown timeout, as deployed, uvicorn waits for the
-    # open stream, so the client receives every frame and `done`.
+    # A stream that ends inside the graceful-shutdown timeout, as deployed
+    # (`GRACEFUL_SHUTDOWN_S`), is waited for, so the client receives every
+    # frame and `done`.
     stage = Stage(script=Script(frames=10, interval_s=0.05))
     async with _serving(stage) as (server, port):
         client = await _Client.connect(port)
@@ -401,6 +404,22 @@ async def test_a_graceful_shutdown_lets_the_stream_end() -> None:
     assert json.loads(chunks[-1].removeprefix(b"data: "))["event"] == "done"
     assert stage.probe.exit == "returned"
     _assert_owner_finished(stage.probe, outcome="done")
+
+
+async def test_a_stream_that_outlasts_the_deployed_timeout_is_cut_and_closed_as_left() -> None:
+    # The stream has no end of its own, so only uvicorn's bound after SIGTERM
+    # (`GRACEFUL_SHUTDOWN_S`) ends it: the response is cancelled, the owner
+    # cuts its turn and finishes its closing write, all before `serve` returns.
+    stage = Stage(script=Script(frames=None, interval_s=0.05))
+    async with _serving(stage) as (server, port):
+        client = await _Client.connect(port)
+        client.post_turn()
+        await client.headers()
+        await client.chunk()
+        server.should_exit = True
+    await _returned(stage.probe)
+    await client.close()
+    _assert_owner_finished(stage.probe, outcome="left")
 
 
 async def test_a_shutdown_past_its_timeout_cancels_the_response_and_not_the_owner() -> None:

@@ -347,7 +347,6 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                 else None
             ),
             "card_new_plan": bool(p.card and p.card.new_plan),
-            "approved_sent": p.approved_sent,
             # Written only when set: an entry with no admitted run has no key.
             **({"admitted_run": p.admitted_run} if p.admitted_run is not None else {}),
         }
@@ -382,7 +381,6 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
             if entry.get("card")
             else None
         ),
-        approved_sent=bool(entry.get("approved_sent")),
         admitted_run=entry.get("admitted_run"),
     )
     if "questions" in entry:
@@ -1391,10 +1389,11 @@ class StudioStore:
                         text(
                             "UPDATE conversations SET lease_segment_id = :segment_id, "
                             "lease_owner = :owner, "
-                            f"lease_expires_at = {self._time_sql} + :ttl "
+                            f"lease_expires_at = {self._time_sql} + :ttl, {_STAMP_STOP} "
                             "WHERE id = :pk RETURNING lease_expires_at"
                         ),
                         {
+                            "minted": _wire_id("stop"),
                             "pk": entry.pk,
                             "segment_id": segment_id,
                             "owner": _OWNER_ID,
@@ -1829,9 +1828,7 @@ class StudioStore:
 
     def snapshot(self, principal: str, conversation_id: str) -> Snapshot:
         """The field `checkpoint` writes of this instance's live state of
-        `conversation_id`, serialised now. It holds the pending interrupts,
-        whose `approved_sent` the save after `plan.approved` exists to
-        store."""
+        `conversation_id`, serialised now: the pending interrupts."""
         entry = self._runtime[(principal, conversation_id)]
         assert entry.state is not None
         return {_KEY_PENDING: _json_safe(_serialize_pending(entry.state.pending))}

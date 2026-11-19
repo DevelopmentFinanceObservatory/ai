@@ -378,10 +378,6 @@ class _PendingInterrupt:
     # refused stale answer gets back (`PlanRevisionStaleError.current_plan`).
     # None for an elicitation and a plan paused before cards were kept.
     card: PlanProposed | None = None
-    # Whether a stream resuming this plan interrupt with an approval sent its
-    # `plan.approved` frame (`harness.studio_stream`), so a retry resuming
-    # the same answer sends it only when the dead attempt did not.
-    approved_sent: bool = False
     # The run the save that recorded this plan interrupt's approval admitted
     # and left for `execute` to compute, `admitted` or `running`
     # (`harness.studio._approval_admission`); None when it admitted none or
@@ -988,13 +984,6 @@ class ConversationState:
         turn whose client left mid-resume runs, and a retry of the same
         answer carries it on."""
         return any(p.resuming_segment is None for p in self.pending.values())
-
-    def mark_approved_sent(self, segment_id: str) -> None:
-        """Record that the stream of `segment_id` sent `plan.approved` for the
-        interrupt it resumes (`_PendingInterrupt.approved_sent`)."""
-        for p in self.pending.values():
-            if p.resuming_segment == segment_id:
-                p.approved_sent = True
 
     def drop_resuming(self, segment_id: str) -> None:
         """Remove every pending entry marked as resuming under

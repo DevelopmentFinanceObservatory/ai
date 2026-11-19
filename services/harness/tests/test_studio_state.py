@@ -2687,9 +2687,9 @@ async def test_checkpoint_writes_its_snapshot_and_keeps_a_renewal_made_since(
     store = new_store(clock=clock)
     state = await store.create("principal", CONVERSATION)
     segment_id = store.claim_segment("principal", CONVERSATION)
-    state.pending["i1"] = _pending(resuming_segment=segment_id)
+    state.pending["i1"] = _pending()
     await store.save("principal", CONVERSATION)
-    state.mark_approved_sent(segment_id)
+    state.pending["i1"].resuming_segment = segment_id
     state.turn_final_text = "beside the snapshot"
     snapshot = store.snapshot("principal", CONVERSATION)
     state.pending["i2"] = _pending()
@@ -2701,7 +2701,7 @@ async def test_checkpoint_writes_its_snapshot_and_keeps_a_renewal_made_since(
 
     reloaded = await new_store().load("principal", CONVERSATION)
     assert list(reloaded.pending) == ["i1"]
-    assert reloaded.pending["i1"].approved_sent
+    assert reloaded.pending["i1"].resuming_segment == segment_id
     assert reloaded.turn_final_text == ""
     assert reloaded.segment.expires_at == renewed
     assert list(state.pending) == ["i1", "i2"]
@@ -2710,17 +2710,17 @@ async def test_checkpoint_writes_its_snapshot_and_keeps_a_renewal_made_since(
 async def test_a_checkpoint_retried_past_a_card_write_keeps_the_card(
     new_store, monkeypatch
 ) -> None:
-    """The save after `plan.approved` meets a dropped connection, and a card
-    lands while it waits to retry. The retry writes no older copy of a field
-    the card's write moved, so the card's digest entry, turn line and canvas
-    block stay, beside the `approved_sent` the save exists for."""
+    """A checkpoint meets a dropped connection, and a card lands while it
+    waits to retry. The retry writes no older copy of a field the card's
+    write moved, so the card's digest entry, turn line and canvas block stay,
+    beside the pending interrupts the checkpoint writes."""
     monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0.2)
     store = new_store()
     state = await store.create("principal", CONVERSATION)
     segment_id = store.claim_segment("principal", CONVERSATION)
-    state.pending["i1"] = _pending(resuming_segment=segment_id)
+    state.pending["i1"] = _pending()
     await store.save("principal", CONVERSATION)
-    state.mark_approved_sent(segment_id)
+    state.pending["i1"].resuming_segment = segment_id
     snapshot = store.snapshot("principal", CONVERSATION)
     real_transaction = store._transaction
     order: list[str] = []
@@ -2751,7 +2751,7 @@ async def test_a_checkpoint_retried_past_a_card_write_keeps_the_card(
     assert "cmp_two" in reloaded.components
     assert [line["component_id"] for line in reloaded.turn_components] == ["cmp_two"]
     assert [block.component_id for block in reloaded.composition.blocks] == ["cmp_two"]
-    assert reloaded.pending["i1"].approved_sent
+    assert reloaded.pending["i1"].resuming_segment == segment_id
 
 
 async def test_an_evicted_instance_holds_no_lease_it_did_not_close(new_store) -> None:

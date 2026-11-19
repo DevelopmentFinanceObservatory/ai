@@ -19,10 +19,6 @@ request cancels. For its segment it alone:
   only as that outcome (`harness.turn.loop.Outcome`);
 - puts each frame on the channel, except the work's ending frame (a pause
   frame, `done`, or a stream-fatal `error`), which it holds;
-- saves the pending interrupts once `plan.approved` has gone out, so a retry
-  of the same answer does not send it again. The save reads them as the
-  frames sent so far leave them, before its first await, and writes nothing
-  else. A save that finds the lease lost ends the work `lost`;
 - reads the client-gone flag in one place, while it waits for the drive's
   next event. Once the flag is set it cancels the drive with the turn's
   `StopScope` unmarked, so the cursor stays as last written for a later
@@ -101,7 +97,7 @@ from harness.studio_state import (
     SegmentLost,
     _recorded_reply,
 )
-from harness.studio_store import SegmentClose, Snapshot
+from harness.studio_store import SegmentClose
 from harness.studio_translate import SEGMENT_LOST_DETAIL, STREAM_RETRY_AFTER_S
 from harness.turn.loop import Outcome, pending_owed_work
 from harness.wire import (
@@ -399,12 +395,6 @@ class Work[E, R](Protocol):
 class SegmentStore(Protocol):
     """The writes an owner makes (`harness.studio_store.StudioStore`)."""
 
-    def snapshot(self, principal: str, conversation_id: str) -> Snapshot: ...
-
-    async def checkpoint(
-        self, principal: str, conversation_id: str, segment_id: str, snapshot: Snapshot
-    ) -> None: ...
-
     async def close_segment(
         self, principal: str, conversation_id: str, segment_id: str
     ) -> SegmentClose: ...
@@ -571,8 +561,7 @@ class _Owner[E, R]:
 
     async def _work_to_end(self) -> Finish:
         """Translate the drive's events until it ends, the client leaves, or
-        the save after `plan.approved` or a card write finds the lease lost,
-        and return how the work ended. When the owner cuts the drive off, it
+        a card write finds the lease lost, and return how the work ended. When the owner cuts the drive off, it
         cancels it and waits for it. A client that left has the events
         the drive emitted translated, unsaved, so the closing write stores
         the state they leave; a lost lease drops them, since no write of
@@ -590,11 +579,9 @@ class _Owner[E, R]:
                     return await self._ended(task)
                 if isinstance(event, _Gone):
                     cut = Finish.LEFT
-                elif await self._take(await self._work.frames(event)):
-                    cut = Finish.LOST
+                else:
+                    await self._take(await self._work.frames(event))
             await self._stop(task)
-            if cut is Finish.LOST:
-                return cut
             await self._translate_left()
             return cut if task.cancelled() else await self._ended(task)
         except (SegmentLost, DatabaseUnavailable) as lost:
@@ -644,14 +631,11 @@ class _Owner[E, R]:
         """Translate, unsaved, the events the drive emitted before the owner
         stopped it."""
         while self._events:
-            await self._take(await self._work.frames(self._events.take()), saving=False)
+            await self._take(await self._work.frames(self._events.take()))
 
-    async def _take(self, frames: list[BaseModel], *, saving: bool = True) -> bool:
+    async def _take(self, frames: list[BaseModel]) -> None:
         """Hold the work's ending frame and put every other frame on the
-        channel, in order. After `plan.approved`, when `saving`, save the
-        conversation and return whether that save found the lease lost. The
-        frames after it are taken, unsaved."""
-        lost = False
+        channel, in order."""
         for frame in frames:
             if isinstance(frame, _ENDING_FRAMES):
                 if self._held is None:
@@ -669,43 +653,6 @@ class _Owner[E, R]:
             self._lines.observe(frame)
             self._channel.put_nowait(frame)
             self._held_last = False
-            if saving and not lost and getattr(frame, "event", None) == "plan.approved":
-                lost = await self._approved()
-        return lost
-
-    async def _approved(self) -> bool:
-        """Record that `plan.approved` went out and save it, so a retry of
-        the same answer after this segment dies does not send it again (a
-        crash before the save sends it twice, so the frame arrives at least
-        once). Returns whether the save found the lease lost. Any other
-        failure is logged and the stream goes on.
-
-        The owner alone translates, so the pending interrupts the snapshot
-        reads, with no await since the frame went on the channel, are those
-        of the frames sent so far. The save writes those and nothing else
-        (`harness.studio_store.StudioStore.checkpoint`). The drive runs on
-        while the save waits, and its events wait for the owner."""
-        self._conversation.mark_approved_sent(self._segment_id)
-        try:
-            snapshot = self._store.snapshot(self._principal, self._conversation_id)
-            await self._store.checkpoint(
-                self._principal, self._conversation_id, self._segment_id, snapshot
-            )
-        except (SegmentLost, DatabaseUnavailable):
-            logger.warning(
-                "studio stream: conversation %s segment %s lost its lease at the save after "
-                "plan.approved",
-                self._conversation_id,
-                self._segment_id,
-            )
-            return True
-        except Exception:
-            logger.exception(
-                "studio stream: conversation %s segment %s's save after plan.approved failed",
-                self._conversation_id,
-                self._segment_id,
-            )
-        return False
 
     async def _ended(self, task: asyncio.Task[R]) -> Finish:
         """How the work ended, once the drive has ended on its own and every
@@ -717,7 +664,7 @@ class _Owner[E, R]:
         if task.cancelled():
             return self._failed(asyncio.CancelledError())
         outcome, frames = await self._work.end(task.result())
-        await self._take(frames, saving=False)
+        await self._take(frames)
         finish = Finish(outcome.value)
         needed = _FINISH_FRAMES.get(finish)
         if needed is None or isinstance(self._held, needed):

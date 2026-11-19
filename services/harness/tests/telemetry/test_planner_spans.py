@@ -309,10 +309,12 @@ async def test_langfuse_shows_each_entry_as_stored(
     shown = await _spans(_ENTRIES[entry](plan), exported_spans)
 
     put_in_place = [seen for seen in shown if seen["type"] == "span"]
-    assert len(put_in_place) == (1 if entry == "stopped" else 0)
+    assert len(put_in_place) == (1 if entry in {"stopped", "budget-closed"} else 0)
     for seen in put_in_place:
         assert seen["usage"] == {}
-        assert seen["output"][0]["parts"][0]["content"].startswith("Stopping this turn:")
+        assert "dfo.model.finish_reason" not in seen["budget"]
+    if entry == "stopped":
+        assert put_in_place[0]["output"][0]["parts"][0]["content"].startswith("Stopping this turn:")
     expect(expectation_name(request), _stored(shown, _TOOLS.get(entry, "span_tools")))
 
 

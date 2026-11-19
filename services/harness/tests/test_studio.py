@@ -1447,7 +1447,7 @@ async def test_a_request_cancelled_after_its_claim_ends_the_span_as_cancelled(
             raise asyncio.CancelledError
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(studio.turns, "open_turn", hanging_open)
+    monkeypatch.setattr(studio_module, "open_turn_on", hanging_open)
     request = asyncio.ensure_future(
         _turn_endpoint(studio)(
             TurnRequest.model_validate(_turn_body("hi")), authorization=AUTH["Authorization"]
@@ -2464,7 +2464,7 @@ async def _close_failure_after_the_claim(monkeypatch: pytest.MonkeyPatch) -> Non
     async def unavailable(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("turn store unavailable")
 
-    monkeypatch.setattr(app.state.studio.turns, "open_turn", unavailable)
+    monkeypatch.setattr(studio_module, "open_turn_on", unavailable)
     async with _client(app) as client:
         with pytest.raises(RuntimeError):
             await _stream(client, "/api/studio/turn", _turn_body("hi"))
@@ -2479,7 +2479,7 @@ async def _close_cancel_after_the_claim(monkeypatch: pytest.MonkeyPatch) -> None
         opening.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(studio.turns, "open_turn", hanging)
+    monkeypatch.setattr(studio_module, "open_turn_on", hanging)
     request = asyncio.ensure_future(
         _turn_endpoint(studio)(
             TurnRequest.model_validate(_turn_body("hi")), authorization=AUTH["Authorization"]
@@ -2599,17 +2599,15 @@ async def _close_turn_over_one_that_failed_before_streaming(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = _app(_text("Hello."))
-    turns = app.state.studio.turns
-    open_turn = turns.open_turn
 
     async def unavailable(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("turn store unavailable")
 
-    turns.open_turn = unavailable
     async with _client(app) as client:
-        with pytest.raises(RuntimeError):
-            await _stream(client, "/api/studio/turn", _turn_body("hi"))
-        turns.open_turn = open_turn
+        with monkeypatch.context() as patch:
+            patch.setattr(studio_module, "open_turn_on", unavailable)
+            with pytest.raises(RuntimeError):
+                await _stream(client, "/api/studio/turn", _turn_body("hi"))
         await _stream(client, "/api/studio/turn", _turn_body("hi again"))
 
 
@@ -2670,7 +2668,7 @@ _LEFT = ("left", "WARNING")
         ),
         pytest.param(
             _close_turn_over_one_that_failed_before_streaming,
-            [("failed", "ERROR"), _ABANDONED, _DONE],
+            [("failed", "ERROR"), _DONE],
             id="turn-over-one-that-failed-before-streaming",
         ),
     ],
@@ -3573,46 +3571,46 @@ async def test_a_raise_building_the_approval_record_leaves_the_pending_entry_for
 async def test_a_failure_before_the_turn_streams_releases_the_lock_and_the_claimed_lease(
     otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The turn cannot be opened after the claim save landed, so `/turn`
-    fails before its stream starts. The lock and the segment it claimed are
+    """The turn cannot be opened in the save that begins it, after the
+    lease's claim landed, so `/turn` fails before its stream starts and
+    nothing of the turn is stored. The lock and the segment it claimed are
     both released, the claimed segment's span ends `failed` and is
-    exported, and the next `/turn` is accepted. That turn closes the first
-    as `abandoned`, and records a zero-length span on the first turn's
-    trace that says so."""
+    exported, and the next `/turn` is accepted, with no turn left to close
+    as `abandoned`."""
     ended = _recording_span_ends(monkeypatch)
     store = StudioStore(
         _engine(),
     )
     app = _app(_text("Hello."), store=store)
-    turns = app.state.studio.turns
-    open_turn = turns.open_turn
+    real_open_turn = studio_module.open_turn_on
 
     async def _unavailable(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("turn store unavailable")
 
-    turns.open_turn = _unavailable
+    monkeypatch.setattr(studio_module, "open_turn_on", _unavailable)
     async with _client(app) as client:
         with pytest.raises(RuntimeError, match="turn store unavailable"):
             await _stream(client, "/api/studio/turn", _turn_body("hi"))
 
         assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
         live = store.current(PRINCIPAL, CONVERSATION)
-        assert (live.turn_index, live.turn_recorded, live.segment) == (1, False, None)
+        assert (live.turn_index, live.segment) == (0, None)
         store.claim_segment(PRINCIPAL, CONVERSATION)  # not refused as busy
         assert _turn_spans(otlp_spans) == 1
-        first_trace = live.trace_id
         stored = await store.load(PRINCIPAL, CONVERSATION)
-        assert stored is not None and stored.segment is None
-        turns.open_turn = open_turn
+        assert stored is not None and (stored.turn_index, stored.segment) == (0, None)
+        monkeypatch.setattr(studio_module, "open_turn_on", real_open_turn)
         frames = await _stream(client, "/api/studio/turn", _turn_body("hi again"))
 
     assert _events(frames)[-1] == "done"
-    assert ended == [("failed", "ERROR"), ("abandoned", "WARNING"), ("done", "DEFAULT")]
-    assert [
+    assert ended == [("failed", "ERROR"), ("done", "DEFAULT")]
+    traces = [
         (span.attributes or {})["dfo.external_id"]
         for span in otlp_spans.get_finished_spans()
         if span.name == "turn"
-    ] == [first_trace, first_trace, _frame(frames, "done")["trace_id"]]
+    ]
+    assert traces[1:] == [_frame(frames, "done")["trace_id"]]
+    assert traces[0] != traces[1]
 
 
 async def test_a_turn_whose_claim_loses_forgets_the_turn_it_began() -> None:
@@ -3686,6 +3684,94 @@ async def test_a_failure_before_a_resume_streams_keeps_the_answer_for_a_same_ans
 
     assert _events(frames)[-1] == "done"
     assert _frame(frames, "message.complete")["text"] == "You meant reading B."
+
+
+def _ask_answer(frames: list[dict[str, Any]], option: int) -> dict[str, Any]:
+    """The answer to the stream's elicitation picking its first question's
+    `option`."""
+    elicitation = _frame(frames, "elicitation.request")
+    (question,) = elicitation["questions"]
+    return _interrupt_body(
+        elicitation["interrupt_id"],
+        "answer",
+        answers={question["id"]: _pick(question["options"][option]["id"])},
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "lost"),
+    [
+        ("plan", "close-fails"),
+        ("plan", "client-left"),
+        ("plan", "response-cut"),
+        ("ask", "response-cut"),
+    ],
+    ids=["plan-close-fails", "plan-client-left", "plan-response-cut", "ask-response-cut"],
+)
+async def test_an_identical_retry_after_the_turn_paused_again_streams_the_later_pause(
+    monkeypatch: pytest.MonkeyPatch, kind: str, lost: str
+) -> None:
+    """An answer resumes the turn, which pauses again on a later question
+    (the amended plan, or a second ask), and the client never reads that
+    pause. The resumed stream's closing write fails (`close-fails`); it
+    commits keeping the answered entry, as for a client that left
+    (`client-left`); or it commits as for any pause, dropping the answered
+    entry, and the response is lost on the way (`response-cut`). The
+    identical retry is answered 409 while the resumed segment's lease is
+    live, then streams the stored pause under its own interrupt id with no
+    model call, and the pause it streams is answerable."""
+    clock = await StoreClock.start(_engine())
+    store = StudioStore(_engine(), **clock.store_kwargs)
+    script = (
+        _plan("q with forks", *_charts_the_plan())
+        if kind == "plan"
+        else (*_ask("reading A", "reading B"), *_ask("C", "D"), _text("Done."))
+    )
+    app = _app(*script, tool_surface=ScriptedSurface(), store=store)
+    real_close = store.close_segment
+    closes: list[int] = []
+
+    async def close(*args: Any, **kwargs: Any) -> SegmentClose:
+        closes.append(1)
+        if lost == "close-fails" and len(closes) == 2:
+            return SegmentClose.FAILED
+        return await real_close(*args, **kwargs)
+
+    store.close_segment = close  # type: ignore[method-assign]
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        body = (
+            _interrupt_body(_frame(first, "plan.proposed")["interrupt_id"], "amend", "commits")
+            if kind == "plan"
+            else _ask_answer(first, 1)
+        )
+        with monkeypatch.context() as patch:
+            if lost == "client-left":
+                patch.setattr(ConversationState, "drop_resuming", lambda self, segment_id: None)
+            await _stream(client, "/api/studio/interrupt", body)
+        cursor = await app.state.studio.turns.open_cursor(PRINCIPAL, CONVERSATION)
+        assert cursor is not None and cursor.pause is not None
+        if lost == "close-fails":
+            live = await client.post("/api/studio/interrupt", json=body, headers=AUTH)
+            assert (live.status_code, live.json()["error"]) == (409, "transient_unavailable")
+            await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)
+        model_calls = len(_model(app).requests)
+        replayed = await _stream(client, "/api/studio/interrupt", body)
+        replay_calls = len(_model(app).requests) - model_calls
+        stored = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+        answered = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(cursor.pause.interrupt_id, "approve")
+            if kind == "plan"
+            else _ask_answer(replayed, 0),
+        )
+
+    pause_event = "plan.proposed" if kind == "plan" else "elicitation.request"
+    assert _frame(replayed, pause_event)["interrupt_id"] == cursor.pause.interrupt_id
+    assert replay_calls == 0
+    assert stored is not None and list(stored.pending) == [cursor.pause.interrupt_id]
+    assert _events(answered)[-1] == "done"
 
 
 # --- asks the agent puts to the user ---------------------------------------------
@@ -7803,13 +7889,18 @@ async def _stop_after_the_claim_before_the_abandon(row: _Row):
     sent: list[httpx2.Response] = []
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
-        real = studio_module.abandon
+        turns = app.state.studio.turns
+        real = turns.open_cursor
+        armed = [True]
 
         async def stopped_first(*args: Any, **kwargs: Any) -> Any:
-            sent.append(await _post_stop(client))
+            # The route reads the turn left open once its claim committed.
+            if armed:
+                armed.clear()
+                sent.append(await _post_stop(client))
             return await real(*args, **kwargs)
 
-        row.monkeypatch.setattr(studio_module, "abandon", stopped_first)
+        row.monkeypatch.setattr(turns, "open_cursor", stopped_first)
         frames = await asyncio.wait_for(
             _stream(client, "/api/studio/turn", _turn_body()), timeout=5
         )
@@ -9045,6 +9136,42 @@ async def test_a_chip_applies_only_on_the_answer_it_was_offered_with() -> None:
     assert turns[2]["applied_choice"]["spec_id"] == _switched_answer(scope)[0]
 
 
+async def test_a_chip_made_stale_between_its_check_and_the_claim_is_refused() -> None:
+    """Another instance's turn answering anew between the chip's first check
+    and the claim makes the chip stale: the check on the conversation
+    reloaded under the claim refuses it 422, Search is asked nothing, no
+    turn is recorded, and the claim is let go, so the next turn streams."""
+    app_a, _, search_a = _chip_app(_text("Next."))
+    app_b, _, search_b = _chip_app()
+    store_a: StudioStore = app_a.state.studio.store
+    real_claim = store_a.claim_turn_lease
+    raced: list[list[dict[str, Any]]] = []
+    async with _client(app_a) as client_a, _client(app_b) as client_b:
+        africa = await _stream(client_a, "/api/studio/turn", _turn_body("health aid to Africa"))
+        (chip,) = [
+            c for c in _frame(africa, "suggestions")["items"] if c["option_id"] == "sector:120+130"
+        ]
+
+        async def claim(*args: Any, **kwargs: Any) -> Any:
+            if not raced:
+                raced.append(
+                    await _stream(client_b, "/api/studio/turn", _turn_body("health aid to Ghana"))
+                )
+            return await real_claim(*args, **kwargs)
+
+        store_a.claim_turn_lease = claim
+        refused = await client_a.post("/api/studio/turn", json=_chip_body(chip), headers=AUTH)
+        turns = [turn["user"] for turn in store_a.current(PRINCIPAL, CONVERSATION).turns]
+        after = await _stream(client_a, "/api/studio/turn", _turn_body("thanks"))
+
+    assert _events(raced[0])[-1] == "done"
+    assert refused.status_code == 422
+    assert refused.json()["constraint_id"] == "scope_choice_stale"
+    assert (len(search_a.posted), len(search_b.posted)) == (0, 0)
+    assert turns == ["health aid to Africa", "health aid to Ghana"]
+    assert _events(after)[-1] == "done"
+
+
 async def test_a_chip_whose_reading_a_plan_card_switch_moved_is_refused() -> None:
     """The Africa answer stands as the latest answered turn, but a later turn
     paused on its plan and a switch on the card moved the chip's choice to a
@@ -9540,6 +9667,44 @@ async def test_a_superseded_pause_is_recorded_as_abandoned() -> None:
     assert records[0]["error"] == "abandoned"
     assert records[0]["plans"] == [{"plan": 1}]
     assert "error" not in records[1]
+
+
+async def test_a_replacement_turn_whose_save_fails_leaves_the_pause_answerable() -> None:
+    """The save that begins a new turn over a paused one fails after the
+    paused turn's close was written in it: nothing of the new turn or the
+    close is stored, so the plan the paused turn holds still approves."""
+    app = _app(*_plan("q with forks", *_charts_the_plan()), tool_surface=ScriptedSurface())
+    store: StudioStore = app.state.studio.store
+    real_save = store.save
+    failed: list[bool] = []
+
+    async def save(*args: Any, **kwargs: Any) -> None:
+        if kwargs.get("seq_reserved") is not None and not failed:
+            failed.append(True)
+            alongside = kwargs.get("alongside")
+
+            async def failing(conn: Any, pk: int) -> None:
+                if alongside is not None:
+                    await alongside(conn, pk)
+                raise ConnectionResetError("the begin-turn save did not reach the database")
+
+            kwargs["alongside"] = failing
+        return await real_save(*args, **kwargs)
+
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        store.save = save  # type: ignore[method-assign]
+        with pytest.raises(ConnectionResetError):
+            await client.post("/api/studio/turn", json=_turn_body("something else"), headers=AUTH)
+        approved = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+        turns = store.current(PRINCIPAL, CONVERSATION).turns
+
+    assert failed == [True]
+    assert _events(approved)[-1] == "done"
+    assert [(turn["user"], turn.get("error")) for turn in turns] == [("q with forks", None)]
 
 
 async def test_a_recreated_edit_card_reaches_the_turn_record() -> None:
@@ -10184,14 +10349,13 @@ async def test_a_heartbeat_that_cannot_renew_ends_the_stream_once_its_clock_pass
     monkeypatch.setattr(store, "renew", _renew_always_fails)
     resolver = _HangingResolver()
     app = _app(*_card(), resolver=resolver, store=store, heartbeat_seconds=0.05)
-    turns = app.state.studio.turns
-    real_open_turn = turns.open_turn
+    real_open_turn = studio_module.open_turn_on
 
     async def slow_open_turn(*args: Any, **kwargs: Any) -> Any:
         await clock.advance(claim_takes)
         return await real_open_turn(*args, **kwargs)
 
-    monkeypatch.setattr(turns, "open_turn", slow_open_turn)
+    monkeypatch.setattr(studio_module, "open_turn_on", slow_open_turn)
 
     async with _client(app) as client:
         stream_task = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
@@ -10337,7 +10501,7 @@ async def test_a_request_cancelled_while_it_drops_its_claim_still_releases_the_l
         await proceed.wait()
         await real_drop(*args, **kwargs)
 
-    monkeypatch.setattr(studio.turns, "open_turn", unavailable)
+    monkeypatch.setattr(studio_module, "open_turn_on", unavailable)
     monkeypatch.setattr(store, "_drop_lease", slow_drop)
     router = create_studio_router(studio, settings=Settings())
     endpoint = next(
@@ -10373,7 +10537,7 @@ async def test_a_claim_whose_span_end_raises_still_releases_the_lock(
     def broken_record(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("telemetry is down")
 
-    monkeypatch.setattr(studio.turns, "open_turn", unavailable)
+    monkeypatch.setattr(studio_module, "open_turn_on", unavailable)
     monkeypatch.setattr(studio_module, "record_unstreamed_span", broken_record)
 
     with pytest.raises(RuntimeError, match="telemetry is down"):
@@ -10798,20 +10962,19 @@ def _member_paths(value: Any, path: str = "") -> set[str]:
 class _OpenedTurns:
     """Records the inputs and opening state of each turn `app` opens."""
 
-    def __init__(self, app: FastAPI) -> None:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.turns: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        turns = app.state.studio.turns
-        open_turn = turns.open_turn
+        open_turn = studio_module.open_turn_on
 
         async def recording(*args: Any, **kwargs: Any) -> Any:
             self.turns.append((kwargs["inputs"], kwargs["state"]))
             return await open_turn(*args, **kwargs)
 
-        turns.open_turn = recording
+        monkeypatch.setattr(studio_module, "open_turn_on", recording)
 
 
 async def test_a_seeded_turn_s_session_keeps_only_what_the_seed_node_reads_of_each_seed(
-    definition_store: InMemoryDefinitionStore,
+    definition_store: InMemoryDefinitionStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The inputs a seeded turn opens with hold each seed's spec_id,
     definition, StatVar dcids and operations, and for a seed the harness
@@ -10832,7 +10995,7 @@ async def test_a_seeded_turn_s_session_keeps_only_what_the_seed_node_reads_of_ea
     app = _app(
         served=[_KENYA_SPEC],
     )
-    opened = _OpenedTurns(app)
+    opened = _OpenedTurns(monkeypatch)
     async with _client(app) as client:
         frames = await _stream(client, "/api/studio/turn", body)
 
@@ -10933,14 +11096,16 @@ async def test_a_request_past_the_body_cap_is_refused_before_it_is_parsed() -> N
     assert search.calls == []
 
 
-async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block() -> None:
+async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The turn opens with the earlier turns' readings, warnings and the
     spec_ids it can pin from a stored block, without the block."""
     store = StudioStore(
         _engine(),
     )
     app = _app(store=store)
-    opened = _OpenedTurns(app)
+    opened = _OpenedTurns(monkeypatch)
     spec_id = "spec_" + "a" * 32
     reading = SearchReading(text="aid", status="definite", spec_id=spec_id).model_dump(mode="json")
     conversation = await store.create(PRINCIPAL, CONVERSATION)
