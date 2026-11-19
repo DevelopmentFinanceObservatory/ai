@@ -122,11 +122,11 @@ type FrameKey = tuple[str, str]
 class FrameLineage:
     """What the store keeps a turn's frame lineage from: `frame_keys`, the
     store keys of the frames a turn's state names, read the way the graph
-    that wrote the state names them, and `source`, the process's frame
-    lineage store."""
+    that wrote the state names them, given the state and the conversation it
+    belongs to, and `source`, the process's frame lineage store."""
 
     source: ProvenanceStore
-    frame_keys: Callable[[Mapping[str, Any]], Iterable[FrameKey]]
+    frame_keys: Callable[[Mapping[str, Any], str], Iterable[FrameKey]]
 
 
 # The range of a Postgres `integer`, the `stat_var_count` column.
@@ -623,7 +623,7 @@ class TurnStore:
             return write
         source, scope = self._lineage.source, segment.scope
         turn_index = cursor.turn_index
-        named = list(dict.fromkeys(self._lineage.frame_keys(state)))
+        named = list(dict.fromkeys(self._lineage.frame_keys(state, scope)))
         source.keep(conversation=scope, keys=named, token=segment.token)
         for key in named:
             spec_id, content_version = key
@@ -801,8 +801,11 @@ class TurnStore:
         (`bounded_read`); the source keeps what it held, which the segment's
         writes then leave unwritten, so the rows stay as they are. Any other
         fault is logged and the segment goes on with the returned value. A
-        row that does not decode is logged, and its frame dropped. `None`
-        without `lineage` or `lineage_scope`: the segment writes no lineage."""
+        cancellation during the restore ends the segment it started
+        (`end_segment`) before it propagates, so the frames it kept do not
+        stay exempt. A row that does not decode is logged, and its frame
+        dropped. `None` without `lineage` or `lineage_scope`: the segment
+        writes no lineage."""
         if self._lineage is None or lineage_scope is None:
             return None
         source = self._lineage.source
@@ -816,6 +819,9 @@ class TurnStore:
                 "turn %s goes on without its stored frame lineage: the restore failed",
                 cursor.turn_index,
             )
+        except BaseException:
+            self.end_segment(segment)
+            raise
         return segment
 
     def end_segment(self, segment: SegmentLineage | None) -> None:
@@ -830,7 +836,7 @@ class TurnStore:
         """The read and restore of `restore_frame_lineage`, into `segment`."""
         assert self._lineage is not None
         source, scope = self._lineage.source, segment.scope
-        named = list(dict.fromkeys(self._lineage.frame_keys(cursor.state)))
+        named = list(dict.fromkeys(self._lineage.frame_keys(cursor.state, scope)))
         source.keep(conversation=scope, keys=named, token=segment.token)
         readable = [key for key in named if _text_key(key)]
         if not readable:

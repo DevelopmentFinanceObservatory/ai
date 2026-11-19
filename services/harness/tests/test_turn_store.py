@@ -1163,22 +1163,87 @@ async def test_a_frame_lineage_read_that_fails_or_stalls_restores_nothing_and_re
 
 
 async def test_a_burst_of_other_turns_mid_segment_keeps_the_segments_frames(
-    pg_engine: AsyncEngine,
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The segment holds its own restore point, so however many other turns
-    the process starts segments of while it runs, its next write stores the
-    frames it produced."""
+    """The segment holds its own restore point and kept set, so however many
+    other segments the process starts and ends while it runs, its frames
+    outlive the per-conversation bound and its next write stores the frames
+    it produced."""
     await _conversation(pg_engine)
     provenance = ProvenanceStore()
     _held(provenance, 1)
     store = _keeping(pg_engine, provenance)
     opened, seg = await _opened(store, provenance)
+    advanced = await _advance(seg, store, opened, _frames({"ref": _key(1)}))
     for turn in range(opened.id + 1, opened.id + 300):
-        await _segment(store, replace(opened, id=turn, state={}))
+        store.end_segment(await _segment(store, replace(opened, id=turn, state={})))
+    monkeypatch.setattr(provenance_module, "_MAX_MANIFESTS_PER_CONVERSATION", 1)
+    for n in (4, 5):
+        _held(provenance, n)
+    _held(provenance, 2)
 
-    await _advance(seg, store, opened, _frames({"ref": _key(1)}))
+    await _advance(seg, store, advanced, _frames({"ref": _key(1)}, {"ref": _key(2)}))
 
-    assert [row[:2] for row in await _lineage_rows(pg_engine)] == [("spec_1", "cv_1")]
+    assert provenance.get(conversation=_SCOPE, **_key(1)) is not None
+    assert [row[:2] for row in await _lineage_rows(pg_engine)] == [
+        ("spec_1", "cv_1"),
+        ("spec_2", "cv_2"),
+    ]
+
+
+async def test_a_second_segment_keeping_nothing_leaves_the_first_segments_frames_kept(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each running segment keeps its own frames: a second segment of the
+    conversation that names none, and then ends, takes nothing of the first
+    segment's kept set."""
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    _held(provenance, 1)
+    store = _keeping(pg_engine, provenance)
+    opened, first = await _opened(store, provenance)
+    advanced = await _advance(first, store, opened, _frames({"ref": _key(1)}))
+
+    second = await _segment(store, replace(advanced, state={}))
+    store.end_segment(second)
+    monkeypatch.setattr(provenance_module, "_MAX_MANIFESTS_PER_CONVERSATION", 1)
+    for n in (4, 5):
+        _held(provenance, n)
+
+    assert provenance.get(conversation=_SCOPE, **_key(1)) is not None
+    store.end_segment(first)
+    _held(provenance, 6)
+    assert provenance.get(conversation=_SCOPE, **_key(1)) is None
+
+
+async def test_a_cut_during_the_restore_leaves_no_kept_entry(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancellation while the restore waits on its read ends the segment
+    it started, so the frames it kept do not stay exempt."""
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    _held(provenance, 1)
+    store = _keeping(pg_engine, provenance)
+    opened, seg = await _opened(store, provenance)
+    advanced = await _advance(seg, store, opened, _frames({"ref": _key(1)}))
+    store.end_segment(seg)
+    reading = asyncio.Event()
+
+    async def _stalls(self: TurnStore, turn: int, keys: Any) -> list[Any]:
+        reading.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(TurnStore, "_frame_lineage", _stalls)
+    restore = asyncio.create_task(store.restore_frame_lineage(advanced, lineage_scope=_SCOPE))
+    await asyncio.wait_for(reading.wait(), 5)
+    assert _SCOPE in provenance._kept
+    restore.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await restore
+
+    assert _SCOPE not in provenance._kept
 
 
 @pytest.mark.parametrize("frames", ["none", "named-without-rows"])

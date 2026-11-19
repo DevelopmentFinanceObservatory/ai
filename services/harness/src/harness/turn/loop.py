@@ -613,11 +613,14 @@ async def drive[E](
     except _Closes as closing:
         return await close(closing.status, node, closing.error)
     cursor = segment.cursor
-    lineage = await _step(store.restore_frame_lineage(cursor, lineage_scope=_lineage_scope(key)))
-
     # The segment's kept frames stop being exempt from the provenance
-    # store's bound when it ends, however it ends (`TurnStore.end_segment`).
+    # store's bound when it ends, however it ends, a cut during the restore
+    # included (`TurnStore.end_segment`).
+    lineage: SegmentLineage | None = None
     try:
+        lineage = await _step(
+            store.restore_frame_lineage(cursor, lineage_scope=_lineage_scope(key))
+        )
         while True:
             # The node works on a copy, so whatever it changes in place, the
             # cursor keeps the state as stored until a write stores the node's.
