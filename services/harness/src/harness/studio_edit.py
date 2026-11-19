@@ -505,9 +505,8 @@ def _refresh_block(
     """Bring the edited component's block up to `revision`, and `title` when
     given; True iff a block changed. A card that is not composed, or whose
     block already shows `revision` and `title`, mints no empty manifest
-    revision. The store retries a write whose commit landed but whose
-    acknowledgement was lost, and that retry reads the block the commit
-    wrote."""
+    revision. `StudioStore.change_canvas` runs it once per committed
+    write."""
     previous = conversation.composition
     if previous is None:
         return False

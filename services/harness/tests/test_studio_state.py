@@ -45,7 +45,7 @@ from harness import studio_state, studio_store
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.conversation import current_conversation_key
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY
-from harness.studio_edit import _refresh_block
+from harness.studio_edit import _record_revision, _refresh_block
 from harness.studio_state import (
     CANVAS_DIGEST_MAX_BYTES,
     CONVERSATION_DIGEST_MAX_BYTES,
@@ -3010,6 +3010,84 @@ async def test_overlapping_canvas_changes_each_land_once_when_the_first_lost_its
     reloaded = await new_store().load("principal", CONVERSATION)
     assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_one"]
     assert state.composition == reloaded.composition
+    assert len(await _canvas_writes(pg_engine)) == 3
+
+
+def _revise_card(work: ConversationState) -> bool:
+    """The Edit Card route's revise of `_CARD` to revision 2."""
+    _record_revision(work, component_id="cmp_two", component=_CARD, revision=2, title="Renamed")
+    return _refresh_block(work, component_id="cmp_two", revision=2, title="Renamed")
+
+
+@pytest.mark.parametrize(
+    ("first", "first_line"),
+    [
+        pytest.param(
+            lambda work: land_component(work, _component("cmp_one")),
+            ("cmp_one", "created"),
+            id="land-then-land",
+        ),
+        pytest.param(_revise_card, ("cmp_two", "revised"), id="revise-then-land"),
+    ],
+)
+async def test_a_canvas_change_after_a_lost_acknowledgement_builds_on_the_commit(
+    new_store, pg_engine, monkeypatch, first: Callable[[Any], Any], first_line: tuple[str, str]
+) -> None:
+    """A's canvas change commits and its acknowledgement is lost. B lands a
+    card before A retries. B builds on A's commit, so the row and the live
+    state each hold both changes' digest entries and turn lines, and the
+    baseline equals the row."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await store.change_canvas("principal", CONVERSATION, lambda work: land_component(work, _CARD))
+    real_transaction = store._transaction
+    faults: list[int] = []
+    landing: list[asyncio.Task[Any]] = []
+
+    @asynccontextmanager
+    async def losing_the_ack() -> Any:
+        async with real_transaction() as conn:
+            yield conn
+        if not faults:
+            faults.append(1)
+            # B is queued on the write lock A holds, so it writes before A's retry.
+            landing.append(
+                asyncio.create_task(
+                    store.change_canvas(
+                        "principal",
+                        CONVERSATION,
+                        lambda work: land_component(work, _component("cmp_new")),
+                    )
+                )
+            )
+            await asyncio.sleep(0)
+            raise _connection_reset("COMMIT")
+
+    store._transaction = losing_the_ack
+
+    await store.change_canvas("principal", CONVERSATION, first)
+
+    assert faults == [1]
+    assert landing[0].done()
+    lines = [
+        ("cmp_two", "created"),
+        first_line,
+        ("cmp_new", "created"),
+    ]
+    reloaded_store = new_store()
+    reloaded = await reloaded_store.load("principal", CONVERSATION)
+    for held in (reloaded, state):
+        assert [(line["component_id"], line["action"]) for line in held.turn_components] == lines
+        assert {cid for cid, _ in lines} <= set(held.components)
+    assert state.components == reloaded.components
+    assert state.composition == reloaded.composition
+    assert (
+        store._runtime[("principal", CONVERSATION)].baseline
+        == reloaded_store._runtime[("principal", CONVERSATION)].baseline
+    )
     assert len(await _canvas_writes(pg_engine)) == 3
 
 

@@ -974,7 +974,11 @@ class ImportReport:
                 (f"{would}imported", self.imported),
                 (f"{would}re-imported", self.reimported),
                 ("unchanged", self.unchanged),
-                ("conflict, changed on both sides (--prefer-adk re-imports)", self.conflicts),
+                (
+                    "conflict, changed on both sides (--prefer-adk re-imports, "
+                    "--keep-tables keeps the tables' copy)",
+                    self.conflicts,
+                ),
                 (f"tables' copy {would}kept (--keep-tables)", self.kept),
             )
             for name in names
@@ -1029,8 +1033,8 @@ class _Undo(Exception):  # noqa: N818 -- names what raising it does
 
 # Records that the operator keeps the tables' copy of a conversation at the
 # ledger session's state as it stands (`--keep-tables`). `imported_digest`
-# is cleared, so a later ADK move meets the rows as changed and is a
-# conflict, never a copy over what the operator kept.
+# is cleared, so a later ADK move meets the rows as changed and is recorded
+# as a conflict, which leaves the kept rows in place.
 _KEEP = text(
     "INSERT INTO adk_ledger_imports "
     "(principal, conversation_id, source_digest, source_updated_at, kept_tables) "
@@ -1074,7 +1078,8 @@ async def _import_one(
     `reimported` when its rows are as last imported or `prefer_adk` names
     it, `live` when `prefer_adk` names it and a stream holds its lease
     (unless `force`), and `conflict` otherwise. It is `kept` when the import
-    record keeps the tables' copy of this ADK state, and when `keep_tables`
+    record keeps the tables' copy of this ADK state and `prefer_adk` does
+    not name it, and when `keep_tables`
     names a conversation that would be refused or in conflict: the record
     then keeps the tables' copy (`_KEEP`) and the rows are left as they are.
     `keep_tables` naming any other conversation refuses it, with nothing
@@ -1118,8 +1123,12 @@ async def _import_one(
             updated = {**names, "updated": session.updated_at}
             kept = {**updated, "source": source}
             keep = session.name in keep_tables
+            prefer = session.name in prefer_adk
             previous = await _import_record(conn, names)
-            if previous is not None and previous.kept_tables and previous.source_digest == source:
+            kept_here = (
+                previous is not None and previous.kept_tables and previous.source_digest == source
+            )
+            if kept_here and not prefer:
                 # The kept copy stands while ADK's state is the one kept.
                 outcome = "kept"
                 if apply:
@@ -1145,7 +1154,12 @@ async def _import_one(
                 return _Copy(session, ledger, outcome, reasons, held, turn)
             if open_turn:
                 turn = await _read_open_turn(conn, session, ledger)
-            if not created and previous is not None and previous.source_digest == source:
+            if (
+                not created
+                and previous is not None
+                and previous.source_digest == source
+                and not (kept_here and prefer)
+            ):
                 if apply:
                     await conn.execute(
                         text(
@@ -1161,7 +1175,7 @@ async def _import_one(
                 previous is not None and await _stored_digest(conn, pk) == previous.imported_digest
             ):
                 outcome = "reimported"
-            elif session.name in prefer_adk:
+            elif prefer:
                 outcome = "reimported"
                 if not force and await _lease_live(conn, pk):
                     outcome = "live"
@@ -1463,7 +1477,9 @@ def _diverged(principal: str, conversation_id: str) -> ConversationHeld:
     logger.error(
         "adk import: %s changed on ADK and in the tables since it was imported, so it is not "
         "served until `python -m harness.adk_import import --apply --prefer-adk %s` takes "
-        "ADK's copy",
+        "ADK's copy or `python -m harness.adk_import import --apply --keep-tables %s` keeps "
+        "the tables' copy",
+        name,
         name,
         name,
     )
@@ -1608,13 +1624,15 @@ class VerifyReport:
     hold turns ADK never saw. The third is a conflict, where both moved,
     and it fails the verify. A conversation whose tables' copy the operator
     kept (`--keep-tables`) at ADK's state as it stands is listed apart too.
-    A verify that compares none of the sessions it read fails, since it has
-    checked nothing, unless every one of them is kept.
+    A compared, written or kept conversation counts as checked. The verify
+    fails on a difference or a conflict, and when the ledger holds sessions
+    and none of them was checked.
 
     `streaming_on_adk` names each ledger session whose `studio:segment`
     lease is live on the database's clock: a stream of the previous
-    revision still runs on it and can write it again. It fails the verify,
-    which is rerun once the stream has ended."""
+    revision still runs on it and can write it again. It is reported and
+    does not fail the verify; `close_open_turns` fails on a live lease of a
+    turn on ADK."""
 
     total: int = 0
     differences: dict[str, list[str]] = field(default_factory=dict)
@@ -1635,13 +1653,12 @@ class VerifyReport:
         )
 
     @property
+    def checked(self) -> int:
+        return self.compared + len(self.written_since_import) + len(self.kept)
+
+    @property
     def clean(self) -> bool:
-        return (
-            not self.differences
-            and not self.conflicts
-            and not self.streaming_on_adk
-            and (self.compared > 0 or self.total == len(self.kept))
-        )
+        return not self.differences and not self.conflicts and (self.checked > 0 or self.total == 0)
 
     def render(self) -> str:
         compared = self.compared
@@ -1655,16 +1672,16 @@ class VerifyReport:
             for name in self.written_since_import
         ]
         lines += [
-            f"conflict, changed on both sides since the import (--prefer-adk re-imports): {name}"
+            "conflict, changed on both sides since the import (--prefer-adk re-imports, "
+            f"--keep-tables keeps the tables' copy): {name}"
             for name in self.conflicts
         ]
         lines += [f"tables' copy kept (--keep-tables), not compared: {name}" for name in self.kept]
-        lines += [
-            f"a stream holds its lease on ADK, rerun once it ends: {name}"
-            for name in self.streaming_on_adk
-        ]
-        if compared == 0 and self.total > len(self.kept):
-            lines.append(f"none of the {self.total} ledger sessions compared")
+        lines += [f"a stream holds its lease on ADK: {name}" for name in self.streaming_on_adk]
+        if self.streaming_on_adk:
+            lines.append(f"{len(self.streaming_on_adk)} streams hold their lease on ADK")
+        if self.checked == 0 and self.total > 0:
+            lines.append(f"none of the {self.total} ledger sessions compared, written or kept")
         lines.append(f"{compared - len(self.differences)} of {compared} equal")
         return "\n".join(lines)
 
@@ -1736,8 +1753,9 @@ async def verify(engine: AsyncEngine) -> VerifyReport:
 # previous revision's `claim_segment` reads a lease.
 _STREAMING_ON_ADK = text(
     "SELECT user_id, id FROM sessions WHERE app_name = :app "
-    "AND jsonb_typeof(state -> 'studio:segment' -> 'expires_at') = 'number' "
-    f"AND (state -> 'studio:segment' ->> 'expires_at')::double precision > {DATABASE_NOW} "
+    "AND CASE WHEN jsonb_typeof(state -> 'studio:segment' -> 'expires_at') = 'number' "
+    "THEN (state -> 'studio:segment' ->> 'expires_at')::double precision END "
+    f"> {DATABASE_NOW} "
     "ORDER BY user_id, id"
 )
 
@@ -1792,7 +1810,7 @@ class CloseReport:
                 ("left open, no ADK turn session", self.not_on_adk),
                 ("left open, turn_cursors holds the turn", self.in_turn_cursors),
                 ("changed during the run, run again", self.changed),
-                ("left alone, diverged (--prefer-adk first)", self.diverged),
+                ("left alone, diverged (--prefer-adk or --keep-tables first)", self.diverged),
             )
             for name in names
         ]

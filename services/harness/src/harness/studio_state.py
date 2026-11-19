@@ -1931,9 +1931,8 @@ def land_component(
     conversation digest reads it.
 
     A canvas that already holds the component's block gets no second one
-    and the return is `"created"`. The store retries a write whose commit
-    landed but whose acknowledgement was lost, and the retry reads the
-    canvas that commit wrote.
+    and the return is `"created"`. `StudioStore.change_canvas` runs it once
+    per committed write.
     """
     entry = _digest_entry(component)
     if intent is not None:
@@ -2004,7 +2003,7 @@ def _replace_block(
     block's `pinned` flag.
 
     True iff the canvas shows `component` in the slot: a block was
-    replaced, or a commit of the same swap already replaced it. A card that
+    replaced, or the canvas already held `component`'s block. A card that
     was never composed (auto_add=false, or removed since) has no block to
     swap. The caller's component still streams as component.created and is
     not added to the canvas here. The Edit Card route's recreate
@@ -2014,7 +2013,7 @@ def _replace_block(
     previous = conversation.composition
     index = _block_index(previous, old_component_id)
     if previous is None or index is None:
-        # A retried write whose first commit landed reads the swap done.
+        # A canvas that already shows the new block reads the swap done.
         return _block_index(previous, component["component_id"]) is not None
     blocks = [block.model_copy(deep=True) for block in previous.blocks]
     blocks[index] = CompositionBlock(

@@ -749,21 +749,23 @@ class _Written(NamedTuple):
     lease_expires_at: float | None
 
 
-@dataclass
+@dataclass(eq=False)
 class _CanvasWrite:
     """One `change_canvas` call's write id and what its latest attempt to
     reach the write computed (`_fenced_save`): the working copy and the live
-    snapshot taken with it, the changed durable keys, `change`'s result and
-    the version the write returned. The id is minted once per call and kept
-    across its retries, so a retry that finds it in the row's
-    `canvas_writes` knows the attempt recorded here committed."""
+    snapshot taken with it, the changed durable keys and `change`'s result.
+    The id is minted once per call and kept across its retries. An attempt
+    that raised after it queued its write leaves the write pending on the
+    runtime entry until the next fenced write resolves it from the row's
+    `canvas_writes`: `landed` once the row holds the id, so the call's retry
+    returns `result` and runs `change` no second time."""
 
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     work: ConversationState | None = None
     base: ConversationState | None = None
     changed: dict[str, Any] = field(default_factory=dict)
     result: Any = None
-    version: int = 0
+    landed: bool = False
 
 
 async def _write_delta(
@@ -822,7 +824,9 @@ class _RuntimeEntry:
     shared `state` object, separate from `lock` since a canvas edit must
     land while a turn streams. `write_lock` serialises this instance's own
     writes on the conversation, so two of them never interleave their
-    `state`/`baseline` updates.
+    `state`/`baseline` updates. `canvas_pending` holds the canvas writes
+    whose attempt raised once it had queued its write, so their commit is
+    unknown; the next fenced write resolves them (`_fenced_save`).
     """
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -840,6 +844,7 @@ class _RuntimeEntry:
     state: ConversationState | None = None
     baseline: dict[str, Any] = field(default_factory=dict)
     draft: tuple[ConversationState, ConversationState] | None = None
+    canvas_pending: list[_CanvasWrite] = field(default_factory=list)
 
 
 class StudioStore:
@@ -1508,14 +1513,16 @@ class StudioStore:
         since included, fences the write out.
 
         Given `write`, a canvas change's (`change_canvas`), the write also
-        records `write.id` in the row's `canvas_writes`, and the attempt's
-        copy, changed keys, result and version are kept on `write` before
-        the commit. A row already holding `write.id` was written by the
-        attempt kept there, whose acknowledgement was lost: nothing is
-        written and `change` does not run again. That attempt's changed keys
-        and version are recorded, its copy, with the canvas as stored now,
-        is assigned to the live state, and its result is returned. A claim
-        empties `canvas_writes`, so the id can only be this lease's."""
+        records `write.id` in the row's `canvas_writes`. The attempt's copy,
+        changed keys and result are kept on `write`, and `write` is queued on
+        `entry.canvas_pending` before the commit and taken off once the
+        commit is acknowledged. Every fenced write first resolves the
+        pending ones from the locked row (`_resolve_canvas_writes`), before
+        it copies the live state, so no write builds on a live state that
+        lacks a commit whose acknowledgement was lost. A `write` resolved as
+        landed returns its kept result, and `change` does not run again. A
+        claim empties `canvas_writes`, so an id found there is this
+        lease's."""
         state = entry.state
         assert entry.pk is not None and state is not None
         async with entry.write_lock:
@@ -1526,8 +1533,10 @@ class StudioStore:
                 stored = (
                     CompositionManifest.model_validate(row.composition) if row.composition else None
                 )
-                if write is not None and write.id in row.canvas_writes:
-                    return self._adopt_canvas_write(entry, state, write, stored, conversation_id)
+                if entry.canvas_pending:
+                    await self._resolve_canvas_writes(conn, entry, state, row, stored)
+                if write is not None and write.landed:
+                    return write.result
                 fenced = _row_segment(row)
                 landed = (
                     retried
@@ -1575,7 +1584,10 @@ class StudioStore:
                             {"pk": entry.pk, "write_id": write.id},
                         )
                         write.work, write.base, write.changed = work, base, changed
-                        write.result, write.version = result, version
+                        write.result = result
+                        entry.canvas_pending.append(write)
+            if write is not None and write in entry.canvas_pending:
+                entry.canvas_pending.remove(write)
             entry.version = version
             entry.baseline.update(changed)
             if work.segment is None:
@@ -1583,30 +1595,61 @@ class StudioStore:
             _assign_changed(state, work, base)
             return result
 
-    @staticmethod
-    def _adopt_canvas_write[T](
+    async def _resolve_canvas_writes(
+        self,
+        conn: AsyncConnection,
         entry: _RuntimeEntry,
         state: ConversationState,
-        write: _CanvasWrite,
+        row: Any,
         stored: CompositionManifest | None,
-        conversation_id: str,
-    ) -> T:
-        """Record the attempt `write` kept as written (`_fenced_save`, whose
-        row lock the caller holds) and return its result. The live state
-        takes the canvas as stored, which a `/composition` edit may have
-        moved since that attempt."""
-        assert write.work is not None and write.base is not None
-        logger.info(
-            "studio store: conversation %s canvas write %s was saved by an attempt "
-            "whose acknowledgement was lost",
-            conversation_id,
-            write.id,
-        )
-        work = dataclasses.replace(write.work, composition=stored)
-        entry.version = max(entry.version, write.version)
-        entry.baseline.update(write.changed)
-        _assign_changed(state, work, write.base)
-        return write.result
+    ) -> None:
+        """Settle each write on `entry.canvas_pending` against `row`, the
+        conversation's row as locked by the caller (`_fenced_save`), and
+        empty the list.
+
+        A write whose id the row's `canvas_writes` holds committed. The row
+        holds that commit and every later one, so the live state reloads
+        from it the durable keys the write's `change` changed, the baseline
+        reloads the keys the write wrote, the version and the canvas are the
+        row's, and the write is marked `landed`. A process-local field
+        `change` set (`ConversationState._removal_unreported`) is set on the
+        live state. A write whose id the row lacks did not commit: it is
+        dropped, and its call's retry runs `change` again on a fresh copy."""
+        pending, entry.canvas_pending = entry.canvas_pending, []
+        landed = [write for write in pending if write.id in row.canvas_writes]
+        for write in pending:
+            if write.id not in row.canvas_writes:
+                write.work = write.base = None
+                write.changed = {}
+        if not landed:
+            return
+        flat = _row_flat(row)
+        for prefix, items in _ITEM_TABLES.items():
+            for ident, value in await conn.execute(items.select(), {"pk": row.id}):
+                flat[f"{prefix}{ident}"] = value
+        for write in landed:
+            assert write.work is not None and write.base is not None
+            logger.info(
+                "studio store: conversation %s canvas write %s was saved by an attempt "
+                "whose acknowledgement was lost",
+                state.conversation_id,
+                write.id,
+            )
+            before = _serialize_durable(write.base)
+            owned = {
+                key
+                for key, value in _serialize_durable(write.work).items()
+                if before.get(key, _NO_BASELINE_VALUE) != value and key in flat
+            }
+            _apply_delta(state, {key: flat[key] for key in owned})
+            entry.baseline.update({key: flat[key] for key in write.changed if key in flat})
+            for name in _PROCESS_LOCAL_FIELDS - {"_telemetry_span"}:
+                value = getattr(write.work, name)
+                if value != getattr(write.base, name):
+                    setattr(state, name, value)
+            write.landed = True
+        entry.version = row.version
+        state.composition = stored
 
     async def renew(
         self,

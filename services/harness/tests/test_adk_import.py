@@ -1141,7 +1141,11 @@ async def test_verify_lists_a_conversation_written_while_it_compares_as_written(
     assert (checked.clean, checked.written_since_import) == (True, [_name(TEXT_ONLY)])
 
 
-async def test_verify_fails_when_it_compares_no_conversation(adk: AsyncEngine) -> None:
+async def test_verify_counts_a_conversation_written_since_the_import_as_checked(
+    adk: AsyncEngine,
+) -> None:
+    """The serving release has written every conversation since the import:
+    verify compares none and passes."""
     await import_conversations(adk, apply=True)
     store = _store(adk)
     for conversation_id in EXPECTED:
@@ -1152,12 +1156,28 @@ async def test_verify_fails_when_it_compares_no_conversation(adk: AsyncEngine) -
 
     report = await verify(adk)
 
-    assert (report.clean, sorted(report.written_since_import)) == (
+    assert (report.clean, sorted(report.written_since_import), report.compared) == (
+        True,
+        sorted(_name(c) for c in EXPECTED),
+        0,
+    )
+
+
+async def test_verify_fails_when_it_checks_no_conversation(adk: AsyncEngine) -> None:
+    """Every conversation moved on ADK since the import: none was compared,
+    written or kept."""
+    await import_conversations(adk, apply=True)
+    for conversation_id in EXPECTED:
+        await _set_adk_state(adk, conversation_id, {"studio:seq": 99})
+
+    report = await verify(adk)
+
+    assert (report.clean, sorted(report.moved_on_adk)) == (
         False,
         sorted(_name(c) for c in EXPECTED),
     )
     assert report.render().splitlines()[-2:] == [
-        "none of the 3 ledger sessions compared",
+        "none of the 3 ledger sessions compared, written or kept",
         "0 of 0 equal",
     ]
 
@@ -1243,7 +1263,11 @@ async def test_a_stop_on_a_copied_lease_does_not_diverge_the_conversation(
 
     assert await store.request_cancel(PRINCIPAL, TEXT_ONLY)
     streaming = await verify(adk)
-    assert (streaming.differences, streaming.streaming_on_adk) == ({}, [_name(TEXT_ONLY)])
+    assert (streaming.differences, streaming.conflicts, streaming.streaming_on_adk) == (
+        {},
+        [],
+        [_name(TEXT_ONLY)],
+    )
     await _set_adk_state(adk, TEXT_ONLY, {"studio:segment": None, "studio:seq": 99})
 
     state = await store.load(PRINCIPAL, TEXT_ONLY)
@@ -1263,7 +1287,10 @@ async def test_close_open_turns_leaves_a_diverged_conversation_alone_and_fails(
 
     assert (report.clean, report.diverged) == (False, [_name(FULL)])
     assert report.closed == [f"{_name(PLAN_PAUSED)} turn 1"]
-    assert f"left alone, diverged (--prefer-adk first): {_name(FULL)}" in report.render()
+    assert (
+        f"left alone, diverged (--prefer-adk or --keep-tables first): {_name(FULL)}"
+        in report.render()
+    )
     kept = await _load(adk, FULL)
     assert kept is not None and not kept.turn_recorded
 
@@ -2163,6 +2190,28 @@ async def test_keep_tables_serves_a_diverged_conversation_until_adk_moves_again(
     assert (await cutover_gate(pg_empty_engine)).first == [name]
 
 
+async def test_prefer_adk_takes_adks_copy_of_a_kept_conversation(
+    pg_empty_engine: AsyncEngine,
+) -> None:
+    """The operator kept the tables' copy, then names the conversation to
+    `--prefer-adk`: the job re-imports ADK's copy and the record is no
+    longer kept."""
+    name = _name(FULL)
+    await _write_adk(pg_empty_engine, RECORDED["sessions"])
+    await _diverge(pg_empty_engine, FULL)
+    await import_conversations(pg_empty_engine, apply=True, keep_tables=frozenset({name}))
+
+    preferred = await import_conversations(
+        pg_empty_engine, apply=True, prefer_adk=frozenset({name})
+    )
+
+    assert (preferred.reimported, preferred.kept, preferred.clean) == ([name], [], True)
+    served = await _reimporting_store(pg_empty_engine).load(PRINCIPAL, FULL)
+    assert served is not None and served.seq == 99
+    checked = await verify(pg_empty_engine)
+    assert (checked.clean, checked.kept, checked.differences) == (True, [], {})
+
+
 async def test_keep_tables_refuses_a_conversation_that_imports_and_a_name_given_twice(
     adk: AsyncEngine,
 ) -> None:
@@ -2187,19 +2236,24 @@ async def test_keep_tables_refuses_a_conversation_that_imports_and_a_name_given_
 
 
 @pytest.mark.parametrize(
-    ("seconds", "streaming"), [(60, True), (-60, False)], ids=["live", "lapsed"]
+    ("expires_at", "streaming"),
+    [(60, True), (-60, False), ("soon", False)],
+    ids=["live", "lapsed", "not-a-number"],
 )
-async def test_verify_fails_while_a_ledger_session_holds_a_live_lease(
-    adk: AsyncEngine, seconds: int, streaming: bool
+async def test_verify_reports_a_ledger_session_that_holds_a_live_lease(
+    adk: AsyncEngine, expires_at: int | str, streaming: bool
 ) -> None:
-    """The previous revision's stream can still write the session."""
+    """The previous revision's stream can still write the session. Verify
+    names it and its count, and does not fail on it."""
     await import_conversations(adk, apply=True)
-    lease = {"id": "seg_old", "owner": "old", "expires_at": time.time() + seconds, "cancel": False}
+    expiry = time.time() + expires_at if isinstance(expires_at, int) else expires_at
+    lease = {"id": "seg_old", "owner": "old", "expires_at": expiry, "cancel": False}
     await _set_adk_state(adk, TEXT_ONLY, {"studio:segment": lease})
 
     report = await verify(adk)
 
     assert (report.clean, report.streaming_on_adk) == (
-        not streaming,
+        True,
         [_name(TEXT_ONLY)] if streaming else [],
     )
+    assert ("1 streams hold their lease on ADK" in report.render().splitlines()) == streaming
