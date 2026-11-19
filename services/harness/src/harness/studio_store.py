@@ -78,6 +78,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.approval import ApprovalRecord
+from harness.db.jsonb import to_json_param
 from harness.studio_state import (
     SEGMENT_TTL_S,
     ConversationState,
@@ -302,8 +303,8 @@ def _changed_since(full: dict[str, Any], baseline: dict[str, Any]) -> dict[str, 
 
 def _json_safe(value: Any) -> Any:
     """`value`, proven JSON-serialisable by round-tripping it through
-    `json.dumps`/`json.loads`. Raises on a value `json.dumps` refuses."""
-    return json.loads(json.dumps(value))
+    `to_json_param`/`json.loads`. Raises on a value the write would refuse."""
+    return json.loads(to_json_param(value))
 
 
 def _serialize_segment(segment: Segment) -> dict[str, Any]:
@@ -571,7 +572,7 @@ class ConversationHeld(Exception):  # noqa: N818 -- names the state the routes r
 
 def _jsonb(value: Any) -> str | None:
     """`value` as a jsonb parameter: JSON text, or SQL NULL for `None`."""
-    return None if value is None else json.dumps(value)
+    return None if value is None else to_json_param(value)
 
 
 _CONVERSATION_COLUMNS = (
@@ -693,7 +694,7 @@ def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
     scalars = {key: value for key, value in delta.items() if key in _SCALAR_KEYS}
     if scalars:
         sets.append("turn_state = turn_state || CAST(:scalars AS jsonb)")
-        params["scalars"] = json.dumps(scalars)
+        params["scalars"] = to_json_param(scalars)
     if _KEY_SEQ in delta:
         _check_column(_KEY_SEQ, delta[_KEY_SEQ], int)
         sets.append("seq_next = :seq_next")
@@ -728,7 +729,7 @@ def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
         rows.setdefault(prefix, []).append(
             {
                 "ident": int(ident) if items.positional else ident,
-                "value": json.dumps(value) if items.json_value else value,
+                "value": to_json_param(value) if items.json_value else value,
             }
         )
     return _DeltaWrite(sets=tuple(sets), params=params, rows=rows)

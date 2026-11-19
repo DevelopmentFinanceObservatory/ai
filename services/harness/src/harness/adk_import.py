@@ -154,6 +154,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.approval import ApprovalRecord
 from harness.db.engine import build_database
+from harness.db.jsonb import to_json_param
 from harness.db.migrate import MigrationChecksumError, apply_pending
 from harness.graph.state import AGENT_NAME, ORCHESTRATOR_SPECS_KEY
 from harness.settings import Settings
@@ -775,7 +776,7 @@ async def _stored_digest(conn: AsyncConnection, pk: int) -> str:
 
 
 def _jsonb(value: Any) -> str | None:
-    return None if value is None else json.dumps(value)
+    return None if value is None else to_json_param(value)
 
 
 @dataclass(frozen=True)
@@ -804,7 +805,7 @@ def _import_rows(ledger: Ledger) -> _ImportRows:
         runs=[
             {
                 "run_id": run_id,
-                "record": json.dumps(record),
+                "record": to_json_param(record),
                 "submission": _jsonb(runs.submissions.get(run_id)),
                 "retrievals": _jsonb(runs.retrievals.get(run_id)),
             }
@@ -812,7 +813,7 @@ def _import_rows(ledger: Ledger) -> _ImportRows:
         ],
         keys=[{"key": key, "run_id": run_id} for key, run_id in runs.keys.items()],
         plans=[
-            {"revision": revision, "plan": json.dumps(plan)}
+            {"revision": revision, "plan": to_json_param(plan)}
             for revision, plan in runs.plans.items()
         ],
     )

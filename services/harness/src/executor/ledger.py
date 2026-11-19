@@ -427,16 +427,23 @@ class LedgerUnavailableError(Exception):
         self.run_id = run_id
 
 
+class NonFiniteJsonError(ValueError):
+    """A NaN or infinity reached a JSON column write (`harness.db.jsonb`). A
+    defect in whatever built the value, not a store fault, so retrying cannot
+    help."""
+
+
 @asynccontextmanager
 async def store_faults(run_id: str | None) -> AsyncIterator[None]:
     """Classify what a read or write of run `run_id`, `None` for an
     admission, raises: a
     `RunLedgerError` is the ledger refusing a change and propagates as it
-    is; any other exception is the ledger's store failing, raised as
+    is, as is a `NonFiniteJsonError` (a code defect, which retrying cannot
+    fix); any other exception is the ledger's store failing, raised as
     `LedgerUnavailableError`, since it says nothing about the run."""
     try:
         yield
-    except RunLedgerError:
+    except (RunLedgerError, NonFiniteJsonError):
         raise
     except Exception as exc:
         raise LedgerUnavailableError(run_id) from exc
