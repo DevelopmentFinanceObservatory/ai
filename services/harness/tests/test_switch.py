@@ -1913,6 +1913,9 @@ async def test_a_ranking_switched_to_dac2a_s_inclusive_scope_compiles_its_sum(
 _RECORDED_TIME = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|\+00:00)")
 
 
+# The date the orchestrator's opening states, which is the day the test runs.
+_TODAY = re.compile(r"Today's date \(UTC\): \d{4}-\d\d-\d\d")
+
 # The wire id the loop mints for a pause.
 _INTERRUPT_ID = re.compile(r"int_[0-9a-f]+")
 # The id Pydantic AI gives each run of the orchestrator, in its stored history.
@@ -1920,11 +1923,13 @@ _RUN_ID = re.compile(r'"run_id": "[0-9a-f-]{36}"')
 
 
 def _stable(value: Any) -> Any:
-    """`value` as JSON, each time recorded in it put as `<time>`, each
-    orchestrator run id as `<run>` and each pause's wire id as
-    `<interrupt N>`, numbered in the order it first appears."""
+    """`value` as JSON, each time recorded in it put as `<time>`, the
+    opening's date as `<today>`, each orchestrator run id as `<run>` and
+    each pause's wire id as `<interrupt N>`, numbered in the order it first
+    appears."""
     text = _RUN_ID.sub('"run_id": "<run>"', json.dumps(value, default=str))
     text = _RECORDED_TIME.sub("<time>", text)
+    text = _TODAY.sub("Today's date (UTC): <today>", text)
     numbered: dict[str, str] = {}
     return json.loads(
         _INTERRUPT_ID.sub(
