@@ -27,6 +27,7 @@ from harness.graph.state import frame_id_for
 from harness.graph.workflow import studio_graph
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.planner_adapter import content_on_spans
+from harness.provenance import ProvenanceStore
 from harness.run_ledger import StudioRunLedger
 from harness.scripted import (
     SCRIPTED_CV,
@@ -116,6 +117,7 @@ def orchestrator_app(
     definition_surface: Any = None,
     early_mints: Any = None,
     heartbeat_seconds: float | None = None,
+    provenance: ProvenanceStore | None = None,
 ) -> tuple[FastAPI, ScriptLlm]:
     """The studio routes on the turn graph, and the agent's model client.
 
@@ -137,7 +139,9 @@ def orchestrator_app(
     card's retrievals, none by default. Conversations and their turns are
     stored in `store`, or in a store built on `engine` (the `pg_engine`
     fixture's); one of the two is required. A stream renews its lease every
-    `heartbeat_seconds`, the server's interval by default.
+    `heartbeat_seconds`, the server's interval by default. The turn store
+    keeps the lineage `provenance` holds of each frame a turn names, none
+    by default.
     """
     if store is None:
         if engine is None:
@@ -179,7 +183,7 @@ def orchestrator_app(
         create_graph=create_graph,
         executor=executor or ScriptedExecutor(),
         store=store,
-        turns=TurnStore(store.engine, clock=store.now),
+        turns=TurnStore(store.engine, clock=store.now, provenance=provenance),
         tool_surface=tool_surface,
         edit_model=edit_model,
         early_mints=early_mints,

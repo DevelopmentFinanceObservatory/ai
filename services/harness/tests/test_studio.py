@@ -111,7 +111,7 @@ from harness.studio_translate import (
     keep_turn_records,
 )
 from harness.tool_contracts import HarnessCode, ResolverError, harness_refusal
-from harness.turn.store import CursorStale, TurnStatus
+from harness.turn.store import CursorStale, TurnStatus, TurnStore
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import SearchReading
 from harness.wire import (
@@ -464,6 +464,7 @@ def _app(
     definition_surface: Any = None,
     early_mints: EarlyMints | None = None,
     heartbeat_seconds: float | None = None,
+    provenance: ProvenanceStore | None = None,
 ) -> FastAPI:
     """`orchestrator_app` on this test's database, its agent's model
     answering from `script` and kept as `app.state.model`. The executor
@@ -471,7 +472,8 @@ def _app(
     `ScriptedPlannerModel`. A cross-instance test passes a second `store`
     on the same engine; a segment TTL scenario passes its own `store` with
     its own clock. A module outside this one, where `database` does not
-    run, passes the `engine` of its own `pg_engine`."""
+    run, passes the `engine` of its own `pg_engine`. The turn store keeps
+    the lineage `provenance` holds of each frame a turn names."""
     app, model = orchestrator_app(
         *script,
         resolver=resolver,
@@ -486,6 +488,7 @@ def _app(
         definition_surface=definition_surface,
         early_mints=early_mints,
         heartbeat_seconds=heartbeat_seconds,
+        provenance=provenance,
     )
     app.state.model = model
     return app
@@ -5772,6 +5775,214 @@ async def test_an_edit_on_another_instance_states_the_sources_and_count_of_the_f
     assert edited_card["fact_summary"]["attribution"] == drawn_card["fact_summary"]["attribution"]
     if event == "component.created":
         assert edited_card["provenance"]["sources"] == drawn_card["provenance"]["sources"]
+
+
+class _FrameNamingPlatform(_TokenIssuingPlatform):
+    """`_TokenIssuingPlatform` whose created card resolves to the frame its
+    write named, so a card drawn from a plan's frame reads that frame's
+    lineage."""
+
+    async def call_tool(
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        *,
+        meta: dict[str, str],
+        progress_handler: Any,
+        raise_on_error: bool,
+    ) -> SimpleNamespace:
+        result = await super().call_tool(
+            tool,
+            arguments,
+            meta=meta,
+            progress_handler=progress_handler,
+            raise_on_error=raise_on_error,
+        )
+        if tool == "write_component" and not result.is_error and result.meta:
+            frame = arguments["intent"]["frame_ref"]
+            result.meta[RESOLVED_PAYLOAD_META_KEY]["provenance"]["inputs"] = [frame]
+        return result
+
+
+class _FetchingMcpExecutor:
+    """`McpExecutor` with `get_data` and `describe_frame` answered as
+    `ScriptedExecutor` answers them, and the fetched frame's lineage put in
+    the executor's store as `McpExecutor._get_data` puts it."""
+
+    def __init__(self, inner: McpExecutor, provenance: ProvenanceStore) -> None:
+        self._inner = inner
+        self._provenance = provenance
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def __call__(
+        self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
+    ) -> dict[str, Any]:
+        if tool == "get_data":
+            self._provenance.put(
+                conversation=f"{PRINCIPAL}/{CONVERSATION}",
+                manifest=_lineage_manifest("src:a"),
+                **REF_A,
+            )
+            return {"outcome": "ok", "frame_refs": [REF_A], "summary": "fetched"}
+        if tool == "describe_frame":
+            return _VIEW
+        return await self._inner(tool=tool, args=args, on_progress=on_progress)
+
+
+def _lineage_manifest(source: str) -> dict[str, Any]:
+    return {
+        "citation": {"text": source, "sources": [{"ref": source, "label": source}]},
+        "trace": {"resolved_stat_vars": [{"ref": f"dcid:{source}"}]},
+    }
+
+
+# The plan frame `ScriptedSurface`'s plan hands back.
+_PLAN_REF = {"spec_id": "ops_" + "9" * 32, "content_version": "ocv_" + "9" * 32}
+
+
+def _plan_lineage(provenance: ProvenanceStore) -> None:
+    """The lineage `_RecordingSurface` writes for the plan's frame: two
+    retrievals under a step that declared one StatVar."""
+    conversation = f"{PRINCIPAL}/{CONVERSATION}"
+    retrievals = [
+        ({"spec_id": "spec_" + str(n) * 32, "content_version": "cv_" + str(n) * 32}, source)
+        for n, source in ((2, "src:b"), (3, "src:c"))
+    ]
+    for ref, source in retrievals:
+        provenance.put(conversation=conversation, manifest=_lineage_manifest(source), **ref)
+    assert provenance.alias(
+        conversation=conversation,
+        **_PLAN_REF,
+        sources=[(ref["spec_id"], ref["content_version"]) for ref, _ in retrievals],
+        stat_var_count=1,
+    )
+
+
+def _drawing_app(
+    *script: types.Part, provenance: ProvenanceStore, store: StudioStore | None = None
+) -> FastAPI:
+    store = store or StudioStore(_engine())
+    return _app(
+        *script,
+        resolver=_search(),
+        executor=_FetchingMcpExecutor(
+            McpExecutor(settings=Settings(), provenance=provenance, card_lineages=store),
+            provenance,
+        ),
+        store=store,
+        tool_surface=ScriptedSurface(),
+        provenance=provenance,
+    )
+
+
+# A turn that fetches SPEC_A, runs a plan, then asks the user a question.
+_FETCH_PLAN_ASK = (
+    search_call("aid to Kenya"),
+    fetch_call(SPEC_A),
+    *_plan("q with forks", *_ask("reading A", "reading B")),
+)
+# What the agent does once the user answers: one card on each frame.
+_CHARTS_BOTH = (
+    make_charts_call(
+        chart(FRAME_A, type_="stat_card", title="Fetched"),
+        chart(PLAN_FRAME, type_="stat_card", title="Planned"),
+    ),
+    _text("Charted."),
+)
+
+
+async def _fetch_plan_ask(client: httpx2.AsyncClient) -> dict[str, Any]:
+    """Run `_FETCH_PLAN_ASK` to its question and return the question's frame."""
+    created = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+    plan = _frame(created, "plan.proposed")
+    approved = await _stream(
+        client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+    )
+    return _frame(approved, "elicitation.request")
+
+
+def _answer(elicitation: dict[str, Any]) -> dict[str, Any]:
+    (question,) = elicitation["questions"]
+    return _interrupt_body(
+        elicitation["interrupt_id"],
+        "answer",
+        answers={"q1": _pick(question["options"][1]["id"])},
+    )
+
+
+def _drawn_cards(frames: list[dict[str, Any]]) -> dict[str, Any]:
+    """Each created card's sources and indicator count, by the frame it was
+    drawn from."""
+    return {
+        frame["provenance"]["inputs"][0]["spec_id"]: (
+            [source["id"] for source in frame["provenance"]["sources"]],
+            frame["fact_summary"]["attribution"]["indicator_count"],
+        )
+        for frame in frames
+        if frame["event"] == "component.created"
+    }
+
+
+@pytest.mark.parametrize("restore", ["read", "fails"])
+async def test_frames_a_turn_named_before_a_pause_draw_on_another_instance(
+    monkeypatch: pytest.MonkeyPatch, restore: str
+) -> None:
+    """A turn fetches a frame and runs a plan on one instance, then asks the
+    user a question. The answer lands on a second instance whose provenance
+    store is empty, and the agent charts both frames there. The turn's state
+    still names both and holds one lineage row for each, written once across
+    the turn's two pauses. Each card states the sources and indicator count a
+    draw on the first instance states. When the second instance cannot read
+    the rows, the turn goes on and both cards are withheld."""
+    platform = _FrameNamingPlatform()
+    monkeypatch.setattr(
+        McpTimeoutPolicy, "client", lambda self, url, *, auth, caller, tool=None: platform
+    )
+    same = ProvenanceStore()
+    _plan_lineage(same)
+    alone = _drawing_app(*_FETCH_PLAN_ASK, *_CHARTS_BOTH, provenance=same)
+    async with _client(alone) as client:
+        elicitation = await _fetch_plan_ask(client)
+        expected = _drawn_cards(
+            await _stream(client, "/api/studio/interrupt", _answer(elicitation))
+        )
+    assert expected == {SPEC_A: (["src:a"], 1), _PLAN_REF["spec_id"]: (["src:b", "src:c"], 1)}
+    async with _engine().begin() as conn:
+        await conn.execute(text("DELETE FROM conversations"))
+
+    first_provenance = ProvenanceStore()
+    _plan_lineage(first_provenance)
+    first = _drawing_app(*_FETCH_PLAN_ASK, provenance=first_provenance)
+    async with _client(first) as client:
+        elicitation = await _fetch_plan_ask(client)
+    async with _engine().connect() as conn:
+        state = (
+            await conn.execute(text("SELECT state FROM turn_cursors WHERE status = 'paused'"))
+        ).scalar_one()
+        rows = (
+            await conn.execute(
+                text("SELECT spec_id, content_version FROM turn_frame_lineage ORDER BY spec_id")
+            )
+        ).all()
+    assert {FRAME_A, PLAN_FRAME} <= set(state["orchestrator:frames"])
+    assert sorted(rows) == sorted(
+        [(ref["spec_id"], ref["content_version"]) for ref in (_PLAN_REF, REF_A)]
+    )
+
+    if restore == "fails":
+
+        async def _fails(self: TurnStore, turn: int) -> list[Any]:
+            raise OSError("connection reset")
+
+        monkeypatch.setattr(TurnStore, "_frame_lineage", _fails)
+    second = _drawing_app(*_CHARTS_BOTH, provenance=ProvenanceStore())
+    async with _client(second) as client:
+        answered = await _stream(client, "/api/studio/interrupt", _answer(elicitation))
+
+    assert _events(answered)[-1] == "done"
+    assert _drawn_cards(answered) == (expected if restore == "read" else {})
 
 
 async def test_component_ref_edit_recreate_replaces_the_block_in_place() -> None:

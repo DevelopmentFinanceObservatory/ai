@@ -46,7 +46,12 @@ commits the `CardLineage` of the frame it was drawn from
 this store does not hold puts the stored one back first
 (`ProvenanceStore.restore`, called by `harness.mcp_client.McpExecutor`), so
 an edit on another instance or after a restart finds the card's frame here.
-A frame no card was drawn from has no stored lineage.
+The lineage of each frame an open turn's state names is stored with the
+turn too (`harness.turn.store.TurnStore`), and put back when a segment on
+another instance or after a restart takes the turn over
+(`ProvenanceStore.restore_frame`), so a card drawn after a pause finds the
+frames the turn fetched or built before it. A frame no card was drawn from
+and no open turn names has no stored lineage.
 """
 
 from __future__ import annotations
@@ -167,14 +172,20 @@ class CardLineage:
 
     def members_json(self) -> list[dict[str, Any]]:
         """`lineage` as the JSON list the card's lineage row stores."""
-        return [
-            {
-                "spec_id": member.spec_id,
-                "content_version": member.content_version,
-                "manifest": member.manifest,
-            }
-            for member in self.lineage
-        ]
+        return lineage_json(self.lineage)
+
+
+def lineage_json(lineage: Lineage) -> list[dict[str, Any]]:
+    """`lineage` as the JSON list a stored lineage row holds: each member's
+    frame key and whole manifest, read back by `lineage_from_json`."""
+    return [
+        {
+            "spec_id": member.spec_id,
+            "content_version": member.content_version,
+            "manifest": member.manifest,
+        }
+        for member in lineage
+    ]
 
 
 class CardLineageDecodeError(ValueError):
@@ -336,10 +347,26 @@ class ProvenanceStore:
     def restore(self, *, conversation: str, card: CardLineage) -> None:
         """Put a stored card's lineage back under its frame, and under the
         frame its write named, wherever the store holds none."""
-        entry = _Entry(card.lineage, card.stat_var_count)
         for key in dict.fromkeys(key for key in (card.frame, card.requested) if key is not None):
-            if self._entry(conversation, key) is None:
-                self._store(conversation=conversation, key=key, entry=entry)
+            self.restore_frame(
+                conversation=conversation,
+                frame=key,
+                lineage=card.lineage,
+                stat_var_count=card.stat_var_count,
+            )
+
+    def restore_frame(
+        self,
+        *,
+        conversation: str,
+        frame: _FrameKey,
+        lineage: Lineage,
+        stat_var_count: int | None = None,
+    ) -> None:
+        """Put a stored `lineage`, with the count stored beside it, back under
+        `frame` when the store holds none there."""
+        if self._entry(conversation, frame) is None:
+            self._store(conversation=conversation, key=frame, entry=_Entry(lineage, stat_var_count))
 
     def _store(self, *, conversation: str, key: _FrameKey, entry: _Entry) -> None:
         bucket = self._by_conversation.get(conversation)
