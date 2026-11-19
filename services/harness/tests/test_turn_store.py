@@ -852,12 +852,18 @@ async def test_a_frame_held_again_after_a_write_without_it_is_written_next(
     assert [row[:3] for row in await _lineage_rows(pg_engine)] == [("spec_1", "cv_1", 2)]
 
 
-async def test_a_restore_reads_only_the_named_frames_the_process_lacks(
+def _evict(provenance: ProvenanceStore, n: int) -> None:
+    """Drop `_key(n)` from `provenance`, as its per-conversation bound does."""
+    del provenance._by_conversation[_SCOPE][(f"spec_{n}", f"cv_{n}")]
+
+
+async def test_a_process_that_wrote_the_turn_last_reads_only_the_named_frames_it_lacks(
     pg_engine: AsyncEngine,
 ) -> None:
     """Rows of frames the state no longer names, and of frames the process
-    holds, are left where they are: the process holds what it held, and no
-    frame the turn dropped."""
+    holds, are left where they are when this process wrote the cursor last:
+    it keeps what it holds, gets back what it lost, and no frame the turn
+    dropped."""
     await _conversation(pg_engine)
     provenance = ProvenanceStore()
     for n in (1, 2, 3):
@@ -866,21 +872,83 @@ async def test_a_restore_reads_only_the_named_frames_the_process_lacks(
     advanced = await _advance(
         store, await _open(store), _frames({"ref": _key(1)}, {"ref": _key(2)}, {"ref": _key(3)})
     )
-    await _pause(store, advanced, _frames({"ref": _key(1)}, {"ref": _key(2)}), interrupt_id="i")
-    fresh = ProvenanceStore()
-    _held(fresh, 2, share=0.9)
-    held = fresh.get(conversation=_SCOPE, **_key(2))
-    other = _keeping(pg_engine, fresh)
-    cursor = await other.open_cursor(PRINCIPAL, CONVERSATION)
-    assert cursor is not None
-
-    await other.restore_frame_lineage(cursor, lineage_scope=_SCOPE)
-
-    assert fresh.get(conversation=_SCOPE, **_key(1)) == provenance.get(
-        conversation=_SCOPE, **_key(1)
+    restored = provenance.get(conversation=_SCOPE, **_key(1))
+    paused = await _pause(
+        store, advanced, _frames({"ref": _key(1)}, {"ref": _key(2)}), interrupt_id="i"
     )
-    assert fresh.get(conversation=_SCOPE, **_key(2)) is held
-    assert fresh.get(conversation=_SCOPE, **_key(3)) is None
+    _held(provenance, 2, share=0.9)
+    held = provenance.get(conversation=_SCOPE, **_key(2))
+    _evict(provenance, 1)
+    _evict(provenance, 3)
+
+    await store.restore_frame_lineage(paused, lineage_scope=_SCOPE)
+
+    assert provenance.get(conversation=_SCOPE, **_key(1)) == restored
+    assert provenance.get(conversation=_SCOPE, **_key(2)) is held
+    assert provenance.get(conversation=_SCOPE, **_key(3)) is None
+
+
+async def test_rows_written_by_another_writer_replace_what_the_process_held(
+    pg_engine: AsyncEngine,
+) -> None:
+    """Instance A holds a frame as L1, instance B takes the turn over and
+    commits L2 for it, and the turn comes back to A: A's restore puts the
+    row over its own entry, so A draws from L2 and its next write keeps L2."""
+    await _conversation(pg_engine)
+    held_a = ProvenanceStore()
+    _held(held_a, 1, share=0.25)
+    a = _keeping(pg_engine, held_a)
+    state = _frames({"ref": _key(1)})
+    paused = await _pause(a, await _open(a), state, interrupt_id="int_1")
+
+    held_b = ProvenanceStore()
+    b = _keeping(pg_engine, held_b)
+    await b.restore_frame_lineage(paused, lineage_scope=_SCOPE)
+    resumed = await b.record_answer(
+        paused, segment_id=SEGMENT, interrupt_id="int_1", round=1, answer={}
+    )
+    _held(held_b, 1, share=0.75, count=4)
+    by_b = await _pause(b, resumed, state, interrupt_id="int_2")
+
+    await a.restore_frame_lineage(by_b, lineage_scope=_SCOPE)
+    resumed_a = await a.record_answer(
+        by_b, segment_id=SEGMENT, interrupt_id="int_2", round=2, answer={}
+    )
+    await _advance(a, resumed_a, state)
+
+    key = {"conversation": _SCOPE, **_key(1)}
+    assert held_a.get(**key) == held_b.get(**key)
+    assert held_a.stat_var_count(**key) == 4
+    (row,) = await _lineage_rows(pg_engine)
+    assert (row[2], row[3][0]["manifest"]) == (4, {"citation": {"share": 0.75}})
+
+
+@pytest.mark.parametrize("part", ["spec_id", "content_version"])
+async def test_a_frame_key_holding_a_nul_gets_no_row_and_is_never_read(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, part: str
+) -> None:
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    _held(provenance, 1)
+    nul = {**_key(7), part: _key(7)[part] + "\x00"}
+    provenance.put(conversation=_SCOPE, manifest={}, **nul)
+    store = _keeping(pg_engine, provenance)
+
+    advanced = await _advance(store, await _open(store), _frames({"ref": _key(1)}, {"ref": nul}))
+
+    assert [row[:2] for row in await _lineage_rows(pg_engine)] == [("spec_1", "cv_1")]
+    reads: list[Any] = []
+    read = TurnStore._frame_lineage
+
+    async def recorded(self: TurnStore, turn: int, keys: Any) -> list[Any]:
+        reads.append(list(keys))
+        return await read(self, turn, keys)
+
+    monkeypatch.setattr(TurnStore, "_frame_lineage", recorded)
+    fresh = ProvenanceStore()
+    await _keeping(pg_engine, fresh).restore_frame_lineage(advanced, lineage_scope=_SCOPE)
+    assert reads == [[("spec_1", "cv_1")]]
+    assert fresh.get(conversation=_SCOPE, **_key(1)) is not None
 
 
 async def test_a_frame_with_no_row_costs_one_read_per_turn_until_another_writer_moves_it(
@@ -1073,30 +1141,28 @@ async def test_a_transient_fault_of_the_lineage_write_fails_the_write_and_counts
 async def test_a_lineage_the_source_gains_during_the_read_is_written_next(
     pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When the source comes to hold its own lineage for a key while the read
-    of the key's row runs, the restore keeps the source's and leaves it
-    unwritten, so the next write stores it."""
+    """When the source of the process that wrote the turn last comes to hold
+    its own lineage for a key while the read of the key's lost row runs, the
+    restore keeps the source's and leaves it unwritten, so the next write
+    stores it."""
     await _conversation(pg_engine)
     provenance = ProvenanceStore()
     _held(provenance, 1)
     store = _keeping(pg_engine, provenance)
     state = _frames({"ref": _key(1)})
-    await _advance(store, await _open(store), state)
-    fresh = ProvenanceStore()
-    other = _keeping(pg_engine, fresh)
+    cursor = await _advance(store, await _open(store), state)
+    _evict(provenance, 1)
     read = TurnStore._frame_lineage
 
     async def gaining(self: TurnStore, turn: int, keys: Any) -> list[Any]:
         rows = await read(self, turn, keys)
-        _held(fresh, 1, share=0.9, count=5)
+        _held(provenance, 1, share=0.9, count=5)
         return rows
 
     monkeypatch.setattr(TurnStore, "_frame_lineage", gaining)
-    cursor = await other.open_cursor(PRINCIPAL, CONVERSATION)
-    assert cursor is not None
-    await other.restore_frame_lineage(cursor, lineage_scope=_SCOPE)
+    await store.restore_frame_lineage(cursor, lineage_scope=_SCOPE)
 
-    await _advance(other, cursor, state)
+    await _advance(store, cursor, state)
 
     (row,) = await _lineage_rows(pg_engine)
     assert row[2] == 5

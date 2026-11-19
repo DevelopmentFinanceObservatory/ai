@@ -542,11 +542,13 @@ async def drive[E](
     The turn and its transcript are read in one snapshot that also checks
     the cursor is still current (`TurnStore.load`), so the caller reads the
     cursor after claiming the lease and no node runs on a cursor another
-    write has moved or closed. The lineage of each frame the turn names is
-    then put back where this process lacks it, best effort
-    (`TurnStore.restore_frame_lineage`). A paused cursor takes `answer`, which the
+    write has moved or closed. A paused cursor takes `answer`, which the
     first write accepts (`TurnStore.record_answer`) before the paused node's
-    `resume` runs. A running cursor runs its node from its start.
+    `resume` runs. A running cursor runs its node from its start. Once the
+    turn goes on, and before its node runs, the lineage of each frame the
+    turn names is brought into step with its rows, best effort
+    (`TurnStore.restore_frame_lineage`), so an answer the turn refuses or a
+    turn that closes does not wait for that read.
 
     A write that fails for any reason but those `_NOT_THE_TURNS` names (a
     value JSON cannot hold, a database error) closes the turn `failed` at
@@ -582,7 +584,6 @@ async def drive[E](
         raise ValueError(f"turn {cursor.turn_index} is paused and needs an answer")
     cursor, stored = await _step(store.load(cursor))
     segment.cursor = cursor
-    await _step(store.restore_frame_lineage(cursor, lineage_scope=_lineage_scope(key)))
     transcript = Transcript(stored)
     node, node_input = cursor.node, cursor.node_input
 
@@ -605,6 +606,7 @@ async def drive[E](
     except _Closes as closing:
         return await close(closing.status, node, closing.error)
     cursor = segment.cursor
+    await _step(store.restore_frame_lineage(cursor, lineage_scope=_lineage_scope(key)))
 
     while True:
         # The node works on a copy, so whatever it changes in place, the
