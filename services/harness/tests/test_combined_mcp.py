@@ -98,6 +98,7 @@ from harness.settings import (
 from mcp import MCPError
 from mcp import types as mt
 from mcp.client import advertise
+from mcp.server import _streamable_http_modern as streamable_http_modern
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from mcp_types import INTERNAL_ERROR, INVALID_PARAMS
 from opentelemetry import trace as otel_trace
@@ -117,6 +118,7 @@ from presentation_mcp.platform_contract import (
 from presentation_mcp.projection import ROWLESS_NOTICE, UNKNOWN_HOST_ROWLESS_NOTICE
 from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic import ValidationError as PydanticValidationError
+from sse_starlette import EventSourceResponse
 from starlette.applications import Starlette
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -3012,20 +3014,48 @@ def _timing_bodies(app: ASGIApp, sent: list[tuple[float, bytes]]) -> ASGIApp:
     return timed
 
 
+# The ping test's clock runs at this fraction of real time, so a 21 s call
+# takes 2.1 s.
+_PING_TIME_SCALE = 0.1
+
+
 @REVISIONS
 async def test_a_slow_call_is_kept_alive_with_pings_under_20s_apart(
     mode: str,
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A proxy on the way cuts a response after 100 s without a byte. Both
-    revisions send an SSE ping comment every 15 s while a call runs."""
+    revisions send an SSE ping comment every 15 s while a call runs.
+
+    The deadline, the call and both revisions' ping intervals run at
+    `_PING_TIME_SCALE`: the 2025-11-25 revision's, which each sse-starlette
+    `EventSourceResponse` sets, and the 2026-07-28 revision's, which the SDK's
+    modern transport reads from its module. Each interval is recorded before it
+    is scaled and must sit under the unscaled 20 s. A ping that came from an
+    unscaled interval would arrive long after the scaled call ends."""
+    chosen = [streamable_http_modern._SSE_PING_INTERVAL]
+    monkeypatch.setattr(
+        streamable_http_modern,
+        "_SSE_PING_INTERVAL",
+        streamable_http_modern._SSE_PING_INTERVAL * _PING_TIME_SCALE,
+    )
+    init = EventSourceResponse.__init__
+
+    def scaled_init(self: EventSourceResponse, *args: Any, **kwargs: Any) -> None:
+        init(self, *args, **kwargs)
+        chosen.append(self.ping_interval)
+        self.ping_interval = self.ping_interval * _PING_TIME_SCALE
+
+    monkeypatch.setattr(EventSourceResponse, "__init__", scaled_init)
+    deadline = 20 * _PING_TIME_SCALE
     probe = FastMCP(name="probe")
 
     @probe.tool
     async def slow() -> str:
-        await asyncio.sleep(21)
+        await asyncio.sleep(21 * _PING_TIME_SCALE)
         return "done"
 
     combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
@@ -3046,9 +3076,10 @@ async def test_a_slow_call_is_kept_alive_with_pings_under_20s_apart(
     pings = [at for at, body in sent if body.startswith(b": ping")]
     marks = [started, *pings, ended]
     assert result.content[0].text == "done"  # shaped: the text alone
-    assert ended - started > 20
+    assert max(chosen) < 20
+    assert ended - started > deadline
     assert pings
-    assert max(later - earlier for earlier, later in pairwise(marks)) < 20
+    assert max(later - earlier for earlier, later in pairwise(marks)) < deadline
 
 
 async def test_the_combined_server_refuses_an_unauthenticated_request(
