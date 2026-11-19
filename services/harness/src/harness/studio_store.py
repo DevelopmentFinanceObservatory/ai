@@ -577,7 +577,7 @@ def _jsonb(value: Any) -> str | None:
 
 _CONVERSATION_COLUMNS = (
     "id, version, turn_state, composition, lease_segment_id, lease_owner, "
-    "lease_expires_at, lease_cancel, seq_next, seq_reserved"
+    "lease_expires_at, lease_cancel, seq_next, seq_reserved, canvas_writes"
 )
 
 
@@ -747,6 +747,23 @@ class _Written(NamedTuple):
 
     version: int
     lease_expires_at: float | None
+
+
+@dataclass
+class _CanvasWrite:
+    """One `change_canvas` call's write id and what its latest attempt to
+    reach the write computed (`_fenced_save`): the working copy and the live
+    snapshot taken with it, the changed durable keys, `change`'s result and
+    the version the write returned. The id is minted once per call and kept
+    across its retries, so a retry that finds it in the row's
+    `canvas_writes` knows the attempt recorded here committed."""
+
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    work: ConversationState | None = None
+    base: ConversationState | None = None
+    changed: dict[str, Any] = field(default_factory=dict)
+    result: Any = None
+    version: int = 0
 
 
 async def _write_delta(
@@ -971,8 +988,14 @@ class StudioStore:
         rows, and `seq_reserved` when given, and return the row's new version
         and lease expiry (`_write_delta`). With `claim`, the segment `delta`
         carries expires `SEGMENT_TTL_S` past the database clock's reading at
-        this write."""
+        this write, and the canvas write ids recorded under earlier leases
+        (`_CanvasWrite`) are cleared."""
         written = await _write_delta(conn, pk, delta, lease_clock=self._time_sql if claim else None)
+        if claim:
+            await conn.execute(
+                text("UPDATE conversations SET canvas_writes = '[]'::jsonb WHERE id = :pk"),
+                {"pk": pk},
+            )
         if seq_reserved is not None:
             await conn.execute(
                 text("UPDATE conversations SET seq_reserved = :reserved WHERE id = :pk"),
@@ -1394,8 +1417,11 @@ class StudioStore:
         one level deep. The fields `change` changed are assigned to the live
         state only once the write has committed, so a write that fails
         leaves the live state as it was. A transient database fault is
-        retried until the lease's deadline (`_retrying`). Returns what
-        `change` returns.
+        retried until the lease's deadline (`_retrying`). The call's write id
+        (`_CanvasWrite`), kept across its retries, commits with the write, so
+        a retry after a commit whose acknowledgement was lost applies
+        `change` no second time and returns what the attempt that committed
+        returned. Returns what `change` returns.
         """
         entry = self._runtime[(principal, conversation_id)]
         state = entry.state
@@ -1403,11 +1429,12 @@ class StudioStore:
         segment_id = state.segment.id if state.segment is not None else None
         if segment_id is None:
             raise SegmentLost(f"conversation {conversation_id!r} holds no segment")
+        write = _CanvasWrite()
         return await self._retrying(
             entry,
             conversation_id,
             lambda retried: self._fenced_save(
-                entry, conversation_id, segment_id, change, retried=retried
+                entry, conversation_id, segment_id, change, retried=retried, write=write
             ),
         )
 
@@ -1458,6 +1485,7 @@ class StudioStore:
         change: Callable[[ConversationState], T],
         *,
         retried: bool = False,
+        write: _CanvasWrite | None = None,
     ) -> T:
         """`checkpoint` and `change_canvas`'s one write. Under the row lock
         and fenced on `segment_id`, run `change` on a one-level copy of the live
@@ -1477,7 +1505,17 @@ class StudioStore:
         would have written (`entry.version` + 1) was saved by that attempt,
         whose acknowledgement was lost. It writes nothing and records the
         write as made. Any other row, another instance's claim and release
-        since included, fences the write out."""
+        since included, fences the write out.
+
+        Given `write`, a canvas change's (`change_canvas`), the write also
+        records `write.id` in the row's `canvas_writes`, and the attempt's
+        copy, changed keys, result and version are kept on `write` before
+        the commit. A row already holding `write.id` was written by the
+        attempt kept there, whose acknowledgement was lost: nothing is
+        written and `change` does not run again. That attempt's changed keys
+        and version are recorded, its copy, with the canvas as stored now,
+        is assigned to the live state, and its result is returned. A claim
+        empties `canvas_writes`, so the id can only be this lease's."""
         state = entry.state
         assert entry.pk is not None and state is not None
         async with entry.write_lock:
@@ -1485,6 +1523,11 @@ class StudioStore:
                 row = (await conn.execute(self._lock_conversation, {"pk": entry.pk})).first()
                 if row is None:
                     raise SegmentLost(f"conversation {conversation_id!r} is no longer stored")
+                stored = (
+                    CompositionManifest.model_validate(row.composition) if row.composition else None
+                )
+                if write is not None and write.id in row.canvas_writes:
+                    return self._adopt_canvas_write(entry, state, write, stored, conversation_id)
                 fenced = _row_segment(row)
                 landed = (
                     retried
@@ -1496,9 +1539,6 @@ class StudioStore:
                     raise SegmentLost(
                         f"conversation {conversation_id!r} segment {segment_id!r} is not the lease"
                     )
-                stored = (
-                    CompositionManifest.model_validate(row.composition) if row.composition else None
-                )
                 base = _shallow_copy(state)
                 work = _shallow_copy(state)
                 work.composition = stored
@@ -1526,12 +1566,47 @@ class StudioStore:
                         if changed
                         else row.version
                     )
+                    if write is not None:
+                        await conn.execute(
+                            text(
+                                "UPDATE conversations SET canvas_writes = canvas_writes"
+                                " || to_jsonb(CAST(:write_id AS text)) WHERE id = :pk"
+                            ),
+                            {"pk": entry.pk, "write_id": write.id},
+                        )
+                        write.work, write.base, write.changed = work, base, changed
+                        write.result, write.version = result, version
             entry.version = version
             entry.baseline.update(changed)
             if work.segment is None:
                 entry.held = None
             _assign_changed(state, work, base)
             return result
+
+    @staticmethod
+    def _adopt_canvas_write[T](
+        entry: _RuntimeEntry,
+        state: ConversationState,
+        write: _CanvasWrite,
+        stored: CompositionManifest | None,
+        conversation_id: str,
+    ) -> T:
+        """Record the attempt `write` kept as written (`_fenced_save`, whose
+        row lock the caller holds) and return its result. The live state
+        takes the canvas as stored, which a `/composition` edit may have
+        moved since that attempt."""
+        assert write.work is not None and write.base is not None
+        logger.info(
+            "studio store: conversation %s canvas write %s was saved by an attempt "
+            "whose acknowledgement was lost",
+            conversation_id,
+            write.id,
+        )
+        work = dataclasses.replace(write.work, composition=stored)
+        entry.version = max(entry.version, write.version)
+        entry.baseline.update(write.changed)
+        _assign_changed(state, work, write.base)
+        return write.result
 
     async def renew(
         self,

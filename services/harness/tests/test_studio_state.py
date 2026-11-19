@@ -2880,6 +2880,157 @@ async def test_a_removal_whose_commit_lost_its_acknowledgement_reports_the_cards
     assert reloaded.composition == state.composition
 
 
+def _user_adds(component_id: str) -> Any:
+    """`/composition`'s add of `component_id`, as the route builds it."""
+
+    def mutate(
+        manifest: CompositionManifest | None, components: dict[str, dict[str, Any]]
+    ) -> CompositionManifest:
+        applied = studio_state._apply_operations(
+            components, manifest, [AddOp(op=MutationOp.ADD, component_id=component_id)]
+        )
+        assert isinstance(applied, tuple)
+        return _next_manifest(manifest, applied[0], actor=CompositionActor.USER)
+
+    return mutate
+
+
+async def _canvas_writes(engine: AsyncEngine) -> list[str]:
+    async with engine.connect() as conn:
+        return (
+            await conn.execute(
+                text("SELECT canvas_writes FROM conversations WHERE conversation_id = :c"),
+                {"c": CONVERSATION},
+            )
+        ).scalar_one()
+
+
+async def _remove_all(store: StudioStore) -> tuple[list[str], list[str]]:
+    remove = studio_state.make_remove_cards(store)
+    token = current_conversation_key.set(("principal", CONVERSATION))
+    try:
+        return await remove(component_ids=[], all_cards=True)
+    finally:
+        current_conversation_key.reset(token)
+
+
+async def test_a_retried_removal_of_every_card_keeps_a_card_the_user_added_meanwhile(
+    new_store, monkeypatch
+) -> None:
+    """The removal commits and its acknowledgement is lost. Before the retry,
+    the user adds a card through another instance. The retry finds its own
+    write recorded, takes nothing more off, and reports what the commit
+    removed."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store_a, store_b = new_store(), new_store()
+    state = await store_a.create("principal", CONVERSATION)
+    store_a.claim_segment("principal", CONVERSATION)
+    await store_a.save("principal", CONVERSATION)
+    for card in ("cmp_one", "cmp_two"):
+        await store_a.change_canvas(
+            "principal",
+            CONVERSATION,
+            lambda work, card=card: land_component(work, _component(card)),
+        )
+    remove = studio_state.make_remove_cards(store_a)
+    token = current_conversation_key.set(("principal", CONVERSATION))
+    try:
+        await remove(component_ids=["cmp_one"], all_cards=False)
+    finally:
+        current_conversation_key.reset(token)
+    real_transaction = store_a._transaction
+    faults: list[int] = []
+
+    @asynccontextmanager
+    async def losing_the_ack() -> Any:
+        async with real_transaction() as conn:
+            yield conn
+        if not faults:
+            faults.append(1)
+            await store_b.mutate_composition(
+                "principal", CONVERSATION, _user_adds("cmp_one"), component_ids={"cmp_one"}
+            )
+            raise _connection_reset("COMMIT")
+
+    store_a._transaction = losing_the_ack
+
+    result = await _remove_all(store_a)
+
+    assert faults == [1]
+    assert result == (["cmp_two"], [])
+    assert state.take_unreported_removal() is True
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_one"]
+    assert state.composition == reloaded.composition
+
+
+async def test_overlapping_canvas_changes_each_land_once_when_the_first_lost_its_acknowledgement(
+    new_store, pg_engine, monkeypatch
+) -> None:
+    """Two of a turn's canvas changes run at once. A's removal commits and
+    its acknowledgement is lost; B lands a card before A retries. A's retry
+    finds its own write recorded beside B's and takes B's card off no
+    second time."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await store.change_canvas("principal", CONVERSATION, lambda work: land_component(work, _CARD))
+    real_transaction = store._transaction
+    faults: list[int] = []
+    landing: list[asyncio.Task[Any]] = []
+
+    @asynccontextmanager
+    async def losing_the_ack() -> Any:
+        async with real_transaction() as conn:
+            yield conn
+        if not faults:
+            faults.append(1)
+            # B is queued on the write lock A holds, so it writes before A's retry.
+            landing.append(
+                asyncio.create_task(
+                    store.change_canvas(
+                        "principal",
+                        CONVERSATION,
+                        lambda work: land_component(work, _component("cmp_one")),
+                    )
+                )
+            )
+            await asyncio.sleep(0)
+            raise _connection_reset("COMMIT")
+
+    store._transaction = losing_the_ack
+
+    result = await _remove_all(store)
+
+    assert faults == [1]
+    assert landing[0].done()
+    assert result == (["cmp_two"], [])
+    reloaded = await new_store().load("principal", CONVERSATION)
+    assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_one"]
+    assert state.composition == reloaded.composition
+    assert len(await _canvas_writes(pg_engine)) == 3
+
+
+async def test_a_claim_empties_the_canvas_writes_of_earlier_leases(new_store, pg_engine) -> None:
+    """Each canvas change records its write id; the next claim clears them."""
+    store = new_store()
+    await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await store.change_canvas("principal", CONVERSATION, lambda work: land_component(work, _CARD))
+    assert len(await _canvas_writes(pg_engine)) == 1
+    await store.release("principal", CONVERSATION, segment_id)
+    assert len(await _canvas_writes(pg_engine)) == 1
+
+    await store.load("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+
+    assert await _canvas_writes(pg_engine) == []
+
+
 async def test_a_block_refresh_whose_commit_lost_its_acknowledgement_mints_one_revision(
     new_store, monkeypatch
 ) -> None:

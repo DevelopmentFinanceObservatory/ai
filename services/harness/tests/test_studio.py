@@ -6194,30 +6194,61 @@ async def test_a_no_op_revise_over_a_readable_head_above_the_canvas_catches_the_
     assert entry["title"] == block["title"]
 
 
-async def test_a_revise_whose_card_write_lost_its_acknowledgement_reports_one_canvas_change(
+_REBUILT = {
+    **COMPONENT,
+    "component_id": "cmp_01test0002",
+    "type": "line_chart",
+    "payload": resolved_revision(
+        "line_chart", component_id="cmp_01test0002", frame_ref=REF_A, title="Aid over time"
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("draft", "written", "block"),
+    [
+        (
+            {"text": "Renamed the card.", "patch": {"title": "Aid to Kenya"}, "recreate": None},
+            {
+                **COMPONENT,
+                "revision": 2,
+                "fact_summary": {**COMPONENT["fact_summary"], "revision": 2},
+            },
+            ("cmp_01test0001", 2),
+        ),
+        (
+            {
+                "text": "Rebuilt as a line chart.",
+                "patch": None,
+                "recreate": {"type": "line_chart", "title": "Aid over time", "select": {"s": "v"}},
+            },
+            _REBUILT,
+            ("cmp_01test0002", 1),
+        ),
+    ],
+    ids=["revise", "recreate"],
+)
+async def test_an_edit_whose_card_write_lost_its_acknowledgement_reports_one_canvas_change(
     monkeypatch: pytest.MonkeyPatch,
+    draft: dict[str, Any],
+    written: dict[str, Any],
+    block: tuple[str, int],
 ) -> None:
     """The card's write commits and its acknowledgement is lost. The retry
-    finds the block already revised and mints no second manifest revision,
-    and the stream still sends the `composition.updated` the commit made."""
+    applies the change no second time: the canvas holds the one card at one
+    manifest revision past the last, the turn has one line for it, and the
+    stream still sends the `composition.updated` the commit made."""
     monkeypatch.setattr(studio_store_module, "_RETRY_FIRST_DELAY_S", 0)
-    revised_component = {
-        **COMPONENT,
-        "revision": 2,
-        "fact_summary": {**COMPONENT["fact_summary"], "revision": 2},
-    }
     executor = ScriptedExecutor(
         [
             *_card_results(write_token=WRITE_TOKEN),
             _described(),
             _VIEW,
-            {"outcome": "ok", "frame_refs": [], "component": revised_component},
+            {"outcome": "ok", "frame_refs": [], "component": written},
         ],
         strict=True,
     )
-    edit_model = ScriptedEditModel(
-        {"text": "Renamed the card.", "patch": {"title": "Aid to Kenya"}, "recreate": None}
-    )
+    edit_model = ScriptedEditModel(draft)
     app = _app(*_card(), resolver=_search(), executor=executor, edit_model=edit_model)
     store = app.state.studio.store
     async with _client(app) as client:
@@ -6241,7 +6272,7 @@ async def test_a_revise_whose_card_write_lost_its_acknowledgement_reports_one_ca
 
         monkeypatch.setattr(store, "_write_composition", arming_write)
         monkeypatch.setattr(store, "_transaction", losing_the_ack)
-        frames = await _stream(client, "/api/studio/turn", _edit_body("rename it"))
+        frames = await _stream(client, "/api/studio/turn", _edit_body("change it"))
 
     assert faults == [1]
     (updated,) = [f for f in frames if f["event"] == "composition.updated"]
@@ -6250,7 +6281,8 @@ async def test_a_revise_whose_card_write_lost_its_acknowledgement_reports_one_ca
     )
     assert reloaded.composition.revision == landed["revision"] + 1
     assert updated["manifest"]["revision"] == reloaded.composition.revision
-    assert reloaded.composition.blocks[0].revision == 2
+    assert [(b.component_id, b.revision) for b in reloaded.composition.blocks] == [block]
+    assert [line["component_id"] for line in reloaded.turns[-1]["cards"]] == [block[0]]
 
 
 async def test_an_edit_whose_canvas_write_failed_lands_when_repeated(

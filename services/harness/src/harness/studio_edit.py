@@ -258,14 +258,7 @@ async def _edit_flow(
             frames: list[Any] = [revised]
             title = _block_title(component) if caught_up else patch.get("title")
 
-            # Whether an earlier attempt of the card's write changed the
-            # canvas: a retry after a commit whose acknowledgement was lost
-            # finds the block already refreshed, and owes the client the
-            # `composition.updated` that commit made.
-            refreshed = False
-
             def revise(work: ConversationState) -> bool:
-                nonlocal refreshed
                 _record_revision(
                     work,
                     component_id=component_id,
@@ -273,13 +266,9 @@ async def _edit_flow(
                     revision=revised.revision,
                     title=title,
                 )
-                refreshed = (
-                    _refresh_block(
-                        work, component_id=component_id, revision=revised.revision, title=title
-                    )
-                    or refreshed
+                return _refresh_block(
+                    work, component_id=component_id, revision=revised.revision, title=title
                 )
-                return refreshed
 
             key = current_conversation_key.get()
             assert key is not None, "an edit runs only inside a conversation's stream"

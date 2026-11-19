@@ -1393,13 +1393,7 @@ def make_remove_cards(store: StudioStore) -> Any:
     """The orchestrator's `remove_cards` function, bound to a store and resolved
     to the conversation at CALL time, as `make_recall_part` is. The removal
     is written as it happens, on the canvas as stored
-    (`StudioStore.change_canvas`).
-
-    The store retries a write whose commit landed but whose acknowledgement
-    was lost, and that retry reads a canvas the cards are already off. A
-    card an earlier attempt took off, which the canvas no longer shows, is
-    reported removed and marks the removal as unreported, so the model and
-    the stream learn what the commit did.
+    (`StudioStore.change_canvas`), which runs it once per committed write.
 
     A `SegmentLost` or `DatabaseUnavailable` there ends the stream
     (`_end_stream`) before it propagates: raised inside the tool, it would
@@ -1411,16 +1405,9 @@ def make_remove_cards(store: StudioStore) -> Any:
         conversation = store.current(*key) if key is not None else None
         if key is None or conversation is None:
             return [], list(component_ids)
-        earlier: list[str] = []
 
         def change(work: ConversationState) -> tuple[list[str], list[str]]:
-            shown = _block_ids(work.composition)
-            removed, missing = remove_cards(work, component_ids, all_cards=all_cards)
-            landed = [cid for cid in earlier if cid not in shown]
-            if landed:
-                work._removal_unreported = True
-            earlier[:] = landed + [cid for cid in removed if cid not in landed]
-            return list(earlier), missing
+            return remove_cards(work, component_ids, all_cards=all_cards)
 
         try:
             return await store.change_canvas(*key, change)
