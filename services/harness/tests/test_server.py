@@ -1045,6 +1045,41 @@ async def test_a_migration_refusal_is_fatal_at_once(monkeypatch: pytest.MonkeyPa
     assert refusal.value.__cause__ is not None
 
 
+async def test_an_uncleared_adk_ledger_session_refuses_startup_with_nothing_applied(
+    pg_empty_engine: AsyncEngine,
+) -> None:
+    """0003's cutover gate (DFA02) stops startup at the first attempt while an
+    ADK ledger session was never imported, and the run applies no migration."""
+    async with pg_empty_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE sessions (app_name varchar(128) NOT NULL, "
+                "user_id varchar(128) NOT NULL, id varchar(128) NOT NULL, state jsonb NOT NULL, "
+                "create_time timestamp NOT NULL, update_time timestamp NOT NULL)"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO sessions VALUES ('dfo_analyst_graph.ledger', 'p', 'c1', '{}', "
+                "now(), now())"
+            )
+        )
+    now, sleep = _fake_clock_and_sleep()
+
+    with pytest.raises(server_module._MigrationRefusedError) as refusal:
+        await server_module._apply_migrations_with_retries(
+            pg_empty_engine, budget_s=60.0, sleep=sleep, now=now
+        )
+
+    assert refusal.value.sqlstate == "DFA02"
+    async with pg_empty_engine.connect() as conn:
+        applied = (
+            await conn.execute(text("SELECT count(*) FROM harness_schema_migrations"))
+        ).scalar()
+        conversations = (await conn.execute(text("SELECT to_regclass('conversations')"))).scalar()
+    assert (applied, conversations) == (0, None)
+
+
 async def test_any_other_migration_database_error_retries_until_the_budget_ends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

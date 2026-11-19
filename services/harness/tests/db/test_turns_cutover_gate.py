@@ -1,0 +1,202 @@
+"""0003's cutover gate: the release that stops reading ADK refuses to start,
+with SQLSTATE DFA02 and nothing applied, while an ADK ledger session is not
+cleared (imported or kept as of its last ADK write). The case table is the
+one release 1's `gate` verb and release 3's 0005 are pinned by."""
+
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+import asyncpg
+import pytest
+from harness.db.migrate import MIGRATIONS_DIR, apply_pending
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+_MIGRATION = "0003_turns.sql"
+
+# ADK's v1 `sessions` as google-adk 2.13 creates it on PostgreSQL
+# (`google/adk/sessions/schemas/v1.py`, StorageSession).
+_ADK_SESSIONS = (
+    "CREATE TABLE sessions (app_name varchar(128) NOT NULL, user_id varchar(128) NOT NULL, "
+    "id varchar(128) NOT NULL, state jsonb NOT NULL, create_time timestamp NOT NULL, "
+    "update_time timestamp NOT NULL, PRIMARY KEY (app_name, user_id, id))"
+)
+_LEDGER_APP = "dfo_analyst_graph.ledger"
+_UPDATED = "2026-11-01 10:05:00"
+_MOVED = "2026-11-02 09:00:00"
+
+
+def _session(cid: str, *, updated: str = _UPDATED, app: str = _LEDGER_APP) -> str:
+    return (
+        f"INSERT INTO sessions VALUES ('{app}', 'p', '{cid}', '{{}}', '2026-11-01 10:00:00', "
+        f"'{updated}')"
+    )
+
+
+def _imported(cid: str, *, updated: str = _UPDATED) -> str:
+    """The ledger row of a session the import copied."""
+    return (
+        "INSERT INTO adk_ledger_imports (principal, conversation_id, source_digest, "
+        f"source_updated_at, imported_digest) VALUES ('p', '{cid}', 'src', '{updated}', 'rows')"
+    )
+
+
+def _kept(cid: str, *, updated: str = _UPDATED) -> str:
+    """The ledger row of a session whose tables' copy the operator kept."""
+    return (
+        "INSERT INTO adk_ledger_imports (principal, conversation_id, source_updated_at, "
+        f"diverged, kept_tables) VALUES ('p', '{cid}', '{updated}', true, true)"
+    )
+
+
+# A first-sight conflict: the tables held the conversation, so nothing was
+# copied and both digests are NULL.
+_PLACEHOLDER = (
+    "INSERT INTO adk_ledger_imports (principal, conversation_id, source_updated_at, diverged) "
+    f"VALUES ('p', 'c1', '{_UPDATED}', true)"
+)
+
+
+def _conversation(cid: str) -> str:
+    return f"INSERT INTO conversations (principal, conversation_id) VALUES ('p', '{cid}')"
+
+
+async def _migrate_before_0003(engine: AsyncEngine, tmp_path: Path) -> None:
+    """Apply the migrations release 1 shipped, 0001 and 0002."""
+    for path in MIGRATIONS_DIR.glob("*.sql"):
+        if path.name < _MIGRATION:
+            shutil.copy(path, tmp_path / path.name)
+    await apply_pending(engine, directory=tmp_path)
+
+
+async def _execute(engine: AsyncEngine, *statements: str) -> None:
+    async with engine.begin() as conn:
+        for statement in statements:
+            await conn.execute(text(statement))
+
+
+async def _applied(engine: AsyncEngine) -> list[str]:
+    """The migrations recorded as applied, none before the bookkeeping table
+    exists."""
+    async with engine.connect() as conn:
+        if not (
+            await conn.execute(text("SELECT to_regclass('harness_schema_migrations')"))
+        ).scalar():
+            return []
+        rows = await conn.execute(
+            text("SELECT version FROM harness_schema_migrations ORDER BY version")
+        )
+        return [row[0] for row in rows]
+
+
+async def _refused(engine: AsyncEngine) -> str:
+    """0003 raises DFA02 and applies nothing. Returns the error's message."""
+    before = await _applied(engine)
+    with pytest.raises(asyncpg.PostgresError) as refusal:
+        await apply_pending(engine)
+    assert refusal.value.sqlstate == "DFA02"
+    assert await _applied(engine) == before
+    async with engine.connect() as conn:
+        assert (await conn.execute(text("SELECT to_regclass('turn_cursors')"))).scalar() is None
+    return str(refusal.value)
+
+
+@pytest.mark.parametrize(
+    ("tables", "rows", "uncleared"),
+    [
+        pytest.param(
+            (_ADK_SESSIONS,),
+            (
+                *(_session("c1"), _session("c2"), _imported("c1"), _imported("c2")),
+                *(_conversation("c1"), _conversation("c2")),
+            ),
+            [],
+            id="complete import",
+        ),
+        pytest.param(
+            (_ADK_SESSIONS,),
+            (_session("c1"), _session("c2"), _imported("c1"), _conversation("c1")),
+            ["p/c2"],
+            id="one of two imported",
+        ),
+        pytest.param(
+            (_ADK_SESSIONS,),
+            (_session("c1"), _PLACEHOLDER, _conversation("c1")),
+            ["p/c1"],
+            id="conflict placeholder only",
+        ),
+        pytest.param(
+            (_ADK_SESSIONS,),
+            (_session("c1", updated=_MOVED), _imported("c1"), _conversation("c1")),
+            ["p/c1"],
+            id="ADK moved after the import",
+        ),
+        pytest.param((_ADK_SESSIONS,), (_session("c1"), _kept("c1")), [], id="kept, current"),
+        pytest.param(
+            (_ADK_SESSIONS,),
+            (_session("c1", updated=_MOVED), _kept("c1")),
+            ["p/c1"],
+            id="kept, ADK moved after it",
+        ),
+        pytest.param((), (), [], id="no sessions table"),
+        pytest.param(
+            ("CREATE TABLE sessions (id text PRIMARY KEY, app_name text)",),
+            (f"INSERT INTO sessions VALUES ('c1', '{_LEDGER_APP}')",),
+            [],
+            id="foreign sessions table",
+        ),
+        pytest.param(
+            (_ADK_SESSIONS,),
+            (_session("c1#t1", app="dfo_analyst_graph"),),
+            [],
+            id="sessions of other apps only",
+        ),
+    ],
+)
+async def test_0003_waits_for_every_ledger_session_to_be_imported_or_kept(
+    pg_empty_engine: AsyncEngine,
+    tmp_path: Path,
+    tables: tuple[str, ...],
+    rows: tuple[str, ...],
+    uncleared: list[str],
+) -> None:
+    await _migrate_before_0003(pg_empty_engine, tmp_path)
+    await _execute(pg_empty_engine, *tables, *rows)
+
+    if not uncleared:
+        assert _MIGRATION in await apply_pending(pg_empty_engine)
+        return
+    message = await _refused(pg_empty_engine)
+    assert message.startswith(f"{len(uncleared)} ledger session")
+    assert f": {', '.join(uncleared)}." in message
+
+
+async def test_the_dfa02_message_names_the_first_ten_and_the_commands_that_clear_them(
+    pg_empty_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    await _migrate_before_0003(pg_empty_engine, tmp_path)
+    await _execute(pg_empty_engine, _ADK_SESSIONS, *(_session(f"c{n:02}") for n in range(12)))
+
+    message = await _refused(pg_empty_engine)
+
+    assert message.startswith("12 ledger session")
+    assert f": {', '.join(f'p/c{n:02}' for n in range(10))}, ...." in message
+    for command in ("import --apply", "--prefer-adk", "--keep-tables", "`gate`"):
+        assert command in message
+
+
+async def test_one_run_from_no_harness_migration_refuses_a_never_imported_ledger_session(
+    pg_empty_engine: AsyncEngine,
+) -> None:
+    """0001 to 0004 apply in one run, so 0002's empty ledger clears nothing,
+    and the run applies none of them."""
+    await _execute(pg_empty_engine, _ADK_SESSIONS, _session("c1"), _session("c2"))
+
+    message = await _refused(pg_empty_engine)
+
+    assert message.startswith("2 ledger session")
+    assert await _applied(pg_empty_engine) == []
+    async with pg_empty_engine.connect() as conn:
+        assert (await conn.execute(text("SELECT to_regclass('conversations')"))).scalar() is None

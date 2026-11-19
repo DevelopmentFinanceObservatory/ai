@@ -6,6 +6,64 @@
 -- the same transaction (`harness.turn.store.TurnStore`). The lease, the Stop
 -- request and the frame numbering stay on `conversations`.
 
+-- The cutover gate, first. This release reads conversations from the
+-- harness's tables only, so it refuses to start, with SQLSTATE DFA02 and
+-- nothing applied, while a ledger session is not cleared. A ledger session
+-- is a row of ADK's `sessions` of app 'dfo_analyst_graph.ledger'. It is
+-- cleared when `adk_ledger_imports` (0002) holds its row (`principal` =
+-- `user_id`, `conversation_id` = `id`) with `source_updated_at` equal to
+-- the session's `update_time`, and that row is either imported (`diverged`
+-- false, `imported_digest` set, and a `conversations` row of the same key)
+-- or kept (`kept_tables`, the operator's choice of the tables' copy over
+-- ADK's). Without the import's tables no session is cleared. A table named
+-- `sessions` that resolves through `search_path` without the columns of
+-- ADK's v0 and v1 `sessions` is another service's, and with none there is
+-- nothing to check. The message gives the count, the first ten keys and the
+-- commands of the previous release's `python -m harness.adk_import` job
+-- that clear them. A live lease on a turn ADK holds does not refuse: the
+-- previous release serves while this one migrates, and that job's
+-- `close-open-turns` checks it.
+DO $$
+DECLARE
+    ledger_app constant text := 'dfo_analyst_graph.ledger';
+    sessions_table regclass := to_regclass('sessions');
+    imports regclass := to_regclass('adk_ledger_imports');
+    conversations_table regclass := to_regclass('conversations');
+    uncleared bigint;
+    uncleared_keys text[];
+BEGIN
+    IF sessions_table IS NULL OR EXISTS (
+        SELECT 1 FROM unnest(ARRAY[
+            'app_name', 'user_id', 'id', 'state', 'create_time', 'update_time'
+        ]) AS c(col)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM pg_attribute a
+            WHERE a.attrelid = sessions_table AND a.attname = c.col
+              AND a.attnum > 0 AND NOT a.attisdropped)
+    ) THEN
+        RETURN;
+    END IF;
+    EXECUTE format(
+        'SELECT count(*), (array_agg(s.user_id || ''/'' || s.id ORDER BY s.user_id, s.id))[1:10] '
+        'FROM %s s WHERE s.app_name = %L AND NOT %s',
+        sessions_table, ledger_app,
+        CASE WHEN imports IS NULL OR conversations_table IS NULL THEN 'false' ELSE format(
+            'EXISTS (SELECT 1 FROM %s i WHERE i.principal = s.user_id '
+            'AND i.conversation_id = s.id AND i.source_updated_at = s.update_time '
+            'AND (i.kept_tables OR (NOT i.diverged AND i.imported_digest IS NOT NULL '
+            'AND EXISTS (SELECT 1 FROM %s c WHERE c.principal = s.user_id '
+            'AND c.conversation_id = s.id))))',
+            imports, conversations_table) END)
+    INTO uncleared, uncleared_keys;
+    IF uncleared > 0 THEN
+        RAISE EXCEPTION USING ERRCODE = 'DFA02', MESSAGE = format(
+            '%s ledger session(s) in ADK''s `sessions` are neither imported nor kept as of their last ADK write: %s%s. 0003 refuses to start the release that stops reading ADK. Run the previous release''s `python -m harness.adk_import` job: `import --apply` copies them, `import --apply --prefer-adk PRINCIPAL/CONVERSATION_ID` takes ADK''s copy of a conflict, and `import --apply --keep-tables PRINCIPAL/CONVERSATION_ID` keeps the tables'' copy. Then run its `gate`, and restart once it exits 0.',
+            uncleared, array_to_string(uncleared_keys, ', '),
+            CASE WHEN uncleared > 10 THEN ', ...' ELSE '' END);
+    END IF;
+END
+$$;
+
 -- The latest Stop on the conversation (`stop_id`) and the turn index it
 -- names (`stop_turn`), recorded from `lease_cancel` by the next write of the
 -- lease columns, which stamps the row's turn index as stored before that

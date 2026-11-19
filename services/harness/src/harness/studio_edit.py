@@ -312,14 +312,7 @@ async def _edit_flow(
             frames: list[EditEvent] = [revised]
             title = _block_title(component) if caught_up else patch.get("title")
 
-            # Whether an earlier attempt of the card's write changed the
-            # canvas: a retry after a commit whose acknowledgement was lost
-            # finds the block already refreshed, and owes the client the
-            # `composition.updated` that commit made.
-            refreshed = False
-
             def revise(work: ConversationState) -> bool:
-                nonlocal refreshed
                 if token:
                     work.write_tokens = {**work.write_tokens, component_id: token}
                 _record_revision(
@@ -329,13 +322,9 @@ async def _edit_flow(
                     revision=revised.revision,
                     title=title,
                 )
-                refreshed = (
-                    _refresh_block(
-                        work, component_id=component_id, revision=revised.revision, title=title
-                    )
-                    or refreshed
+                return _refresh_block(
+                    work, component_id=component_id, revision=revised.revision, title=title
                 )
-                return refreshed
 
             frames.append(CanvasChange(revise, lineage=recorder.card_lineage(component)))
             frames.extend(_close(text or "Done -- the card was updated."))
@@ -560,9 +549,8 @@ def _refresh_block(
     """Bring the edited component's block up to `revision`, and `title` when
     given; True iff a block changed. A card that is not composed, or whose
     block already shows `revision` and `title`, mints no empty manifest
-    revision. The store retries a write whose commit landed but whose
-    acknowledgement was lost, and that retry reads the block the commit
-    wrote."""
+    revision. `StudioStore.change_canvas` runs it once per committed
+    write."""
     previous = conversation.composition
     if previous is None:
         return False
