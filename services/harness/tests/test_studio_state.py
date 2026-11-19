@@ -3145,6 +3145,41 @@ async def test_a_landed_canvas_write_whose_settling_read_failed_is_applied_once(
     assert len(await _canvas_writes(pg_engine)) == 1
 
 
+async def test_a_release_keeps_the_line_of_a_card_whose_write_gave_up_after_it_landed(
+    new_store, monkeypatch
+) -> None:
+    """A card lands and its acknowledgement is lost, and the write gives up
+    without a retry. The stream's failure close records the turn from a live
+    state missing the card's line. The release settles the landed write
+    first, so the stored record and the live state hold the line once."""
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    faults = _dropping_connection(store, acknowledged=True)
+
+    async def giving_up(entry: Any, conversation_id: str, attempt: Any) -> Any:
+        return await attempt(False)
+
+    monkeypatch.setattr(store, "_retrying", giving_up)
+    with pytest.raises(OperationalError):
+        await store.change_canvas(
+            "principal", CONVERSATION, lambda work: land_component(work, _CARD)
+        )
+    assert faults == [1]
+    assert state.turn_components == []
+    state.close_turn(final_text="", error="internal")
+
+    await store.release("principal", CONVERSATION, segment_id)
+
+    reloaded = await new_store().load("principal", CONVERSATION)
+    for held in (reloaded, state):
+        assert [line["component_id"] for line in held.turn_components] == ["cmp_two"]
+        assert [line["component_id"] for line in held.turns[-1]["cards"]] == ["cmp_two"]
+        assert held.turns[-1]["error"] == "internal"
+    assert state.composition == reloaded.composition
+
+
 async def test_a_claim_empties_the_canvas_writes_of_earlier_leases(new_store, pg_engine) -> None:
     """Each canvas change records its write id; the next claim clears them."""
     store = new_store()

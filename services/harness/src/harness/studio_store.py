@@ -264,6 +264,21 @@ def _shallow_copy(state: ConversationState) -> ConversationState:
     )
 
 
+def _refold_turn_cards(state: ConversationState, baseline: dict[str, Any]) -> None:
+    """Fold `state.turn_components` into the turn's record again, as
+    `ConversationState.close_turn` folds them, when this instance recorded
+    the turn since its last stored write (`baseline`). A card write whose
+    acknowledgement was lost, settled only by the next fenced write
+    (`_resolve_canvas_writes`), adds its turn line after a failure close
+    built the record without it."""
+    if not state.turn_recorded or baseline.get(_KEY_TURN_RECORDED) or not state.turns:
+        return
+    record = {key: value for key, value in state.turns[-1].items() if key != "cards"}
+    if state.turn_components:
+        record["cards"] = list(state.turn_components)
+    state.turns[-1] = record
+
+
 async def _run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
     """Run `work` in a task of its own and wait for it to finish even when
     the caller is cancelled, then re-raise the caller's cancellation.
@@ -1533,8 +1548,10 @@ class StudioStore:
                 stored = (
                     CompositionManifest.model_validate(row.composition) if row.composition else None
                 )
-                if entry.canvas_pending:
-                    await self._resolve_canvas_writes(conn, entry, state, row, stored)
+                if entry.canvas_pending and await self._resolve_canvas_writes(
+                    conn, entry, state, row, stored
+                ):
+                    _refold_turn_cards(state, entry.baseline)
                 if write is not None and write.landed:
                     return write.result
                 fenced = _row_segment(row)
@@ -1602,11 +1619,12 @@ class StudioStore:
         state: ConversationState,
         row: Any,
         stored: CompositionManifest | None,
-    ) -> None:
+    ) -> bool:
         """Settle each write on `entry.canvas_pending` against `row`, the
         conversation's row as locked by the caller (`_fenced_save`), and take
         it off the list once settled. A fault while reading the row's items
         leaves every write pending, to be settled by the next fenced write.
+        Returns whether any write landed.
 
         A write whose id the row's `canvas_writes` holds committed. The row
         holds that commit and every later one, so the live state reloads
@@ -1654,9 +1672,10 @@ class StudioStore:
             write.changed = {}
             entry.canvas_pending.remove(write)
         if not landed:
-            return
+            return False
         entry.version = row.version
         state.composition = stored
+        return True
 
     async def renew(
         self,
