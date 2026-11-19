@@ -117,7 +117,8 @@ jobs:
         run: uv run playwright install --with-deps --only-shell chromium
 
       - name: Test -- all packages
-        run: uv run pytest
+        # The 25 slowest tests over a second, so a slow addition shows in the log.
+        run: uv run pytest --durations=25 --durations-min=1.0
 
   docker:
     # Catches a broken Dockerfile.ai before merge.
