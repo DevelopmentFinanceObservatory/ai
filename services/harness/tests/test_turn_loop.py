@@ -29,6 +29,7 @@ from harness.turn.loop import (
     Outcome,
     TurnExpired,
     abandon,
+    pending_owed_work,
     reject,
     run_segment,
     stop_turn,
@@ -1646,8 +1647,10 @@ async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
     back waits on the turn's row. At `read_back` and `absorbed_read_back`
     the write's acknowledgement is lost and the cut lands during the read
     back, which ends on it or catches it and returns. Wherever the cut lands
-    before `work`'s work after the commit starts, that work runs exactly
-    once: in the step that caught the cut, or when the segment settles. `work`'s `NodeDone` is reported once,
+    before one of `work`'s works after the commit starts, that work runs
+    exactly once: in the step that caught the cut, or when the segment
+    settles. A cut inside the first work (`after_commit`) still has the
+    second, the acknowledgement, run once. `work`'s `NodeDone` is reported once,
     before the segment settles on the turn as stored: `done` for the final node, the move to
     `later` for a middle one, with `later` never run. A write that caught
     the cut and returned still has its work after the commit run (an
@@ -1665,13 +1668,7 @@ async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
         if cut_at in ("read_back", "absorbed_read_back")
         else TurnStore(pg_engine)
     )
-    owed = (
-        "acknowledgement",
-        "absorbed_acknowledgement",
-        "read_back",
-        "absorbed_read_back",
-        "commit_in_flight",
-    )
+
     segment_id = await _claim(lease_a)
     ran: list[str] = []
     acknowledged: list[str] = []
@@ -1695,8 +1692,7 @@ async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
             ctx.after_commit(escaping)
         elif cut_at == "after_after_commit":
             ctx.after_commit(absorbing)
-        elif cut_at in owed:
-            ctx.after_commit(acknowledge)
+        ctx.after_commit(acknowledge)
         return Next(label)
 
     async def later(ctx: NodeCtx, node_input: Any) -> Next:
@@ -1719,16 +1715,69 @@ async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
         )
         if late.committing is not None:
             await late.committing
+    # The owed work `_settle` starts runs in a task of its own.
+    await asyncio.gather(*pending_owed_work())
 
     assert events == [NodeDone(node="work", label=label, output=None)]
     assert ran == []
-    assert acknowledged == (["work"] if cut_at in owed else [])
+    assert acknowledged == ["work"]
     stored = await TurnStore(pg_engine).turn(opened.id)
     if ends:
         assert (segment.outcome, stored.status) == (Outcome.DONE, TurnStatus.DONE)
     else:
         assert segment.outcome is Outcome.LOST
         assert (stored.status, stored.node) == (TurnStatus.RUNNING, "later")
+
+
+@pytest.mark.parametrize("cut", ["stop", "lost"])
+async def test_a_cut_segment_leaves_its_commits_owed_work_running_on_its_own(
+    pg_engine: AsyncEngine, clock: StoreClock, cut: str
+) -> None:
+    """A Stop or a lost lease cuts the segment while `work`'s committed move
+    awaits its acknowledgement, and the work the commit is owed is slow. The
+    segment settles without waiting for it, a Stop closing the turn
+    `cancelled`, and the work runs once in a task of its own, held until it
+    ends (`pending_owed_work`), also when the segment's caller is cancelled
+    meanwhile."""
+    lease_a = await _cut_lease(pg_engine, clock, cut)
+    lease_b = await _instance(pg_engine, clock)
+    store = _CutAfterCommit(pg_engine, cut=lambda: _make_cut(lease_a, lease_b, cut))
+    segment_id = await _claim(lease_a)
+    release = asyncio.Event()
+    started: list[str] = []
+    finished: list[str] = []
+
+    async def slow() -> None:
+        started.append("work")
+        await release.wait()
+        finished.append("work")
+
+    async def work(ctx: NodeCtx, node_input: Any) -> Next:
+        ctx.after_commit(slow)
+        return Next("next")
+
+    graph = Graph(
+        start="work",
+        nodes={"work": Node(run=work), "later": _stays("later", ran=[])},
+        edges={("work", "next"): "later"},
+    )
+    opened = await _open(store, segment_id, graph)
+    running = asyncio.create_task(_segment(store, lease_a, opened, segment_id, graph, []))
+    segment = await asyncio.wait_for(asyncio.shield(running), 2)
+    await _until(lambda: asyncio.sleep(0, result=started == ["work"]))
+    running.cancel()
+
+    stored = await TurnStore(pg_engine).turn(opened.id)
+    if cut == "stop":
+        assert (segment.outcome, stored.status) == (Outcome.CANCELLED, TurnStatus.CANCELLED)
+    else:
+        assert segment.outcome is Outcome.LOST
+    [owed] = pending_owed_work()
+    assert finished == []
+    release.set()
+    await owed
+    assert (started, finished) == (["work"], ["work"])
+    assert pending_owed_work() == frozenset()
 
 
 class _TakenOverAtTheWrite(TurnStore):

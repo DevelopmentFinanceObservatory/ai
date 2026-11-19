@@ -7860,15 +7860,16 @@ async def _stop_whose_claim_commits_as_the_lease_is_read(row: _Row):
 
 async def _stop_in_after_commit_work(row: _Row):
     entered = asyncio.Event()
-    real = turn_loop_module._after_commit
+    real = turn_loop_module._Owed.run
 
-    async def held(ctx: Any, node: str) -> None:
-        if (await _turn_statuses())[-1] == "paused":
+    async def held(owed: Any) -> None:
+        # Held once: the Stop cuts it, and the owed work then runs on.
+        if not entered.is_set() and (await _turn_statuses())[-1] == "paused":
             entered.set()
             await asyncio.sleep(5)
-        await real(ctx, node)
+        await real(owed)
 
-    row.monkeypatch.setattr(turn_loop_module, "_after_commit", held)
+    row.monkeypatch.setattr(turn_loop_module._Owed, "run", held)
     app = await row.build(*_plan())
     async with _client(app) as client:
         stream = asyncio.ensure_future(
