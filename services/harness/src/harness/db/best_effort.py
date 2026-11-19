@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Coroutine, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping
 from typing import Any
 
 from compiler.surface import transient
@@ -77,23 +77,19 @@ def _abandon(
 async def execute_in_savepoint(
     conn: AsyncConnection,
     statement: Executable,
-    params: Mapping[str, Any] | Sequence[Mapping[str, Any]],
+    params: Mapping[str, Any],
     *,
     logger: logging.Logger,
-    failure: Callable[[], str] | None = None,
-) -> Exception | None:
+    failure: Callable[[], str],
+) -> None:
     """Run `statement` with `params` on `conn` in a savepoint, so a failure
     leaves the caller's transaction to commit. A transient fault
-    (`compiler.surface.transient`) raises, for the whole write to be retried.
-    Any other is returned, and logged at error on `logger` as `failure()`
-    when `failure` is given. `None` means the statement ran."""
+    (`compiler.surface.transient`) raises, for the whole write to be retried;
+    any other is logged at error on `logger` as `failure()`."""
     try:
         async with conn.begin_nested():
-            await conn.execute(statement, params if isinstance(params, Mapping) else list(params))
+            await conn.execute(statement, params)
     except Exception as exc:
         if transient(exc):
             raise
-        if failure is not None:
-            logger.exception(failure())
-        return exc
-    return None
+        logger.exception(failure())

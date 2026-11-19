@@ -138,7 +138,7 @@ class _Entry:
     lineage: Lineage
     stat_var_count: int | None = None
     # The store's write counter when this entry was stored under its key
-    # (`ProvenanceStore.generation`).
+    # (`ProvenanceStore.held`).
     generation: int = 0
 
 
@@ -243,7 +243,7 @@ class ProvenanceStore:
         # a distinction `get`'s bare `None` cannot carry without changing
         # its return type for every caller.
         self._evicted: OrderedDict[tuple[str, _FrameKey], None] = OrderedDict()
-        # Bumped by every store of an entry under a key (`generation`).
+        # Bumped by every store of an entry under a key (`held`).
         self._generations = 0
 
     def put(
@@ -367,12 +367,13 @@ class ProvenanceStore:
         frame: _FrameKey,
         lineage: Lineage,
         stat_var_count: int | None = None,
+        overwrite: bool = False,
     ) -> int | None:
         """Put a stored `lineage`, with the count stored beside it, back under
-        `frame` when the store holds none there, and return the generation it
-        was stored at (`generation`). `None` when the store already held an
-        entry for `frame`, which it keeps."""
-        if self._entry(conversation, frame) is not None:
+        `frame` when the store holds none there, or over the entry it holds
+        when `overwrite`, and return the generation it was stored at (`held`).
+        `None` when the store already held an entry for `frame` and kept it."""
+        if not overwrite and self._entry(conversation, frame) is not None:
             return None
         self._store(conversation=conversation, key=frame, entry=_Entry(lineage, stat_var_count))
         return self._generations
@@ -429,24 +430,16 @@ class ProvenanceStore:
     def held(
         self, *, conversation: str, spec_id: str | None, content_version: str | None
     ) -> tuple[Lineage, int | None, int] | None:
-        """The lineage, count (`stat_var_count`) and generation (`generation`)
-        held for the frame `(spec_id, content_version)`, read from one entry,
-        or `None` for a frame the store does not hold."""
+        """The lineage, count (`stat_var_count`) and generation held for the
+        frame `(spec_id, content_version)`, read from one entry, or `None` for
+        a frame the store does not hold. The generation is a number that
+        changes whenever the entry is stored again (`put`, `put_retrieval`,
+        `alias`, `restore`, `restore_frame`) and stays the same while it is
+        unchanged, whatever objects `get` hands out."""
         entry = self._entry(conversation, (spec_id, content_version))
         if entry is None:
             return None
         return entry.lineage, entry.stat_var_count, entry.generation
-
-    def generation(
-        self, *, conversation: str, spec_id: str | None, content_version: str | None
-    ) -> int | None:
-        """A number that changes whenever the lineage or count held for the
-        frame `(spec_id, content_version)` is stored again (`put`,
-        `put_retrieval`, `alias`, `restore`), and stays the same while the
-        entry is unchanged, whatever objects `get` hands out. `None` for a
-        frame the store does not hold."""
-        entry = self._entry(conversation, (spec_id, content_version))
-        return entry.generation if entry is not None else None
 
     def _entry(self, conversation: str, key: _FrameKey) -> _Entry | None:
         """The entry held for `key`, marked most recently used."""

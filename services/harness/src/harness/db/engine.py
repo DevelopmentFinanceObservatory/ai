@@ -58,6 +58,10 @@ class DatabaseHandle:
     one connection, no overflow, on the same settings, for the best-effort
     reads of a card's stored lineage (`StudioStore.card_lineage`), so those
     reads never take a connection the lease renewals and card writes need.
+    The turn frame lineage restore (`harness.turn.store.TurnStore.
+    restore_frame_lineage`) reads over `engine`, under its own 2 s bound,
+    since many turns can resume at once and one connection would queue
+    them.
     `aclose` disposes both and, on the Cloud SQL Connector path, closes the
     connector their connections were dialled through. Call it from the
     harness lifespan's shutdown phase.
