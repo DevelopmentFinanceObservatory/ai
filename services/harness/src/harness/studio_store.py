@@ -89,7 +89,8 @@ from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.approval import ApprovalRecord
-from harness.db.jsonb import to_json_param
+from harness.db.best_effort import insert_in_savepoint
+from harness.db.jsonb import json_or_none, to_json_param
 from harness.fatal_codes import recorded_code
 from harness.graph.state import (
     ORCHESTRATOR_APPLIED_KEY,
@@ -909,14 +910,15 @@ def _card_lineage_row(lineage: CardLineage) -> dict[str, Any] | None:
     `None`, logged at error, when JSON cannot hold them (a NaN or an
     infinity among a manifest's values, which `json` would write as a bare
     token Postgres refuses). The card then lands without its row."""
-    try:
-        members = to_json_param(lineage.members_json())
-    except (TypeError, ValueError):
-        logger.exception(
-            "studio store: the lineage of component_id=%r cannot be stored as JSON; "
-            "the card lands without it",
-            lineage.component_id,
-        )
+    members = json_or_none(
+        lineage.members_json(),
+        logger=logger,
+        failure=(
+            f"studio store: the lineage of component_id={lineage.component_id!r} cannot be "
+            "stored as JSON; the card lands without it"
+        ),
+    )
+    if members is None:
         return None
     requested = lineage.requested or (None, None)
     return {
@@ -936,18 +938,18 @@ async def _insert_card_lineage(conn: AsyncConnection, pk: int, row: Mapping[str,
     card's lineage is written once: its frame never changes, and a write
     retried after a commit whose acknowledgement was lost finds the row there.
     A transient fault raises, for the whole write to be retried; any other
-    is logged at error and the card lands without its row."""
-    try:
-        async with conn.begin_nested():
-            await conn.execute(_INSERT_CARD_LINEAGE, {**row, "pk": pk})
-    except Exception as exc:
-        if transient(exc):
-            raise
-        logger.exception(
-            "studio store: the lineage of component_id=%r was not stored; the card lands "
-            "without it",
-            row["component_id"],
-        )
+    is logged at error and the card lands without its row
+    (`harness.db.best_effort.insert_in_savepoint`)."""
+    await insert_in_savepoint(
+        conn,
+        _INSERT_CARD_LINEAGE,
+        {**row, "pk": pk},
+        logger=logger,
+        failure=(
+            f"studio store: the lineage of component_id={row['component_id']!r} was not "
+            "stored; the card lands without it"
+        ),
+    )
 
 
 def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any]) -> None:

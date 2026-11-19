@@ -49,6 +49,7 @@ from harness.db.migrate import MigrationChecksumError, apply_pending
 from harness.early_mint import EarlyMints
 from harness.generative import GeminiEdit
 from harness.graph.events import GraphEvent
+from harness.graph.state import frame_store_keys
 from harness.graph.workflow import studio_graph
 from harness.live_refresh import build_live_refresh, create_live_refresh_router
 from harness.mcp_client import McpExecutor, McpResolver
@@ -73,7 +74,7 @@ from harness.studio_state import (
 )
 from harness.studio_store import StudioStore
 from harness.turn.loop import Graph
-from harness.turn.store import TurnStore
+from harness.turn.store import FrameLineage, TurnStore
 from harness.turn_budget import current_turn_budget
 from harness.wiring import build_planner, handing_back_planner_failures
 
@@ -621,7 +622,7 @@ def create_app(
         turns=TurnStore(
             engine,
             clock=store.now,
-            provenance=provenance,
+            lineage=FrameLineage(source=provenance, frame_keys=frame_store_keys),
             lineage_engine=database.lineage_engine,
         ),
         edit_model=GeminiEdit(

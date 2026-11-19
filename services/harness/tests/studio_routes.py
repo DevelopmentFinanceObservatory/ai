@@ -23,7 +23,7 @@ from executor.ledger import InMemoryRunLedger
 from fastapi import FastAPI
 from google.genai import types
 from harness.conversation import current_conversation_id
-from harness.graph.state import frame_id_for
+from harness.graph.state import frame_id_for, frame_store_keys
 from harness.graph.workflow import studio_graph
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.planner_adapter import content_on_spans
@@ -41,7 +41,7 @@ from harness.settings import Settings
 from harness.studio import StudioRunner, create_studio_router
 from harness.studio_state import make_recall_part
 from harness.studio_store import StudioStore
-from harness.turn.store import TurnStore
+from harness.turn.store import FrameLineage, TurnStore
 from harness.turn_budget import TurnBudget, current_turn_budget
 from harness.wire import STUDIO_FRAME_ADAPTER
 from harness.wiring import handing_back_planner_failures
@@ -183,7 +183,15 @@ def orchestrator_app(
         create_graph=create_graph,
         executor=executor or ScriptedExecutor(),
         store=store,
-        turns=TurnStore(store.engine, clock=store.now, provenance=provenance),
+        turns=TurnStore(
+            store.engine,
+            clock=store.now,
+            lineage=(
+                FrameLineage(source=provenance, frame_keys=frame_store_keys)
+                if provenance is not None
+                else None
+            ),
+        ),
         tool_surface=tool_surface,
         edit_model=edit_model,
         early_mints=early_mints,
