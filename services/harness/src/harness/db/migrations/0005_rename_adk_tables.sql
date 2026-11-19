@@ -29,8 +29,9 @@
 --          session's `update_time`, and that row is either imported
 --          (`diverged` false, `imported_digest` set, and a `conversations`
 --          row of the same key) or kept (`kept_tables`, the operator's
---          choice of the tables' copy over ADK's). The message gives the
---          count and the first ten keys.
+--          choice of the tables' copy over ADK's). With no
+--          `adk_ledger_imports` or no `conversations` table, no session is
+--          cleared. The message gives the count and the first ten keys.
 --   DFA03  A table to rename is not owned by the current user, or the user
 --          lacks CREATE on its schema.
 --   DFA04  For a table, index or sequence to rename, `adk_archive_<name>`
@@ -69,6 +70,7 @@ DECLARE
     object_kind text;
     owner_name text;
     imports regclass;
+    conversations_table regclass;
     uncleared bigint;
     uncleared_keys text[];
     not_owner boolean;
@@ -131,21 +133,22 @@ BEGIN
 
     IF 'sessions' = ANY (adk_present) THEN
         imports := to_regclass('adk_ledger_imports');
+        conversations_table := to_regclass('conversations');
         EXECUTE format(
             'SELECT count(*), (array_agg(s.user_id || ''/'' || s.id ORDER BY s.user_id, s.id))[1:10] '
             'FROM %s s WHERE s.app_name = %L AND NOT %s',
             to_regclass('sessions'), ledger_app,
-            CASE WHEN imports IS NULL THEN 'false' ELSE format(
+            CASE WHEN imports IS NULL OR conversations_table IS NULL THEN 'false' ELSE format(
                 'EXISTS (SELECT 1 FROM %s i WHERE i.principal = s.user_id '
                 'AND i.conversation_id = s.id AND i.source_updated_at = s.update_time '
                 'AND (i.kept_tables OR (NOT i.diverged AND i.imported_digest IS NOT NULL '
                 'AND EXISTS (SELECT 1 FROM %s c WHERE c.principal = s.user_id '
                 'AND c.conversation_id = s.id))))',
-                imports, to_regclass('conversations')) END)
+                imports, conversations_table) END)
         INTO uncleared, uncleared_keys;
         IF uncleared > 0 THEN
             RAISE EXCEPTION USING ERRCODE = 'DFA02', MESSAGE = format(
-                '%s ledger session(s) in ADK''s `sessions` are neither imported nor kept as of their last ADK write: %s%s. 0005 refuses to rename the tables out from under them. Run the `python -m harness.adk_import` job of the image that holds it: `import --apply` copies them, `import --apply --prefer-adk PRINCIPAL/CONVERSATION_ID` re-imports a conflict, and `import --keep-tables PRINCIPAL/CONVERSATION_ID` keeps the tables'' copy. Then restart.',
+                '%s ledger session(s) in ADK''s `sessions` are neither imported nor kept as of their last ADK write: %s%s. 0005 refuses to rename the tables out from under them. Run the `python -m harness.adk_import` job of the image that holds it: `import --apply` copies them, `import --apply --prefer-adk PRINCIPAL/CONVERSATION_ID` takes ADK''s copy of a conflict, and `import --apply --keep-tables PRINCIPAL/CONVERSATION_ID` keeps the tables'' copy. Then run its `gate`, and restart once it exits 0.',
                 uncleared, array_to_string(uncleared_keys, ', '),
                 CASE WHEN uncleared > 10 THEN ', ...' ELSE '' END);
         END IF;

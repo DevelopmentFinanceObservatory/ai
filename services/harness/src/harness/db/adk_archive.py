@@ -8,20 +8,33 @@ commits.
 
 - `archive` runs `0005_rename_adk_tables.sql`, the migration that renames
   ADK's five tables and `adk_ledger_imports` to `adk_archive_<name>`, so its
-  checks and its rename are the migration's own. The file is one `DO` block
-  and renames nothing a second time, so a rerun finds nothing to do.
+  checks and its rename are the migration's own, and records the file in
+  `harness_schema_migrations` as applied when it is not recorded yet. The
+  file is one `DO` block and renames nothing a second time, so a rerun
+  finds nothing to do.
 - `restore` renames every `adk_archive_<name>` table back, with its indexes
-  and owned sequences, for an image that reads ADK's tables. It refuses
-  before renaming anything when a name it would restore exists in the
-  object's schema, or, for a table, resolves on `search_path`, where an
-  ADK-reading image that started after the archive created fresh tables.
-  After renaming it checks, in the same transaction, that each restored
-  table's name resolves on `search_path` to that table, and rolls back
-  otherwise.
+  and owned sequences, for an image that reads ADK's tables, and deletes
+  0005's row from `harness_schema_migrations`, so the next start of an image
+  that holds 0005 runs it again, with its check that every ledger session
+  is imported or kept. It prints which of ADK's five tables it restores and
+  refuses when anything is archived but not all five, the import ledger
+  alone included, unless `--allow-missing` is given. With nothing archived
+  it finds nothing to do, so a rerun after a restore changes nothing. It refuses before renaming anything when a name it would restore
+  exists in the object's schema, or, for a table, resolves on
+  `search_path`, where an ADK-reading image that started after the archive
+  created fresh tables. After renaming it checks, in the same transaction,
+  that each restored table's name resolves on `search_path` to that table,
+  and rolls back otherwise.
 - `drop-adk` drops each of ADK's five tables that resolves on `search_path`
   and has ADK's columns, which discards ADK's copy of the conversations. A
   table of an ADK name without ADK's columns is another service's and stays.
-- `drop-archive` drops every `adk_archive_<name>` table.
+- `drop-archive` drops every `adk_archive_<name>` table. It refuses, and
+  drops nothing, when a table of such a name lacks the columns of the table
+  it would archive.
+
+Each verb's transaction takes the advisory lock and the statement and lock
+timeouts of `harness.db.migrate`, so it never runs beside a starting
+instance's migrations.
 
 Tables resolve through `search_path`, as the migration resolves them. The
 module connects as the harness does (`harness.settings.Settings`,
@@ -29,23 +42,26 @@ module connects as the harness does (`harness.settings.Settings`,
 `SESSION_STORE_*` settings over the Cloud SQL Connector with IAM auth.
 
 Exit status: 0 when the verb ran or found nothing to do, 1 when it or the
-database refused, and 2 on a usage error or with no database configured.
+database refused, and 2 on a usage error or with no or an invalid database
+configuration.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import asyncpg
+import pydantic
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from harness.db.engine import build_database
-from harness.db.migrate import MIGRATION_LOCK_TIMEOUT_S, MIGRATIONS_DIR
+from harness.db.migrate import MIGRATIONS_DIR, bound_and_lock, record_applied, sha256
 from harness.settings import Settings
 
 ARCHIVE_MIGRATION = MIGRATIONS_DIR / "0005_rename_adk_tables.sql"
@@ -63,6 +79,26 @@ _ADK_COLUMNS = {
     "user_states": ("app_name", "user_id", "state", "update_time"),
     "adk_internal_metadata": ("key", "value"),
 }
+# The columns of `adk_ledger_imports` as `0002_adk_ledger_imports.sql`
+# creates it.
+_LEDGER_COLUMNS = (
+    "principal",
+    "conversation_id",
+    "source_digest",
+    "source_updated_at",
+    "imported_digest",
+    "diverged",
+    "kept_tables",
+    "imported_at",
+)
+
+# How many of the columns `$2` the relation `$1` resolves to on
+# `search_path` lacks.
+_MISSING_COLUMNS = (
+    "SELECT count(*) FROM unnest($2::text[]) AS c(col) WHERE NOT EXISTS ("
+    "SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass($1) "
+    "AND a.attname = c.col AND a.attnum > 0 AND NOT a.attisdropped)"
+)
 
 # Each table that resolves on `search_path` from `$1`, then each one's indexes
 # and owned sequences.
@@ -138,25 +174,57 @@ async def _quoted(conn: Any, name: str) -> str:
 
 
 async def _archive(conn: Any) -> list[str]:
+    if await conn.fetchval("SELECT to_regclass('harness_schema_migrations')") is None:
+        raise ArchiveRefusedError(
+            "archive renames nothing, because `harness_schema_migrations` does not resolve on "
+            "search_path, so this is not a database the harness has migrated. Point the job at "
+            "the harness's database."
+        )
     before = await _relations(conn, ARCHIVED)
     await conn.execute(ARCHIVE_MIGRATION.read_text())
     after = {
         row["oid"]: row["relname"] for row in await conn.fetch(_DESCRIBE, [r.oid for r in before])
     }
-    return [
+    statements = [
         f"ALTER {relation.kind} {relation.qualified} RENAME TO {await _quoted(conn, after[relation.oid])}"
         for relation in before
         if after[relation.oid] != relation.name
     ]
+    recorded = await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM harness_schema_migrations WHERE version = $1)",
+        ARCHIVE_MIGRATION.name,
+    )
+    if not recorded:
+        await record_applied(conn, ARCHIVE_MIGRATION)
+        statements.append(
+            "INSERT INTO harness_schema_migrations (version, content_sha256) "
+            f"VALUES ('{ARCHIVE_MIGRATION.name}', '{sha256(ARCHIVE_MIGRATION)}')"
+        )
+    return statements
 
 
-async def _restore(conn: Any) -> list[str]:
+async def _restore(conn: Any, *, allow_missing: bool = False) -> list[str]:
     archived = [
         relation
         for relation in await _relations(conn, [PREFIX + name for name in ARCHIVED])
         if relation.name.startswith(PREFIX)
     ]
     tables = [relation for relation in archived if relation.kind == "TABLE"]
+    found = {table.name.removeprefix(PREFIX) for table in tables}
+    restoring = [name for name in ADK_TABLES if name in found]
+    missing = [name for name in ADK_TABLES if name not in found]
+    if not archived:
+        return []
+    print(
+        f"adk_archive restore: ADK's tables in the archive: {', '.join(restoring) or 'none'}; "
+        f"missing: {', '.join(missing) or 'none'}"
+    )
+    if missing and not allow_missing:
+        raise ArchiveRefusedError(
+            f"restore renames nothing, because the archive lacks ADK's {', '.join(missing)}. An "
+            "image that reads ADK's tables would create them empty. Pass --allow-missing to "
+            "restore the rest anyway."
+        )
     taken = await _restore_conflicts(conn, archived)
     if taken:
         raise ArchiveRefusedError(
@@ -183,6 +251,15 @@ async def _restore(conn: Any) -> list[str]:
                 f"to the restored {table.schema}.{restored}, so an image reading ADK's tables "
                 "would not read the restored rows."
             )
+    if (
+        statements
+        and await conn.fetchval("SELECT to_regclass('harness_schema_migrations')") is not None
+    ):
+        statement = (
+            f"DELETE FROM harness_schema_migrations WHERE version = '{ARCHIVE_MIGRATION.name}'"
+        )
+        if await conn.execute(statement) != "DELETE 0":
+            statements.append(statement)
     return statements
 
 
@@ -217,14 +294,7 @@ async def _drop_adk(conn: Any) -> list[str]:
         qualified = await conn.fetchval(_RESOLVED, name)
         if qualified is None:
             continue
-        missing = await conn.fetchval(
-            "SELECT count(*) FROM unnest($2::text[]) AS c(col) WHERE NOT EXISTS ("
-            "SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass($1) "
-            "AND a.attname = c.col AND a.attnum > 0 AND NOT a.attisdropped)",
-            name,
-            list(_ADK_COLUMNS[name]),
-        )
-        if missing:
+        if await conn.fetchval(_MISSING_COLUMNS, name, list(_ADK_COLUMNS[name])):
             continue
         statement = f"DROP TABLE {qualified} CASCADE"
         await conn.execute(statement)
@@ -238,6 +308,13 @@ async def _drop_archive(conn: Any) -> list[str]:
         qualified = await conn.fetchval(_RESOLVED, PREFIX + name)
         if qualified is None:
             continue
+        columns = _LEDGER_COLUMNS if name == "adk_ledger_imports" else _ADK_COLUMNS[name]
+        if await conn.fetchval(_MISSING_COLUMNS, PREFIX + name, list(columns)):
+            raise ArchiveRefusedError(
+                f"drop-archive drops nothing, because `{PREFIX}{name}` resolves to {qualified}, "
+                f"which lacks the columns of `{name}`, so it is not the archive. Rename it or "
+                "drop it by hand, then run drop-archive again."
+            )
         statement = f"DROP TABLE {qualified} CASCADE"
         await conn.execute(statement)
         statements.append(statement)
@@ -252,9 +329,16 @@ _VERBS: dict[str, Callable[[Any], Awaitable[list[str]]]] = {
 }
 
 
-async def run(engine: AsyncEngine, *, verb: str, apply: bool) -> int:
+async def run(engine: AsyncEngine, *, verb: str, apply: bool, allow_missing: bool = False) -> int:
     """Run `verb` in one transaction on `engine`, commit it when `apply` and
-    roll it back otherwise, print what it ran, and return the exit status."""
+    roll it back otherwise, print what it ran, and return the exit status.
+    `allow_missing` lets `restore` run when the archive lacks some of ADK's
+    tables."""
+    act = (
+        functools.partial(_restore, allow_missing=allow_missing)
+        if verb == "restore"
+        else _VERBS[verb]
+    )
     async with engine.connect() as sa_conn:
         raw = await sa_conn.get_raw_connection()
         conn = raw.driver_connection
@@ -262,8 +346,8 @@ async def run(engine: AsyncEngine, *, verb: str, apply: bool) -> int:
         transaction = conn.transaction()
         await transaction.start()
         try:
-            await conn.execute(f"SET LOCAL lock_timeout = {round(MIGRATION_LOCK_TIMEOUT_S * 1000)}")
-            statements = await _VERBS[verb](conn)
+            await bound_and_lock(conn)
+            statements = await act(conn)
         except ArchiveRefusedError as exc:
             await transaction.rollback()
             print(f"adk_archive {verb}: {exc}", file=sys.stderr)
@@ -302,28 +386,44 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     helps = {
         "archive": "rename ADK's tables and adk_ledger_imports to adk_archive_<name>, as "
         "migration 0005 does",
-        "restore": "rename every adk_archive_<name> table back, for an image that reads ADK",
+        "restore": "rename every adk_archive_<name> table back, for an image that reads ADK, "
+        "and unrecord migration 0005 so the next start runs it again",
         "drop-adk": "drop ADK's five tables, discarding ADK's copy of the conversations",
         "drop-archive": "drop every adk_archive_<name> table",
     }
     for verb, help_text in helps.items():
-        verbs.add_parser(verb, help=help_text).add_argument(
-            "--apply", action="store_true", help="commit the change"
-        )
+        verb_parser = verbs.add_parser(verb, help=help_text)
+        verb_parser.add_argument("--apply", action="store_true", help="commit the change")
+        if verb == "restore":
+            verb_parser.add_argument(
+                "--allow-missing",
+                action="store_true",
+                help="restore when the archive lacks some of ADK's five tables",
+            )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the verb and print what it ran. Returns the exit status."""
     arguments = _arguments(argv)
-    database = build_database(settings=Settings())
+    try:
+        settings = Settings()
+    except pydantic.ValidationError as exc:
+        print(f"adk_archive: the database settings are invalid:\n{exc}", file=sys.stderr)
+        return 2
+    database = build_database(settings=settings)
     if database is None:
         print("adk_archive: set DATABASE_URL or the SESSION_STORE_* variables", file=sys.stderr)
         return 2
 
     async def go() -> int:
         try:
-            return await run(database.engine, verb=arguments.verb, apply=arguments.apply)
+            return await run(
+                database.engine,
+                verb=arguments.verb,
+                apply=arguments.apply,
+                allow_missing=getattr(arguments, "allow_missing", False),
+            )
         finally:
             await database.aclose()
 

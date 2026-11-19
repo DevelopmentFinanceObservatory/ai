@@ -280,37 +280,35 @@ This image reads saved Studio conversations from the harness's own tables (`harn
 
 Migration `0005_rename_adk_tables.sql` renames ADK's `sessions`, `events`, `app_states`, `user_states` and `adk_internal_metadata` tables and the import job's `adk_ledger_imports` to `adk_archive_<name>`, in the schema each is in, and renames each table's indexes and owned sequences the same way. It drops nothing and changes no row. A renamed table keeps its rows, keys and foreign keys, and `adk_archive_events` still references `adk_archive_sessions`. The runtime user needs ownership of the tables and `CREATE` on their schema. A table is ADK's when it has the columns of ADK's tables, and tables resolve through `search_path`. Startup applies the migration, so deploying the image that carries it runs it.
 
-No revision that reads ADK's tables may take traffic once the migration commits. An instance of the ADK-serving image that starts afterwards recreates empty ADK tables and serves an empty conversation list. Its new rows then sit in neither the harness tables nor the archive, and its fresh tables stop `restore` below. Deploy the image that carries the migration only after the image that serves Studio from ADK, or from the first conversation tables, has stopped taking traffic.
+No revision that reads ADK's tables may exist once the migration commits. An instance of such an image that starts afterwards recreates empty ADK tables and serves an empty conversation list. Its new rows then sit in neither the harness tables nor the archive, and its fresh tables stop `restore` below. A revision with no share of traffic can still start instances, since Cloud Run's session-affinity cookie takes precedence over traffic splitting, so the cutover below deletes every such revision before this image merges.
 
 Each check below stops startup at once with its own SQLSTATE and renames nothing:
 
 - `DFA01`: a table of an ADK name lacks ADK's columns while another carries them. Rename the foreign table by hand, or discard ADK's tables with `drop-adk --apply`. With no ADK table at all, tables of those names are left alone without a message.
-- `DFA02`: a ledger session, a row of ADK's `sessions` of app `dfo_analyst_graph.ledger`, is neither imported nor kept as of its last ADK write. A session is imported when `adk_ledger_imports` holds its row with `source_updated_at` equal to the session's `update_time`, not diverged, with `imported_digest` set, and `conversations` holds the conversation. It is kept when that current row has `kept_tables` set. The message gives the count and the first ten keys. A database that applies `0003_turns.sql` and this migration in one start refuses at `0003`'s check of the same predicate first, so this one fires when `0003` was applied earlier and an ADK-reading revision wrote sessions since. Run the import job of the image that holds it: `import --apply` copies them, `--prefer-adk` re-imports a conflict, and `--keep-tables` keeps the tables' copy. To discard ADK's conversations instead, run `drop-adk --apply`.
+- `DFA02`: a ledger session, a row of ADK's `sessions` of app `dfo_analyst_graph.ledger`, is neither imported nor kept as of its last ADK write. A session is imported when `adk_ledger_imports` holds its row with `source_updated_at` equal to the session's `update_time`, not diverged, with `imported_digest` set, and `conversations` holds the conversation. It is kept when that current row has `kept_tables` set. With no `adk_ledger_imports` or no `conversations` table, no session is cleared. The message gives the count and the first ten keys. A database that applies `0003_turns.sql` and this migration in one start refuses at `0003`'s check of the same predicate first, so this one fires when `0003` was applied earlier and an ADK-reading revision wrote sessions since, as after a rollback and `restore --apply`. Run the import job of the image that holds it: `import --apply` copies them, `import --apply --prefer-adk PRINCIPAL/CONVERSATION_ID` takes ADK's copy of a conflict, and `import --apply --keep-tables PRINCIPAL/CONVERSATION_ID` keeps the tables' copy. Then run its `gate`, and restart once it exits 0. To discard ADK's conversations instead, run `drop-adk --apply`.
 - `DFA03`: a table to rename is not owned by the user the migration runs as, or that user lacks `CREATE` on its schema. Run it as the owner or grant `CREATE`.
 - `DFA04`: for a table, index or sequence to rename, `adk_archive_<name>` would pass PostgreSQL's 63-byte identifier limit, which would truncate it, or a relation or type of that name exists in the schema; or, for a table to rename, a relation named `adk_archive_<table>` resolves through `search_path` in any schema. Rename the object to a shorter name, or rename or drop the one in the way. After the migration each `adk_archive_<table>` therefore resolves to the table it archived, and `restore` gives each object its own name back.
 
 ### The archive job
 
-`python -m harness.db.adk_archive` acts on these tables from this image. Each verb runs in one transaction and prints the statements it ran. Without `--apply` it rolls the transaction back, so a dry run checks everything the verb would do and changes nothing. It connects with the settings the service uses, `DATABASE_URL` or the three `SESSION_STORE_*` variables over IAM auth, and exits 0 when it ran or found nothing to do, 1 when it or the database refused, and 2 on a usage error or with no database configured.
+`python -m harness.db.adk_archive` acts on these tables from this image. Each verb runs in one transaction and prints the statements it ran. The transaction takes the migrations' advisory lock and statement and lock timeouts, so a verb never runs beside a starting instance's migrations. Without `--apply` it rolls the transaction back, so a dry run checks everything the verb would do and changes nothing. It connects with the settings the service uses, `DATABASE_URL` or the three `SESSION_STORE_*` variables over IAM auth, and exits 0 when it ran or found nothing to do, 1 when it or the database refused, and 2 on a usage error or with no or an invalid database configuration.
 
 ```
 uv run --package harness python -m harness.db.adk_archive archive        # dry run, the default
 uv run --package harness python -m harness.db.adk_archive archive --apply
-uv run --package harness python -m harness.db.adk_archive restore [--apply]
+uv run --package harness python -m harness.db.adk_archive restore [--allow-missing] [--apply]
 uv run --package harness python -m harness.db.adk_archive drop-adk [--apply]
 uv run --package harness python -m harness.db.adk_archive drop-archive [--apply]
 ```
 
-- `archive` runs `0005_rename_adk_tables.sql` itself, so its four checks hold. A second run finds nothing to rename.
-- `restore` renames every `adk_archive_<name>` table back, with its indexes and owned sequences. It refuses before renaming anything when a name it would restore exists in the object's schema, or, for a table, resolves through `search_path`, as fresh tables an ADK-reading image created do. After renaming it checks that each restored name resolves to the restored table and rolls back otherwise.
+- `archive` runs `0005_rename_adk_tables.sql` itself, so its four checks hold, and records the migration in `harness_schema_migrations` as applied when it is not recorded yet. A second run finds nothing to rename.
+- `restore` renames every `adk_archive_<name>` table back, with its indexes and owned sequences, and deletes the migration's row from `harness_schema_migrations`, so the next start of this image runs the migration again with its four checks. It prints which of ADK's five tables the archive holds and refuses when it holds anything but not all five, the import ledger alone included, since an image that reads ADK's tables would create a missing one empty; `--allow-missing` restores the rest anyway. With nothing archived it finds nothing to do, so a rerun after a restore changes nothing. It refuses before renaming anything when a name it would restore exists in the object's schema, or, for a table, resolves through `search_path`, as fresh tables an ADK-reading image created do. After renaming it checks that each restored name resolves to the restored table and rolls back otherwise.
 - `drop-adk` drops ADK's five tables, each that resolves through `search_path` and has ADK's columns, which discards ADK's copy of the conversations.
-- `drop-archive` drops every `adk_archive_<name>` table, once ADK's copy is no longer needed.
+- `drop-archive` drops every `adk_archive_<name>` table, once ADK's copy is no longer needed. It refuses, and drops nothing, when a table of such a name lacks the columns of the table it would archive, as another service's table earlier on `search_path` would.
 
 On dev and production the database is reachable only from the service's PSC network, as the runtime service account, so the job runs as a Cloud Run job on this image with the service's identity, network and database settings, as the conversation import job does. A workstation cannot reach it.
 
 ### Cutover
-
-Deploy this image as usual: its startup applies the migration. Then, in each environment, as soon as the release has started and taken traffic, create the job and execute the `restore` dry run. Its exit status 0 and its list of renames are the evidence that a rollback to an image that reads ADK's tables would find every table it needs. Keep the job: a rollback uses it.
 
 Set the environment's values. For dev:
 
@@ -320,7 +318,33 @@ PROJECT_ID=$(gh variable get PROJECT_ID --env dev)
 SERVICE_AI=$(gh variable get SERVICE_AI --env dev)
 ```
 
-For production, the same with `--env production`. Create the job on the serving image. The `jq` step refuses unless the service holds exactly the three `SESSION_STORE_*` variables, each as a literal value, and the job is created only when it succeeds:
+For production, the same with `--env production`.
+
+Before this image merges in an environment, delete every revision of the service older than the oldest revision of the release before this one: the revision of the release that added the conversation tables, which reads ADK's tables, and any revision a rollback started. The release before this one reads the harness tables only, so its revisions stay. List the revisions, newest first, and delete each older one by name:
+
+```
+gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
+  --sort-by=~metadata.creationTimestamp --format='table(metadata.name,metadata.creationTimestamp)'
+gcloud run revisions delete "${REVISION:?set it to a revision to delete}" \
+  --region="$REGION" --project="$PROJECT_ID" --quiet
+```
+
+Then list them again: the list holds only revisions of the release before this one. Confirm that each deleted revision's instance count has reached zero, from Cloud Monitoring's `run.googleapis.com/container/instance_count`, since a deleted revision is gone from `gcloud run revisions describe`. The command prints each series' newest points, newest first, by instance state; the revision has drained when the newest points read 0, or when no point is newer than the delete:
+
+```
+START=$(date -u -d '-30 min' +%FT%TZ 2>/dev/null || date -u -v-30M +%FT%TZ)
+curl -sG -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  "https://monitoring.googleapis.com/v3/projects/$PROJECT_ID/timeSeries" \
+  --data-urlencode "filter=metric.type=\"run.googleapis.com/container/instance_count\" AND resource.labels.revision_name=\"$REVISION\"" \
+  --data-urlencode "interval.startTime=$START" \
+  --data-urlencode "interval.endTime=$(date -u +%FT%TZ)" \
+  | jq -r '.timeSeries[]? | .metric.labels.state as $state
+    | .points[:5][] | "\(.interval.endTime) \($state) \(.value.int64Value)"'
+```
+
+Then deploy this image as usual: its startup applies the migration. In each environment, as soon as the release has started and taken traffic, create the job and execute the `restore` dry run. Its exit status 0 and the ADK tables it lists, all five, are the evidence that a rollback to an image that reads ADK's tables would find every table it needs: `restore` refuses when the archive lacks any of them. Keep the job: a rollback uses it.
+
+Create the job on the serving image. The `jq` step refuses unless the service holds exactly the three `SESSION_STORE_*` variables, each as a literal value, and the job is created only when it succeeds:
 
 ```
 IMAGE=$(gcloud run services describe "$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
@@ -352,7 +376,13 @@ gcloud run jobs execute "$SERVICE_AI-adk-archive" --region="$REGION" --project="
   --args=-m,harness.db.adk_archive,restore,--apply
 ```
 
-The migration is recorded as applied, so a later start of this image does not run it again. To roll forward after a rollback, first run the import job of the image that holds it, so the conversations the ADK-reading image wrote meanwhile reach the harness tables. Then run `archive --apply`, whose `DFA02` check confirms that every ledger session is imported or kept, before this image starts. To discard ADK's conversations instead, run `drop-adk --apply`.
+`restore --apply` also deletes the migration's row from `harness_schema_migrations`, so the next start of this image runs the migration again, its `DFA02` check included, and refuses while a conversation the ADK-reading image wrote has not reached the harness tables. This image's startup renames the tables while the revision serving traffic reads them, so a roll forward from an image that reads ADK's tables passes through the release before this one:
+
+1. Run the import job of the release that added the conversation tables, as its cutover's step 7 says: `import --apply` and `import --verify` until each exits 0 with no conversation in conflict, then its `gate` until it exits 0.
+1. Move traffic to the release before this one. Delete every revision that reads ADK's tables, the one the rollback started included, and confirm each is gone and drained, with the commands of the cutover above. Run the `gate` again, and rerun the import and the `gate` until the `gate` exits 0.
+1. Deploy this image. Its startup renames the tables again.
+
+To discard ADK's conversations instead of importing them, run `drop-adk --apply` after the deletes of step 2, in place of the import and the `gate`.
 
 ## Langfuse export
 

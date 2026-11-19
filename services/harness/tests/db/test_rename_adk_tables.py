@@ -335,6 +335,12 @@ _MOVED = "2026-11-02 09:00:00"
             ["p/c1"],
             id="kept, ADK moved after it",
         ),
+        pytest.param(
+            (*_ADK_V1_DDL, "DROP TABLE conversations CASCADE"),
+            (_session("c1"), _imported("c1")),
+            ["p/c1"],
+            id="no conversations table",
+        ),
         pytest.param((), (), [], id="no sessions table"),
         pytest.param(
             ("CREATE TABLE sessions (id text PRIMARY KEY, app_name text)",),
@@ -368,7 +374,7 @@ async def test_the_archive_waits_for_every_ledger_session_to_be_imported_or_kept
     assert f": {', '.join(uncleared)}." in message
 
 
-async def test_the_dfa02_message_names_the_first_ten_of_more_ledger_sessions(
+async def test_the_dfa02_message_names_the_first_ten_and_the_commands_that_clear_them(
     pg_empty_engine: AsyncEngine, tmp_path: Path
 ) -> None:
     await _migrate_through_0004(pg_empty_engine, tmp_path)
@@ -378,6 +384,13 @@ async def test_the_dfa02_message_names_the_first_ten_of_more_ledger_sessions(
 
     assert message.startswith("12 ledger session")
     assert f": {', '.join(f'p/c{n:02}' for n in range(10))}, ...." in message
+    for command in (
+        "`import --apply`",
+        "`import --apply --prefer-adk PRINCIPAL/CONVERSATION_ID`",
+        "`import --apply --keep-tables PRINCIPAL/CONVERSATION_ID`",
+        "`gate`",
+    ):
+        assert command in message
 
 
 async def test_one_run_from_no_harness_migration_refuses_unimported_ledger_sessions(

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from harness.db import adk_archive
+from harness.db.migrate import apply_pending
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -18,6 +19,7 @@ from .test_rename_adk_tables import (
     _execute,
     _foreign_key_target,
     _migrate_through_0004,
+    _refused,
     _rows,
     _session,
     _tables,
@@ -114,7 +116,9 @@ async def test_archive_dry_runs_then_renames_a_split_layout_and_a_rerun_finds_no
 
         assert await _verb(split, "archive") == 0
         assert capsys.readouterr().out.splitlines()[1:] == printed.splitlines()[1:]
-        assert len(printed.splitlines()) == 1 + len(_archived_split(schema, adk_schema))
+        # The heading, the renames and the line recording 0005 as applied.
+        assert len(printed.splitlines()) == 2 + len(_archived_split(schema, adk_schema))
+        assert "INSERT INTO harness_schema_migrations" in printed.splitlines()[-1]
         assert await _archive_relations(split, schema, adk_schema) == _archived_split(
             schema, adk_schema
         )
@@ -204,6 +208,115 @@ async def test_restore_rolls_back_when_a_restored_name_resolves_to_another_table
         )
 
 
+async def _archived_by_startup(engine: AsyncEngine, tmp_path: Path) -> None:
+    """ADK's tables with one imported ledger session, archived by a start
+    that applied 0005 and recorded it."""
+    await _migrate_through_0004(engine, tmp_path)
+    await _execute(engine, *_ADK_V1_DDL, *_ADK_ROWS)
+    assert await apply_pending(engine) == [adk_archive.ARCHIVE_MIGRATION.name]
+
+
+async def _recorded(engine: AsyncEngine) -> bool:
+    async with engine.connect() as conn:
+        return bool(
+            (
+                await conn.execute(
+                    text("SELECT count(*) FROM harness_schema_migrations WHERE version = :v"),
+                    {"v": adk_archive.ARCHIVE_MIGRATION.name},
+                )
+            ).scalar()
+        )
+
+
+async def test_after_restore_the_next_start_reruns_0005_and_refuses_an_unimported_session(
+    pg_empty_engine: AsyncEngine, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A roll forward after a rollback meets 0005's DFA02 check again. A
+    second restore finds nothing to do."""
+    await _archived_by_startup(pg_empty_engine, tmp_path)
+
+    assert await _verb(pg_empty_engine, "restore", apply=False) == 0
+    assert await _recorded(pg_empty_engine)
+    assert await _verb(pg_empty_engine, "restore") == 0
+    assert not await _recorded(pg_empty_engine)
+    tables = await _tables(pg_empty_engine)
+    capsys.readouterr()
+    assert await _verb(pg_empty_engine, "restore") == 0
+    assert "nothing to do" in capsys.readouterr().out
+    assert await _tables(pg_empty_engine) == tables
+    await _execute(pg_empty_engine, _session("c2"))
+
+    message = await _refused(pg_empty_engine, "DFA02")
+    assert message.startswith("1 ledger session")
+
+
+async def test_archive_after_restore_records_0005_so_a_later_start_runs_nothing(
+    pg_empty_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    await _archived_by_startup(pg_empty_engine, tmp_path)
+    assert await _verb(pg_empty_engine, "restore") == 0
+
+    assert await _verb(pg_empty_engine, "archive", apply=False) == 0
+    assert not await _recorded(pg_empty_engine)
+    assert await _verb(pg_empty_engine, "archive") == 0
+
+    assert await _recorded(pg_empty_engine)
+    assert await apply_pending(pg_empty_engine) == []
+    assert "adk_archive_sessions" in await _tables(pg_empty_engine)
+
+
+@pytest.mark.parametrize(
+    ("tables", "missing"),
+    [
+        pytest.param(_ADK_V1_DDL[1:], ("adk_internal_metadata",), id="one of five missing"),
+        pytest.param((), _ADK_TABLES, id="ledger only"),
+    ],
+)
+async def test_restore_refuses_an_archive_without_all_of_adks_tables_unless_allowed(
+    pg_empty_engine: AsyncEngine,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    tables: tuple[str, ...],
+    missing: tuple[str, ...],
+) -> None:
+    await _migrate_through_0004(pg_empty_engine, tmp_path)
+    await _execute(pg_empty_engine, *tables)
+    await apply_pending(pg_empty_engine)
+    archived = await _tables(pg_empty_engine)
+    capsys.readouterr()
+
+    for apply in (False, True):
+        assert await _verb(pg_empty_engine, "restore", apply=apply) == 1
+
+    printed = capsys.readouterr()
+    assert f"missing: {', '.join(missing)}" in printed.out
+    assert f"lacks ADK's {', '.join(missing)}" in printed.err
+    assert await _tables(pg_empty_engine) == archived
+    assert adk_archive._arguments(["restore", "--allow-missing"]).allow_missing
+    assert (
+        await adk_archive.run(pg_empty_engine, verb="restore", apply=True, allow_missing=True) == 0
+    )
+    restored = await _tables(pg_empty_engine)
+    assert {*_ADK_TABLES, "adk_ledger_imports"} - set(missing) <= restored
+    assert "adk_archive_adk_ledger_imports" not in restored
+
+
+async def test_drop_archive_refuses_a_foreign_table_of_an_archive_name_ahead_on_search_path(
+    pg_empty_engine: AsyncEngine, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async with _split_layout(pg_empty_engine, tmp_path) as (split, schema, adk_schema):
+        assert await _verb(split, "archive") == 0
+        await _execute(split, f"CREATE TABLE {schema}.adk_archive_sessions (x int)")
+        capsys.readouterr()
+
+        assert await _verb(split, "drop-archive") == 1
+
+        assert "lacks the columns of `sessions`" in capsys.readouterr().err
+        assert await _archive_relations(split, schema, adk_schema) == _archived_split(
+            schema, adk_schema
+        ) | {f"{schema}.adk_archive_sessions"}
+
+
 async def test_drop_archive_drops_every_archived_table_of_a_split_layout(
     pg_empty_engine: AsyncEngine, tmp_path: Path
 ) -> None:
@@ -278,6 +391,14 @@ def test_a_usage_error_exits_2() -> None:
 
 def test_no_database_configured_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(adk_archive, "build_database", lambda *, settings: None)
+
+    assert adk_archive.main(["archive"]) == 2
+
+
+def test_an_invalid_database_configuration_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both backends set fails `Settings` validation."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@127.0.0.1:1/db")
+    monkeypatch.setenv("SESSION_STORE_INSTANCE_CONNECTION_NAME", "proj:region:instance")
 
     assert adk_archive.main(["archive"]) == 2
 

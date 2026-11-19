@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -60,8 +61,34 @@ class MigrationChecksumError(RuntimeError):
     missing. Fix forward with a new file."""
 
 
-def _sha256(path: Path) -> str:
+def sha256(path: Path) -> str:
+    """The SHA-256 of the bytes of the file at `path`, as hex."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+async def bound_and_lock(
+    conn: Any,
+    *,
+    timeout_s: float = MIGRATION_TIMEOUT_S,
+    lock_timeout_s: float = MIGRATION_LOCK_TIMEOUT_S,
+) -> None:
+    """Bound each statement and lock wait of the asyncpg connection `conn`'s
+    open transaction, then take the migrations' advisory lock until it ends."""
+    await conn.execute(
+        f"SET LOCAL statement_timeout = {round(timeout_s * 1000)}; "
+        f"SET LOCAL lock_timeout = {round(lock_timeout_s * 1000)}"
+    )
+    await conn.execute("SELECT pg_advisory_xact_lock($1)", _ADVISORY_LOCK_KEY)
+
+
+async def record_applied(conn: Any, path: Path) -> None:
+    """Record the file at `path` in `harness_schema_migrations` as applied,
+    with the SHA-256 of its bytes."""
+    await conn.execute(
+        "INSERT INTO harness_schema_migrations (version, content_sha256) VALUES ($1, $2)",
+        path.name,
+        sha256(path),
+    )
 
 
 async def apply_pending(
@@ -87,17 +114,11 @@ async def apply_pending(
         raw = await sa_conn.get_raw_connection()
         conn = raw.driver_connection
         assert conn is not None
-        timeout = (
-            f"SET LOCAL statement_timeout = {round(timeout_s * 1000)}; "
-            f"SET LOCAL lock_timeout = {round(lock_timeout_s * 1000)}"
-        )
         async with conn.transaction():
-            await conn.execute(timeout)
-            await conn.execute("SELECT pg_advisory_xact_lock($1)", _ADVISORY_LOCK_KEY)
+            await bound_and_lock(conn, timeout_s=timeout_s, lock_timeout_s=lock_timeout_s)
             await conn.execute(_BOOKKEEPING)
         async with conn.transaction():
-            await conn.execute(timeout)
-            await conn.execute("SELECT pg_advisory_xact_lock($1)", _ADVISORY_LOCK_KEY)
+            await bound_and_lock(conn, timeout_s=timeout_s, lock_timeout_s=lock_timeout_s)
             rows = await conn.fetch("SELECT version, content_sha256 FROM harness_schema_migrations")
             applied = {row["version"]: row["content_sha256"] for row in rows}
             missing = sorted(set(applied) - {path.name for path in files})
@@ -107,18 +128,13 @@ async def apply_pending(
                 logger.info("schema: applied by a later release, not in this image: %s", missing)
             ran: list[str] = []
             for path in files:
-                digest = _sha256(path)
+                digest = sha256(path)
                 if path.name in applied:
                     if applied[path.name] != digest:
                         raise MigrationChecksumError(f"{path.name} changed since it was applied")
                     continue
                 await conn.execute(path.read_text())
-                await conn.execute(
-                    "INSERT INTO harness_schema_migrations (version, content_sha256) "
-                    "VALUES ($1, $2)",
-                    path.name,
-                    digest,
-                )
+                await record_applied(conn, path)
                 ran.append(path.name)
         for name in ran:
             logger.info("schema: applied %s", name)
