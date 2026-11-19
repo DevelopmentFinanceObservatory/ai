@@ -85,8 +85,9 @@ Verbs:
   compares it included), are each listed and not compared. One where both
   moved is a conflict, listed, not compared, and fails the verify. A kept
   conversation is listed and not compared. A ledger session whose
-  `studio:segment` lease is live on the database's clock fails the verify:
-  the previous revision still streams on it and can write it again.
+  `studio:segment` lease is live on the database's clock is listed apart
+  and does not fail the verify: the previous revision still streams on it
+  and can write it again, and the gate is what fails on it.
 - `close-open-turns`: closes, in the tables, every open turn that holds no
   live lease and ran on ADK (its turn session `{conversation_id}#t{n}`
   under app `dfo_analyst_graph` exists), as `ConversationState.begin_turn`
