@@ -43,16 +43,19 @@ dfo-apis' analysis runner, and every read of a frame it stored, from the replies
 recorded in `fixtures/runner_replies.json`, through analysis-mcp's own replay
 (`services/analysis-mcp/tests/runner_replay.py`, which says how to record more).
 
-`pg_empty_engine` and `pg_engine` give a test its own Postgres schema on the
-database `HARNESS_TEST_DATABASE_URL` names (an asyncpg SQLAlchemy URL, see
+`pg_empty_engine` and `pg_engine` give a test its own Postgres schema on a
+database each xdist worker (or the one process) gets for the run, on the
+server `HARNESS_TEST_DATABASE_URL` names (an asyncpg SQLAlchemy URL, see
 `just pg-up`): `pg_empty_engine` has no tables, `pg_engine` has the harness
-tables applied. Every connection of the engine resolves unqualified names in
-that schema, which is dropped when the test ends. `pg_database_url` is a
-fresh database on the same server, copied from a template with the harness
-tables applied, for a test that builds the app with
-`Settings(database_url=...)`. The variable is separate from `DATABASE_URL`
-because `Settings` reads that one and would route every test's app to
-Postgres. Without the variable a test using any of these fixtures
+tables applied. A database per worker, because the migrations' advisory lock
+covers a whole database, and workers sharing one would wait on and time out
+against each other's migrations. Every connection of the engine resolves
+unqualified names in that schema, which is dropped when the test ends.
+`pg_database_url` is a fresh database on the same server, copied from a
+template with the harness tables applied, for a test that builds the app
+with `Settings(database_url=...)`. The variable is separate from
+`DATABASE_URL` because `Settings` reads that one and would route every test's
+app to Postgres. Without the variable a test using any of these fixtures
 fails, so no run passes by skipping them.
 """
 
@@ -498,12 +501,34 @@ def _test_database_url() -> str:
     pytest.fail(f"{TEST_DATABASE_URL_VAR} is not set; run `just pg-up` and use its URL")
 
 
+@pytest.fixture(scope="session")
+def _pg_worker_database(testrun_uid: str, worker_id: str) -> Iterator[str]:
+    """The URL of this worker's own database, created for the session and
+    dropped at its end. xdist's `testrun_uid` is in the name as well as its
+    `worker_id` (`gw0`, ... or `master`), so two runs against one server, from
+    two checkouts sharing `just pg-up`'s container, never meet."""
+    base = make_url(_test_database_url())
+    name = f"w_{testrun_uid[:12]}_{worker_id}"
+
+    async def admin(statement: str) -> None:
+        engine = create_async_engine(base, isolation_level="AUTOCOMMIT")
+        async with engine.connect() as conn:
+            await conn.execute(text(statement))
+        await engine.dispose()
+
+    asyncio.run(admin(f"CREATE DATABASE {name}"))
+    try:
+        yield base.set(database=name).render_as_string(hide_password=False)
+    finally:
+        asyncio.run(admin(f"DROP DATABASE {name} WITH (FORCE)"))
+
+
 @pytest.fixture
-async def pg_empty_engine() -> AsyncIterator[AsyncEngine]:
-    """An engine on a fresh, empty Postgres schema, dropped after the test.
-    Its pool of two connections without overflow matches the deployed
-    session-store pool."""
-    url = _test_database_url()
+async def pg_empty_engine(_pg_worker_database: str) -> AsyncIterator[AsyncEngine]:
+    """An engine on a fresh, empty Postgres schema of this worker's database,
+    dropped after the test. Its pool of two connections without overflow
+    matches the deployed session-store pool."""
+    url = _pg_worker_database
     schema = f"t_{uuid.uuid4().hex[:12]}"
     admin = create_async_engine(url)
     async with admin.begin() as conn:
