@@ -541,6 +541,31 @@ def _answered_lines(pending: _PendingInterrupt, answers: dict[str, ElicitationAn
     return lines
 
 
+def _answer_turn_lines(
+    pending: _PendingInterrupt, body: InterruptResponse
+) -> list[tuple[str, bool]]:
+    """The lines an answer adds to the turn's record, each with whether the
+    user wrote it (`ConversationState.add_to_turn`): an elicitation's
+    answers, a switch's choice, an amendment. The record must carry them or
+    the next turn's digest shows only the un-refined ask. A switch's line
+    names an option's label, which Search would read as scope the user
+    stated, so it is no user's words. An approval, a rejection and a skip
+    add none."""
+    if pending.kind == "elicitation":
+        if body.decision is InterruptDecision.SKIP:
+            return []
+        return [(line, True) for line in _answered_lines(pending, _given_answers(pending, body))]
+    match body.decision:
+        case InterruptDecision.SWITCH:
+            assert body.choice_id is not None and body.option_id is not None
+            label = pending.choices[body.choice_id].options[body.option_id].label
+            verb = "use" if is_decision_choice(body.choice_id) else "count"
+            return [(f"{verb} {label}", False)]
+        case InterruptDecision.AMEND:
+            return [(str(body.payload), True)]
+    return []
+
+
 def _composition_refusal(
     manifest: CompositionManifest | None, body: CompositionMutation
 ) -> JSONResponse | None:
@@ -1924,11 +1949,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # The stream's owner releases the segment and lets go of the
             # lock hold. A failure before the owner starts releases them
             # here (`_release_claim`), which does nothing once a refusal
-            # above let go of the hold. Before the claim commits, nothing is
-            # saved. After it, the lease is dropped and an unsaved working
-            # copy is given up. A turn the claim's holder abandoned, saved
-            # or opened stays as written, and the next `/turn` closes what
-            # is open as it closes any open turn.
+            # above let go of the hold. A failure after the lease's claim
+            # drops the lease. One before the begin-turn save commits also
+            # gives up the unsaved working copy, and leaves the turn left
+            # open as it stood, its pause answerable. Once that save
+            # commits, the abandoned turn and the opened one stay as
+            # written, and the next `/turn` closes the open one as it closes
+            # any open turn.
             await _release_claim(
                 studio.store,
                 principal,
@@ -2273,8 +2300,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         # save above claimed, and releases the lock. It drops only the lease.
         # Once the answer is saved below, the pending entry stays resuming
         # under the dropped segment with the answer recorded, so a retry of
-        # the same answer claims at once and resumes. The turn lines added
-        # below stay unsaved, and the retry's load reads the row afresh.
+        # the same answer claims at once and resumes, with the answer's turn
+        # lines saved beside it.
         try:
             # The read above only gated the claim. A segment whose lease
             # lapsed can still write the turn until the claim commits, so
@@ -2363,6 +2390,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # owner drops it in that write on every ending but a client
             # that left (`harness.studio_stream`). A client that left, or a
             # crash, leaves it for this same retry path to pick back up.
+            if not resuming:
+                # The answer's lines commit with the answer, so every
+                # resumed segment, and a replay of the pause it reaches, finds
+                # them stored. A retry resuming the same answer adds none.
+                for line, user_words in _answer_turn_lines(pending, body):
+                    work.add_to_turn(line, user_words=user_words)
             pending.answer = requested_answer
             pending.resuming_segment = segment_id
             if body.decision is InterruptDecision.SWITCH and pending.card is not None:
@@ -2447,10 +2480,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                             for question in pending.questions
                         }
                     }
-                    # The turn's history record must carry the answers or the
-                    # next turn's digest shows only the un-refined ask.
-                    for line in _answered_lines(pending, given):
-                        conversation.add_to_turn(line, user_words=True)
             elif body.decision is InterruptDecision.APPROVE:
                 # The plan is keyed on its revision hash (`plan_revision`), and
                 # the approval dated by the record of its first answer, so a
@@ -2474,20 +2503,14 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # The graph's `switch` node revises the plan in code and offers
                 # it again; a planner decision's switch (`is_decision_choice`)
                 # replans with the pick held (`harness.decision_pick`). The
-                # turn's history record carries the choice.
+                # turn's history record carries the choice (`_answer_turn_lines`).
                 assert body.choice_id is not None and body.option_id is not None
                 answer = {
                     "approved": None,
                     "switch": {"choice_id": body.choice_id, "option_id": body.option_id},
                 }
-                label = pending.choices[body.choice_id].options[body.option_id].label
-                verb = "use" if is_decision_choice(body.choice_id) else "count"
-                conversation.add_to_turn(f"{verb} {label}", user_words=False)
             else:  # amend: a stated non-approval routes the graph to the planner
                 answer = {"approved": None, "amendment": body.payload}
-                # An amendment refines the question, so the turn's history record
-                # carries it.
-                conversation.add_to_turn(str(body.payload), user_words=True)
             # The user's words as amended, so a search after the resume reads the
             # refined ask and no switch's label.
             _set_turn_context(principal, body.conversation_id, conversation, settings)

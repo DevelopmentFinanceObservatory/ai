@@ -73,10 +73,11 @@ class Settings(BaseServiceSettings):
     needs all three or none. `session_store_pool_size` and
     `session_store_max_overflow` size the pooled connections
     `create_async_engine` opens for that engine. The defaults (2 and 0) sum
-    to two per instance. A rollout can leave an old revision still draining
-    SSE streams running alongside the new one, so up to four instances hold
-    connections at once, and four times two stays within the ten
-    connections the infra repository's platform Postgres instance reserves for it.
+    to two per instance, and the lineage engine adds a fixed three. A rollout
+    can leave an old revision still draining SSE streams running alongside
+    the new one, so up to four instances hold connections at once, and four
+    times (2 + 3) is 20, the number the infra repository's platform Postgres
+    instance reserves for it.
     `session_store_connect_timeout_s` bounds one connector dial attempt,
     matching apis' `DATASET_STORE_CONNECT_TIMEOUT` default. Every one of
     these five `session_store_*` fields, and `database_url` itself,

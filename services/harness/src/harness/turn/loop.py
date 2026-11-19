@@ -39,8 +39,8 @@ beat.
 
 A turn no segment runs is closed without running its node: `stop_turn` closes it `cancelled` on a
 Stop that found no live segment (the turn paused, or left running by a segment whose lease lapsed),
-`reject` closes a paused turn `done` on the user's reject of its open pause, and `abandon` closes an
-open turn `abandoned` when the conversation's next turn opens.
+`reject` closes a paused turn `done` on the user's reject of its open pause, and `abandon_on` closes
+an open turn `abandoned` in the transaction that opens the conversation's next turn.
 """
 
 from __future__ import annotations
@@ -1142,19 +1142,6 @@ def _abandoned(cursor: Cursor) -> dict[str, Any]:
         "when the next turn opened"
     )
     return failure(cursor.node, left)
-
-
-async def abandon(store: TurnStore, cursor: Cursor, *, segment_id: str) -> Cursor:
-    """Close the open turn at `cursor` `abandoned` without running its node,
-    in a transaction of its own (`abandon_on`).
-
-    Raises:
-        SegmentLost: `segment_id` does not hold the conversation's lease.
-        CursorStale: another writer moved the cursor, or closed the turn.
-    """
-    return await store.finish(
-        cursor, segment_id=segment_id, status=TurnStatus.ABANDONED, error=_abandoned(cursor)
-    )
 
 
 async def abandon_on(conn: AsyncConnection, cursor: Cursor, *, segment_id: str) -> Cursor:

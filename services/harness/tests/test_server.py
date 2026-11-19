@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, cast
 
+import asyncpg
 import httpx2
 import pytest
 from analysis_mcp.fixtures import seed_fixture_store
@@ -955,6 +956,8 @@ CLOUD_RUN_SIGKILL_AFTER_S = 10.0
         ("gemini-3.8-flash", "gemini-3.8-flash"),
         ("Gemini:gemini-3.8-flash", "gemini-3.8-flash"),
         ("gemini:gemini-3.8-flash", "gemini-3.8-flash"),
+        ("models/gemini-3.8-flash", "gemini-3.8-flash"),
+        ("Gemini:models/gemini-3.8-flash", "gemini-3.8-flash"),
     ],
 )
 def test_the_model_name_is_resolved_to_the_one_the_developer_api_is_sent(
@@ -970,12 +973,14 @@ def test_the_model_name_is_resolved_to_the_one_the_developer_api_is_sent(
         "Gemini:projects/p/locations/l/publishers/google/models/gemini-3.8-flash",
         "claude-sonnet-5-5",
         "Other:gemini-3.8-flash",
+        "Gemini:",
+        "Gemini:models/",
     ],
 )
 def test_a_model_name_the_developer_api_cannot_serve_refuses_startup(
     name: str, pg_database_url: str
 ) -> None:
-    with pytest.raises(RuntimeError, match="MODEL_NAME"):
+    with pytest.raises(server_module.ModelNameRefusedError):
         create_app(settings=Settings(database_url=pg_database_url, model_name=name))
 
 
@@ -1011,3 +1016,50 @@ def test_main_bounds_the_request_drain_so_the_owners_close_before_sigkill(
         passed["timeout_graceful_shutdown"] + SHUTDOWN_WAIT_S + engine_close_s
         <= CLOUD_RUN_SIGKILL_AFTER_S - 1.0
     )
+
+
+def _postgres_error(sqlstate: str | None) -> asyncpg.PostgresError:
+    error = asyncpg.PostgresError("failed")
+    error.sqlstate = sqlstate
+    return error
+
+
+async def test_a_migration_refusal_is_fatal_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A SQLSTATE beginning `DFA`, a migration's own refusal, is not retried."""
+    attempts: list[int] = []
+
+    async def refusing_apply_pending(engine: object) -> list[str]:
+        attempts.append(len(attempts) + 1)
+        raise _postgres_error("DFA04")
+
+    monkeypatch.setattr(server_module, "apply_pending", refusing_apply_pending)
+    now, sleep = _fake_clock_and_sleep()
+
+    with pytest.raises(server_module._MigrationRefusedError) as refusal:
+        await server_module._apply_migrations_with_retries(
+            cast(AsyncEngine, object()), budget_s=60.0, sleep=sleep, now=now
+        )
+
+    assert attempts == [1]
+    assert refusal.value.sqlstate == "DFA04"
+    assert refusal.value.__cause__ is not None
+
+
+async def test_any_other_migration_database_error_retries_until_the_budget_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[int] = []
+
+    async def failing_apply_pending(engine: object) -> list[str]:
+        attempts.append(len(attempts) + 1)
+        raise _postgres_error("55P03")
+
+    monkeypatch.setattr(server_module, "apply_pending", failing_apply_pending)
+    now, sleep = _fake_clock_and_sleep()
+
+    with pytest.raises(asyncpg.PostgresError):
+        await server_module._apply_migrations_with_retries(
+            cast(AsyncEngine, object()), budget_s=10.0, sleep=sleep, now=now
+        )
+
+    assert len(attempts) >= 2

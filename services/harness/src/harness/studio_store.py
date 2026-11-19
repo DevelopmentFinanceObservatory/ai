@@ -114,7 +114,7 @@ from harness.studio_state import (
 )
 from harness.tool_contracts import HarnessCode
 from harness.turn.store import CLOSED, Cursor, TurnStatus, cursor_at, finish_on
-from harness.wire import CompositionManifest, ErrorCode, PlanProposed
+from harness.wire import STUDIO_FRAME_ADAPTER, CompositionManifest, ErrorCode, PlanProposed
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +348,12 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             "card_new_plan": bool(p.card and p.card.new_plan),
             # Written only when set: an entry with no admitted run has no key.
             **({"admitted_run": p.admitted_run} if p.admitted_run is not None else {}),
+            # Written only when set, as the wire sends each frame.
+            **(
+                {"frames": [frame.model_dump(mode="json", exclude_none=True) for frame in p.frames]}
+                if p.frames
+                else {}
+            ),
         }
         for interrupt_id, p in pending.items()
     }
@@ -381,6 +387,9 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
             else None
         ),
         admitted_run=entry.get("admitted_run"),
+        frames=tuple(
+            STUDIO_FRAME_ADAPTER.validate_python(frame) for frame in entry.get("frames") or ()
+        ),
     )
     if "questions" in entry:
         pending.questions = tuple(

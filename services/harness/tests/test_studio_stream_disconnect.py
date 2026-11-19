@@ -56,6 +56,7 @@ class Script:
     closing write (`close_s`) and sends `done`. Before frame
     `slow_write_at` it makes a mid-stream write of `slow_write_s`.
     `frames=None` runs until the client leaves. `frame_bytes` pads each frame.
+    After its last frame the owner waits for `hold` to be set, when given.
     """
 
     frames: int | None
@@ -64,6 +65,7 @@ class Script:
     slow_write_at: int | None = None
     slow_write_s: float = 0.0
     frame_bytes: int = 0
+    hold: asyncio.Event | None = None
 
 
 class _Frame(BaseModel):
@@ -105,6 +107,8 @@ async def _owner(script: Script, *, channel: Channel, gone: asyncio.Event, probe
                 break
             channel.put_nowait(_Frame(event="frame", n=n, pad="x" * script.frame_bytes))
             n += 1
+        if script.hold is not None and outcome == "done":
+            await script.hold.wait()
         log.append(f"closing:{outcome}")
         await asyncio.sleep(script.close_s)
         log.append("closed")
@@ -391,13 +395,17 @@ async def test_a_graceful_shutdown_lets_the_stream_end() -> None:
     # A stream that ends inside the graceful-shutdown timeout, as deployed
     # (`GRACEFUL_SHUTDOWN_S`), is waited for, so the client receives every
     # frame and `done`.
-    stage = Stage(script=Script(frames=10, interval_s=0.05))
+    # The owner ends on an event the test sets right after `should_exit`, so
+    # the end has no timing of its own to race the bound.
+    hold = asyncio.Event()
+    stage = Stage(script=Script(frames=1, hold=hold))
     async with _serving(stage) as (server, port):
         client = await _Client.connect(port)
         client.post_turn()
         await client.headers()
         await client.chunk()
         server.should_exit = True
+        hold.set()
         chunks = await client.body()
         await _returned(stage.probe)
         await client.close()

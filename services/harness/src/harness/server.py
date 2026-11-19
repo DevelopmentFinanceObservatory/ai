@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
+import asyncpg
 import httpx2
 import uvicorn
 from analysis_mcp.server import mcp as analysis_mcp
@@ -240,10 +241,22 @@ async def _retry_startup_step(
             backoff_s = min(backoff_s * 2, _STARTUP_MAX_BACKOFF_S)
 
 
+class _MigrationRefusedError(RuntimeError):
+    """A migration raised a SQLSTATE beginning `DFA`, its own refusal to run
+    against this database. The database does not change by waiting. The
+    message leads with the SQLSTATE."""
+
+    def __init__(self, sqlstate: str, message: str) -> None:
+        super().__init__(f"{sqlstate}: {message}")
+        self.sqlstate = sqlstate
+
+
 async def _apply_migrations_with_retries(
     engine: AsyncEngine,
     *,
     budget_s: float,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    now: Callable[[], float] = time.monotonic,
 ) -> None:
     """Retry `apply_pending` under `_retry_startup_step`'s budget. An
     attempt has no bound of its own. `apply_pending` bounds each statement
@@ -251,12 +264,25 @@ async def _apply_migrations_with_retries(
     migration of several statements runs as long as its statements take.
     A failed attempt leaves no lock behind, because `apply_pending` holds
     a transaction-level lock. A `MigrationChecksumError` is a fault in the
-    files, so it propagates at once."""
+    files, and a migration's own refusal (a SQLSTATE beginning `DFA`) a fact
+    about the database, so each propagates at once."""
+
+    async def attempt() -> None:
+        try:
+            await apply_pending(engine)
+        except asyncpg.PostgresError as exc:
+            sqlstate = getattr(exc, "sqlstate", None) or ""
+            if sqlstate.startswith("DFA"):
+                raise _MigrationRefusedError(sqlstate, str(exc)) from exc
+            raise
+
     await _retry_startup_step(
         "apply_pending",
-        lambda: apply_pending(engine),
+        attempt,
         budget_s=budget_s,
-        fatal=(MigrationChecksumError,),
+        sleep=sleep,
+        now=now,
+        fatal=(MigrationChecksumError, _MigrationRefusedError),
     )
 
 
@@ -650,23 +676,34 @@ def create_app(
     return app
 
 
+class ModelNameRefusedError(RuntimeError):
+    """`MODEL_NAME` names no model the Gemini developer API serves."""
+
+
 def resolved_model_name(name: str) -> str:
     """`name` as the Gemini developer API is sent it: any `Gemini:` class
     prefix dropped (`harness.prefix_cache.gemini_model_name`), so the
     orchestrator and Edit Card call one model under one name.
 
+    A leading `models/` is dropped, so `models/gemini-3.8-flash` names the
+    same model as its bare name.
+
     Raises:
-        RuntimeError: `name` names no Gemini model, or is a Vertex AI resource
-            path, which the developer API serves no model under.
+        ModelNameRefusedError: `name` names no Gemini model, names none after its
+            `Gemini:` prefix, or is a Vertex AI resource path, which the
+            developer API serves no model under.
     """
-    resolved = gemini_model_name(name)
-    if resolved is None:
-        raise RuntimeError(f"MODEL_NAME {name!r} names no Gemini model.")
+    resolved = gemini_model_name(name.removeprefix("models/"))
+    if resolved is not None:
+        resolved = resolved.removeprefix("models/")
+    if not resolved:
+        raise ModelNameRefusedError(f"MODEL_NAME {name!r} names no Gemini model.")
     if resolved.startswith("projects/"):
-        raise RuntimeError(
+        raise ModelNameRefusedError(
             f"MODEL_NAME {name!r} is a Vertex AI resource path, and the harness runs on "
             "the Gemini developer API, which serves no model by that name. Name the "
-            "model as the developer API does (models/... or its bare name)."
+            "model as the developer API does: models/... or its bare name, with an "
+            "optional Gemini: prefix."
         )
     return resolved
 

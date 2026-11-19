@@ -28,7 +28,7 @@ from harness.turn.loop import (
     Graph,
     Outcome,
     TurnExpired,
-    abandon,
+    abandon_on,
     pending_owed_work,
     reject,
     run_segment,
@@ -1946,7 +1946,7 @@ class _BoundaryWriteRaises(TurnStore):
         elif self._how == "abandoned":
             async with self._engine.begin() as conn:
                 await conn.execute(text("UPDATE conversations SET lease_segment_id = 'segment-b'"))
-            await abandon(TurnStore(self._engine), cursor, segment_id="segment-b")
+                await abandon_on(conn, cursor, segment_id="segment-b")
         elif self._how != "uncommitted":
             await write(cursor, **kwargs)
         if self._how == "locked":

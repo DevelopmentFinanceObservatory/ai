@@ -14,7 +14,7 @@ The canvas digest entry is pinned here too: what a card shows (its entities
 and span) travels in the digest the models read, from the names the
 component's own fact summary and stored intent carry.
 
-The store (`StudioStore.create`/`load`/`save`/`checkpoint`/`release`) and
+The store (`StudioStore.create`/`load`/`save`/`close_segment`) and
 the segment lease (`claim_segment`/`renew`/`request_cancel`) are exercised
 at the bottom of this file against Postgres (the `pg_engine` fixture), each
 test in a schema of its own.
@@ -1702,7 +1702,7 @@ def test_drop_resuming_removes_only_entries_under_the_named_segment() -> None:
     assert set(state.pending) == {"int_2", "int_3"}
 
 
-# --- the ledger-backed store: create / load / save / checkpoint / release ---
+# --- the ledger-backed store: create / load / save / close_segment ---------
 # --- and the segment lease: claim_segment / renew / request_cancel ----------
 
 
@@ -3012,8 +3012,8 @@ async def test_a_stream_whose_segment_was_taken_over_lands_no_card(new_store, cl
 
 async def test_a_canvas_write_that_fails_leaves_the_live_state_as_it_was(new_store) -> None:
     """The card's digest entry, turn record and block reach the live state
-    only once the canvas write commits, so a later checkpoint never stores a
-    card the canvas does not hold."""
+    only once the canvas write commits, so a later closing write never
+    stores a card the canvas does not hold."""
     store = new_store()
     state = await store.create("principal", CONVERSATION)
     store.claim_segment("principal", CONVERSATION)

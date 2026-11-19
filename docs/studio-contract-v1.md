@@ -160,7 +160,7 @@ pause; `plan.proposed` has a second showing a failed switch).
 | `message.complete`    | final text for the turn's message                                                                                                           |
 | `plan.proposed`       | the plan awaiting approval; **pauses and ends the stream** (delta 1)                                                                        |
 | `plan.versioned`      | a new plan replaces the one `supersedes` names; a fresh `plan.proposed` follows. `version` can be lower than the superseded one (see below) |
-| `plan.approved`       | the plan the user approved; sent once per interrupt, once the run has accepted the approval, and not on a retried resume (delta 22)         |
+| `plan.approved`       | the plan the user approved; sent once, by the segment whose `approve` node takes the approval, and by no retry after it (delta 22)          |
 | `activity.step`       | one execution step, the only progress channel; `step_id` is the call's position within the stream (see `docs/frontend-interface.md`)        |
 | `component.created`   | a new card: opaque `payload` + `fact_summary` + inline `provenance`                                                                         |
 | `component.revised`   | new revision under the same `component_id`                                                                                                  |
@@ -212,7 +212,8 @@ resumed stream was lost, the retry's stream sends that question
 `interrupt_id`) and runs nothing again, and the client answers it as it
 answers any pause.
 Retrying with a DIFFERENT decision, payload or answers than the one that actually resumed answers 409
-`edit_conflict`. The approval record for a plan interrupt is appended
+`edit_conflict`. Once the turn has paused again on a later question, a
+different answer finds no pending interrupt and answers 404 `not_found`. The approval record for a plan interrupt is appended
 once per `interrupt_id`, on its first answer, however many times the
 resume itself retries.
 

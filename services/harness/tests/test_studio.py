@@ -1975,7 +1975,7 @@ class _HangingSurface(ScriptedSurface):
     resumed segment's crash point every test below abandons A's resume at:
     after `/interrupt`'s own save (the segment claimed, the entry marked
     resuming, the answer recorded) has already landed, but before the
-    resumed segment's first plan step -- let alone its own checkpoint --
+    resumed segment's first plan step -- let alone its closing write --
     completes."""
 
     def __init__(self) -> None:
@@ -3669,10 +3669,12 @@ async def test_a_failure_before_a_resume_streams_keeps_the_answer_for_a_same_ans
         with monkeypatch.context() as patch:
 
             def _boom(*args: Any, **kwargs: Any) -> Any:
-                raise RuntimeError("answer lookup failed")
+                raise RuntimeError("resume answer failed")
 
-            patch.setattr("harness.studio._given_answers", _boom)
-            with pytest.raises(RuntimeError, match="answer lookup failed"):
+            # The answer's turn lines are built before the save; the answer
+            # the graph reads, after it.
+            patch.setattr("harness.studio._resume_answer", _boom)
+            with pytest.raises(RuntimeError, match="resume answer failed"):
                 await _stream(client, "/api/studio/interrupt", body)
 
         assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
@@ -3698,33 +3700,81 @@ def _ask_answer(frames: list[dict[str, Any]], option: int) -> dict[str, Any]:
     )
 
 
+# What the amended plan's pause carries beside the plan, by kind: a plan
+# drafted again over one the planner could not read counts from version 1
+# with a note (`restarted`), and a first draft starts a new card lineage.
+_LATER_PAUSE_FLAGS: dict[str, dict[str, Any]] = {
+    "plan": {},
+    "restarted": {"restarted": True, "refusal_note": "The plan was drafted again.", "version": 1},
+    "new_plan": {"new_plan": True},
+}
+# The frames a pause is sent as (`_Translator._interrupt_frames`).
+_PAUSE_EVENTS = frozenset(
+    {"message.delta", "message.complete", "plan.versioned", "plan.proposed", "elicitation.request"}
+)
+
+
+def _pause_frames(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The frames of a stream's pause, without their `seq`."""
+    return [
+        {key: value for key, value in frame.items() if key != "seq"}
+        for frame in frames
+        if frame["event"] in _PAUSE_EVENTS
+    ]
+
+
 @pytest.mark.parametrize(
     ("kind", "lost"),
     [
         ("plan", "close-fails"),
         ("plan", "client-left"),
         ("plan", "response-cut"),
+        ("restarted", "client-left"),
+        ("restarted", "response-cut"),
+        ("new_plan", "client-left"),
+        ("new_plan", "response-cut"),
+        ("ask", "close-fails"),
         ("ask", "response-cut"),
     ],
-    ids=["plan-close-fails", "plan-client-left", "plan-response-cut", "ask-response-cut"],
+    ids=[
+        "plan-close-fails",
+        "plan-client-left",
+        "plan-response-cut",
+        "restarted-client-left",
+        "restarted-response-cut",
+        "new-plan-client-left",
+        "new-plan-response-cut",
+        "ask-close-fails",
+        "ask-response-cut",
+    ],
 )
 async def test_an_identical_retry_after_the_turn_paused_again_streams_the_later_pause(
     monkeypatch: pytest.MonkeyPatch, kind: str, lost: str
 ) -> None:
     """An answer resumes the turn, which pauses again on a later question
-    (the amended plan, or a second ask), and the client never reads that
-    pause. The resumed stream's closing write fails (`close-fails`); it
-    commits keeping the answered entry, as for a client that left
-    (`client-left`); or it commits as for any pause, dropping the answered
-    entry, and the response is lost on the way (`response-cut`). The
-    identical retry is answered 409 while the resumed segment's lease is
-    live, then streams the stored pause under its own interrupt id with no
-    model call, and the pause it streams is answerable."""
+    (the amended plan, plain, drafted again from version 1 or drafted as a
+    new plan, or a second ask), and the client never reads that pause. The
+    resumed stream's closing write fails (`close-fails`); it commits
+    keeping the answered entry, as for a client that left (`client-left`);
+    or it commits as for any pause, dropping the answered entry, and the
+    response is lost on the way (`response-cut`). The identical retry is
+    answered 409 while the resumed segment's lease is live, then streams
+    the stored pause under its own interrupt id with no model call, and the
+    pause it streams is answerable.
+
+    The replay shows a client that last saw the first card what the lost
+    stream would have: a plan drafted again supersedes the first card, and
+    a new plan supersedes nothing. A pause the lost stream's closing write
+    stored is sent as that stream sent it, and leaves the stored lineage as
+    it was. The answer's line (the amendment, or the pick) is stored with
+    the answer, so after the replay the turn's record and the words Search
+    reads carry it exactly once, as does the record the turn closes on."""
+    planned = kind != "ask"
     clock = await StoreClock.start(_engine())
     store = StudioStore(_engine(), **clock.store_kwargs)
     script = (
         _plan("q with forks", *_charts_the_plan())
-        if kind == "plan"
+        if planned
         else (*_ask("reading A", "reading B"), *_ask("C", "D"), _text("Done."))
     )
     app = _app(*script, tool_surface=ScriptedSurface(), store=store)
@@ -3738,23 +3788,31 @@ async def test_an_identical_retry_after_the_turn_paused_again_streams_the_later_
         return await real_close(*args, **kwargs)
 
     store.close_segment = close  # type: ignore[method-assign]
+    real_pause = approve_module.Pause
+
+    def flagged(*, kind: str, payload: dict[str, Any], message: str) -> Any:
+        return real_pause(kind=kind, payload={**payload, **flags}, message=message)
+
+    flags = _LATER_PAUSE_FLAGS.get(kind, {})
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         body = (
             _interrupt_body(_frame(first, "plan.proposed")["interrupt_id"], "amend", "commits")
-            if kind == "plan"
+            if planned
             else _ask_answer(first, 1)
         )
         with monkeypatch.context() as patch:
+            patch.setattr(approve_module, "Pause", flagged)
             if lost == "client-left":
                 patch.setattr(ConversationState, "drop_resuming", lambda self, segment_id: None)
-            await _stream(client, "/api/studio/interrupt", body)
+            sent = await _stream(client, "/api/studio/interrupt", body)
         cursor = await app.state.studio.turns.open_cursor(PRINCIPAL, CONVERSATION)
         assert cursor is not None and cursor.pause is not None
         if lost == "close-fails":
             live = await client.post("/api/studio/interrupt", json=body, headers=AUTH)
             assert (live.status_code, live.json()["error"]) == (409, "transient_unavailable")
             await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)
+        before = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
         model_calls = len(_model(app).requests)
         replayed = await _stream(client, "/api/studio/interrupt", body)
         replay_calls = len(_model(app).requests) - model_calls
@@ -3763,15 +3821,45 @@ async def test_an_identical_retry_after_the_turn_paused_again_streams_the_later_
             client,
             "/api/studio/interrupt",
             _interrupt_body(cursor.pause.interrupt_id, "approve")
-            if kind == "plan"
+            if planned
             else _ask_answer(replayed, 0),
         )
 
-    pause_event = "plan.proposed" if kind == "plan" else "elicitation.request"
+    pause_event = "plan.proposed" if planned else "elicitation.request"
     assert _frame(replayed, pause_event)["interrupt_id"] == cursor.pause.interrupt_id
     assert replay_calls == 0
     assert stored is not None and list(stored.pending) == [cursor.pause.interrupt_id]
     assert _events(answered)[-1] == "done"
+    line = "\n(then: commits)" if planned else "\n(then: reading B"
+    assert stored.turn_user_message.count(line) == 1
+    assert stored.turn_user_words.count(line) == 1
+    closed = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert closed is not None
+    assert closed.turns[-1]["user"].count(line) == 1
+    if planned:
+        card = _frame(replayed, "plan.proposed")
+        assert card["plan_version_id"] == stored.plan_version_ids[card["version"]]
+        versioned = [frame for frame in replayed if frame["event"] == "plan.versioned"]
+        if kind == "new_plan":
+            assert versioned == []
+            assert card.get("new_plan") is True
+        else:
+            (frame,) = versioned
+            assert frame["supersedes"] == _frame(first, "plan.proposed")["plan_version_id"]
+            assert frame["plan_version_id"] == card["plan_version_id"]
+        notes = [frame["text"] for frame in replayed if frame["event"] == "message.complete"]
+        assert notes == ([flags["refusal_note"]] if kind == "restarted" else [])
+    if lost != "close-fails":
+        # The lost stream's closing write stored the pause it sent.
+        assert before is not None
+        assert _pause_frames(replayed) == _pause_frames(sent)
+        assert (stored.plan_version_ids, stored.latest_plan_version) == (
+            before.plan_version_ids,
+            before.latest_plan_version,
+        )
+        later = cursor.pause.interrupt_id
+        assert stored.pending[later].card == before.pending[later].card
+        assert stored.pending[later].frames == before.pending[later].frames != ()
 
 
 # --- asks the agent puts to the user ---------------------------------------------
@@ -4176,7 +4264,7 @@ async def _approve_plan_then_hang(
     (scripted) plan step, and abandon it there: `POST /cancel` ends the
     stream without ever persisting the segment's closing write or the turn's
     close (`_dies_on_a_stop`), standing in for a crash between
-    `/interrupt`'s save and the resumed segment's own checkpoint. Returns once the abandoned stream's
+    `/interrupt`'s save and the resumed segment's closing write. Returns once the abandoned stream's
     `error` frame has been read off the wire."""
     hanging = _HangingSurface()
     app.state.studio.surface_recorder._surface = hanging
@@ -4285,8 +4373,8 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
     """A's resume of a plan approval crashes (`_approve_plan_then_hang`)
     strictly after `/interrupt`'s own save landed -- the segment claimed,
     the entry marked resuming, the one `ApprovalRecord` appended -- but
-    before the resumed segment's first plan step, let alone its own
-    checkpoint, completes. B's same answer is refused while A's segment
+    before the resumed segment's first plan step, let alone its closing
+    write, completes. B's same answer is refused while A's segment
     lease is still live, and resumes the turn once it expires (an injected
     clock), without a second `ApprovalRecord` and past every `seq` A's dead
     attempt may already have sent."""
@@ -10704,7 +10792,7 @@ async def test_a_card_fenced_out_by_a_takeover_ends_the_turn_as_transient(
 ) -> None:
     """Another instance took the conversation over while this stream drew a
     card, so the card's canvas write is fenced out. The stream ends as at a
-    fenced-out checkpoint: a transient error, the turn left open for the
+    fenced-out closing write: a transient error, the turn left open for the
     instance that owns it, and no internal fault in the log. A write that
     could not reach the database before the lease's deadline ends it the
     same way, leaving the turn as stored, since no close could be saved."""
@@ -10778,8 +10866,9 @@ async def test_a_remote_composition_write_during_a_stream_reaches_its_done_frame
     None
 ):
     """A remote instance's `/composition` write, landing mid-stream before
-    A's second turn finishes, is merged in by the checkpoint that runs
-    before `done`: A's own Done frame carries it, not just a later reload
+    A's second turn finishes, is merged in by the canvas write of A's
+    second card, which reads the canvas as stored
+    (`StudioStore.change_canvas`): A's own Done frame carries it, not just a later reload
     from the ledger, pinned on the composition manifest specifically."""
     app_b = _app()
 

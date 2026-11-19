@@ -65,6 +65,7 @@ from harness.wire import (
     RetryMode,
     SetCardMetaOp,
     SetLayoutHintsOp,
+    StudioFrame,
     ToolError,
 )
 
@@ -384,6 +385,13 @@ class _PendingInterrupt:
     # the key named a finished run. A retry resuming the same answer names
     # it to `approve` as the first did.
     admitted_run: str | None = None
+    # Every frame the pause was sent as, in order, its card or questions
+    # last: a plan's refusal note and `plan.versioned` come first. A replay
+    # of the pause to a client that never read it sends these again under
+    # fresh `seq`s (`harness.studio_translate._Translator._interrupt_frames`),
+    # so it mints, supersedes and versions nothing. Empty for an entry
+    # stored before the frames were kept, which a replay translates afresh.
+    frames: tuple[StudioFrame, ...] = ()
 
 
 # A conversation's active stream may run on any instance; this is the

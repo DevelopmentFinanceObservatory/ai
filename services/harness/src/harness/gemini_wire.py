@@ -223,11 +223,12 @@ class GeminiStream:
     ) -> AsyncGenerator[Chunk]:
         span = trace.get_current_span()
         spent: Usage | None = None
+        sent_any = False
         for attempt in range(_ATTEMPTS):
             if self.before_request is not None and (turn := self.before_request()) is not None:
                 # After a sent attempt the span carries that call's usage, so it
                 # stays a generation.
-                if spent is None and span.is_recording():
+                if not sent_any and span.is_recording():
                     span.set_attribute(_OBSERVATION_TYPE, "span")
                 yield _chunk(turn, usage=None)
                 return
@@ -246,7 +247,7 @@ class GeminiStream:
                 if span.is_recording():
                     span.set_attribute(_ERROR, type(exc).__name__)
                 raise
-            unsent = relay.closing is not None and not relay.closing.sent and spent is None
+            unsent = relay.closing is not None and not relay.closing.sent and not sent_any
             if span.is_recording():
                 if unsent:
                     # Nothing went to the model on any attempt, so the span is no
@@ -254,6 +255,7 @@ class GeminiStream:
                     span.set_attribute(_OBSERVATION_TYPE, "span")
                 else:
                     span.set_attribute(_FINISH_REASON, relay.finish_reason or "none")
+            sent_any = sent_any or (relay.closing is None or relay.closing.sent)
             usage = relay.usage
             spent = _added(spent, usage)
             _record_usage(span, spent)

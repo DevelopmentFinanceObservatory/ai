@@ -2173,7 +2173,9 @@ class _Translator:
     def _interrupt_frames(self, pause: Paused) -> list[Any]:
         """The frame of `pause`, under the wire interrupt id the turn loop
         minted for it: the plan card for an `approve` pause, the questions
-        for any other.
+        for any other. A pause the conversation already holds, which a
+        stream whose client never read it translated, is sent as that stream
+        sent it (`_PendingInterrupt.frames`).
 
         Every wire model either branch below returns is `extra="forbid"`,
         so building one is real work that can raise. Both branches write
@@ -2187,6 +2189,15 @@ class _Translator:
         payload = pause.payload
         wire_id = pause.interrupt_id
         self.paused = True
+        shown = conversation.pending.get(wire_id)
+        if shown is not None and shown.frames:
+            # A stream whose client never read this pause translated it and
+            # stored what it sent: the replay of the pause
+            # (`harness.studio._replay_pause`) sends the same frames, the
+            # lineage as that stream left it, under fresh `seq`s.
+            return [
+                frame.model_copy(update={"seq": conversation.next_seq()}) for frame in shown.frames
+            ]
         if pause.kind == APPROVE_PAUSE:
             frames: list[Any] = []
             note = payload.get("refusal_note")
@@ -2400,6 +2411,7 @@ class _Translator:
                 step_labels=step_labels,
                 choices=choices,
                 card=card,
+                frames=tuple(frames),
             )
             return frames
         # The graph's own `ask` node pauses with a `payload` that carries one
@@ -2451,6 +2463,7 @@ class _Translator:
                 for question in questions
             ),
             skippable=skippable,
+            frames=(frame,),
         )
         return [frame]
 
