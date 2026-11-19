@@ -47,24 +47,19 @@ CREATE TABLE conversation_card_lineage (
 -- after a pause, on another instance or after a restart, finds the frames the
 -- turn fetched or built before it (`harness.turn.store.TurnStore`, with the
 -- frames read by `harness.graph.state.frame_store_keys`). One row per store
--- key an entry names (its `ref` and its `store_ref`), upserted by a cursor
--- write when the writing instance holds a lineage for the key it has not
--- stored for the turn since, so a lineage replaced in process is replaced
--- here too. A write refused for a key's values deletes the key's row in the
--- same write, so no row holds a lineage older than one an instance could not
--- store. When the database itself refuses a lineage write (a lock, a
--- timeout, the disk, a privilege), the table keeps the key's previous row
--- until a later write lands, and an instance that takes over the turn in
--- that window restores it. A segment that lacks a named key reads that
--- key's row once (`TurnStore.restore_frame_lineage`). `members` and
--- `stat_var_count` are encoded as `conversation_card_lineage` encodes them.
+-- key an entry names (its `ref` and its `store_ref`). The rows commit with
+-- the turn's cursor write or not at all, so the rows a cursor write commits
+-- are the lineage the writing instance held for every frame the state names,
+-- at that write: a key whose lineage it holds anew is upserted, and one whose
+-- lineage fails the check before the write (JSON cannot hold it, or its count
+-- is past `integer`) has its row deleted. A segment that lacks a named key
+-- reads that key's row once (`TurnStore.restore_frame_lineage`). `members`
+-- and `stat_var_count` are encoded as `conversation_card_lineage` encodes
+-- them.
 --
--- Rows are best effort: a frame no instance held at a write, or whose
--- lineage JSON cannot hold, has none, and a card drawn from it is withheld
--- `provenance_unavailable`. The closing write deletes the turn's rows, best
--- effort (`harness.turn.store.finish_on`). Nothing reads a closed turn's
--- rows, and a row a failed delete leaves stays until its conversation is
--- deleted.
+-- A frame no instance held at a write has no row, and a card drawn from it
+-- is withheld `provenance_unavailable`. The closing write deletes the turn's
+-- rows (`harness.turn.store.finish_on`).
 --
 -- Creating the table takes SHARE ROW EXCLUSIVE on `turn_cursors` for the
 -- foreign key, as the table above does on `conversations`.

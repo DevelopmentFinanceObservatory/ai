@@ -50,22 +50,22 @@ records the Stop the turn's `StopScope` answered (`stop_taken_id`).
 The lineage of each frame the turn's state names is a `turn_frame_lineage`
 row, kept while the turn is open, when the store is given a `FrameLineage`:
 the graph's reading of which frames a state names, and the process's
-`ProvenanceStore`. An `advance` or `pause` writes a row for each named frame
-whose lineage the process holds at a generation (`ProvenanceStore.generation`)
-it has not written for the turn since, so a lineage replaced in process, or
-held again after an eviction or a skipped write, is written at the next
-write. A batch refused for a row's values (SQLSTATE class 22) is tried row
-by row, so the other rows land, and a row refused for its values has its
-older row deleted in the same write. A refusal by the database itself (a
-lock, a timeout, the disk, a privilege) deletes nothing and is tried again
-at the next write. Either way a refused key gets three attempts per
-generation and is not restored from its row here. A segment that
-lacks one of the named frames reads the rows of those it has not already
-found absent (`TurnStore.restore_frame_lineage`) and puts them back. The
-closing write deletes the turn's rows. A frame whose lineage no process
-held, or that JSON cannot hold, has no row, and the write goes on without
-it. The rows are best effort: a card drawn on a frame with none is
-withheld, as on the instance that fetched it once the lineage is evicted.
+`ProvenanceStore`. The rows commit with the cursor write or not at all, so
+the rows a turn's cursor write commits are the lineage the process held for
+every frame the state names, at that write. An `advance` or `pause` writes
+each named frame whose lineage the process holds at a generation
+(`ProvenanceStore.generation`) it has not written for the turn since, so a
+lineage replaced in process, or held again after an eviction, is written at
+the next write. Each row is checked before the transaction opens (JSON that
+encodes, a count Postgres `integer` holds); a lineage that fails the check
+deletes its frame's row instead, logged once per generation, so nothing the
+database receives can be refused for its values, and any refusal fails the
+cursor write like a refusal of the cursor statement. A segment that lacks
+one of the named frames reads the rows of those it has not already found
+absent (`TurnStore.restore_frame_lineage`) and puts them back. The closing
+write deletes the turn's rows. A frame whose lineage no process held has no
+row: a card drawn on it is withheld, as on the instance that fetched it once
+the lineage is evicted.
 
 The lease itself, the Stop request and the frame numbering live on
 `conversations` and are written by `harness.studio_store.StudioStore`.
@@ -88,8 +88,8 @@ from typing import Any, Literal
 from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from harness.db.best_effort import bounded_read, execute_in_savepoint, sqlstate
-from harness.db.jsonb import json_or_none, to_json_param
+from harness.db.best_effort import bounded_read
+from harness.db.jsonb import to_json_param
 from harness.provenance import (
     CardLineageDecodeError,
     ProvenanceStore,
@@ -130,63 +130,33 @@ class FrameLineage:
     frame_keys: Callable[[Mapping[str, Any]], Iterable[FrameKey]]
 
 
-# The attempts a row the database refused gets at one generation of its
-# lineage (`_TurnLineage.failed`) before it is left until the lineage changes.
-_MAX_ROW_ATTEMPTS = 3
-
-# The SQLSTATE class of a data exception: a refusal of a row's own values (a
-# count out of range, JSON the column refuses). Any other refusal of a
-# lineage write comes from the database (a lock, a timeout, the disk, a
-# privilege) and says nothing about the rows.
-_DATA_EXCEPTION_CLASS = "22"
+# The range of a Postgres `integer`, the `stat_var_count` column.
+_INTEGER_RANGE = range(-(2**31), 2**31)
 
 
 @dataclass
 class _TurnLineage:
     """What this process knows of one turn's stored frame lineage as of the
-    cursor at `version`. `written` holds, for each key, the source's
-    generation (`ProvenanceStore.generation`) of the lineage this process
-    stored or read back. `failed` holds, for a key whose latest write failed
-    (JSON cannot hold the lineage, or the database refused the row), the
-    generation that failed and the attempts made at it; such a key is
-    tried `_MAX_ROW_ATTEMPTS` times in all per generation, and
-    never restored from its row, which can hold an older lineage. `absent`
-    holds the keys a read found no usable row for."""
+    cursor at `version`: for each key, the source's generation
+    (`ProvenanceStore.generation`) of the lineage this process committed
+    (a row, or the delete of one whose lineage failed its check) or read
+    back (`written`), and the keys a read found no usable row for
+    (`absent`)."""
 
     version: int
     written: dict[FrameKey, int] = field(default_factory=dict)
-    failed: dict[FrameKey, tuple[int, int]] = field(default_factory=dict)
     absent: set[FrameKey] = field(default_factory=set)
 
 
-@dataclass(frozen=True)
-class _PendingRow:
-    """One `turn_frame_lineage` row a write stores: its key, the source's
-    generation of its lineage, the attempts already made at that
-    generation, and the statement's parameters."""
-
-    key: FrameKey
-    generation: int
-    attempts: int
-    params: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class _Unencodable:
-    """A key whose lineage, at the source's `generation`, JSON cannot hold:
-    the write deletes its row and records it failed at the attempt limit."""
-
-    key: FrameKey
-    generation: int
-
-
 @dataclass
-class _Written:
-    """What a write's lineage rows came to: the generation stored for each
-    key, and the generation and attempts for each key that failed."""
+class _LineageWrite:
+    """What a cursor write commits of the turn's frame lineage: the rows to
+    upsert, the keys whose rows to delete, and the generation each key
+    records as written once the write commits."""
 
-    stored: dict[FrameKey, int] = field(default_factory=dict)
-    failed: dict[FrameKey, tuple[int, int]] = field(default_factory=dict)
+    upserts: list[dict[str, Any]] = field(default_factory=list)
+    deletes: list[dict[str, Any]] = field(default_factory=list)
+    generations: dict[FrameKey, int] = field(default_factory=dict)
 
 
 class TurnStatus(StrEnum):
@@ -475,6 +445,28 @@ _DELETE_FRAME_LINEAGE_KEY = text(
     "DELETE FROM turn_frame_lineage WHERE turn = :turn AND spec_id = :spec_id "
     "AND content_version = :content_version"
 )
+
+
+def _utf8(key: FrameKey) -> bool:
+    """Whether both parts of `key` encode as UTF-8, as Postgres text needs."""
+    try:
+        for part in key:
+            part.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+async def _write_lineage(conn: AsyncConnection, write: _LineageWrite) -> None:
+    """Commit `write` (`TurnStore._lineage_rows`) in the cursor write's
+    transaction: the deletes, then the upserts in one statement. An error
+    from either fails the write as an error of the cursor statement does."""
+    if write.deletes:
+        await conn.execute(_DELETE_FRAME_LINEAGE_KEY, write.deletes)
+    if write.upserts:
+        await conn.execute(_UPSERT_FRAME_LINEAGE, write.upserts)
+
+
 _SELECT_FRAME_LINEAGE = text(
     "SELECT l.spec_id, l.content_version, l.members, l.stat_var_count "
     "FROM turn_frame_lineage l "
@@ -628,177 +620,73 @@ class TurnStore:
 
     def _lineage_rows(
         self, cursor: Cursor, state: Mapping[str, Any], scope: str | None
-    ) -> tuple[list[_PendingRow], list[_Unencodable]]:
-        """What a write of `state` from `cursor` stores of the turn's frame
+    ) -> _LineageWrite:
+        """What a write of `state` from `cursor` commits of the turn's frame
         lineage: for each store key `state` names whose lineage the process
-        holds in conversation `scope` at a generation it has not stored for
-        the turn since, and has not failed to store `_MAX_ROW_ATTEMPTS` times
-        (`_TurnLineage`), its row with its members as JSON text, or, when JSON
-        cannot hold the lineage (a NaN in a manifest), the key as
-        `_Unencodable`, logged. None without `lineage` or `scope`."""
+        holds in conversation `scope` at a generation it has not written for
+        the turn since (`_TurnLineage.written`), its row with its members as
+        JSON text, or, when the lineage fails the check (JSON cannot hold it,
+        or its count is past Postgres `integer`), a delete of its row,
+        logged. A key whose text is not UTF-8 (a lone surrogate) can have no
+        row and is only logged. Nothing without `lineage` or `scope`."""
+        write = _LineageWrite()
         if self._lineage is None or scope is None:
-            return [], []
+            return write
         source = self._lineage.source
-        known = self._turn_lineage(cursor)
+        written = self._turn_lineage(cursor).written
         turn_index = cursor.turn_index
-        rows: list[_PendingRow] = []
-        unencodable: list[_Unencodable] = []
         for key in dict.fromkeys(self._lineage.frame_keys(state)):
             spec_id, content_version = key
             held = source.held(conversation=scope, spec_id=spec_id, content_version=content_version)
             if held is None:
                 continue
             lineage, count, generation = held
-            if known.written.get(key) == generation:
+            if written.get(key) == generation:
                 continue
-            failed_at, attempts = known.failed.get(key, (None, 0))
-            if failed_at != generation:
-                attempts = 0
-            if attempts >= _MAX_ROW_ATTEMPTS:
-                continue
-            members = json_or_none(
-                lineage_json(lineage),
-                logger=logger,
-                failure=lambda key=key: (
-                    f"turn store: the lineage of frame spec_id={key[0]!r} "
-                    f"content_version={key[1]!r} cannot be stored as JSON; "
-                    f"turn {turn_index} goes on without it"
-                ),
-            )
-            if members is None:
-                unencodable.append(_Unencodable(key=key, generation=generation))
-                continue
-            rows.append(
-                _PendingRow(
-                    key=key,
-                    generation=generation,
-                    attempts=attempts,
-                    params={
-                        "turn": cursor.id,
-                        "spec_id": spec_id,
-                        "content_version": content_version,
-                        "members": members,
-                        "stat_var_count": count,
-                    },
+            write.generations[key] = generation
+            if not _utf8(key):
+                logger.error(
+                    "turn store: frame %r of turn %s has a key Postgres text cannot hold; "
+                    "it gets no lineage row",
+                    key,
+                    turn_index,
                 )
-            )
-        return rows, unencodable
-
-    async def _write_lineage(
-        self,
-        conn: AsyncConnection,
-        cursor: Cursor,
-        rows: Sequence[_PendingRow],
-        unencodable: Sequence[_Unencodable],
-    ) -> _Written:
-        """Store `rows` and `unencodable` (`_lineage_rows`) in the write's
-        transaction, and return what they came to.
-
-        The rows go in one savepoint (`execute_in_savepoint`); a transient
-        fault raises, for the whole write to be retried, and counts nothing.
-        A refusal of a row's values (a data exception, SQLSTATE class 22)
-        splits a batch into rows, each in a savepoint of its own; a row
-        refused for its values is logged, counts one attempt at its
-        generation, and deletes its key's row in a savepoint of its own, so
-        the table holds no lineage older than one this process could not
-        store. An `_Unencodable` key is the same case, recorded failed at the
-        attempt limit. Any other refusal comes from the database, not the
-        rows: it is logged once with its SQLSTATE, deletes nothing, and
-        counts one attempt for each key of the batch, so a lasting fault
-        stops retrying and a short one lands at the next write."""
-        written = _Written()
-        for skipped in unencodable:
-            written.failed[skipped.key] = (
-                skipped.generation,
-                _MAX_ROW_ATTEMPTS,
-            )
-            await self._delete_key(conn, cursor, skipped.key)
-        if not rows:
-            return written
-        refused = await execute_in_savepoint(
-            conn, _UPSERT_FRAME_LINEAGE, [row.params for row in rows], logger=logger
-        )
-        if refused is None:
-            written.stored.update((row.key, row.generation) for row in rows)
-            return written
-        turn_index = cursor.turn_index
-        state = sqlstate(refused)
-        if not (state or "").startswith(_DATA_EXCEPTION_CLASS):
-            logger.error(
-                "turn store: the database refused the lineage of turn %s's %d frame(s) "
-                "(SQLSTATE %s); they are tried again at the next write",
-                turn_index,
-                len(rows),
-                state,
-                exc_info=refused,
-            )
-            for row in rows:
-                written.failed[row.key] = (row.generation, row.attempts + 1)
-            return written
-        if len(rows) == 1:
-            (row,) = rows
-            key = row.key
-            logger.error(
-                "turn store: the lineage of frame spec_id=%r content_version=%r was not "
-                "stored (SQLSTATE %s); turn %s goes on without it",
-                key[0],
-                key[1],
-                state,
-                turn_index,
-                exc_info=refused,
-            )
-            written.failed[key] = (row.generation, row.attempts + 1)
-            await self._delete_key(conn, cursor, key)
-            return written
-        for row in rows:
-            key = row.key
-            if (
-                await execute_in_savepoint(
-                    conn,
-                    _UPSERT_FRAME_LINEAGE,
-                    row.params,
-                    logger=logger,
-                    failure=lambda key=key: (
-                        f"turn store: the lineage of frame spec_id={key[0]!r} "
-                        f"content_version={key[1]!r} was not stored; turn "
-                        f"{turn_index} goes on without it"
-                    ),
-                )
-                is None
-            ):
-                written.stored[key] = row.generation
                 continue
-            written.failed[key] = (row.generation, row.attempts + 1)
-            await self._delete_key(conn, cursor, key)
-        return written
+            ref = {"turn": cursor.id, "spec_id": spec_id, "content_version": content_version}
+            try:
+                members = to_json_param(lineage_json(lineage))
+            except (TypeError, ValueError):
+                logger.exception(
+                    "turn store: the lineage of frame spec_id=%r content_version=%r of turn %s "
+                    "cannot be stored as JSON; its row is deleted",
+                    spec_id,
+                    content_version,
+                    turn_index,
+                )
+                write.deletes.append(ref)
+                continue
+            if count is not None and count not in _INTEGER_RANGE:
+                logger.error(
+                    "turn store: the count %d of frame spec_id=%r content_version=%r of turn "
+                    "%s is past the integer column; its row is deleted",
+                    count,
+                    spec_id,
+                    content_version,
+                    turn_index,
+                )
+                write.deletes.append(ref)
+                continue
+            write.upserts.append({**ref, "members": members, "stat_var_count": count})
+        return write
 
-    async def _delete_key(self, conn: AsyncConnection, cursor: Cursor, key: FrameKey) -> None:
-        """Delete the turn's row of `key`, in a savepoint, logging a failure."""
-        turn_index = cursor.turn_index
-        await execute_in_savepoint(
-            conn,
-            _DELETE_FRAME_LINEAGE_KEY,
-            {"turn": cursor.id, "spec_id": key[0], "content_version": key[1]},
-            logger=logger,
-            failure=lambda: (
-                f"turn store: the older lineage of frame spec_id={key[0]!r} "
-                f"content_version={key[1]!r} was not deleted from turn {turn_index}"
-            ),
-        )
-
-    def _stored(self, before: Cursor, after: Cursor, written: _Written) -> None:
-        """Record a committed write from `before` to `after`, whose lineage
-        rows came to `written`."""
+    def _stored(self, before: Cursor, after: Cursor, write: _LineageWrite) -> None:
+        """Record a committed write from `before` to `after`, which committed
+        `write`."""
         self._moved(before, after)
-        if written.stored or written.failed:
+        if write.generations:
             known = self._turn_lineage(after)
-            known.written.update(written.stored)
-            for key in written.stored:
-                known.failed.pop(key, None)
-            known.absent.difference_update(written.stored)
-            for key, failed in written.failed.items():
-                known.failed[key] = failed
-                known.written.pop(key, None)
+            known.written.update(write.generations)
+            known.absent.difference_update(write.generations)
 
     async def open_turn(
         self,
@@ -911,8 +799,7 @@ class TurnStore:
         `FrameLineage` source lacks in conversation `lineage_scope` back in it
         (`ProvenanceStore.restore_frame`): a segment on another instance, or
         after a restart, taking over an open turn. Rows of frames the state no
-        longer names, or the source holds, are left unread, and so are the
-        rows of frames whose latest write here failed (`_TurnLineage.failed`).
+        longer names, or the source holds, are left unread.
 
         A key a read found no usable row for is not read again by this
         process until another writer moves the cursor, so a frame with no row
@@ -935,7 +822,7 @@ class TurnStore:
             )
             is None
         ]
-        unread = [key for key in missing if key not in known.absent and key not in known.failed]
+        unread = [key for key in missing if key not in known.absent and _utf8(key)]
         if not unread:
             return
         turn_index = cursor.turn_index
@@ -1035,7 +922,7 @@ class TurnStore:
             SegmentLost: `segment_id` does not hold the conversation's lease.
             CursorStale: the cursor moved, or the turn is not running.
         """
-        rows, unencodable = self._lineage_rows(cursor, state, lineage_scope)
+        lineage = self._lineage_rows(cursor, state, lineage_scope)
         async with self._engine.begin() as conn:
             await _fence(conn, cursor.conversation, segment_id)
             advanced = await _swap(
@@ -1049,8 +936,8 @@ class TurnStore:
                 state=state,
                 records=records,
             )
-            written = await self._write_lineage(conn, cursor, rows, unencodable)
-        self._stored(cursor, advanced, written)
+            await _write_lineage(conn, lineage)
+        self._stored(cursor, advanced, lineage)
         return advanced
 
     async def pause(
@@ -1080,7 +967,7 @@ class TurnStore:
             SegmentLost: `segment_id` does not hold the conversation's lease.
             CursorStale: the cursor moved, or the turn is not running.
         """
-        rows, unencodable = self._lineage_rows(cursor, state, lineage_scope)
+        lineage = self._lineage_rows(cursor, state, lineage_scope)
         async with self._engine.begin() as conn:
             await _fence(conn, cursor.conversation, segment_id)
             paused = await _swap(
@@ -1104,8 +991,8 @@ class TurnStore:
                 state=state,
                 records=records,
             )
-            written = await self._write_lineage(conn, cursor, rows, unencodable)
-        self._stored(cursor, paused, written)
+            await _write_lineage(conn, lineage)
+        self._stored(cursor, paused, lineage)
         return paused
 
     async def record_answer(
@@ -1205,8 +1092,7 @@ async def finish_on(
 ) -> Cursor:
     """Close the open turn with `status`, one of `CLOSED`, on `conn`, in the
     caller's transaction, appending `records`, and delete the turn's frame
-    lineage rows, best effort: a delete that fails for good is logged and
-    the close commits (`execute_in_savepoint`). `FAILED` and `ABANDONED`
+    lineage rows in the same transaction. `FAILED` and `ABANDONED`
     take an `error` and the others none. `state`, its spec blocks included,
     replaces the stored state when given. A paused turn's pause is dropped,
     so no answer can reach it. A close `CANCELLED` records failed every
@@ -1238,17 +1124,7 @@ async def finish_on(
         state=state,
         records=records,
     )
-    turn_index = cursor.turn_index
-    await execute_in_savepoint(
-        conn,
-        _DELETE_FRAME_LINEAGE,
-        {"turn": cursor.id},
-        logger=logger,
-        failure=lambda: (
-            f"turn store: the frame lineage of closed turn {turn_index} was not deleted; "
-            "the close goes on"
-        ),
-    )
+    await conn.execute(_DELETE_FRAME_LINEAGE, {"turn": cursor.id})
     if status is TurnStatus.CANCELLED:
         await end_unfinished(conn, cursor.conversation, now=now)
     return closed

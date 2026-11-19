@@ -1012,32 +1012,6 @@ async def test_a_frame_evicted_after_an_earlier_read_is_read_at_the_next_segment
     assert fresh.get(**key) == provenance.get(**key)
 
 
-async def test_a_row_refused_for_its_values_keeps_no_other_from_landing_and_is_tried_three_times(
-    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A frame whose count the column cannot hold fails its own row: the
-    write's other rows land, a frame named later still gets its row, and
-    the refused row is tried alone at the next writes, three times in all
-    while its lineage is unchanged."""
-    await _conversation(pg_engine)
-    provenance = ProvenanceStore()
-    _held(provenance, 1)
-    _held(provenance, 9, count=2**40)
-    _held(provenance, 3)
-    store = _keeping(pg_engine, provenance)
-    cursor = await _advance(store, await _open(store), _frames({"ref": _key(9)}, {"ref": _key(1)}))
-    state = _frames({"ref": _key(9)}, {"ref": _key(1)}, {"ref": _key(3)})
-    for _ in range(4):
-        cursor = await _advance(store, cursor, state)
-
-    assert [row[:2] for row in await _lineage_rows(pg_engine)] == [
-        ("spec_1", "cv_1"),
-        ("spec_3", "cv_3"),
-    ]
-    refused = [r for r in caplog.records if "spec_9" in r.getMessage() and r.levelname == "ERROR"]
-    assert len(refused) == 3
-
-
 async def _refuse_lineage_writes(engine: AsyncEngine, errcode: str) -> None:
     """Make the database refuse every insert or update of a lineage row with
     SQLSTATE `errcode`, as a trigger raising it."""
@@ -1065,50 +1039,6 @@ def _refusals(caplog: pytest.LogCaptureFixture, needle: str) -> int:
     return len([r for r in caplog.records if r.levelname == "ERROR" and needle in r.getMessage()])
 
 
-async def test_a_database_refusal_keeps_the_current_rows_and_stops_after_three_attempts(
-    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A refusal that comes from the database (here disk_full, 53100), not
-    from a row's values, deletes no row, is logged once per write with its
-    SQLSTATE, and counts one attempt for each key, three in all."""
-    await _conversation(pg_engine)
-    provenance = ProvenanceStore()
-    for n in (1, 9):
-        _held(provenance, n)
-    store = _keeping(pg_engine, provenance)
-    state = _frames({"ref": _key(1)}, {"ref": _key(9)})
-    cursor = await _advance(store, await _open(store), state)
-    stored = await _row_versions(pg_engine)
-    for n in (1, 9):
-        _held(provenance, n)
-    await _refuse_lineage_writes(pg_engine, "53100")
-
-    for _ in range(5):
-        cursor = await _advance(store, cursor, state)
-
-    assert await _row_versions(pg_engine) == stored
-    assert _refusals(caplog, "53100") == 3
-
-
-async def test_a_short_database_refusal_lands_at_the_next_write(
-    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
-) -> None:
-    await _conversation(pg_engine)
-    provenance = ProvenanceStore()
-    _held(provenance, 1)
-    store = _keeping(pg_engine, provenance)
-    state = _frames({"ref": _key(1)})
-    await _refuse_lineage_writes(pg_engine, "55P03")
-    cursor = await _advance(store, await _open(store), state)
-    assert await _lineage_rows(pg_engine) == []
-    await _allow_lineage_writes(pg_engine)
-
-    await _advance(store, cursor, state)
-
-    assert [row[:2] for row in await _lineage_rows(pg_engine)] == [("spec_1", "cv_1")]
-    assert _refusals(caplog, "55P03") == 1
-
-
 async def test_a_transient_fault_of_the_lineage_write_fails_the_write_and_counts_nothing(
     pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1132,45 +1062,6 @@ async def test_a_transient_fault_of_the_lineage_write_fails_the_write_and_counts
 
     assert [row[:2] for row in await _lineage_rows(pg_engine)] == [("spec_1", "cv_1")]
     assert _refusals(caplog, "turn store") == 0
-
-
-@pytest.mark.parametrize("frames", [1, 2])
-async def test_a_row_refused_for_its_values_counts_the_same_alone_or_in_a_batch(
-    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture, frames: int
-) -> None:
-    await _conversation(pg_engine)
-    provenance = ProvenanceStore()
-    _held(provenance, 9, count=2**40)
-    _held(provenance, 1)
-    store = _keeping(pg_engine, provenance)
-    state = _frames({"ref": _key(9)}, *([{"ref": _key(1)}] if frames == 2 else []))
-    cursor = await _advance(store, await _open(store), state)
-
-    for _ in range(4):
-        cursor = await _advance(store, cursor, state)
-
-    assert _refusals(caplog, "spec_9") == 3
-
-
-async def test_a_failed_write_of_a_newer_lineage_deletes_the_older_row(
-    pg_engine: AsyncEngine,
-) -> None:
-    """A key whose newer lineage cannot be stored loses its row, so no restore
-    states the lineage the process replaced."""
-    await _conversation(pg_engine)
-    provenance = ProvenanceStore()
-    _held(provenance, 1)
-    store = _keeping(pg_engine, provenance)
-    state = _frames({"ref": _key(1)})
-    advanced = await _advance(store, await _open(store), state)
-    assert len(await _lineage_rows(pg_engine)) == 1
-    _held(provenance, 1, share=float("nan"))
-
-    await _advance(store, advanced, state)
-
-    assert await _lineage_rows(pg_engine) == []
-    fresh, _ = await _restored(pg_engine)
-    assert fresh.get(conversation=_SCOPE, **_key(1)) is None
 
 
 async def test_a_lineage_the_source_gains_during_the_read_is_written_next(
@@ -1239,9 +1130,9 @@ async def _row_versions(engine: AsyncEngine) -> list[tuple[str, str]]:
         return [tuple(row) for row in rows]
 
 
-async def test_a_close_commits_when_the_frame_lineage_delete_fails(
-    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_a_close_fails_when_the_frame_lineage_delete_fails(pg_engine: AsyncEngine) -> None:
+    """The close deletes the turn's rows in its own transaction, so a close
+    whose delete fails does not commit and the turn stays open as written."""
     await _conversation(pg_engine)
     provenance = ProvenanceStore()
     _held(provenance, 1)
@@ -1250,8 +1141,80 @@ async def test_a_close_commits_when_the_frame_lineage_delete_fails(
     async with pg_engine.begin() as conn:
         await conn.execute(text("ALTER TABLE turn_frame_lineage RENAME TO frame_lineage_gone"))
 
-    closed = await store.finish(advanced, segment_id=SEGMENT, status=TurnStatus.DONE)
+    with pytest.raises(DBAPIError):
+        await store.finish(advanced, segment_id=SEGMENT, status=TurnStatus.DONE)
 
-    assert closed.status is TurnStatus.DONE
-    assert await store.open_cursor(PRINCIPAL, CONVERSATION) is None
-    assert any(record.levelname == "ERROR" for record in caplog.records)
+    assert await store.open_cursor(PRINCIPAL, CONVERSATION) == advanced
+
+
+@pytest.mark.parametrize("invalid", ["nan", "count-past-integer"])
+async def test_a_lineage_that_fails_its_check_deletes_the_older_row_and_the_write_commits(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture, invalid: str
+) -> None:
+    """A lineage JSON cannot hold, or whose count the integer column cannot,
+    never reaches the database: the key's older row is deleted, the other
+    frames' rows land, the write commits, and the check is logged once while
+    the lineage is unchanged."""
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    for n in (1, 9):
+        _held(provenance, n)
+    store = _keeping(pg_engine, provenance)
+    state = _frames({"ref": _key(1)}, {"ref": _key(9)})
+    cursor = await _advance(store, await _open(store), state)
+    if invalid == "nan":
+        _held(provenance, 9, share=float("nan"))
+    else:
+        _held(provenance, 9, count=2**40)
+    _held(provenance, 1, share=0.6)
+
+    cursor = await _advance(store, cursor, state)
+    await _advance(store, cursor, state)
+
+    (row,) = await _lineage_rows(pg_engine)
+    assert row[0] == "spec_1"
+    assert row[3][0]["manifest"] == {"citation": {"share": 0.6}}
+    assert len([r for r in caplog.records if "spec_9" in r.getMessage()]) == 1
+
+
+async def test_a_frame_key_postgres_text_cannot_hold_gets_no_row_and_the_write_commits(
+    pg_engine: AsyncEngine,
+) -> None:
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    _held(provenance, 1)
+    surrogate = {"spec_id": "spec_\ud800", "content_version": "cv_x"}
+    provenance.put(conversation=_SCOPE, manifest={}, **surrogate)
+    store = _keeping(pg_engine, provenance)
+
+    advanced = await _advance(
+        store, await _open(store), _frames({"ref": _key(1)}, {"ref": surrogate})
+    )
+
+    assert advanced.status is TurnStatus.RUNNING
+    assert [row[:2] for row in await _lineage_rows(pg_engine)] == [("spec_1", "cv_1")]
+    fresh, _ = await _restored(pg_engine)
+    assert fresh.get(conversation=_SCOPE, **_key(1)) is not None
+
+
+async def test_a_database_refusal_of_the_lineage_fails_the_cursor_write_and_commits_nothing(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A refusal by the database (here disk_full, 53100) of the lineage
+    statement fails the cursor write as a refusal of the cursor statement
+    would: neither the cursor nor any lineage row moves."""
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    _held(provenance, 1)
+    store = _keeping(pg_engine, provenance)
+    state = _frames({"ref": _key(1)})
+    advanced = await _advance(store, await _open(store), state)
+    stored = await _row_versions(pg_engine)
+    _held(provenance, 1, share=0.6)
+    await _refuse_lineage_writes(pg_engine, "53100")
+
+    with pytest.raises(DBAPIError):
+        await _advance(store, advanced, state)
+
+    assert await store.open_cursor(PRINCIPAL, CONVERSATION) == advanced
+    assert await _row_versions(pg_engine) == stored

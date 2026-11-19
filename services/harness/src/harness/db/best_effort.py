@@ -2,10 +2,11 @@
 
 A lineage row helps a later draw state its sources, and nothing waits on it
 past a small bound or fails for want of it. `bounded_read` runs one read for
-at most a budget, and `execute_in_savepoint` runs a statement without
-risking the write around it. The card lineage (`harness.studio_store`,
-`harness.mcp_client.McpExecutor`) and the turn frame lineage
-(`harness.turn.store.TurnStore`) use both. Each takes its caller's logger
+at most a budget, used by the card lineage read (`harness.mcp_client.
+McpExecutor`) and the turn frame lineage restore
+(`harness.turn.store.TurnStore`). `execute_in_savepoint` runs a statement
+without risking the write around it, used by the card lineage insert
+(`harness.studio_store`). Each takes its caller's logger
 and a label it builds only when it logs, so a call that succeeds formats
 nothing.
 """
@@ -96,10 +97,3 @@ async def execute_in_savepoint(
             logger.exception(failure())
         return exc
     return None
-
-
-def sqlstate(exc: BaseException) -> str | None:
-    """The SQLSTATE the database refused a statement with, as the driver
-    reports it on the error SQLAlchemy wraps, or `None` when it names none."""
-    state = getattr(getattr(exc, "orig", None), "sqlstate", None)
-    return state if isinstance(state, str) else None
