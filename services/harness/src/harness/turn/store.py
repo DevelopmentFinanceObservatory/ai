@@ -208,6 +208,14 @@ class PauseNotOpen(Exception):  # noqa: N818 -- names the state that refuses
     """An answer named a pause the turn does not have open."""
 
 
+class WriteNotEncoded(ValueError):  # noqa: N818 -- names the write's state, as the others do
+    """A write's value JSON cannot hold: a NaN or an infinity
+    (`executor.ledger.NonFiniteJsonError`), or a value JSON cannot encode,
+    which is the cause. Values are encoded only while a write builds its
+    parameters, before or inside its transaction, so the transaction ends
+    without committing and the write stored nothing."""
+
+
 def require_open_pause(cursor: Cursor, *, interrupt_id: str, round: int) -> None:
     """Refuse an answer to `(interrupt_id, round)` unless it is the pause
     `cursor` has open.
@@ -286,12 +294,25 @@ class Cursor:
     written_by: str | None = None
 
 
+def _encode(value: Any) -> str:
+    """`value` as JSON text for a json parameter.
+
+    Raises:
+        WriteNotEncoded: JSON cannot hold `value`.
+    """
+    try:
+        return to_json_param(value)
+    except (ValueError, TypeError) as exc:
+        raise WriteNotEncoded(f"a turn write's value cannot be stored as JSON: {exc}") from exc
+
+
 def _json(value: Any) -> str | None:
     """`value` as a json parameter: JSON text, or SQL NULL for `None`.
-    Raises `ValueError` for a NaN or an infinity, which JSON cannot hold,
-    and `TypeError` for a value JSON cannot encode, before any statement
-    runs."""
-    return None if value is None else to_json_param(value)
+
+    Raises:
+        WriteNotEncoded: JSON cannot hold `value`.
+    """
+    return None if value is None else _encode(value)
 
 
 _COLUMNS = (
@@ -425,7 +446,7 @@ async def _write_specs(conn: AsyncConnection, cursor: Cursor, specs: Specs) -> _
     changed: list[dict[str, Any]] = []
     moved: list[dict[str, Any]] = []
     for position, (spec_id, block) in enumerate(specs.items()):
-        body = to_json_param(block)
+        body = _encode(block)
         digests[spec_id] = digest = _spec_digest(body)
         if cursor.spec_digests.get(spec_id) == digest:
             # `spec_blocks` holds a block for every digest the cursor holds.
@@ -590,6 +611,10 @@ async def _swap(
     )
     await _append(conn, cursor, records)
     return _cursor(row, cursor.record_count + len(records), stored)
+
+
+# Waits for a write in flight to the turn's cursor row (`settled_turn`).
+_SETTLE = text("SELECT 1 FROM turn_cursors WHERE id = :id FOR SHARE")
 
 
 class TurnStore:
@@ -769,6 +794,22 @@ class TurnStore:
             LookupError: no turn has that id.
         """
         async with self._engine.connect() as conn:
+            cursor = await _read_cursor(conn, "t.id = :id", {"id": turn_id})
+        if cursor is None:
+            raise LookupError(f"no turn {turn_id}")
+        return cursor
+
+    async def settled_turn(self, turn_id: int) -> Cursor:
+        """The turn `turn_id` as stored once every write to its cursor that
+        is in flight has committed or rolled back: the read first takes the
+        `turn_cursors` row `FOR SHARE`, which waits for such a write's row
+        lock, then reads the turn in a statement that sees what it committed.
+
+        Raises:
+            LookupError: no turn has that id.
+        """
+        async with self._engine.begin() as conn:
+            await conn.execute(_SETTLE, {"id": turn_id})
             cursor = await _read_cursor(conn, "t.id = :id", {"id": turn_id})
         if cursor is None:
             raise LookupError(f"no turn {turn_id}")
@@ -989,6 +1030,7 @@ class TurnStore:
         Raises:
             SegmentLost: `segment_id` does not hold the conversation's lease.
             CursorStale: the cursor moved, or the turn is not running.
+            WriteNotEncoded: JSON cannot hold a value of the write.
         """
         write = self._lineage_rows(cursor, state, lineage)
         async with self._engine.begin() as conn:
@@ -1035,6 +1077,7 @@ class TurnStore:
         Raises:
             SegmentLost: `segment_id` does not hold the conversation's lease.
             CursorStale: the cursor moved, or the turn is not running.
+            WriteNotEncoded: JSON cannot hold a value of the write.
         """
         write = self._lineage_rows(cursor, state, lineage)
         async with self._engine.begin() as conn:
@@ -1132,6 +1175,7 @@ class TurnStore:
                 missing for `FAILED` or `ABANDONED` or given for another.
             SegmentLost: `segment_id` does not hold the conversation's lease.
             CursorStale: the cursor moved, or the turn is closed.
+            WriteNotEncoded: JSON cannot hold a value of the write.
         """
         async with self._engine.begin() as conn:
             closed = await finish_on(

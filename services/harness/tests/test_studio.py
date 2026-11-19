@@ -1048,7 +1048,7 @@ def _plan_pause_acknowledgement_lost(
     """Make the turn store's first pause commit and then raise, as a write
     whose acknowledgement was lost does. With `read_back_fails`, every read
     of the turn after it fails too, until the list returned is emptied."""
-    real_pause, real_turn = TurnStore.pause, TurnStore.turn
+    real_pause, real_turn = TurnStore.pause, TurnStore.settled_turn
     raised: list[bool] = []
 
     async def pause(self: TurnStore, cursor: Any, **kwargs: Any) -> Any:
@@ -1064,7 +1064,7 @@ def _plan_pause_acknowledgement_lost(
         return await real_turn(self, turn_id)
 
     monkeypatch.setattr(TurnStore, "pause", pause)
-    monkeypatch.setattr(TurnStore, "turn", turn)
+    monkeypatch.setattr(TurnStore, "settled_turn", turn)
     return raised
 
 
