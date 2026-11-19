@@ -916,11 +916,11 @@ _NAN = float("nan")
 @pytest.mark.parametrize(
     ("ends", "error_type"),
     [
-        ("nan-node-input", "ValueError"),
+        ("nan-node-input", "NonFiniteJsonError"),
         ("unencodable-node-input", "TypeError"),
-        ("nan-pause-payload", "ValueError"),
-        ("nan-state-at-the-end", "ValueError"),
-        ("nan-spec-block", "ValueError"),
+        ("nan-pause-payload", "NonFiniteJsonError"),
+        ("nan-state-at-the-end", "NonFiniteJsonError"),
+        ("nan-spec-block", "NonFiniteJsonError"),
     ],
 )
 async def test_a_boundary_write_that_cannot_store_its_values_closes_the_turn_failed(
