@@ -3015,8 +3015,9 @@ def _timing_bodies(app: ASGIApp, sent: list[tuple[float, bytes]]) -> ASGIApp:
 
 
 # The ping test's clock runs at this fraction of real time, so a 21 s call
-# takes 2.1 s.
-_PING_TIME_SCALE = 0.1
+# takes 5.25 s. The 5 s between the 15 s ping interval and the 20 s deadline
+# scales to 1.25 s, which absorbs scheduler delay under parallel workers.
+_PING_TIME_SCALE = 0.25
 
 
 @REVISIONS
