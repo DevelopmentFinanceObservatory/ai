@@ -3564,19 +3564,39 @@ def _revise_card(work: ConversationState) -> bool:
     return _refresh_block(work, component_id="cmp_two", revision=2, title="Renamed")
 
 
+def _land_cards(*component_ids: str) -> Callable[[ConversationState], None]:
+    """One canvas change landing each of `component_ids` in turn."""
+
+    def land(work: ConversationState) -> None:
+        for component_id in component_ids:
+            land_component(work, _component(component_id))
+
+    return land
+
+
 @pytest.mark.parametrize(
-    ("first", "first_line"),
+    ("first", "first_lines"),
     [
+        pytest.param(_land_cards("cmp_one"), [("cmp_one", "created")], id="land-then-land"),
         pytest.param(
-            lambda work: land_component(work, _component("cmp_one")),
-            ("cmp_one", "created"),
-            id="land-then-land",
+            _land_cards("cmp_one", "cmp_three", "cmp_four", "cmp_five"),
+            [
+                ("cmp_one", "created"),
+                ("cmp_three", "created"),
+                ("cmp_four", "created"),
+                ("cmp_five", "created"),
+            ],
+            id="land-several-then-land",
         ),
-        pytest.param(_revise_card, ("cmp_two", "revised"), id="revise-then-land"),
+        pytest.param(_revise_card, [("cmp_two", "revised")], id="revise-then-land"),
     ],
 )
 async def test_a_canvas_change_after_a_lost_acknowledgement_builds_on_the_commit(
-    new_store, pg_engine, monkeypatch, first: Callable[[Any], Any], first_line: tuple[str, str]
+    new_store,
+    pg_engine,
+    monkeypatch,
+    first: Callable[[Any], Any],
+    first_lines: list[tuple[str, str]],
 ) -> None:
     """A's canvas change commits and its acknowledgement is lost. B lands a
     card before A retries. B builds on A's commit, so the row and the live
@@ -3617,23 +3637,57 @@ async def test_a_canvas_change_after_a_lost_acknowledgement_builds_on_the_commit
 
     assert faults == [1]
     assert landing[0].done()
-    lines = [
-        ("cmp_two", "created"),
-        first_line,
-        ("cmp_new", "created"),
-    ]
+    lines = [("cmp_two", "created"), *first_lines, ("cmp_new", "created")]
     reloaded_store = new_store()
     reloaded = await reloaded_store.load("principal", CONVERSATION)
     for held in (reloaded, state):
         assert [(line["component_id"], line["action"]) for line in held.turn_components] == lines
         assert {cid for cid, _ in lines} <= set(held.components)
     assert state.components == reloaded.components
+    assert (
+        list(state.components)
+        == list(reloaded.components)
+        == list(dict.fromkeys(cid for cid, _ in lines))
+    )
     assert state.composition == reloaded.composition
     assert (
         store._runtime[("principal", CONVERSATION)].baseline
         == reloaded_store._runtime[("principal", CONVERSATION)].baseline
     )
     assert len(await _canvas_writes(pg_engine)) == 3
+
+
+async def test_a_landed_canvas_write_whose_settling_read_failed_is_applied_once(
+    new_store, pg_engine, monkeypatch
+) -> None:
+    """A's card lands and its acknowledgement is lost. The retry's read of
+    the row's items, which settles the landed write, meets a dropped
+    connection too. The next retry settles it: the card has one turn line,
+    and its write id is recorded once."""
+    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    faults = _dropping_connection(store, acknowledged=True)
+    real_select = studio_store._ItemTable.select
+    select_faults: list[int] = []
+
+    def failing_once(self: Any) -> Any:
+        if faults and not select_faults:
+            select_faults.append(1)
+            raise _connection_reset("SELECT")
+        return real_select(self)
+
+    monkeypatch.setattr(studio_store._ItemTable, "select", failing_once)
+
+    await store.change_canvas("principal", CONVERSATION, lambda work: land_component(work, _CARD))
+
+    assert (faults, select_faults) == ([1], [1])
+    reloaded = await new_store().load("principal", CONVERSATION)
+    for held in (reloaded, state):
+        assert [line["component_id"] for line in held.turn_components] == ["cmp_two"]
+    assert len(await _canvas_writes(pg_engine)) == 1
 
 
 @pytest.mark.parametrize("turn_lease", [False, True], ids=["claim-save", "claim-turn-lease"])
