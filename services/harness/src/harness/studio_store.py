@@ -1826,8 +1826,10 @@ class StudioStore:
                 stored = (
                     CompositionManifest.model_validate(row.composition) if row.composition else None
                 )
-                if entry.canvas_pending:
-                    await self._resolve_canvas_writes(conn, entry, state, row, stored)
+                if entry.canvas_pending and await self._resolve_canvas_writes(
+                    conn, entry, state, row, stored
+                ):
+                    _refold_turn_cards(state, entry.baseline)
                 if write is not None and write.landed:
                     return write.result
                 fenced = _row_segment(row)
