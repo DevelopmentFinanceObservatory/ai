@@ -367,11 +367,15 @@ class ProvenanceStore:
         frame: _FrameKey,
         lineage: Lineage,
         stat_var_count: int | None = None,
-    ) -> None:
+    ) -> int | None:
         """Put a stored `lineage`, with the count stored beside it, back under
-        `frame` when the store holds none there."""
-        if self._entry(conversation, frame) is None:
-            self._store(conversation=conversation, key=frame, entry=_Entry(lineage, stat_var_count))
+        `frame` when the store holds none there, and return the generation it
+        was stored at (`generation`). `None` when the store already held an
+        entry for `frame`, which it keeps."""
+        if self._entry(conversation, frame) is not None:
+            return None
+        self._store(conversation=conversation, key=frame, entry=_Entry(lineage, stat_var_count))
+        return self._generations
 
     def _store(self, *, conversation: str, key: _FrameKey, entry: _Entry) -> None:
         bucket = self._by_conversation.get(conversation)
@@ -421,6 +425,17 @@ class ProvenanceStore:
         its manifest resolved or summed."""
         entry = self._entry(conversation, (spec_id, content_version))
         return entry.stat_var_count if entry is not None else None
+
+    def held(
+        self, *, conversation: str, spec_id: str | None, content_version: str | None
+    ) -> tuple[Lineage, int | None, int] | None:
+        """The lineage, count (`stat_var_count`) and generation (`generation`)
+        held for the frame `(spec_id, content_version)`, read from one entry,
+        or `None` for a frame the store does not hold."""
+        entry = self._entry(conversation, (spec_id, content_version))
+        if entry is None:
+            return None
+        return entry.lineage, entry.stat_var_count, entry.generation
 
     def generation(
         self, *, conversation: str, spec_id: str | None, content_version: str | None

@@ -1018,35 +1018,112 @@ async def test_a_frame_evicted_after_an_earlier_read_is_read_at_the_next_segment
     assert fresh.get(**key) == provenance.get(**key)
 
 
-async def test_a_row_the_database_refuses_keeps_no_other_from_landing_and_is_tried_once(
+async def test_a_row_refused_for_its_values_keeps_no_other_from_landing_and_is_tried_three_times(
     pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A frame whose count the column cannot hold fails its own row: the
-    write's other rows land, and the refused row is logged once and not
-    tried again while its lineage is unchanged, while a frame named later
-    still gets its row."""
+    write's other rows land, a frame named later still gets its row, and
+    the refused row is tried alone at the next writes, three times in all
+    while its lineage is unchanged."""
     await _conversation(pg_engine)
     provenance = ProvenanceStore()
     _held(provenance, 1)
     _held(provenance, 9, count=2**40)
     _held(provenance, 3)
     store = _keeping(pg_engine, provenance)
-    advanced = await _advance(
-        store, await _open(store), _frames({"ref": _key(9)}, {"ref": _key(1)})
-    )
-    await _pause(
-        store,
-        advanced,
-        _frames({"ref": _key(9)}, {"ref": _key(1)}, {"ref": _key(3)}),
-        interrupt_id="int_1",
-    )
+    cursor = await _advance(store, await _open(store), _frames({"ref": _key(9)}, {"ref": _key(1)}))
+    state = _frames({"ref": _key(9)}, {"ref": _key(1)}, {"ref": _key(3)})
+    for _ in range(4):
+        cursor = await _advance(store, cursor, state)
 
     assert [row[:2] for row in await _lineage_rows(pg_engine)] == [
         ("spec_1", "cv_1"),
         ("spec_3", "cv_3"),
     ]
     refused = [r for r in caplog.records if "spec_9" in r.getMessage() and r.levelname == "ERROR"]
-    assert len(refused) == 1
+    assert len(refused) == 3
+
+
+async def test_a_batch_refused_for_all_its_rows_is_logged_once_and_tried_whole_next_time(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal no row's own values caused (here a missing table) is one
+    log line and marks no frame failed, so the next write stores them all."""
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    for n in (1, 2):
+        _held(provenance, n)
+    store = _keeping(pg_engine, provenance)
+    state = _frames({"ref": _key(1)}, {"ref": _key(2)})
+    upsert = turn_store._UPSERT_FRAME_LINEAGE
+    monkeypatch.setattr(
+        turn_store, "_UPSERT_FRAME_LINEAGE", text("INSERT INTO no_such_table VALUES (:turn)")
+    )
+    advanced = await _advance(store, await _open(store), state)
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    monkeypatch.setattr(turn_store, "_UPSERT_FRAME_LINEAGE", upsert)
+
+    await _advance(store, advanced, state)
+
+    assert [row[:2] for row in await _lineage_rows(pg_engine)] == [
+        ("spec_1", "cv_1"),
+        ("spec_2", "cv_2"),
+    ]
+
+
+async def test_a_failed_write_of_a_newer_lineage_deletes_the_older_row(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A key whose newer lineage cannot be stored loses its row, so no restore
+    states the lineage the process replaced."""
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    _held(provenance, 1)
+    store = _keeping(pg_engine, provenance)
+    state = _frames({"ref": _key(1)})
+    advanced = await _advance(store, await _open(store), state)
+    assert len(await _lineage_rows(pg_engine)) == 1
+    _held(provenance, 1, share=float("nan"))
+
+    await _advance(store, advanced, state)
+
+    assert await _lineage_rows(pg_engine) == []
+    fresh, _ = await _restored(pg_engine)
+    assert fresh.get(conversation=_SCOPE, **_key(1)) is None
+
+
+async def test_a_lineage_the_source_gains_during_the_read_is_written_next(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the source comes to hold its own lineage for a key while the read
+    of the key's row runs, the restore keeps the source's and leaves it
+    unwritten, so the next write stores it."""
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    _held(provenance, 1)
+    store = _keeping(pg_engine, provenance)
+    state = _frames({"ref": _key(1)})
+    await _advance(store, await _open(store), state)
+    fresh = ProvenanceStore()
+    other = _keeping(pg_engine, fresh)
+    read = TurnStore._frame_lineage
+
+    async def gaining(self: TurnStore, turn: int, keys: Any) -> list[Any]:
+        rows = await read(self, turn, keys)
+        _held(fresh, 1, share=0.9, count=5)
+        return rows
+
+    monkeypatch.setattr(TurnStore, "_frame_lineage", gaining)
+    cursor = await other.open_cursor(PRINCIPAL, CONVERSATION)
+    assert cursor is not None
+    await other.restore_frame_lineage(cursor, lineage_scope=_SCOPE)
+
+    await _advance(other, cursor, state)
+
+    (row,) = await _lineage_rows(pg_engine)
+    assert row[2] == 5
+    assert row[3][0]["manifest"] == {"citation": {"share": 0.9}}
 
 
 async def test_an_unchanged_lineage_is_not_written_again_whatever_object_holds_it(

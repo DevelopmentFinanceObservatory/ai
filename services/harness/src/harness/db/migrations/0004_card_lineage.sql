@@ -50,15 +50,18 @@ CREATE TABLE conversation_card_lineage (
 -- key an entry names (its `ref` and its `store_ref`), upserted by a cursor
 -- write when the writing instance holds a lineage for the key it has not
 -- stored for the turn since, so a lineage replaced in process is replaced
--- here too. A segment that lacks a named key reads that key's row once
--- (`TurnStore.restore_frame_lineage`). `members` and `stat_var_count` are
--- encoded as `conversation_card_lineage` encodes them.
+-- here too. A write that fails to store a key's newer lineage deletes the
+-- key's row, best effort, so no row holds a lineage older than one an
+-- instance failed to store. A segment that lacks a named key reads that
+-- key's row once (`TurnStore.restore_frame_lineage`). `members` and
+-- `stat_var_count` are encoded as `conversation_card_lineage` encodes them.
 --
 -- Rows are best effort: a frame no instance held at a write, or whose
 -- lineage JSON cannot hold, has none, and a card drawn from it is withheld
--- `provenance_unavailable`. The closing write deletes the turn's rows
--- (`harness.turn.store.finish_on`), so the table holds open turns only; a
--- delete that fails is logged and the close commits, leaving its rows.
+-- `provenance_unavailable`. The closing write deletes the turn's rows, best
+-- effort (`harness.turn.store.finish_on`). Nothing reads a closed turn's
+-- rows, and a row a failed delete leaves stays until its conversation is
+-- deleted.
 --
 -- Creating the table takes SHARE ROW EXCLUSIVE on `turn_cursors` for the
 -- foreign key, as the table above does on `conversations`.
