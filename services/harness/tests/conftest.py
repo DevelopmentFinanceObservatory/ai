@@ -59,8 +59,10 @@ fails, so no run passes by skipping them.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import os
+import sys
 import uuid
 from collections.abc import (
     AsyncIterator,
@@ -213,6 +215,24 @@ def _reset_mcp_auth_gate() -> Any:
     """
     yield
     mcp_auth.reset()
+
+
+@pytest.fixture(autouse=True)
+def _no_owed_work_left() -> Iterator[None]:
+    """Leave no owed work of a cut segment held after a test
+    (`harness.turn.loop.pending_owed_work`). Each test runs on a loop of its
+    own, so a task one test left behind could never finish under the next,
+    and the shutdown wait (`harness.studio_stream.LiveOwners.wait`) would
+    see it. A test run that never imported the loop has none."""
+    yield
+    turn_loop = sys.modules.get("harness.turn.loop")
+    if turn_loop is None:
+        return
+    for task in turn_loop.pending_owed_work():
+        # The test's loop may be closed by now; the task then never runs on.
+        with contextlib.suppress(RuntimeError):
+            task.cancel()
+    turn_loop._OWED_WORK.clear()
 
 
 @pytest.fixture(autouse=True)
