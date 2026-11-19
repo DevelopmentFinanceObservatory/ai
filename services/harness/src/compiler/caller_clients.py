@@ -18,12 +18,18 @@ a function the harness passes in.
 A held client for a whole turn is the reuse `fastmcp.Client` is built for
 (its docstring: "efficient session reuse in any scenario with nested or
 concurrent client usage"), and it saves the connect round trips a fresh
-client pays on every call. A turn pays one connect per server it calls.
+client pays on every call. A turn pays one connect per registry it calls on,
+and each registry reconnects on every turn: a turn that searches, fetches and
+aggregates pays about four, since data-mcp alone has three registries
+(`harness.mcp_client.McpResolver` for `search`, `harness.mcp_client.McpExecutor`
+for `get_data`, and `McpSurface`'s data-mcp source) and analysis-mcp adds one.
 
 The registry tracks each caller's latest turn: the newest turn `get()` has
 seen for it, among the last `RECENT_TURNS`. A turn id is random, so the order
 `get()` first sees turns in is the only order there is. The latest turn's
-connect retires the caller's clients of older turns. A connect for an older
+connect retires the caller's clients of older turns and disconnects them in a
+task of its own (`CallerClients._retire`), so the new turn's call neither
+waits on nor fails with that disconnect. A connect for an older
 turn, such as an early mint the turn before queued and sent late, retires
 nothing, so it never cuts the latest turn's client. Nothing in this process
 observes a conversation ending, so the registry is also an LRU bounded at
@@ -153,10 +159,12 @@ class CallerClients:
         # them, the latest last; least recently used caller first.
         self._turns: OrderedDict[str | None, deque[str | None]] = OrderedDict()
         self._lock = asyncio.Lock()
+        # The disconnects `_retire` runs in the background, held until each ends.
+        self._retiring: set[asyncio.Task[None]] = set()
 
     async def get(self) -> Client:
-        """The current caller's client, connecting it on the caller's first
-        call, with this call counted as one of its in-flight users.
+        """The current `CallerTurn`'s client, connecting it on that caller and
+        turn's first call, with this call counted as one of its in-flight users.
 
         Concurrent calls from one caller share the returned client;
         `fastmcp.Client` supports concurrent `call_tool`s on one connection.
@@ -208,8 +216,9 @@ class CallerClients:
         older turns are retired.
 
         The client becomes held in the same step that retires the connect,
-        so a waiter always finds one or the other. A retired client is
-        disconnected once its last in-flight call releases it.
+        so a waiter always finds one or the other. A retired client with no
+        in-flight call is disconnected in the background (`_retire`); one with
+        a call in flight is disconnected once its last call releases it.
         """
         try:
             client = self._factory(caller)
@@ -241,8 +250,16 @@ class CallerClients:
                 )
                 if self._mark_discarded_locked(evicted):
                     to_disconnect.append(evicted)
-        for evicted in to_disconnect:
-            await evicted.client.__aexit__(None, None, None)
+        for retired in to_disconnect:
+            self._retire(retired.client)
+
+    def _retire(self, client: Client) -> None:
+        """Disconnect `client` in a task of its own, which logs and swallows a
+        failed disconnect. fastmcp can wait seconds on a session's end, and
+        the connect that retires `client` serves another turn's call."""
+        task = asyncio.create_task(_disconnect_quietly(client))
+        self._retiring.add(task)
+        task.add_done_callback(self._retiring.discard)
 
     async def release(self, client: Client) -> None:
         """Release one hold on `client` taken by `get()`, disconnecting it
@@ -291,7 +308,8 @@ class CallerClients:
         """Disconnect every held client, at shutdown.
 
         Does not wait for in-flight calls: shutdown expects none. A connect
-        still in progress is cancelled.
+        still in progress is cancelled, and the background disconnects of
+        retired clients are awaited.
         """
         connecting = list(self._connecting.values())
         for task in connecting:
@@ -301,3 +319,12 @@ class CallerClients:
         self._by_client_id = {}
         for held in held_clients.values():
             await held.client.__aexit__(None, None, None)
+        await asyncio.gather(*self._retiring, return_exceptions=True)
+
+
+async def _disconnect_quietly(client: Client) -> None:
+    """Disconnect `client`, logging rather than raising a failure."""
+    try:
+        await client.__aexit__(None, None, None)
+    except Exception:
+        logger.warning("caller_clients: a retired client failed to disconnect", exc_info=True)

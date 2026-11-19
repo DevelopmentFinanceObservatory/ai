@@ -969,14 +969,15 @@ class PlatformAssembler:
     async def _post_analysis(self, path: str, body: Mapping[str, Any]) -> httpx2.Response | Refusal:
         """POST `body` to apis' analysis `path` once, for `common.derived_replay`.
         Returns the response whatever its status, or `transient_unavailable` for a
-        call that got none. It names the caller as an external create does
-        (`_card_write_headers`), since only a public call replays, and waits as
-        long as a whole presentation call may."""
+        call that got none. It names the caller and turn as analysis-mcp's own
+        analysis calls do (`vouched_caller_headers`): an `ip:` caller with its
+        surface and user agent, or a Studio `conversation:` caller with its turn.
+        It waits as long as a whole presentation call may."""
         try:
             headers = dict(await self._auth()) if self._auth else {}
         except ApisAuthError as exc:
             return self._refusal(PlatformTransportError(detail=f"no dfo-apis ID token: {exc}"))
-        headers.update(self._card_write_headers(Caller.EXTERNAL))
+        headers.update(vouched_caller_headers(self._caller_principal))
         timeout = self._attempt_timeout(max(self._retry_budget_s, self._read_timeout_s))
         try:
             return await self._client.post(path, json=dict(body), headers=headers, timeout=timeout)

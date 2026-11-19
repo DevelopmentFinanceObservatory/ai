@@ -140,6 +140,61 @@ async def test_a_callers_next_turn_gets_a_client_built_for_it() -> None:
     assert registry.built[1].exited == 0
 
 
+class _StuckExitClient(_CountingClient):
+    """A client whose disconnect waits until the test opens `gate`."""
+
+    def __init__(self, caller: str | None, turn: str | None, *, gate: asyncio.Event) -> None:
+        super().__init__(caller, turn)
+        self._gate = gate
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self._gate.wait()
+        await super().__aexit__(*exc_info)
+
+
+class _FailingExitClient(_CountingClient):
+    async def __aexit__(self, *exc_info: object) -> None:
+        raise RuntimeError("session runner failed")
+
+
+async def test_retiring_the_turn_befores_client_neither_delays_nor_fails_the_new_turn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """fastmcp can wait seconds on a session's end, or raise from it. The new
+    turn's first call returns while the old client's disconnect still waits, and
+    a disconnect that raises is logged. `aclose` waits for the stuck one."""
+    gate = asyncio.Event()
+    built: list[_CountingClient] = []
+
+    def build(who: CallerTurn) -> Any:
+        if who.turn == "tr_" + "1" * 16:
+            client: _CountingClient = _StuckExitClient(who.caller, who.turn, gate=gate)
+        elif who.turn == "tr_" + "2" * 16:
+            client = _FailingExitClient(who.caller, who.turn)
+        else:
+            client = _CountingClient(who.caller, who.turn)
+        built.append(client)
+        return client
+
+    turn = ["tr_" + "1" * 16]
+    clients = CallerClients(build, caller=lambda: CallerTurn("conversation:a", turn[0]))
+    for digit in "123":
+        turn[0] = "tr_" + digit * 16
+        client = await asyncio.wait_for(clients.get(), timeout=1)
+        await clients.release(client)
+    await asyncio.sleep(0)
+
+    assert [client.turn for client in built] == ["tr_" + d * 16 for d in "123"]
+    assert built[0].exited == 0  # still disconnecting
+    assert "failed to disconnect" in caplog.text
+    closing = asyncio.create_task(clients.aclose())
+    await asyncio.sleep(0)
+    assert not closing.done()
+    gate.set()
+    await asyncio.wait_for(closing, timeout=1)
+    assert [built[0].exited, built[2].exited] == [1, 1]
+
+
 async def test_a_late_call_from_an_earlier_turn_leaves_the_latest_turns_client_held() -> None:
     """An early mint turn 1 queued goes out after turn 2 began. It reconnects
     under turn 1's id and retires nothing; turn 3 retires both."""

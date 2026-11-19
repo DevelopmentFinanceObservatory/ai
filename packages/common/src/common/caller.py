@@ -83,6 +83,25 @@ ANONYMOUS_WRITER = "anonymous"
 
 _supplied: ContextVar[str | None] = ContextVar("supplied_caller", default=None)
 _supplied_turn: ContextVar[str | None] = ContextVar("supplied_turn", default=None)
+# Set by `shared_work_context`: the context runs work several requests join, so
+# the current MCP request's headers name none of them.
+_shared_work: ContextVar[bool] = ContextVar("shared_work", default=False)
+
+
+def _request_headers(name: str) -> list[str] | None:
+    """Every value of the current MCP request's `name` header, or `None` outside
+    an HTTP request or inside `shared_work_context`."""
+    if _shared_work.get():
+        return None
+    # Imported here so that `import common` stays free of fastmcp: the
+    # package's value modules, such as `common.hashed_fields`, are imported
+    # by code that serves no MCP request.
+    from fastmcp.server.dependencies import get_http_request  # noqa: PLC0415
+
+    try:
+        return get_http_request().headers.getlist(name)
+    except RuntimeError:  # no HTTP request in flight
+        return None
 
 
 def current_caller() -> str | None:
@@ -96,16 +115,8 @@ def current_caller() -> str | None:
     supplied = _supplied.get()
     if supplied is not None:
         return supplied
-    # Imported here so that `import common` stays free of fastmcp: the
-    # package's value modules, such as `common.hashed_fields`, are imported
-    # by code that serves no MCP request.
-    from fastmcp.server.dependencies import get_http_request  # noqa: PLC0415
-
-    try:
-        values = get_http_request().headers.getlist(CALLER_HEADER)
-    except RuntimeError:  # no HTTP request in flight
-        return None
-    if len(values) != 1:
+    values = _request_headers(CALLER_HEADER)
+    if values is None or len(values) != 1:
         return None
     caller = values[0].strip()
     return caller if 0 < len(caller) <= MAX_CALLER_CHARS else None
@@ -120,13 +131,8 @@ def current_turn() -> str | None:
     """
     turn = _supplied_turn.get()
     if turn is None:
-        from fastmcp.server.dependencies import get_http_request  # noqa: PLC0415
-
-        try:
-            values = get_http_request().headers.getlist(TURN_HEADER)
-        except RuntimeError:  # no HTTP request in flight
-            return None
-        if len(values) != 1:
+        values = _request_headers(TURN_HEADER)
+        if values is None or len(values) != 1:
             return None
         turn = values[0].strip()
     return turn if TURN.fullmatch(turn) else None
@@ -141,12 +147,10 @@ def current_user_agent() -> str | None:
     an HTTP request. The value is a valid header value and cannot forge a log
     field.
     """
-    from fastmcp.server.dependencies import get_http_request  # noqa: PLC0415
-
-    try:
-        user_agent = get_http_request().headers.get(_USER_AGENT_HEADER, "")
-    except RuntimeError:  # no HTTP request in flight
+    values = _request_headers(_USER_AGENT_HEADER)
+    if not values:
         return None
+    user_agent = values[0]
     cleaned = "".join(ch for ch in user_agent if ch.isascii() and ch.isprintable())
     return cleaned.strip()[:MAX_USER_AGENT_CHARS].strip() or None
 
@@ -226,17 +230,27 @@ def set_supplied_turn(turn: str | None) -> None:
 
 
 def shared_work_context() -> Context:
-    """A copy of the current context with no supplied caller and no supplied turn.
+    """A copy of the current context that names no caller and no turn.
 
     For a task several requests join, such as a replay two conversations both
-    wait on: run it in this context (`asyncio.create_task(..., context=...)`) so
-    the dfo-apis calls it makes name neither the conversation nor the turn that
-    happened to start it.
+    wait on or a fetch several MCP requests share: run it in this context
+    (`asyncio.create_task(..., context=...)`) so the dfo-apis calls it makes name
+    neither the caller nor the turn that happened to start it. The supplied
+    caller and turn are cleared, and `current_caller`, `current_turn` and
+    `current_user_agent` read no header of the MCP request in flight
+    (`in_shared_work`).
     """
     context = copy_context()
     context.run(_supplied.set, None)
     context.run(_supplied_turn.set, None)
+    context.run(_shared_work.set, True)
     return context
+
+
+def in_shared_work() -> bool:
+    """Whether the current context is one `shared_work_context` built, so the
+    work it runs belongs to no single caller."""
+    return _shared_work.get()
 
 
 @contextmanager

@@ -623,8 +623,10 @@ class _Replay:
             return self.root_frames[node["root"]]
         key = rfc8785.dumps(node).decode()
         if key not in self._nodes:
-            # Every slot reaching the node joins this task, so its in-process
-            # dfo-apis calls name no supplied caller or turn.
+            # Every slot reaching the node joins this task, so it names no
+            # caller or turn: neither its in-process dfo-apis calls nor its MCP
+            # calls, whose clients read `in_shared_work` through
+            # `harness.conversation.current_caller_turn`.
             self._nodes[key] = asyncio.create_task(
                 self._derived(node), context=shared_work_context()
             )

@@ -60,9 +60,17 @@ current_user_message: ContextVar[str | None] = ContextVar("studio_user_message",
 def current_conversation_caller() -> str | None:
     """The caller the harness names in its MCP calls: the current
     conversation's, or `None` outside any conversation, which sends no
-    caller rather than one every conversation-less call would share."""
+    caller rather than one every conversation-less call would share.
+
+    `None` too inside work several requests join
+    (`common.caller.in_shared_work`), so a task run in
+    `common.caller.shared_work_context` names no conversation even where it
+    keeps the conversation's ids, as `harness.recipe_replay`'s node tasks do.
+    """
     conversation = current_conversation_id.get()
-    return None if conversation == NO_CONVERSATION else conversation_caller(conversation)
+    if conversation == NO_CONVERSATION or common_caller.in_shared_work():
+        return None
+    return conversation_caller(conversation)
 
 
 def current_caller_turn() -> CallerTurn:
