@@ -59,7 +59,7 @@ from __future__ import annotations
 import logging
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any, Protocol
 
@@ -137,6 +137,9 @@ class _Entry:
 
     lineage: Lineage
     stat_var_count: int | None = None
+    # The store's write counter when this entry was stored under its key
+    # (`ProvenanceStore.generation`).
+    generation: int = 0
 
 
 # The `write_component` outcome key `harness.mcp_client.McpExecutor` hands a
@@ -240,6 +243,8 @@ class ProvenanceStore:
         # a distinction `get`'s bare `None` cannot carry without changing
         # its return type for every caller.
         self._evicted: OrderedDict[tuple[str, _FrameKey], None] = OrderedDict()
+        # Bumped by every store of an entry under a key (`generation`).
+        self._generations = 0
 
     def put(
         self,
@@ -386,7 +391,8 @@ class ProvenanceStore:
                 )
         else:
             self._by_conversation.move_to_end(conversation)
-        bucket[key] = entry
+        self._generations += 1
+        bucket[key] = replace(entry, generation=self._generations)
         bucket.move_to_end(key)
         while len(bucket) > _MAX_MANIFESTS_PER_CONVERSATION:
             evicted_key, _ = bucket.popitem(last=False)
@@ -415,6 +421,17 @@ class ProvenanceStore:
         its manifest resolved or summed."""
         entry = self._entry(conversation, (spec_id, content_version))
         return entry.stat_var_count if entry is not None else None
+
+    def generation(
+        self, *, conversation: str, spec_id: str | None, content_version: str | None
+    ) -> int | None:
+        """A number that changes whenever the lineage or count held for the
+        frame `(spec_id, content_version)` is stored again (`put`,
+        `put_retrieval`, `alias`, `restore`), and stays the same while the
+        entry is unchanged, whatever objects `get` hands out. `None` for a
+        frame the store does not hold."""
+        entry = self._entry(conversation, (spec_id, content_version))
+        return entry.generation if entry is not None else None
 
     def _entry(self, conversation: str, key: _FrameKey) -> _Entry | None:
         """The entry held for `key`, marked most recently used."""

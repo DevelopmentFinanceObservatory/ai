@@ -51,15 +51,17 @@ The lineage of each frame the turn's state names is a `turn_frame_lineage`
 row, kept while the turn is open, when the store is given a `FrameLineage`:
 the graph's reading of which frames a state names, and the process's
 `ProvenanceStore`. An `advance` or `pause` writes a row for each named frame
-whose lineage the process holds and has not written for the turn since, so a
-lineage replaced in process, or held again after an eviction or a skipped
-write, is written at the next write. A segment that lacks one of the named
-frames puts the stored rows of those back, in one read per turn per process
-(`TurnStore.restore_frame_lineage`). The closing write deletes the turn's
-rows. A frame whose lineage no process held, or that JSON cannot hold, has
-no row, and the write goes on without it. The rows are best effort: a card
-drawn on a frame with none is withheld, as on the instance that fetched it
-once the lineage is evicted.
+whose lineage the process holds at a generation (`ProvenanceStore.generation`)
+it has not written for the turn since, so a lineage replaced in process, or
+held again after an eviction or a skipped write, is written at the next
+write. A row the database refuses is logged and not tried again until its
+generation changes, and the other rows of the write land. A segment that
+lacks one of the named frames reads the rows of those it has not already
+found absent (`TurnStore.restore_frame_lineage`) and puts them back. The
+closing write deletes the turn's rows. A frame whose lineage no process
+held, or that JSON cannot hold, has no row, and the write goes on without
+it. The rows are best effort: a card drawn on a frame with none is
+withheld, as on the instance that fetched it once the lineage is evicted.
 
 The lease itself, the Stop request and the frame numbering live on
 `conversations` and are written by `harness.studio_store.StudioStore`.
@@ -82,11 +84,10 @@ from typing import Any, Literal
 from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from harness.db.best_effort import bounded_read, insert_in_savepoint
+from harness.db.best_effort import bounded_read, execute_in_savepoint
 from harness.db.jsonb import json_or_none, to_json_param
 from harness.provenance import (
     CardLineageDecodeError,
-    Lineage,
     ProvenanceStore,
     lineage_from_json,
     lineage_json,
@@ -128,12 +129,27 @@ class FrameLineage:
 @dataclass
 class _TurnLineage:
     """What this process knows of one turn's stored frame lineage as of the
-    cursor at `version`: the lineage and count it last stored (or read back)
-    for each key, and whether it has read the turn's rows."""
+    cursor at `version`. `written` holds, for each key, the source's
+    generation (`ProvenanceStore.generation`) of the lineage this process
+    stored or read back; `failed` the generation of a lineage whose row could
+    not be stored (JSON cannot hold it, or the database refused the row),
+    not tried again until the generation changes; and `absent` the keys a
+    read found no usable row for."""
 
     version: int
-    written: dict[FrameKey, tuple[Lineage, int | None]] = field(default_factory=dict)
-    read: bool = False
+    written: dict[FrameKey, int] = field(default_factory=dict)
+    failed: dict[FrameKey, int] = field(default_factory=dict)
+    absent: set[FrameKey] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class _PendingRow:
+    """One `turn_frame_lineage` row a write stores: its key, the source's
+    generation of its lineage, and the statement's parameters."""
+
+    key: FrameKey
+    generation: int
+    params: dict[str, Any]
 
 
 class TurnStatus(StrEnum):
@@ -417,6 +433,7 @@ _UPSERT_FRAME_LINEAGE = text(
     "ON CONFLICT (turn, spec_id, content_version) DO UPDATE "
     "SET members = EXCLUDED.members, stat_var_count = EXCLUDED.stat_var_count"
 )
+_DELETE_FRAME_LINEAGE = text("DELETE FROM turn_frame_lineage WHERE turn = :turn")
 _SELECT_FRAME_LINEAGE = text(
     "SELECT l.spec_id, l.content_version, l.members, l.stat_var_count "
     "FROM turn_frame_lineage l "
@@ -570,83 +587,109 @@ class TurnStore:
 
     def _lineage_rows(
         self, cursor: Cursor, state: Mapping[str, Any], scope: str | None
-    ) -> tuple[list[dict[str, Any]], dict[FrameKey, tuple[Lineage, int | None]]]:
+    ) -> list[_PendingRow]:
         """The `turn_frame_lineage` rows a write of `state` from `cursor`
-        stores, and what each records as written: one per store key `state`
-        names whose lineage the process holds in conversation `scope` and has
-        not stored for the turn since (`_TurnLineage.written`), its members as
-        JSON text. A key whose lineage JSON cannot hold (a NaN in a manifest)
-        has no row and is logged. None without `lineage` or `scope`."""
+        stores: one per store key `state` names whose lineage the process
+        holds in conversation `scope` at a generation it has neither stored
+        for the turn since nor failed to store (`_TurnLineage`), its members
+        as JSON text. A key whose lineage JSON cannot hold (a NaN in a
+        manifest) has no row, is logged and is recorded as failed at its
+        generation. None without `lineage` or `scope`."""
         if self._lineage is None or scope is None:
-            return [], {}
+            return []
         source = self._lineage.source
-        written = self._turn_lineage(cursor).written
-        rows: list[dict[str, Any]] = []
-        storing: dict[FrameKey, tuple[Lineage, int | None]] = {}
-        for spec_id, content_version in dict.fromkeys(self._lineage.frame_keys(state)):
+        known = self._turn_lineage(cursor)
+        rows: list[_PendingRow] = []
+        for key in dict.fromkeys(self._lineage.frame_keys(state)):
+            spec_id, content_version = key
+            generation = source.generation(
+                conversation=scope, spec_id=spec_id, content_version=content_version
+            )
+            if generation is None or generation in (known.written.get(key), known.failed.get(key)):
+                continue
             lineage = source.get(
                 conversation=scope, spec_id=spec_id, content_version=content_version
             )
-            if lineage is None:
-                continue
-            count = source.stat_var_count(
-                conversation=scope, spec_id=spec_id, content_version=content_version
-            )
-            last = written.get((spec_id, content_version))
-            if last is not None and last[0] is lineage and last[1] == count:
-                continue
+            assert lineage is not None  # the source holds a generation for the key
             members = json_or_none(
                 lineage_json(lineage),
                 logger=logger,
-                failure=(
-                    f"turn store: the lineage of frame spec_id={spec_id!r} "
-                    f"content_version={content_version!r} cannot be stored as JSON; "
+                failure=lambda key=key: (
+                    f"turn store: the lineage of frame spec_id={key[0]!r} "
+                    f"content_version={key[1]!r} cannot be stored as JSON; "
                     f"turn {cursor.turn_index} goes on without it"
                 ),
             )
             if members is None:
+                known.failed[key] = generation
                 continue
             rows.append(
-                {
-                    "turn": cursor.id,
-                    "spec_id": spec_id,
-                    "content_version": content_version,
-                    "members": members,
-                    "stat_var_count": count,
-                }
+                _PendingRow(
+                    key=key,
+                    generation=generation,
+                    params={
+                        "turn": cursor.id,
+                        "spec_id": spec_id,
+                        "content_version": content_version,
+                        "members": members,
+                        "stat_var_count": source.stat_var_count(
+                            conversation=scope, spec_id=spec_id, content_version=content_version
+                        ),
+                    },
+                )
             )
-            storing[(spec_id, content_version)] = (lineage, count)
-        return rows, storing
+        return rows
 
     async def _write_lineage(
-        self, conn: AsyncConnection, cursor: Cursor, rows: Sequence[Mapping[str, Any]]
-    ) -> bool:
-        """Upsert `rows` (`_lineage_rows`) in the write's transaction, in a
-        savepoint (`insert_in_savepoint`). `True` when they were stored."""
+        self, conn: AsyncConnection, cursor: Cursor, rows: Sequence[_PendingRow]
+    ) -> tuple[dict[FrameKey, int], dict[FrameKey, int]]:
+        """Upsert `rows` (`_lineage_rows`) in the write's transaction, in one
+        savepoint (`execute_in_savepoint`), and return the generations stored
+        and those that failed, by key. A batch the database refuses is tried
+        again row by row, each in a savepoint of its own, so one bad row
+        keeps no other from landing; each row that fails is logged."""
         if not rows:
-            return True
-        return await insert_in_savepoint(
+            return {}, {}
+        if len(rows) > 1 and await execute_in_savepoint(
             conn,
             _UPSERT_FRAME_LINEAGE,
-            rows,
-            logger=logger,
-            failure=(
-                f"turn store: the lineage of turn {cursor.turn_index}'s frames was not "
-                "stored; the turn goes on without it"
-            ),
-        )
+            [row.params for row in rows],
+            logger=None,
+            failure=lambda: "",
+        ):
+            return {row.key: row.generation for row in rows}, {}
+        stored: dict[FrameKey, int] = {}
+        failed: dict[FrameKey, int] = {}
+        for row in rows:
+            landed = await execute_in_savepoint(
+                conn,
+                _UPSERT_FRAME_LINEAGE,
+                row.params,
+                logger=logger,
+                failure=lambda row=row: (
+                    f"turn store: the lineage of frame spec_id={row.key[0]!r} "
+                    f"content_version={row.key[1]!r} was not stored; turn "
+                    f"{cursor.turn_index} goes on without it"
+                ),
+            )
+            (stored if landed else failed)[row.key] = row.generation
+        return stored, failed
 
     def _stored(
         self,
         before: Cursor,
         after: Cursor,
-        storing: Mapping[FrameKey, tuple[Lineage, int | None]],
+        written: tuple[Mapping[FrameKey, int], Mapping[FrameKey, int]],
     ) -> None:
-        """Record a committed write from `before` to `after`, which stored
-        `storing`."""
+        """Record a committed write from `before` to `after`, which stored the
+        first of `written` and failed to store the second."""
         self._moved(before, after)
-        if storing:
-            self._turn_lineage(after).written.update(storing)
+        stored, failed = written
+        if stored or failed:
+            known = self._turn_lineage(after)
+            known.written.update(stored)
+            known.failed.update(failed)
+            known.absent.difference_update(stored)
 
     async def open_turn(
         self,
@@ -761,9 +804,10 @@ class TurnStore:
         after a restart, taking over an open turn. Rows of frames the state no
         longer names, or the source holds, are left unread.
 
-        One read per turn per process, until another writer moves the cursor:
-        a frame with no row anywhere costs no read at each later segment.
-        Best effort: the read waits at most `_FRAME_LINEAGE_READ_BUDGET_S`,
+        A key a read found no usable row for is not read again by this
+        process until another writer moves the cursor, so a frame with no row
+        anywhere costs one read, and a frame evicted after an earlier read is
+        read at the next segment that lacks it. Best effort: the read waits at most `_FRAME_LINEAGE_READ_BUDGET_S`,
         and one that fails or runs past it is logged, restores nothing and is
         tried again at the next segment (`bounded_read`). A row that does not
         decode is logged and skipped. Nothing happens without `lineage` or
@@ -780,18 +824,21 @@ class TurnStore:
             )
             is None
         ]
-        if not missing or known.read:
+        unread = [key for key in missing if key not in known.absent]
+        if not unread:
             return
         rows = await bounded_read(
-            self._frame_lineage(cursor.id, missing),
+            self._frame_lineage(cursor.id, unread),
             budget_s=_FRAME_LINEAGE_READ_BUDGET_S,
             held=self._abandoned_reads,
             logger=logger,
-            what=f"turn {cursor.turn_index} goes on without its stored frame lineage: the read",
+            what=lambda: (
+                f"turn {cursor.turn_index} goes on without its stored frame lineage: the read"
+            ),
         )
         if rows is None:
             return
-        known.read = True
+        known.absent.update(unread)
         for row in rows:
             try:
                 lineage = lineage_from_json(row.members)
@@ -804,13 +851,19 @@ class TurnStore:
                     row.content_version,
                 )
                 continue
+            key = (row.spec_id, row.content_version)
             source.restore_frame(
                 conversation=lineage_scope,
-                frame=(row.spec_id, row.content_version),
+                frame=key,
                 lineage=lineage,
                 stat_var_count=row.stat_var_count,
             )
-            known.written[(row.spec_id, row.content_version)] = (lineage, row.stat_var_count)
+            known.absent.discard(key)
+            generation = source.generation(
+                conversation=lineage_scope, spec_id=row.spec_id, content_version=row.content_version
+            )
+            if generation is not None:
+                known.written[key] = generation
 
     async def _frame_lineage(self, turn: int, keys: Sequence[FrameKey]) -> list[Any]:
         """The turn's `turn_frame_lineage` rows of `keys`, read over the
@@ -873,7 +926,7 @@ class TurnStore:
             SegmentLost: `segment_id` does not hold the conversation's lease.
             CursorStale: the cursor moved, or the turn is not running.
         """
-        rows, storing = self._lineage_rows(cursor, state, lineage_scope)
+        rows = self._lineage_rows(cursor, state, lineage_scope)
         async with self._engine.begin() as conn:
             await _fence(conn, cursor.conversation, segment_id)
             advanced = await _swap(
@@ -887,8 +940,8 @@ class TurnStore:
                 state=state,
                 records=records,
             )
-            stored = await self._write_lineage(conn, cursor, rows)
-        self._stored(cursor, advanced, storing if stored else {})
+            written = await self._write_lineage(conn, cursor, rows)
+        self._stored(cursor, advanced, written)
         return advanced
 
     async def pause(
@@ -918,7 +971,7 @@ class TurnStore:
             SegmentLost: `segment_id` does not hold the conversation's lease.
             CursorStale: the cursor moved, or the turn is not running.
         """
-        rows, storing = self._lineage_rows(cursor, state, lineage_scope)
+        rows = self._lineage_rows(cursor, state, lineage_scope)
         async with self._engine.begin() as conn:
             await _fence(conn, cursor.conversation, segment_id)
             paused = await _swap(
@@ -942,8 +995,8 @@ class TurnStore:
                 state=state,
                 records=records,
             )
-            stored = await self._write_lineage(conn, cursor, rows)
-        self._stored(cursor, paused, storing if stored else {})
+            written = await self._write_lineage(conn, cursor, rows)
+        self._stored(cursor, paused, written)
         return paused
 
     async def record_answer(
@@ -1043,7 +1096,8 @@ async def finish_on(
 ) -> Cursor:
     """Close the open turn with `status`, one of `CLOSED`, on `conn`, in the
     caller's transaction, appending `records`, and delete the turn's frame
-    lineage rows. `FAILED` and `ABANDONED`
+    lineage rows, best effort: a delete that fails for good is logged and
+    the close commits (`execute_in_savepoint`). `FAILED` and `ABANDONED`
     take an `error` and the others none. `state`, its spec blocks included,
     replaces the stored state when given. A paused turn's pause is dropped,
     so no answer can reach it. A close `CANCELLED` records failed every
@@ -1075,8 +1129,15 @@ async def finish_on(
         state=state,
         records=records,
     )
-    await conn.execute(
-        text("DELETE FROM turn_frame_lineage WHERE turn = :turn"), {"turn": cursor.id}
+    await execute_in_savepoint(
+        conn,
+        _DELETE_FRAME_LINEAGE,
+        {"turn": cursor.id},
+        logger=logger,
+        failure=lambda: (
+            f"turn store: the frame lineage of closed turn {cursor.turn_index} was not "
+            "deleted; the close goes on"
+        ),
     )
     if status is TurnStatus.CANCELLED:
         await end_unfinished(conn, cursor.conversation, now=now)

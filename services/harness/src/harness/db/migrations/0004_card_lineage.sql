@@ -57,7 +57,8 @@ CREATE TABLE conversation_card_lineage (
 -- Rows are best effort: a frame no instance held at a write, or whose
 -- lineage JSON cannot hold, has none, and a card drawn from it is withheld
 -- `provenance_unavailable`. The closing write deletes the turn's rows
--- (`harness.turn.store.finish_on`), so the table holds open turns only.
+-- (`harness.turn.store.finish_on`), so the table holds open turns only; a
+-- delete that fails is logged and the close commits, leaving its rows.
 --
 -- Creating the table takes SHARE ROW EXCLUSIVE on `turn_cursors` for the
 -- foreign key, as the table above does on `conversations`.

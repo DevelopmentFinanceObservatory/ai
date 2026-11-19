@@ -89,7 +89,7 @@ from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.approval import ApprovalRecord
-from harness.db.best_effort import insert_in_savepoint
+from harness.db.best_effort import execute_in_savepoint
 from harness.db.jsonb import json_or_none, to_json_param
 from harness.fatal_codes import recorded_code
 from harness.graph.state import (
@@ -913,7 +913,7 @@ def _card_lineage_row(lineage: CardLineage) -> dict[str, Any] | None:
     members = json_or_none(
         lineage.members_json(),
         logger=logger,
-        failure=(
+        failure=lambda: (
             f"studio store: the lineage of component_id={lineage.component_id!r} cannot be "
             "stored as JSON; the card lands without it"
         ),
@@ -939,13 +939,13 @@ async def _insert_card_lineage(conn: AsyncConnection, pk: int, row: Mapping[str,
     retried after a commit whose acknowledgement was lost finds the row there.
     A transient fault raises, for the whole write to be retried; any other
     is logged at error and the card lands without its row
-    (`harness.db.best_effort.insert_in_savepoint`)."""
-    await insert_in_savepoint(
+    (`harness.db.best_effort.execute_in_savepoint`)."""
+    await execute_in_savepoint(
         conn,
         _INSERT_CARD_LINEAGE,
         {**row, "pk": pk},
         logger=logger,
-        failure=(
+        failure=lambda: (
             f"studio store: the lineage of component_id={row['component_id']!r} was not "
             "stored; the card lands without it"
         ),
