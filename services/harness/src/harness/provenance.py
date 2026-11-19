@@ -57,9 +57,9 @@ and no open turn names has no stored lineage.
 from __future__ import annotations
 
 import logging
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any, Protocol
 
@@ -232,6 +232,17 @@ class CardLineages(Protocol):
         ...
 
 
+@dataclass
+class _Kept:
+    """The frames one conversation's running segments keep
+    (`ProvenanceStore.keep`): how many segments keep each key (`counts`, so
+    a key is exempt while it is in it) and the keys each segment's token
+    keeps (`by_token`, for its release)."""
+
+    counts: Counter[_FrameKey] = field(default_factory=Counter)
+    by_token: dict[int, frozenset[_FrameKey]] = field(default_factory=dict)
+
+
 class ProvenanceStore:
     """Frame lineages, keyed by conversation and `(spec_id, content_version)`."""
 
@@ -246,9 +257,9 @@ class ProvenanceStore:
         self._evicted: OrderedDict[tuple[str, _FrameKey], None] = OrderedDict()
         # Bumped by every store of an entry under a key (`held`).
         self._generations = 0
-        # Per conversation with a running segment that names frames, each
-        # such segment's token and the keys it keeps (`keep`).
-        self._kept: dict[str, dict[int, frozenset[_FrameKey]]] = {}
+        # Per conversation with a running segment that names frames, the keys
+        # its running segments keep (`keep`).
+        self._kept: dict[str, _Kept] = {}
         # The last token `segment_token` handed out.
         self._segments = 0
 
@@ -409,19 +420,26 @@ class ProvenanceStore:
         past `_MAX_CONVERSATIONS` drops its entries. The turn's tool budgets
         (`harness.graph.state.BUDGETS`) bound each segment's keys, so the
         store stays bounded."""
-        if keys:
-            self._kept.setdefault(conversation, {})[token] = frozenset(keys)
-        else:
-            self.release(conversation=conversation, token=token)
+        self.release(conversation=conversation, token=token)
+        if not keys:
+            return
+        kept = self._kept.setdefault(conversation, _Kept())
+        held = frozenset(keys)
+        kept.by_token[token] = held
+        kept.counts.update(held)
 
     def release(self, *, conversation: str, token: int) -> None:
         """End the keep of the segment of `token`: the frames no other running
         segment keeps count against the per-conversation bound again."""
-        segments = self._kept.get(conversation)
-        if segments is None:
+        kept = self._kept.get(conversation)
+        if kept is None:
             return
-        segments.pop(token, None)
-        if not segments:
+        held = kept.by_token.pop(token, frozenset())
+        kept.counts.subtract(held)
+        for key in held:
+            if kept.counts[key] <= 0:
+                del kept.counts[key]
+        if not kept.by_token:
             del self._kept[conversation]
 
     def _store(self, *, conversation: str, key: _FrameKey, entry: _Entry) -> None:
@@ -448,8 +466,9 @@ class ProvenanceStore:
         bucket.move_to_end(key)
         if len(bucket) <= _MAX_MANIFESTS_PER_CONVERSATION:
             return
-        kept: set[_FrameKey] = set().union(*self._kept.get(conversation, {}).values())
-        others = [held for held in bucket if held not in kept]
+        kept = self._kept.get(conversation)
+        counts = kept.counts if kept is not None else Counter()
+        others = [held for held in bucket if held not in counts]
         while len(others) > _MAX_MANIFESTS_PER_CONVERSATION:
             evicted_key = others.pop(0)
             del bucket[evicted_key]

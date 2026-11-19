@@ -553,9 +553,10 @@ async def drive[E](
     turn goes on, and before its node runs, the lineage of each frame the
     turn names is brought into step with its rows, best effort
     (`TurnStore.restore_frame_lineage`), so an answer the turn refuses or a
-    turn that closes does not wait for that read. The restore's
-    `SegmentLineage` goes to each of the segment's pause and move writes, and
-    the segment ends it however it returns (`TurnStore.end_segment`).
+    turn that closes does not wait for that read. The segment's
+    `SegmentLineage` is made before the restore (`TurnStore.start_segment`),
+    goes to the restore and each of the segment's pause and move writes, and
+    is ended however the segment returns (`TurnStore.end_segment`).
 
     A write that fails for any reason but those `_NOT_THE_TURNS` names (a
     value JSON cannot hold, a database error) closes the turn `failed` at
@@ -613,14 +614,12 @@ async def drive[E](
     except _Closes as closing:
         return await close(closing.status, node, closing.error)
     cursor = segment.cursor
-    # The segment's kept frames stop being exempt from the provenance
-    # store's bound when it ends, however it ends, a cut during the restore
-    # included (`TurnStore.end_segment`).
-    lineage: SegmentLineage | None = None
+    # Made before any await, so the segment's kept frames stop being exempt
+    # from the provenance store's bound however the segment ends, a cut
+    # during or just after the restore included (`TurnStore.end_segment`).
+    lineage = store.start_segment(lineage_scope=_lineage_scope(key))
     try:
-        lineage = await _step(
-            store.restore_frame_lineage(cursor, lineage_scope=_lineage_scope(key))
-        )
+        await _step(store.restore_frame_lineage(cursor, lineage))
         while True:
             # The node works on a copy, so whatever it changes in place, the
             # cursor keeps the state as stored until a write stores the node's.

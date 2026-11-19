@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
-from collections import OrderedDict
 from collections.abc import (
     Mapping,
     Sequence,
@@ -31,13 +29,11 @@ from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter
 from harness.tool_contracts import (
     reading_facts,
 )
-from harness.turn.store import SPECS_KEY, FrameKey
+from harness.turn.store import SPECS_KEY, FrameKey, FrameKeys
 from harness.turn_records import Origin, SearchReading, open_prices
 
 if TYPE_CHECKING:
     from harness.turn.node import NodeCtx
-
-logger = logging.getLogger(__name__)
 
 # The kind of the pause the `approve` node puts the plan card to the user
 # under, read by `harness.studio_translate` to tell the plan card from a
@@ -495,41 +491,16 @@ def frame_store_ref(entry: Mapping[str, Any]) -> dict[str, Any]:
     return entry["ref"]
 
 
-# The conversations and malformed frames shapes `frame_store_keys` has warned
-# of, least recently seen dropped past `_MAX_WARNED_FRAME_SHAPES`, so a state
-# read at every boundary write warns once per conversation.
-_warned_frame_shapes: OrderedDict[tuple[str, ...], None] = OrderedDict()
-_MAX_WARNED_FRAME_SHAPES = 256
-
-
-def _warn_frame_shape_once(shape: tuple[str, ...], message: str, *args: Any) -> None:
-    if shape in _warned_frame_shapes:
-        _warned_frame_shapes.move_to_end(shape)
-        return
-    _warned_frame_shapes[shape] = None
-    while len(_warned_frame_shapes) > _MAX_WARNED_FRAME_SHAPES:
-        _warned_frame_shapes.popitem(last=False)
-    logger.warning(message, *args)
-
-
-def frame_store_keys(state: Mapping[str, Any], scope: str) -> list[FrameKey]:
+def frame_store_keys(state: Mapping[str, Any]) -> FrameKeys:
     """The lineage store keys of the frames in `state`
     (`ORCHESTRATOR_FRAMES_KEY`): each entry's `ref` and `store_ref`, in order
     and each once, which the turn store keeps the lineage of
     (`harness.turn.store.FrameLineage`). A pair with a member missing names
     no key, and so does a frames value or entry that is not a mapping, which
-    is logged once per conversation `scope` and malformed shape
-    (`_warn_frame_shape_once`)."""
+    `FrameKeys.skipped` describes for the caller to report."""
     frames = state.get(ORCHESTRATOR_FRAMES_KEY) or {}
     if not isinstance(frames, Mapping):
-        _warn_frame_shape_once(
-            (scope, "container", type(frames).__name__),
-            "conversation %s: the state's %s is a %s, not a mapping; it names no frame",
-            scope,
-            ORCHESTRATOR_FRAMES_KEY,
-            type(frames).__name__,
-        )
-        return []
+        return FrameKeys(keys=[], skipped=[f":{type(frames).__name__}"])
     keys: dict[FrameKey, None] = {}
     skipped: list[str] = []
     for frame_id, entry in frames.items():
@@ -541,17 +512,7 @@ def frame_store_keys(state: Mapping[str, Any], scope: str) -> list[FrameKey]:
                 spec_id, content_version = ref.get("spec_id"), ref.get("content_version")
                 if isinstance(spec_id, str) and isinstance(content_version, str):
                     keys[(spec_id, content_version)] = None
-    if skipped:
-        _warn_frame_shape_once(
-            (scope, "entries", *skipped),
-            "conversation %s: the state's %s holds %d frame entries that are not "
-            "mappings (%s); they name no frame",
-            scope,
-            ORCHESTRATOR_FRAMES_KEY,
-            len(skipped),
-            ", ".join(skipped),
-        )
-    return list(keys)
+    return FrameKeys(keys=list(keys), skipped=skipped)
 
 
 def store_search(

@@ -83,11 +83,11 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -118,15 +118,26 @@ _FRAME_LINEAGE_READ_BUDGET_S = 2.0
 type FrameKey = tuple[str, str]
 
 
+class FrameKeys(NamedTuple):
+    """The store keys a turn's state names, in order and each once (`keys`),
+    and a description of each frames value or entry that named none because
+    it is not a mapping (`skipped`, as `frame_id:type`, or `:type` for the
+    frames value itself)."""
+
+    keys: list[FrameKey]
+    skipped: list[str]
+
+
 @dataclass(frozen=True)
 class FrameLineage:
     """What the store keeps a turn's frame lineage from: `frame_keys`, the
     store keys of the frames a turn's state names, read the way the graph
-    that wrote the state names them, given the state and the conversation it
-    belongs to, and `source`, the process's frame lineage store."""
+    that wrote the state names them, with the entries it skipped as not
+    mappings (`FrameKeys`), and `source`, the process's frame lineage
+    store."""
 
     source: ProvenanceStore
-    frame_keys: Callable[[Mapping[str, Any], str], Iterable[FrameKey]]
+    frame_keys: Callable[[Mapping[str, Any]], FrameKeys]
 
 
 # The range of a Postgres `integer`, the `stat_var_count` column.
@@ -136,7 +147,7 @@ _INTEGER_RANGE = range(-(2**31), 2**31)
 @dataclass
 class SegmentLineage:
     """One segment's frame lineage bookkeeping, which
-    `TurnStore.restore_frame_lineage` starts and each of the segment's
+    `TurnStore.start_segment` makes and the segment's restore and each of its
     `advance` and `pause` writes takes: the conversation the source holds
     the turn's frames under (`scope`), the source's last generation
     (`ProvenanceStore.last_generation`) at the segment's restore point
@@ -144,9 +155,9 @@ class SegmentLineage:
     and for each key the source's generation (`ProvenanceStore.held`) of the
     lineage the segment committed (a row, or the delete of one whose lineage
     failed its check) or read back (`written`). `token` is the segment's
-    place in the order the source started segments in
-    (`ProvenanceStore.segment_token`), which its kept frames are recorded
-    under (`ProvenanceStore.keep`)."""
+    identity in the source (`ProvenanceStore.segment_token`), which its kept
+    frames are recorded under (`ProvenanceStore.keep`); tokens carry no
+    order."""
 
     scope: str
     since: int
@@ -623,7 +634,7 @@ class TurnStore:
             return write
         source, scope = self._lineage.source, segment.scope
         turn_index = cursor.turn_index
-        named = list(dict.fromkeys(self._lineage.frame_keys(state, scope)))
+        named = list(dict.fromkeys(self._lineage.frame_keys(state).keys))
         source.keep(conversation=scope, keys=named, token=segment.token)
         for key in named:
             spec_id, content_version = key
@@ -777,41 +788,48 @@ class TurnStore:
                     )
                 return current, await _records(conn, cursor.id)
 
-    async def restore_frame_lineage(
-        self, cursor: Cursor, *, lineage_scope: str | None
-    ) -> SegmentLineage | None:
-        """Bring the `FrameLineage` source's lineage of each frame `cursor`'s
-        state names in conversation `lineage_scope` into step with the turn's
-        rows, which commit with the cursor, at the start of a segment, and
-        return the segment's `SegmentLineage`, which each of its writes takes.
+    def start_segment(self, *, lineage_scope: str | None) -> SegmentLineage | None:
+        """The `SegmentLineage` of a segment starting now in conversation
+        `lineage_scope`: its restore point is the source's last generation
+        now (`SegmentLineage.since`), and its token is new. Synchronous, so
+        the caller holds the value before any await and ends it however the
+        segment ends (`end_segment`). `None` without `lineage` or
+        `lineage_scope`: the segment writes no lineage."""
+        if self._lineage is None or lineage_scope is None:
+            return None
+        source = self._lineage.source
+        return SegmentLineage(
+            scope=lineage_scope, since=source.last_generation(), token=source.segment_token()
+        )
 
-        The segment's restore point is the source's last generation now
-        (`SegmentLineage.since`): from here on the segment's writes store
-        only entries produced or restored after it. The source keeps every
-        named frame past its per-conversation bound (`ProvenanceStore.keep`).
-        One read takes the rows of every named frame. Each row is put over
-        what the source holds (`ProvenanceStore.restore_frame` with
-        `overwrite`), in the state's frame order, and a named frame with no
-        row is dropped from the source, since the turn vouches for no lineage
-        of it. Rows of frames the state no longer names are left unread, and
-        so are frames whose key Postgres text cannot hold.
+    async def restore_frame_lineage(self, cursor: Cursor, segment: SegmentLineage | None) -> None:
+        """Bring the `FrameLineage` source's lineage of each frame `cursor`'s
+        state names in `segment`'s conversation into step with the turn's
+        rows, which commit with the cursor, at the start of the segment
+        (`start_segment`).
+
+        From the segment's restore point on, its writes store only entries
+        produced or restored after it. The source keeps every named frame
+        past its per-conversation bound (`ProvenanceStore.keep`) until the
+        segment ends (`end_segment`). One read takes the rows of every named
+        frame. Each row is put over what the source holds
+        (`ProvenanceStore.restore_frame` with `overwrite`), in the state's
+        frame order, and a named frame with no row is dropped from the
+        source, since the turn vouches for no lineage of it. Rows of frames
+        the state no longer names are left unread, and so are frames whose
+        key Postgres text cannot hold. A frames value or entry that is not a
+        mapping names no frame and is logged here, once per segment; the
+        segment's writes skip it without a word.
 
         Best effort: the read waits at most `_FRAME_LINEAGE_READ_BUDGET_S`,
         and one that fails or runs past it is logged and restores nothing
         (`bounded_read`); the source keeps what it held, which the segment's
         writes then leave unwritten, so the rows stay as they are. Any other
-        fault is logged and the segment goes on with the returned value. A
-        cancellation during the restore ends the segment it started
-        (`end_segment`) before it propagates, so the frames it kept do not
-        stay exempt. A row that does not decode is logged, and its frame
-        dropped. `None` without `lineage` or `lineage_scope`: the segment
-        writes no lineage."""
-        if self._lineage is None or lineage_scope is None:
-            return None
-        source = self._lineage.source
-        segment = SegmentLineage(
-            scope=lineage_scope, since=source.last_generation(), token=source.segment_token()
-        )
+        fault is logged and the segment goes on. A row that does not decode
+        is logged, and its frame dropped. Nothing without `lineage` or
+        `segment`."""
+        if self._lineage is None or segment is None:
+            return
         try:
             await self._restore(cursor, segment)
         except Exception:
@@ -819,16 +837,12 @@ class TurnStore:
                 "turn %s goes on without its stored frame lineage: the restore failed",
                 cursor.turn_index,
             )
-        except BaseException:
-            self.end_segment(segment)
-            raise
-        return segment
 
     def end_segment(self, segment: SegmentLineage | None) -> None:
         """End `segment`: the frames it kept outside the source's
-        per-conversation bound become evictable again
-        (`ProvenanceStore.release`), unless a later segment of the
-        conversation has kept its own since."""
+        per-conversation bound (`ProvenanceStore.release`) count against it
+        again, unless another running segment of the conversation keeps
+        them."""
         if self._lineage is not None and segment is not None:
             self._lineage.source.release(conversation=segment.scope, token=segment.token)
 
@@ -836,7 +850,16 @@ class TurnStore:
         """The read and restore of `restore_frame_lineage`, into `segment`."""
         assert self._lineage is not None
         source, scope = self._lineage.source, segment.scope
-        named = list(dict.fromkeys(self._lineage.frame_keys(cursor.state, scope)))
+        frames = self._lineage.frame_keys(cursor.state)
+        if frames.skipped:
+            logger.warning(
+                "turn %s of conversation %s: its state's frames hold entries that are "
+                "not mappings (%s); they name no frame",
+                cursor.turn_index,
+                scope,
+                ", ".join(frames.skipped),
+            )
+        named = list(dict.fromkeys(frames.keys))
         source.keep(conversation=scope, keys=named, token=segment.token)
         readable = [key for key in named if _text_key(key)]
         if not readable:
