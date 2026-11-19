@@ -65,6 +65,7 @@ from typing import Any, Literal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from harness.db.jsonb import to_json_param
 from harness.run_ledger import end_unfinished
 from harness.studio_state import SegmentLost
 
@@ -184,7 +185,7 @@ def _json(value: Any) -> str | None:
     Raises `ValueError` for a NaN or an infinity, which JSON cannot hold,
     and `TypeError` for a value JSON cannot encode, before any statement
     runs."""
-    return None if value is None else json.dumps(value, allow_nan=False)
+    return None if value is None else to_json_param(value)
 
 
 _COLUMNS = (
@@ -318,7 +319,7 @@ async def _write_specs(conn: AsyncConnection, cursor: Cursor, specs: Specs) -> _
     changed: list[dict[str, Any]] = []
     moved: list[dict[str, Any]] = []
     for position, (spec_id, block) in enumerate(specs.items()):
-        body = json.dumps(block, allow_nan=False)
+        body = to_json_param(block)
         digests[spec_id] = digest = _spec_digest(body)
         if cursor.spec_digests.get(spec_id) == digest:
             # `spec_blocks` holds a block for every digest the cursor holds.

@@ -40,7 +40,6 @@ with `SegmentLost`.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -71,6 +70,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from harness.conversation import current_conversation_key
+from harness.db.jsonb import to_json_param
 from harness.studio_state import SegmentLost, renew_lease_now
 from harness.tool_contracts import HarnessCode
 
@@ -108,7 +108,7 @@ async def _put_record(conn: AsyncConnection, pk: int, run_id: str, record: Any) 
             "UPDATE runs SET record = CAST(:record AS jsonb) "
             "WHERE conversation = :pk AND run_id = :run_id"
         ),
-        {"pk": pk, "run_id": run_id, "record": json.dumps(record)},
+        {"pk": pk, "run_id": run_id, "record": to_json_param(record)},
     )
 
 
@@ -219,8 +219,8 @@ async def admit_on(
         {
             "pk": pk,
             "run_id": candidate.run_id,
-            "record": json.dumps(candidate.model_dump(mode="json")),
-            "submission": json.dumps(submission),
+            "record": to_json_param(candidate.model_dump(mode="json")),
+            "submission": to_json_param(submission),
         },
     )
     if fresh is None:
@@ -242,7 +242,7 @@ async def store_plan_on(conn: AsyncConnection, pk: int, revision: str, plan: Jso
             "INSERT INTO run_plans (conversation, revision, plan) "
             "VALUES (:pk, :revision, CAST(:plan AS jsonb)) ON CONFLICT DO NOTHING"
         ),
-        {"pk": pk, "revision": revision, "plan": json.dumps(plan)},
+        {"pk": pk, "revision": revision, "plan": to_json_param(plan)},
     )
 
 
@@ -440,6 +440,10 @@ class StudioRunLedger:
                         "UPDATE runs SET retrievals = CAST(:retrievals AS jsonb) "
                         "WHERE conversation = :pk AND run_id = :run_id"
                     ),
-                    {"pk": pk, "run_id": run_id, "retrievals": json.dumps(list(change.retrievals))},
+                    {
+                        "pk": pk,
+                        "run_id": run_id,
+                        "retrievals": to_json_param(list(change.retrievals)),
+                    },
                 )
             return advanced
