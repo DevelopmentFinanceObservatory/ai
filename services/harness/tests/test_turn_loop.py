@@ -1311,11 +1311,27 @@ async def test_a_segment_cut_off_after_its_pause_committed_settles_on_the_cut(
 ) -> None:
     """A Stop after the pause's write closes the turn `cancelled` with no
     question shown: the user stopped it. After a lost lease the client gets
-    the question the store holds, and the turn stays paused for the answer."""
+    the question the store holds, and the turn stays paused for the answer.
+    The work the pause's commit is owed (early mints) is started only for a
+    question that stays open, so a Stop starts none."""
     store = _HeldAfterPausing(pg_engine)
     lease_a, lease_b = await _instance(pg_engine, clock), await _instance(pg_engine, clock)
     segment_id = await _claim(lease_a)
-    graph = Graph(start="ask", nodes={"ask": _asking([])}, edges={("ask", "next"): END})
+    minted: list[str] = []
+    asking = _asking([])
+
+    async def ask(ctx: NodeCtx, node_input: Any) -> Pause:
+        async def mint() -> None:
+            minted.append("ask")
+
+        ctx.after_commit(mint)
+        return await asking.run(ctx, node_input)
+
+    graph = Graph(
+        start="ask",
+        nodes={"ask": Node(run=ask, resume=asking.resume)},
+        edges={("ask", "next"): END},
+    )
     events: list[TurnEvent] = []
     running = asyncio.create_task(
         _segment(store, lease_a, await _open(store, segment_id, graph), segment_id, graph, events)
@@ -1327,7 +1343,9 @@ async def test_a_segment_cut_off_after_its_pause_committed_settles_on_the_cut(
         async with pg_engine.begin() as conn:
             await conn.execute(text("UPDATE conversations SET lease_segment_id = 'segment-b'"))
     segment = await asyncio.wait_for(running, 5)
+    await asyncio.gather(*pending_owed_work())
 
+    assert minted == ([] if cut_by == "stop" else ["ask"])
     if cut_by == "stop":
         assert events == []
         assert segment.outcome is Outcome.CANCELLED
@@ -1843,8 +1861,9 @@ async def test_a_lost_lease_during_after_commit_work_leaves_the_segment_on_the_c
 ) -> None:
     """`work`'s move to `later` commits, and the lease is lost while its
     work after the commit awaits. The read back that would settle the turn
-    fails, so the segment is lost holding the cursor the write committed,
-    whose records the next turn keeps."""
+    fails, so the segment settles on the cursor the write acknowledged: it
+    reports the move and starts the work after the commit not yet started,
+    and is lost holding that cursor, whose records the next turn keeps."""
     store = _ReadBackFails(pg_engine)
     lease_a = _RenewalsFail(pg_engine, **clock.store_kwargs)
     lease_b = await _instance(pg_engine, clock)
@@ -1855,8 +1874,14 @@ async def test_a_lost_lease_during_after_commit_work_leaves_the_segment_on_the_c
         await _make_cut(lease_a, lease_b, "lost")
         await asyncio.sleep(3600)
 
+    acknowledged: list[str] = []
+
+    async def acknowledge() -> None:
+        acknowledged.append("work")
+
     async def work(ctx: NodeCtx, node_input: Any) -> Next:
         ctx.after_commit(cut_while_working)
+        ctx.after_commit(acknowledge)
         return Next("next")
 
     async def later(ctx: NodeCtx, node_input: Any) -> Next:
@@ -1868,8 +1893,12 @@ async def test_a_lost_lease_during_after_commit_work_leaves_the_segment_on_the_c
         edges={("work", "next"): "later", ("later", "done"): END},
     )
     opened = await _open(store, segment_id, graph)
-    segment = await asyncio.wait_for(_segment(store, lease_a, opened, segment_id, graph, []), 5)
+    events: list[TurnEvent] = []
+    segment = await asyncio.wait_for(_segment(store, lease_a, opened, segment_id, graph, events), 5)
+    await asyncio.gather(*pending_owed_work())
 
+    assert events == [NodeDone(node="work", label="next", output=None)]
+    assert acknowledged == ["work"]
     assert segment.outcome is Outcome.LOST
     committed = await TurnStore(pg_engine).turn(opened.id)
     assert (committed.node, committed.version) == ("later", opened.version + 1)

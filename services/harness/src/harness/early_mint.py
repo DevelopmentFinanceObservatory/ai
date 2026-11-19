@@ -124,12 +124,18 @@ class EarlyMints:
         # Every call not yet finished, so none is collected mid-flight and
         # `aclose` can cancel them.
         self._tasks: set[asyncio.Task[None]] = set()
+        # Set by `aclose`, after which an offer starts nothing.
+        self._closed = False
 
     def offer(self, plan: Plan) -> None:
         """Start `plan`'s retrievals, unless its revision is the one this
         conversation last started. Returns at once. The calls run as tasks of
         their own, in the current context, so they name the conversation's
-        caller."""
+        caller. Once `aclose` has run, an offer, such as one a cut segment's
+        owed work makes at shutdown, is logged and starts nothing."""
+        if self._closed:
+            logger.warning("early mint: an offer after shutdown started nothing")
+            return
         if plan.workflow is None:
             return
         revision = plan_revision(plan)
@@ -215,7 +221,9 @@ class EarlyMints:
         )
 
     async def aclose(self) -> None:
-        """Cancel every call still running, at shutdown."""
+        """Cancel every call still running, at shutdown, and refuse every
+        later offer."""
+        self._closed = True
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()

@@ -3395,3 +3395,8 @@ async def test_closing_early_mints_cancels_the_calls_still_running(
     await early.aclose()
 
     assert sends.cancelled == 1
+    # An offer after the close, as a cut segment's owed work can make at
+    # shutdown, starts nothing.
+    early.offer(_planner_plan(schemas=real_schemas))
+    await asyncio.sleep(0)
+    assert len(sends.sent) == 1

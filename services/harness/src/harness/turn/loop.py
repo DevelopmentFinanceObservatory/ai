@@ -1172,31 +1172,47 @@ async def _settle(
     for a Stop or a lost lease. The node may have been inside a boundary's
     write, which may have committed, so the turn is read back as stored once
     any write to it still in flight has settled (`TurnStore.settled_turn`).
-    A turn the store closed keeps that outcome. A Stop closes any other
-    `cancelled`, a pause the segment wrote included, since the user stopped
-    the turn; work the pause's commit started (early mints) runs to
-    completion and is discarded. After a lost lease a pause the segment was
-    writing that committed keeps the turn paused, and its `Paused` is
-    emitted here when the cut came before `drive` emitted it, so the client
-    gets the question the store holds. A turn still running is left to the
-    instance that holds the lease. A move or end the segment was writing
-    that committed has its `NodeDone` emitted here when the cut came before
-    `drive` emitted it, whether the cut came while the write's
-    acknowledgement was awaited, during the node's work after the commit, or
-    after it. A Stop's close that raises is read back (`_read_back`): a turn
-    it, or another write, closed takes the stored outcome; any other raises
-    the close's error. A write of the segment's that committed has the works
-    its commit is owed (`_Writing.owed`) that had not started when the cut
-    came started here in a task of their own (`_start_owed`), bounded at
+    When that read fails and the write's own acknowledgement holds the write
+    (`segment.cursor`), the segment settles on that cursor; otherwise the
+    read's error is raised. A turn the store closed keeps that outcome. A
+    Stop closes any other `cancelled`, a pause the segment wrote included,
+    since the user stopped the turn; work the pause's commit started (early
+    mints) runs to completion and is discarded, and work it had not started
+    is not started. After a lost lease a pause the segment was writing that
+    committed keeps the turn paused, and its `Paused` is emitted here when
+    the cut came before `drive` emitted it, so the client gets the question
+    the store holds. A turn still running is left to the instance that holds
+    the lease. A move or end the segment was writing that committed has its
+    `NodeDone` emitted here when the cut came before `drive` emitted it,
+    whether the cut came while the write's acknowledgement was awaited,
+    during the node's work after the commit, or after it. A Stop's close
+    that raises is read back (`_read_back`): a turn it, or another write,
+    closed takes the stored outcome; any other raises the close's error. Any
+    other write of the segment's that committed has the works its commit is
+    owed (`_Writing.owed`) that had not started when the cut came started
+    here in a task of their own (`_start_owed`), bounded at
     `OWED_WORK_TIMEOUT_S`, without waiting for them, so a Stop's close goes
     on at once. A write another segment's later write moved past before the
     read back is not found committed, so its owed work is dropped; the
     conversation's next turn lists the hand-back it would have acknowledged
     again."""
-    stored = await store.settled_turn(segment.cursor.id)
+    try:
+        stored = await store.settled_turn(segment.cursor.id)
+    except Exception:
+        # The write's own acknowledgement still tells the turn as written.
+        if segment.writing is None or not segment.writing.committed(segment.cursor):
+            raise
+        logger.exception(
+            "turn %s: reading the turn back after the cut failed; settling on the cursor "
+            "the write acknowledged",
+            key,
+        )
+        stored = segment.cursor
     writing, segment.writing = segment.writing, None
     reported = writing.reports if writing is not None and writing.committed(stored) else None
-    if reported is not None:
+    # A Stop closes a pause it cut, so the pause's owed work (early mints)
+    # would be for a question no one can answer.
+    if reported is not None and not (isinstance(reported, Paused) and cut_by is Outcome.CANCELLED):
         assert writing is not None
         _start_owed(writing.owed, key)
     if isinstance(reported, NodeDone):
