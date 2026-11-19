@@ -74,12 +74,15 @@ carries it.
 
 `DFO_CALLER_PRINCIPAL` is the secret apis shares with the website, and must
 equal apis' and the website's value. The website names each `/mcp` client
-in `x-dfo-caller` as `ip:<digest>`. analysis-mcp sends the secret and that
-caller with each analysis runner call, and presentation-mcp with each card an
-external client creates or revises, so apis counts the client's own
-allowance. Unset, neither sends a caller: runner calls are not attributed to
-a client, and every external client's cards spend the one allowance of the
-address apis sees for this service.
+in `x-dfo-caller` as `ip:<digest>`. data-mcp and analysis-mcp send the secret
+and that caller with each dfo-apis call, beside `x-dfo-surface: mcp` and the
+client's `User-Agent` as `x-dfo-user-agent`, and presentation-mcp sends them
+with each card an external client creates or revises, so apis counts the
+client's own allowance. For a Studio call, whose caller is
+`conversation:<digest>`, data-mcp and analysis-mcp send the secret and the
+caller alone, with no surface and no user agent. Unset, none sends a caller,
+so calls are not attributed to a client, and every external client's cards spend
+the one allowance of the address apis sees for this service.
 
 A refresh answers within 53 seconds, the deadline `LIVE_REFRESH_DEADLINE_S`
 (default 45) plus an 8 second hard stop. The website gives the call 60 seconds, so startup

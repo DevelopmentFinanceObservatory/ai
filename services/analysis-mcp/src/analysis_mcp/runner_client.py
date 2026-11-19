@@ -61,11 +61,14 @@ and its `/file`, for a caller that needs its recipe or its rows. Each raises
 `derived_read_timeout_s`, far less than a compute call's
 `analysis_runner_timeout_s`, so a stalled dfo-apis fails a read in seconds.
 
-Every call carries the Cloud Run ID token (`common.apis_auth`) and, for a caller
-the website named (`x-dfo-caller: ip:<digest>`), the caller principal beside it,
-so dfo-apis resolves the website's client as it does on the website's own
-calls (`dfo_platform.caller.resolve_caller`). A `conversation:` caller from the
-harness names no client address, so it is not sent.
+Every call carries the Cloud Run ID token (`common.apis_auth`) and the headers
+that name its caller (`common.caller.vouched_caller_headers`), which hold when
+this process has the caller principal. For an `ip:` caller the website named,
+they are `x-dfo-caller-principal`, `x-dfo-caller`, `x-dfo-surface: mcp`, and
+`x-dfo-user-agent`, the whole User-Agent clipped to 256 characters. For a
+harness `conversation:` caller they are the principal and the caller alone.
+dfo-apis resolves them as it does the website's own calls
+(`dfo_platform.caller.resolve_caller`).
 """
 
 from __future__ import annotations
@@ -78,7 +81,7 @@ from typing import Annotated, Any
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider, apis_auth_provider
-from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
+from common.caller import vouched_caller_headers
 from common.derived_replay import (
     ANALYSIS_PATH,
     DEFAULT_RETRY_AFTER_S,
@@ -183,14 +186,6 @@ class RunnerClient:
         self._caller_principal = caller_principal
         self._auth = auth
 
-    def _caller_headers(self) -> dict[str, str]:
-        caller = current_caller()
-        if self._caller_principal is None or caller is None:
-            return {}
-        if not ADDRESS_CALLER.fullmatch(caller):
-            return {}
-        return {CALLER_PRINCIPAL_HEADER: self._caller_principal, CALLER_HEADER: caller}
-
     async def post(self, path: str, body: Mapping[str, Any]) -> httpx2.Response | ToolRefusal:
         """POST `body` to `path`, or the retryable refusal for a call that got no answer."""
         return await self._send("POST", path, json=body)
@@ -204,7 +199,7 @@ class RunnerClient:
 
     async def _send(self, method: str, path: str, **request: Any) -> httpx2.Response | ToolRefusal:
         try:
-            headers = {**(await self._auth()), **self._caller_headers()}
+            headers = {**vouched_caller_headers(self._caller_principal), **(await self._auth())}
             return await self._client.request(method, path, headers=headers, **request)
         except ApisAuthError as exc:
             detail = f"no dfo-apis credential: {exc}"

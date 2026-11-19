@@ -27,15 +27,32 @@ from contextvars import ContextVar
 
 CALLER_HEADER = "x-dfo-caller"
 
-# Sent beside `CALLER_HEADER` to dfo-apis on an external caller's calls, when the
-# website named that caller by address: the secret dfo-apis shares with the
-# website, which vouches for the caller it names
-# (`dfo_platform.caller.resolve_caller`).
+# Sent beside `CALLER_HEADER` to dfo-apis (`vouched_caller_headers`): the secret
+# dfo-apis shares with its first-party callers, which vouches for the caller it
+# names (`dfo_platform.caller.resolve_caller`).
 CALLER_PRINCIPAL_HEADER = "x-dfo-caller-principal"
 
-# The form of a caller the website named by its client's address. dfo-apis
-# accepts no other form beside `CALLER_PRINCIPAL_HEADER`.
+# The form of a caller the website named by its client's address.
 ADDRESS_CALLER = re.compile(r"ip:[0-9a-f]{32}")
+
+# The form of the caller `conversation_caller` builds for a Studio conversation.
+CONVERSATION_CALLER = re.compile(r"conversation:[0-9a-f]{32}")
+
+# Sent beside `CALLER_PRINCIPAL_HEADER` for an `ADDRESS_CALLER`: the surface the
+# caller reached dfo-apis through. A `conversation:` caller sends none, since
+# dfo-apis reads Studio from the caller's prefix.
+SURFACE_HEADER = "x-dfo-surface"
+MCP_SURFACE = "mcp"
+
+# Sent beside `CALLER_PRINCIPAL_HEADER` for an `ADDRESS_CALLER`: the MCP client's
+# `User-Agent` (`current_user_agent`). Distinct from x-dfo-client, which carries a
+# dfo SDK client's label.
+USER_AGENT_HEADER = "x-dfo-user-agent"
+
+# The longest `User-Agent` `current_user_agent` keeps.
+MAX_USER_AGENT_CHARS = 256
+
+_USER_AGENT_HEADER = "user-agent"
 
 # The longest caller `current_caller` accepts. The frame store writes the
 # caller into GCS object metadata, which holds 8 KiB in all.
@@ -76,6 +93,52 @@ def current_caller() -> str | None:
         return None
     caller = values[0].strip()
     return caller if 0 < len(caller) <= MAX_CALLER_CHARS else None
+
+
+def current_user_agent() -> str | None:
+    """The current MCP request's `User-Agent`, whole, or `None`.
+
+    Characters that are not printable ASCII (controls, tabs, accented letters)
+    are dropped, then the value is stripped and clipped to `MAX_USER_AGENT_CHARS`
+    (256). A header that is blank after that gives `None`, as does a call outside
+    an HTTP request. The value is a valid header value and cannot forge a log
+    field.
+    """
+    from fastmcp.server.dependencies import get_http_request  # noqa: PLC0415
+
+    try:
+        user_agent = get_http_request().headers.get(_USER_AGENT_HEADER, "")
+    except RuntimeError:  # no HTTP request in flight
+        return None
+    cleaned = "".join(ch for ch in user_agent if ch.isascii() and ch.isprintable())
+    return cleaned.strip()[:MAX_USER_AGENT_CHARS].strip() or None
+
+
+def vouched_caller_headers(principal: str | None) -> dict[str, str]:
+    """The headers that name the current request's caller to dfo-apis.
+
+    Sent when this process holds `principal`, the secret dfo-apis shares with
+    its first-party callers, and the caller has a form dfo-apis accepts beside
+    it. For an `ADDRESS_CALLER`, an MCP client the website named by address:
+    `CALLER_PRINCIPAL_HEADER`, `CALLER_HEADER`, `SURFACE_HEADER` as
+    `MCP_SURFACE`, and `USER_AGENT_HEADER` when `current_user_agent` finds one.
+    dfo-apis counts that client's allowance. For a `CONVERSATION_CALLER` from the
+    harness: `CALLER_PRINCIPAL_HEADER` and `CALLER_HEADER` alone, with no surface
+    and no user agent, since dfo-apis reads Studio from the caller's prefix and
+    the User-Agent is the harness's own. Empty otherwise, and
+    dfo-apis counts the call against this service.
+    """
+    caller = current_caller()
+    if principal is None or caller is None:
+        return {}
+    headers = {CALLER_PRINCIPAL_HEADER: principal, CALLER_HEADER: caller}
+    if ADDRESS_CALLER.fullmatch(caller):
+        headers[SURFACE_HEADER] = MCP_SURFACE
+        if (user_agent := current_user_agent()) is not None:
+            headers[USER_AGENT_HEADER] = user_agent
+    elif not CONVERSATION_CALLER.fullmatch(caller):
+        return {}
+    return headers
 
 
 def current_writer() -> str:
