@@ -591,7 +591,12 @@ def create_app(
         create_graph=create_graph,
         executor=executor,
         store=store,
-        turns=TurnStore(engine, clock=store.now),
+        turns=TurnStore(
+            engine,
+            clock=store.now,
+            provenance=provenance,
+            lineage_engine=database.lineage_engine,
+        ),
         edit_model=GeminiEdit(
             model_name=resolved_settings.model_name,
             timeout_s=resolved_settings.turn_model_time_s,

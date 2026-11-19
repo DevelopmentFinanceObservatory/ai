@@ -29,7 +29,7 @@ from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter
 from harness.tool_contracts import (
     reading_facts,
 )
-from harness.turn.store import SPECS_KEY
+from harness.turn.store import FRAMES_KEY, SPECS_KEY
 from harness.turn_records import Origin, SearchReading, open_prices
 
 if TYPE_CHECKING:
@@ -42,7 +42,8 @@ APPROVE_PAUSE: Final = "approve"
 
 # The orchestrator's turn state, written by its tools
 # (`harness.orchestrator_tools`) and read by the turn's nodes.
-ORCHESTRATOR_FRAMES_KEY = "orchestrator:frames"  # frame id -> {"ref", "view", "store_ref"}
+# frame id -> {"ref", "view", "store_ref"}; the turn store keeps each frame's lineage.
+ORCHESTRATOR_FRAMES_KEY = FRAMES_KEY
 # spec_id -> its search spec block, kept by the turn store as rows of their own.
 ORCHESTRATOR_SPECS_KEY = SPECS_KEY
 # The action the agent's `plan` or `ask_user` call recorded, which the

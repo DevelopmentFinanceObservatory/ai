@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import harness.provenance as provenance_module
 import pytest
 from executor.ledger import PlanApproval, SourcePolicy, new_run
+from harness.conversation import current_conversation_id
 from harness.db.migrate import MIGRATIONS_DIR, apply_pending
+from harness.provenance import ProvenanceStore
 from harness.studio_state import SegmentLost
 from harness.turn import store as turn_store
 from harness.turn.store import (
+    FRAMES_KEY,
     SPECS_KEY,
     AgentRecord,
     Cursor,
@@ -93,6 +99,14 @@ async def test_the_turn_tables_apply_on_top_of_the_conversation_tables(
     await _conversation(pg_empty_engine)
     cursor = await _open(TurnStore(pg_empty_engine))
     assert cursor.status is TurnStatus.RUNNING
+    async with pg_empty_engine.connect() as conn:
+        tables = await conn.execute(
+            text(
+                "SELECT to_regclass('conversation_card_lineage') IS NOT NULL, "
+                "to_regclass('turn_frame_lineage') IS NOT NULL"
+            )
+        )
+        assert tables.one() == (True, True)
 
 
 async def test_a_turn_runs_pauses_resumes_and_closes_with_its_transcript_in_order(
@@ -649,3 +663,189 @@ async def test_a_value_json_cannot_hold_is_refused_before_the_write(
             state={"share": nan} if where == "state" else {SPECS_KEY: {"spec_a": {"share": nan}}},
         )
     assert await store.open_cursor(PRINCIPAL, CONVERSATION) == opened
+
+
+# The conversation `current_conversation_id` names while a turn's frames are
+# written and restored.
+_LEDGER_CONVERSATION = f"{PRINCIPAL}/{CONVERSATION}"
+
+
+@pytest.fixture
+def in_conversation() -> Iterator[None]:
+    token = current_conversation_id.set(_LEDGER_CONVERSATION)
+    yield
+    current_conversation_id.reset(token)
+
+
+def _key(n: int) -> dict[str, str]:
+    return {"spec_id": f"spec_{n}", "content_version": f"cv_{n}"}
+
+
+def _held(provenance: ProvenanceStore, n: int, *, share: float = 0.5) -> None:
+    """Put a one-retrieval lineage for `_key(n)`, counted as two StatVars."""
+    provenance.put(
+        conversation=_LEDGER_CONVERSATION, manifest={"citation": {"share": share}}, **_key(n)
+    )
+    assert provenance.alias(
+        conversation=_LEDGER_CONVERSATION,
+        **_key(n),
+        sources=[(f"spec_{n}", f"cv_{n}")],
+        stat_var_count=2,
+    )
+
+
+def _frames(*entries: dict[str, Any]) -> dict[str, Any]:
+    return {"plan": None, FRAMES_KEY: {f"frame_{i}": entry for i, entry in enumerate(entries)}}
+
+
+async def _lineage_rows(engine: AsyncEngine) -> list[tuple[str, str, int | None]]:
+    async with engine.connect() as conn:
+        rows = await conn.execute(
+            text(
+                "SELECT spec_id, content_version, stat_var_count FROM turn_frame_lineage "
+                "ORDER BY spec_id"
+            )
+        )
+        return [tuple(row) for row in rows]
+
+
+async def test_a_turns_frames_keep_their_lineage_once_and_another_store_restores_it(
+    pg_engine: AsyncEngine, in_conversation: None
+) -> None:
+    """Each store key a frame entry names (`ref` and `store_ref`) is written
+    once, by the write that first stores the entry, and a store whose
+    provenance is empty puts each lineage back with its count."""
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    for n in (1, 2, 3):
+        _held(provenance, n)
+    store = TurnStore(pg_engine, provenance=provenance)
+    first = _frames({"ref": _key(1), "store_ref": _key(2)})
+    advanced = await store.advance(
+        await _open(store), segment_id=SEGMENT, node="orchestrate", node_input=None, state=first
+    )
+    both = _frames({"ref": _key(1), "store_ref": _key(2)}, {"ref": _key(3)})
+    paused = await store.pause(
+        advanced,
+        segment_id=SEGMENT,
+        node="orchestrate",
+        node_input=None,
+        kind="ask",
+        interrupt_id="int_1",
+        payload={},
+        state=both,
+    )
+    resumed = await store.record_answer(
+        paused, segment_id=SEGMENT, interrupt_id="int_1", round=1, answer={}
+    )
+    await store.pause(
+        resumed,
+        segment_id=SEGMENT,
+        node="orchestrate",
+        node_input=None,
+        kind="ask",
+        interrupt_id="int_2",
+        payload={},
+        state=both,
+    )
+
+    assert await _lineage_rows(pg_engine) == [
+        ("spec_1", "cv_1", 2),
+        ("spec_2", "cv_2", 2),
+        ("spec_3", "cv_3", 2),
+    ]
+    fresh = ProvenanceStore()
+    other = TurnStore(pg_engine, provenance=fresh)
+    open_cursor = await other.open_cursor(PRINCIPAL, CONVERSATION)
+    assert open_cursor is not None
+    await other.restore_frame_lineage(open_cursor)
+    for n in (1, 2, 3):
+        key = {"conversation": _LEDGER_CONVERSATION, **_key(n)}
+        assert fresh.get(**key) == provenance.get(**key)
+        assert fresh.stat_var_count(**key) == 2
+
+
+async def test_a_frame_the_process_no_longer_holds_or_json_cannot_hold_writes_no_row(
+    pg_engine: AsyncEngine,
+    in_conversation: None,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The write goes on with the rows it can store: a key the provenance
+    store evicted has none, and a lineage holding a NaN has none and is
+    logged."""
+    monkeypatch.setattr(provenance_module, "_MAX_MANIFESTS_PER_CONVERSATION", 2)
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    _held(provenance, 4)
+    _held(provenance, 1)
+    _held(provenance, 2, share=float("nan"))
+    assert provenance.was_evicted(conversation=_LEDGER_CONVERSATION, **_key(4))
+    store = TurnStore(pg_engine, provenance=provenance)
+
+    advanced = await store.advance(
+        await _open(store),
+        segment_id=SEGMENT,
+        node="orchestrate",
+        node_input=None,
+        state=_frames({"ref": _key(1)}, {"ref": _key(2)}, {"ref": _key(4)}),
+    )
+
+    assert advanced.status is TurnStatus.RUNNING
+    assert set(advanced.state[FRAMES_KEY]) == {"frame_0", "frame_1", "frame_2"}
+    assert await _lineage_rows(pg_engine) == [("spec_1", "cv_1", 2)]
+    assert any("spec_2" in record.getMessage() for record in caplog.records)
+
+
+async def test_a_closing_write_stores_no_frame_lineage(
+    pg_engine: AsyncEngine, in_conversation: None
+) -> None:
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    _held(provenance, 1)
+    store = TurnStore(pg_engine, provenance=provenance)
+
+    await store.finish(
+        await _open(store),
+        segment_id=SEGMENT,
+        status=TurnStatus.DONE,
+        state=_frames({"ref": _key(1)}),
+    )
+
+    assert await _lineage_rows(pg_engine) == []
+
+
+@pytest.mark.parametrize("read", ["fails", "stalls"])
+async def test_a_frame_lineage_read_that_fails_or_stalls_restores_nothing_and_returns(
+    pg_engine: AsyncEngine,
+    in_conversation: None,
+    monkeypatch: pytest.MonkeyPatch,
+    read: str,
+) -> None:
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    _held(provenance, 1)
+    store = TurnStore(pg_engine, provenance=provenance)
+    advanced = await store.advance(
+        await _open(store),
+        segment_id=SEGMENT,
+        node="orchestrate",
+        node_input=None,
+        state=_frames({"ref": _key(1)}),
+    )
+    fresh = ProvenanceStore()
+    other = TurnStore(pg_engine, provenance=fresh)
+    released = asyncio.Event()
+
+    async def _read(turn: int) -> list[Any]:
+        if read == "fails":
+            raise OSError("connection reset")
+        await released.wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(other, "_frame_lineage", _read)
+    monkeypatch.setattr(turn_store, "_FRAME_LINEAGE_READ_BUDGET_S", 0.05)
+
+    await asyncio.wait_for(other.restore_frame_lineage(advanced), 5)
+
+    assert fresh.get(conversation=_LEDGER_CONVERSATION, **_key(1)) is None

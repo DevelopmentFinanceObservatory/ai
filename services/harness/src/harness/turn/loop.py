@@ -532,7 +532,9 @@ async def drive[E](
     The turn and its transcript are read in one snapshot that also checks
     the cursor is still current (`TurnStore.load`), so the caller reads the
     cursor after claiming the lease and no node runs on a cursor another
-    write has moved or closed. A paused cursor takes `answer`, which the
+    write has moved or closed. The lineage of each frame the turn names is
+    then put back where this process lacks it, best effort
+    (`TurnStore.restore_frame_lineage`). A paused cursor takes `answer`, which the
     first write accepts (`TurnStore.record_answer`) before the paused node's
     `resume` runs. A running cursor runs its node from its start.
 
@@ -570,6 +572,7 @@ async def drive[E](
         raise ValueError(f"turn {cursor.turn_index} is paused and needs an answer")
     cursor, stored = await _step(store.load(cursor))
     segment.cursor = cursor
+    await _step(store.restore_frame_lineage(cursor))
     transcript = Transcript(stored)
     node, node_input = cursor.node, cursor.node_input
 
