@@ -13,6 +13,9 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
+from harness.conversation import ledger_conversation_id
+from harness.graph.state import ORCHESTRATOR_FRAMES_KEY, frame_store_keys
+from harness.provenance import ProvenanceStore
 from harness.studio_store import StudioStore
 from harness.turn import transcript as entries
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
@@ -32,6 +35,7 @@ from harness.turn.store import (
     AgentRecord,
     Cursor,
     CursorStale,
+    FrameLineage,
     PauseNotOpen,
     TurnStatus,
     TurnStore,
@@ -967,6 +971,61 @@ async def test_a_boundary_write_that_cannot_store_its_values_closes_the_turn_fai
     assert segment.cursor.error is not None
     assert (segment.cursor.error["node"], segment.cursor.error["type"]) == ("work", error_type)
     assert await store.open_cursor(PRINCIPAL, CONVERSATION) is None
+
+
+async def test_a_boundary_write_whose_lineage_the_database_refuses_closes_the_turn_failed(
+    pg_engine: AsyncEngine, clock: StoreClock
+) -> None:
+    """The turn's frame lineage commits with the boundary's cursor write, so
+    a refusal of its rows by the database (here disk_full, 53100, raised by a
+    trigger) fails that write, and the turn closes `failed` at the node as
+    for any other boundary write that fails."""
+    provenance = ProvenanceStore()
+    scope = ledger_conversation_id(PRINCIPAL, CONVERSATION)
+    frame = {"spec_id": "spec_a", "content_version": "cv_a"}
+    provenance.put(conversation=scope, manifest={}, **frame)
+    store = TurnStore(
+        pg_engine, lineage=FrameLineage(source=provenance, frame_keys=frame_store_keys)
+    )
+    lease = await _instance(pg_engine, clock)
+    segment_id = await _claim(lease)
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE FUNCTION refuse_lineage() RETURNS trigger LANGUAGE plpgsql AS "
+                "$$ BEGIN RAISE EXCEPTION 'refused' USING ERRCODE = '53100'; END $$"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TRIGGER refuse_lineage BEFORE INSERT OR UPDATE ON turn_frame_lineage "
+                "FOR EACH ROW EXECUTE FUNCTION refuse_lineage()"
+            )
+        )
+
+    async def work(ctx: NodeCtx, node_input: Any) -> Next:
+        ctx.state[ORCHESTRATOR_FRAMES_KEY] = {"frame_a": {"ref": frame}}
+        return Next("next")
+
+    async def after(ctx: NodeCtx, node_input: Any) -> Next:
+        raise AssertionError("the turn went past the failed write")
+
+    graph = Graph(
+        start="work",
+        nodes={"work": Node(run=work), "after": Node(run=after)},
+        edges={("work", "next"): "after", ("after", "next"): END},
+    )
+    events: list[TurnEvent] = []
+    segment = await _segment(
+        store, lease, await _open(store, segment_id, graph), segment_id, graph, events
+    )
+
+    assert segment.outcome is Outcome.FAILED
+    [failed] = events
+    assert isinstance(failed, TurnFailed) and failed.node == "work"
+    assert segment.cursor.status is TurnStatus.FAILED
+    async with pg_engine.connect() as conn:
+        assert (await conn.execute(text("SELECT count(*) FROM turn_frame_lineage"))).scalar() == 0
 
 
 @pytest.mark.parametrize("since", ["moved", "closed"])
