@@ -2108,7 +2108,7 @@
           {
             "parts": [
               {
-                "content": "Today's date (UTC): 2026-11-18",
+                "content": "Today's date (UTC): <today>",
                 "timestamp": "<time>",
                 "part_kind": "user-prompt"
               }
