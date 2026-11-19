@@ -9,9 +9,10 @@ store does not hold. The next node takes its input as the cursor stored it.
 
 A node that raises, a boundary write that did not commit for any reason but a lost lease, a moved
 cursor or an answer to no open pause, and an owed answer the store lacks each close the turn
-`failed`, with `failure`'s record of the exception as its error. A boundary write that raised any
-error but `WriteNotEncoded` is read back first: one that committed, its acknowledgement lost,
-carries on as written. A cursor naming a node the running `Graph` lacks, or paused at a node that
+`failed`, with `failure`'s record of the exception as its error. A boundary write, an answer's
+acceptance or a close that raised any error but `WriteNotEncoded` is read back first (`_read_back`):
+one that committed, its acknowledgement lost, carries on as written, and a turn another write closed
+takes the stored outcome. A cursor naming a node the running `Graph` lacks, or paused at a node that
 cannot resume, closes the turn `abandoned` with a `TurnExpired` error, before any answer to it is
 accepted. No turn is carried across a graph change. A close that cannot be written is logged and
 leaves the turn running or paused as last written, for a Stop or the conversation's next turn to
@@ -51,7 +52,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, override
 
 from compiler.surface import transient
 
@@ -64,6 +65,7 @@ from harness.turn.store import (
     CLOSED,
     Cursor,
     CursorStale,
+    OwedAnswer,
     PauseNotOpen,
     SegmentLineage,
     TurnStatus,
@@ -232,10 +234,14 @@ async def _close_on_error(
 ) -> Segment:
     """Close the turn `status` on `error` at `node` and report `error`. A
     close the store refuses for any reason but those `_NOT_THE_TURNS` names
-    is logged and leaves the turn as last written, running or paused, for a
-    Stop or the conversation's next turn to close. The segment ends
-    `unclosed` and `error` is reported. The close is a step of `drive`
-    (`_step`), so a cut pending raises it, which the segment settles on."""
+    may still have committed, its acknowledgement lost, so the turn is read
+    back (`_read_back`). A close that committed ends as one that returned. A
+    turn another write closed ends on its stored outcome, with nothing
+    reported. A turn still open, or one that cannot be read, is left as last
+    written, running or paused, for a Stop or the conversation's next turn
+    to close: the segment ends `unclosed` and `error` is reported. The close
+    and the read are steps of `drive` (`_step`), so a cut pending raises it,
+    which the segment settles on."""
     try:
         segment.cursor = await _step(
             store.finish(
@@ -244,11 +250,25 @@ async def _close_on_error(
         )
     except _NOT_THE_TURNS:
         raise
-    except Exception:
-        logger.exception("turn %s: closing the turn %s at node %s failed", key, status, node)
-        segment.outcome = Outcome.UNCLOSED
-        emit(TurnFailed(node=node, error=error))
-        return segment
+    except Exception as exc:
+        landed, stored = await _read_back(
+            store,
+            segment.cursor,
+            key=key,
+            what=f"closing the turn {status.value} at node {node}",
+            error=exc,
+            holds=_closes(segment.cursor, segment_id=segment_id, status=status),
+        )
+        if stored is not None:
+            segment.cursor = stored
+        if landed is _Landed.CLOSED:
+            assert stored is not None
+            segment.outcome = Outcome(stored.status.value)
+            return segment
+        if landed is not _Landed.COMMITTED:
+            segment.outcome = Outcome.UNCLOSED
+            emit(TurnFailed(node=node, error=error))
+            return segment
     segment.outcome = Outcome(status.value)
     emit(TurnFailed(node=node, error=error))
     return segment
@@ -257,29 +277,32 @@ async def _close_on_error(
 async def _close_on_taken_stop(
     store: TurnStore, segment: Segment, *, key: TurnKey, segment_id: str
 ) -> Segment:
-    """Close the turn `cancelled` on the Stop its `StopScope` took, whose pause
-    never came, without writing the node's outcome. A close the store
+    """Close the turn `cancelled` on the Stop its `StopScope` took, whose
+    pause never came, without writing the node's outcome. A close the store
     refuses for any reason but those `_NOT_THE_TURNS` names may still have
-    committed (its acknowledgement lost), so the turn is read back as stored
-    once any write to it still in flight has settled
-    (`TurnStore.settled_turn`), as `_settle` does. A turn the store closed
-    keeps that outcome. One that is open, or cannot be read, is logged and
-    left running with the Stop live, for the segment's closing write to
-    close (`StudioStore.close_segment`). The segment ends `unclosed` and
-    emits no `TurnFailed`. The close and the read are steps of `drive`
-    (`_step`), so a cut pending raises it, which the segment settles on."""
+    committed (its acknowledgement lost), so the turn is read back
+    (`_read_back`). A turn the store closed keeps that outcome. One that is
+    open, or cannot be read, is left running with the Stop live, for the
+    segment's closing write to close (`StudioStore.close_segment`). The
+    segment ends `unclosed` and emits no `TurnFailed`. The close and the
+    read are steps of `drive` (`_step`), so a cut pending raises it, which
+    the segment settles on."""
     try:
         segment.cursor = await _step(
             store.finish(segment.cursor, segment_id=segment_id, status=TurnStatus.CANCELLED)
         )
     except _NOT_THE_TURNS:
         raise
-    except Exception:
-        logger.exception("turn %s: closing the turn on the Stop its scope took failed", key)
-        try:
-            stored = await _step(store.settled_turn(segment.cursor.id))
-        except Exception:
-            logger.exception("turn %s: reading the turn after its close failed", key)
+    except Exception as exc:
+        _, stored = await _read_back(
+            store,
+            segment.cursor,
+            key=key,
+            what="closing the turn on the Stop its scope took",
+            error=exc,
+            holds=_closes(segment.cursor, segment_id=segment_id, status=TurnStatus.CANCELLED),
+        )
+        if stored is None:
             segment.outcome = Outcome.UNCLOSED
             return segment
         segment.cursor = stored
@@ -289,6 +312,89 @@ async def _close_on_taken_stop(
         return segment
     segment.outcome = Outcome.CANCELLED
     return segment
+
+
+class _Landed(StrEnum):
+    """What a write that raised left in the store, as its read back found it
+    (`_read_back`)."""
+
+    COMMITTED = "committed"
+    NOT_COMMITTED = "not committed"
+    CLOSED = "closed by another write"
+    MOVED = "moved by another write"
+    UNREADABLE = "unreadable"
+
+
+async def _read_back(
+    store: TurnStore,
+    before: Cursor,
+    *,
+    key: TurnKey,
+    what: str,
+    error: Exception,
+    holds: Callable[[Cursor], bool],
+    then: Callable[[Cursor], Awaitable[None]] | None = None,
+) -> tuple[_Landed, Cursor | None]:
+    """Read the turn back after the write `what`, made from `before`,
+    raised `error`, once any write to it still in flight has settled
+    (`TurnStore.settled_turn`, bounded at `SETTLE_TIMEOUT_S`), and say what
+    the write left with the turn as stored (`None` when it cannot be read).
+    `holds` tells whether the stored turn holds the write. When it does,
+    `then` runs in the same step as the read, so work a commit is owed runs
+    even when a cut became pending during the read. The read is a step of
+    `drive` (`_step`), so a cut pending raises it once the read and `then`
+    return. The write's failure is logged as a warning before the read, and
+    the outcome after it, with `error`'s traceback when the turn does not
+    carry on as written."""
+    logger.warning("turn %s: %s raised %r; reading the turn back", key, what, error)
+
+    async def read() -> Cursor:
+        stored = await store.settled_turn(before.id)
+        if then is not None and holds(stored):
+            await then(stored)
+        return stored
+
+    try:
+        stored = await _step(read())
+    except Exception:
+        logger.exception("turn %s: the turn cannot be read back after %s failed", key, what)
+        logger.error("turn %s: %s failed: the turn is unreadable", key, what, exc_info=error)
+        return _Landed.UNREADABLE, None
+    if holds(stored):
+        logger.warning("turn %s: %s committed; its acknowledgement was lost", key, what)
+        return _Landed.COMMITTED, stored
+    if stored.version == before.version:
+        landed = _Landed.NOT_COMMITTED
+    elif stored.status in CLOSED:
+        landed = _Landed.CLOSED
+    else:
+        landed = _Landed.MOVED
+    logger.error(
+        "turn %s: %s failed: the turn is %s (version %d, %s, by %s)",
+        key,
+        what,
+        landed.value,
+        stored.version,
+        stored.status.value,
+        stored.written_by,
+        exc_info=error,
+    )
+    return landed, stored
+
+
+def _closes(before: Cursor, *, segment_id: str, status: TurnStatus) -> Callable[[Cursor], bool]:
+    """Whether a stored turn holds the close `status` `segment_id` wrote
+    from `before`: the one write after it, by that segment, closed
+    `status`."""
+
+    def holds(stored: Cursor) -> bool:
+        return (
+            stored.version == before.version + 1
+            and stored.written_by == segment_id
+            and stored.status is status
+        )
+
+    return holds
 
 
 async def _after_commit(ctx: NodeCtx[Any], node: str) -> None:
@@ -353,24 +459,23 @@ async def _after_failed_write(
     """Settle `segment` after its boundary write after `node`
     (`segment.writing`) raised `error`, for any reason but those
     `_NOT_THE_TURNS` names. A write that could not encode its values
-    (`WriteNotEncoded`) sent nothing, and closes the turn `failed` at once
-    (`_close_on_error`). Any other write may have committed and lost its
-    acknowledgement, so the turn is read back once any write to it still in
-    flight has settled (`TurnStore.settled_turn`). A turn that holds the
-    write (`_Writing.committed`) takes the stored cursor and runs the node's
-    work after the commit (`_after_commit`), as a write that returned does,
-    and `True` is returned for `drive` to report the boundary and go on. The
+    (`WriteNotEncoded`) never committed, and closes the turn `failed` at
+    once (`_close_on_error`). Any other write may have committed and lost
+    its acknowledgement, so the turn is read back (`_read_back`). A turn
+    that holds the write (`_Writing.committed`) takes the stored cursor and
+    runs the node's work after the commit (`_after_commit`) in the same step
+    as the read, as a write that returned does (`_commit_boundary`), and
+    `True` is returned for `drive` to report the boundary and go on. The
     lineage generations a committed write stores are not recorded on the
     segment's `SegmentLineage`, so the segment's next write writes those
     rows again, at the same generations. A turn at the version the write
     started from holds no write, and is closed `failed` from the cursor as
-    read (`_close_on_error`). A turn another writer closed ends the segment
-    on the stored outcome, with nothing emitted, as `_close_on_taken_stop`
-    does. A read back that fails, or an open turn another write moved, is
-    left as stored: the segment ends `unclosed` and reports `error`, as when
-    a close cannot be written. The read and the work are steps of `drive`
-    (`_step`), so a cut pending raises it with `segment.writing` still held,
-    which the segment settles on."""
+    read. A turn another writer closed ends the segment on the stored
+    outcome, with nothing emitted, as `_close_on_taken_stop` does. A read
+    back that fails, or an open turn another write moved, is left as
+    stored: the segment ends `unclosed` and reports `error`, as when a close
+    cannot be written. A cut pending raises with `segment.writing` still
+    held, which the segment settles on."""
     writing = segment.writing
     assert writing is not None
 
@@ -388,34 +493,34 @@ async def _after_failed_write(
         return False
 
     if isinstance(error, WriteNotEncoded):
+        logger.error("turn %s: the write after node %s failed", key, node, exc_info=error)
         segment.writing = None
         return await close_failed()
-    try:
-        stored = await _step(store.settled_turn(segment.cursor.id))
-    except Exception:
-        logger.exception("turn %s: reading the turn after the write after %s failed", key, node)
-        segment.writing = None
-        segment.outcome = Outcome.UNCLOSED
-        emit(TurnFailed(node=node, error=error))
-        return False
-    if writing.committed(stored):
+
+    async def committed(stored: Cursor) -> None:
         segment.cursor = stored
-        await _step(_after_commit(ctx, node))
+        await _after_commit(ctx, node)
+
+    landed, stored = await _read_back(
+        store,
+        segment.cursor,
+        key=key,
+        what=f"the write after node {node}",
+        error=error,
+        holds=writing.committed,
+        then=committed,
+    )
+    if landed is _Landed.COMMITTED:
         return True
     segment.writing = None
-    segment.cursor = stored
-    if stored.version == writing.version:
+    if stored is not None:
+        segment.cursor = stored
+    if landed is _Landed.NOT_COMMITTED:
         return await close_failed()
-    if stored.status in CLOSED:
+    if landed is _Landed.CLOSED:
+        assert stored is not None
         segment.outcome = Outcome(stored.status.value)
         return False
-    logger.error(
-        "turn %s: the write after %s failed and the turn moved to version %d by %s",
-        key,
-        node,
-        stored.version,
-        stored.written_by,
-    )
     segment.outcome = Outcome.UNCLOSED
     emit(TurnFailed(node=node, error=error))
     return False
@@ -504,14 +609,52 @@ async def _write_boundary(
     )
 
 
-class _Closes(Exception):  # noqa: N818 -- carries the close, not an error kind
-    """`_enter` found the turn cannot go on. The turn closes with `status`
-    and `error`."""
+type _Close = Callable[[TurnStatus, str, Exception], Awaitable[Segment]]
+
+
+class _Stops(Exception):  # noqa: N818 -- carries how the segment ends, not an error kind
+    """`_enter` found the turn cannot go on (`_Closes`, `_Ends`)."""
+
+    async def end(
+        self, segment: Segment, *, node: str, emit: Callable[[TurnEvent], None], close: _Close
+    ) -> Segment:
+        """End `segment` at `node`, closing the turn through `close` when the
+        turn closes."""
+        raise NotImplementedError
+
+
+class _Closes(_Stops):
+    """The turn closes with `status` and `error`."""
 
     def __init__(self, status: TurnStatus, error: Exception) -> None:
         super().__init__(str(error))
         self.status = status
         self.error = error
+
+    @override
+    async def end(
+        self, segment: Segment, *, node: str, emit: Callable[[TurnEvent], None], close: _Close
+    ) -> Segment:
+        return await close(self.status, node, self.error)
+
+
+class _Ends(_Stops):
+    """The turn as stored must not be closed here. The segment ends
+    `outcome`, reporting `error` when one is given (`TurnFailed`)."""
+
+    def __init__(self, outcome: Outcome, error: Exception | None) -> None:
+        super().__init__(outcome.value)
+        self.outcome = outcome
+        self.error = error
+
+    @override
+    async def end(
+        self, segment: Segment, *, node: str, emit: Callable[[TurnEvent], None], close: _Close
+    ) -> Segment:
+        segment.outcome = self.outcome
+        if self.error is not None:
+            emit(TurnFailed(node=node, error=self.error))
+        return segment
 
 
 async def _enter[E](
@@ -532,8 +675,11 @@ async def _enter[E](
     Raises:
         PauseNotOpen: `answer` names a pause the turn does not have open.
         _Closes: the running graph cannot run or resume the node
-            (`abandoned`), accepting the answer failed (`failed`), or the
-            owed answer is not stored (`failed`).
+            (`abandoned`), accepting the answer failed and did not commit
+            (`failed`), or the owed answer is not stored (`failed`).
+        _Ends: accepting the answer failed and the turn, read back, was
+            closed by another write (its stored outcome), moved by one, or
+            could not be read (`unclosed`, reporting the error).
     """
     cursor = segment.cursor
     node = cursor.node
@@ -567,8 +713,13 @@ async def _enter[E](
         except _NOT_THE_TURNS:
             raise
         except Exception as exc:
-            logger.exception("turn %s: accepting the answer at node %s failed", key, node)
-            raise _Closes(TurnStatus.FAILED, exc) from exc
+            _settle_answer(
+                await _answer_read_back(
+                    store, cursor, key=key, segment_id=segment_id, answer=answer, error=exc
+                ),
+                segment,
+                error=exc,
+            )
         owed = answer.value
     elif cursor.owed is not None:
         owed = await _step(
@@ -582,6 +733,63 @@ async def _enter[E](
             logger.error("turn %s: %s", key, missing)
             raise _Closes(TurnStatus.FAILED, missing)
     return target, owed
+
+
+async def _answer_read_back(
+    store: TurnStore,
+    before: Cursor,
+    *,
+    key: TurnKey,
+    segment_id: str,
+    answer: Answer,
+    error: Exception,
+) -> tuple[_Landed, Cursor | None]:
+    """The read back after accepting `answer` from `before` raised `error`
+    (`_read_back`): the accepting write is held by a stored turn one
+    version on, written by `segment_id`, running and owing the answer to
+    `answer`'s pause. An answer JSON cannot hold (`WriteNotEncoded`) never
+    committed and is not read back."""
+    if isinstance(error, WriteNotEncoded):
+        logger.error("turn %s: accepting the answer failed", key, exc_info=error)
+        return _Landed.NOT_COMMITTED, None
+    owed = OwedAnswer(interrupt_id=answer.interrupt_id, round=answer.round)
+
+    def holds(stored: Cursor) -> bool:
+        return (
+            stored.version == before.version + 1
+            and stored.written_by == segment_id
+            and stored.status is TurnStatus.RUNNING
+            and stored.owed == owed
+        )
+
+    return await _read_back(
+        store, before, key=key, what="accepting the answer", error=error, holds=holds
+    )
+
+
+def _settle_answer(
+    read_back: tuple[_Landed, Cursor | None], segment: Segment, *, error: Exception
+) -> None:
+    """Take the turn `_answer_read_back` found onto `segment` and return for
+    an accepted answer, or raise how the segment ends otherwise.
+
+    Raises:
+        _Closes: the answer did not commit (`failed`).
+        _Ends: the turn was closed by another write, moved by one, or could
+            not be read.
+    """
+    landed, stored = read_back
+    if stored is not None:
+        segment.cursor = stored
+    match landed:
+        case _Landed.COMMITTED:
+            return
+        case _Landed.NOT_COMMITTED:
+            raise _Closes(TurnStatus.FAILED, error) from error
+        case _Landed.CLOSED:
+            assert stored is not None
+            raise _Ends(Outcome(stored.status.value), None)
+    raise _Ends(Outcome.UNCLOSED, error)
 
 
 async def _step[T](step: Awaitable[T]) -> T:
@@ -698,8 +906,8 @@ async def drive[E](
         target, owed = await _enter(
             store, segment, transcript, key=key, graph=graph, segment_id=segment_id, answer=answer
         )
-    except _Closes as closing:
-        return await close(closing.status, node, closing.error)
+    except _Stops as stopping:
+        return await stopping.end(segment, node=node, emit=emit, close=close)
     cursor = segment.cursor
     # Made before any await, so the segment's kept frames stop being exempt
     # from the provenance store's bound however the segment ends, a cut
@@ -779,7 +987,6 @@ async def drive[E](
             except _NOT_THE_TURNS:
                 raise
             except Exception as exc:
-                logger.exception("turn %s: the write after node %s failed", key, node)
                 if not await _after_failed_write(
                     store,
                     segment,
@@ -885,6 +1092,7 @@ async def _settle(
     store: TurnStore,
     segment: Segment,
     *,
+    key: TurnKey,
     cut_by: Outcome,
     segment_id: str,
     emit: Callable[[TurnEvent], None],
@@ -904,7 +1112,9 @@ async def _settle(
     that committed has its `NodeDone` emitted here when the cut came before
     `drive` emitted it, whether the cut came while the write's
     acknowledgement was awaited, during the node's work after the commit, or
-    after it."""
+    after it. A Stop's close that raises is read back (`_read_back`): a turn
+    it, or another write, closed takes the stored outcome; any other raises
+    the close's error."""
     stored = await store.settled_turn(segment.cursor.id)
     writing, segment.writing = segment.writing, None
     reported = writing.reports if writing is not None and writing.committed(stored) else None
@@ -919,10 +1129,26 @@ async def _settle(
             emit(reported)
         return
     segment.cursor, segment.outcome = stored, cut_by
-    if cut_by is Outcome.CANCELLED:
+    if cut_by is not Outcome.CANCELLED:
+        return
+    try:
         segment.cursor = await store.finish(
             stored, segment_id=segment_id, status=TurnStatus.CANCELLED
         )
+    except _NOT_THE_TURNS:
+        raise
+    except Exception as exc:
+        _, closed = await _read_back(
+            store,
+            stored,
+            key=key,
+            what="closing the stopped turn",
+            error=exc,
+            holds=_closes(stored, segment_id=segment_id, status=TurnStatus.CANCELLED),
+        )
+        if closed is None or closed.status not in CLOSED:
+            raise
+        segment.cursor, segment.outcome = closed, Outcome(closed.status.value)
 
 
 async def run_segment[E](
@@ -1042,7 +1268,9 @@ async def run_segment[E](
             raise
         segment.outcome = Outcome.LOST
         try:
-            await _settle(store, segment, cut_by=ended[0], segment_id=segment_id, emit=emit)
+            await _settle(
+                store, segment, key=key, cut_by=ended[0], segment_id=segment_id, emit=emit
+            )
         except SegmentLost:
             segment.outcome = Outcome.LOST
         except Exception:
