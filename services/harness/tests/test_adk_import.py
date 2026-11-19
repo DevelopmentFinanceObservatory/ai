@@ -2194,8 +2194,8 @@ async def test_prefer_adk_takes_adks_copy_of_a_kept_conversation(
     pg_empty_engine: AsyncEngine,
 ) -> None:
     """The operator kept the tables' copy, then names the conversation to
-    `--prefer-adk`: the job re-imports ADK's copy and the record is no
-    longer kept."""
+    `--prefer-adk`: the job re-imports ADK's copy, the release serves it,
+    and verify compares it as imported."""
     name = _name(FULL)
     await _write_adk(pg_empty_engine, RECORDED["sessions"])
     await _diverge(pg_empty_engine, FULL)
@@ -2240,20 +2240,28 @@ async def test_keep_tables_refuses_a_conversation_that_imports_and_a_name_given_
     [(60, True), (-60, False), ("soon", False)],
     ids=["live", "lapsed", "not-a-number"],
 )
-async def test_verify_reports_a_ledger_session_that_holds_a_live_lease(
+async def test_verify_reports_and_the_gate_fails_on_a_ledger_session_that_holds_a_live_lease(
     adk: AsyncEngine, expires_at: int | str, streaming: bool
 ) -> None:
     """The previous revision's stream can still write the session. Verify
-    names it and its count, and does not fail on it."""
+    names it and its count, and does not fail on it. The gate, run before
+    that revision is deleted, fails on it."""
     await import_conversations(adk, apply=True)
     expiry = time.time() + expires_at if isinstance(expires_at, int) else expires_at
     lease = {"id": "seg_old", "owner": "old", "expires_at": expiry, "cancel": False}
     await _set_adk_state(adk, TEXT_ONLY, {"studio:segment": lease})
+    await import_conversations(adk, apply=True)
 
     report = await verify(adk)
+    gate = await cutover_gate(adk)
 
     assert (report.clean, report.streaming_on_adk) == (
         True,
         [_name(TEXT_ONLY)] if streaming else [],
     )
-    assert ("1 streams hold their lease on ADK" in report.render().splitlines()) == streaming
+    assert gate.streaming_on_adk == ([_name(TEXT_ONLY)] if streaming else [])
+    if isinstance(expires_at, int):
+        # The import refuses a lease whose expiry is not a number, which the
+        # gate then lists as not cleared.
+        assert (gate.clean, gate.uncleared) == (not streaming, 0)
+    assert ("1 stream holds its lease on ADK" in report.render().splitlines()) == streaming

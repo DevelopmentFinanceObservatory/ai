@@ -119,8 +119,12 @@ Verbs:
   while any ledger session is not cleared: its import record must be
   current (recorded at the session's `update_time`) and either imported
   (not diverged, with its rows) or kept (`--keep-tables`). It prints the
-  count, the first ten, and the commands that clear them. Where no table
-  named `sessions` carries ADK's columns it passes.
+  count, the first ten, and the commands that clear them. It also fails
+  while a ledger session's `studio:segment` lease is live on the database's
+  clock (`_STREAMING_ON_ADK`): a stream of the previous revision still runs
+  on it, and deleting that revision would cut it. It lists them, and is
+  rerun once they end. Where no table named `sessions` carries ADK's
+  columns it passes.
 
 The serving release reads conversations from the tables while the previous
 release may finish turns on ADK. `reimport_on_access` is the
@@ -1679,7 +1683,10 @@ class VerifyReport:
         lines += [f"tables' copy kept (--keep-tables), not compared: {name}" for name in self.kept]
         lines += [f"a stream holds its lease on ADK: {name}" for name in self.streaming_on_adk]
         if self.streaming_on_adk:
-            lines.append(f"{len(self.streaming_on_adk)} streams hold their lease on ADK")
+            count = len(self.streaming_on_adk)
+            lines.append(
+                f"{count} {'stream holds its' if count == 1 else 'streams hold their'} lease on ADK"
+            )
         if self.checked == 0 and self.total > 0:
             lines.append(f"none of the {self.total} ledger sessions compared, written or kept")
         lines.append(f"{compared - len(self.differences)} of {compared} equal")
@@ -2038,19 +2045,31 @@ _GATE_COMMANDS = (
 @dataclass
 class GateReport:
     """What `cutover_gate` found: how many ledger sessions are not cleared
-    and the first ten of them, by `principal/conversation_id`."""
+    and the first ten of them, and each ledger session a stream of the
+    previous revision holds a live lease on, by
+    `principal/conversation_id`."""
 
     uncleared: int = 0
     first: list[str] = field(default_factory=list)
+    streaming_on_adk: list[str] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
-        return self.uncleared == 0
+        return self.uncleared == 0 and not self.streaming_on_adk
 
     def render(self) -> str:
         if self.clean:
             return "cutover gate: every ledger session is cleared"
-        lines = [f"cutover gate: {self.uncleared} ledger sessions not cleared"]
+        lines: list[str] = []
+        if self.streaming_on_adk:
+            lines.append(
+                f"cutover gate: {len(self.streaming_on_adk)} ledger sessions hold a live "
+                "stream lease on ADK; wait for the streams to end and run the gate again:"
+            )
+            lines += [f"  {name}" for name in self.streaming_on_adk]
+        if self.uncleared == 0:
+            return "\n".join(lines)
+        lines.append(f"cutover gate: {self.uncleared} ledger sessions not cleared")
         lines += [f"  {name}" for name in self.first]
         if self.uncleared > len(self.first):
             lines.append(f"  and {self.uncleared - len(self.first)} more")
@@ -2064,14 +2083,19 @@ class GateReport:
 
 
 async def cutover_gate(engine: AsyncEngine) -> GateReport:
-    """Run the cutover predicate (`CUTOVER_PREDICATE`): clean when every
-    ledger session is cleared, or when no table named `sessions` carries
-    ADK's columns (`CUTOVER_ADK_SESSIONS`). Columns and tables a later
-    release adds do not change what it reads. Before `import` has created
-    the tables, no ledger session is cleared."""
+    """Run the cutover predicate (`CUTOVER_PREDICATE`) and list the ledger
+    sessions whose stream lease is live (`_STREAMING_ON_ADK`): clean when
+    every ledger session is cleared and none holds a live lease, or when no
+    table named `sessions` carries ADK's columns (`CUTOVER_ADK_SESSIONS`).
+    Columns and tables a later release adds do not change what it reads.
+    Before `import` has created the tables, no ledger session is cleared."""
     async with engine.connect() as conn:
         if not (await conn.execute(text(CUTOVER_ADK_SESSIONS))).scalar_one():
             return GateReport()
+        streaming = [
+            f"{principal}/{cid}"
+            for principal, cid in await conn.execute(_STREAMING_ON_ADK, {"app": LEDGER_APP})
+        ]
         imported = (
             await conn.execute(
                 text(
@@ -2084,10 +2108,11 @@ async def cutover_gate(engine: AsyncEngine) -> GateReport:
             await conn.execute(text(CUTOVER_PREDICATE if imported else _CUTOVER_NO_TABLES))
         ).all()
     if not rows:
-        return GateReport()
+        return GateReport(streaming_on_adk=streaming)
     return GateReport(
         uncleared=rows[0].uncleared,
         first=[f"{row.principal}/{row.conversation_id}" for row in rows],
+        streaming_on_adk=streaming,
     )
 
 
@@ -2136,7 +2161,8 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     closes.add_argument("--apply", action="store_true", help="write the closed turns")
     verbs.add_parser(
         "gate",
-        help="check that every ledger session is imported or kept as ADK holds it now; reads only",
+        help="check that every ledger session is imported or kept as ADK holds it now and "
+        "that no stream holds a live lease on one; reads only",
     )
     return parser.parse_args(argv)
 

@@ -1604,8 +1604,9 @@ class StudioStore:
         stored: CompositionManifest | None,
     ) -> None:
         """Settle each write on `entry.canvas_pending` against `row`, the
-        conversation's row as locked by the caller (`_fenced_save`), and
-        empty the list.
+        conversation's row as locked by the caller (`_fenced_save`), and take
+        it off the list once settled. A fault while reading the row's items
+        leaves every write pending, to be settled by the next fenced write.
 
         A write whose id the row's `canvas_writes` holds committed. The row
         holds that commit and every later one, so the live state reloads
@@ -1615,18 +1616,15 @@ class StudioStore:
         `change` set (`ConversationState._removal_unreported`) is set on the
         live state. A write whose id the row lacks did not commit: it is
         dropped, and its call's retry runs `change` again on a fresh copy."""
-        pending, entry.canvas_pending = entry.canvas_pending, []
-        landed = [write for write in pending if write.id in row.canvas_writes]
-        for write in pending:
-            if write.id not in row.canvas_writes:
-                write.work = write.base = None
-                write.changed = {}
-        if not landed:
-            return
-        flat = _row_flat(row)
-        for prefix, items in _ITEM_TABLES.items():
-            for ident, value in await conn.execute(items.select(), {"pk": row.id}):
-                flat[f"{prefix}{ident}"] = value
+        landed = [write for write in entry.canvas_pending if write.id in row.canvas_writes]
+        flat: dict[str, Any] = {}
+        if landed:
+            flat = _row_flat(row)
+            for prefix, items in _ITEM_TABLES.items():
+                for ident, value in await conn.execute(items.select(), {"pk": row.id}):
+                    flat[f"{prefix}{ident}"] = value
+        # No await from here on: a write leaves the pending list only once
+        # it is settled, so a fault above leaves every write pending.
         for write in landed:
             assert write.work is not None and write.base is not None
             logger.info(
@@ -1636,11 +1634,13 @@ class StudioStore:
                 write.id,
             )
             before = _serialize_durable(write.base)
-            owned = {
+            # In the order the write produced them, so new per-item keys
+            # land in the live state in that order.
+            owned = [
                 key
                 for key, value in _serialize_durable(write.work).items()
                 if before.get(key, _NO_BASELINE_VALUE) != value and key in flat
-            }
+            ]
             _apply_delta(state, {key: flat[key] for key in owned})
             entry.baseline.update({key: flat[key] for key in write.changed if key in flat})
             for name in _PROCESS_LOCAL_FIELDS - {"_telemetry_span"}:
@@ -1648,6 +1648,13 @@ class StudioStore:
                 if value != getattr(write.base, name):
                     setattr(state, name, value)
             write.landed = True
+            entry.canvas_pending.remove(write)
+        for write in [w for w in entry.canvas_pending if w.id not in row.canvas_writes]:
+            write.work = write.base = None
+            write.changed = {}
+            entry.canvas_pending.remove(write)
+        if not landed:
+            return
         entry.version = row.version
         state.composition = stored
 
