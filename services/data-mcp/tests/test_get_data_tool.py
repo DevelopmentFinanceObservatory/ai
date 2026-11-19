@@ -45,8 +45,10 @@ from data_mcp.definition_store import (
 from data_mcp.errors import UpstreamError
 from data_mcp.frame_materialisation import (
     CANONICAL_FRAME_RENDERING,
+    FLOW_PARTY_ROLE_COLUMNS,
     KIND_COLUMNS,
     MaterialisationOutcome,
+    _kind_columns_refusal,
     frame_from_parquet_bytes,
     frame_ref_for,
 )
@@ -6110,6 +6112,17 @@ async def test_a_replayed_kinds_root_whose_frame_lacks_a_sides_kinds_is_refused(
     assert refused.structured_content["code"] == "upstream_error"
     assert await frame_store.list_frames() == []
     assert frame_store.records == []
+
+
+@pytest.mark.parametrize("role", sorted(FLOW_PARTY_ROLE_COLUMNS))
+def test_a_frame_holding_a_flow_party_role_without_its_kind_column_is_refused(
+    role: str,
+) -> None:
+    refusal = _kind_columns_refusal([role, "value"], frame="the frame")
+
+    assert refusal is not None
+    assert refusal.code == "upstream_error"
+    assert _kind_columns_refusal([role, f"{role}_party_kind"], frame="the frame") is None
 
 
 class _RecordsKept(InMemoryMaterialisationStore):

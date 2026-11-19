@@ -93,6 +93,7 @@ from dfo_frame_grammar import (
     unit_codes,
 )
 from dfo_frame_grammar.grammar import validate_unit_request
+from dfo_spec_kit.registry import FLOW_ROLE_AXES
 from fastmcp.exceptions import ResourceError
 from pydantic import ValidationError
 
@@ -180,21 +181,12 @@ FLOW_ENRICHMENT_COLUMNS: tuple[str, ...] = (
     *KIND_COLUMNS,
 )
 
-# Every role column apis reads as a party of a flow and gives a `{role}_party_kind` column
-# when asked for the kinds: the flow-axis labels and each graph role placed on one (dfo-apis
-# `materialise.enrichment.is_party_role` over `dfo_platform.roles.ROLE_AXES`). The tables
+# Every role column apis reads as a party of a flow and gives a `{role}_party_kind` column when
+# asked for the kinds: each graph role with a flow axis and each axis label. The roles come from
+# dfo-spec-kit's `FLOW_ROLE_AXES`, so a role the kit adds is covered here with no edit. The tables
 # data-mcp serves today spell their sides `PARTY_ROLES`, a subset of these.
-FLOW_PARTY_ROLE_COLUMNS: frozenset[str] = frozenset(
-    {
-        *FLOW_ROLE_COLUMNS,
-        *PARTY_ROLES,
-        "provider",
-        "creditor",
-        "source",
-        "recipient",
-        "debtor",
-        "target",
-    }
+FLOW_PARTY_ROLE_COLUMNS: frozenset[str] = frozenset(FLOW_ROLE_AXES) | frozenset(
+    FLOW_ROLE_AXES.values()
 )
 
 # The earlier token for a flow party kind that old recorded selections carry. Replays translate
