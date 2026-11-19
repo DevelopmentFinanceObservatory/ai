@@ -96,3 +96,10 @@ async def execute_in_savepoint(
             logger.exception(failure())
         return exc
     return None
+
+
+def sqlstate(exc: BaseException) -> str | None:
+    """The SQLSTATE the database refused a statement with, as the driver
+    reports it on the error SQLAlchemy wraps, or `None` when it names none."""
+    state = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    return state if isinstance(state, str) else None

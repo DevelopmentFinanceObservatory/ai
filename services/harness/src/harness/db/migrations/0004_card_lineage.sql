@@ -50,11 +50,12 @@ CREATE TABLE conversation_card_lineage (
 -- key an entry names (its `ref` and its `store_ref`), upserted by a cursor
 -- write when the writing instance holds a lineage for the key it has not
 -- stored for the turn since, so a lineage replaced in process is replaced
--- here too. A write that fails to store a key's newer lineage deletes the
--- key's row in the same write, so no row holds a lineage older than one an
--- instance failed to store. Only when the upsert and that delete of one key
--- both fail in one write does the older row stay; the instance that failed
--- does not restore it, and another instance can. A segment that lacks a named key reads that
+-- here too. A write refused for a key's values deletes the key's row in the
+-- same write, so no row holds a lineage older than one an instance could not
+-- store. When the database itself refuses a lineage write (a lock, a
+-- timeout, the disk, a privilege), the table keeps the key's previous row
+-- until a later write lands, and an instance that takes over the turn in
+-- that window restores it. A segment that lacks a named key reads that
 -- key's row once (`TurnStore.restore_frame_lineage`). `members` and
 -- `stat_var_count` are encoded as `conversation_card_lineage` encodes them.
 --
