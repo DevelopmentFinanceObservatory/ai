@@ -4,8 +4,10 @@
 -- one is in, with each table's indexes and owned sequences renamed likewise
 -- (`adk_archive_<name>`). Nothing is dropped and no row changes: a renamed
 -- table keeps its rows, keys and foreign keys. A rename needs ownership of
--- the table and CREATE on its schema, which the runtime user holds. Dropping the renamed tables and
--- renaming them back are manual steps (`deploy/README.md`).
+-- the table and CREATE on its schema, which the runtime user holds.
+-- `python -m harness.db.adk_archive` runs this file as its `archive` verb,
+-- renames the tables back (`restore`) and drops them (`drop-adk`,
+-- `drop-archive`); `deploy/README.md` says when.
 --
 -- Table names resolve through `search_path`, as ADK and the import job of
 -- the image that holds it resolve them, so a split layout renames every
@@ -14,25 +16,31 @@
 -- `event_data`). The import ledger is this schema's own table and always
 -- renames. Four checks run first, in the order DFA01, DFA03, DFA02, DFA04 (a
 -- table the user does not own cannot be read for DFA02), and a failed one
--- raises with its own SQLSTATE and renames nothing. Each is a guard against a misdeploy, and
--- renaming the tables by hand with the statements in `deploy/README.md` is
--- the override:
+-- raises with its own SQLSTATE and renames nothing. Each guards against a
+-- misdeploy, and its message names what clears it:
 --   DFA01  A table of an ADK name lacks ADK's columns while another carries
 --          them, so the layout is mixed and no rename would be right. With
 --          no ADK table at all, tables of those names are another service's
 --          and stay.
---   DFA02  ADK's `sessions` holds rows of the ledger app
---          'dfo_analyst_graph.ledger' and `adk_ledger_imports` holds no row,
---          so the import never ran and the new image would list no
---          conversation.
+--   DFA02  A ledger session, a row of ADK's `sessions` of app
+--          'dfo_analyst_graph.ledger', is not cleared. It is cleared when
+--          `adk_ledger_imports` holds its row (`principal` = `user_id`,
+--          `conversation_id` = `id`) with `source_updated_at` equal to the
+--          session's `update_time`, and that row is either imported
+--          (`diverged` false, `imported_digest` set, and a `conversations`
+--          row of the same key) or kept (`kept_tables`, the operator's
+--          choice of the tables' copy over ADK's). The message gives the
+--          count and the first ten keys.
 --   DFA03  A table to rename is not owned by the current user, or the user
 --          lacks CREATE on its schema.
---   DFA04  A relation or type named `adk_archive_<name>` already exists in
---          the schema, for a table, index or sequence to rename, or a
---          relation named `adk_archive_<table>` resolves through
---          `search_path` in any schema, for a table to rename. So after the
---          rename each `adk_archive_<table>` resolves to the table it
---          archived, which the statements in `deploy/README.md` rely on.
+--   DFA04  For a table, index or sequence to rename, `adk_archive_<name>`
+--          would exceed PostgreSQL's 63-byte identifier limit, which would
+--          truncate it, or a relation or type of that name already exists
+--          in the schema; or, for a table to rename, a relation named
+--          `adk_archive_<table>` resolves through `search_path` in any
+--          schema. So after the rename each `adk_archive_<table>` resolves
+--          to the table it archived, which `restore` and `drop-archive`
+--          rely on, and `restore` gives each object its own name back.
 
 DO $$
 DECLARE
@@ -60,8 +68,9 @@ DECLARE
     object_schema text;
     object_kind text;
     owner_name text;
-    has_ledger_sessions boolean;
-    has_imports boolean;
+    imports regclass;
+    uncleared bigint;
+    uncleared_keys text[];
     not_owner boolean;
     no_create boolean;
 BEGIN
@@ -83,7 +92,7 @@ BEGIN
 
     IF cardinality(adk_present) > 0 AND cardinality(foreign_present) > 0 THEN
         RAISE EXCEPTION USING ERRCODE = 'DFA01', MESSAGE = format(
-            'ADK''s tables (%s) sit beside %s, which lack the columns of ADK''s tables of those names. 0005 refuses to rename a mixed layout. Rename the foreign tables, or ADK''s tables as deploy/README.md lists, by hand, then restart.',
+            'ADK''s tables (%s) sit beside %s, which lack the columns of ADK''s tables of those names. 0005 refuses to rename a mixed layout. Rename the foreign tables by hand, or drop ADK''s with `python -m harness.db.adk_archive drop-adk --apply`, then restart.',
             array_to_string(adk_present, ', '), array_to_string(foreign_present, ', '));
     END IF;
 
@@ -121,16 +130,24 @@ BEGIN
     END LOOP;
 
     IF 'sessions' = ANY (adk_present) THEN
-        EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s WHERE app_name = %L)',
-                       to_regclass('sessions'), ledger_app) INTO has_ledger_sessions;
-        IF to_regclass('adk_ledger_imports') IS NULL THEN
-            has_imports := false;
-        ELSE
-            EXECUTE 'SELECT EXISTS (SELECT 1 FROM adk_ledger_imports)' INTO has_imports;
-        END IF;
-        IF has_ledger_sessions AND NOT has_imports THEN
-            RAISE EXCEPTION USING ERRCODE = 'DFA02', MESSAGE =
-                'ADK''s `sessions` holds ledger sessions and `adk_ledger_imports` holds no row, so the import never ran. 0005 refuses to rename the tables out from under the conversations. Run the import job of the image that holds it, or rename ADK''s tables by hand as deploy/README.md lists, then restart.';
+        imports := to_regclass('adk_ledger_imports');
+        EXECUTE format(
+            'SELECT count(*), (array_agg(s.user_id || ''/'' || s.id ORDER BY s.user_id, s.id))[1:10] '
+            'FROM %s s WHERE s.app_name = %L AND NOT %s',
+            to_regclass('sessions'), ledger_app,
+            CASE WHEN imports IS NULL THEN 'false' ELSE format(
+                'EXISTS (SELECT 1 FROM %s i WHERE i.principal = s.user_id '
+                'AND i.conversation_id = s.id AND i.source_updated_at = s.update_time '
+                'AND (i.kept_tables OR (NOT i.diverged AND i.imported_digest IS NOT NULL '
+                'AND EXISTS (SELECT 1 FROM %s c WHERE c.principal = s.user_id '
+                'AND c.conversation_id = s.id))))',
+                imports, to_regclass('conversations')) END)
+        INTO uncleared, uncleared_keys;
+        IF uncleared > 0 THEN
+            RAISE EXCEPTION USING ERRCODE = 'DFA02', MESSAGE = format(
+                '%s ledger session(s) in ADK''s `sessions` are neither imported nor kept as of their last ADK write: %s%s. 0005 refuses to rename the tables out from under them. Run the `python -m harness.adk_import` job of the image that holds it: `import --apply` copies them, `import --apply --prefer-adk PRINCIPAL/CONVERSATION_ID` re-imports a conflict, and `import --keep-tables PRINCIPAL/CONVERSATION_ID` keeps the tables'' copy. Then restart.',
+                uncleared, array_to_string(uncleared_keys, ', '),
+                CASE WHEN uncleared > 10 THEN ', ...' ELSE '' END);
         END IF;
     END IF;
 
@@ -151,6 +168,11 @@ BEGIN
         SELECT c.relname, n.nspname INTO object_name, object_schema
         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE c.oid = object_oid;
+        IF octet_length('adk_archive_' || object_name) > 63 THEN
+            RAISE EXCEPTION USING ERRCODE = 'DFA04', MESSAGE = format(
+                '`adk_archive_%s` would exceed PostgreSQL''s 63-byte identifier limit, so renaming %I.%I would truncate its name; 0005 refuses to rename it. Rename it to a name of at most 51 bytes by hand, then restart.',
+                object_name, object_schema, object_name);
+        END IF;
         IF to_regclass(format('%I.%I', object_schema, 'adk_archive_' || object_name)) IS NOT NULL
            OR to_regtype(format('%I.%I', object_schema, 'adk_archive_' || object_name)) IS NOT NULL
         THEN

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import re
 import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -44,6 +43,49 @@ _ADK_V1_DDL = (
     "CREATE TABLE user_states (app_name varchar(128) NOT NULL, user_id varchar(128) NOT NULL, "
     "state jsonb NOT NULL, update_time timestamp NOT NULL, PRIMARY KEY (app_name, user_id))",
 )
+_LEDGER_APP = "dfo_analyst_graph.ledger"
+_UPDATED = "2026-11-01 10:05:00"
+
+
+def _session(cid: str, *, updated: str = _UPDATED, app: str = _LEDGER_APP) -> str:
+    return (
+        f"INSERT INTO sessions VALUES ('{app}', 'p', '{cid}', '{{}}', '2026-11-01 10:00:00', "
+        f"'{updated}')"
+    )
+
+
+def _imported(cid: str, *, updated: str = _UPDATED) -> str:
+    """The ledger row of a session the import copied."""
+    return (
+        "INSERT INTO adk_ledger_imports (principal, conversation_id, source_digest, "
+        f"source_updated_at, imported_digest) VALUES ('p', '{cid}', 'src', '{updated}', 'rows')"
+    )
+
+
+def _kept(cid: str, *, updated: str = _UPDATED) -> str:
+    """The ledger row of a session whose tables' copy the operator kept."""
+    return (
+        "INSERT INTO adk_ledger_imports (principal, conversation_id, source_updated_at, "
+        f"diverged, kept_tables) VALUES ('p', '{cid}', '{updated}', true, true)"
+    )
+
+
+# A first-sight conflict: the tables held the conversation, so nothing was
+# copied and both digests are NULL.
+_PLACEHOLDER = (
+    "INSERT INTO adk_ledger_imports (principal, conversation_id, source_updated_at, diverged) "
+    f"VALUES ('p', 'c1', '{_UPDATED}', true)"
+)
+
+
+def _conversation(cid: str) -> str:
+    turn_state = json.dumps({"turn_index": 3, "turn_recorded": False})
+    return (
+        "INSERT INTO conversations (principal, conversation_id, turn_state, lease_cancel, "
+        f"version) VALUES ('p', '{cid}', '{turn_state}', true, 5)"
+    )
+
+
 _ADK_ROWS = (
     "INSERT INTO adk_internal_metadata VALUES ('schema_version', '1')",
     "INSERT INTO sessions VALUES ('dfo_analyst_graph.ledger', 'p', 'c1', "
@@ -52,9 +94,30 @@ _ADK_ROWS = (
     "'2026-11-01 10:01:00', '{\"a\": [1, 2]}')",
     "INSERT INTO app_states VALUES ('dfo_analyst_graph', '{}', '2026-11-01 10:00:00')",
     "INSERT INTO user_states VALUES ('dfo_analyst_graph', 'p', '{\"k\": 1}', '2026-11-01 10:00:00')",
-    "INSERT INTO adk_ledger_imports (principal, conversation_id, source_updated_at) "
-    "VALUES ('p', 'c1', '2026-11-01 10:05:00')",
+    _imported("c1"),
+    _conversation("c1"),
 )
+
+
+# `adk_ledger_imports.kept_tables` as the import job's release adds it to
+# 0002. A no-op once this tree's 0002 holds the column.
+_KEPT_TABLES = (
+    "ALTER TABLE adk_ledger_imports ADD COLUMN IF NOT EXISTS kept_tables boolean NOT NULL "
+    "DEFAULT false"
+)
+
+
+def _every_migration(tmp_path: Path) -> Path:
+    """A copy of every migration, its 0002 carrying `_KEPT_TABLES`, for a run
+    that applies 0001 to 0005 at once."""
+    directory = tmp_path / "every"
+    directory.mkdir()
+    for path in MIGRATIONS_DIR.glob("*.sql"):
+        shutil.copy(path, directory / path.name)
+    ledger = directory / "0002_adk_ledger_imports.sql"
+    if "kept_tables" not in ledger.read_text():
+        ledger.write_text(f"{ledger.read_text()}\n{_KEPT_TABLES};\n")
+    return directory
 
 
 async def _migrate_through_0004(engine: AsyncEngine, tmp_path: Path) -> None:
@@ -62,6 +125,7 @@ async def _migrate_through_0004(engine: AsyncEngine, tmp_path: Path) -> None:
         if path.name < _MIGRATION:
             shutil.copy(path, tmp_path / path.name)
     await apply_pending(engine, directory=tmp_path)
+    await _execute(engine, _KEPT_TABLES)
 
 
 async def _execute(engine: AsyncEngine, *statements: str) -> None:
@@ -109,20 +173,11 @@ async def _foreign_key_target(engine: AsyncEngine) -> str | None:
         ).scalar()
 
 
-async def _conversation_row(engine: AsyncEngine) -> None:
-    await _execute(
-        engine,
-        "INSERT INTO conversations (principal, conversation_id, turn_state, lease_cancel, version) "
-        f"VALUES ('p', 'c1', '{json.dumps({'turn_index': 3, 'turn_recorded': False})}', true, 5)",
-    )
-
-
 async def test_an_adk_database_renames_all_six_tables_with_rows_and_foreign_key_intact(
     pg_empty_engine: AsyncEngine, tmp_path: Path
 ) -> None:
     await _migrate_through_0004(pg_empty_engine, tmp_path)
     await _execute(pg_empty_engine, *_ADK_V1_DDL, *_ADK_ROWS)
-    await _conversation_row(pg_empty_engine)
     before = {table: await _rows(pg_empty_engine, table) for table in _ARCHIVED}
     conversations = await _rows(pg_empty_engine, "conversations")
 
@@ -218,6 +273,8 @@ async def test_a_role_holding_only_usage_and_create_on_its_schema_runs_the_migra
     async with _runtime_user(
         pg_empty_engine, owns=(*_ARCHIVED, "harness_schema_migrations")
     ) as runtime:
+        # DFA02 reads `conversations`, which the deployed runtime user owns.
+        await _execute(pg_empty_engine, "GRANT SELECT ON conversations TO PUBLIC")
         assert await apply_pending(runtime) == [_MIGRATION]
 
 
@@ -260,47 +317,102 @@ async def test_a_foreign_sessions_table_beside_adks_events_is_a_mixed_layout(
     await _refused(pg_empty_engine, "DFA01")
 
 
-async def test_ledger_sessions_with_an_empty_import_ledger_refuse(
+_MOVED = "2026-11-02 09:00:00"
+
+
+@pytest.mark.parametrize(
+    ("tables", "rows", "uncleared"),
+    [
+        pytest.param(
+            _ADK_V1_DDL,
+            (
+                *(_session("c1"), _session("c2"), _imported("c1"), _imported("c2")),
+                *(_conversation("c1"), _conversation("c2")),
+            ),
+            [],
+            id="complete import",
+        ),
+        pytest.param(
+            _ADK_V1_DDL,
+            (_session("c1"), _session("c2"), _imported("c1"), _conversation("c1")),
+            ["p/c2"],
+            id="one of two imported",
+        ),
+        pytest.param(
+            _ADK_V1_DDL,
+            (_session("c1"), _PLACEHOLDER, _conversation("c1")),
+            ["p/c1"],
+            id="conflict placeholder only",
+        ),
+        pytest.param(
+            _ADK_V1_DDL,
+            (_session("c1", updated=_MOVED), _imported("c1"), _conversation("c1")),
+            ["p/c1"],
+            id="ADK moved after the import",
+        ),
+        pytest.param(_ADK_V1_DDL, (_session("c1"), _kept("c1")), [], id="kept, current"),
+        pytest.param(
+            _ADK_V1_DDL,
+            (_session("c1", updated=_MOVED), _kept("c1")),
+            ["p/c1"],
+            id="kept, ADK moved after it",
+        ),
+        pytest.param((), (), [], id="no sessions table"),
+        pytest.param(
+            ("CREATE TABLE sessions (id text PRIMARY KEY, app_name text)",),
+            (f"INSERT INTO sessions VALUES ('c1', '{_LEDGER_APP}')",),
+            [],
+            id="foreign sessions table",
+        ),
+        pytest.param(
+            _ADK_V1_DDL,
+            (_session("c1#t1", app="dfo_analyst_graph"),),
+            [],
+            id="sessions of other apps only",
+        ),
+    ],
+)
+async def test_the_archive_waits_for_every_ledger_session_to_be_imported_or_kept(
+    pg_empty_engine: AsyncEngine,
+    tmp_path: Path,
+    tables: tuple[str, ...],
+    rows: tuple[str, ...],
+    uncleared: list[str],
+) -> None:
+    await _migrate_through_0004(pg_empty_engine, tmp_path)
+    await _execute(pg_empty_engine, *tables, *rows)
+
+    if not uncleared:
+        assert await apply_pending(pg_empty_engine) == [_MIGRATION]
+        return
+    message = await _refused(pg_empty_engine, "DFA02")
+    assert message.startswith(f"{len(uncleared)} ledger session")
+    assert f": {', '.join(uncleared)}." in message
+
+
+async def test_the_dfa02_message_names_the_first_ten_of_more_ledger_sessions(
     pg_empty_engine: AsyncEngine, tmp_path: Path
 ) -> None:
     await _migrate_through_0004(pg_empty_engine, tmp_path)
-    await _execute(
-        pg_empty_engine,
-        *_ADK_V1_DDL,
-        "INSERT INTO sessions VALUES ('dfo_analyst_graph.ledger', 'p', 'c1', '{}', now(), now())",
-    )
+    await _execute(pg_empty_engine, *_ADK_V1_DDL, *(_session(f"c{n:02}") for n in range(12)))
 
-    await _refused(pg_empty_engine, "DFA02")
+    message = await _refused(pg_empty_engine, "DFA02")
+
+    assert message.startswith("12 ledger session")
+    assert f": {', '.join(f'p/c{n:02}' for n in range(10))}, ...." in message
 
 
 async def test_one_run_from_no_harness_migration_refuses_unimported_ledger_sessions(
-    pg_empty_engine: AsyncEngine,
+    pg_empty_engine: AsyncEngine, tmp_path: Path
 ) -> None:
     """0001 to 0005 apply in one run, so 0002's empty ledger refuses."""
-    await _execute(
-        pg_empty_engine,
-        *_ADK_V1_DDL,
-        "INSERT INTO sessions VALUES ('dfo_analyst_graph.ledger', 'p', 'c1', '{}', now(), now())",
-    )
+    await _execute(pg_empty_engine, *_ADK_V1_DDL, _session("c1"))
 
     with pytest.raises(asyncpg.PostgresError) as refusal:
-        await apply_pending(pg_empty_engine)
+        await apply_pending(pg_empty_engine, directory=_every_migration(tmp_path))
 
     assert refusal.value.sqlstate == "DFA02"
     assert "adk_archive_sessions" not in await _tables(pg_empty_engine)
-
-
-async def test_sessions_of_other_apps_with_an_empty_import_ledger_rename(
-    pg_empty_engine: AsyncEngine, tmp_path: Path
-) -> None:
-    await _migrate_through_0004(pg_empty_engine, tmp_path)
-    await _execute(
-        pg_empty_engine,
-        *_ADK_V1_DDL,
-        "INSERT INTO sessions VALUES ('dfo_analyst_graph', 'p', 'c1#t1', '{}', now(), now())",
-    )
-
-    assert await apply_pending(pg_empty_engine) == [_MIGRATION]
 
 
 async def test_indexes_and_owned_sequences_are_renamed_so_adk_can_create_fresh_tables(
@@ -345,12 +457,14 @@ async def test_indexes_and_owned_sequences_are_renamed_so_adk_can_create_fresh_t
             "ON other (x)",
             False,
         ),
+        # 52 bytes, which `adk_archive_` would take past 63.
+        (f"CREATE INDEX {'i' * 52} ON events (invocation_id)", False),
         # A schema ahead of ADK's on `search_path`, where `adk_archive_sessions`
-        # would hide the archive from deploy/README.md's drop and rename-back.
+        # would hide the archive from `adk_archive`'s `drop-archive` and `restore`.
         ("CREATE TABLE {shadow}.adk_archive_sessions (x int)", True),
     ],
 )
-async def test_a_name_already_taken_refuses_and_renames_nothing(
+async def test_a_name_already_taken_or_too_long_refuses_and_renames_nothing(
     pg_empty_engine: AsyncEngine, tmp_path: Path, clash: str, shadow: bool
 ) -> None:
     await _migrate_through_0004(pg_empty_engine, tmp_path)
@@ -372,21 +486,31 @@ async def test_a_name_already_taken_refuses_and_renames_nothing(
         else pg_empty_engine
     )
     try:
-        await _refused(engine, "DFA04", schema=schema)
+        # A schema first on `search_path` takes the bookkeeping table too, so
+        # the shadowed run applies 0001 to 0005 there.
+        directory = _every_migration(tmp_path) if shadow else MIGRATIONS_DIR
+        await _refused(engine, "DFA04", schema=schema, directory=directory)
     finally:
         if shadow:
             await engine.dispose()
         await _execute(pg_empty_engine, f"DROP SCHEMA {shadow_schema} CASCADE")
 
 
-async def _refused(engine: AsyncEngine, sqlstate: str, *, schema: str | None = None) -> None:
+async def _refused(
+    engine: AsyncEngine,
+    sqlstate: str,
+    *,
+    schema: str | None = None,
+    directory: Path = MIGRATIONS_DIR,
+) -> str:
     """0005 raises `sqlstate` and renames nothing in `schema`, the engine's
-    current schema by default."""
+    current schema by default. Returns the error's message."""
     before = await _tables(engine, schema)
     with pytest.raises(asyncpg.PostgresError) as refusal:
-        await apply_pending(engine)
+        await apply_pending(engine, directory=directory)
     assert refusal.value.sqlstate == sqlstate
     assert await _tables(engine, schema) == before
+    return str(refusal.value)
 
 
 async def test_a_schema_the_current_user_cannot_create_in_refuses_at_once(
@@ -428,179 +552,3 @@ async def test_a_schema_the_current_user_cannot_create_in_refuses_at_once(
             f"DROP ROLE {role}",
             f"DROP SCHEMA {adk_schema} CASCADE",
         )
-
-
-_README = Path(__file__).resolve().parents[4] / "deploy" / "README.md"
-
-
-def _readme_statements() -> dict[str, str]:
-    """The `SELECT` of each `psql` block under deploy/README.md's "Renaming the
-    ADK tables", whose rows `\\gexec` runs in the block's one transaction, keyed
-    by what the block does."""
-    section = _README.read_text().split("## Renaming the ADK tables\n", 1)[1].split("\n## ", 1)[0]
-    blocks = re.findall(r"```sql\n(.*?)```", section, flags=re.DOTALL)
-    selects = []
-    for block in blocks:
-        frame = re.fullmatch(
-            r"\\set ON_ERROR_STOP on\nBEGIN;\n(.*) \\gexec\nCOMMIT;\n", block, flags=re.DOTALL
-        )
-        assert frame, block
-        selects.append(frame[1])
-    assert len(selects) == 4
-    return dict(
-        zip(("discard", "drop_archive", "rename_back", "rename_away"), selects, strict=True)
-    )
-
-
-async def _run_readme(engine: AsyncEngine, name: str) -> None:
-    """Runs a README block as `psql` does: its `SELECT`, then each statement it
-    returns, in one transaction."""
-    async with engine.begin() as conn:
-        generated = (await conn.execute(text(_readme_statements()[name]))).scalars().all()
-        assert generated
-        for statement in generated:
-            await conn.execute(text(statement))
-
-
-async def _resolved(engine: AsyncEngine, name: str) -> str | None:
-    """The schema-qualified relation `name` resolves to through `search_path`."""
-    async with engine.connect() as conn:
-        return (
-            await conn.execute(
-                text(
-                    "SELECT n.nspname || '.' || c.relname FROM pg_class c "
-                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
-                    "WHERE c.oid = to_regclass(:name)"
-                ),
-                {"name": name},
-            )
-        ).scalar()
-
-
-@contextlib.asynccontextmanager
-async def _split_layout(
-    engine: AsyncEngine, tmp_path: Path
-) -> AsyncIterator[tuple[AsyncEngine, str, str]]:
-    """The harness tables in the test schema and ADK's, with rows and an owned
-    sequence, in a second schema after it on `search_path`, migrated through
-    the rename. Yields an engine on that `search_path` and both schemas."""
-    await _migrate_through_0004(engine, tmp_path)
-    async with engine.connect() as conn:
-        schema = (await conn.execute(text("SELECT current_schema()"))).scalar()
-    assert schema
-    adk_schema = f"{schema}_adk"
-    await _execute(
-        engine,
-        f"CREATE SCHEMA {adk_schema}",
-        f"SET LOCAL search_path TO {adk_schema}",
-        *_ADK_V1_DDL,
-        "ALTER TABLE adk_internal_metadata ADD COLUMN n serial",
-    )
-    split = create_async_engine(
-        engine.url, connect_args={"server_settings": {"search_path": f"{schema},{adk_schema}"}}
-    )
-    try:
-        await _execute(split, *_ADK_ROWS)
-        yield split, schema, adk_schema
-    finally:
-        await split.dispose()
-        await _execute(engine, f"DROP SCHEMA {adk_schema} CASCADE")
-
-
-def _home(name: str, schema: str, adk_schema: str) -> str:
-    return adk_schema if name in _ADK_TABLES else schema
-
-
-async def _archive_relations(engine: AsyncEngine, *schemas: str) -> set[str]:
-    async with engine.connect() as conn:
-        rows = await conn.execute(
-            text(
-                "SELECT n.nspname || '.' || c.relname FROM pg_class c "
-                "JOIN pg_namespace n ON n.oid = c.relnamespace "
-                "WHERE n.nspname = ANY (:schemas) AND c.relname LIKE 'adk\\_archive\\_%'"
-            ),
-            {"schemas": list(schemas)},
-        )
-        return {row[0] for row in rows}
-
-
-async def test_the_readme_rename_back_restores_every_table_of_a_split_layout_with_its_rows(
-    pg_empty_engine: AsyncEngine, tmp_path: Path
-) -> None:
-    """ADK's tables in one schema and the import ledger in another both rename
-    back, with their indexes and sequences, and the discard then drops ADK's
-    five tables and leaves the ledger."""
-    async with _split_layout(pg_empty_engine, tmp_path) as (split, schema, adk_schema):
-        before = {table: await _rows(split, table) for table in _ARCHIVED}
-        assert await apply_pending(split) == [_MIGRATION]
-        for table in _ARCHIVED:
-            assert await _resolved(split, f"adk_archive_{table}") == (
-                f"{_home(table, schema, adk_schema)}.adk_archive_{table}"
-            )
-
-        await _run_readme(split, "rename_back")
-
-        for table in _ARCHIVED:
-            assert await _resolved(split, table) == f"{_home(table, schema, adk_schema)}.{table}"
-            assert await _rows(split, table) == before[table]
-        assert await _archive_relations(split, schema, adk_schema) == set()
-        assert await _resolved(split, "idx_events_app_user_session_ts_id") == (
-            f"{adk_schema}.idx_events_app_user_session_ts_id"
-        )
-        assert await _resolved(split, "adk_internal_metadata_n_seq") == (
-            f"{adk_schema}.adk_internal_metadata_n_seq"
-        )
-
-        await _run_readme(split, "rename_away")
-
-        assert await _archive_relations(split, schema, adk_schema) == {
-            f"{_home(table, schema, adk_schema)}.adk_archive_{table}" for table in _ARCHIVED
-        } | {
-            f"{adk_schema}.adk_archive_idx_events_app_user_session_ts_id",
-            f"{adk_schema}.adk_archive_adk_internal_metadata_n_seq",
-        } | {f"{_home(table, schema, adk_schema)}.adk_archive_{table}_pkey" for table in _ARCHIVED}
-        for table in _ARCHIVED:
-            assert await _rows(split, f"adk_archive_{table}") == before[table]
-        assert await _foreign_key_target(split) == "adk_archive_sessions"
-
-        await _run_readme(split, "rename_back")
-        await _run_readme(split, "discard")
-
-        assert await _tables(split, adk_schema) == set()
-        assert await _resolved(split, "adk_ledger_imports") == f"{schema}.adk_ledger_imports"
-
-
-async def test_the_readme_drop_removes_every_archived_table_of_a_split_layout(
-    pg_empty_engine: AsyncEngine, tmp_path: Path
-) -> None:
-    async with _split_layout(pg_empty_engine, tmp_path) as (split, schema, adk_schema):
-        await _conversation_row(split)
-        conversations = await _rows(split, "conversations")
-        assert await apply_pending(split) == [_MIGRATION]
-
-        await _run_readme(split, "drop_archive")
-
-        assert await _archive_relations(split, schema, adk_schema) == set()
-        assert await _tables(split, adk_schema) == set()
-        assert await _rows(split, "conversations") == conversations
-
-
-async def test_the_readme_rename_away_lets_the_migration_run_after_an_unimported_refusal(
-    pg_empty_engine: AsyncEngine, tmp_path: Path
-) -> None:
-    await _migrate_through_0004(pg_empty_engine, tmp_path)
-    await _execute(
-        pg_empty_engine,
-        *_ADK_V1_DDL,
-        "INSERT INTO sessions VALUES ('dfo_analyst_graph.ledger', 'p', 'c1', '{}', now(), now())",
-    )
-    before = {table: await _rows(pg_empty_engine, table) for table in _ADK_TABLES}
-    await _refused(pg_empty_engine, "DFA02")
-
-    await _run_readme(pg_empty_engine, "rename_away")
-
-    assert await apply_pending(pg_empty_engine) == [_MIGRATION]
-    tables = await _tables(pg_empty_engine)
-    assert not set(_ADK_TABLES) & tables
-    for table in _ADK_TABLES:
-        assert await _rows(pg_empty_engine, f"adk_archive_{table}") == before[table]
