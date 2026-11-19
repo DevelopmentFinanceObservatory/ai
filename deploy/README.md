@@ -276,6 +276,32 @@ The first number is the frames whose cards can be refreshed after the bucket's o
 
 This image reads saved Studio conversations from the harness's own tables (`harness/db/migrations`) only. A deployment whose serving revision stores conversations in ADK's session tables (app `dfo_analyst_graph.ledger` in the `sessions` table) copies them across with the `python -m harness.adk_import` job on the image of the revision that added the tables, and that image's `deploy/README.md` gives the cutover steps. Its step 7 is complete in an environment before this image merges there: `import --apply` and `import --verify` exit 0 with no conversation in conflict, `gate` exits 0, the previous revision is deleted, and `gate` exits 0 again. This image's first migration (`0003_turns.sql`) runs the gate's predicate and refuses startup with SQLSTATE `DFA02` while any ledger session is uncleared, naming the count and the first ten. That job clears them on the previous image: `import --apply` copies a session ADK moved since its last copy, `import --apply --prefer-adk PRINCIPAL/CONVERSATION_ID` takes ADK's copy of a diverged one, `import --apply --keep-tables PRINCIPAL/CONVERSATION_ID` keeps the tables' copy, and `gate` then confirms. Once this image takes traffic, that job's `close-open-turns --apply` is rerun until it exits 0. It leaves open every turn this image opened, which the `turn_cursors` table holds a row for by conversation and `turn_index`. A turn the tables record as open with no turn of this image behind it is closed as `abandoned` on the conversation's next turn, with what the conversation holds.
 
+Once this image takes traffic and that job's `close-open-turns --apply` exits 0, delete the previous image's revision, the one that ran turns on ADK turn sessions and still reads ADK, and leave no revision of an earlier image on the service. A revision at 0% traffic can still serve: Cloud Run's session affinity cookie takes precedence over the traffic split, so a client holding one can start an instance of an ADK-reading revision. Such an instance writes to ADK's tables, which this image never reads, and once the release that renames ADK's tables (`0005_rename_adk_tables.sql`) has run, it creates them again empty beside the archive. Set `PREVIOUS` to the previous image's revision name and delete it, delete any other revision of an earlier image the first list shows the same way, and confirm that the last list prints only revisions of this image:
+
+```
+gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
+  --format='table(metadata.name,metadata.creationTimestamp,status.conditions[0].status)'
+gcloud run revisions delete "${PREVIOUS:?set it to the previous image's revision}" \
+  --region="$REGION" --project="$PROJECT_ID" --quiet
+gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
+  --format='value(metadata.name)'
+```
+
+Then confirm the deleted revision's instance count reaches zero with the command of the previous image's step 7. A deleted revision is gone from `gcloud run revisions describe`, so the count comes from Cloud Monitoring's `run.googleapis.com/container/instance_count`, newest points first by instance state; the revision has drained when the newest points read 0, or when no point is newer than the delete:
+
+```
+START=$(date -u -d '-30 min' +%FT%TZ 2>/dev/null || date -u -v-30M +%FT%TZ)
+curl -sG -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  "https://monitoring.googleapis.com/v3/projects/$PROJECT_ID/timeSeries" \
+  --data-urlencode "filter=metric.type=\"run.googleapis.com/container/instance_count\" AND resource.labels.revision_name=\"$PREVIOUS\"" \
+  --data-urlencode "interval.startTime=$START" \
+  --data-urlencode "interval.endTime=$(date -u +%FT%TZ)" \
+  | jq -r '.timeSeries[]? | .metric.labels.state as $state
+    | .points[:5][] | "\(.interval.endTime) \($state) \(.value.int64Value)"'
+```
+
+A rollback after the delete is a redeploy of the previous image by digest.
+
 ## Langfuse export
 
 `python -m harness.langfuse_export` loads the Langfuse observations of one environment into the BigQuery table `observations`, day-partitioned on `start_time`. It runs as the Cloud Run job named by `JOB_LANGFUSE_EXPORT` on this image, and `build-deploy.yml` points that job at each new image in an Environment that sets the var. It reads these settings from the environment or `.env` and exits 2 naming any that is unset:

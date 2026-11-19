@@ -244,6 +244,21 @@ def _shallow_copy(state: ConversationState) -> ConversationState:
     )
 
 
+def _refold_turn_cards(state: ConversationState, baseline: dict[str, Any]) -> None:
+    """Fold `state.turn_components` into the turn's record again, as
+    `ConversationState.close_turn` folds them, when this instance recorded
+    the turn since its last stored write (`baseline`). A card write whose
+    acknowledgement was lost, settled only by the closing write
+    (`_resolve_canvas_writes`), adds its turn line after a failure close
+    built the record without it."""
+    if not state.turn_recorded or baseline.get(_KEY_TURN_RECORDED) or not state.turns:
+        return
+    record = {key: value for key, value in state.turns[-1].items() if key != "cards"}
+    if state.turn_components:
+        record["cards"] = list(state.turn_components)
+    state.turns[-1] = record
+
+
 async def run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
     """Run `work` in a task of its own and wait for it to finish even when
     the caller is cancelled, then re-raise the caller's cancellation.
@@ -1042,7 +1057,8 @@ class _RuntimeEntry:
     writes on the conversation, so two of them never interleave their
     `state`/`baseline` updates. `canvas_pending` holds the canvas writes
     whose attempt raised once it had queued its write, so their commit is
-    unknown; the next fenced write resolves them (`_fenced_save`).
+    unknown; the next fenced write (`_fenced_save`) or closing write
+    (`close_segment`) resolves them.
     """
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -1863,11 +1879,12 @@ class StudioStore:
         state: ConversationState,
         row: Any,
         stored: CompositionManifest | None,
-    ) -> None:
+    ) -> bool:
         """Settle each write on `entry.canvas_pending` against `row`, the
-        conversation's row as locked by the caller (`_fenced_save`), and take
-        it off the list once settled. A fault while reading the row's items
-        leaves every write pending, to be settled by the next fenced write.
+        conversation's row as locked by the caller (`_fenced_save`,
+        `_close_segment`), and take it off the list once settled. A fault
+        while reading the row's items leaves every write pending, to be
+        settled by the next fenced write. Returns whether any write landed.
 
         A write whose id the row's `canvas_writes` holds committed. The row
         holds that commit and every later one, so the live state reloads
@@ -1915,9 +1932,10 @@ class StudioStore:
             write.changed = {}
             entry.canvas_pending.remove(write)
         if not landed:
-            return
+            return False
         entry.version = row.version
         state.composition = stored
+        return True
 
     async def renew(
         self,
@@ -2008,7 +2026,11 @@ class StudioStore:
         stores this instance's changed durable fields (the turn's record,
         the pending interrupts and `seq_next` among them) and clears the
         lease. The canvas is read back from the row, as `change_canvas` reads
-        it, since every card commits as it lands.
+        it, since every card commits as it lands. Before it copies the live
+        state, it settles the canvas writes whose acknowledgement was lost
+        from the locked row (`_resolve_canvas_writes`), as every fenced write
+        does, and folds a landed card's turn line into a record the stream
+        built without it (`_refold_turn_cards`).
 
         When a Stop is live for the open turn as the locked row and its
         cursor stand (`StopState.live`, with this segment's own lease
@@ -2083,6 +2105,12 @@ class StudioStore:
                     segment_id,
                 )
                 return SegmentClose.LOST
+            if entry.canvas_pending:
+                stored = (
+                    CompositionManifest.model_validate(row.composition) if row.composition else None
+                )
+                if await self._resolve_canvas_writes(conn, entry, state, row, stored):
+                    _refold_turn_cards(state, entry.baseline)
             stop = await _stop_state(conn, row, lease_live=True)
             # A Stop on this segment's own lease is live for it whatever
             # the cursor. A turn with no cursor (an Edit Card's) is open
