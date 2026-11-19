@@ -68,7 +68,8 @@ from fastmcp.exceptions import ResourceError
 
 logger = logging.getLogger(__name__)
 
-# Per-conversation entry ceiling; least-recently-used eviction past it.
+# Per-conversation ceiling on the entries outside the keys the conversation's
+# open turn names (`ProvenanceStore.keep`); least-recently-used eviction past it.
 _MAX_MANIFESTS_PER_CONVERSATION = 64
 
 # Global ceiling on the number of conversation buckets held at once;
@@ -245,6 +246,8 @@ class ProvenanceStore:
         self._evicted: OrderedDict[tuple[str, _FrameKey], None] = OrderedDict()
         # Bumped by every store of an entry under a key (`held`).
         self._generations = 0
+        # Per conversation, the keys its open turn's frames name (`keep`).
+        self._kept: dict[str, frozenset[_FrameKey]] = {}
 
     def put(
         self,
@@ -378,6 +381,17 @@ class ProvenanceStore:
         self._store(conversation=conversation, key=frame, entry=_Entry(lineage, stat_var_count))
         return self._generations
 
+    def keep(self, *, conversation: str, keys: Sequence[_FrameKey]) -> None:
+        """Hold `keys`, the frames the conversation's open turn names, outside
+        the per-conversation bound, in place of the keys an earlier call held:
+        the bound counts only the other entries, and eviction past it drops
+        the least recently used of those, so the bucket holds at most the
+        bound plus `keys`. The turn's tool budgets
+        (`harness.graph.state.BUDGETS`) bound the frames it names, one call's
+        keys replace the last, and a conversation dropped past
+        `_MAX_CONVERSATIONS` drops its keys, so the store stays bounded."""
+        self._kept[conversation] = frozenset(keys)
+
     def _store(self, *, conversation: str, key: _FrameKey, entry: _Entry) -> None:
         bucket = self._by_conversation.get(conversation)
         if bucket is None:
@@ -385,6 +399,7 @@ class ProvenanceStore:
             self._by_conversation[conversation] = bucket
             while len(self._by_conversation) > _MAX_CONVERSATIONS:
                 evicted_id, evicted_bucket = self._by_conversation.popitem(last=False)
+                self._kept.pop(evicted_id, None)
                 for evicted_key in evicted_bucket:
                     self._record_eviction(evicted_id, evicted_key)
                 logger.warning(
@@ -399,8 +414,11 @@ class ProvenanceStore:
         self._generations += 1
         bucket[key] = replace(entry, generation=self._generations)
         bucket.move_to_end(key)
-        while len(bucket) > _MAX_MANIFESTS_PER_CONVERSATION:
-            evicted_key, _ = bucket.popitem(last=False)
+        kept = self._kept.get(conversation, frozenset())
+        others = [held for held in bucket if held not in kept]
+        while len(others) > _MAX_MANIFESTS_PER_CONVERSATION:
+            evicted_key = others.pop(0)
+            del bucket[evicted_key]
             self._record_eviction(conversation, evicted_key)
             logger.warning(
                 "provenance: dropped frame %r for conversation %r past the "

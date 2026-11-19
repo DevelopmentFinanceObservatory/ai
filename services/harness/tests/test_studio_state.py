@@ -2297,7 +2297,7 @@ async def _streaming_turn(
             payload={},
             state={},
             stop_taken_id=taken,
-            lineage_scope=None,
+            lineage=None,
         )
     elif cursor == "done":
         await turns.finish(opened, segment_id=segment_id, status=TurnStatus.DONE)

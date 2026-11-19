@@ -56,7 +56,10 @@ CREATE TABLE conversation_card_lineage (
 -- every named key, puts them over what its instance holds and drops a named
 -- key with no row (`TurnStore.restore_frame_lineage`), and its writes store
 -- only lineage produced or read after that point, so a stale entry never
--- reaches the rows and a failed read leaves them as they are. `members` and
+-- reaches the rows and a failed read leaves them as they are. One case
+-- remains: an entry the segment builds from entries it did not confirm (an
+-- `alias` over them, or a card's stored lineage put back by
+-- `ProvenanceStore.restore`) is new, and a write stores it. `members` and
 -- `stat_var_count` are encoded as `conversation_card_lineage` encodes them.
 --
 -- A frame no instance held at a write has no row, and a card drawn from it
