@@ -25,7 +25,7 @@ import hashlib
 import itertools
 import json
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, tzinfo
@@ -4739,13 +4739,41 @@ class _GatedSurface(ScriptedSurface):
         return await super().call_tool(**kwargs)
 
 
-async def test_two_concurrent_first_answers_to_one_interrupt_give_one_stream_and_one_409() -> None:
+def _meet_at_first_save(monkeypatch: pytest.MonkeyPatch, *apps: FastAPI) -> None:
+    """Hold each app's next `StudioStore.save` until every app has reached
+    its own, so each request has loaded the conversation and read the turn's
+    cursor before any of them saves."""
+    barrier = asyncio.Barrier(len(apps))
+
+    def _meeting(save: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+        met = False
+
+        async def _save(*args: Any, **kwargs: Any) -> Any:
+            nonlocal met
+            if not met:
+                met = True
+                async with asyncio.timeout(10):
+                    await barrier.wait()
+            return await save(*args, **kwargs)
+
+        return _save
+
+    for app in apps:
+        store = app.state.studio.store
+        monkeypatch.setattr(store, "save", _meeting(store.save))
+
+
+async def test_two_concurrent_first_answers_to_one_interrupt_give_one_stream_and_one_409(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A and B both answer the SAME fresh interrupt at once: whichever
     instance's claim save lands first resumes the turn; the other's save
     finds the ledger already moved and answers the existing 409, rather
-    than each resuming its own segment of the turn. The winner's plan step
-    waits on a gate, so its segment still holds the lease when the loser's
-    answer comes back."""
+    than each resuming its own segment of the turn. Both claim saves wait
+    until both requests have loaded the conversation and read the paused
+    cursor, so the answers overlap however the loop schedules them. The
+    winner's plan step waits on a gate, so its segment still holds the
+    lease when the loser's answer comes back."""
     surface_a, surface_b = _GatedSurface(), _GatedSurface()
     app_a = _app(*_plan(), tool_surface=surface_a)
     app_b = _app(tool_surface=surface_b)
@@ -4754,6 +4782,7 @@ async def test_two_concurrent_first_answers_to_one_interrupt_give_one_stream_and
         first = await _stream(client_a, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
 
+    _meet_at_first_save(monkeypatch, app_a, app_b)
     async with _client(app_a) as client_a, _client(app_b) as client_b:
         task_a = asyncio.ensure_future(
             client_a.post(
