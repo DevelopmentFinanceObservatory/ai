@@ -2209,8 +2209,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 )
             if pending is not None and resuming and pending.answer != requested_answer:
                 # The claim above only succeeds once the earlier resume's
-                # segment has expired (its owner died before reaching a
-                # checkpoint) or was dropped (it failed before its stream
+                # segment has expired (its owner died before reaching its
+                # closing write) or was dropped (it failed before its stream
                 # started), so this is a genuinely dead attempt, and
                 # this request's answer does not match what actually
                 # resumed it. Refused for good: a live segment above would

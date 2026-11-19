@@ -25,7 +25,7 @@ from harness.scripted import ScriptedExecutor, ScriptedSurface
 from harness.studio import StudioRunner
 from harness.studio_relay import Channel
 from harness.studio_state import ConversationState
-from harness.studio_store import SegmentClose, Snapshot
+from harness.studio_store import SegmentClose
 from harness.studio_stream import Emit, LockHold, own_segment
 from harness.turn.loop import Outcome
 from harness.wire import ErrorFrame, MessageDelta
@@ -359,14 +359,6 @@ class _SlowWork:
 
 class _SavingStore:
     """The owner's writes, each landing."""
-
-    def snapshot(self, principal: str, conversation_id: str) -> Snapshot:
-        return {}
-
-    async def checkpoint(
-        self, principal: str, conversation_id: str, segment_id: str, snapshot: Snapshot
-    ) -> None:
-        return None
 
     async def close_segment(
         self, principal: str, conversation_id: str, segment_id: str

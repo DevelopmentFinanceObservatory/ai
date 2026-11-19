@@ -4400,7 +4400,7 @@ async def test_a_retry_after_an_attempt_that_died_before_the_approval_sends_it()
 
 async def test_a_cancel_on_a_lapsed_lease_fences_out_the_stream_still_running_under_it() -> None:
     """A's stream outlives its lease without renewing it. A Stop on B finds no
-    live segment, so it closes the conversation itself. A's next checkpoint
+    live segment, so it closes the conversation itself. A's closing write
     is refused, so it cannot write over what the Stop saved."""
     clock = await StoreClock.start(_engine())
     store_a = StudioStore(
@@ -4427,10 +4427,7 @@ async def test_a_cancel_on_a_lapsed_lease_fences_out_the_stream_still_running_un
     assert cancel.status_code == 204
 
     state_a.turn_final_text = "written after the Stop"
-    with pytest.raises(SegmentLost):
-        await store_a.checkpoint(
-            PRINCIPAL, CONVERSATION, segment_id, store_a.snapshot(PRINCIPAL, CONVERSATION)
-        )
+    assert await store_a.close_segment(PRINCIPAL, CONVERSATION, segment_id) is SegmentClose.LOST
     reloaded = await StudioStore(
         _engine(),
     ).load(PRINCIPAL, CONVERSATION)

@@ -2648,10 +2648,10 @@ async def test_request_cancel_returns_false_once_the_segment_has_expired(new_sto
     assert await store.request_cancel("principal", CONVERSATION) is False
 
 
-# --- checkpoint: fencing on the segment ------------------------------------
+# --- closing write: fencing on the segment ---------------------------------
 
 
-async def test_checkpoint_raises_segment_lost_after_a_takeover_and_writes_nothing(
+async def test_the_closing_write_is_lost_after_a_takeover_and_writes_nothing(
     new_store,
     clock,
 ) -> None:
@@ -2668,90 +2668,11 @@ async def test_checkpoint_raises_segment_lost_after_a_takeover_and_writes_nothin
     assert new_segment_id != segment_id
 
     store_a.current("principal", CONVERSATION).turn_final_text = "a's answer, too late"
-    with pytest.raises(SegmentLost):
-        await store_a.checkpoint(
-            "principal", CONVERSATION, segment_id, store_a.snapshot("principal", CONVERSATION)
-        )
+    assert await store_a.close_segment("principal", CONVERSATION, segment_id) is SegmentClose.LOST
 
     reloaded = await new_store().load("principal", CONVERSATION)
     assert reloaded.turn_final_text == ""
-
-
-async def test_checkpoint_writes_its_snapshot_and_keeps_a_renewal_made_since(
-    new_store, clock, pg_engine
-) -> None:
-    """The checkpoint stores the pending interrupts as its snapshot holds
-    them, and nothing else: a change the live state takes after the
-    snapshot, and any other field, is left for the next write, and a renewal
-    of the lease since keeps its expiry."""
-    store = new_store(clock=clock)
-    state = await store.create("principal", CONVERSATION)
-    segment_id = store.claim_segment("principal", CONVERSATION)
-    state.pending["i1"] = _pending()
-    await store.save("principal", CONVERSATION)
-    state.pending["i1"].resuming_segment = segment_id
-    state.turn_final_text = "beside the snapshot"
-    snapshot = store.snapshot("principal", CONVERSATION)
-    state.pending["i2"] = _pending()
-    await clock.advance(10)
-    assert (await store.renew("principal", CONVERSATION, segment_id)).held
-    renewed = state.segment.expires_at
-
-    await store.checkpoint("principal", CONVERSATION, segment_id, snapshot)
-
-    reloaded = await new_store().load("principal", CONVERSATION)
-    assert list(reloaded.pending) == ["i1"]
-    assert reloaded.pending["i1"].resuming_segment == segment_id
-    assert reloaded.turn_final_text == ""
-    assert reloaded.segment.expires_at == renewed
-    assert list(state.pending) == ["i1", "i2"]
-
-
-async def test_a_checkpoint_retried_past_a_card_write_keeps_the_card(
-    new_store, monkeypatch
-) -> None:
-    """A checkpoint meets a dropped connection, and a card lands while it
-    waits to retry. The retry writes no older copy of a field the card's
-    write moved, so the card's digest entry, turn line and canvas block stay,
-    beside the pending interrupts the checkpoint writes."""
-    monkeypatch.setattr(studio_store, "_RETRY_FIRST_DELAY_S", 0.2)
-    store = new_store()
-    state = await store.create("principal", CONVERSATION)
-    segment_id = store.claim_segment("principal", CONVERSATION)
-    state.pending["i1"] = _pending()
-    await store.save("principal", CONVERSATION)
-    state.pending["i1"].resuming_segment = segment_id
-    snapshot = store.snapshot("principal", CONVERSATION)
-    real_transaction = store._transaction
-    order: list[str] = []
-    landing: list[asyncio.Task[Any]] = []
-
-    @asynccontextmanager
-    async def dropping() -> Any:
-        async with real_transaction() as conn:
-            yield conn
-            if not landing:
-                # The card lands while the checkpoint waits to retry.
-                landing.append(asyncio.create_task(land()))
-                raise _connection_reset("COMMIT")
-
-    async def land() -> None:
-        await store.change_canvas(
-            "principal", CONVERSATION, lambda work: land_component(work, _CARD)
-        )
-        order.append("card")
-
-    store._transaction = dropping
-    await store.checkpoint("principal", CONVERSATION, segment_id, snapshot)
-    order.append("checkpoint")
-    await landing[0]
-
-    assert order == ["card", "checkpoint"]
-    reloaded = await new_store().load("principal", CONVERSATION)
-    assert "cmp_two" in reloaded.components
-    assert [line["component_id"] for line in reloaded.turn_components] == ["cmp_two"]
-    assert [block.component_id for block in reloaded.composition.blocks] == ["cmp_two"]
-    assert reloaded.pending["i1"].resuming_segment == segment_id
+    assert reloaded.segment is not None and reloaded.segment.id == new_segment_id
 
 
 async def test_an_evicted_instance_holds_no_lease_it_did_not_close(new_store) -> None:
@@ -2772,7 +2693,7 @@ async def test_an_evicted_instance_holds_no_lease_it_did_not_close(new_store) ->
         await store.save("principal", CONVERSATION)
 
 
-async def test_checkpoint_raises_segment_lost_when_the_ledger_is_gone(new_store, pg_engine) -> None:
+async def test_the_closing_write_is_lost_when_the_ledger_is_gone(new_store, pg_engine) -> None:
     store = new_store()
     await store.create("principal", CONVERSATION)
     segment_id = store.claim_segment("principal", CONVERSATION)
@@ -2781,10 +2702,7 @@ async def test_checkpoint_raises_segment_lost_when_the_ledger_is_gone(new_store,
         await conn.execute(text("DELETE FROM conversations"))
 
     store.current("principal", CONVERSATION).turn_final_text = "an answer with no ledger"
-    with pytest.raises(SegmentLost):
-        await store.checkpoint(
-            "principal", CONVERSATION, segment_id, store.snapshot("principal", CONVERSATION)
-        )
+    assert await store.close_segment("principal", CONVERSATION, segment_id) is SegmentClose.LOST
 
 
 # --- canvas writes: change_canvas and mutate_composition ------------------

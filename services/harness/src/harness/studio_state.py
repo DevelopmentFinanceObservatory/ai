@@ -11,8 +11,8 @@ composition changes: `_apply_operations` for the user's mutations,
 `Segment` is a durable lease on a conversation's active stream, the
 mechanism that keeps at most one instance streaming a conversation at a
 time: `StudioStore.claim_segment` takes it, `renew` pushes its TTL forward,
-`checkpoint` writes the rest of the conversation's state to storage
-mid-stream (and at end of segment, in `close_segment`'s one transaction), and
+`close_segment` writes the rest of the conversation's state to storage
+at end of segment in one transaction, and
 `request_cancel` signals it from any instance. See `Segment`,
 `SegmentBusy`, `SegmentLost` and `DatabaseUnavailable`.
 """
@@ -361,7 +361,7 @@ class _PendingInterrupt:
     step_labels: dict[str, str] = field(default_factory=dict)
     # Set by `/interrupt` to the id of the segment resuming this interrupt,
     # instead of deleting the entry outright: a crash between the answer
-    # being appended and the resumed segment's own checkpoint leaves a
+    # being appended and the resumed segment's own closing write leaves a
     # durable, retryable record. Cleared by `ConversationState.drop_resuming`
     # once that segment ends, win or lose; a crashed segment leaves it set,
     # and the same answer resumes again on a fresh segment.
@@ -410,14 +410,14 @@ class SegmentBusy(Exception):  # noqa: N818 -- named for the wire 409, not an er
 
 
 class SegmentLost(Exception):  # noqa: N818 -- named for the wire condition, not an error kind
-    """Raised by `StudioStore.checkpoint` when the stored live segment is
-    no longer the one this call is checkpointing on behalf of. Another
+    """Raised by `StudioStore`'s fenced writes (`change_canvas`) when the
+    stored live segment is no longer the one the call writes on behalf of. Another
     instance took over after this one's TTL lapsed."""
 
 
 class DatabaseUnavailable(Exception):  # noqa: N818 -- named for the condition the stream reports
-    """Raised by `StudioStore`'s retried writes (`checkpoint`,
-    `change_canvas`) when the database stayed unreachable
+    """Raised by `StudioStore`'s retried write
+    (`change_canvas`) when the database stayed unreachable
     until the lease's deadline. The stream ends as a lost segment does,
     leaving the turn as stored, since no close could be saved either."""
 
@@ -427,7 +427,7 @@ class Segment:
     """One durable claim on a conversation's active stream, the lease
     columns of its stored row. `id` is the fencing token
     `StudioStore.claim_segment` mints; every later write on behalf of this
-    segment (`renew`, `checkpoint`) is fenced against it, never against
+    segment (`renew`, `change_canvas`) is fenced against it, never against
     `owner`. `owner` is the claiming instance's id, carried for logs only.
     `expires_at` is a wall-clock epoch second past which the claim is dead
     and takeable. The Stop requests made of the conversation live in columns
@@ -456,8 +456,7 @@ class ConversationState:
     composition: CompositionManifest | None = None
     # The durable lease on this conversation's active stream. None when no
     # segment is live. Set by `claim_segment`, refreshed by `renew`,
-    # cleared by `close_segment`; a `checkpoint` writes whatever value it holds
-    # like any other durable field.
+    # cleared by `close_segment`.
     segment: Segment | None = None
     # Set while a stream runs on this instance. Setting it makes the
     # stream's heartbeat renew the lease at once, so a Stop posted here
