@@ -43,21 +43,21 @@ CREATE TABLE conversation_card_lineage (
     PRIMARY KEY (conversation, component_id)
 );
 
--- The lineage of each frame an open turn's state names
--- (`harness.turn.store.FRAMES_KEY`), so a card drawn after a pause, on
--- another instance or after a restart, finds the frames the turn fetched or
--- built before it. One row per store key an entry names (its `ref` and its
--- `store_ref`), written by the cursor write that first stores the entry
--- (`harness.turn.store.TurnStore`) from the lineage the instance holds then,
--- and read once when a segment that lacks one of them takes the turn over
+-- The lineage of each frame an open turn's state names, so a card drawn
+-- after a pause, on another instance or after a restart, finds the frames the
+-- turn fetched or built before it (`harness.turn.store.TurnStore`, with the
+-- frames read by `harness.graph.state.frame_store_keys`). One row per store
+-- key an entry names (its `ref` and its `store_ref`), upserted by a cursor
+-- write when the writing instance holds a lineage for the key it has not
+-- stored for the turn since, so a lineage replaced in process is replaced
+-- here too. A segment that lacks a named key reads that key's row once
 -- (`TurnStore.restore_frame_lineage`). `members` and `stat_var_count` are
--- encoded as `conversation_card_lineage` encodes them. `ON CONFLICT DO
--- NOTHING` keeps the first row, since a frame key names one lineage.
+-- encoded as `conversation_card_lineage` encodes them.
 --
--- Rows are best effort: a frame the instance no longer held at the write, or
--- whose lineage JSON cannot hold, has none, and a card drawn from it is
--- withheld `provenance_unavailable`. A closing write stores none, and the
--- rows go with their turn.
+-- Rows are best effort: a frame no instance held at a write, or whose
+-- lineage JSON cannot hold, has none, and a card drawn from it is withheld
+-- `provenance_unavailable`. The closing write deletes the turn's rows
+-- (`harness.turn.store.finish_on`), so the table holds open turns only.
 --
 -- Creating the table takes SHARE ROW EXCLUSIVE on `turn_cursors` for the
 -- foreign key, as the table above does on `conversations`.

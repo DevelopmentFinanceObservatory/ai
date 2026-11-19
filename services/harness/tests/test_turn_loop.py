@@ -987,7 +987,14 @@ async def test_a_cursor_moved_since_it_was_read_runs_no_node(
     graph = Graph(start="work", nodes={"work": Node(run=work)}, edges={("work", "done"): END})
     read = await _open(store, segment_id, graph)
     if since == "moved":
-        await store.advance(read, segment_id=segment_id, node="work", node_input="moved", state={})
+        await store.advance(
+            read,
+            segment_id=segment_id,
+            node="work",
+            node_input="moved",
+            state={},
+            lineage_scope=None,
+        )
     else:
         read = await store.turn(
             (await store.finish(read, segment_id=segment_id, status=TurnStatus.DONE)).id

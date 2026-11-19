@@ -29,7 +29,7 @@ from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter
 from harness.tool_contracts import (
     reading_facts,
 )
-from harness.turn.store import FRAMES_KEY, SPECS_KEY
+from harness.turn.store import SPECS_KEY, FrameKey
 from harness.turn_records import Origin, SearchReading, open_prices
 
 if TYPE_CHECKING:
@@ -42,8 +42,7 @@ APPROVE_PAUSE: Final = "approve"
 
 # The orchestrator's turn state, written by its tools
 # (`harness.orchestrator_tools`) and read by the turn's nodes.
-# frame id -> {"ref", "view", "store_ref"}; the turn store keeps each frame's lineage.
-ORCHESTRATOR_FRAMES_KEY = FRAMES_KEY
+ORCHESTRATOR_FRAMES_KEY = "orchestrator:frames"  # frame id -> {"ref", "view", "store_ref"}
 # spec_id -> its search spec block, kept by the turn store as rows of their own.
 ORCHESTRATOR_SPECS_KEY = SPECS_KEY
 # The action the agent's `plan` or `ask_user` call recorded, which the
@@ -490,6 +489,22 @@ def frame_store_ref(entry: Mapping[str, Any]) -> dict[str, Any]:
     ):
         return dict(store_ref)
     return entry["ref"]
+
+
+def frame_store_keys(state: Mapping[str, Any]) -> list[FrameKey]:
+    """The lineage store keys of the frames in `state`
+    (`ORCHESTRATOR_FRAMES_KEY`): each entry's `ref` and `store_ref`, in order
+    and each once, which the turn store keeps the lineage of
+    (`harness.turn.store.FrameLineage`). A pair with a member missing names
+    no key."""
+    keys: dict[FrameKey, None] = {}
+    for entry in (state.get(ORCHESTRATOR_FRAMES_KEY) or {}).values():
+        for ref in (entry.get("ref"), entry.get("store_ref")):
+            if isinstance(ref, Mapping):
+                spec_id, content_version = ref.get("spec_id"), ref.get("content_version")
+                if isinstance(spec_id, str) and isinstance(content_version, str):
+                    keys[(spec_id, content_version)] = None
+    return list(keys)
 
 
 def store_search(

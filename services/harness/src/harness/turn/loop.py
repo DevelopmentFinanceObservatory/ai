@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING, Any
 
 from compiler.surface import transient
 
+from harness.conversation import ledger_conversation_id
 from harness.studio_state import HEARTBEAT_INTERVAL_S, SegmentLost, _wire_id
 from harness.turn import transcript as entries
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
@@ -347,6 +348,13 @@ def _following(graph: Graph[Any], node: str, result: Next | Pause) -> str | None
     return following
 
 
+def _lineage_scope(key: TurnKey) -> str:
+    """The conversation the process's frame lineage store holds `key`'s
+    frames under (`harness.conversation.ledger_conversation_id`), which the
+    turn store keeps and restores them by."""
+    return ledger_conversation_id(key.principal, key.conversation_id)
+
+
 # A boundary write fails with one of these when the turn belongs to another
 # writer or the answer named no open pause. They pass up and close nothing.
 _NOT_THE_TURNS = (SegmentLost, CursorStale, PauseNotOpen)
@@ -389,6 +397,7 @@ async def _write_boundary(
             state=ctx.state,
             records=ctx.transcript.take(),
             stop_taken_id=ctx.stop.taken,
+            lineage_scope=_lineage_scope(ctx.key),
         )
     if following == END:
         return await store.finish(
@@ -406,6 +415,7 @@ async def _write_boundary(
         node_input=result.output,
         state=ctx.state,
         records=ctx.transcript.take(),
+        lineage_scope=_lineage_scope(ctx.key),
     )
 
 
@@ -572,7 +582,7 @@ async def drive[E](
         raise ValueError(f"turn {cursor.turn_index} is paused and needs an answer")
     cursor, stored = await _step(store.load(cursor))
     segment.cursor = cursor
-    await _step(store.restore_frame_lineage(cursor))
+    await _step(store.restore_frame_lineage(cursor, lineage_scope=_lineage_scope(key)))
     transcript = Transcript(stored)
     node, node_input = cursor.node, cursor.node_input
 

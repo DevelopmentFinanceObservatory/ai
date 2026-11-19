@@ -154,6 +154,7 @@ from harness.conversation import (
     current_conversation_id,
     current_conversation_key,
 )
+from harness.db.best_effort import bounded_read
 from harness.derived_frames import derived_recipe
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import (
@@ -1016,48 +1017,18 @@ class McpExecutor:
         stored. One that runs past the budget reads as none too: it runs as a
         task of its own, so a connection that stalls while the read is
         cancelled holds up only that task, which is left to finish its cleanup
-        and logged if it fails (`_abandoned_read_done`)."""
+        and logged if it fails (`harness.db.best_effort.bounded_read`)."""
         assert self._card_lineages is not None
-        read = asyncio.create_task(
-            self._card_lineages.card_lineage(*key, component_id=component_id, frame=frame)
+        return await bounded_read(
+            self._card_lineages.card_lineage(*key, component_id=component_id, frame=frame),
+            budget_s=_LINEAGE_READ_BUDGET_S,
+            held=self._abandoned_reads,
+            logger=logger,
+            what=(
+                "write_component goes on without a stored lineage: reading that of "
+                f"component_id={component_id!r} frame={frame!r}"
+            ),
         )
-        try:
-            done, _ = await asyncio.wait({read}, timeout=_LINEAGE_READ_BUDGET_S)
-        except asyncio.CancelledError:
-            self._abandon(read)
-            raise
-        if not done:
-            self._abandon(read)
-            logger.warning(
-                "write_component goes on without a stored lineage: reading that of "
-                "component_id=%r frame=%r ran past %gs",
-                component_id,
-                frame,
-                _LINEAGE_READ_BUDGET_S,
-            )
-            return None
-        try:
-            return read.result()
-        except Exception:
-            logger.warning(
-                "write_component goes on without a stored lineage: reading that of "
-                "component_id=%r frame=%r failed",
-                component_id,
-                frame,
-                exc_info=True,
-            )
-            return None
-
-    def _abandon(self, read: asyncio.Task[Any]) -> None:
-        """Cancel `read` and hold it until it finishes, without waiting."""
-        read.cancel()
-        self._abandoned_reads.add(read)
-        read.add_done_callback(self._abandoned_read_done)
-
-    def _abandoned_read_done(self, read: asyncio.Task[Any]) -> None:
-        self._abandoned_reads.discard(read)
-        if not read.cancelled() and (exc := read.exception()) is not None:
-            logger.warning("an abandoned card lineage read failed while it finished", exc_info=exc)
 
     async def _drawn(self, written: _Written, *, read: tuple[str, str] | None) -> dict[str, Any]:
         """The outcome of a `write_component` the platform stored, once
