@@ -1051,10 +1051,17 @@ async def test_a_cut_at_the_restore_leaves_no_kept_entry(
         ctx.state[ORCHESTRATOR_FRAMES_KEY] = {"frame_a": {"ref": frame}}
         return Pause(kind="ask", payload={})
 
-    async def resume(ctx: NodeCtx, node_input: Any, answer: dict[str, Any]) -> Next:
-        raise AssertionError("the node ran past the cut")
+    resumed_node: list[Any] = []
 
-    graph = Graph(start="work", nodes={"work": Node(run=work, resume=resume)}, edges={})
+    async def resume(ctx: NodeCtx, node_input: Any, answer: dict[str, Any]) -> Next:
+        resumed_node.append(answer)
+        return Next("done")
+
+    graph = Graph(
+        start="work",
+        nodes={"work": Node(run=work, resume=resume)},
+        edges={("work", "done"): END},
+    )
     paused = await _segment(
         store, lease, await _open(store, segment_id, graph), segment_id, graph, []
     )
@@ -1067,8 +1074,11 @@ async def test_a_cut_at_the_restore_leaves_no_kept_entry(
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
+    kept_before_cut: list[bool] = []
+
     async def _cut_on_return(self: TurnStore, cursor: Cursor, segment: Any) -> None:
         await restore(self, cursor, segment)
+        kept_before_cut.append(scope in provenance._kept)
         task = asyncio.current_task()
         assert task is not None
         task.cancel()
@@ -1085,11 +1095,13 @@ async def test_a_cut_at_the_restore_leaves_no_kept_entry(
     )
     if cut == "during":
         await asyncio.wait_for(reading.wait(), 5)
-        assert scope in provenance._kept
+        kept_before_cut.append(scope in provenance._kept)
         resumed.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await asyncio.wait_for(resumed, 10)
 
+    assert kept_before_cut == [True]
+    assert resumed_node == []
     assert scope not in provenance._kept
 
 

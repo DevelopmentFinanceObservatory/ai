@@ -1005,12 +1005,12 @@ async def test_a_named_frame_with_no_row_is_dropped_and_not_stored_again(
 async def test_a_malformed_frames_entry_names_no_frame_and_the_turn_goes_on(
     pg_engine: AsyncEngine,
     caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
     frames: Any,
 ) -> None:
-    """A frames value or entry that is not a mapping names no key: the
-    restore and the write both go on, logged, and the write stores the
-    well-formed frames' rows."""
+    """A frames value, or a frames entry, that is not a mapping names no
+    key: the writes and the next segment's restore go on, the writes store
+    the well-formed frames' rows, and each segment logs the case once,
+    worded for which of the two it is."""
     await _conversation(pg_engine)
     provenance = ProvenanceStore()
     _held(provenance, 1)
@@ -1022,12 +1022,14 @@ async def test_a_malformed_frames_entry_names_no_frame_and_the_turn_goes_on(
         state = {ORCHESTRATOR_FRAMES_KEY: frames}
 
     advanced = await _advance(seg, store, opened, state)
+    advanced = await _advance(seg, store, advanced, state)
     await _segment(store, advanced)
 
     assert advanced.status is TurnStatus.RUNNING
     rows = [row[:2] for row in await _lineage_rows(pg_engine)]
     assert rows == ([("spec_1", "cv_1")] if isinstance(frames, dict) else [])
-    assert any("mapping" in record.getMessage() for record in caplog.records)
+    wording = "are not mappings" if isinstance(frames, dict) else "is a list, not a mapping"
+    assert len([r for r in caplog.records if wording in r.getMessage()]) == 2
     assert not any("restore failed" in record.getMessage() for record in caplog.records)
 
 
@@ -1197,7 +1199,7 @@ async def test_a_burst_of_other_turns_mid_segment_keeps_the_segments_frames(
 
 
 @pytest.mark.parametrize("second_names", ["nothing", "the same frame"])
-async def test_a_second_segment_keeping_nothing_leaves_the_first_segments_frames_kept(
+async def test_a_second_segment_ending_leaves_the_first_segments_frames_kept(
     pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, second_names: str
 ) -> None:
     """Each running segment keeps its own frames: a second segment of the
