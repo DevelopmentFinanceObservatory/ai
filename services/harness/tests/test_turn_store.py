@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -732,6 +733,22 @@ def _keeping(engine: AsyncEngine, provenance: ProvenanceStore) -> TurnStore:
     return TurnStore(engine, lineage=FrameLineage(source=provenance, frame_keys=frame_store_keys))
 
 
+async def _opened(store: TurnStore, provenance: ProvenanceStore) -> Cursor:
+    """Open the turn and start its first segment, as the turn loop does
+    (`TurnStore.restore_frame_lineage`), then store again every lineage the
+    test put in `provenance`, as the segment's own fetches would, so each is
+    produced after the segment's restore point."""
+    cursor = await _open(store)
+    await store.restore_frame_lineage(cursor, lineage_scope=_SCOPE)
+    for key in list(provenance._by_conversation.get(_SCOPE, {})):
+        held = provenance.held(conversation=_SCOPE, spec_id=key[0], content_version=key[1])
+        assert held is not None
+        provenance.restore_frame(
+            conversation=_SCOPE, frame=key, lineage=held[0], stat_var_count=held[1], overwrite=True
+        )
+    return cursor
+
+
 async def _advance(store: TurnStore, cursor: Cursor, state: dict[str, Any]) -> Cursor:
     return await store.advance(
         cursor,
@@ -792,7 +809,7 @@ async def test_a_turns_frames_keep_their_lineage_and_another_store_restores_it(
         _held(provenance, n)
     store = _keeping(pg_engine, provenance)
     first = _frames({"ref": _key(1), "store_ref": _key(2)})
-    advanced = await _advance(store, await _open(store), first)
+    advanced = await _advance(store, await _opened(store, provenance), first)
     both = _frames({"ref": _key(1), "store_ref": _key(2)}, {"ref": _key(3)})
     paused = await _pause(store, advanced, both, interrupt_id="int_1")
     resumed = await store.record_answer(
@@ -821,7 +838,7 @@ async def test_a_lineage_replaced_in_process_replaces_its_row(pg_engine: AsyncEn
     _held(provenance, 1, share=0.25, count=1)
     store = _keeping(pg_engine, provenance)
     state = _frames({"ref": _key(1)})
-    advanced = await _advance(store, await _open(store), state)
+    advanced = await _advance(store, await _opened(store, provenance), state)
     _held(provenance, 1, share=0.75, count=3)
     await _pause(store, advanced, state, interrupt_id="int_1")
 
@@ -843,7 +860,7 @@ async def test_a_frame_held_again_after_a_write_without_it_is_written_next(
     provenance = ProvenanceStore()
     store = _keeping(pg_engine, provenance)
     state = _frames({"ref": _key(1)})
-    advanced = await _advance(store, await _open(store), state)
+    advanced = await _advance(store, await _opened(store, provenance), state)
     assert await _lineage_rows(pg_engine) == []
 
     _held(provenance, 1)
@@ -857,35 +874,117 @@ def _evict(provenance: ProvenanceStore, n: int) -> None:
     del provenance._by_conversation[_SCOPE][(f"spec_{n}", f"cv_{n}")]
 
 
-async def test_a_process_that_wrote_the_turn_last_reads_only_the_named_frames_it_lacks(
+async def test_a_segment_on_the_process_that_wrote_last_draws_without_a_new_fetch(
     pg_engine: AsyncEngine,
 ) -> None:
-    """Rows of frames the state no longer names, and of frames the process
-    holds, are left where they are when this process wrote the cursor last:
-    it keeps what it holds, gets back what it lost, and no frame the turn
-    dropped."""
+    """The next segment on the process that paused the turn reads its rows
+    back over what it holds, so every named frame stays drawable with the
+    lineage it was stored with, and a frame the turn dropped is not read."""
     await _conversation(pg_engine)
     provenance = ProvenanceStore()
     for n in (1, 2, 3):
         _held(provenance, n)
     store = _keeping(pg_engine, provenance)
     advanced = await _advance(
-        store, await _open(store), _frames({"ref": _key(1)}, {"ref": _key(2)}, {"ref": _key(3)})
+        store,
+        await _opened(store, provenance),
+        _frames({"ref": _key(1)}, {"ref": _key(2)}, {"ref": _key(3)}),
     )
-    restored = provenance.get(conversation=_SCOPE, **_key(1))
+    stored = {n: provenance.get(conversation=_SCOPE, **_key(n)) for n in (1, 2)}
     paused = await _pause(
         store, advanced, _frames({"ref": _key(1)}, {"ref": _key(2)}), interrupt_id="i"
     )
-    _held(provenance, 2, share=0.9)
-    held = provenance.get(conversation=_SCOPE, **_key(2))
     _evict(provenance, 1)
     _evict(provenance, 3)
 
     await store.restore_frame_lineage(paused, lineage_scope=_SCOPE)
 
-    assert provenance.get(conversation=_SCOPE, **_key(1)) == restored
-    assert provenance.get(conversation=_SCOPE, **_key(2)) is held
+    for n in (1, 2):
+        assert provenance.get(conversation=_SCOPE, **_key(n)) == stored[n]
+        assert provenance.stat_var_count(conversation=_SCOPE, **_key(n)) == 2
     assert provenance.get(conversation=_SCOPE, **_key(3)) is None
+
+
+async def test_a_failed_restore_read_leaves_the_rows_as_another_writer_committed_them(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Instance A holds L1, B commits L2, and the turn comes back to A, whose
+    read of the rows fails: A's next write stores nothing over L2, since A's
+    entry predates the segment's restore point and no read confirmed it."""
+    await _conversation(pg_engine)
+    held_a = ProvenanceStore()
+    _held(held_a, 1, share=0.25)
+    a = _keeping(pg_engine, held_a)
+    state = _frames({"ref": _key(1)})
+    paused = await _pause(a, await _opened(a, held_a), state, interrupt_id="int_1")
+    held_b = ProvenanceStore()
+    b = _keeping(pg_engine, held_b)
+    await b.restore_frame_lineage(paused, lineage_scope=_SCOPE)
+    resumed = await b.record_answer(
+        paused, segment_id=SEGMENT, interrupt_id="int_1", round=1, answer={}
+    )
+    _held(held_b, 1, share=0.75, count=4)
+    by_b = await _pause(b, resumed, state, interrupt_id="int_2")
+
+    async def _fails(self: TurnStore, turn: int, keys: Any) -> list[Any]:
+        raise OSError("connection reset")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(TurnStore, "_frame_lineage", _fails)
+        await a.restore_frame_lineage(by_b, lineage_scope=_SCOPE)
+    resumed_a = await a.record_answer(
+        by_b, segment_id=SEGMENT, interrupt_id="int_2", round=2, answer={}
+    )
+    await _advance(a, resumed_a, state)
+
+    (row,) = await _lineage_rows(pg_engine)
+    assert (row[2], row[3][0]["manifest"]) == (4, {"citation": {"share": 0.75}})
+
+
+async def test_a_named_frame_with_no_row_is_dropped_and_not_stored_again(
+    pg_engine: AsyncEngine,
+) -> None:
+    """Instance A holds L1; B's lineage for the frame fails its check, so B's
+    write deletes the row. Back on A, the restore finds no row and drops A's
+    entry, and A's next write does not store L1 as the turn's record."""
+    await _conversation(pg_engine)
+    held_a = ProvenanceStore()
+    _held(held_a, 1, share=0.25)
+    a = _keeping(pg_engine, held_a)
+    state = _frames({"ref": _key(1)})
+    paused = await _pause(a, await _opened(a, held_a), state, interrupt_id="int_1")
+    held_b = ProvenanceStore()
+    b = _keeping(pg_engine, held_b)
+    await b.restore_frame_lineage(paused, lineage_scope=_SCOPE)
+    resumed = await b.record_answer(
+        paused, segment_id=SEGMENT, interrupt_id="int_1", round=1, answer={}
+    )
+    _held(held_b, 1, share=float("nan"))
+    by_b = await _pause(b, resumed, state, interrupt_id="int_2")
+    assert await _lineage_rows(pg_engine) == []
+
+    await a.restore_frame_lineage(by_b, lineage_scope=_SCOPE)
+    resumed_a = await a.record_answer(
+        by_b, segment_id=SEGMENT, interrupt_id="int_2", round=2, answer={}
+    )
+    await _advance(a, resumed_a, state)
+
+    assert held_a.get(conversation=_SCOPE, **_key(1)) is None
+    assert await _lineage_rows(pg_engine) == []
+
+
+async def test_a_restore_that_meets_a_malformed_frames_entry_logs_and_returns(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    store = _keeping(pg_engine, provenance)
+    cursor = await _open(store)
+    malformed = replace(cursor, state={**cursor.state, ORCHESTRATOR_FRAMES_KEY: {"f": ["ref"]}})
+
+    await store.restore_frame_lineage(malformed, lineage_scope=_SCOPE)
+
+    assert any("restore failed" in record.getMessage() for record in caplog.records)
 
 
 async def test_rows_written_by_another_writer_replace_what_the_process_held(
@@ -899,7 +998,7 @@ async def test_rows_written_by_another_writer_replace_what_the_process_held(
     _held(held_a, 1, share=0.25)
     a = _keeping(pg_engine, held_a)
     state = _frames({"ref": _key(1)})
-    paused = await _pause(a, await _open(a), state, interrupt_id="int_1")
+    paused = await _pause(a, await _opened(a, held_a), state, interrupt_id="int_1")
 
     held_b = ProvenanceStore()
     b = _keeping(pg_engine, held_b)
@@ -934,7 +1033,9 @@ async def test_a_frame_key_holding_a_nul_gets_no_row_and_is_never_read(
     provenance.put(conversation=_SCOPE, manifest={}, **nul)
     store = _keeping(pg_engine, provenance)
 
-    advanced = await _advance(store, await _open(store), _frames({"ref": _key(1)}, {"ref": nul}))
+    advanced = await _advance(
+        store, await _opened(store, provenance), _frames({"ref": _key(1)}, {"ref": nul})
+    )
 
     assert [row[:2] for row in await _lineage_rows(pg_engine)] == [("spec_1", "cv_1")]
     reads: list[Any] = []
@@ -949,46 +1050,6 @@ async def test_a_frame_key_holding_a_nul_gets_no_row_and_is_never_read(
     await _keeping(pg_engine, fresh).restore_frame_lineage(advanced, lineage_scope=_SCOPE)
     assert reads == [[("spec_1", "cv_1")]]
     assert fresh.get(conversation=_SCOPE, **_key(1)) is not None
-
-
-async def test_a_frame_with_no_row_costs_one_read_per_turn_until_another_writer_moves_it(
-    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A named frame no instance held has no row. Each segment that starts on
-    the turn lacks it, and only the first reads; a write from another
-    instance moves the cursor, and the next segment reads again."""
-    await _conversation(pg_engine)
-    provenance = ProvenanceStore()
-    store = _keeping(pg_engine, provenance)
-    paused = await _pause(
-        store, await _open(store), _frames({"ref": _key(1)}), interrupt_id="int_1"
-    )
-    reads: list[int] = []
-    read = TurnStore._frame_lineage
-
-    async def counted(self: TurnStore, turn: int, keys: Any) -> list[Any]:
-        reads.append(turn)
-        return await read(self, turn, keys)
-
-    monkeypatch.setattr(TurnStore, "_frame_lineage", counted)
-
-    await store.restore_frame_lineage(paused, lineage_scope=_SCOPE)
-    resumed = await store.record_answer(
-        paused, segment_id=SEGMENT, interrupt_id="int_1", round=1, answer={}
-    )
-    await store.restore_frame_lineage(resumed, lineage_scope=_SCOPE)
-    assert len(reads) == 1
-
-    moved = await TurnStore(pg_engine).advance(
-        resumed,
-        segment_id=SEGMENT,
-        node="orchestrate",
-        node_input=None,
-        state=resumed.state,
-        lineage_scope=None,
-    )
-    await store.restore_frame_lineage(moved, lineage_scope=_SCOPE)
-    assert len(reads) == 2
 
 
 async def test_a_frame_the_process_no_longer_holds_or_json_cannot_hold_writes_no_row(
@@ -1007,7 +1068,9 @@ async def test_a_frame_the_process_no_longer_holds_or_json_cannot_hold_writes_no
     store = _keeping(pg_engine, provenance)
 
     advanced = await _advance(
-        store, await _open(store), _frames({"ref": _key(1)}, {"ref": _key(2)}, {"ref": _key(4)})
+        store,
+        await _opened(store, provenance),
+        _frames({"ref": _key(1)}, {"ref": _key(2)}, {"ref": _key(4)}),
     )
 
     assert advanced.status is TurnStatus.RUNNING
@@ -1021,7 +1084,7 @@ async def test_a_closing_write_deletes_the_turns_frame_lineage(pg_engine: AsyncE
     provenance = ProvenanceStore()
     _held(provenance, 1)
     store = _keeping(pg_engine, provenance)
-    advanced = await _advance(store, await _open(store), _frames({"ref": _key(1)}))
+    advanced = await _advance(store, await _opened(store, provenance), _frames({"ref": _key(1)}))
     assert len(await _lineage_rows(pg_engine)) == 1
 
     await store.finish(advanced, segment_id=SEGMENT, status=TurnStatus.DONE)
@@ -1037,7 +1100,7 @@ async def test_a_frame_lineage_read_that_fails_or_stalls_restores_nothing_and_re
     provenance = ProvenanceStore()
     _held(provenance, 1)
     store = _keeping(pg_engine, provenance)
-    advanced = await _advance(store, await _open(store), _frames({"ref": _key(1)}))
+    advanced = await _advance(store, await _opened(store, provenance), _frames({"ref": _key(1)}))
     fresh = ProvenanceStore()
     other = _keeping(pg_engine, fresh)
     released = asyncio.Event()
@@ -1068,7 +1131,10 @@ async def test_a_frame_evicted_after_an_earlier_read_is_read_at_the_next_segment
         _held(provenance, n)
     store = _keeping(pg_engine, provenance)
     paused = await _pause(
-        store, await _open(store), _frames({"ref": _key(1)}, {"ref": _key(2)}), interrupt_id="i"
+        store,
+        await _opened(store, provenance),
+        _frames({"ref": _key(1)}, {"ref": _key(2)}),
+        interrupt_id="i",
     )
     monkeypatch.setattr(provenance_module, "_MAX_MANIFESTS_PER_CONVERSATION", 2)
     fresh = ProvenanceStore()
@@ -1124,7 +1190,7 @@ async def test_a_transient_fault_of_the_lineage_write_fails_the_write_and_counts
     _held(provenance, 1)
     store = _keeping(pg_engine, provenance)
     state = _frames({"ref": _key(1)})
-    opened = await _open(store)
+    opened = await _opened(store, provenance)
     await _refuse_lineage_writes(pg_engine, "57P03")
 
     with pytest.raises(DBAPIError):
@@ -1136,37 +1202,6 @@ async def test_a_transient_fault_of_the_lineage_write_fails_the_write_and_counts
 
     assert [row[:2] for row in await _lineage_rows(pg_engine)] == [("spec_1", "cv_1")]
     assert _refusals(caplog, "turn store") == 0
-
-
-async def test_a_lineage_the_source_gains_during_the_read_is_written_next(
-    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """When the source of the process that wrote the turn last comes to hold
-    its own lineage for a key while the read of the key's lost row runs, the
-    restore keeps the source's and leaves it unwritten, so the next write
-    stores it."""
-    await _conversation(pg_engine)
-    provenance = ProvenanceStore()
-    _held(provenance, 1)
-    store = _keeping(pg_engine, provenance)
-    state = _frames({"ref": _key(1)})
-    cursor = await _advance(store, await _open(store), state)
-    _evict(provenance, 1)
-    read = TurnStore._frame_lineage
-
-    async def gaining(self: TurnStore, turn: int, keys: Any) -> list[Any]:
-        rows = await read(self, turn, keys)
-        _held(provenance, 1, share=0.9, count=5)
-        return rows
-
-    monkeypatch.setattr(TurnStore, "_frame_lineage", gaining)
-    await store.restore_frame_lineage(cursor, lineage_scope=_SCOPE)
-
-    await _advance(store, cursor, state)
-
-    (row,) = await _lineage_rows(pg_engine)
-    assert row[2] == 5
-    assert row[3][0]["manifest"] == {"citation": {"share": 0.9}}
 
 
 async def test_an_unchanged_lineage_is_not_written_again_whatever_object_holds_it(
@@ -1186,7 +1221,7 @@ async def test_an_unchanged_lineage_is_not_written_again_whatever_object_holds_i
     monkeypatch.setattr(ProvenanceStore, "get", copying)
     store = _keeping(pg_engine, provenance)
     state = _frames({"ref": _key(1)})
-    advanced = await _advance(store, await _open(store), state)
+    advanced = await _advance(store, await _opened(store, provenance), state)
     first = await _row_versions(pg_engine)
     await _pause(store, advanced, state, interrupt_id="int_1")
 
@@ -1209,7 +1244,7 @@ async def test_a_close_fails_when_the_frame_lineage_delete_fails(pg_engine: Asyn
     provenance = ProvenanceStore()
     _held(provenance, 1)
     store = _keeping(pg_engine, provenance)
-    advanced = await _advance(store, await _open(store), _frames({"ref": _key(1)}))
+    advanced = await _advance(store, await _opened(store, provenance), _frames({"ref": _key(1)}))
     async with pg_engine.begin() as conn:
         await conn.execute(text("ALTER TABLE turn_frame_lineage RENAME TO frame_lineage_gone"))
 
@@ -1233,7 +1268,7 @@ async def test_a_lineage_that_fails_its_check_deletes_the_older_row_and_the_writ
         _held(provenance, n)
     store = _keeping(pg_engine, provenance)
     state = _frames({"ref": _key(1)}, {"ref": _key(9)})
-    cursor = await _advance(store, await _open(store), state)
+    cursor = await _advance(store, await _opened(store, provenance), state)
     if invalid == "nan":
         _held(provenance, 9, share=float("nan"))
     else:
@@ -1260,7 +1295,7 @@ async def test_a_frame_key_postgres_text_cannot_hold_gets_no_row_and_the_write_c
     store = _keeping(pg_engine, provenance)
 
     advanced = await _advance(
-        store, await _open(store), _frames({"ref": _key(1)}, {"ref": surrogate})
+        store, await _opened(store, provenance), _frames({"ref": _key(1)}, {"ref": surrogate})
     )
 
     assert advanced.status is TurnStatus.RUNNING
@@ -1280,7 +1315,7 @@ async def test_a_database_refusal_of_the_lineage_fails_the_cursor_write_and_comm
     _held(provenance, 1)
     store = _keeping(pg_engine, provenance)
     state = _frames({"ref": _key(1)})
-    advanced = await _advance(store, await _open(store), state)
+    advanced = await _advance(store, await _opened(store, provenance), state)
     stored = await _row_versions(pg_engine)
     _held(provenance, 1, share=0.6)
     await _refuse_lineage_writes(pg_engine, "53100")

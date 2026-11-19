@@ -38,15 +38,18 @@ logger = logging.getLogger(__name__)
 # SQLAlchemy an async engine.
 _CONNECTOR_DRIVER = "asyncpg"
 
-# The pool of `DatabaseHandle.lineage_engine`: one connection and no
-# overflow. A read that finds it busy waits at most `pool_timeout`, inside its
-# caller's budget (`harness.mcp_client._LINEAGE_READ_BUDGET_S`, 2 s), which
-# lets the write go on without it.
-_LINEAGE_POOL: dict[str, Any] = {"pool_size": 1, "max_overflow": 0, "pool_timeout": 1.5}
+# The pool of `DatabaseHandle.lineage_engine`: four connections and no
+# overflow, for the card lineage reads and the turn frame lineage restores of
+# the turns that resume at once. A read that finds it busy waits at most
+# `pool_timeout`, inside its caller's budget
+# (`harness.mcp_client._LINEAGE_READ_BUDGET_S` and
+# `harness.turn.store._FRAME_LINEAGE_READ_BUDGET_S`, 2 s each), which lets
+# the caller go on without it.
+_LINEAGE_POOL: dict[str, Any] = {"pool_size": 4, "max_overflow": 0, "pool_timeout": 1.5}
 
 # asyncpg's bound on each statement over the lineage engine, cleanup's
 # rollback included, so a read the caller abandoned on a stalled statement
-# ends and gives the pool's one connection back.
+# ends and gives its connection back.
 _LINEAGE_COMMAND_TIMEOUT_S = 3.0
 
 
@@ -55,13 +58,12 @@ class DatabaseHandle:
     """The engines plus their async teardown.
 
     `engine` holds the session store's pool. `lineage_engine` is a pool of
-    one connection, no overflow, on the same settings, for the best-effort
-    reads of a card's stored lineage (`StudioStore.card_lineage`), so those
-    reads never take a connection the lease renewals and card writes need.
-    The turn frame lineage restore (`harness.turn.store.TurnStore.
-    restore_frame_lineage`) reads over `engine`, under its own 2 s bound,
-    since many turns can resume at once and one connection would queue
-    them.
+    four connections, no overflow, on the same settings, for the best-effort
+    lineage reads: a card's (`StudioStore.card_lineage`) and a resuming
+    turn's frames' (`harness.turn.store.TurnStore.restore_frame_lineage`), so
+    those reads never take a connection the lease renewals, cursor writes and
+    card writes need, and several turns resuming at once do not queue on one
+    connection.
     `aclose` disposes both and, on the Cloud SQL Connector path, closes the
     connector their connections were dialled through. Call it from the
     harness lifespan's shutdown phase.

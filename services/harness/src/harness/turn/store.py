@@ -52,20 +52,19 @@ row, kept while the turn is open, when the store is given a `FrameLineage`:
 the graph's reading of which frames a state names, and the process's
 `ProvenanceStore`. The rows commit with the cursor write or not at all, so
 the rows a turn's cursor write commits are the lineage the process held for
-every frame the state names, at that write. An `advance` or `pause` writes
-each named frame whose lineage the process holds at a generation
-(`ProvenanceStore.held`) it has not written for the turn since, so a
-lineage replaced in process, or held again after an eviction, is written at
-the next write. Each row is checked before the transaction opens (JSON that
+every frame the state names, at that write. Each segment starts by reading
+the rows of every frame the state names, putting each over what the process
+holds and dropping a named frame with no row (`TurnStore.
+restore_frame_lineage`); the process's last generation then is the
+segment's restore point. An `advance` or `pause` writes each named frame
+whose lineage the process holds at a generation (`ProvenanceStore.held`)
+produced or restored after that point and not written for the turn since,
+so an entry from before it that no read confirmed never reaches the rows,
+and a failed read leaves them as they are. Each row is checked before the transaction opens (JSON that
 encodes, a count Postgres `integer` holds); a lineage that fails the check
 deletes its frame's row instead, logged once per generation, so nothing the
 database receives can be refused for its values, and any refusal fails the
-cursor write like a refusal of the cursor statement. The rows are the
-turn's record of its frames: a segment taking over a turn another writer
-moved since this process last saw it puts every named frame's row over what
-the process holds, and a segment of the process that wrote the turn last
-reads only the named frames it lacks (`TurnStore.restore_frame_lineage`).
-A key holding a NUL or text that is not UTF-8 has no row. The closing
+cursor write like a refusal of the cursor statement. A key holding a NUL or text that is not UTF-8 has no row. The closing
 write deletes the turn's rows. A frame whose lineage no process held has no
 row: a card drawn on it is withheld, as on the instance that fetched it once
 the lineage is evicted.
@@ -140,18 +139,16 @@ _INTEGER_RANGE = range(-(2**31), 2**31)
 @dataclass
 class _TurnLineage:
     """What this process knows of one turn's stored frame lineage as of the
-    cursor at `version`: for each key, the source's generation
-    (`ProvenanceStore.held`) of the lineage this process committed (a row,
-    or the delete of one whose lineage failed its check) or read back
-    (`written`), the keys a read found no usable row for (`absent`), and
-    whether the source agrees with the rows of every named key (`synced`):
-    true once this process committed a write of the turn or read all its
-    named rows, false when another writer moved the cursor since."""
+    cursor at `version`: the source's last generation
+    (`ProvenanceStore.last_generation`) at the segment's restore point
+    (`since`), before which no entry is written unless a read confirmed it,
+    and for each key the source's generation (`ProvenanceStore.held`) of the
+    lineage this process committed (a row, or the delete of one whose
+    lineage failed its check) or read back (`written`)."""
 
     version: int
+    since: int
     written: dict[FrameKey, int] = field(default_factory=dict)
-    absent: set[FrameKey] = field(default_factory=set)
-    synced: bool = False
 
 
 @dataclass
@@ -584,8 +581,9 @@ class TurnStore:
     `clock` is the `time.time`-shaped clock the runs a close `cancelled`
     ends are stamped with. With `lineage`, the store keeps the lineage of
     each frame an open turn names with the turn, and puts it back for a
-    segment that lacks it (module docstring). Without it no lineage is
-    kept."""
+    segment that takes the turn over (module docstring), reading it over
+    `lineage_engine` (`harness.db.engine.DatabaseHandle.lineage_engine`,
+    `engine` when none is given). Without it no lineage is kept."""
 
     def __init__(
         self,
@@ -593,8 +591,10 @@ class TurnStore:
         *,
         clock: Callable[[], float] = time.time,
         lineage: FrameLineage | None = None,
+        lineage_engine: AsyncEngine | None = None,
     ) -> None:
         self._engine = engine
+        self._lineage_engine = lineage_engine or engine
         self._clock = clock
         self._lineage = lineage
         self._turns: OrderedDict[int, _TurnLineage] = OrderedDict()
@@ -605,10 +605,14 @@ class TurnStore:
     def _turn_lineage(self, cursor: Cursor) -> _TurnLineage:
         """What this process knows of `cursor`'s turn's stored lineage. When
         another writer moved the cursor since this process last wrote or read
-        it, the rows may have changed, and the turn starts afresh."""
+        it, or the process has no record of the turn, the turn starts afresh,
+        its restore point now."""
+        assert self._lineage is not None
         known = self._turns.get(cursor.id)
         if known is None or known.version != cursor.version:
-            known = _TurnLineage(version=cursor.version)
+            known = _TurnLineage(
+                version=cursor.version, since=self._lineage.source.last_generation()
+            )
             self._turns[cursor.id] = known
         self._turns.move_to_end(cursor.id)
         while len(self._turns) > _MAX_TURNS_HELD:
@@ -627,8 +631,9 @@ class TurnStore:
     ) -> _LineageWrite:
         """What a write of `state` from `cursor` commits of the turn's frame
         lineage: for each store key `state` names whose lineage the process
-        holds in conversation `scope` at a generation it has not written for
-        the turn since (`_TurnLineage.written`), its row with its members as
+        holds in conversation `scope` at a generation produced or restored
+        after the segment's restore point (`_TurnLineage.since`) and not
+        written for the turn since (`_TurnLineage.written`), its row with its members as
         JSON text, or, when the lineage fails the check (JSON cannot hold it,
         or its count is past Postgres `integer`), a delete of its row,
         logged. A key whose text is not UTF-8 (a lone surrogate) can have no
@@ -637,7 +642,7 @@ class TurnStore:
         if self._lineage is None or scope is None:
             return write
         source = self._lineage.source
-        written = self._turn_lineage(cursor).written
+        known = self._turn_lineage(cursor)
         turn_index = cursor.turn_index
         for key in dict.fromkeys(self._lineage.frame_keys(state)):
             spec_id, content_version = key
@@ -645,7 +650,9 @@ class TurnStore:
             if held is None:
                 continue
             lineage, count, generation = held
-            if written.get(key) == generation:
+            # An entry from before the restore point that no read confirmed
+            # can be older than the turn's row, so it is never written.
+            if generation <= known.since or known.written.get(key) == generation:
                 continue
             write.generations[key] = generation
             if not _text_key(key):
@@ -689,10 +696,7 @@ class TurnStore:
         self._moved(before, after)
         if self._lineage is None:
             return
-        known = self._turn_lineage(after)
-        known.written.update(write.generations)
-        known.absent.difference_update(write.generations)
-        known.synced = True
+        self._turn_lineage(after).written.update(write.generations)
 
     async def open_turn(
         self,
@@ -803,49 +807,52 @@ class TurnStore:
     async def restore_frame_lineage(self, cursor: Cursor, *, lineage_scope: str | None) -> None:
         """Bring the `FrameLineage` source's lineage of each frame `cursor`'s
         state names in conversation `lineage_scope` into step with the turn's
-        rows, which commit with the cursor: a segment on another instance, or
-        after a restart, taking over an open turn.
+        rows, which commit with the cursor, at the start of a segment.
 
-        When another writer moved the cursor since this process last wrote or
-        read it, or this process never saw the turn, the rows of every named
-        frame are read and each is put over what the source holds
-        (`ProvenanceStore.restore_frame` with `overwrite`), since an entry
-        the process held before can be older than the row. Otherwise only the
-        named frames the source lacks are read and put back, and a frame a
-        read found no usable row for is not read again until another writer
-        moves the cursor. Rows of frames the state no longer names are left
+        The segment's restore point is the source's last generation now
+        (`_TurnLineage.since`): from here on the turn's writes store only
+        entries produced or restored after it. One read takes the rows of
+        every named frame. Each row is put over what the source holds
+        (`ProvenanceStore.restore_frame` with `overwrite`), and a named frame
+        with no row is dropped from the source, since the turn vouches for no
+        lineage of it. Rows of frames the state no longer names are left
         unread, and so are frames whose key Postgres text cannot hold.
 
         Best effort: the read waits at most `_FRAME_LINEAGE_READ_BUDGET_S`,
-        and one that fails or runs past it is logged, restores nothing and is
-        tried again at the next segment (`bounded_read`). A row that does not
-        decode is logged and skipped. Nothing happens without `lineage` or
-        `lineage_scope`."""
+        and one that fails or runs past it is logged and restores nothing
+        (`bounded_read`); the source keeps what it held, which the turn's
+        writes then leave unwritten, so the rows stay as they are. Any other
+        fault (a malformed frames entry among them) is logged and the segment
+        goes on. A row that does not decode is logged, and its frame dropped.
+        Nothing happens without `lineage` or `lineage_scope`."""
         if self._lineage is None or lineage_scope is None:
             return
         source = self._lineage.source
-        known = self._turn_lineage(cursor)
+        known = _TurnLineage(version=cursor.version, since=source.last_generation())
+        self._turns[cursor.id] = known
+        self._turns.move_to_end(cursor.id)
+        while len(self._turns) > _MAX_TURNS_HELD:
+            self._turns.popitem(last=False)
+        turn_index = cursor.turn_index
+        try:
+            await self._restore(cursor, lineage_scope, known)
+        except Exception:
+            logger.exception(
+                "turn %s goes on without its stored frame lineage: the restore failed", turn_index
+            )
+
+    async def _restore(self, cursor: Cursor, scope: str, known: _TurnLineage) -> None:
+        """The read and restore of `restore_frame_lineage`, into `known`."""
+        assert self._lineage is not None
+        source = self._lineage.source
         named = [
             key for key in dict.fromkeys(self._lineage.frame_keys(cursor.state)) if _text_key(key)
         ]
-        authoritative = not known.synced
-        unread = (
-            named
-            if authoritative
-            else [
-                key
-                for key in named
-                if key not in known.absent
-                and source.get(conversation=lineage_scope, spec_id=key[0], content_version=key[1])
-                is None
-            ]
-        )
-        if not unread:
-            known.synced = True
+        if not named:
             return
         turn_index = cursor.turn_index
         rows = await bounded_read(
-            self._frame_lineage(cursor.id, unread),
+            self._frame_lineage(cursor.id, named),
             budget_s=_FRAME_LINEAGE_READ_BUDGET_S,
             held=self._abandoned_reads,
             logger=logger,
@@ -853,46 +860,39 @@ class TurnStore:
         )
         if rows is None:
             return
-        known.synced = True
-        known.absent.update(
-            key
-            for key in unread
-            if source.get(conversation=lineage_scope, spec_id=key[0], content_version=key[1])
-            is None
-        )
+        restored: set[FrameKey] = set()
         for row in rows:
+            key = (row.spec_id, row.content_version)
             try:
                 lineage = lineage_from_json(row.members)
             except CardLineageDecodeError:
                 logger.exception(
-                    "turn store: skipping turn %s's lineage of frame spec_id=%r "
-                    "content_version=%r, which does not decode",
+                    "turn store: dropping turn %s's lineage of frame spec_id=%r "
+                    "content_version=%r, whose row does not decode",
                     turn_index,
                     row.spec_id,
                     row.content_version,
                 )
                 continue
-            key = (row.spec_id, row.content_version)
-            known.absent.discard(key)
             generation = source.restore_frame(
-                conversation=lineage_scope,
+                conversation=scope,
                 frame=key,
                 lineage=lineage,
                 stat_var_count=row.stat_var_count,
-                overwrite=authoritative,
+                overwrite=True,
             )
-            # Restoring only what the source lacked, it can have gained its
-            # own entry for the key during the read; that entry, which the
-            # row may not hold, stays unwritten.
-            if generation is not None:
-                known.written[key] = generation
+            assert generation is not None  # an overwrite always stores
+            known.written[key] = generation
+            restored.add(key)
+        for spec_id, content_version in named:
+            if (spec_id, content_version) not in restored:
+                source.drop(conversation=scope, spec_id=spec_id, content_version=content_version)
 
     async def _frame_lineage(self, turn: int, keys: Sequence[FrameKey]) -> list[Any]:
-        """The turn's `turn_frame_lineage` rows of `keys`, read over the turn
-        store's own engine. The card lineage reads' pool of one connection
-        (`harness.db.engine.DatabaseHandle.lineage_engine`) would queue the
-        restores of every turn resuming at once behind each other."""
-        async with self._engine.connect() as conn:
+        """The turn's `turn_frame_lineage` rows of `keys`, read over the
+        lineage engine, off the pool the cursor writes and lease renewals
+        use."""
+        async with self._lineage_engine.connect() as conn:
             rows = await conn.execute(
                 _SELECT_FRAME_LINEAGE,
                 {

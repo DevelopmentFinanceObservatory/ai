@@ -5861,6 +5861,28 @@ def _plan_lineage(provenance: ProvenanceStore) -> None:
     )
 
 
+class _LineageWritingSurface(ScriptedSurface):
+    """`ScriptedSurface` whose plan run writes its frame's lineage into
+    `provenance` (`_plan_lineage`) as `_RecordingSurface` does while the
+    plan's steps run."""
+
+    def __init__(self, provenance: ProvenanceStore) -> None:
+        super().__init__()
+        self._provenance = provenance
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Mapping[str, Any],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        result = await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+        if tool.name == "aggregate":
+            _plan_lineage(self._provenance)
+        return result
+
+
 def _drawing_app(
     *script: types.Part, provenance: ProvenanceStore, store: StudioStore | None = None
 ) -> FastAPI:
@@ -5873,7 +5895,7 @@ def _drawing_app(
             provenance,
         ),
         store=store,
-        tool_surface=ScriptedSurface(),
+        tool_surface=_LineageWritingSurface(provenance),
         provenance=provenance,
     )
 
@@ -5942,7 +5964,6 @@ async def test_frames_a_turn_named_before_a_pause_draw_on_another_instance(
         McpTimeoutPolicy, "client", lambda self, url, *, auth, caller, tool=None: platform
     )
     same = ProvenanceStore()
-    _plan_lineage(same)
     alone = _drawing_app(*_FETCH_PLAN_ASK, *_CHARTS_BOTH, provenance=same)
     async with _client(alone) as client:
         elicitation = await _fetch_plan_ask(client)
@@ -5954,7 +5975,6 @@ async def test_frames_a_turn_named_before_a_pause_draw_on_another_instance(
         await conn.execute(text("DELETE FROM conversations"))
 
     first_provenance = ProvenanceStore()
-    _plan_lineage(first_provenance)
     first = _drawing_app(*_FETCH_PLAN_ASK, provenance=first_provenance)
     async with _client(first) as client:
         elicitation = await _fetch_plan_ask(client)

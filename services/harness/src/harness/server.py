@@ -623,6 +623,7 @@ def create_app(
             engine,
             clock=store.now,
             lineage=FrameLineage(source=provenance, frame_keys=frame_store_keys),
+            lineage_engine=database.lineage_engine,
         ),
         edit_model=GeminiEdit(
             model_name=resolved_settings.model_name,

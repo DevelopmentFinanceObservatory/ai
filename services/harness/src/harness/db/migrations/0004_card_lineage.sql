@@ -52,10 +52,11 @@ CREATE TABLE conversation_card_lineage (
 -- are the lineage the writing instance held for every frame the state names,
 -- at that write: a key whose lineage it holds anew is upserted, and one whose
 -- lineage fails the check before the write (JSON cannot hold it, or its count
--- is past `integer`) has its row deleted. A segment taking over a turn that
--- another writer moved puts every named key's row over what its instance
--- holds, and one of the instance that wrote the turn last reads only the
--- named keys it lacks (`TurnStore.restore_frame_lineage`). `members` and
+-- is past `integer`) has its row deleted. Each segment reads the rows of
+-- every named key, puts them over what its instance holds and drops a named
+-- key with no row (`TurnStore.restore_frame_lineage`), and its writes store
+-- only lineage produced or read after that point, so a stale entry never
+-- reaches the rows and a failed read leaves them as they are. `members` and
 -- `stat_var_count` are encoded as `conversation_card_lineage` encodes them.
 --
 -- A frame no instance held at a write has no row, and a card drawn from it

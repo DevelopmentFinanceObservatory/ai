@@ -141,11 +141,9 @@ async def test_connector_backend_builds_the_connector_only_once_across_pooled_co
         ),
     ],
 )
-async def test_card_lineage_reads_get_a_pool_of_one_connection_of_their_own(
-    settings: Settings, fake_connector
-) -> None:
+async def test_lineage_reads_get_a_pool_of_their_own(settings: Settings, fake_connector) -> None:
     """The lineage engine shares no pool with the session store's engine, and
-    holds one connection with no overflow."""
+    holds four connections with no overflow."""
     database = build_database(settings=settings)
     assert database is not None
 
@@ -153,7 +151,7 @@ async def test_card_lineage_reads_get_a_pool_of_one_connection_of_their_own(
     assert database.lineage_engine.pool is not database.engine.pool
     # `size` and `_max_overflow` are on the `AsyncAdaptedQueuePool` the
     # engine builds, not on the `Pool` it is typed as.
-    assert database.lineage_engine.pool.size() == 1  # type: ignore[attr-defined]
+    assert database.lineage_engine.pool.size() == 4  # type: ignore[attr-defined]
     assert database.lineage_engine.pool._max_overflow == 0  # type: ignore[attr-defined]
     assert database.lineage_engine.pool.timeout() == 1.5  # type: ignore[attr-defined]
 
@@ -162,7 +160,7 @@ async def test_card_lineage_reads_get_a_pool_of_one_connection_of_their_own(
 
 async def test_the_connector_backed_lineage_engine_bounds_each_statement(fake_connector) -> None:
     """Its connections are dialled with asyncpg's `command_timeout`, so a
-    stalled lineage read cannot hold the pool's one connection."""
+    stalled lineage read cannot hold a pool connection."""
     settings = Settings(
         session_store_instance_connection_name="my-project:my-region:my-instance",
         session_store_database="sessions",

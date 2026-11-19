@@ -427,6 +427,18 @@ class ProvenanceStore:
         entry = self._entry(conversation, (spec_id, content_version))
         return entry.stat_var_count if entry is not None else None
 
+    def last_generation(self) -> int:
+        """The generation the store's most recent store of an entry was given
+        (`held`); every later store gives a greater one."""
+        return self._generations
+
+    def drop(self, *, conversation: str, spec_id: str | None, content_version: str | None) -> None:
+        """Forget the lineage held for the frame `(spec_id, content_version)`,
+        if any: a frame the caller knows has no lineage it can vouch for."""
+        bucket = self._by_conversation.get(conversation)
+        if bucket is not None:
+            bucket.pop((spec_id, content_version), None)
+
     def held(
         self, *, conversation: str, spec_id: str | None, content_version: str | None
     ) -> tuple[Lineage, int | None, int] | None:
