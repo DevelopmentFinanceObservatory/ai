@@ -26,6 +26,7 @@ from harness.turn.loop import (
     Graph,
     Outcome,
     TurnExpired,
+    abandon,
     reject,
     run_segment,
     stop_turn,
@@ -42,7 +43,7 @@ from harness.turn.store import (
     TurnStore,
 )
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from .store_clock import StoreClock
 
@@ -926,6 +927,7 @@ _NAN = float("nan")
         ("nan-pause-payload", "NonFiniteJsonError"),
         ("nan-state-at-the-end", "NonFiniteJsonError"),
         ("nan-spec-block", "NonFiniteJsonError"),
+        ("connection-reset-before-commit", "ConnectionResetError"),
     ],
 )
 async def test_a_boundary_write_that_cannot_store_its_values_closes_the_turn_failed(
@@ -933,8 +935,18 @@ async def test_a_boundary_write_that_cannot_store_its_values_closes_the_turn_fai
 ) -> None:
     """A node's outcome that JSON cannot hold fails the boundary's write,
     which closes the turn `failed` at that node with the error stored and
-    reported, so no later segment reruns the node into the same failure."""
-    store, lease = TurnStore(pg_engine), await _instance(pg_engine, clock)
+    reported, so no later segment reruns the node into the same failure.
+    Such a write sent nothing, so the turn is closed without being read back,
+    which fails here. A write that raised before committing for any other
+    reason (a dropped connection) is read back, found unwritten, and closed
+    the same way."""
+    store: TurnStore
+    if ends == "connection-reset-before-commit":
+        store = _BoundaryWriteRaises(pg_engine, how="uncommitted")
+    else:
+        store = _ReadBackFails(pg_engine)
+        store.failing = True
+    lease = await _instance(pg_engine, clock)
     segment_id = await _claim(lease)
 
     async def work(ctx: NodeCtx, node_input: Any) -> Next | Pause:
@@ -948,6 +960,8 @@ async def test_a_boundary_write_that_cannot_store_its_values_closes_the_turn_fai
             case "nan-state-at-the-end":
                 ctx.state["share"] = _NAN
                 return Next("done")
+            case "connection-reset-before-commit":
+                return Next("next")
             case _:
                 ctx.state[SPECS_KEY] = {"spec_a": {"share": _NAN}}
                 return Next("next")
@@ -970,7 +984,13 @@ async def test_a_boundary_write_that_cannot_store_its_values_closes_the_turn_fai
     assert isinstance(failed, TurnFailed) and failed.node == "work"
     assert segment.cursor.status is TurnStatus.FAILED
     assert segment.cursor.error is not None
-    assert (segment.cursor.error["node"], segment.cursor.error["type"]) == ("work", error_type)
+    # An encoding error is the store's `WriteNotEncoded`, raised from the encoder's.
+    raised = failed.error if ends == "connection-reset-before-commit" else failed.error.__cause__
+    assert type(raised).__name__ == error_type
+    assert (segment.cursor.error["node"], segment.cursor.error["type"]) == (
+        "work",
+        type(failed.error).__name__,
+    )
     assert await store.open_cursor(PRINCIPAL, CONVERSATION) is None
 
 
@@ -1562,7 +1582,14 @@ class _CutAfterCommit(TurnStore):
 
 @pytest.mark.parametrize("ends", [True, False], ids=["final-node", "middle-node"])
 @pytest.mark.parametrize(
-    "cut_at", ["acknowledgement", "absorbed_acknowledgement", "after_commit", "after_after_commit"]
+    "cut_at",
+    [
+        "acknowledgement",
+        "absorbed_acknowledgement",
+        "commit_in_flight",
+        "after_commit",
+        "after_after_commit",
+    ],
 )
 async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
     pg_engine: AsyncEngine, clock: StoreClock, cut_at: str, ends: bool
@@ -1570,8 +1597,10 @@ async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
     """A lost lease cuts the segment once `work`'s move or end committed:
     while the write's acknowledgement is awaited, during `work`'s work
     after the commit, or once that work caught the cancellation and
-    returned. `work`'s `NodeDone` is reported once, before the segment
-    settles on the turn as stored: `done` for the final node, the move to
+    returned. At `commit_in_flight` the cut lands while the write's
+    transaction is still open, and it commits only once the segment's read
+    back waits on the turn's row. `work`'s `NodeDone` is reported once,
+    before the segment settles on the turn as stored: `done` for the final node, the move to
     `later` for a middle one, with `later` never run. A write that caught
     the cut and returned still has its work after the commit run (an
     acknowledgement recorded) before the segment settles on the cut."""
@@ -1624,7 +1653,15 @@ async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
     )
     events: list[TurnEvent] = []
     opened = await _open(store, segment_id, graph)
-    segment = await asyncio.wait_for(_segment(store, lease_a, opened, segment_id, graph, events), 5)
+    async with _side_engine(pg_engine) as side:
+        late = _LateFirstCommit(pg_engine, side, cut=cut)
+        if cut_at == "commit_in_flight":
+            store._engine = late  # type: ignore[assignment] -- the write under test goes through it
+        segment = await asyncio.wait_for(
+            _segment(store, lease_a, opened, segment_id, graph, events), 10
+        )
+        if late.committing is not None:
+            await late.committing
 
     assert events == [NodeDone(node="work", label=label, output=None)]
     assert ran == []
@@ -1684,15 +1721,15 @@ async def test_a_cut_reports_no_node_done_for_a_move_another_segment_wrote(
 
 
 class _ReadBackFails(TurnStore):
-    """A `TurnStore` whose `turn` reads fail once `failing` is set, as a
-    database the lease was lost to is unreachable for the read back."""
+    """A `TurnStore` whose `settled_turn` reads fail once `failing` is set,
+    as a database the lease was lost to is unreachable for the read back."""
 
     failing = False
 
-    async def turn(self, turn_id: int) -> Cursor:
+    async def settled_turn(self, turn_id: int) -> Cursor:
         if self.failing:
             raise ConnectionError("the turn could not be read back")
-        return await super().turn(turn_id)
+        return await super().settled_turn(turn_id)
 
 
 async def test_a_lost_lease_during_after_commit_work_leaves_the_segment_on_the_committed_cursor(
@@ -1738,12 +1775,15 @@ class _BoundaryWriteRaises(TurnStore):
     transient error. By `how`: after the write committed, as a lost
     acknowledgement does (`committed`); before it wrote anything
     (`uncommitted`); after it committed, with the read of the turn after it
-    failing too (`read_back_fails`); or after another segment took the lease
-    and made the same write from the same version (`taken_over`)."""
+    failing too (`read_back_fails`); after another segment took the lease
+    and made the same write from the same version (`taken_over`); or after
+    another segment took the lease and closed the turn `abandoned`
+    (`abandoned`), as the conversation's next turn does."""
 
-    def __init__(self, engine: AsyncEngine, *, how: str) -> None:
+    def __init__(self, engine: AsyncEngine, *, how: str, error: Exception | None = None) -> None:
         super().__init__(engine)
         self._how = how
+        self._error = error or ConnectionResetError("the write's acknowledgement was lost")
         self.raised = False
 
     async def _raises(
@@ -1756,9 +1796,13 @@ class _BoundaryWriteRaises(TurnStore):
             async with self._engine.begin() as conn:
                 await conn.execute(text("UPDATE conversations SET lease_segment_id = 'segment-b'"))
             await write(cursor, **{**kwargs, "segment_id": "segment-b"})
+        elif self._how == "abandoned":
+            async with self._engine.begin() as conn:
+                await conn.execute(text("UPDATE conversations SET lease_segment_id = 'segment-b'"))
+            await abandon(TurnStore(self._engine), cursor, segment_id="segment-b")
         elif self._how != "uncommitted":
             await write(cursor, **kwargs)
-        raise ConnectionResetError("the write's acknowledgement was lost")
+        raise self._error
 
     async def pause(self, cursor: Cursor, **kwargs: Any) -> Cursor:
         return await self._raises(super().pause, cursor, kwargs)
@@ -1771,10 +1815,10 @@ class _BoundaryWriteRaises(TurnStore):
             return await super().finish(cursor, **kwargs)
         return await self._raises(super().finish, cursor, kwargs)
 
-    async def turn(self, turn_id: int) -> Cursor:
+    async def settled_turn(self, turn_id: int) -> Cursor:
         if self.raised and self._how == "read_back_fails":
             raise ConnectionError("the turn could not be read back")
-        return await super().turn(turn_id)
+        return await super().settled_turn(turn_id)
 
 
 def _boundary_graph(boundary: str, ran: list[str]) -> Graph:
@@ -1812,17 +1856,23 @@ def _boundary_graph(boundary: str, ran: list[str]) -> Graph:
     )
 
 
+@pytest.mark.parametrize(
+    "error",
+    [ConnectionResetError("the write's acknowledgement was lost"), ValueError("not an encoding")],
+    ids=["connection-reset", "value-error"],
+)
 @pytest.mark.parametrize("boundary", ["pause", "move", "end"])
 async def test_a_boundary_write_whose_acknowledgement_was_lost_carries_on_as_committed(
-    pg_engine: AsyncEngine, clock: StoreClock, boundary: str
+    pg_engine: AsyncEngine, clock: StoreClock, boundary: str, error: Exception
 ) -> None:
     """`work`'s pause, move or end commits and its write then raises. The
     turn read back holds the write, so the segment goes on as after a write
     that returned: `work`'s work after the commit runs, the boundary is
     reported, and a pause stays open for its answer, which a later segment
-    resumes."""
+    resumes. A `ValueError` that is not the store's `WriteNotEncoded` is
+    read back the same way."""
     store, lease = (
-        _BoundaryWriteRaises(pg_engine, how="committed"),
+        _BoundaryWriteRaises(pg_engine, how="committed", error=error),
         await _instance(pg_engine, clock),
     )
     segment_id = await _claim(lease)
@@ -1862,44 +1912,129 @@ async def test_a_boundary_write_whose_acknowledgement_was_lost_carries_on_as_com
         assert ran == ["after_commit"]
 
 
+@contextlib.asynccontextmanager
+async def _side_engine(pg_engine: AsyncEngine) -> Any:
+    """An engine of its own on `pg_engine`'s schema."""
+    async with pg_engine.connect() as conn:
+        schema = (await conn.execute(text("SELECT current_schema()"))).scalar_one()
+    side = create_async_engine(
+        pg_engine.url, connect_args={"server_settings": {"search_path": schema}}
+    )
+    try:
+        yield side
+    finally:
+        await side.dispose()
+
+
+class _LateFirstCommit:
+    """An engine whose first `begin` hands out a transaction that raises
+    as a lost acknowledgement does once its statements ran, and commits it
+    only once another statement waits on a row lock: a COMMIT the server
+    was still making when the client gave up. With `cut`, the write cuts
+    the segment through it in place of raising, and waits to be cancelled.
+    That transaction and the watch
+    for the wait run on `side`, off `engine`'s pool of two, which the read
+    back and the heartbeat need. Everything else is `engine`'s."""
+
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        side: AsyncEngine,
+        *,
+        cut: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        self._engine = engine
+        self._side = side
+        self._cut = cut
+        self._first = True
+        self.committing: asyncio.Task[None] | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine, name)
+
+    def begin(self) -> Any:
+        if not self._first:
+            return self._engine.begin()
+        self._first = False
+        return self._late()
+
+    @contextlib.asynccontextmanager
+    async def _late(self) -> Any:
+        conn = await self._side.connect()
+        transaction = await conn.begin()
+        try:
+            yield conn
+        except BaseException:
+            await transaction.rollback()
+            await conn.close()
+            raise
+        self.committing = asyncio.create_task(self._commit_once_waited(conn, transaction))
+        if self._cut is None:
+            raise ConnectionResetError("the commit's acknowledgement was lost")
+        await self._cut()
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable")
+
+    async def _commit_once_waited(self, conn: Any, transaction: Any) -> None:
+        async with self._side.connect() as watch:
+            for _ in range(500):
+                waiting = await watch.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                    )
+                )
+                if waiting.scalar():
+                    break
+                await asyncio.sleep(0.01)
+        await transaction.commit()
+        await conn.close()
+
+
 @pytest.mark.parametrize("boundary", ["pause", "move", "end"])
-async def test_a_boundary_write_that_raised_before_committing_closes_the_turn_failed(
+async def test_a_boundary_write_still_committing_at_the_read_back_carries_on_as_committed(
     pg_engine: AsyncEngine, clock: StoreClock, boundary: str
 ) -> None:
-    """`work`'s write raises with nothing written. The turn read back stands
-    at the version the write started from, so it closes `failed` at `work`
-    with the write's error, and `work`'s work after a commit never runs."""
-    store = _BoundaryWriteRaises(pg_engine, how="uncommitted")
-    lease = await _instance(pg_engine, clock)
+    """`work`'s write raises while its transaction is still open, and the
+    transaction commits only once the read back waits on the turn's row.
+    The read back waits for it, so the segment finds the write and goes on
+    as after one that returned."""
+    store, lease = TurnStore(pg_engine), await _instance(pg_engine, clock)
     segment_id = await _claim(lease)
     ran: list[str] = []
     graph = _boundary_graph(boundary, ran)
-    events: list[TurnEvent] = []
     opened = await _open(store, segment_id, graph)
-    segment = await _segment(store, lease, opened, segment_id, graph, events)
+    events: list[TurnEvent] = []
+    async with _side_engine(pg_engine) as side:
+        late = _LateFirstCommit(pg_engine, side)
+        store._engine = late  # type: ignore[assignment] -- the write under test goes through it
+        segment = await asyncio.wait_for(
+            _segment(store, lease, opened, segment_id, graph, events), 10
+        )
+        assert late.committing is not None
+        await late.committing
 
-    [failed] = events
-    assert isinstance(failed, TurnFailed) and failed.node == "work"
-    assert isinstance(failed.error, ConnectionResetError)
-    assert segment.outcome is Outcome.FAILED
-    assert ran == []
+    assert not [event for event in events if isinstance(event, TurnFailed)]
+    assert segment.outcome is (Outcome.PAUSED if boundary == "pause" else Outcome.DONE)
+    assert ran == (["after_commit", "later"] if boundary == "move" else ["after_commit"])
     stored = await TurnStore(pg_engine).turn(opened.id)
-    assert (stored.status, stored.version) == (TurnStatus.FAILED, opened.version + 1)
-    assert stored.error is not None
-    assert (stored.error["node"], stored.error["transient"]) == ("work", True)
+    assert stored.status is (TurnStatus.PAUSED if boundary == "pause" else TurnStatus.DONE)
 
 
-@pytest.mark.parametrize("how", ["read_back_fails", "taken_over"])
+@pytest.mark.parametrize("how", ["read_back_fails", "taken_over", "abandoned"])
 @pytest.mark.parametrize("boundary", ["pause", "move", "end"])
 async def test_a_boundary_write_whose_turn_cannot_be_settled_leaves_it_as_stored(
     pg_engine: AsyncEngine, clock: StoreClock, boundary: str, how: str
 ) -> None:
-    """`work`'s write raises, and either the read of the turn after it fails
-    or the turn holds the same write by another segment. Nothing tells
-    whether this segment's write committed, so the turn is not closed: the
-    segment ends `unclosed` on the write's transient error and leaves the
-    turn as stored, for a later segment or an answer to settle. The
-    heartbeat waits out the test, so no renewal finds the lease taken."""
+    """`work`'s write raises, and the read of the turn after it fails, the
+    turn holds the same write by another segment, or another segment
+    closed it. The turn is not closed here. One another segment closed
+    (`abandoned`, or `done` by the same end) ends the segment on its stored
+    outcome with nothing reported. Otherwise nothing tells whether this
+    segment's write committed: the segment ends `unclosed` on the write's
+    transient error and leaves the turn as stored, for a later segment or an
+    answer to settle. The heartbeat waits out the test, so no renewal finds
+    the lease taken."""
     store = _BoundaryWriteRaises(pg_engine, how=how)
     lease = await _instance(pg_engine, clock)
     segment_id = await _claim(lease)
@@ -1919,22 +2054,19 @@ async def test_a_boundary_write_whose_turn_cannot_be_settled_leaves_it_as_stored
         heartbeat_seconds=3600,
     )
 
-    [failed] = events
-    assert isinstance(failed, TurnFailed) and failed.node == "work"
-    assert isinstance(failed.error, ConnectionResetError)
-    assert segment.outcome is Outcome.UNCLOSED
     assert ran == []
     stored = await TurnStore(pg_engine).turn(opened.id)
     assert stored.version == opened.version + 1
-    assert stored.written_by == ("segment-b" if how == "taken_over" else segment_id)
-    assert (
-        stored.status
-        is {
-            "pause": TurnStatus.PAUSED,
-            "move": TurnStatus.RUNNING,
-            "end": TurnStatus.DONE,
-        }[boundary]
-    )
+    assert stored.written_by == (segment_id if how == "read_back_fails" else "segment-b")
+    closed = {"pause": TurnStatus.PAUSED, "move": TurnStatus.RUNNING, "end": TurnStatus.DONE}
+    assert stored.status is (TurnStatus.ABANDONED if how == "abandoned" else closed[boundary])
+    if how != "read_back_fails" and stored.status in (TurnStatus.ABANDONED, TurnStatus.DONE):
+        assert (segment.outcome, events) == (Outcome(stored.status.value), [])
+    else:
+        [failed] = events
+        assert isinstance(failed, TurnFailed) and failed.node == "work"
+        assert isinstance(failed.error, ConnectionResetError)
+        assert segment.outcome is Outcome.UNCLOSED
     expected = opened if how == "read_back_fails" else stored
     assert (segment.cursor.version, segment.cursor.status) == (expected.version, expected.status)
 
