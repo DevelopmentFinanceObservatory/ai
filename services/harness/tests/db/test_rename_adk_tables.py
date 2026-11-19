@@ -446,8 +446,10 @@ def _readme_statements() -> dict[str, str]:
         )
         assert frame, block
         selects.append(frame[1])
-    assert len(selects) == 3
-    return dict(zip(("discard", "drop_archive", "rename_back"), selects, strict=True))
+    assert len(selects) == 4
+    return dict(
+        zip(("discard", "drop_archive", "rename_back", "rename_away"), selects, strict=True)
+    )
 
 
 async def _run_readme(engine: AsyncEngine, name: str) -> None:
@@ -549,6 +551,19 @@ async def test_the_readme_rename_back_restores_every_table_of_a_split_layout_wit
             f"{adk_schema}.adk_internal_metadata_n_seq"
         )
 
+        await _run_readme(split, "rename_away")
+
+        assert await _archive_relations(split, schema, adk_schema) == {
+            f"{_home(table, schema, adk_schema)}.adk_archive_{table}" for table in _ARCHIVED
+        } | {
+            f"{adk_schema}.adk_archive_idx_events_app_user_session_ts_id",
+            f"{adk_schema}.adk_archive_adk_internal_metadata_n_seq",
+        } | {f"{_home(table, schema, adk_schema)}.adk_archive_{table}_pkey" for table in _ARCHIVED}
+        for table in _ARCHIVED:
+            assert await _rows(split, f"adk_archive_{table}") == before[table]
+        assert await _foreign_key_target(split) == "adk_archive_sessions"
+
+        await _run_readme(split, "rename_back")
         await _run_readme(split, "discard")
 
         assert await _tables(split, adk_schema) == set()
@@ -568,3 +583,24 @@ async def test_the_readme_drop_removes_every_archived_table_of_a_split_layout(
         assert await _archive_relations(split, schema, adk_schema) == set()
         assert await _tables(split, adk_schema) == set()
         assert await _rows(split, "conversations") == conversations
+
+
+async def test_the_readme_rename_away_lets_the_migration_run_after_an_unimported_refusal(
+    pg_empty_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    await _migrate_through_0004(pg_empty_engine, tmp_path)
+    await _execute(
+        pg_empty_engine,
+        *_ADK_V1_DDL,
+        "INSERT INTO sessions VALUES ('dfo_analyst_graph.ledger', 'p', 'c1', '{}', now(), now())",
+    )
+    before = {table: await _rows(pg_empty_engine, table) for table in _ADK_TABLES}
+    await _refused(pg_empty_engine, "DFA02")
+
+    await _run_readme(pg_empty_engine, "rename_away")
+
+    assert await apply_pending(pg_empty_engine) == [_MIGRATION]
+    tables = await _tables(pg_empty_engine)
+    assert not set(_ADK_TABLES) & tables
+    for table in _ADK_TABLES:
+        assert await _rows(pg_empty_engine, f"adk_archive_{table}") == before[table]

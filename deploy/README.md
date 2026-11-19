@@ -285,7 +285,7 @@ No revision that reads ADK's tables may take traffic once the migration commits.
 Each check below stops startup at once with its own SQLSTATE and renames nothing:
 
 - `DFA01`: a table of an ADK name lacks ADK's columns while another carries them. Rename the foreign table by hand. With no ADK table at all, tables of those names are left alone without a message.
-- `DFA02`: ADK's `sessions` holds rows of app `dfo_analyst_graph.ledger` and `adk_ledger_imports` holds no row, so the import never ran. Run the import job of the image that holds it. To discard ADK's conversations instead, drop ADK's five tables with the statement below.
+- `DFA02`: ADK's `sessions` holds rows of app `dfo_analyst_graph.ledger` and `adk_ledger_imports` holds no row, so the import never ran. Run the import job of the image that holds it. To discard ADK's conversations instead, drop ADK's five tables with the first statement below; to keep them in the archive, rename them away with the statement after the rename-back.
 - `DFA03`: a table to rename is not owned by the user the migration runs as, or that user lacks `CREATE` on its schema. Run it as the owner or grant `CREATE`.
 - `DFA04`: a relation or type named `adk_archive_<name>` exists in the schema, for a table, index or sequence to rename, or a relation named `adk_archive_<table>` resolves through `search_path` in any schema, for a table to rename. Rename or drop it. After the migration each `adk_archive_<table>` therefore resolves to the table it archived, which the statements below rely on.
 
@@ -346,7 +346,36 @@ WHERE c.relname LIKE 'adk\_archive\_%' \gexec
 COMMIT;
 ```
 
-The migration is recorded as applied, so a later start of the image that carries it does not run it again. To roll forward after a rollback, first run the import job of the image that holds it, so the conversations the ADK-reading image wrote meanwhile reach the harness tables. Then drop ADK's five tables with the first statement above, or rename them away, before this image starts.
+To keep ADK's conversations in the archive without the migration, rename ADK's five tables and the import ledger to `adk_archive_<name>`, with their indexes and owned sequences, as the migration does. This is the inverse of the rename-back. It stops with `42P07` when an `adk_archive_<name>` relation already exists:
+
+```sql
+\set ON_ERROR_STOP on
+BEGIN;
+WITH adk AS (
+    SELECT c.oid
+    FROM unnest(ARRAY['sessions', 'events', 'app_states', 'user_states', 'adk_internal_metadata',
+                      'adk_ledger_imports']) AS t(name)
+    JOIN pg_class c ON c.oid = to_regclass(t.name)
+), renamed AS (
+    SELECT oid FROM adk
+    UNION ALL
+    SELECT i.indexrelid FROM pg_index i JOIN adk a ON i.indrelid = a.oid
+    UNION ALL
+    SELECT d.objid FROM pg_depend d
+    JOIN adk a ON d.refobjid = a.oid
+    JOIN pg_class s ON s.oid = d.objid AND s.relkind = 'S'
+    WHERE d.classid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')
+)
+SELECT format('ALTER %s %I.%I RENAME TO %I',
+    CASE c.relkind WHEN 'i' THEN 'INDEX' WHEN 'S' THEN 'SEQUENCE' ELSE 'TABLE' END,
+    n.nspname, c.relname, 'adk_archive_' || c.relname)
+FROM renamed r
+JOIN pg_class c ON c.oid = r.oid
+JOIN pg_namespace n ON n.oid = c.relnamespace \gexec
+COMMIT;
+```
+
+The migration is recorded as applied, so a later start of the image that carries it does not run it again. To roll forward after a rollback, first run the import job of the image that holds it, so the conversations the ADK-reading image wrote meanwhile reach the harness tables. Then drop ADK's five tables with the first statement above, or rename them away with the statement just above, before this image starts.
 
 ## Langfuse export
 
