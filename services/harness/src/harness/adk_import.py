@@ -750,15 +750,44 @@ async def _lease_live(conn: AsyncConnection, pk: int) -> bool:
 _UNCOMPARED_LEASE_FIELD = "cancel"
 
 
+# The columns of each table the digest covers: those the import writes,
+# named so that a column a later migration adds leaves every digest as it was.
+_DIGESTED_COLUMNS: dict[str, tuple[str, ...]] = {
+    "conversations": (
+        "principal",
+        "conversation_id",
+        "version",
+        "turn_state",
+        "composition",
+        "lease_segment_id",
+        "lease_owner",
+        "lease_expires_at",
+        "seq_next",
+        "seq_reserved",
+    ),
+    "conversation_turns": ("position", "record"),
+    "conversation_components": ("component_id", "seq", "entry"),
+    "conversation_write_tokens": ("component_id", "token"),
+    "conversation_approvals": ("position", "record"),
+    "runs": ("run_id", "record", "submission", "retrievals"),
+    "run_keys": ("idempotency_key", "run_id"),
+    "run_plans": ("revision", "plan"),
+}
+
+
+def _digested_row(table: str) -> str:
+    """The SQL expression for one row of `table` as the digest reads it."""
+    pairs = ", ".join(f"'{column}', {column}" for column in _DIGESTED_COLUMNS[table])
+    return f"jsonb_build_object({pairs})"
+
+
 async def _stored_digest(conn: AsyncConnection, pk: int) -> str:
-    """A digest of every row the tables hold for the conversation, its lease
-    included bar `_UNCOMPARED_LEASE_FIELD`."""
+    """A digest of every row the tables hold for the conversation, over the
+    columns `_DIGESTED_COLUMNS` names. `lease_{_UNCOMPARED_LEASE_FIELD}` is
+    not among them."""
     conversation = (
         await conn.execute(
-            text(
-                "SELECT to_jsonb(c) - 'id' - 'created_at' - 'updated_at' "
-                f"- 'lease_{_UNCOMPARED_LEASE_FIELD}' FROM conversations c WHERE id = :pk"
-            ),
+            text(f"SELECT {_digested_row('conversations')} FROM conversations WHERE id = :pk"),
             {"pk": pk},
         )
     ).scalar_one()
@@ -766,7 +795,7 @@ async def _stored_digest(conn: AsyncConnection, pk: int) -> str:
     for table, order in _CHILD_TABLES:
         result = await conn.execute(
             text(
-                f"SELECT to_jsonb(t) - 'conversation' FROM {table} t "
+                f"SELECT {_digested_row(table)} FROM {table} "
                 f"WHERE conversation = :pk ORDER BY {order}"
             ),
             {"pk": pk},
@@ -1473,7 +1502,8 @@ class VerifyReport:
     release re-imports it on its next read. Another is a conversation whose
     rows the serving release has written since the import, so its tables
     hold turns ADK never saw. The third is a conflict, where both moved,
-    and it fails the verify."""
+    and it fails the verify. A verify that compares none of the sessions
+    it read fails too, since it has checked nothing."""
 
     total: int = 0
     differences: dict[str, list[str]] = field(default_factory=dict)
@@ -1482,16 +1512,22 @@ class VerifyReport:
     conflicts: list[str] = field(default_factory=list)
 
     @property
-    def clean(self) -> bool:
-        return not self.differences and not self.conflicts
-
-    def render(self) -> str:
-        compared = (
+    def compared(self) -> int:
+        return (
             self.total
             - len(self.moved_on_adk)
             - len(self.written_since_import)
             - len(self.conflicts)
         )
+
+    @property
+    def clean(self) -> bool:
+        return (
+            not self.differences and not self.conflicts and (self.compared > 0 or self.total == 0)
+        )
+
+    def render(self) -> str:
+        compared = self.compared
         lines = [f"differs: {name}: {', '.join(keys)}" for name, keys in self.differences.items()]
         lines += [
             f"moved on ADK since the import; re-imported on access: {name}"
@@ -1505,6 +1541,8 @@ class VerifyReport:
             f"conflict, changed on both sides since the import (--prefer-adk re-imports): {name}"
             for name in self.conflicts
         ]
+        if compared == 0 and self.total:
+            lines.append(f"none of the {self.total} ledger sessions compared")
         lines.append(f"{compared - len(self.differences)} of {compared} equal")
         return "\n".join(lines)
 

@@ -256,10 +256,26 @@ async def test_a_dry_run_writes_nothing_and_apply_copies_what_adk_loaded(
     assert EXPECTED[FULL]["run_items"]
 
 
+async def _add_columns(engine: AsyncEngine) -> None:
+    """Add a nullable column to the conversations table and to a child
+    table, as a later release's migration does."""
+    async with engine.begin() as conn:
+        await conn.execute(text("ALTER TABLE conversations ADD COLUMN later_col text"))
+        await conn.execute(text("ALTER TABLE conversation_turns ADD COLUMN later_col text"))
+
+
+_LATER_COLUMNS = pytest.mark.parametrize(
+    "later_columns", [False, True], ids=["schema-as-imported", "columns-added-since"]
+)
+
+
+@_LATER_COLUMNS
 async def test_verify_counts_equal_conversations_and_names_each_difference(
-    adk: AsyncEngine,
+    adk: AsyncEngine, later_columns: bool
 ) -> None:
     await import_conversations(adk, apply=True)
+    if later_columns:
+        await _add_columns(adk)
 
     assert (await verify(adk)).render() == "3 of 3 equal"
 
@@ -302,10 +318,13 @@ async def test_verify_counts_equal_conversations_and_names_each_difference(
     assert report.render().splitlines()[-1] == "1 of 3 equal"
 
 
+@_LATER_COLUMNS
 async def test_a_rerun_leaves_unmoved_conversations_and_reimports_what_only_adk_changed(
-    adk: AsyncEngine,
+    adk: AsyncEngine, later_columns: bool
 ) -> None:
     await import_conversations(adk, apply=True)
+    if later_columns:
+        await _add_columns(adk)
     again = await import_conversations(adk, apply=True)
     assert (sorted(again.unchanged), again.imported, again.reimported) == (
         sorted(_name(c) for c in EXPECTED),
@@ -1089,6 +1108,58 @@ async def test_verify_lists_a_conversation_written_while_it_compares_as_written(
     checked = await verify(adk)
 
     assert (checked.clean, checked.written_since_import) == (True, [_name(TEXT_ONLY)])
+
+
+async def test_verify_fails_when_it_compares_no_conversation(adk: AsyncEngine) -> None:
+    await import_conversations(adk, apply=True)
+    store = _store(adk)
+    for conversation_id in EXPECTED:
+        state = await store.load(PRINCIPAL, conversation_id)
+        assert state is not None
+        state.auto_add = not state.auto_add
+        await store.save(PRINCIPAL, conversation_id)
+
+    report = await verify(adk)
+
+    assert (report.clean, sorted(report.written_since_import)) == (
+        False,
+        sorted(_name(c) for c in EXPECTED),
+    )
+    assert report.render().splitlines()[-2:] == [
+        "none of the 3 ledger sessions compared",
+        "0 of 0 equal",
+    ]
+
+
+async def test_the_digest_covers_every_column_the_import_writes(adk: AsyncEngine) -> None:
+    """Every column of release 1's tables is digested, bar the row's id and
+    timestamps, the uncompared lease field and each child's parent key."""
+    await import_conversations(adk, apply=True)
+    left_out = {
+        ("conversations", "id"),
+        ("conversations", "created_at"),
+        ("conversations", "updated_at"),
+        ("conversations", "lease_cancel"),
+    }
+    async with adk.connect() as conn:
+        result = await conn.execute(
+            text(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = ANY(:tables)"
+            ),
+            {"tables": list(adk_import._DIGESTED_COLUMNS)},
+        )
+        columns = {
+            (table, column)
+            for table, column in result.tuples()
+            if column != "conversation" or table == "conversations"
+        }
+
+    assert columns - left_out == {
+        (table, column)
+        for table, digested in adk_import._DIGESTED_COLUMNS.items()
+        for column in digested
+    }
 
 
 async def test_verify_lists_a_conversation_only_adk_moved_apart_from_the_compared(

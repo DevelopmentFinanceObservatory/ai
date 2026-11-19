@@ -69,7 +69,7 @@ from collections.abc import (
 )
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, NamedTuple, Protocol
 
 from compiler.surface import transient
 from executor.ledger import RunStatus
@@ -681,14 +681,16 @@ def _check_column(key: str, value: Any, kind: type | tuple[type, ...]) -> None:
         raise TypeError(f"{key} is of type {type(value).__name__}")
 
 
-def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
+def _delta_write(delta: dict[str, Any], *, lease_clock: str | None = None) -> _DeltaWrite:
     """The statements that write `delta`'s flat keys. Raises on a value the
     columns cannot hold (a `seq` that is not an integer, a segment without
     an id or whose id, owner or expiry is of another type, a position that
     is not a number, a write token that is not a string, a value
     `json.dumps` refuses) and on a key no column or row holds, so a caller
     that builds the statements without running them learns what running
-    them would refuse."""
+    them would refuse. Given `lease_clock`, an SQL expression for the
+    database clock, a segment's expiry is written as `SEGMENT_TTL_S` past
+    that clock's reading at the write, in place of the segment's own."""
     sets = ["version = version + 1", "updated_at = now()"]
     params: dict[str, Any] = {}
     scalars = {key: value for key, value in delta.items() if key in _SCALAR_KEYS}
@@ -705,16 +707,21 @@ def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
             _check_column("segment id", segment.id, str)
             _check_column("segment owner", segment.owner, str)
             _check_column("segment expiry", segment.expires_at, (int, float))
+        clocked = segment is not None and lease_clock is not None
+        expires = f"{lease_clock} + :ttl" if clocked else ":expires_at"
         sets.append(
             "lease_segment_id = :segment_id, lease_owner = :owner, "
-            "lease_expires_at = :expires_at, lease_cancel = :cancel"
+            f"lease_expires_at = {expires}, lease_cancel = :cancel"
         )
         params |= {
             "segment_id": segment.id if segment else None,
             "owner": segment.owner if segment else None,
-            "expires_at": segment.expires_at if segment else None,
             "cancel": segment.cancel if segment else False,
         }
+        if clocked:
+            params["ttl"] = SEGMENT_TTL_S
+        else:
+            params["expires_at"] = segment.expires_at if segment else None
     rows: dict[str, list[dict[str, Any]]] = {}
     for key, value in delta.items():
         if key in _SCALAR_KEYS or key in (_KEY_SEQ, _KEY_SEGMENT):
@@ -735,27 +742,38 @@ def _delta_write(delta: dict[str, Any]) -> _DeltaWrite:
     return _DeltaWrite(sets=tuple(sets), params=params, rows=rows)
 
 
-async def _write_delta(conn: AsyncConnection, pk: int, delta: dict[str, Any]) -> int:
-    """Write `delta`'s flat keys to their columns and rows, bump the turn
-    state's version, and return the new version. The caller holds the row
-    lock and decided the write is allowed."""
-    return await _run_delta_write(conn, pk, _delta_write(delta))
+class _Written(NamedTuple):
+    """The row's turn-state version and lease expiry after a delta write."""
+
+    version: int
+    lease_expires_at: float | None
 
 
-async def _run_delta_write(conn: AsyncConnection, pk: int, write: _DeltaWrite) -> int:
+async def _write_delta(
+    conn: AsyncConnection, pk: int, delta: dict[str, Any], *, lease_clock: str | None = None
+) -> _Written:
+    """Write `delta`'s flat keys to their columns and rows (`_delta_write`),
+    bump the turn state's version, and return the new version and the
+    stored lease expiry. The caller holds the row lock and decided the
+    write is allowed."""
+    return await _run_delta_write(conn, pk, _delta_write(delta, lease_clock=lease_clock))
+
+
+async def _run_delta_write(conn: AsyncConnection, pk: int, write: _DeltaWrite) -> _Written:
     """Run `write`'s statements on row `pk` and return the row's new
-    version (`_write_delta`)."""
-    version = (
+    version and lease expiry (`_write_delta`)."""
+    written = (
         await conn.execute(
             text(
-                f"UPDATE conversations SET {', '.join(write.sets)} WHERE id = :pk RETURNING version"
+                f"UPDATE conversations SET {', '.join(write.sets)} WHERE id = :pk "
+                "RETURNING version, lease_expires_at"
             ),
             {**write.params, "pk": pk},
         )
-    ).scalar_one()
+    ).one()
     for prefix, rows in write.rows.items():
         await conn.execute(_ITEM_TABLES[prefix].upsert(), [{**row, "pk": pk} for row in rows])
-    return version
+    return _Written(written.version, written.lease_expires_at)
 
 
 @dataclass
@@ -770,8 +788,8 @@ class _RuntimeEntry:
     `claim_segment` compares the loaded lease against, and `read_stamp` this
     instance's own clock just before that read. `lease_stamp` is this
     instance's clock just before the read or renewal that set the held
-    lease's expiry: the claim's `read_stamp`, then each renewal's start, the
-    anchor of `StudioStore.lease_deadline`. `held` is the segment
+    lease's expiry: the start of the save that wrote the claim, then each
+    renewal's start, the anchor of `StudioStore.lease_deadline`. `held` is the segment
     this instance claimed and has not yet released, the one lease its own
     saves may write under. `seq_reserved` is the stored end of the frame
     numbers reserved for the conversation's segments (`reserve_frames`),
@@ -947,17 +965,20 @@ class StudioStore:
         delta: dict[str, Any],
         *,
         seq_reserved: int | None = None,
-    ) -> int:
+        claim: bool = False,
+    ) -> _Written:
         """Write `delta` to the turn state, the canvas, the lease and the item
         rows, and `seq_reserved` when given, and return the row's new version
-        (`_write_delta`)."""
-        version = await _write_delta(conn, pk, delta)
+        and lease expiry (`_write_delta`). With `claim`, the segment `delta`
+        carries expires `SEGMENT_TTL_S` past the database clock's reading at
+        this write."""
+        written = await _write_delta(conn, pk, delta, lease_clock=self._time_sql if claim else None)
         if seq_reserved is not None:
             await conn.execute(
                 text("UPDATE conversations SET seq_reserved = :reserved WHERE id = :pk"),
                 {"pk": pk, "reserved": seq_reserved},
             )
-        return version
+        return written
 
     async def _write_composition(
         self, conn: AsyncConnection, pk: int, composition: dict[str, Any] | None
@@ -1081,8 +1102,11 @@ class StudioStore:
         `load` must have run first). Raises
         `SegmentBusy` when the loaded lease had not lapsed by the database
         clock's reading taken with the load. Otherwise writes a fresh segment
-        into that state, expiring `SEGMENT_TTL_S` after that reading, and
-        returns its id.
+        into that state and returns its id. The expiry it holds,
+        `SEGMENT_TTL_S` after that reading, stands until the claim save
+        writes the stored one, `SEGMENT_TTL_S` after the database clock's
+        reading at that write, so time spent between the load and the save
+        does not come off the lease.
 
         The claim also takes the segment's first block of frame numbers and
         starts the state's `seq` there. For a turn `begin_turn` just opened
@@ -1140,6 +1164,11 @@ class StudioStore:
         load: the lapsed stream the claim takes over reserved more numbers
         before its lease lapsed, and may have sent them.
 
+        A save that persists `claim_segment`'s claim writes its expiry as
+        `SEGMENT_TTL_S` past the database clock's reading at the write and
+        sets the state's segment to the expiry stored, and the lease deadline
+        (`lease_deadline`) counts from the save's start.
+
         `guard`, when given, runs in the write's transaction once the row is
         locked and its version and lease pass, with the transaction's
         connection and the locked row's id, and returns whether the write
@@ -1156,6 +1185,10 @@ class StudioStore:
                 return
             claimed = _deserialize_segment(delta.get(_KEY_SEGMENT))
             reserved = entry.claimed_reserved if claimed is not None else None
+            # A segment `claim_segment` claimed, which reserved its frame
+            # numbers; its expiry is set at the write.
+            claiming = reserved is not None
+            stamp = self._clock()
             async with self._transaction() as conn:
                 row = (await conn.execute(self._lock_conversation, {"pk": entry.pk})).first()
                 if row is None or row.version != entry.version:
@@ -1173,13 +1206,19 @@ class StudioStore:
                     target.seq = row.seq_reserved
                     reserved = row.seq_reserved + SEQ_BLOCK
                     delta = _changed_since(_serialize_durable(target), entry.baseline)
-                version = (
-                    await self._write(conn, entry.pk, delta, seq_reserved=reserved)
+                written = (
+                    await self._write(conn, entry.pk, delta, seq_reserved=reserved, claim=claiming)
                     if delta
-                    else row.version
+                    else _Written(row.version, row.lease_expires_at)
                 )
-            entry.version = version
+            entry.version = written.version
             entry.baseline.update(delta)
+            if claimed is not None and claiming:
+                assert written.lease_expires_at is not None
+                claimed = dataclasses.replace(claimed, expires_at=written.lease_expires_at)
+                target.segment = claimed
+                entry.baseline[_KEY_SEGMENT] = _serialize_segment(claimed)
+                entry.lease_stamp = stamp
             self._take_draft(entry, target)
             if claimed is not None:
                 entry.held = claimed.id
@@ -1482,7 +1521,11 @@ class StudioStore:
                             if work.composition is not None
                             else None,
                         )
-                    version = await self._write(conn, entry.pk, changed) if changed else row.version
+                    version = (
+                        (await self._write(conn, entry.pk, changed)).version
+                        if changed
+                        else row.version
+                    )
             entry.version = version
             entry.baseline.update(changed)
             if work.segment is None:

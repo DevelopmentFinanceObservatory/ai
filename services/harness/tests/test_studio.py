@@ -9010,12 +9010,12 @@ async def test_a_heartbeat_that_cannot_renew_ends_the_stream_once_its_clock_pass
 ) -> None:
     """`renew` raises on every call: the stream stays open, retried every
     heartbeat interval, for as long as the store's instance clock reads
-    before 10 seconds short of a TTL past the load the claim's lease expiry
-    was dated from. Moving that clock past the deadline, with no real time
+    before 10 seconds short of a TTL past the claim save the lease expiry
+    is dated from. Moving that clock past the deadline, with no real time
     elapsed, is what ends the stream with a stream-fatal
     `transient_unavailable` error. A claim whose session creation is slow
-    (`claim_takes` seconds) starts its heartbeat later and keeps the same
-    deadline, since the lease expires on the same date. The segment's span
+    (`claim_takes` seconds) starts its heartbeat later and its deadline
+    moves with it, since the lease runs from the claim save. The segment's span
     ends `database_unavailable`, the status a save that cannot reach the
     database gives, although the release's own save lands."""
     monkeypatch.setattr(studio_module, "HEARTBEAT_INTERVAL_S", 0.05)
@@ -9049,7 +9049,7 @@ async def test_a_heartbeat_that_cannot_renew_ends_the_stream_once_its_clock_pass
         await asyncio.wait_for(resolver.entered.wait(), timeout=5)
         state = store.current(PRINCIPAL, CONVERSATION)
         assert state is not None and state.segment is not None
-        deadline = loaded_at + studio_state_module.SEGMENT_TTL_S - 10
+        deadline = loaded_at + claim_takes + studio_state_module.SEGMENT_TTL_S - 10
 
         await clock.set(deadline - 1)
         await asyncio.sleep(0.2)  # several heartbeat ticks, clock still short of the deadline

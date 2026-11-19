@@ -2225,6 +2225,36 @@ async def test_claim_segment_raises_segment_busy_while_a_live_segment_exists(
     assert excinfo.value.retry_after_seconds == studio_state.SEGMENT_TTL_S - 10
 
 
+@pytest.mark.parametrize("gap", [0, studio_state.SEGMENT_TTL_S + 5], ids=["at-once", "past-ttl"])
+async def test_a_claim_save_starts_the_lease_at_the_write(new_store, clock, gap) -> None:
+    """`/turn` awaits the ADK session between its claim and the claim save.
+    The lease runs `SEGMENT_TTL_S` from the save however long that took."""
+    store_a = new_store(clock=clock)
+    store_b = new_store(clock=clock)
+    await store_a.create("principal", CONVERSATION)
+    await store_a.load("principal", CONVERSATION)
+    work = store_a.draft("principal", CONVERSATION)
+    work.begin_turn()
+    segment_id = store_a.claim_segment("principal", CONVERSATION, work)
+
+    await clock.advance(gap)
+    await store_a.save("principal", CONVERSATION, work)
+
+    saved_at = clock.at
+    stored = (await new_store(clock=clock).load("principal", CONVERSATION)).segment
+    assert stored is not None
+    assert (stored.id, stored.expires_at) == (segment_id, saved_at + studio_state.SEGMENT_TTL_S)
+    live = store_a.current("principal", CONVERSATION)
+    assert live is not None and live.segment == stored
+    assert store_a.lease_deadline("principal", CONVERSATION) == (
+        saved_at + studio_state.SEGMENT_TTL_S - studio_store.LEASE_MARGIN_S
+    )
+    await store_b.load("principal", CONVERSATION)
+    with pytest.raises(SegmentBusy):
+        store_b.claim_segment("principal", CONVERSATION)
+    assert await store_a.renew("principal", CONVERSATION, segment_id) == "ok"
+
+
 async def test_claim_segment_succeeds_once_the_live_segment_has_expired(
     new_store,
     clock,
