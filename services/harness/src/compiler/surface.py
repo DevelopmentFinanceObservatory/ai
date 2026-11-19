@@ -48,7 +48,7 @@ from planner.workflow import ToolId
 from pydantic import BaseModel, Field
 from sqlalchemy import exc as sa_exc
 
-from compiler.caller_clients import CallerClients, caller_transport, session_call_meta
+from compiler.caller_clients import CallerClients, CallerTurn, caller_transport, session_call_meta
 
 logger = logging.getLogger(__name__)
 
@@ -608,21 +608,23 @@ def _auth_for(source: Source) -> str | None:
     return bearer_token() if isinstance(source, str) else None
 
 
-def _no_caller() -> None:
-    """The caller of a surface built without one: none."""
-    return None
+def _no_caller() -> CallerTurn:
+    """The caller of a surface built without one: none, in no turn."""
+    return CallerTurn(None)
 
 
-def _call_client(source: Source, caller: str | None, *, init_timeout_s: float) -> Client:
+def _call_client(source: Source, caller: CallerTurn, *, init_timeout_s: float) -> Client:
     """The `call_tool` client for `source` on behalf of `caller`.
 
-    A URL source is the mount over streamable HTTP, so its client names
-    `caller` in the `x-dfo-caller` header and carries the bearer token. An
-    in-memory `FastMCP` or a test-built transport has no header to set, and
-    its calls carry no caller.
+    A URL source is the mount over streamable HTTP, so its client names the
+    caller in the `x-dfo-caller` header and the turn in the `x-dfo-turn`
+    header, and carries the bearer token. An in-memory `FastMCP` or a
+    test-built transport has no header to set, and its calls carry neither.
     """
     if isinstance(source, str):
-        transport = caller_transport(source, caller=caller, auth=_auth_for(source))
+        transport = caller_transport(
+            source, caller=caller.caller, turn=caller.turn, auth=_auth_for(source)
+        )
         return Client(transport, init_timeout=init_timeout_s)
     return Client(source, init_timeout=init_timeout_s)
 
@@ -642,13 +644,14 @@ class McpSurface:
     which outweighs the loopback round trip each read costs. `call_tool` gets
     no such benefit from a fresh client, since the tool it invokes was
     already resolved by an earlier `list_tools`. It holds one `Client` per
-    source per caller (`compiler.caller_clients.CallerClients`), the same
-    registry `harness.mcp_client` holds its clients in. `caller` returns the
-    current caller; a URL source's client names it in the `x-dfo-caller`
-    header, which data-mcp and analysis-mcp record as a stored frame's
-    `writer`. The harness passes the current conversation's caller
-    (`harness.agents.build_tool_surface`); a surface built without one holds
-    one client per source and its calls carry no caller.
+    source per caller and turn (`compiler.caller_clients.CallerClients`), the
+    same registry `harness.mcp_client` holds its clients in. `caller` returns
+    the current `CallerTurn`; a URL source's client names the caller in the
+    `x-dfo-caller` header, which data-mcp and analysis-mcp record as a stored
+    frame's `writer`, and the turn in the `x-dfo-turn` header, which they
+    forward to dfo-apis. The harness passes the current conversation's caller
+    and turn (`harness.agents.build_tool_surface`); a surface built without
+    one holds one client per source and its calls carry no caller.
 
     `call_timeouts` is an opaque `{ToolId: seconds}` mapping supplied at
     construction. This module knows no tool by name and must not import
@@ -669,7 +672,7 @@ class McpSurface:
         default_call_timeout_s: float = DEFAULT_CALL_TIMEOUT_S,
         list_timeout_s: float = DEFAULT_LIST_TIMEOUT_S,
         init_timeout_s: float = DEFAULT_INIT_TIMEOUT_S,
-        caller: Callable[[], str | None] = _no_caller,
+        caller: Callable[[], CallerTurn] = _no_caller,
     ) -> None:
         """Keep `sources`, keyed by server name.
 

@@ -23,7 +23,6 @@ from analysis_mcp.runner_client import (
 )
 from analysis_mcp.summary import LIST_CAP, VerbSummary
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
-from common.caller import supplied_caller
 from common.materialisation import (
     DEFAULT_MINT_OPTIONS,
     AnchorRecord,
@@ -35,7 +34,9 @@ from common.materialisation import (
     rendering,
     set_store,
 )
+from fastmcp.server.http import set_http_request
 from runner_replay import REPLIES_PATH
+from starlette.requests import Request
 
 _SPEC = "spec_" + "1" * 32
 _CV = "cv_" + "2" * 32
@@ -653,27 +654,48 @@ def test_a_summary_holds_only_the_entries_its_digest_shows(
         (
             _ADDRESS_CALLER,
             "secret",
-            {"x-dfo-caller-principal": "secret", "x-dfo-caller": _ADDRESS_CALLER},
+            {
+                "x-dfo-caller-principal": "secret",
+                "x-dfo-caller": _ADDRESS_CALLER,
+                "x-dfo-surface": "mcp",
+                "x-dfo-user-agent": "claude-user/1.0 (+https://claude.ai)",
+            },
         ),
         (_ADDRESS_CALLER, None, {}),
-        ("conversation:" + "b" * 32, "secret", {}),
+        (
+            "conversation:" + "b" * 32,
+            "secret",
+            {
+                "x-dfo-caller-principal": "secret",
+                "x-dfo-caller": "conversation:" + "b" * 32,
+            },
+        ),
+        ("conversation:" + "b" * 32, None, {}),
     ],
-    ids=["website-client", "no-principal", "harness-conversation"],
+    ids=["website-client", "no-principal", "harness-conversation", "harness-no-principal"],
 )
-async def test_a_website_caller_is_named_beside_the_principal(
+async def test_the_caller_is_named_beside_the_principal(
     store: InMemoryMaterialisationStore,
     caller: str,
     principal: str | None,
     sent: dict[str, str],
 ) -> None:
     runner = _install(_problem(422, "op_spec_invalid"), principal=principal)
-    with supplied_caller(caller):
+    inbound = [("x-dfo-caller", caller), ("user-agent", "claude-user/1.0 (+https://claude.ai)")]
+    scope = {"type": "http", "headers": [(k.encode(), v.encode()) for k, v in inbound]}
+    with set_http_request(Request(scope)):
         await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
 
     headers = runner.requests[-1].headers
     named = {
         name: headers[name]
-        for name in ("x-dfo-caller-principal", "x-dfo-caller")
+        for name in (
+            "x-dfo-caller-principal",
+            "x-dfo-caller",
+            "x-dfo-surface",
+            "x-dfo-user-agent",
+            "x-dfo-client",
+        )
         if name in headers
     }
     assert named == sent

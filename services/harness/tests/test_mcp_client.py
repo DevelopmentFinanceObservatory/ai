@@ -28,7 +28,7 @@ from analysis_mcp.runner_client import DerivedUnread
 from common.auth import apply_gate
 from common.caller import conversation_caller
 from common.period_note import period_note
-from compiler.caller_clients import CallerClients
+from compiler.caller_clients import CallerClients, CallerTurn
 from compiler.surface import ProgressReport, ToolSurfaceUnavailableError, current_spec_uses
 from data_mcp import client_holder, mint_admission, stat_var_list
 from data_mcp.client import UpstreamClient
@@ -42,7 +42,7 @@ from data_mcp.stat_var_list import STAT_VARS_OMITTED_KEY
 from executor.classify import MAX_ATTEMPTS_PER_STEP
 from fastmcp import Client, Context, FastMCP
 from fastmcp.tools import ToolResult
-from harness.conversation import current_conversation_id
+from harness.conversation import current_conversation_id, current_turn_id
 from harness.mcp_client import (
     McpExecutor,
     McpResolver,
@@ -1149,7 +1149,7 @@ def fake_policy_clients(monkeypatch: pytest.MonkeyPatch) -> list[_FakeMcpClient]
         url: str,
         *,
         auth: str | None,
-        caller: str | None,
+        caller: CallerTurn,
         tool: str | None = None,
     ) -> Any:
         client = _FakeMcpClient(caller)
@@ -1190,33 +1190,40 @@ async def test_the_executor_reuses_one_get_data_client_across_calls(
 async def test_two_conversations_get_two_separate_get_data_clients(
     fake_policy_clients: list[_FakeMcpClient],
 ) -> None:
-    """Client reuse is per conversation, not process-wide: two conversations
-    calling `get_data` must not share one client, and each client names its
-    own conversation as the caller."""
+    """Client reuse is per conversation turn, not process-wide: two
+    conversations calling `get_data` must not share one client, nor two turns
+    of one conversation, and each client names its own conversation as the
+    caller and its own turn."""
     executor = McpExecutor(settings=Settings())
+    first, second = "tr_" + "1" * 16, "tr_" + "2" * 16
 
     current_conversation_id.set("conv-a")
+    current_turn_id.set(first)
     await executor(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
     current_conversation_id.set("conv-b")
     await executor(tool="get_data", args={"spec_id": "spec_" + "2" * 32})
+    current_conversation_id.set("conv-a")
+    current_turn_id.set(second)
+    await executor(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
 
-    assert len(fake_policy_clients) == 2
-    assert fake_policy_clients[0] is not fake_policy_clients[1]
-    assert fake_policy_clients[0].calls == ["get_data"]
-    assert fake_policy_clients[1].calls == ["get_data"]
+    assert len(fake_policy_clients) == 3
+    assert [client.calls for client in fake_policy_clients] == [["get_data"]] * 3
     assert [client.caller for client in fake_policy_clients] == [
-        conversation_caller("conv-a"),
-        conversation_caller("conv-b"),
+        CallerTurn(conversation_caller("conv-a"), first),
+        CallerTurn(conversation_caller("conv-b"), first),
+        CallerTurn(conversation_caller("conv-a"), second),
     ]
 
 
 async def test_a_call_outside_any_conversation_names_no_caller(
     fake_policy_clients: list[_FakeMcpClient],
 ) -> None:
+    """Nor a turn: a turn id names nothing without its conversation."""
+    current_turn_id.set("tr_" + "1" * 16)
     await McpExecutor(settings=Settings())(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
 
     (client,) = fake_policy_clients
-    assert client.caller is None
+    assert client.caller == CallerTurn(None, None)
 
 
 # --- `_call_held`: a broken session is discarded, a slow call is not -------
@@ -1260,7 +1267,7 @@ class _ScriptedMcpClient:
 
 def _held_clients(factory: Callable[[], Any]) -> CallerClients:
     """A registry over `factory`'s stand-in clients, for a caller that never changes."""
-    return CallerClients(lambda _caller: factory(), caller=lambda: None)
+    return CallerClients(lambda _caller: factory(), caller=lambda: CallerTurn(None))
 
 
 async def test_call_held_keeps_a_timed_out_client_cached() -> None:

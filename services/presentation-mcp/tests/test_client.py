@@ -24,7 +24,14 @@ import httpx2
 import pytest
 import rfc8785
 from common.apis_auth import ApisAuthError
-from common.caller import CALLER_HEADER, CALLER_PRINCIPAL_HEADER, supplied_caller
+from common.caller import (
+    CALLER_HEADER,
+    CALLER_PRINCIPAL_HEADER,
+    MCP_SURFACE,
+    SURFACE_HEADER,
+    USER_AGENT_HEADER,
+    supplied_caller,
+)
 from common.derived_replay import DEFAULT_RETRY_AFTER_S
 from common.materialisation import (
     KIND_COLUMNS,
@@ -46,6 +53,7 @@ from common.materialisation import (
 from common.recipe import build_recipe
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, row_budget, set_row_budget
 from dfo_frame_grammar import Frame
+from fastmcp.server.http import set_http_request
 from presentation_mcp import client as client_module
 from presentation_mcp import frame_publish
 from presentation_mcp.client import (
@@ -64,6 +72,7 @@ from presentation_mcp.platform_contract import (
     WriteReply,
 )
 from presentation_mcp.settings import Settings
+from starlette.requests import Request
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
 
@@ -1222,6 +1231,7 @@ async def test_publish_call_carries_the_configured_principal_header(
 
 _CALLER_PRINCIPAL = "website-secret"
 _ADDRESS_CALLER = "ip:" + "0123456789abcdef" * 2
+_MCP_USER_AGENT = "claude-user/1.0"
 
 
 @pytest.mark.parametrize(
@@ -1243,7 +1253,12 @@ _ADDRESS_CALLER = "ip:" + "0123456789abcdef" * 2
             _PUBLISH_PRINCIPAL,
             _CALLER_PRINCIPAL,
             _ADDRESS_CALLER,
-            {CALLER_PRINCIPAL_HEADER: _CALLER_PRINCIPAL, CALLER_HEADER: _ADDRESS_CALLER},
+            {
+                CALLER_PRINCIPAL_HEADER: _CALLER_PRINCIPAL,
+                CALLER_HEADER: _ADDRESS_CALLER,
+                SURFACE_HEADER: MCP_SURFACE,
+                USER_AGENT_HEADER: _MCP_USER_AGENT,
+            },
             id="external-named-by-website",
         ),
         pytest.param(
@@ -1285,7 +1300,11 @@ async def test_a_component_write_names_whose_card_allowance_it_spends(
         datasets_first_party_principal=publish_principal, dfo_caller_principal=caller_principal
     )
 
-    with supplied_caller(named) if named is not None else contextlib.nullcontext():
+    mcp_request = Request({"type": "http", "headers": [(b"user-agent", _MCP_USER_AGENT.encode())]})
+    with (
+        set_http_request(mcp_request),
+        supplied_caller(named) if named is not None else contextlib.nullcontext(),
+    ):
         async with _assembler(handler, settings=settings) as assembler:
             if call == "create":
                 reply = await assembler.create_component(intent=INTENT, caller=caller)
@@ -1298,7 +1317,13 @@ async def test_a_component_write_names_whose_card_allowance_it_spends(
                 )
 
     assert isinstance(reply, WriteReply)
-    allowance_headers = (PRINCIPAL_HEADER, CALLER_PRINCIPAL_HEADER, CALLER_HEADER)
+    allowance_headers = (
+        PRINCIPAL_HEADER,
+        CALLER_PRINCIPAL_HEADER,
+        CALLER_HEADER,
+        SURFACE_HEADER,
+        USER_AGENT_HEADER,
+    )
     assert {
         name: requests[0].headers[name] for name in allowance_headers if name in requests[0].headers
     } == sent

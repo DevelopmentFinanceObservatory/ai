@@ -43,9 +43,10 @@ import httpx2
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common import telemetry
-from common.caller import conversation_caller
+from common.caller import CALLER_HEADER, CALLER_PRINCIPAL_HEADER, TURN_HEADER, conversation_caller
 from common.logging import JSON_FIELDS
 from common.telemetry import record_event
+from compiler.caller_clients import CallerTurn
 from compiler.surface import (
     FixtureSurface,
     McpSurface,
@@ -56,6 +57,7 @@ from compiler.surface import (
     ToolSurface,
     note_spec_use,
 )
+from data_mcp.client import UpstreamClient
 from data_mcp.definition_store import (
     InMemoryDefinitionStore,
     canonicalize,
@@ -63,6 +65,7 @@ from data_mcp.definition_store import (
 )
 from data_mcp.definition_store import set_store as set_definition_store
 from data_mcp.server import mcp as data_mcp
+from data_mcp.settings import Settings as DataMcpSettings
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from google.adk import Context
@@ -70,7 +73,12 @@ from google.adk.events import Event, EventActions
 from google.adk.models.llm_response import LlmResponse
 from google.adk.sessions import BaseSessionService, DatabaseSessionService, InMemorySessionService
 from google.genai import types
-from harness.conversation import NO_CONVERSATION, current_conversation_id
+from harness.conversation import (
+    NO_CONVERSATION,
+    current_caller_turn,
+    current_conversation_id,
+    current_turn_id,
+)
 from harness.early_mint import EarlyMints
 from harness.graph.state import (
     AGENT_NAME,
@@ -6428,6 +6436,105 @@ async def test_two_streaming_conversations_keep_their_steps_apart() -> None:
     assert fetch_details(frames_b) == [f"fetched for {theirs}"]
     assert _events(frames_a)[-1] == "done"
     assert _events(frames_b)[-1] == "done"
+
+
+_CALLER_PRINCIPAL = "caller-principal-secret"
+
+
+async def _in_process_dfo_apis_call() -> dict[str, str | None]:
+    """The identity headers a dfo-apis call the graph makes in process carries:
+    data-mcp's `UpstreamClient` outside any MCP request, as the executor's
+    statistics fetch and label lookups make it. Beside them, the caller and
+    turn the harness's MCP clients are keyed on and name in their headers."""
+    sent: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request)
+        return httpx2.Response(200, json={"ok": True})
+
+    settings = DataMcpSettings(
+        dfo_apis_url="http://apis.test", dfo_caller_principal=_CALLER_PRINCIPAL
+    )
+    async with UpstreamClient(settings=settings, transport=httpx2.MockTransport(handler)) as apis:
+        await apis.request("GET", "/api/datasets/spec_1/cv_1", route="/api/datasets/{id}/{cv}")
+    (request,) = [r for r in sent if r.url.path == "/api/datasets/spec_1/cv_1"]
+    names = (CALLER_PRINCIPAL_HEADER, CALLER_HEADER, TURN_HEADER)
+    return {name: request.headers.get(name) for name in names} | {
+        "mcp_clients": str(current_caller_turn())
+    }
+
+
+async def test_the_graphs_in_process_dfo_apis_calls_name_the_conversation_and_turn(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """On a turn and on the resume an approval sends, a dfo-apis call made in
+    process, outside any MCP request, carries the conversation's caller and the
+    turn's trace id beside the caller principal, and the harness's MCP clients
+    are keyed on the same caller and turn."""
+    seen: dict[str, dict[str, str | None]] = {}
+
+    class CallingExecutor(ScriptedExecutor):
+        async def __call__(
+            self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
+        ) -> dict[str, Any]:
+            seen.setdefault("turn", await _in_process_dfo_apis_call())
+            return await super().__call__(tool=tool, args=args)
+
+    # The turn each plan was proposed in.
+    planned_in: list[str | None] = []
+
+    class TurnPlanner(ScriptedPlanner):
+        async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            planned_in.append(current_turn_id.get())
+            return await super().__call__(**kwargs)
+
+    class CallingSurface:
+        async def list_tools(self) -> list[ToolSchema]:
+            return real_schemas
+
+        async def call_tool(
+            self,
+            *,
+            tool: ToolId,
+            arguments: Mapping[str, Any],
+            on_progress: ProgressCallback | None = None,
+        ) -> ToolCallResult:
+            seen.setdefault("resume", await _in_process_dfo_apis_call())
+            return ToolCallResult(
+                is_error=False, structured_content=_get_data_manifest(), text="fetched"
+            )
+
+    caller = conversation_caller(f"{PRINCIPAL}/{CONVERSATION}")
+
+    def expected(turn: str) -> dict[str, str | None]:
+        return {
+            CALLER_PRINCIPAL_HEADER: _CALLER_PRINCIPAL,
+            CALLER_HEADER: caller,
+            TURN_HEADER: turn,
+            "mcp_clients": str(CallerTurn(caller, turn)),
+        }
+
+    # Each turn streams in a task of its own, so its context stays out of the
+    # resume's, as two requests' contexts do in production.
+    turn_app = _app(fetch_call(SPEC_A), _text("Kenya."), executor=CallingExecutor())
+    async with _client(turn_app) as client:
+        fetched = await asyncio.create_task(_stream(client, "/api/studio/turn", _turn_body()))
+    plan_app = _app(*_plan(), planner=TurnPlanner(real_schemas), tool_surface=CallingSurface())
+    async with _client(plan_app) as client:
+        first = await asyncio.create_task(
+            _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        )
+        plan = _frame(first, "plan.proposed")
+        (planned_turn,) = planned_in
+        await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+
+    # The resume continues the turn the plan paused, under that turn's id.
+    fetched_turn = _frame(fetched, "done")["trace_id"]
+    assert planned_turn is not None
+    assert fetched_turn != planned_turn
+    assert seen == {"turn": expected(fetched_turn), "resume": expected(planned_turn)}
 
 
 async def test_the_recorder_keeps_concurrent_conversations_apart() -> None:

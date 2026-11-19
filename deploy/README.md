@@ -72,14 +72,7 @@ holding the publish grant from the per-caller card allowance, so Studio's
 cards spend none. A card an external MCP client writes through `/mcp` never
 carries it.
 
-`DFO_CALLER_PRINCIPAL` is the secret apis shares with the website, and must
-equal apis' and the website's value. The website names each `/mcp` client
-in `x-dfo-caller` as `ip:<digest>`. analysis-mcp sends the secret and that
-caller with each analysis runner call, and presentation-mcp with each card an
-external client creates or revises, so apis counts the client's own
-allowance. Unset, neither sends a caller: runner calls are not attributed to
-a client, and every external client's cards spend the one allowance of the
-address apis sees for this service.
+`DFO_CALLER_PRINCIPAL` is the secret apis shares with the website, and must equal apis' and the website's value. The website names each `/mcp` client in `x-dfo-caller` as `ip:<digest>`. data-mcp and analysis-mcp send the secret and that caller with each dfo-apis call, beside `x-dfo-surface: mcp` and the client's `User-Agent` as `x-dfo-user-agent`, and presentation-mcp sends them with each card an external client creates or revises, so apis counts the client's own allowance. For a Studio call, whose caller is `conversation:<digest>`, data-mcp and analysis-mcp send the secret, the caller, and the turn's id as `x-dfo-turn`, with no surface and no user agent, as does the harness for the dfo-apis calls its graph makes in process. Unset, none sends a caller, so calls are not attributed to a client, and every external client's cards spend the one allowance of the address apis sees for this service. Set it only once dfo-apis runs a release that logs deliveries by caller and turn (`feat/delivery-log`, apis#337): an earlier dfo-apis, the one on dev included, refuses a `conversation:` caller sent beside the principal, so every Studio call to it would fail. Leaving it unset is the gate, so deploy dfo-apis first, then set the secret on the harness and the MCP services.
 
 A refresh answers within 53 seconds, the deadline `LIVE_REFRESH_DEADLINE_S`
 (default 45) plus an 8 second hard stop. The website gives the call 60 seconds, so startup

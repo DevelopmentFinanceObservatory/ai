@@ -31,7 +31,7 @@ from typing import Any, Self
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider
-from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
+from common.caller import ADDRESS_CALLER, current_caller, vouched_caller_headers
 from common.derived_replay import (
     DEFAULT_RETRY_AFTER_S,
     ReplayBusy,
@@ -1036,7 +1036,8 @@ class PlatformAssembler:
         A first-party write, Studio's, carries the publish principal, which
         dfo-apis exempts. An external write carries the caller principal and
         the caller the website named, when this process holds the principal
-        and the request's `x-dfo-caller` is an `ip:` digest, so dfo-apis
+        and the request's `x-dfo-caller` is an `ip:` digest
+        (`vouched_caller_headers`, with the surface and user agent), so dfo-apis
         counts that client. Any other external write carries neither, and
         dfo-apis counts it against the address it sees for this service.
         """
@@ -1044,9 +1045,9 @@ class PlatformAssembler:
             principal = self._publish_principal
             return {} if principal is None else {PRINCIPAL_HEADER: principal}
         named = current_caller()
-        if self._caller_principal is None or named is None or not ADDRESS_CALLER.fullmatch(named):
+        if named is None or not ADDRESS_CALLER.fullmatch(named):
             return {}
-        return {CALLER_PRINCIPAL_HEADER: self._caller_principal, CALLER_HEADER: named}
+        return vouched_caller_headers(self._caller_principal)
 
     async def get_frame_view(
         self,

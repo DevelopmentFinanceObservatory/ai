@@ -1,5 +1,6 @@
-"""Tests for `compiler.caller_clients`: one held client per caller, bounded
-by an LRU, and the transport that names the caller in its header."""
+"""Tests for `compiler.caller_clients`: one held client per caller and turn,
+bounded by an LRU, and the transport that names the caller and turn in its
+headers."""
 
 from __future__ import annotations
 
@@ -7,12 +8,13 @@ import asyncio
 from typing import Any
 
 import pytest
-from common.caller import CALLER_HEADER
+from common.caller import CALLER_HEADER, TURN_HEADER
 from common.telemetry import SESSION_META_KEY
 from compiler import caller_clients
 from compiler.caller_clients import (
     MAX_CALLERS,
     CallerClients,
+    CallerTurn,
     caller_transport,
     session_call_meta,
 )
@@ -20,8 +22,9 @@ from fastmcp import Client, FastMCP
 
 
 class _CountingClient:
-    def __init__(self, caller: str | None) -> None:
+    def __init__(self, caller: str | None, turn: str | None = None) -> None:
         self.caller = caller
+        self.turn = turn
         self.entered = 0
         self.exited = 0
 
@@ -50,7 +53,7 @@ class _GatedClient(_CountingClient):
 
 
 class _Registry:
-    """A `CallerClients` over `_CountingClient`s, with a caller the test sets.
+    """A `CallerClients` over `_CountingClient`s, with a caller and turn the test sets.
 
     A caller in `gates` connects only once its gate opens; a caller in
     `failing` fails its connect.
@@ -58,17 +61,19 @@ class _Registry:
 
     def __init__(self) -> None:
         self.caller: str | None = None
+        self.turn: str | None = None
         self.built: list[_CountingClient] = []
         self.gates: dict[str | None, asyncio.Event] = {}
         self.failing: set[str | None] = set()
-        self.clients = CallerClients(self._build, caller=lambda: self.caller)
+        self.clients = CallerClients(self._build, caller=lambda: CallerTurn(self.caller, self.turn))
 
-    def _build(self, caller: str | None) -> Any:
+    def _build(self, who: CallerTurn) -> Any:
+        caller = who.caller
         gate = self.gates.get(caller)
         client = (
             _GatedClient(caller, gate=gate, fail=caller in self.failing)
             if gate is not None
-            else _CountingClient(caller)
+            else _CountingClient(caller, who.turn)
         )
         self.built.append(client)
         return client
@@ -107,6 +112,58 @@ async def test_each_caller_gets_its_own_client_built_for_it() -> None:
         "conversation:b",
         None,
     ]
+
+
+async def test_a_callers_next_turn_gets_a_client_built_for_it() -> None:
+    """A transport's headers are fixed when it is built, so a client kept into
+    the next turn would name the turn before it. The new turn's client retires
+    the old one, which disconnects once its in-flight call releases it."""
+    registry = _Registry()
+    registry.caller = "conversation:a"
+    registry.turn = "tr_" + "1" * 16
+    first = await registry.clients.get()  # still in flight below
+    again = await registry.clients.get()
+    await registry.clients.release(again)
+
+    registry.turn = "tr_" + "2" * 16
+    second = await registry.clients.get()
+
+    assert again is first
+    assert second is not first
+    assert [(client.caller, client.turn) for client in registry.built] == [
+        ("conversation:a", "tr_" + "1" * 16),
+        ("conversation:a", "tr_" + "2" * 16),
+    ]
+    assert registry.built[0].exited == 0
+    await registry.clients.release(first)
+    assert registry.built[0].exited == 1
+    assert registry.built[1].exited == 0
+
+
+async def test_a_late_call_from_an_earlier_turn_leaves_the_latest_turns_client_held() -> None:
+    """An early mint turn 1 queued goes out after turn 2 began. It reconnects
+    under turn 1's id and retires nothing; turn 3 retires both."""
+    registry = _Registry()
+    registry.caller = "conversation:a"
+    turns = ["tr_" + digit * 16 for digit in "123"]
+
+    async def call_in(turn: str) -> Any:
+        registry.turn = turn
+        client = await registry.clients.get()
+        await registry.clients.release(client)
+        return client
+
+    first = await call_in(turns[0])
+    second = await call_in(turns[1])
+    late = await call_in(turns[0])
+    again = await call_in(turns[1])
+    third = await call_in(turns[2])
+
+    assert first.exited == 1  # retired by turn 2's connect
+    assert late is not first
+    assert late.turn == turns[0]
+    assert again is second
+    assert [late.exited, second.exited, third.exited] == [1, 1, 0]
 
 
 async def test_aclose_disconnects_and_forgets_every_client() -> None:
@@ -189,6 +246,14 @@ def test_the_transport_names_the_caller_in_its_header() -> None:
 
     assert transport.headers == {CALLER_HEADER: "conversation:a"}
     assert transport.auth is not None
+
+
+def test_the_transport_names_the_turn_beside_the_caller() -> None:
+    transport = caller_transport(
+        "http://mcp.internal/mcp", caller="conversation:a", turn="tr_" + "1" * 16, auth=None
+    )
+
+    assert transport.headers == {CALLER_HEADER: "conversation:a", TURN_HEADER: "tr_" + "1" * 16}
 
 
 def test_no_caller_sends_no_header() -> None:

@@ -20,6 +20,7 @@ import httpx2
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common.auth import apply_gate
+from compiler.caller_clients import CallerTurn
 from compiler.surface import (
     DuplicateToolNameError,
     FixtureSurface,
@@ -47,7 +48,7 @@ from ..unreachable_surface import UNREACHABLE_URL
 
 def _held(surface: McpSurface, server: str, caller: str | None = None) -> Client | None:
     """The client `surface` holds for `server` and `caller`, or `None`."""
-    held = surface._call_clients[server]._clients.get(caller)
+    held = surface._call_clients[server]._clients.get(CallerTurn(caller))
     return held.client if held is not None else None
 
 
@@ -750,7 +751,9 @@ async def test_call_tool_gives_each_source_its_own_held_client() -> None:
 
 async def test_call_tool_holds_one_client_per_caller() -> None:
     callers = iter(["conversation:a", "conversation:b", "conversation:a"])
-    surface = McpSurface(sources={"data-mcp": _answering_server()}, caller=lambda: next(callers))
+    surface = McpSurface(
+        sources={"data-mcp": _answering_server()}, caller=lambda: CallerTurn(next(callers))
+    )
 
     for _ in range(3):
         await surface.call_tool(

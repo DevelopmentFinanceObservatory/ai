@@ -46,7 +46,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import anyio
-from common.caller import ADDRESS_CALLER
+from common.caller import ADDRESS_CALLER, set_supplied_caller, set_supplied_turn
 from common.telemetry import flush_telemetry
 from compiler.surface import SpecUse, ToolSurface, current_spec_uses
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -70,6 +70,7 @@ from harness.conversation import (
     current_conversation_caller,
     current_conversation_id,
     current_conversation_key,
+    current_turn_id,
     current_user_message,
 )
 from harness.decision_pick import is_decision_choice
@@ -1419,6 +1420,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # turn records the caller its MCP clients send.
             current_conversation_id.set(f"{principal}/{body.conversation_id}")
             current_conversation_key.set((principal, body.conversation_id))
+            # The graph's in-process dfo-apis calls (the executor's statistics
+            # and labels, the translator's lookups) run outside any MCP request,
+            # so they name the conversation and turn through the supplied ones.
+            set_supplied_caller(current_conversation_caller())
             # The segment lease: claimed on the live state before the turn
             # begins, so a refusal leaves the conversation as loaded, and
             # before the claim save below persists it, so the save's own
@@ -1444,6 +1449,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     surface=body.surface.value,
                 )
             )
+            # `begin_turn` mints the turn id. The turn's MCP clients name it
+            # (`current_caller_turn`), and so do the in-process dfo-apis calls.
+            current_turn_id.set(conversation.trace_id)
+            set_supplied_turn(conversation.trace_id)
             current_spec_uses.set(
                 _spec_use_sink(studio.store, principal, body.conversation_id, conversation.trace_id)
             )
@@ -1803,6 +1812,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # names is set.
             current_conversation_id.set(f"{principal}/{body.conversation_id}")
             current_conversation_key.set((principal, body.conversation_id))
+            # The resume continues the paused turn, so it names that turn's id.
+            current_turn_id.set(conversation.trace_id)
+            set_supplied_caller(current_conversation_caller())
+            set_supplied_turn(conversation.trace_id)
             conversation.take_identity(
                 account=account, visitor=visitor, caller=current_conversation_caller()
             )
