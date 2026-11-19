@@ -986,3 +986,115 @@ async def test_a_frame_lineage_read_that_fails_or_stalls_restores_nothing_and_re
     await asyncio.wait_for(other.restore_frame_lineage(advanced, lineage_scope=_SCOPE), 5)
 
     assert fresh.get(conversation=_SCOPE, **_key(1)) is None
+
+
+async def test_a_frame_evicted_after_an_earlier_read_is_read_at_the_next_segment(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read that restored one frame leaves the turn's other rows readable:
+    a frame held at that read and evicted since is put back at the next
+    segment that lacks it."""
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    for n in (1, 2):
+        _held(provenance, n)
+    store = _keeping(pg_engine, provenance)
+    paused = await _pause(
+        store, await _open(store), _frames({"ref": _key(1)}, {"ref": _key(2)}), interrupt_id="i"
+    )
+    monkeypatch.setattr(provenance_module, "_MAX_MANIFESTS_PER_CONVERSATION", 2)
+    fresh = ProvenanceStore()
+    _held(fresh, 2)
+    other = _keeping(pg_engine, fresh)
+    await other.restore_frame_lineage(paused, lineage_scope=_SCOPE)
+    assert fresh.get(conversation=_SCOPE, **_key(1)) is not None
+    for n in (3, 4):
+        _held(fresh, n)
+    assert fresh.get(conversation=_SCOPE, **_key(2)) is None
+
+    await other.restore_frame_lineage(paused, lineage_scope=_SCOPE)
+
+    key = {"conversation": _SCOPE, **_key(2)}
+    assert fresh.get(**key) == provenance.get(**key)
+
+
+async def test_a_row_the_database_refuses_keeps_no_other_from_landing_and_is_tried_once(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A frame whose count the column cannot hold fails its own row: the
+    write's other rows land, and the refused row is logged once and not
+    tried again while its lineage is unchanged, while a frame named later
+    still gets its row."""
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    _held(provenance, 1)
+    _held(provenance, 9, count=2**40)
+    _held(provenance, 3)
+    store = _keeping(pg_engine, provenance)
+    advanced = await _advance(
+        store, await _open(store), _frames({"ref": _key(9)}, {"ref": _key(1)})
+    )
+    await _pause(
+        store,
+        advanced,
+        _frames({"ref": _key(9)}, {"ref": _key(1)}, {"ref": _key(3)}),
+        interrupt_id="int_1",
+    )
+
+    assert [row[:2] for row in await _lineage_rows(pg_engine)] == [
+        ("spec_1", "cv_1"),
+        ("spec_3", "cv_3"),
+    ]
+    refused = [r for r in caplog.records if "spec_9" in r.getMessage() and r.levelname == "ERROR"]
+    assert len(refused) == 1
+
+
+async def test_an_unchanged_lineage_is_not_written_again_whatever_object_holds_it(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The store compares the source's generation, so a source that hands out
+    a copy of an unchanged lineage on each read causes no second upsert."""
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    _held(provenance, 1)
+    get = ProvenanceStore.get
+
+    def copying(self: ProvenanceStore, **kwargs: Any) -> Any:
+        lineage = get(self, **kwargs)
+        return None if lineage is None else tuple(member for member in lineage)
+
+    monkeypatch.setattr(ProvenanceStore, "get", copying)
+    store = _keeping(pg_engine, provenance)
+    state = _frames({"ref": _key(1)})
+    advanced = await _advance(store, await _open(store), state)
+    first = await _row_versions(pg_engine)
+    await _pause(store, advanced, state, interrupt_id="int_1")
+
+    assert await _row_versions(pg_engine) == first
+
+
+async def _row_versions(engine: AsyncEngine) -> list[tuple[str, str]]:
+    """Each lineage row's key and the transaction that last wrote it."""
+    async with engine.connect() as conn:
+        rows = await conn.execute(
+            text("SELECT spec_id, xmin::text FROM turn_frame_lineage ORDER BY spec_id")
+        )
+        return [tuple(row) for row in rows]
+
+
+async def test_a_close_commits_when_the_frame_lineage_delete_fails(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    _held(provenance, 1)
+    store = _keeping(pg_engine, provenance)
+    advanced = await _advance(store, await _open(store), _frames({"ref": _key(1)}))
+    async with pg_engine.begin() as conn:
+        await conn.execute(text("ALTER TABLE turn_frame_lineage RENAME TO frame_lineage_gone"))
+
+    closed = await store.finish(advanced, segment_id=SEGMENT, status=TurnStatus.DONE)
+
+    assert closed.status is TurnStatus.DONE
+    assert await store.open_cursor(PRINCIPAL, CONVERSATION) is None
+    assert any(record.levelname == "ERROR" for record in caplog.records)

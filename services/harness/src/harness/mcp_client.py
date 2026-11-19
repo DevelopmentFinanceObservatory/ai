@@ -1024,9 +1024,9 @@ class McpExecutor:
             budget_s=_LINEAGE_READ_BUDGET_S,
             held=self._abandoned_reads,
             logger=logger,
-            what=(
-                "write_component goes on without a stored lineage: reading that of "
-                f"component_id={component_id!r} frame={frame!r}"
+            what=lambda: (
+                "write_component goes on without a stored lineage: reading the card "
+                f"lineage of component_id={component_id!r} frame={frame!r}"
             ),
         )
 

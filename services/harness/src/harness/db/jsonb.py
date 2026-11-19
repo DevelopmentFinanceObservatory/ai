@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from executor.ledger import NonFiniteJsonError
@@ -27,13 +28,13 @@ def to_json_param(value: Any) -> str:
         raise
 
 
-def json_or_none(value: Any, *, logger: logging.Logger, failure: str) -> str | None:
+def json_or_none(value: Any, *, logger: logging.Logger, failure: Callable[[], str]) -> str | None:
     """`value` as `to_json_param` writes it, or `None` when JSON cannot hold
     it (a NaN or an infinity, or a value `json` cannot encode), logged at
-    error on `logger` as `failure`. For a best-effort row its write
+    error on `logger` as `failure()`, built only then. For a best-effort row its write
     goes on without."""
     try:
         return to_json_param(value)
     except (TypeError, ValueError):
-        logger.exception(failure)
+        logger.exception(failure())
         return None
