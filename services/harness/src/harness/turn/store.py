@@ -810,8 +810,12 @@ class TurnStore:
         `turn_cursors` row `FOR SHARE`, which waits for such a write's row
         lock, then reads the turn in a statement that sees what it committed.
         The wait for the lock and each statement are bounded at
-        `SETTLE_TIMEOUT_S` (`lock_timeout`, `statement_timeout`), so a lock
-        an orphaned transaction holds fails the read.
+        `SETTLE_TIMEOUT_S` (`lock_timeout`, `statement_timeout`). A lock held
+        past it belongs to a stalled or orphaned write, so the read fails and
+        the caller leaves the turn as stored, for the next segment, a Stop or
+        the conversation's next turn to settle. The cost: a write that
+        commits after the bound is not reported by the segment that made
+        it.
 
         Raises:
             LookupError: no turn has that id.

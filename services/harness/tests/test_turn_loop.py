@@ -1585,12 +1585,16 @@ class _CutAfterCommit(TurnStore):
 class _CutAtTheReadBack(TurnStore):
     """A `TurnStore` whose first `advance`, or first close `done`, commits and
     then raises as a lost acknowledgement does, and whose first read back
-    (`settled_turn`) cuts the segment through `cut`, catches the
-    cancellation, and returns the turn as stored, leaving the cut pending."""
+    (`settled_turn`) cuts the segment through `cut`. With `absorb` the read
+    catches the cancellation and returns the turn as stored, leaving the cut
+    pending; without it the cancellation ends the read."""
 
-    def __init__(self, engine: AsyncEngine, *, cut: Callable[[], Awaitable[None]]) -> None:
+    def __init__(
+        self, engine: AsyncEngine, *, cut: Callable[[], Awaitable[None]], absorb: bool
+    ) -> None:
         super().__init__(engine)
         self._cut = cut
+        self._absorb = absorb
         self._raised = self._cuts = False
 
     async def _raises(self, written: Cursor) -> Cursor:
@@ -1610,7 +1614,10 @@ class _CutAtTheReadBack(TurnStore):
         if not self._cuts:
             self._cuts = True
             await self._cut()
-            with contextlib.suppress(asyncio.CancelledError):
+            if self._absorb:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.sleep(3600)
+            else:
                 await asyncio.sleep(3600)
         return await super().settled_turn(turn_id)
 
@@ -1621,6 +1628,7 @@ class _CutAtTheReadBack(TurnStore):
     [
         "acknowledgement",
         "absorbed_acknowledgement",
+        "read_back",
         "absorbed_read_back",
         "commit_in_flight",
         "after_commit",
@@ -1635,9 +1643,11 @@ async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
     after the commit, or once that work caught the cancellation and
     returned. At `commit_in_flight` the cut lands while the write's
     transaction is still open, and it commits only once the segment's read
-    back waits on the turn's row. At `absorbed_read_back` the write's
-    acknowledgement is lost and the cut lands during the read back, which
-    catches it and returns: the work after the commit still runs. `work`'s `NodeDone` is reported once,
+    back waits on the turn's row. At `read_back` and `absorbed_read_back`
+    the write's acknowledgement is lost and the cut lands during the read
+    back, which ends on it or catches it and returns. Wherever the cut lands
+    before `work`'s work after the commit starts, that work runs exactly
+    once: in the step that caught the cut, or when the segment settles. `work`'s `NodeDone` is reported once,
     before the segment settles on the turn as stored: `done` for the final node, the move to
     `later` for a middle one, with `later` never run. A write that caught
     the cut and returned still has its work after the commit run (an
@@ -1651,11 +1661,17 @@ async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
     store: TurnStore = (
         _CutAfterCommit(pg_engine, cut=cut, absorb=cut_at == "absorbed_acknowledgement")
         if cut_at in ("acknowledgement", "absorbed_acknowledgement")
-        else _CutAtTheReadBack(pg_engine, cut=cut)
-        if cut_at == "absorbed_read_back"
+        else _CutAtTheReadBack(pg_engine, cut=cut, absorb=cut_at == "absorbed_read_back")
+        if cut_at in ("read_back", "absorbed_read_back")
         else TurnStore(pg_engine)
     )
-    absorbed = ("absorbed_acknowledgement", "absorbed_read_back")
+    owed = (
+        "acknowledgement",
+        "absorbed_acknowledgement",
+        "read_back",
+        "absorbed_read_back",
+        "commit_in_flight",
+    )
     segment_id = await _claim(lease_a)
     ran: list[str] = []
     acknowledged: list[str] = []
@@ -1679,7 +1695,7 @@ async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
             ctx.after_commit(escaping)
         elif cut_at == "after_after_commit":
             ctx.after_commit(absorbing)
-        elif cut_at in absorbed:
+        elif cut_at in owed:
             ctx.after_commit(acknowledge)
         return Next(label)
 
@@ -1706,7 +1722,7 @@ async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
 
     assert events == [NodeDone(node="work", label=label, output=None)]
     assert ran == []
-    assert acknowledged == (["work"] if cut_at in absorbed else [])
+    assert acknowledged == (["work"] if cut_at in owed else [])
     stored = await TurnStore(pg_engine).turn(opened.id)
     if ends:
         assert (segment.outcome, stored.status) == (Outcome.DONE, TurnStatus.DONE)
@@ -2210,15 +2226,23 @@ async def test_an_answer_whose_write_raised_is_settled_on_the_turn_as_stored(
         assert ran == ["after_commit"]
 
 
-@pytest.mark.parametrize("closes", [TurnStatus.FAILED, TurnStatus.CANCELLED])
+@pytest.mark.parametrize(
+    ("closes", "how"),
+    [
+        (TurnStatus.FAILED, "committed"),
+        (TurnStatus.CANCELLED, "committed"),
+        (TurnStatus.FAILED, "abandoned"),
+    ],
+)
 async def test_a_close_whose_acknowledgement_was_lost_ends_on_the_stored_close(
-    pg_engine: AsyncEngine, clock: StoreClock, closes: TurnStatus
+    pg_engine: AsyncEngine, clock: StoreClock, closes: TurnStatus, how: str
 ) -> None:
-    """The close the segment writes commits and then raises: `failed` on
-    `work`'s error, or `cancelled` on a Stop that cut `work` off. Read back,
-    the turn is closed, so the segment ends on the stored close. The failed
-    close still reports `work`'s error."""
-    store = _BoundaryWriteRaises(pg_engine, how="committed", closes=closes)
+    """The close the segment writes raises: `failed` on `work`'s error, or
+    `cancelled` on a Stop that cut `work` off, after it committed or after
+    another segment closed the turn `abandoned`. Read back, the turn is
+    closed, so the segment ends on the stored close. A failed close reports
+    `work`'s error whoever closed the turn."""
+    store = _BoundaryWriteRaises(pg_engine, how=how, closes=closes)
     lease_a, lease_b = await _instance(pg_engine, clock), await _instance(pg_engine, clock)
     segment_id = await _claim(lease_a)
     ran: list[str] = []
@@ -2238,8 +2262,9 @@ async def test_a_close_whose_acknowledgement_was_lost_ends_on_the_stored_close(
     segment = await asyncio.wait_for(running, 5)
 
     assert store.raised
-    assert segment.outcome is Outcome(closes.value)
-    assert (await store.turn(segment.cursor.id)).status is closes
+    stored_close = TurnStatus.ABANDONED if how == "abandoned" else closes
+    assert segment.outcome is Outcome(stored_close.value)
+    assert (await store.turn(segment.cursor.id)).status is stored_close
     if closes is TurnStatus.FAILED:
         [failed] = events
         assert isinstance(failed, TurnFailed) and str(failed.error) == "work broke"
