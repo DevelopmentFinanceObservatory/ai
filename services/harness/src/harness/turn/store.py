@@ -52,13 +52,14 @@ row, kept while the turn is open, when the store is given a `FrameLineage`:
 the graph's reading of which frames a state names, and the process's
 `ProvenanceStore`. The rows commit with the cursor write or not at all, so
 the rows a turn's cursor write commits are the lineage the process held for
-every frame the state names, at that write. Each segment starts by reading
-the rows of every frame the state names, putting each over what the process
+every frame the state names, at that write. Each segment starts by making
+its `SegmentLineage` (`TurnStore.start_segment`): the process's last
+generation then (its restore point) and, as the segment goes on, the
+generations it reads back and writes. The restore fills it by reading the
+rows of every frame the state names, putting each over what the process
 holds, in the state's frame order, and dropping a named frame with no row
-(`TurnStore.restore_frame_lineage`). The restore returns the segment's
-`SegmentLineage`, which the segment passes to each of its writes: the
-process's last generation at the restore (its restore point) and the
-generations written since. An `advance` or `pause` writes each named frame
+(`TurnStore.restore_frame_lineage`), and the segment passes it to each of
+its writes. An `advance` or `pause` writes each named frame
 whose lineage the process holds at a generation (`ProvenanceStore.held`)
 produced or restored after that point and not written in the segment
 since, so an entry from before it that no read confirmed never reaches the
@@ -68,9 +69,9 @@ holds); a lineage that fails the check deletes its frame's row instead,
 logged once per generation, so nothing the database receives can be
 refused for its values, and any refusal fails the cursor write like a
 refusal of the cursor statement. A key holding a NUL or text that is not
-UTF-8 has no row. The closing write deletes the turn's rows. A frame whose lineage no process held has no
-row: a card drawn on it is withheld, as on the instance that fetched it once
-the lineage is evicted.
+UTF-8 has no row. The closing write deletes the turn's rows. A frame whose
+lineage no process held has no row: a card drawn on it is withheld, as on
+the instance that fetched it once the lineage is evicted.
 
 The lease itself, the Stop request and the frame numbering live on
 `conversations` and are written by `harness.studio_store.StudioStore`.
@@ -120,12 +121,13 @@ type FrameKey = tuple[str, str]
 
 class FrameKeys(NamedTuple):
     """The store keys a turn's state names, in order and each once (`keys`),
-    and a description of each frames value or entry that named none because
-    it is not a mapping (`skipped`, as `frame_id:type`, or `:type` for the
-    frames value itself)."""
+    and what named none because it is not a mapping: the type of the frames
+    value itself (`container`), or each frames entry as `frame_id:type`
+    (`skipped`)."""
 
     keys: list[FrameKey]
     skipped: list[str]
+    container: str | None = None
 
 
 @dataclass(frozen=True)
@@ -157,12 +159,14 @@ class SegmentLineage:
     failed its check) or read back (`written`). `token` is the segment's
     identity in the source (`ProvenanceStore.segment_token`), which its kept
     frames are recorded under (`ProvenanceStore.keep`); tokens carry no
-    order."""
+    order. `reported` is set once the segment has logged its state's
+    malformed frames (`TurnStore._named`), so it logs them once."""
 
     scope: str
     since: int
     token: int
     written: dict[FrameKey, int] = field(default_factory=dict)
+    reported: bool = False
 
 
 @dataclass
@@ -634,7 +638,7 @@ class TurnStore:
             return write
         source, scope = self._lineage.source, segment.scope
         turn_index = cursor.turn_index
-        named = list(dict.fromkeys(self._lineage.frame_keys(state).keys))
+        named = self._named(cursor, state, segment)
         source.keep(conversation=scope, keys=named, token=segment.token)
         for key in named:
             spec_id, content_version = key
@@ -846,20 +850,41 @@ class TurnStore:
         if self._lineage is not None and segment is not None:
             self._lineage.source.release(conversation=segment.scope, token=segment.token)
 
+    def _named(
+        self, cursor: Cursor, state: Mapping[str, Any], segment: SegmentLineage
+    ) -> list[FrameKey]:
+        """The store keys `state` names (`FrameLineage.frame_keys`). What
+        names none because it is not a mapping is logged the first time the
+        segment meets it, at its restore or a write (`SegmentLineage.
+        reported`)."""
+        assert self._lineage is not None
+        frames = self._lineage.frame_keys(state)
+        if not segment.reported and (frames.container is not None or frames.skipped):
+            segment.reported = True
+            if frames.container is not None:
+                logger.warning(
+                    "turn %s of conversation %s: its state's frames value is a %s, not a "
+                    "mapping; it names no frame",
+                    cursor.turn_index,
+                    segment.scope,
+                    frames.container,
+                )
+            else:
+                logger.warning(
+                    "turn %s of conversation %s: its state's frames hold %d entries that "
+                    "are not mappings (%s); they name no frame",
+                    cursor.turn_index,
+                    segment.scope,
+                    len(frames.skipped),
+                    ", ".join(frames.skipped),
+                )
+        return frames.keys
+
     async def _restore(self, cursor: Cursor, segment: SegmentLineage) -> None:
         """The read and restore of `restore_frame_lineage`, into `segment`."""
         assert self._lineage is not None
         source, scope = self._lineage.source, segment.scope
-        frames = self._lineage.frame_keys(cursor.state)
-        if frames.skipped:
-            logger.warning(
-                "turn %s of conversation %s: its state's frames hold entries that are "
-                "not mappings (%s); they name no frame",
-                cursor.turn_index,
-                scope,
-                ", ".join(frames.skipped),
-            )
-        named = list(dict.fromkeys(frames.keys))
+        named = self._named(cursor, cursor.state, segment)
         source.keep(conversation=scope, keys=named, token=segment.token)
         readable = [key for key in named if _text_key(key)]
         if not readable:
@@ -958,8 +983,8 @@ class TurnStore:
     ) -> Cursor:
         """Move the running turn to `node` with `node_input`, writing `state`,
         its spec blocks included, and appending `records`, with it.
-        `lineage` is the segment's (`restore_frame_lineage`); with `None` no
-        lineage is written.
+        `lineage` is the segment's, which `start_segment` made and
+        `restore_frame_lineage` filled; with `None` no lineage is written.
 
         Raises:
             SegmentLost: `segment_id` does not hold the conversation's lease.

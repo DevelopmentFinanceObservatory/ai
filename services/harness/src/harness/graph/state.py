@@ -500,7 +500,7 @@ def frame_store_keys(state: Mapping[str, Any]) -> FrameKeys:
     `FrameKeys.skipped` describes for the caller to report."""
     frames = state.get(ORCHESTRATOR_FRAMES_KEY) or {}
     if not isinstance(frames, Mapping):
-        return FrameKeys(keys=[], skipped=[f":{type(frames).__name__}"])
+        return FrameKeys(keys=[], skipped=[], container=type(frames).__name__)
     keys: dict[FrameKey, None] = {}
     skipped: list[str] = []
     for frame_id, entry in frames.items():
