@@ -1044,32 +1044,72 @@ async def test_a_row_refused_for_its_values_keeps_no_other_from_landing_and_is_t
     assert len(refused) == 3
 
 
-async def test_a_batch_refused_for_all_its_rows_is_logged_once_and_tried_whole_next_time(
-    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+async def _refuse_spec_9(engine: AsyncEngine) -> None:
+    """Make the database refuse any new or updated row of `spec_9` with a
+    check violation (SQLSTATE 23514), a refusal that is not a data exception."""
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "ALTER TABLE turn_frame_lineage ADD CONSTRAINT refuse_spec_9 "
+                "CHECK (spec_id <> 'spec_9') NOT VALID"
+            )
+        )
+
+
+def _refusals_of_spec_9(caplog: pytest.LogCaptureFixture) -> int:
+    return len(
+        [
+            r
+            for r in caplog.records
+            if "spec_9" in r.getMessage() and "was not stored" in r.getMessage()
+        ]
+    )
+
+
+async def test_a_refused_batch_lands_its_other_rows_and_drops_the_refused_keys_older_row(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A refusal no row's own values caused (here a missing table) is one
-    log line and marks no frame failed, so the next write stores them all."""
+    """A two-row batch refused for one row, by a refusal of any kind, is split:
+    the other row lands, the refused key's older row is deleted in the same
+    write, and the refused row stops after three attempts."""
     await _conversation(pg_engine)
     provenance = ProvenanceStore()
-    for n in (1, 2):
-        _held(provenance, n)
+    _held(provenance, 1)
+    _held(provenance, 9)
     store = _keeping(pg_engine, provenance)
-    state = _frames({"ref": _key(1)}, {"ref": _key(2)})
-    upsert = turn_store._UPSERT_FRAME_LINEAGE
-    monkeypatch.setattr(
-        turn_store, "_UPSERT_FRAME_LINEAGE", text("INSERT INTO no_such_table VALUES (:turn)")
-    )
-    advanced = await _advance(store, await _open(store), state)
-    errors = [r for r in caplog.records if r.levelname == "ERROR"]
-    assert len(errors) == 1
-    monkeypatch.setattr(turn_store, "_UPSERT_FRAME_LINEAGE", upsert)
+    state = _frames({"ref": _key(1)}, {"ref": _key(9)})
+    cursor = await _advance(store, await _open(store), state)
+    assert [row[0] for row in await _lineage_rows(pg_engine)] == ["spec_1", "spec_9"]
+    _held(provenance, 1, share=0.6)
+    _held(provenance, 9, share=0.7)
+    await _refuse_spec_9(pg_engine)
 
-    await _advance(store, advanced, state)
+    for _ in range(5):
+        cursor = await _advance(store, cursor, state)
 
-    assert [row[:2] for row in await _lineage_rows(pg_engine)] == [
-        ("spec_1", "cv_1"),
-        ("spec_2", "cv_2"),
-    ]
+    (row,) = await _lineage_rows(pg_engine)
+    assert row[0] == "spec_1"
+    assert row[3][0]["manifest"] == {"citation": {"share": 0.6}}
+    assert _refusals_of_spec_9(caplog) == 3
+
+
+@pytest.mark.parametrize("frames", [1, 2])
+async def test_a_refused_row_counts_the_same_alone_or_in_a_batch(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture, frames: int
+) -> None:
+    await _conversation(pg_engine)
+    provenance = ProvenanceStore()
+    _held(provenance, 9)
+    _held(provenance, 1)
+    await _refuse_spec_9(pg_engine)
+    store = _keeping(pg_engine, provenance)
+    state = _frames({"ref": _key(9)}, *([{"ref": _key(1)}] if frames == 2 else []))
+    cursor = await _advance(store, await _open(store), state)
+
+    for _ in range(4):
+        cursor = await _advance(store, cursor, state)
+
+    assert _refusals_of_spec_9(caplog) == 3
 
 
 async def test_a_failed_write_of_a_newer_lineage_deletes_the_older_row(
