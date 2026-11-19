@@ -1042,6 +1042,80 @@ async def test_plan_proposed_pauses_and_approve_resumes_on_a_new_stream() -> Non
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
 
 
+def _plan_pause_acknowledgement_lost(
+    monkeypatch: pytest.MonkeyPatch, *, read_back_fails: bool = False
+) -> list[bool]:
+    """Make the turn store's first pause commit and then raise, as a write
+    whose acknowledgement was lost does. With `read_back_fails`, every read
+    of the turn after it fails too, until the list returned is emptied."""
+    real_pause, real_turn = TurnStore.pause, TurnStore.turn
+    raised: list[bool] = []
+
+    async def pause(self: TurnStore, cursor: Any, **kwargs: Any) -> Any:
+        written = await real_pause(self, cursor, **kwargs)
+        if raised:
+            return written
+        raised.append(True)
+        raise ConnectionResetError("the pause's acknowledgement was lost")
+
+    async def turn(self: TurnStore, turn_id: int) -> Any:
+        if raised and read_back_fails:
+            raise ConnectionError("the turn could not be read back")
+        return await real_turn(self, turn_id)
+
+    monkeypatch.setattr(TurnStore, "pause", pause)
+    monkeypatch.setattr(TurnStore, "turn", turn)
+    return raised
+
+
+async def test_a_plan_pause_whose_acknowledgement_was_lost_is_shown_and_approvable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plan's pause commits and its write raises. The turn read back
+    holds the pause, so the stream shows the plan card as for a pause that
+    returned, and an approval on a new stream runs the plan to `done`."""
+    _plan_pause_acknowledgement_lost(monkeypatch)
+    app = _app(
+        *_plan("q with forks", *_charts_the_plan()),
+        executor=ScriptedExecutor(),
+        tool_surface=ScriptedSurface(),
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        assert _events(first)[-1] == "plan.proposed"
+        plan = _frame(first, "plan.proposed")
+        second = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+
+    assert _events(second)[0] == "plan.approved"
+    assert _events(second)[-1] == "done"
+
+
+async def test_a_plan_pause_whose_turn_cannot_be_read_back_ends_transient_and_stays_paused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plan's pause commits, its write raises, and the read of the turn
+    after it fails. The stream ends on a retryable `transient_unavailable`
+    error and the turn stays paused on the pause as stored, unclosed."""
+    failing = _plan_pause_acknowledgement_lost(monkeypatch, read_back_fails=True)
+    app = _app(
+        *_plan("q with forks", *_charts_the_plan()),
+        executor=ScriptedExecutor(),
+        tool_surface=ScriptedSurface(),
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+
+    assert _events(first)[-1] == "error"
+    error = _frame(first, "error")["error"]
+    assert (error["error"], error["retry"]) == ("transient_unavailable", "retry_after_delay")
+    failing.clear()
+    stored = await TurnStore(_engine()).open_cursor(PRINCIPAL, CONVERSATION)
+    assert stored is not None
+    assert stored.status is TurnStatus.PAUSED and stored.pause is not None
+
+
 @pytest.fixture
 def otlp_spans(monkeypatch: pytest.MonkeyPatch) -> InMemorySpanExporter:
     """The OTLP backend of `common.telemetry`, exporting to memory: an
