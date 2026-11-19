@@ -29,6 +29,7 @@ from common.caller import (
     CALLER_PRINCIPAL_HEADER,
     MCP_SURFACE,
     SURFACE_HEADER,
+    TURN_HEADER,
     USER_AGENT_HEADER,
     supplied_caller,
 )
@@ -3270,6 +3271,62 @@ async def _rebuilt_ops(
                 rebuild_lost_frames=True,
             )
     return reply, requests
+
+
+_STUDIO_CALLER = "conversation:" + "0" * 32
+_STUDIO_TURN = "tr_" + "0" * 16
+
+
+@pytest.mark.usefixtures("materialisation_store")
+@pytest.mark.parametrize(
+    ("headers", "sent"),
+    [
+        pytest.param(
+            [(CALLER_HEADER, _STUDIO_CALLER), (TURN_HEADER, _STUDIO_TURN)],
+            {
+                CALLER_PRINCIPAL_HEADER: _CALLER_PRINCIPAL,
+                CALLER_HEADER: _STUDIO_CALLER,
+                TURN_HEADER: _STUDIO_TURN,
+            },
+            id="studio",
+        ),
+        pytest.param(
+            [(CALLER_HEADER, _ADDRESS_CALLER), ("user-agent", _MCP_USER_AGENT)],
+            {
+                CALLER_PRINCIPAL_HEADER: _CALLER_PRINCIPAL,
+                CALLER_HEADER: _ADDRESS_CALLER,
+                SURFACE_HEADER: MCP_SURFACE,
+                USER_AGENT_HEADER: _MCP_USER_AGENT,
+            },
+            id="mcp-client",
+        ),
+    ],
+)
+async def test_a_frame_replay_names_the_caller_and_turn_to_the_analysis_door(
+    headers: list[tuple[str, str]], sent: dict[str, str]
+) -> None:
+    """The analysis door logs a delivery for the replay, so it names the caller and
+    turn as every other analysis call does, a Studio conversation's included."""
+    requests, handler = _replaying_handler(
+        _REPLAY_READY, httpx2.Response(404, content=_VERSION_LOST)
+    )
+    mcp_request = Request(
+        {"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers]}
+    )
+    identity = (CALLER_PRINCIPAL_HEADER, CALLER_HEADER, TURN_HEADER, SURFACE_HEADER)
+    identity += (USER_AGENT_HEADER,)
+
+    with set_http_request(mcp_request):
+        async with _assembler(
+            handler, settings=_settings(dfo_caller_principal=_CALLER_PRINCIPAL)
+        ) as assembler:
+            reply = await assembler.get_frame_view(
+                frame_ref=_LOST_OPS.model_dump(), rebuild_lost_frames=True
+            )
+
+    assert not isinstance(reply, Refusal)
+    (replay,) = [r for r in requests if r.url.path == "/api/datasets/analysis"]
+    assert {name: replay.headers[name] for name in identity if name in replay.headers} == sent
 
 
 @pytest.mark.usefixtures("materialisation_store")

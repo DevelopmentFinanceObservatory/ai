@@ -64,9 +64,10 @@ class McpTimeoutPolicy:
     ) -> Client:
         """A `Client` for `caller`, bound by this policy's call and init deadlines.
 
-        The caller goes out as the `x-dfo-caller` header and the turn as the
-        `x-dfo-turn` header on every request
-        (`compiler.caller_clients.caller_transport`); `None` sends none.
+        `caller.caller` goes out as the `x-dfo-caller` header and `caller.turn`
+        as the `x-dfo-turn` header on every request
+        (`compiler.caller_clients.caller_transport`). `caller.caller=None` sends
+        no `x-dfo-caller` header, and `caller.turn=None` no `x-dfo-turn` header.
 
         `tool=None` is for a client not scoped to one tool ahead of time --
         the presentation client (`harness.mcp_client.McpExecutor.
