@@ -78,21 +78,28 @@ async def execute_in_savepoint(
     statement: Executable,
     params: Mapping[str, Any] | Sequence[Mapping[str, Any]],
     *,
-    logger: logging.Logger | None,
-    failure: Callable[[], str],
-) -> bool:
+    logger: logging.Logger,
+    failure: Callable[[], str] | None = None,
+) -> Exception | None:
     """Run `statement` with `params` on `conn` in a savepoint, so a failure
     leaves the caller's transaction to commit. A transient fault
-    (`compiler.surface.transient`) raises, for the whole write to be retried;
-    any other is logged at error on `logger` as `failure()`, unless `logger`
-    is `None`, and this returns `False`. `True` means the statement ran."""
+    (`compiler.surface.transient`) raises, for the whole write to be retried.
+    Any other is returned, and logged at error on `logger` as `failure()`
+    when `failure` is given. `None` means the statement ran."""
     try:
         async with conn.begin_nested():
             await conn.execute(statement, params if isinstance(params, Mapping) else list(params))
     except Exception as exc:
         if transient(exc):
             raise
-        if logger is not None:
+        if failure is not None:
             logger.exception(failure())
-        return False
-    return True
+        return exc
+    return None
+
+
+def sqlstate(exc: BaseException) -> str | None:
+    """The SQLSTATE the database refused a statement with, as the driver
+    reports it on the error SQLAlchemy wraps, or `None` when it names none."""
+    state = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    return state if isinstance(state, str) else None

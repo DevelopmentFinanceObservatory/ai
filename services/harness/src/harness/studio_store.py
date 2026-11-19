@@ -910,11 +910,12 @@ def _card_lineage_row(lineage: CardLineage) -> dict[str, Any] | None:
     `None`, logged at error, when JSON cannot hold them (a NaN or an
     infinity among a manifest's values, which `json` would write as a bare
     token Postgres refuses). The card then lands without its row."""
+    component_id = lineage.component_id
     members = json_or_none(
         lineage.members_json(),
         logger=logger,
         failure=lambda: (
-            f"studio store: the lineage of component_id={lineage.component_id!r} cannot be "
+            f"studio store: the lineage of component_id={component_id!r} cannot be "
             "stored as JSON; the card lands without it"
         ),
     )
@@ -940,13 +941,14 @@ async def _insert_card_lineage(conn: AsyncConnection, pk: int, row: Mapping[str,
     A transient fault raises, for the whole write to be retried; any other
     is logged at error and the card lands without its row
     (`harness.db.best_effort.execute_in_savepoint`)."""
+    component_id = row["component_id"]
     await execute_in_savepoint(
         conn,
         _INSERT_CARD_LINEAGE,
         {**row, "pk": pk},
         logger=logger,
         failure=lambda: (
-            f"studio store: the lineage of component_id={row['component_id']!r} was not "
+            f"studio store: the lineage of component_id={component_id!r} was not "
             "stored; the card lands without it"
         ),
     )
