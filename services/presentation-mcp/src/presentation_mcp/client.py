@@ -31,7 +31,7 @@ from typing import Any, Self
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider
-from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
+from common.caller import ADDRESS_CALLER, current_caller, vouched_caller_headers
 from common.derived_replay import (
     DEFAULT_RETRY_AFTER_S,
     ReplayBusy,
@@ -969,14 +969,15 @@ class PlatformAssembler:
     async def _post_analysis(self, path: str, body: Mapping[str, Any]) -> httpx2.Response | Refusal:
         """POST `body` to apis' analysis `path` once, for `common.derived_replay`.
         Returns the response whatever its status, or `transient_unavailable` for a
-        call that got none. It names the caller as an external create does
-        (`_card_write_headers`), since only a public call replays, and waits as
-        long as a whole presentation call may."""
+        call that got none. It names the caller and turn as analysis-mcp's own
+        analysis calls do (`vouched_caller_headers`): an `ip:` caller with its
+        surface and user agent, or a Studio `conversation:` caller with its turn.
+        It waits as long as a whole presentation call may."""
         try:
             headers = dict(await self._auth()) if self._auth else {}
         except ApisAuthError as exc:
             return self._refusal(PlatformTransportError(detail=f"no dfo-apis ID token: {exc}"))
-        headers.update(self._card_write_headers(Caller.EXTERNAL))
+        headers.update(vouched_caller_headers(self._caller_principal))
         timeout = self._attempt_timeout(max(self._retry_budget_s, self._read_timeout_s))
         try:
             return await self._client.post(path, json=dict(body), headers=headers, timeout=timeout)
@@ -1036,7 +1037,8 @@ class PlatformAssembler:
         A first-party write, Studio's, carries the publish principal, which
         dfo-apis exempts. An external write carries the caller principal and
         the caller the website named, when this process holds the principal
-        and the request's `x-dfo-caller` is an `ip:` digest, so dfo-apis
+        and the request's `x-dfo-caller` is an `ip:` digest
+        (`vouched_caller_headers`, with the surface and user agent), so dfo-apis
         counts that client. Any other external write carries neither, and
         dfo-apis counts it against the address it sees for this service.
         """
@@ -1044,9 +1046,9 @@ class PlatformAssembler:
             principal = self._publish_principal
             return {} if principal is None else {PRINCIPAL_HEADER: principal}
         named = current_caller()
-        if self._caller_principal is None or named is None or not ADDRESS_CALLER.fullmatch(named):
+        if named is None or not ADDRESS_CALLER.fullmatch(named):
             return {}
-        return {CALLER_PRINCIPAL_HEADER: self._caller_principal, CALLER_HEADER: named}
+        return vouched_caller_headers(self._caller_principal)
 
     async def get_frame_view(
         self,

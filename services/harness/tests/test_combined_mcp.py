@@ -717,7 +717,7 @@ async def test_the_renderer_page_reads_through_the_combined_server(
         *["combined mcp call resource outcome=ok"] * 2,
     ]
     assert " uri=" not in logged[0]
-    assert [message.split(" uri=")[1] for message in logged[1:]] == [
+    assert [message.split(" uri=")[1].rsplit(" user_agent=", 1)[0] for message in logged[1:]] == [
         json.dumps(uri) for uri in uris
     ]
 
@@ -751,7 +751,7 @@ async def test_a_resource_reads_query_and_fragment_stay_out_of_the_request_log(
         for r in caplog.records
         if r.name == "harness.combined_mcp" and r.getMessage().startswith("combined mcp call")
     ]
-    assert logged.endswith(" uri=" + json.dumps("dfo://artifact"))
+    assert logged.rsplit(" user_agent=", 1)[0].endswith(" uri=" + json.dumps("dfo://artifact"))
     assert "secret" not in logged
 
 
@@ -2113,6 +2113,51 @@ async def test_get_data_refuses_on_its_own_deadline_before_the_limit_stops_it(
         assert answered_after < limit_s
 
 
+async def test_an_address_caller_reaches_dfo_apis_with_its_surface_and_user_agent(
+    running_lifespan: Callable[..., Any],
+) -> None:
+    """The caller, surface and User-Agent a client sends to `/mcp/` arrive at
+    dfo-apis beside the principal."""
+    caller = "ip:" + "ab" * 16
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        if request.url.path.endswith("/options"):
+            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
+        return httpx2.Response(400)
+
+    client_holder.set_client(
+        UpstreamClient(
+            settings=DataMcpSettings(dfo_caller_principal="principal-secret"),
+            transport=httpx2.MockTransport(handler),
+        )
+    )
+    app = _limited_app()
+    transport = StreamableHttpTransport(
+        url="http://testserver/",
+        auth=TOKEN,
+        headers={"x-dfo-caller": caller, "user-agent": "claude-user/1.0"},
+        httpx_client_factory=cast(
+            McpHttpClientFactory,
+            lambda **kwargs: httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=app), base_url="http://testserver", **kwargs
+            ),
+        ),
+    )
+    try:
+        async with running_lifespan(app), Client(transport, timeout=_CLIENT_TIMEOUT_S) as client:
+            await client.call_tool("get_data", {"spec_id": _UNSTORED_SPEC}, raise_on_error=False)
+    finally:
+        client_holder.set_client(None)
+
+    assert seen
+    for request in seen:
+        assert request.headers["x-dfo-caller"] == caller
+        assert request.headers["x-dfo-surface"] == "mcp"
+        assert request.headers["x-dfo-user-agent"] == "claude-user/1.0"
+
+
 async def _until(condition: Callable[[], bool]) -> None:
     async with asyncio.timeout(5):
         while not condition():
@@ -2624,7 +2669,7 @@ async def test_each_call_through_the_combined_server_is_logged(
     transport = StreamableHttpTransport(
         url=f"http://testserver{COMBINED}",
         auth=TOKEN,
-        headers={"x-dfo-caller": "ip:test"},
+        headers={"x-dfo-caller": "ip:test", "user-agent": "claude-user/1.0 (+https://claude.ai)"},
         httpx_client_factory=cast(
             McpHttpClientFactory,
             lambda **kwargs: httpx2.AsyncClient(
@@ -2652,14 +2697,19 @@ async def test_each_call_through_the_combined_server_is_logged(
     # fastmcp's own client names itself `mcp` and declares no MCP Apps extension.
     # A 2025-11-25 client says so on initialize alone.
     host = 'client="mcp" client_version="0.1.0" views=undeclared view_mime_types=None'
-    initialize = [f"combined mcp initialize outcome=ok revision={revision} caller=ip:test {host}"]
+    # Every request carries the user agent, so a 2025-11-25 client's calls, which
+    # log no client, still name it by its whole User-Agent.
+    user_agent = 'user_agent="claude-user/1.0 (+https://claude.ai)"'
+    initialize = [
+        f"combined mcp initialize outcome=ok revision={revision} caller=ip:test {host} {user_agent}"
+    ]
     unseen = "client=None client_version=None views=unknown view_mime_types=None"
     call_host = unseen if revision == "2025-11-25" else host
     assert [re.sub(r"trace_id=[0-9a-f]{32}", "trace_id=<id>", message) for message in messages] == [
         *(initialize if revision == "2025-11-25" else []),
         *(
             f"combined mcp call tool=aggregate outcome={outcome} revision={revision} "
-            f"caller=ip:test trace_id=<id> {call_host}"
+            f"caller=ip:test trace_id=<id> {call_host} {user_agent}"
             for outcome in ("ok", "rendering_not_recorded")
         ),
     ]
@@ -2695,7 +2745,11 @@ async def test_the_request_log_names_the_host_and_what_it_declared_about_views(
     transport = StreamableHttpTransport(
         url=f"http://testserver{COMBINED}",
         auth=TOKEN,
-        headers={"x-dfo-caller": "ip:test", WRITE_TOKEN_HEADER: _HEADER_WRITE_TOKEN},
+        headers={
+            "x-dfo-caller": "ip:test",
+            WRITE_TOKEN_HEADER: _HEADER_WRITE_TOKEN,
+            "user-agent": "Host/2.5",
+        },
         httpx_client_factory=cast(
             McpHttpClientFactory,
             lambda **kwargs: httpx2.AsyncClient(
@@ -2734,18 +2788,28 @@ async def test_the_request_log_names_the_host_and_what_it_declared_about_views(
     )
     unseen = "client=None client_version=None views=unknown view_mime_types=None"
     initialize = [
-        f"combined mcp initialize outcome=ok revision={revision} caller=ip:test {declared}"
+        f"combined mcp initialize outcome=ok revision={revision} caller=ip:test "
+        f'{declared} user_agent="Host/2.5"'
     ]
     call_host = unseen if revision == "2025-11-25" else declared
+    user_agent = 'user_agent="Host/2.5"'
     assert [re.sub(r" trace_id=[0-9a-f]{32}", "", message) for message in messages] == [
         *(initialize if revision == "2025-11-25" else []),
         f"combined mcp call tool=write_component outcome=not_found revision={revision} "
-        f"caller=ip:test {call_host}",
+        f"caller=ip:test {call_host} {user_agent}",
         f"combined mcp call resource outcome=ok revision={revision} caller=ip:test {call_host} "
-        f"uri={json.dumps(presentation_server._RENDERER_URI)}",
+        f"uri={json.dumps(presentation_server._RENDERER_URI)} {user_agent}",
         f"combined mcp call resource outcome=ArtifactRefusalError revision={revision} caller=ip:test "
-        f'{call_host} uri="dfo://artifact"',
+        f'{call_host} uri="dfo://artifact" {user_agent}',
     ]
+    # The dfo-infra log parser (infra/stacks/telemetry/sql/parse_mcp_line.sql, `mcp_line`)
+    # reads these lines into mcp_daily. A line it does not match counts as `unparsed`.
+    # The pattern is copied from that file, with BigQuery's `r'...'` quoting removed.
+    mcp_line = re.compile(
+        r'(?s)^combined mcp (?:call (tool=(?:[A-Za-z0-9_.-]+|"(?:[^"\\]|\\.)*")|resource|resource_list) outcome=(.*?) revision=\S* caller=(.*?) trace_id=\S*|(initialize) outcome=(.*?) revision=\S* caller=(.*?)) client=(None|"(?:[^"\\]|\\.)*") client_version=.*$'
+    )
+    assert messages
+    assert all(mcp_line.match(message) for message in messages)
     logged = "\n".join(
         f"{record.getMessage()} {record.args!r} {record.exc_text or ''}"
         for record in caplog.records
@@ -2837,7 +2901,7 @@ async def test_a_malformed_resource_uri_is_logged_and_the_read_fails_as_usual(
         if r.name == "harness.combined_mcp" and r.getMessage().startswith("combined mcp call")
     ]
     assert line.startswith("combined mcp call resource outcome=ResourceError ")
-    assert line.endswith(f" uri={logged}")
+    assert line.rsplit(" user_agent=", 1)[0].endswith(f" uri={logged}")
     assert "pw" not in line
 
 

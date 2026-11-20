@@ -18,6 +18,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from common.apis_auth import TOKEN_HEADER
+from common.caller import (
+    CALLER_HEADER,
+    CALLER_PRINCIPAL_HEADER,
+    TURN_HEADER,
+    set_supplied_caller,
+    set_supplied_turn,
+)
 from data_mcp import client_holder, series_statistics
 from data_mcp.deadline import CallDeadline
 from data_mcp.manifest import Manifest, strip_manifest
@@ -36,6 +43,8 @@ from data_mcp.series_statistics import (
     series_statistics_table,
 )
 from fastmcp.exceptions import ResourceError
+from fastmcp.server.http import set_http_request
+from starlette.requests import Request
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
 from .test_client import ID_TOKEN, _client, _settings, id_token_auth
@@ -1416,3 +1425,73 @@ def test_continuing_method_reads_the_trace(trace: dict[str, Any], method: str | 
     manifest = _manifest(rendering={"statistics": "series"}).model_copy(update={"trace": trace})
 
     assert continuing_method(manifest) == method
+
+
+_CONVERSATION_A = "conversation:" + "a" * 32
+_TURN_A = "tr_" + "a" * 16
+
+
+@pytest.mark.parametrize("named_by", ["header", "supplied"])
+async def test_a_shared_fetch_names_neither_the_caller_nor_the_turn_that_started_it(
+    named_by: str,
+) -> None:
+    """Every read missing the table joins one fetch, so the fetch's dfo-apis calls
+    name no caller and no turn, whether conversation A's request named them in its
+    headers or the process supplied them. The control: a dfo-apis call conversation
+    A's request makes itself names both."""
+    clear_series_statistics_cache()
+    data = _parquet_bytes([_row(stat_var="dcid:VarA")])
+    digest = _digest_for(data)
+    artifact = _manifest(rendering={"statistics": "series"}, artifact_digest=digest).artifacts[0]
+    seen: list[httpx2.Request] = []
+
+    def snapshot_handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, json=_snapshot_payload(artifact_digest=digest))
+
+    def get_handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, content=data)
+
+    inbound = Request(
+        {
+            "type": "http",
+            "headers": [
+                (CALLER_HEADER.encode(), _CONVERSATION_A.encode()),
+                (TURN_HEADER.encode(), _TURN_A.encode()),
+            ],
+        }
+    )
+    settings = _settings(dfo_caller_principal="caller-principal-secret")
+    identity = (CALLER_PRINCIPAL_HEADER, CALLER_HEADER, TURN_HEADER)
+    async with _client(snapshot_handler, settings=settings) as upstream:
+        client_holder.set_client(upstream)
+
+        async def as_conversation_a() -> None:
+            if named_by == "supplied":
+                set_supplied_caller(_CONVERSATION_A)
+                set_supplied_turn(_TURN_A)
+            await upstream.request("GET", "/api/control", route="/api/control")
+            await fetch_series_statistics_table(
+                subject_id=_SPEC_ID,
+                content_version=_CONTENT_VERSION,
+                artifact=artifact,
+                expected_series=1,
+                continuing=None,
+                transport=httpx2.MockTransport(get_handler),
+            )
+
+        if named_by == "header":
+            with set_http_request(inbound):
+                await as_conversation_a()
+        else:
+            await asyncio.create_task(as_conversation_a())
+
+    control, *shared = seen
+    assert (control.headers[CALLER_HEADER], control.headers[TURN_HEADER]) == (
+        _CONVERSATION_A,
+        _TURN_A,
+    )
+    assert len(shared) == 2  # the link and the GET
+    for request in shared:
+        assert not set(identity) & set(request.headers.keys()), request.url

@@ -3,7 +3,7 @@ server's spans.
 
 The harness calls its own MCP servers over loopback HTTP, and each call's spans
 start in the server's own context, so they carry none of the turn's attributes.
-`common.telemetry.turn_call_meta` sends the session in `_meta`. The harness
+`common.telemetry.turn_call_meta` sends the session, user and tags in `_meta`. The harness
 marks every request that arrived over loopback with `LOOPBACK_SCOPE_KEY`, and
 `LangfuseSessionMiddleware` honours the session in `_meta` only on a marked
 request. A call through the public combined `/mcp/` server never has the mark,
@@ -35,7 +35,7 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 from opentelemetry import trace
 
-from common.telemetry import SESSION_META_KEY, use_call_session
+from common.telemetry import SESSION_META_KEY, TAGS_META_KEY, USER_META_KEY, use_call_session
 from common.uri_redaction import redact_uris
 
 logger = logging.getLogger(__name__)
@@ -76,28 +76,43 @@ def is_loopback_request() -> bool:
     return get_http_request().scope.get(LOOPBACK_SCOPE_KEY) is True
 
 
-def _session_from_loopback_request() -> str | None:
-    """The session the current request's `_meta` carries, or `None` when the
-    request has no HTTP request behind it, did not arrive over loopback, or
-    carries no string under `SESSION_META_KEY`. Never raises."""
+def _call_attributes_from_loopback_request() -> dict[str, Any]:
+    """The `use_call_session` arguments the current request's `_meta` carries:
+    `session_id` (a string under `SESSION_META_KEY`), `user_id` (a string under
+    `USER_META_KEY`) and `tags` (a list of strings under `TAGS_META_KEY`), each
+    present only when well formed. `{}` when the request has no HTTP request
+    behind it or did not arrive over loopback. Never raises."""
     try:
         if not is_loopback_request():
-            return None
+            return {}
         request_context = fastmcp_request_ctx.get()
         meta = request_context.meta if request_context is not None else None
-        session = meta.get(SESSION_META_KEY) if meta else None
+        if not meta:
+            return {}
+        session, user, tags = (
+            meta.get(SESSION_META_KEY),
+            meta.get(USER_META_KEY),
+            meta.get(TAGS_META_KEY),
+        )
     except RuntimeError:  # no HTTP request in flight
-        return None
+        return {}
     except Exception:
         logger.debug("failed to read the call session -- continuing", exc_info=True)
-        return None
-    return session if isinstance(session, str) else None
+        return {}
+    attributes: dict[str, Any] = {}
+    if isinstance(session, str):
+        attributes["session_id"] = session
+    if isinstance(user, str):
+        attributes["user_id"] = user
+    if isinstance(tags, list) and all(isinstance(tag, str) for tag in tags):
+        attributes["tags"] = tags
+    return attributes
 
 
 class LangfuseSessionMiddleware(Middleware):
-    """Runs each tool call inside `use_call_session` for the session its
-    loopback client sent in `_meta`, so the call's SERVER span and everything
-    it opens carry `session.id`.
+    """Runs each tool call inside `use_call_session` for the session, user and
+    tags its loopback client sent in `_meta`, so the call's SERVER span and
+    everything it opens carry `session.id`, `user.id` and the trace tags.
 
     The session is read from `fastmcp_request_ctx`, whose `meta` is the wire
     `_meta`. `context.message.meta` is rebuilt by fastmcp without the wire keys.
@@ -110,7 +125,8 @@ class LangfuseSessionMiddleware(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        with use_call_session(_session_from_loopback_request()):
+        attributes = _call_attributes_from_loopback_request()
+        with use_call_session(attributes.pop("session_id", None), **attributes):
             return await call_next(context)
 
 

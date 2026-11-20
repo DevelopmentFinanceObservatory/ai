@@ -39,8 +39,12 @@ request cancels. For its segment it alone:
   ending frame, then the channel's end. The ending frame goes out after the
   closing write has returned, as the stream's last frame, so a client never
   reads a pause or `done` the store does not hold;
-- opens, enters, ends and exports the segment's telemetry span, whose status
-  is the ending's, with `dfo.saved` and `dfo.client_gone` beside it.
+- opens, enters, ends and exports the segment's `turn.segment` span, whose
+  status is the ending's, with `dfo.saved` and `dfo.client_gone` beside it.
+  The span carries no input or output. The turn's close and each of its
+  pauses are outcome observations of their own, a `turn` and a `turn.pause`,
+  written with the turn's `studio.turn` log line by the write that commits
+  them (`harness.studio_store`, `harness.turn.store.TurnStore.pause`).
 
 The closing frames are numbered from the conversation's `seq` as the owner
 read it before the closing write, or from the work's ending frame's own
@@ -82,10 +86,10 @@ from typing import Any, Final, Protocol
 
 from common.telemetry import (
     EventLevel,
-    end_turn_span,
+    end_turn_segment,
     flush_telemetry,
-    start_turn_span,
-    use_turn_span,
+    start_turn_segment,
+    use_turn_segment,
 )
 from pydantic import BaseModel
 
@@ -95,7 +99,6 @@ from harness.studio_state import (
     ConversationState,
     DatabaseUnavailable,
     SegmentLost,
-    _recorded_reply,
 )
 from harness.studio_store import SegmentClose
 from harness.studio_translate import SEGMENT_LOST_DETAIL, STREAM_RETRY_AFTER_S
@@ -699,9 +702,18 @@ class _Owner[E, R]:
         if finish in (Finish.LOST, Finish.ABANDONED):
             return None
         if finish is Finish.CANCELLED:
-            conversation.close_turn(
-                final_text=conversation.turn_final_text, error=ErrorCode.CANCELLED.value
-            )
+            try:
+                conversation.close_turn(
+                    final_text=conversation.turn_final_text, error=ErrorCode.CANCELLED.value
+                )
+            except Exception:
+                # The closing write still runs: the Stop is live for the open
+                # turn, so it closes the record `cancelled` itself and clears
+                # the lease (`StudioStore.close_segment`).
+                logger.exception(
+                    "studio stream: conversation %s's cancelled close could not be built",
+                    self._conversation_id,
+                )
         if finish is not Finish.LEFT:
             conversation.drop_resuming(self._segment_id)
         conversation.seq = max(conversation.seq, self._first_seq + len(self._lines) + 1)
@@ -770,16 +782,19 @@ async def own_segment[E, R](
         channel=channel,
         gone=gone,
     )
-    span = start_turn_span(conversation.trace_id, session_id=conversation_id)
+    usage = conversation.turn_usage
+    span = start_turn_segment(
+        conversation.trace_id,
+        session_id=conversation_id,
+        user_id=usage.user_id,
+        tags=usage.tags,
+    )
     end = Ending(None, Status.UNCLOSED, saved=False)
     frames: list[BaseModel] = []
-    reply: str | None = None
     try:
-        with use_turn_span(span):
+        with use_turn_segment(span):
             end = await owner.run()
         frames = owner.closing_frames(end)
-        if conversation.turn_recorded and conversation.turns:
-            reply = _recorded_reply(conversation.turns[-1])
         if not end.saved:
             store.evict(principal, conversation_id)
     except Exception:
@@ -793,11 +808,9 @@ async def own_segment[E, R](
         for frame in frames:
             channel.put_nowait(frame)
         channel.put_nowait(None)
-        end_turn_span(
+        end_turn_segment(
             span,
-            request=conversation.turn_user_message,
-            response=reply,
-            error=end.status.value,
+            status=end.status.value,
             level=_LEVELS[end.status],
             attributes={
                 "dfo.saved": str(end.saved).lower(),

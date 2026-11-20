@@ -30,6 +30,12 @@ in the store. Cross-turn context reaches the models as the turn's inputs:
 the canvas digest (block titles + fact summaries) and the conversation
 digest (the newest turn records); anything past their bounds is served on
 demand by the recall function (`make_recall_part`).
+
+Who asks (`studio_identity`): the website's proxy names a signed-in account in
+`x-dfo-account` and the visitor's address in `x-dfo-caller`. The harness reads
+both only on a request the bearer check admitted with `STUDIO_API_TOKEN` set,
+keeps them on the turn (`harness.studio_state.TurnUsage`), and writes them on
+the turn's spans and its `studio.turn` log line.
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextlib import (
     suppress,
@@ -44,8 +51,9 @@ from contextlib import (
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from common.caller import ADDRESS_CALLER, set_supplied_caller, set_supplied_turn
 from common.telemetry import flush_telemetry
-from compiler.surface import ToolSurface
+from compiler.surface import SpecUse, ToolSurface, current_spec_uses
 from executor.ledger import UNFINISHED_STATUSES, submission_content
 from executor.run import UnrunnablePlan, approved_work, run_candidate
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -64,8 +72,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
 from harness.conversation import (
+    current_conversation_caller,
     current_conversation_id,
     current_conversation_key,
+    current_turn_id,
     current_user_message,
     ledger_conversation_id,
 )
@@ -91,10 +101,10 @@ from harness.studio_edit import (
 )
 from harness.studio_state import (
     HEARTBEAT_INTERVAL_S,
-    ClosedTurn,
     ConversationState,
     SegmentBusy,
     SegmentLost,
+    TurnUsage,
     UnstreamedStatus,
     _apply_operations,
     _next_manifest,
@@ -102,7 +112,6 @@ from harness.studio_state import (
     _PendingQuestion,
     _tool_error_response,
     _wire_id,
-    record_closed_turn_span,
     record_unstreamed_span,
     renew_lease_now,
 )
@@ -114,6 +123,7 @@ from harness.studio_store import (
     StudioStore,
     closed_turn_error,
     retry_delays,
+    write_pause_line,
 )
 from harness.studio_stream import Emit, LiveOwners, LockHold, open_stream
 from harness.studio_translate import (
@@ -175,6 +185,54 @@ from harness.wire import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# The form of the account digest the website sends in `x-dfo-account`: the
+# hex HMAC-SHA256 of the account id, as its event export writes it.
+_ACCOUNT_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+def studio_identity(
+    *, account: str | None, caller: str | None, settings: Settings
+) -> tuple[str | None, str | None]:
+    """The account and visitor a Studio request names: `account` when it is
+    an account digest, `caller` when it is an address caller
+    (`common.caller.ADDRESS_CALLER`), `None` for each otherwise. Call it only
+    once `principal_for` admitted the request, since the proxy that holds the
+    bearer token vouches for both headers. With no
+    `settings.studio_api_token` the route is open, nothing vouches, and both
+    are `None`."""
+    if settings.studio_api_token is None:
+        return None, None
+    account = (account or "").strip().lower()
+    caller = (caller or "").strip().lower()
+    return (
+        account if _ACCOUNT_DIGEST.fullmatch(account) else None,
+        caller if ADDRESS_CALLER.fullmatch(caller) else None,
+    )
+
+
+def _spec_use_sink(
+    store: StudioStore, principal: str, conversation_id: str, trace_id: str
+) -> Callable[[SpecUse, str], None]:
+    """Where the turn `trace_id` of `(principal, conversation_id)` hears each
+    spec it used (`compiler.surface.current_spec_uses`). It goes to the
+    conversation the store holds live when the use is heard, so a state the
+    store reloads meanwhile still gets it. A use heard once that conversation
+    holds another turn, or once the turn is recorded
+    (`ConversationState.turn_recorded`), is dropped, since the turn's record,
+    which its log line and outcome are written from, was built without it."""
+
+    def note(use: SpecUse, spec_id: str) -> None:
+        conversation = store.current(principal, conversation_id)
+        if (
+            conversation is not None
+            and conversation.trace_id == trace_id
+            and not conversation.turn_recorded
+        ):
+            conversation.note_spec_use(use, spec_id)
+
+    return note
 
 
 # The wire decision on a plan interrupt, as the record `/interrupt` keeps of it.
@@ -834,7 +892,15 @@ class _SegmentWork:
             answer=self._answer,
             heartbeat_seconds=runner.heartbeat_seconds,
             renew_now=self._renew_now,
+            paused=self._paused,
         )
+
+    def _paused(self, cursor: Cursor) -> None:
+        """Write the `studio.turn` line and `turn.pause` outcome of the pause
+        `cursor` holds, once its write committed (`run_segment`'s `paused`):
+        a line exists exactly when the cursor stores the pause, whatever cut
+        or failed closing write follows it."""
+        write_pause_line(self._conversation.conversation_id, self._conversation)
 
     async def frames(self, event: _MarkedEvent) -> list[BaseModel]:
         """The frames of one event `drive` emitted."""
@@ -1245,14 +1311,15 @@ async def _release_claim(
     (`segment_id`) drops its lease (`StudioStore.drop_lease`, which runs to
     the end under cancellation). A request opens no span before its stream,
     whose owner opens one: `turn`, the working copy its claim began or
-    resumed a turn on, gets a zero-length span on the turn's trace
-    (`record_unstreamed_span`) whose status says what let it go. `cause`,
+    resumed a turn on, gets a zero-length `turn.segment` span on the turn's
+    trace (`record_unstreamed_span`) whose status says what let it go. `cause`,
     the exception that ended the request, gives `cancelled` when it is this
     task's own cancellation (the client gone) and `failed` otherwise, a
     `CancelledError` an inner task let out among them, and a refusal, with
     no `cause`, gives `not_started`. Then `hold` lets go of the lock,
-    whatever recording the span raised, and that span is exported. It does
-    nothing once `hold` has let go: the working copy and the lease are then
+    whatever recording the span raised, and that span is exported, and with
+    it any turn line the claim save wrote, an abandoned turn's close, which no
+    stream then exports. It does nothing once `hold` has let go: the working copy and the lease are then
     another request's, so a request cancelled while it exports the span
     leaves the next request's claim alone."""
     if not hold.held:
@@ -1273,10 +1340,7 @@ async def _release_claim(
         try:
             if turn is not None:
                 record_unstreamed_span(
-                    conversation_id,
-                    trace_id=turn.trace_id,
-                    user_message=turn.turn_user_message,
-                    status=status,
+                    conversation_id, trace_id=turn.trace_id, status=status, usage=turn.turn_usage
                 )
         finally:
             hold.release()
@@ -1310,12 +1374,14 @@ async def _stop_open_turn(
     cursor = await studio.turns.open_cursor(principal, conversation_id)
     if cursor is None:
         try:
-            closed = await _save_turn_closed(
+            wrote = await _save_turn_closed(
                 studio, principal, conversation_id, None, clear_lease=True
             )
         except ConversationStale as exc:
             raise _ClaimLost from exc
-        await _record_closed(conversation_id, closed)
+        if wrote:
+            # No stream is left to export the close's outcome.
+            await flush_telemetry()
         return None
     return await _stop_turn_at(studio, principal, conversation_id, cursor)
 
@@ -1332,9 +1398,9 @@ async def _stop_turn_at(
     (`harness.turn.loop.stop_turn`) and ends the Stop. Returns `None` once
     the turn is closed, and a retryable 503 when a write fails. The turn
     then stays open with a Stop live, so the next claimant closes it
-    (`_act_on_stop`) and no later turn carries its runs on. A turn closed
-    here ran no segment of its own, so its trace ends on a closing span
-    (`_record_closed`).
+    (`_act_on_stop`) and no later turn carries its runs on. The save of the
+    turn's record closed writes its `cancelled` line and `turn` outcome,
+    which this exports, since no stream runs to.
 
     Raises:
         _ClaimLost: the claim lost to another request, the lease was taken
@@ -1346,12 +1412,12 @@ async def _stop_turn_at(
         await studio.store.save(principal, conversation_id, stopping=True)
     except (SegmentBusy, ConversationStale) as exc:
         raise _ClaimLost from exc
-    closed: ClosedTurn | None = None
+    wrote = False
     try:
         try:
             if not await studio.store.request_cancel(principal, conversation_id):
                 raise _ClaimLost
-            closed = await _save_turn_closed(studio, principal, conversation_id, cursor)
+            wrote = await _save_turn_closed(studio, principal, conversation_id, cursor)
             await stop_turn(studio.turns, cursor, segment_id=segment_id)
         except _ClaimLost:
             raise
@@ -1373,17 +1439,10 @@ async def _stop_turn_at(
             )
     finally:
         await studio.store.drop_lease(principal, conversation_id, segment_id)
-    await _record_closed(conversation_id, closed)
+        if wrote:
+            # No stream is left to export the close's outcome.
+            await flush_telemetry()
     return None
-
-
-async def _record_closed(conversation_id: str, closed: ClosedTurn | None) -> None:
-    """End the trace of a turn closed with no segment of its own running,
-    `closed`, on its closing span (`record_closed_turn_span`), and export
-    it. A no-op for `None`."""
-    if closed is not None:
-        record_closed_turn_span(conversation_id, closed)
-        await flush_telemetry()
 
 
 async def _save_turn_closed(
@@ -1393,33 +1452,30 @@ async def _save_turn_closed(
     open_turn: Cursor | None,
     *,
     clear_lease: bool = False,
-) -> ClosedTurn | None:
+) -> bool:
     """Save the conversation's turn closed `cancelled` when it is open,
     keeping the records `open_turn`, its cursor, holds (`keep_turn_records`),
     with its pending interrupts cleared, so an answer to one is refused.
     With `clear_lease`, the lease on record is cleared too. The change is made
     on a working copy (`StudioStore.draft`) and saved (`StudioStore.save`):
-    only once the save commits does the live state take it. Returns the
-    turn it closed, `None` when none was open, for a caller that closed it
-    with no segment of its own running to record its closing span
-    (`_record_closed`). Raises what the save raises, with the live state as
+    only once the save commits does the live state take it. The save
+    writes the close's `cancelled` line and `turn` outcome once it commits
+    (`StudioStore.save`). Returns whether it wrote one, for a caller with no
+    stream to export it. Raises what the save raises, with the live state as
     it was."""
     work = studio.store.draft(principal, conversation_id)
     work.pending.clear()
-    closed: ClosedTurn | None = None
     if work.turn_index and not work.turn_recorded:
-        closed = ClosedTurn(work.trace_id, work.turn_user_message, "cancelled")
         if open_turn is not None:
             keep_turn_records(work, open_turn.state)
         work.close_turn(final_text=work.turn_final_text, error=ErrorCode.CANCELLED.value)
     if clear_lease:
         work.segment = None
     try:
-        await studio.store.save(principal, conversation_id, work)
+        return await studio.store.save(principal, conversation_id, work)
     except BaseException:
         studio.store.drop_draft(principal, conversation_id)
         raise
-    return closed
 
 
 def _set_turn_context(
@@ -1699,9 +1755,15 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
     router = APIRouter(prefix="/api/studio")
 
     async def turn(  # noqa: PLR0911 -- one distinct refusal per claim guard the route enforces
-        body: TurnRequest, authorization: str | None = Header(default=None)
+        body: TurnRequest,
+        authorization: str | None = Header(default=None),
+        x_dfo_account: str | None = Header(default=None),
+        x_dfo_caller: str | None = Header(default=None),
     ) -> Response:
         principal = principal_for(authorization, settings=settings)
+        account, visitor = studio_identity(
+            account=x_dfo_account, caller=x_dfo_caller, settings=settings
+        )
         hold = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
         if isinstance(hold, JSONResponse):
             return hold
@@ -1750,6 +1812,22 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             chip_label = checked
             pick = body.apply_choice
             user_message = body.message if pick is None else f"count {chip_label}"
+            # The conversation's identity, set in the request task's context
+            # (`_set_turn_context` sets it again with the rest of the turn's)
+            # before the turn begins, so the turn records the caller its MCP
+            # clients send. The graph's in-process dfo-apis calls (the
+            # executor's statistics and labels, the translator's lookups) run
+            # outside any MCP request, so they name the conversation and turn
+            # through the supplied ones.
+            current_conversation_id.set(ledger_conversation_id(principal, body.conversation_id))
+            current_conversation_key.set((principal, body.conversation_id))
+            set_supplied_caller(current_conversation_caller())
+            usage = TurnUsage(
+                caller=current_conversation_caller(),
+                account=account,
+                visitor=visitor,
+                surface=body.surface.value,
+            )
             # The claim: the lease, written alone (`StudioStore.claim_turn_lease`),
             # before the turn opens and before the SSE response starts. A
             # segment whose lease lapsed can still write the turn left open
@@ -1769,6 +1847,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 conversation_id=body.conversation_id,
                 trace_id=_wire_id("tr"),
                 turn_user_message=user_message,
+                turn_usage=usage.copy(),
             )
             try:
                 lease = await studio.store.claim_turn_lease(principal, body.conversation_id)
@@ -1844,9 +1923,18 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 if closed is not None:
                     keep_turn_records(work, closed.state)
                     work.close_turn(final_text="", error=closed_turn_error(closed))
-            abandoned = work.begin_turn()
-            work.trace_id = begun.trace_id
+            # An unrecorded previous turn this closes as `abandoned` rides the
+            # claim save, which writes its line once it commits
+            # (`StudioStore.save`).
+            work.begin_turn(usage, trace_id=begun.trace_id)
             begun = work
+            # The turn's MCP clients name its id (`current_caller_turn`), and
+            # so do the in-process dfo-apis calls.
+            current_turn_id.set(work.trace_id)
+            set_supplied_turn(work.trace_id)
+            current_spec_uses.set(
+                _spec_use_sink(studio.store, principal, body.conversation_id, work.trace_id)
+            )
             work.auto_add = body.auto_add
             work.turn_user_message = user_message
             if pick is None:
@@ -1897,11 +1985,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
-            if abandoned is not None:
-                # The unrecorded turn this one closed as `abandoned` ends its
-                # trace as its record does. The stream's end exports the
-                # span.
-                record_closed_turn_span(body.conversation_id, abandoned)
             _set_turn_context(principal, body.conversation_id, conversation, settings)
             if body.component_ref is not None and editing:
                 # The Edit Card route bypasses the graph entirely: no
@@ -2116,16 +2199,23 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
 
     @router.post("/interrupt")
     async def interrupt(  # noqa: PLR0911 -- one distinct refusal per claim guard the route enforces
-        body: InterruptResponse, authorization: str | None = Header(default=None)
+        body: InterruptResponse,
+        authorization: str | None = Header(default=None),
+        x_dfo_account: str | None = Header(default=None),
+        x_dfo_caller: str | None = Header(default=None),
     ) -> Response:
         principal = principal_for(authorization, settings=settings)
+        account, visitor = studio_identity(
+            account=x_dfo_account, caller=x_dfo_caller, settings=settings
+        )
         hold = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
         if isinstance(hold, JSONResponse):
             return hold
         # The working copy of a claim about to be saved, whose trace records
         # how a request let go of its claim before its stream started
-        # (`_release_claim`).
+        # (`_release_claim`), and the segment that save claims.
         claiming: ConversationState | None = None
+        segment_id: str | None = None
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
@@ -2264,6 +2354,26 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # The resumed segment's span is its owner's, on the turn's
             # trace, whichever instance runs it.
             claiming = work
+            # The turn keeps who asked it from `/turn`. A turn that recorded
+            # no one takes this request's account, visitor and caller, and
+            # the surface its graph state names (`_turn_opening`), so the
+            # resumed segment's span and the turn's line name them, and the
+            # claim save below persists them with the segment. The caller is
+            # read once the conversation it names is set. The resume
+            # continues the paused turn, so it names that turn's id, as the
+            # in-process dfo-apis calls do.
+            current_conversation_id.set(ledger_conversation_id(principal, body.conversation_id))
+            current_conversation_key.set((principal, body.conversation_id))
+            current_turn_id.set(work.trace_id)
+            set_supplied_caller(current_conversation_caller())
+            set_supplied_turn(work.trace_id)
+            surface = cursor.state.get("surface") if cursor is not None else None
+            work.take_identity(
+                account=account,
+                visitor=visitor,
+                caller=current_conversation_caller(),
+                surface=surface if isinstance(surface, str) else None,
+            )
             # The claim is saved alone, before the answer is recorded: a
             # double answer to the same interrupt across two instances loses
             # cleanly here, with a 409, rather than each resuming its own
@@ -2291,8 +2401,18 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     turn=claiming,
                 )
         except BaseException:
+            # A claim save that raised once its write committed, cancelled
+            # during the commit say, still handed its segment to the live
+            # state (`StudioStore.save`), whose lease is dropped as any
+            # committed claim's.
+            live = studio.store.current(principal, body.conversation_id)
+            committed = (
+                segment_id
+                if live is not None and live.segment is not None and live.segment.id == segment_id
+                else None
+            )
             await _release_claim(
-                studio.store, principal, body.conversation_id, hold, None, turn=claiming
+                studio.store, principal, body.conversation_id, hold, committed, turn=claiming
             )
             raise
 
@@ -2428,8 +2548,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             pending = conversation.pending[body.interrupt_id]
             # A workflow's own steps run as concurrent waves, whose recording
             # order `_RecordingSurface` needs the plan's own step order to
-            # undo (`_PendingInterrupt.step_order`'s docstring). It is set
-            # before anything below can run the graph or close the turn.
+            # undo (`_PendingInterrupt.step_order`'s docstring). It and the
+            # spec-use sink are set before anything below can run the graph
+            # or close the turn.
+            current_spec_uses.set(
+                _spec_use_sink(studio.store, principal, body.conversation_id, conversation.trace_id)
+            )
             if studio.surface_recorder is not None:
                 studio.surface_recorder.set_step_order(
                     ledger_conversation_id(principal, body.conversation_id),

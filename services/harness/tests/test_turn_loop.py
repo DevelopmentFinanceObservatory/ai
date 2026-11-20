@@ -91,6 +91,7 @@ async def _segment(
     graph: Graph,
     events: list[TurnEvent],
     answer: Answer | None = None,
+    paused: Callable[[Cursor], None] | None = None,
 ) -> Any:
     return await run_segment(
         store,
@@ -103,6 +104,7 @@ async def _segment(
         emit=events.append,
         answer=answer,
         heartbeat_seconds=BEAT,
+        paused=paused,
     )
 
 
@@ -1313,7 +1315,9 @@ async def test_a_segment_cut_off_after_its_pause_committed_settles_on_the_cut(
     question shown: the user stopped it. After a lost lease the client gets
     the question the store holds, and the turn stays paused for the answer.
     The work the pause's commit is owed (early mints) is started only for a
-    question that stays open, so a Stop starts none."""
+    question that stays open, so a Stop starts none. The pause committed, so
+    the segment's `paused` hook hears it once either way, with the paused
+    cursor, for the turn's `paused` line."""
     store = _HeldAfterPausing(pg_engine)
     lease_a, lease_b = await _instance(pg_engine, clock), await _instance(pg_engine, clock)
     segment_id = await _claim(lease_a)
@@ -1333,8 +1337,17 @@ async def test_a_segment_cut_off_after_its_pause_committed_settles_on_the_cut(
         edges={("ask", "next"): END},
     )
     events: list[TurnEvent] = []
+    noted: list[Cursor] = []
     running = asyncio.create_task(
-        _segment(store, lease_a, await _open(store, segment_id, graph), segment_id, graph, events)
+        _segment(
+            store,
+            lease_a,
+            await _open(store, segment_id, graph),
+            segment_id,
+            graph,
+            events,
+            paused=noted.append,
+        )
     )
     await store.paused.wait()
     if cut_by == "stop":
@@ -1346,6 +1359,9 @@ async def test_a_segment_cut_off_after_its_pause_committed_settles_on_the_cut(
     await asyncio.gather(*pending_owed_work())
 
     assert minted == ([] if cut_by == "stop" else ["ask"])
+    [noted_pause] = noted
+    assert noted_pause.status is TurnStatus.PAUSED
+    assert noted_pause.pause is not None and noted_pause.pause.round == 1
     if cut_by == "stop":
         assert events == []
         assert segment.outcome is Outcome.CANCELLED
@@ -2027,7 +2043,8 @@ async def test_a_boundary_write_whose_acknowledgement_was_lost_carries_on_as_com
     that returned: `work`'s work after the commit runs, the boundary is
     reported, and a pause stays open for its answer, which a later segment
     resumes. A `ValueError` that is not the store's `WriteNotEncoded` is
-    read back the same way."""
+    read back the same way. A pause's `paused` hook hears it once, from the
+    commit or the read back, whichever reaches it first."""
     store, lease = (
         _BoundaryWriteRaises(pg_engine, how="committed", error=error),
         await _instance(pg_engine, clock),
@@ -2036,10 +2053,12 @@ async def test_a_boundary_write_whose_acknowledgement_was_lost_carries_on_as_com
     ran: list[str] = []
     graph = _boundary_graph(boundary, ran)
     events: list[TurnEvent] = []
+    noted: list[Cursor] = []
     opened = await _open(store, segment_id, graph)
-    segment = await _segment(store, lease, opened, segment_id, graph, events)
+    segment = await _segment(store, lease, opened, segment_id, graph, events, paused=noted.append)
 
     assert store.raised
+    assert len(noted) == (1 if boundary == "pause" else 0)
     assert not [event for event in events if isinstance(event, TurnFailed)]
     stored = await TurnStore(pg_engine).turn(opened.id)
     assert stored.state["worked"] is True
@@ -2155,18 +2174,20 @@ async def test_a_boundary_write_still_committing_at_the_read_back_carries_on_as_
     """`work`'s write raises while its transaction is still open, and the
     transaction commits only once the read back waits on the turn's row.
     The read back waits for it, so the segment finds the write and goes on
-    as after one that returned."""
+    as after one that returned. A pause's `paused` hook hears it from the
+    read back, since its own commit returned nothing."""
     store, lease = TurnStore(pg_engine), await _instance(pg_engine, clock)
     segment_id = await _claim(lease)
     ran: list[str] = []
     graph = _boundary_graph(boundary, ran)
     opened = await _open(store, segment_id, graph)
     events: list[TurnEvent] = []
+    noted: list[Cursor] = []
     async with _side_engine(pg_engine) as side:
         late = _LateFirstCommit(pg_engine, side)
         store._engine = late  # type: ignore[assignment] -- the write under test goes through it
         segment = await asyncio.wait_for(
-            _segment(store, lease, opened, segment_id, graph, events), 10
+            _segment(store, lease, opened, segment_id, graph, events, paused=noted.append), 10
         )
         assert late.committing is not None
         await late.committing
@@ -2176,6 +2197,9 @@ async def test_a_boundary_write_still_committing_at_the_read_back_carries_on_as_
     assert ran == (["after_commit", "later"] if boundary == "move" else ["after_commit"])
     stored = await TurnStore(pg_engine).turn(opened.id)
     assert stored.status is (TurnStatus.PAUSED if boundary == "pause" else TurnStatus.DONE)
+    assert [cursor.status for cursor in noted] == (
+        [TurnStatus.PAUSED] if boundary == "pause" else []
+    )
 
 
 @pytest.mark.parametrize("how", ["read_back_fails", "locked", "taken_over", "abandoned"])

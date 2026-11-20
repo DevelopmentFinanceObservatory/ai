@@ -1,3 +1,7 @@
+"""`harness.db.engine.build_database`: the engines it builds, their pools,
+and asyncpg's `command_timeout` (`COMMAND_TIMEOUT_S`) on every runtime
+connection, on the `DATABASE_URL` engine and on the Cloud SQL Connector's."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -49,7 +53,8 @@ async def test_connector_backend_passes_iam_auth_and_psc_settings_through(
     """The connector path builds one connector with `refresh_strategy="lazy"`
     and `ip_type=IPTypes.PSC`, then dials with the asyncpg driver and the
     settings-provided user/database, authenticating as the runtime service
-    account over IAM rather than a password."""
+    account over IAM rather than a password, and bounds each statement with
+    `COMMAND_TIMEOUT_S`."""
     settings = Settings(
         session_store_instance_connection_name="my-project:my-region:my-instance",
         session_store_database="sessions",
@@ -75,6 +80,7 @@ async def test_connector_backend_passes_iam_auth_and_psc_settings_through(
             "user": "ai-run",
             "db": "sessions",
             "enable_iam_auth": True,
+            "command_timeout": engine_module.COMMAND_TIMEOUT_S,
         }
     ]
 
@@ -201,3 +207,22 @@ async def test_a_failed_statement_leaves_its_bound_values_out_of_the_error(
     assert planted not in str(raised.value)
 
     await database.aclose()
+
+
+async def test_a_statement_that_outlasts_the_command_timeout_raises(
+    pg_database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A statement still running past `COMMAND_TIMEOUT_S` raises
+    `TimeoutError` on the `DATABASE_URL` engine, and one that ends in time
+    returns. The bound is shrunk so the test waits under a second."""
+    monkeypatch.setattr(engine_module, "COMMAND_TIMEOUT_S", 0.2)
+    database = build_database(settings=Settings(database_url=pg_database_url))
+    assert database is not None
+    try:
+        async with database.engine.connect() as conn:
+            assert (await conn.execute(text("SELECT 1"))).scalar_one() == 1
+        with pytest.raises(TimeoutError):
+            async with database.engine.connect() as conn:
+                await conn.execute(text("SELECT pg_sleep(2)"))
+    finally:
+        await database.aclose()

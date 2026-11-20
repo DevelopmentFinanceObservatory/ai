@@ -410,10 +410,10 @@ async def test_a_stopped_runs_derived_frame_is_withheld_unlinked(
 
 
 async def test_a_frame_with_no_linked_manifest_is_withheld_not_fabricated() -> None:
-    """`_assemble_component` withholds the component when the frame has no
-    lineage in the store, the state of a frame nothing was linked to (a
-    retrieval it rests on has no recorded manifest, or the store evicted it).
-    An empty `ProvenanceStore` reproduces that "no lineage found" state
+    """`McpExecutor._assemble_component` withholds the component when the
+    frame has no lineage in the store, the state of a frame nothing was linked
+    to (a retrieval it rests on has no recorded manifest, or the store evicted
+    it). An empty `ProvenanceStore` reproduces that "no lineage found" state
     directly."""
     frame_ref = {"spec_id": "ops_" + "f" * 32, "content_version": "ocv_" + "f" * 32}
     executor = McpExecutor(settings=Settings(), provenance=ProvenanceStore())

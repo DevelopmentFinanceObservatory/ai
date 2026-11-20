@@ -677,18 +677,18 @@ class Spans:
 def spans(monkeypatch: pytest.MonkeyPatch) -> Spans:
     recorded = Spans()
 
-    def start(external_id: str, *, session_id: str | None = None) -> object:
+    def start(trace_id: str, **_: Any) -> object:
         recorded.started += 1
         return object()
 
     def end(handle: object, **kwargs: Any) -> None:
-        recorded.ended.append((kwargs.get("error"), dict(kwargs.get("attributes") or {})))
+        recorded.ended.append((kwargs.get("status"), dict(kwargs.get("attributes") or {})))
 
     async def flush() -> None:
         return None
 
-    monkeypatch.setattr(studio_stream, "start_turn_span", start)
-    monkeypatch.setattr(studio_stream, "end_turn_span", end)
+    monkeypatch.setattr(studio_stream, "start_turn_segment", start)
+    monkeypatch.setattr(studio_stream, "end_turn_segment", end)
     monkeypatch.setattr(studio_stream, "flush_telemetry", flush)
     return recorded
 
