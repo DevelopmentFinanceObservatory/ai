@@ -2076,11 +2076,14 @@ async def test_get_data_refuses_on_its_own_deadline_before_the_limit_stops_it(
         assert answered_after < limit_s
 
 
+@REVISIONS
 async def test_an_address_caller_reaches_dfo_apis_with_its_surface_and_user_agent(
-    running_lifespan: Callable[..., Any],
+    mode: str, revision: str, running_lifespan: Callable[..., Any]
 ) -> None:
     """The caller, surface and User-Agent a client sends to `/mcp/` arrive at
-    dfo-apis beside the principal."""
+    dfo-apis beside the principal, with its `clientInfo` name where the revision
+    delivers it on a call. A 2025-11-25 client names itself on initialize alone,
+    which this stateless server does not keep for the call."""
     caller = "ip:" + "ab" * 16
     seen: list[httpx2.Request] = []
 
@@ -2109,16 +2112,26 @@ async def test_an_address_caller_reaches_dfo_apis_with_its_surface_and_user_agen
         ),
     )
     try:
-        async with running_lifespan(app), Client(transport, timeout=_CLIENT_TIMEOUT_S) as client:
+        async with (
+            running_lifespan(app),
+            Client(
+                transport,
+                timeout=_CLIENT_TIMEOUT_S,
+                mode=mode,
+                client_info=mt.Implementation(name="Anthropic/ClaudeAI", version="1.0"),
+            ) as client,
+        ):
             await client.call_tool("get_data", {"spec_id": _UNSTORED_SPEC}, raise_on_error=False)
     finally:
         client_holder.set_client(None)
 
+    mcp_client = "Anthropic/ClaudeAI" if revision == "2026-07-28" else None
     assert seen
     for request in seen:
         assert request.headers["x-dfo-caller"] == caller
         assert request.headers["x-dfo-surface"] == "mcp"
         assert request.headers["x-dfo-user-agent"] == "claude-user/1.0"
+        assert request.headers.get("x-dfo-mcp-client") == mcp_client
 
 
 async def _until(condition: Callable[[], bool]) -> None:
