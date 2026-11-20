@@ -2055,7 +2055,7 @@ class StudioStore:
         included, and raises nothing. A failure is logged and returned as
         `FAILED`, and the lease then lapses by its TTL. The write settles the
         pending canvas writes under the row lock and rebuilds the record's
-        cards from the row's items; a fault reading those items fails the
+        cards from the row's items. A fault reading those items fails the
         closing write. After `LOST` or `FAILED` the live state may hold what
         was not stored, so the caller evicts it (`evict`) and the next claim
         reloads from the row. Either way this instance stops counting
