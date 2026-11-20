@@ -3936,6 +3936,40 @@ async def test_an_identical_retry_after_the_turn_paused_again_streams_the_later_
         assert stored.pending[later].frames == before.pending[later].frames != ()
 
 
+@pytest.mark.parametrize(
+    ("decision", "target"),
+    [("approve", "_spec_use_sink"), ("reject", "reject")],
+)
+async def test_a_raise_after_the_interrupt_save_releases_the_conversation(
+    monkeypatch: pytest.MonkeyPatch, decision: str, target: str
+) -> None:
+    """`/interrupt` raises after its save has claimed the segment and before
+    it hands the segment to a stream's owner. The route lets go of the lock
+    and drops the lease, so the next turn on the same instance streams at
+    once."""
+    app = _app(*_plan(), tool_surface=ScriptedSurface())
+    store = app.state.studio.store
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("raised before the stream")
+
+    async with _client(app) as client:
+        plan = await _paused_plan(client)
+        with monkeypatch.context() as patch:
+            patch.setattr(studio_module, target, _boom)
+            with pytest.raises(RuntimeError, match="raised before the stream"):
+                await _stream(
+                    client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], decision)
+                )
+
+    assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
+    stored = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert stored is not None and stored.segment is None
+    async with _client(_app(_text("Again."), store=store)) as client:
+        again = await _stream(client, "/api/studio/turn", _turn_body("again"))
+    assert _frame(again, "done")
+
+
 # --- asks the agent puts to the user ---------------------------------------------
 
 
@@ -11437,11 +11471,15 @@ async def _asgi(
     *,
     disconnect_after: asyncio.Event | None = None,
     sent: list[str] | None = None,
+    spec_version: str = "2.3",
 ) -> None:
     """Run one POST through `app` as raw ASGI, so the route's task sees the
     client leave: the second `receive` is a disconnect, once
     `disconnect_after` is set when one is given. Each body chunk the route
-    sends lands in `sent`."""
+    sends lands in `sent`. At ASGI `spec_version` 2.4 Starlette reads no
+    disconnect, so the client is gone at the first send, which raises
+    `OSError` as a server's write to a closed socket does, and Starlette's
+    `ClientDisconnect` is expected."""
     encoded = json.dumps(body).encode()
     request_sent = False
 
@@ -11455,12 +11493,17 @@ async def _asgi(
         return {"type": "http.disconnect"}
 
     async def send(message: dict[str, Any]) -> None:
+        if spec_version == "2.4":
+            raise OSError("the client is gone")
+        # A server's send yields to the loop, where a disconnect's
+        # cancellation can land before the body's first chunk.
+        await asyncio.sleep(0)
         if sent is not None and message.get("body"):
             sent.append(message["body"].decode())
 
     scope = {
         "type": "http",
-        "asgi": {"version": "3.0"},
+        "asgi": {"version": "3.0", "spec_version": spec_version},
         "http_version": "1.1",
         "method": "POST",
         "scheme": "http",
@@ -11476,7 +11519,53 @@ async def _asgi(
         "client": ("127.0.0.1", 50000),
         "server": ("studio.test", 80),
     }
-    await asyncio.wait_for(app(scope, receive, send), timeout=10)
+    if spec_version == "2.4":
+        with pytest.raises(ClientDisconnect):
+            await asyncio.wait_for(app(scope, receive, send), timeout=10)
+    else:
+        await asyncio.wait_for(app(scope, receive, send), timeout=10)
+
+
+@pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+@pytest.mark.parametrize("request_kind", ["turn", "edit", "reject", "approve"])
+async def test_a_client_gone_before_the_first_chunk_leaves_the_conversation_free(
+    otlp_spans: InMemorySpanExporter, request_kind: str, spec_version: str
+) -> None:
+    """The client of each route that streams a segment is gone before the
+    response's first body chunk. The segment's owner runs as a task of its
+    own, so it still ends the segment: the lock is let go, the lease
+    cleared, and the segment's span ended with the client gone. The next
+    turn on the same instance streams."""
+    if request_kind == "edit":
+        app = _app(*_card(), **_edit_app(Finish.DONE))
+    elif request_kind == "turn":
+        app = _app(search_call("aid to Kenya"), resolver=_HangingResolver())
+    else:
+        app = _app(*_plan(), tool_surface=ScriptedSurface())
+    store = app.state.studio.store
+    async with _client(app) as client:
+        if request_kind == "edit":
+            await _conversation_with_component(client)
+            path, body = "/api/studio/turn", _edit_body("rename it")
+        elif request_kind == "turn":
+            path, body = "/api/studio/turn", _turn_body("hi")
+        else:
+            plan = await _paused_plan(client)
+            path = "/api/studio/interrupt"
+            body = _interrupt_body(plan["interrupt_id"], request_kind)
+    sent: list[str] = []
+
+    await _asgi(app, path, body, sent=sent, spec_version=spec_version)
+
+    assert sent == []
+    assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
+    stored = await StudioStore(_engine()).load(PRINCIPAL, CONVERSATION)
+    assert stored is not None and stored.segment is None
+    segments = [span for span in otlp_spans.get_finished_spans() if span.name == "turn.segment"]
+    assert (segments[-1].attributes or {}).get("dfo.client_gone") == "true"
+    async with _client(_app(_text("Again."), store=store)) as client:
+        again = await _stream(client, "/api/studio/turn", _turn_body("again"))
+    assert _frame(again, "done")
 
 
 class _HangingDataClient:
