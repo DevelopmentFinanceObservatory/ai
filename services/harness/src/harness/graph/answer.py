@@ -245,7 +245,7 @@ def link_evidence_to_terminal_frames(
     `ops_` frame identity, distinct from the retrieval's `spec_` one that
     `harness.provenance.ProvenanceStore` was written under
     (`harness.studio_translate._RecordingSurface._remember_manifest`).
-    Without this, `McpExecutor._assemble_component` would never find a
+    Without this, `McpExecutor._component_from_lineage` would never find a
     terminal frame's provenance on the approved-plan path.
 
     A stopped run, or an accepted run whose derived frames are not yet
@@ -269,7 +269,7 @@ def link_evidence_to_terminal_frames(
 
     All-or-nothing: a frame with no retrieval under it (a workflow defect,
     never a valid one), or one whose retrieval has no `EvidenceRecord`, is
-    not linked and a warning names it. `McpExecutor._assemble_component`
+    not linked and a warning names it. `McpExecutor._component_from_lineage`
     withholds the card for a frame with no lineage rather than state a
     provenance narrower than the frame has. `link_evidence` is looked up via
     `getattr`, the same duck-typed opt-in `_RecordingExecutor.aclose` uses.

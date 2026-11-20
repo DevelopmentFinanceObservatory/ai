@@ -15,7 +15,7 @@ same clients send in their `x-dfo-turn` header (`current_caller_turn`), so a
 dfo-apis call names the turn that caused it. A header is fixed when a client
 is built, so each turn gets clients of its own
 (`compiler.caller_clients.CallerClients`). `shared_work_context` clears both
-for a task several requests join.
+for a task several requests join, and detaches it from the turn's trace.
 
 `current_user_message` holds the user's own message for the turn, which the
 orchestrator's `search` sends Search to read intent and explicit scope from.
@@ -30,6 +30,8 @@ from contextvars import Context, ContextVar
 from common import caller as common_caller
 from common.caller import conversation_caller
 from compiler.caller_clients import CallerTurn
+from compiler.surface import current_spec_uses
+from opentelemetry import context as otel_context
 
 NO_CONVERSATION = "no-conversation"
 
@@ -88,12 +90,19 @@ def shared_work_context() -> Context:
     both wait on (`harness.rolling_cards`). The task's MCP clients name no
     caller and no turn (`current_caller_turn`), and its in-process dfo-apis
     calls none either (`common.caller.shared_work_context`), so no
-    conversation's identity is attached to the shared work.
+    conversation's identity is attached to the shared work. The copy holds an
+    empty OpenTelemetry context too, so the task records on no turn's trace
+    and its MCP calls carry no turn's Langfuse session, user or tags
+    (`common.telemetry.turn_call_meta`), as work outside any turn does. It
+    reports its fetches to no turn's spec-use sink (`current_spec_uses`).
     """
     context = common_caller.shared_work_context()
     context.run(current_conversation_id.set, NO_CONVERSATION)
     context.run(current_conversation_key.set, None)
     context.run(current_turn_id.set, None)
+    context.run(current_spec_uses.set, None)
+    # The attach lives in the copy and dies with it.
+    context.run(otel_context.attach, otel_context.Context())
     return context
 
 

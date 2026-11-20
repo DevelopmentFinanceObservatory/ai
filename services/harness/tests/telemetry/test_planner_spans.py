@@ -25,8 +25,7 @@ from common.telemetry import (
     TURN_SPAN_NAME,
     flush_telemetry,
     init_telemetry,
-    start_turn_span,
-    use_turn_span,
+    turn_segment,
 )
 from harness.turn_budget import COMPLETION_START_TIME, TurnBudget
 from opentelemetry.sdk.trace import ReadableSpan
@@ -473,8 +472,7 @@ async def test_the_turns_session_and_trace_name_reach_the_planners_spans(
     trace name."""
     init_telemetry(service_name="harness")
     fake_langfuse.exports.clear()
-    handle = start_turn_span("trace-planner", session_id=_SESSION)
-    with use_turn_span(handle):
+    with turn_segment("trace-planner", session_id=_SESSION):
         await _entry(_ENTRIES["refused-then-accepted"](plan))
     await flush_telemetry()
     exported = [
