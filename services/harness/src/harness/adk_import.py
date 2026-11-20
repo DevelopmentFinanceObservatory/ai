@@ -110,8 +110,20 @@ Verbs:
   under the same lock. A block that does not convert is kept as stored, as
   `import` keeps one, and reported. A turn a stream holds the lease of is
   left open and listed as live on ADK when its turn session exists and
-  `turn_cursors` does not hold it, and as live elsewhere otherwise. A turn
-  live on ADK fails the run, which is repeated until none is left. A diverged conversation is
+  `turn_cursors` does not hold it, and as live elsewhere otherwise. A
+  stream of the previous release writes its lease to the ledger session
+  and never to the tables, so a conversation whose ledger session's
+  `studio:segment` lease is live on the database's clock
+  (`_STREAMING_ON_ADK`) is left open and listed as live on ADK, whatever
+  the tables' lease. A conversation whose import record is not current
+  (`_STALE_IMPORTS`: ADK wrote its ledger session after the import
+  recorded its `update_time`) is left open and listed as imported before
+  ADK's last write, since the tables lack that write; `import --apply`
+  is run first. Both are read once per run, where a table named
+  `sessions` carries ADK's columns, and a conversation with no ledger
+  session is read from the tables alone. A turn or conversation live on
+  ADK fails the run, which is repeated until none is left, and so does a
+  conversation imported before ADK's last write. A diverged conversation is
   left alone and listed, and fails the run: its rows lack the turns ADK
   holds, so `--prefer-adk` must take ADK's copy first. A conversation
   whose close fails is refused and left open, and the run goes on with
@@ -153,6 +165,7 @@ Exit status: 0 when every conversation imported, was unchanged, kept or
 verified equal, every open turn eligible was closed, and the gate found
 every ledger session cleared; 1 on a refusal, a conflict, a difference, a
 stream live on ADK, a diverged conversation `close-open-turns` left alone, a
+conversation it left open because ADK wrote since the import, a
 conversation that changed during the run, or a ledger session the gate did
 not clear; 2 when no database is configured, ADK's schema is not the one the
 job reads, the harness's tables are missing, a migration file is refused, or
@@ -1785,13 +1798,22 @@ class CloseReport:
     """What `close_open_turns` did, or would do, by
     `principal/conversation_id turn n`. A turn a stream holds the lease of
     is `live_on_adk` when it runs on ADK (its ADK turn session exists and
-    `turn_cursors` does not hold it) and `live_not_adk` otherwise. A turn
-    live on ADK fails the run, since its stream can still end on a pause
-    the tables' turns cannot answer; the run is repeated once it ends."""
+    `turn_cursors` does not hold it) and `live_not_adk` otherwise. A
+    conversation whose ledger session holds a live `studio:segment` lease
+    (`_STREAMING_ON_ADK`), which a stream of the previous release writes
+    there and never to the tables, is `live_on_adk` by
+    `principal/conversation_id`, whatever the tables' lease. A conversation
+    whose import record is not current (`_STALE_IMPORTS`: ADK wrote its
+    ledger session since the import) is `stale_import`, since the tables
+    lack what ADK wrote; `import --apply` is run first. Each is left open.
+    A turn or conversation live on ADK fails the run, since its stream can
+    still end on a pause the tables' turns cannot answer; the run is
+    repeated once it ends. A stale import fails it too."""
 
     apply: bool
     closed: list[str] = field(default_factory=list)
     live_on_adk: list[str] = field(default_factory=list)
+    stale_import: list[str] = field(default_factory=list)
     live_not_adk: list[str] = field(default_factory=list)
     not_on_adk: list[str] = field(default_factory=list)
     in_turn_cursors: list[str] = field(default_factory=list)
@@ -1802,7 +1824,9 @@ class CloseReport:
 
     @property
     def clean(self) -> bool:
-        return not self.changed and not self.diverged and not self.refused and not self.live_on_adk
+        return not (
+            self.changed or self.diverged or self.refused or self.live_on_adk or self.stale_import
+        )
 
     def render(self) -> str:
         would = "" if self.apply else "would be "
@@ -1813,6 +1837,10 @@ class CloseReport:
                 (
                     "left open, a stream on ADK holds its lease, run again once it ends",
                     self.live_on_adk,
+                ),
+                (
+                    "left open, ADK wrote since the import, rerun import --apply first",
+                    self.stale_import,
                 ),
                 ("left open, a stream holds its lease on a turn not on ADK", self.live_not_adk),
                 ("left open, no ADK turn session", self.not_on_adk),
@@ -1831,6 +1859,7 @@ class CloseReport:
             lines += [f"  {finding}" for finding in found]
         lines.append(
             f"{len(self.closed)} {would}closed, {len(self.live_on_adk)} live on ADK, "
+            f"{len(self.stale_import)} imported before ADK's last write, "
             f"{len(self.live_not_adk)} live not on ADK, "
             f"{len(self.not_on_adk)} without an ADK turn session, "
             f"{len(self.in_turn_cursors)} in turn_cursors, {len(self.changed)} changed, "
@@ -1843,10 +1872,23 @@ async def close_open_turns(engine: AsyncEngine, *, apply: bool) -> CloseReport:
     """Close every open ADK turn the tables hold (module docstring). With
     `apply` false, decide only. A diverged conversation is left alone and
     listed, since its rows lack what ADK holds. A conversation whose close
-    fails is refused, and the run goes on with the rest."""
+    fails is refused, and the run goes on with the rest. A conversation
+    a stream holds on ADK's ledger, or whose import is not current, is left
+    open (`CloseReport`)."""
     await _check_tables(engine)
     report = CloseReport(apply=apply)
+    streaming: set[tuple[str, str]] = set()
+    stale: set[tuple[str, str]] = set()
     async with engine.connect() as conn:
+        if (await conn.execute(text(CUTOVER_ADK_SESSIONS))).scalar_one():
+            streaming = {
+                (principal, cid)
+                for principal, cid in await conn.execute(_STREAMING_ON_ADK, {"app": LEDGER_APP})
+            }
+            stale = {
+                (principal, cid)
+                for principal, cid in await conn.execute(_STALE_IMPORTS, {"app": LEDGER_APP})
+            }
         conversations = (
             await conn.execute(
                 text(
@@ -1861,8 +1903,15 @@ async def close_open_turns(engine: AsyncEngine, *, apply: bool) -> CloseReport:
             )
         ).all()
     for pk, principal, conversation_id, leased, diverged in conversations:
+        name = f"{principal}/{conversation_id}"
         if diverged:
-            report.diverged.append(f"{principal}/{conversation_id}")
+            report.diverged.append(name)
+            continue
+        if (principal, conversation_id) in streaming:
+            report.live_on_adk.append(name)
+            continue
+        if (principal, conversation_id) in stale:
+            report.stale_import.append(name)
             continue
         try:
             await _close_one(
@@ -1876,9 +1925,7 @@ async def close_open_turns(engine: AsyncEngine, *, apply: bool) -> CloseReport:
             )
         # One conversation's failure refuses it. The run goes on with the rest.
         except Exception as exc:
-            report.refused[f"{principal}/{conversation_id}"] = [
-                f"the close failed: {type(exc).__name__}: {exc}"
-            ]
+            report.refused[name] = [f"the close failed: {type(exc).__name__}: {exc}"]
     return report
 
 
@@ -2013,6 +2060,18 @@ CUTOVER_ADK_SESSIONS = (
     "AND a.attnum > 0 AND NOT a.attisdropped))"
 )
 
+# A ledger session's import record is current when it was recorded at the
+# session's `update_time`: ADK has not written the session since.
+_IMPORT_CURRENT = "i.source_updated_at = s.update_time"
+
+# Each ledger session whose import record is not current, or that has none.
+_STALE_IMPORTS = text(
+    "SELECT s.user_id, s.id FROM sessions s LEFT JOIN adk_ledger_imports i "
+    "ON i.principal = s.user_id AND i.conversation_id = s.id "
+    f"WHERE s.app_name = :app AND NOT coalesce({_IMPORT_CURRENT}, false) "
+    "ORDER BY s.user_id, s.id"
+)
+
 # The cutover predicate: every ledger session not cleared, the first ten by
 # key, each with the count of all of them. A session is cleared when its
 # `adk_ledger_imports` row is current (`source_updated_at` is the session's
@@ -2023,7 +2082,7 @@ CUTOVER_PREDICATE = (
     "FROM sessions s LEFT JOIN adk_ledger_imports i "
     "ON i.principal = s.user_id AND i.conversation_id = s.id "
     f"WHERE s.app_name = '{LEDGER_APP}' "
-    "AND NOT coalesce(i.source_updated_at = s.update_time AND (i.kept_tables OR ("
+    f"AND NOT coalesce({_IMPORT_CURRENT} AND (i.kept_tables OR ("
     "NOT i.diverged AND i.imported_digest IS NOT NULL AND EXISTS ("
     "SELECT 1 FROM conversations c "
     "WHERE c.principal = s.user_id AND c.conversation_id = s.id))), false) "

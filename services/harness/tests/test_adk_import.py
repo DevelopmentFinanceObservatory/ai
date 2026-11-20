@@ -589,6 +589,45 @@ async def test_close_open_turns_leaves_a_turn_a_stream_holds_or_that_never_ran_o
 
 
 @pytest.mark.parametrize(
+    ("adk_write", "bucket"),
+    [
+        (
+            {
+                "studio:segment": {
+                    "id": "seg_old",
+                    "owner": "old",
+                    "expires_at": time.time() + 600,
+                    "cancel": False,
+                }
+            },
+            "live_on_adk",
+        ),
+        ({"studio:seq": 99}, "stale_import"),
+    ],
+    ids=["adk-lease-live", "adk-wrote-since-import"],
+)
+async def test_close_open_turns_leaves_a_conversation_adk_streams_or_wrote_since_the_import(
+    adk: AsyncEngine, adk_write: dict[str, Any], bucket: str
+) -> None:
+    """A stream of the previous release that started after the import writes
+    its lease to ADK's ledger session, and the tables hold none. A
+    conversation whose ledger session holds a live lease, or moved since its
+    import, is left open and fails the run, dry or applied. A live lease is
+    listed as live, whether or not the import is current."""
+    await import_conversations(adk, apply=True)
+    await _set_adk_state(adk, PLAN_PAUSED, adk_write)
+
+    for apply in (False, True):
+        report = await close_open_turns(adk, apply=apply)
+
+        assert (report.closed, report.clean) == ([f"{_name(FULL)} turn 4"], False)
+        assert report.live_on_adk + report.stale_import == [_name(PLAN_PAUSED)]
+        assert getattr(report, bucket) == [_name(PLAN_PAUSED)]
+    state = await _load(adk, PLAN_PAUSED)
+    assert state is not None and not state.turn_recorded
+
+
+@pytest.mark.parametrize(
     "statement",
     [
         "UPDATE adk_internal_metadata SET value = '0'",
