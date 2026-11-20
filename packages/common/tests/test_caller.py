@@ -17,11 +17,13 @@ from common.caller import (
     CALLER_PRINCIPAL_HEADER,
     MAX_CALLER_CHARS,
     MAX_USER_AGENT_CHARS,
+    MCP_CLIENT_HEADER,
     SURFACE_HEADER,
     TURN_HEADER,
     USER_AGENT_HEADER,
     conversation_caller,
     current_caller,
+    current_mcp_client,
     current_surface,
     current_turn,
     current_user_agent,
@@ -36,6 +38,7 @@ from common.mcp_telemetry import LOOPBACK_SCOPE_KEY
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.server.http import set_http_request
+from mcp import types as mt
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from starlette.requests import Request
 
@@ -53,8 +56,11 @@ def _probe_server(seen: list[str | None]) -> FastMCP:
 
 
 @asynccontextmanager
-async def _http_client(server: FastMCP, *, headers: dict[str, str]) -> AsyncIterator[Client]:
-    """A client reaching `server` over streamable HTTP in-process, sending `headers`."""
+async def _http_client(
+    server: FastMCP, *, headers: dict[str, str], client_name: str | None = None
+) -> AsyncIterator[Client]:
+    """A client reaching `server` over streamable HTTP in-process, sending `headers`,
+    and naming itself `client_name` in its `clientInfo` when one is given."""
     app = server.http_app(path="/mcp")
 
     def factory(**kwargs: Any) -> httpx2.AsyncClient:
@@ -67,7 +73,8 @@ async def _http_client(server: FastMCP, *, headers: dict[str, str]) -> AsyncIter
         headers=headers,
         httpx_client_factory=cast(McpHttpClientFactory, factory),
     )
-    async with app.lifespan(app), Client(transport) as client:
+    client_info = None if client_name is None else mt.Implementation(name=client_name, version="1")
+    async with app.lifespan(app), Client(transport, client_info=client_info) as client:
         yield client
 
 
@@ -273,6 +280,50 @@ def test_the_vouched_headers_name_a_conversations_turn(
     scope = {"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers]}
     with set_http_request(Request(scope)):
         assert vouched_caller_headers("p").get(TURN_HEADER) == sent_turn
+
+
+def _mcp_client_server(seen: list[str | None]) -> FastMCP:
+    server = FastMCP(name="_mcp_client_probe")
+
+    @server.tool
+    async def probe() -> str:
+        """Record the MCP client name this call would send dfo-apis, in and out of
+        shared work."""
+        seen.append(vouched_caller_headers("p").get(MCP_CLIENT_HEADER))
+        seen.append(shared_work_context(surface="mcp").run(current_mcp_client))
+        return "ok"
+
+    return server
+
+
+@pytest.mark.parametrize(
+    ("caller", "client_name", "sent"),
+    [
+        (_ADDRESS, "Anthropic/ClaudeAI", "Anthropic/ClaudeAI"),
+        (_ADDRESS, " claude-code ", "claude-code"),
+        (_CONVERSATION, "Anthropic/ClaudeAI", None),
+        (_ADDRESS, "a" * 65, None),
+        (_ADDRESS, 'host" views=declared', None),
+    ],
+    ids=["chat-host", "stripped", "conversation", "too-long", "outside-pattern"],
+)
+async def test_the_vouched_headers_name_an_address_callers_mcp_client(
+    caller: str, client_name: str, sent: str | None
+) -> None:
+    """An `ip:` caller's `clientInfo` name reaches dfo-apis when it is a safe
+    header value; a Studio conversation and shared work send none."""
+    seen: list[str | None] = []
+
+    async with _http_client(
+        _mcp_client_server(seen), headers={CALLER_HEADER: caller}, client_name=client_name
+    ) as client:
+        await client.call_tool("probe", {})
+
+    assert seen == [sent, None]
+
+
+def test_no_mcp_client_outside_a_request() -> None:
+    assert current_mcp_client() is None
 
 
 async def test_a_supplied_turn_names_an_in_process_call() -> None:
