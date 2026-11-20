@@ -902,7 +902,11 @@ async def test_a_slow_migration_is_not_cut_short(
         await asyncio.sleep(0.05)
         return []
 
+    async def no_adk_tables(engine: object) -> list[str]:
+        return []
+
     monkeypatch.setattr(server_module, "apply_pending", slow_apply_pending)
+    monkeypatch.setattr(server_module, "live_adk_tables", no_adk_tables)
 
     await server_module._apply_migrations_with_retries(cast(AsyncEngine, object()), budget_s=0.0)
 

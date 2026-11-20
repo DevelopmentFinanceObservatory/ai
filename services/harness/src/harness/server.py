@@ -44,6 +44,7 @@ from starlette.websockets import WebSocketClose
 from harness import __version__
 from harness.agents import build_tool_surface
 from harness.combined_mcp import build_combined_mcp, children_start_once, combined_http_app
+from harness.db.adk_archive import live_adk_tables
 from harness.db.engine import DatabaseHandle, build_database
 from harness.db.migrate import MigrationChecksumError, apply_pending
 from harness.early_mint import EarlyMints
@@ -243,13 +244,32 @@ async def _retry_startup_step(
 
 class _MigrationRefusedError(RuntimeError):
     """A migration raised a SQLSTATE beginning `DFA`, its own refusal to run
-    against this database (`0003_turns.sql` and `0005_rename_adk_tables.sql`).
-    The database does not change by waiting. The message leads with the
-    SQLSTATE, which deploy/README.md lists with each refusal's manual step."""
+    against this database (`0003_turns.sql` and `0005_rename_adk_tables.sql`),
+    or `_refuse_beside_adk_tables` refused with `DFA05`. The database does
+    not change by waiting. The message leads with the SQLSTATE, which
+    deploy/README.md lists with each refusal's manual step."""
 
     def __init__(self, sqlstate: str, message: str) -> None:
         super().__init__(f"{sqlstate}: {message}")
         self.sqlstate = sqlstate
+
+
+async def _refuse_beside_adk_tables(engine: AsyncEngine) -> None:
+    """Raise `_MigrationRefusedError` with `DFA05` while any of ADK's tables
+    resolves on `search_path` under its own name with ADK's columns
+    (`harness.db.adk_archive.live_adk_tables`). This image never serves
+    beside them: an image that reads them may be serving, as after a
+    rollback and `restore --apply`, and only the `archive` verb, which
+    reruns 0005's checks, renames them."""
+    if tables := await live_adk_tables(engine):
+        raise _MigrationRefusedError(
+            "DFA05",
+            f"ADK's tables resolve on search_path under their own names: {', '.join(tables)}. "
+            "This image does not start beside them, since an image that reads them may be "
+            "serving. Once no revision that reads ADK's tables is left, run "
+            "`python -m harness.db.adk_archive archive --apply`, which reruns "
+            "0005_rename_adk_tables.sql's checks and renames them, then restart.",
+        )
 
 
 async def _apply_migrations_with_retries(
@@ -264,9 +284,10 @@ async def _apply_migrations_with_retries(
     with `statement_timeout` and each lock wait with `lock_timeout`, so a
     migration of several statements runs as long as its statements take.
     A failed attempt leaves no lock behind, because `apply_pending` holds
-    a transaction-level lock. A `MigrationChecksumError` is a fault in the
-    files, and a migration's own refusal (a SQLSTATE beginning `DFA`) a fact
-    about the database, so each propagates at once."""
+    a transaction-level lock. Each attempt then runs
+    `_refuse_beside_adk_tables`. A `MigrationChecksumError` is a fault in the
+    files, and a refusal (a SQLSTATE beginning `DFA`) a fact about the
+    database, so each propagates at once."""
 
     async def attempt() -> None:
         try:
@@ -276,6 +297,7 @@ async def _apply_migrations_with_retries(
             if sqlstate.startswith("DFA"):
                 raise _MigrationRefusedError(sqlstate, str(exc)) from exc
             raise
+        await _refuse_beside_adk_tables(engine)
 
     await _retry_startup_step(
         "apply_pending",

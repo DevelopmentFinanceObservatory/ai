@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from harness import server as server_module
 from harness.db import adk_archive
 from harness.db.migrate import apply_pending
 from sqlalchemy import text
@@ -16,10 +17,11 @@ from .test_rename_adk_tables import (
     _ADK_TABLES,
     _ADK_V1_DDL,
     _ARCHIVED,
+    _conversation,
     _execute,
     _foreign_key_target,
+    _imported,
     _migrate_through_0004,
-    _refused,
     _rows,
     _session,
     _tables,
@@ -228,41 +230,78 @@ async def _recorded(engine: AsyncEngine) -> bool:
         )
 
 
-async def test_after_restore_the_next_start_reruns_0005_and_refuses_an_unimported_session(
+async def _start(engine: AsyncEngine) -> None:
+    """Run startup's migrations and checks, failing on any retry."""
+
+    async def no_retry(seconds: float) -> None:
+        raise AssertionError(f"startup retried after {seconds}s")
+
+    await server_module._apply_migrations_with_retries(engine, budget_s=60.0, sleep=no_retry)
+
+
+async def _start_refused(engine: AsyncEngine) -> str:
+    """Startup refuses with DFA05 at its first attempt. Returns the message."""
+    with pytest.raises(server_module._MigrationRefusedError) as refusal:
+        await _start(engine)
+    assert refusal.value.sqlstate == "DFA05"
+    return str(refusal.value)
+
+
+async def test_after_restore_startup_refuses_until_archive_reruns_0005s_checks(
     pg_empty_engine: AsyncEngine, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A roll forward after a rollback meets 0005's DFA02 check again. A
-    second restore finds nothing to do."""
+    """A restore leaves 0005 recorded, so a start of this image beside the
+    restored tables renames nothing and refuses. `archive` meets 0005's DFA02
+    check for a session the ADK-reading image wrote, then renames once it is
+    imported, and startup proceeds."""
     await _archived_by_startup(pg_empty_engine, tmp_path)
-
-    assert await _verb(pg_empty_engine, "restore", apply=False) == 0
-    assert await _recorded(pg_empty_engine)
     assert await _verb(pg_empty_engine, "restore") == 0
-    assert not await _recorded(pg_empty_engine)
-    tables = await _tables(pg_empty_engine)
+    assert await _recorded(pg_empty_engine)
     capsys.readouterr()
     assert await _verb(pg_empty_engine, "restore") == 0
     assert "nothing to do" in capsys.readouterr().out
-    assert await _tables(pg_empty_engine) == tables
     await _execute(pg_empty_engine, _session("c2"))
+    tables = await _tables(pg_empty_engine)
 
-    message = await _refused(pg_empty_engine, "DFA02")
-    assert message.startswith("1 ledger session")
+    message = await _start_refused(pg_empty_engine)
+
+    assert all(f".{table}" in message for table in _ADK_TABLES)
+    assert "adk_archive archive --apply" in message
+    assert await _tables(pg_empty_engine) == tables
+    assert await _verb(pg_empty_engine, "archive") == 1
+    assert "SQLSTATE DFA02" in capsys.readouterr().err
+    assert await _tables(pg_empty_engine) == tables
+
+    await _execute(pg_empty_engine, _imported("c2"), _conversation("c2"))
+    assert await _verb(pg_empty_engine, "archive") == 0
+    await _start(pg_empty_engine)
+    assert {f"adk_archive_{table}" for table in _ARCHIVED} <= await _tables(pg_empty_engine)
 
 
-async def test_archive_after_restore_records_0005_so_a_later_start_runs_nothing(
+async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive(
     pg_empty_engine: AsyncEngine, tmp_path: Path
 ) -> None:
+    """An ADK-reading image started after the archive creates its tables."""
     await _archived_by_startup(pg_empty_engine, tmp_path)
-    assert await _verb(pg_empty_engine, "restore") == 0
+    await _start(pg_empty_engine)
+    sessions = next(statement for statement in _ADK_V1_DDL if "TABLE sessions" in statement)
+    await _execute(pg_empty_engine, sessions)
 
-    assert await _verb(pg_empty_engine, "archive", apply=False) == 0
-    assert not await _recorded(pg_empty_engine)
-    assert await _verb(pg_empty_engine, "archive") == 0
+    message = await _start_refused(pg_empty_engine)
 
-    assert await _recorded(pg_empty_engine)
-    assert await apply_pending(pg_empty_engine) == []
-    assert "adk_archive_sessions" in await _tables(pg_empty_engine)
+    assert ".sessions" in message
+    assert ".events" not in message
+
+
+async def test_startup_leaves_foreign_tables_of_adks_names_alone(
+    pg_empty_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    await _migrate_through_0004(pg_empty_engine, tmp_path)
+    await _execute(pg_empty_engine, *(f"CREATE TABLE {table} (x int)" for table in _ADK_TABLES))
+
+    await _start(pg_empty_engine)
+
+    assert set(_ADK_TABLES) <= await _tables(pg_empty_engine)
 
 
 @pytest.mark.parametrize(
@@ -301,15 +340,21 @@ async def test_restore_refuses_an_archive_without_all_of_adks_tables_unless_allo
     assert "adk_archive_adk_ledger_imports" not in restored
 
 
-async def test_drop_archive_refuses_a_foreign_table_of_an_archive_name_ahead_on_search_path(
-    pg_empty_engine: AsyncEngine, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("verb", ["restore", "drop-archive"])
+async def test_restore_and_drop_archive_refuse_a_foreign_table_of_an_archive_name_ahead(
+    pg_empty_engine: AsyncEngine,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    verb: str,
 ) -> None:
+    """A table of an archive name earlier on `search_path` without the
+    archived table's columns is another service's."""
     async with _split_layout(pg_empty_engine, tmp_path) as (split, schema, adk_schema):
         assert await _verb(split, "archive") == 0
         await _execute(split, f"CREATE TABLE {schema}.adk_archive_sessions (x int)")
         capsys.readouterr()
 
-        assert await _verb(split, "drop-archive") == 1
+        assert await _verb(split, verb) == 1
 
         assert "lacks the columns of `sessions`" in capsys.readouterr().err
         assert await _archive_relations(split, schema, adk_schema) == _archived_split(
@@ -382,6 +427,39 @@ async def test_drop_adk_leaves_a_table_of_an_adk_name_without_adks_columns(
     assert not (set(_ADK_TABLES) - {"user_states"}) & tables
 
 
+@pytest.mark.parametrize(
+    ("verb", "view"),
+    [
+        pytest.param("drop-adk", "events", id="drop-adk"),
+        pytest.param("drop-archive", "adk_archive_events", id="drop-archive"),
+    ],
+)
+async def test_a_drop_refuses_while_another_object_depends_on_a_table(
+    pg_empty_engine: AsyncEngine,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    verb: str,
+    view: str,
+) -> None:
+    """The drop names every table without `CASCADE`, so the foreign key
+    between `events` and `sessions` resolves and a view on one refuses."""
+    await _archived_by_startup(pg_empty_engine, tmp_path)
+    if verb == "drop-adk":
+        assert await _verb(pg_empty_engine, "restore") == 0
+    await _execute(pg_empty_engine, f"CREATE VIEW event_ids AS SELECT id FROM {view}")
+    tables = await _tables(pg_empty_engine)
+    capsys.readouterr()
+
+    assert await _verb(pg_empty_engine, verb) == 1
+
+    assert "SQLSTATE 2BP01" in capsys.readouterr().err
+    assert await _tables(pg_empty_engine) == tables
+
+    await _execute(pg_empty_engine, "DROP VIEW event_ids")
+    assert await _verb(pg_empty_engine, verb) == 0
+    assert not {view, "sessions", "adk_archive_sessions"} & await _tables(pg_empty_engine)
+
+
 def test_a_usage_error_exits_2() -> None:
     with pytest.raises(SystemExit) as exited:
         adk_archive.main(["rename"])
@@ -395,12 +473,17 @@ def test_no_database_configured_exits_2(monkeypatch: pytest.MonkeyPatch) -> None
     assert adk_archive.main(["archive"]) == 2
 
 
-def test_an_invalid_database_configuration_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Both backends set fails `Settings` validation."""
-    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@127.0.0.1:1/db")
+def test_an_invalid_database_configuration_exits_2_without_printing_the_input(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both backends set fails `Settings` validation. Pydantic's own text
+    quotes the start of the input, which holds `DATABASE_URL`."""
+    monkeypatch.setenv("DATABASE_URL", "S3CRET")
     monkeypatch.setenv("SESSION_STORE_INSTANCE_CONNECTION_NAME", "proj:region:instance")
 
     assert adk_archive.main(["archive"]) == 2
+
+    assert "S3CRET" not in capsys.readouterr().err
 
 
 def test_drop_adk_checks_the_column_signature_the_migration_checks() -> None:
