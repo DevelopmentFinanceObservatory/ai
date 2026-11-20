@@ -281,23 +281,31 @@ Once this image takes traffic and that job's `close-open-turns --apply` exits 0,
 ```
 gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
   --format='table(metadata.name,metadata.creationTimestamp,status.conditions[0].status)'
+```
+
+Run the delete only once `close-open-turns --apply` has exited 0. One chained command deletes the revision, records the delete time as `DELETED_AT` and confirms the revision is gone from the list, so a failure at any step stops the rest. Delete any other revision of an earlier image the same way, with its name in `PREVIOUS`:
+
+```
 gcloud run revisions delete "${PREVIOUS:?set it to the previous image's revision}" \
-  --region="$REGION" --project="$PROJECT_ID" --quiet
-gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
-  --format='value(metadata.name)'
+  --region="$REGION" --project="$PROJECT_ID" --quiet \
+&& DELETED_AT=$(date -u +%FT%TZ) \
+&& [ -z "$(gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
+  --filter="metadata.name=$PREVIOUS" --format='value(metadata.name)')" ] \
+&& echo "deleted $PREVIOUS at $DELETED_AT"
 ```
 
-Then confirm the deleted revision's instance count reaches zero with the command below. A deleted revision is gone from `gcloud run revisions describe`, so the count comes from Cloud Monitoring's `run.googleapis.com/container/instance_count`, newest points first by instance state; Cloud Monitoring samples `instance_count` every 60 s and can show a point up to about 180 s late, so wait at least 5 minutes after the delete before reading. The revision has drained when a point dated after the delete reads 0 for every instance state, or when the series is absent for a full 5-minute window after the delete:
+Then confirm the deleted revision's instance count reaches zero with the command below, no sooner than 5 minutes after `DELETED_AT`, in the same shell or with `DELETED_AT` set to the time the delete printed. A deleted revision is gone from `gcloud run revisions describe`, so the count comes from Cloud Monitoring's `run.googleapis.com/container/instance_count`; Cloud Monitoring samples it every 60 s and can show a point up to about 180 s late. `curl -f` fails on an HTTP error, and jq exits non-zero unless the answer is well formed and the newest point of every series reads 0; every point is dated after the delete, since the window starts there. It prints how many series it read. With no series it prints `no series since the delete` and exits 0: no instance reported after the delete. Whether a deleted revision reports zeros or nothing is a check to make on dev first:
 
 ```
-START=$(date -u -d '-30 min' +%FT%TZ 2>/dev/null || date -u -v-30M +%FT%TZ)
-curl -sG -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+curl -fsSG -H "Authorization: Bearer $(gcloud auth print-access-token)" \
   "https://monitoring.googleapis.com/v3/projects/$PROJECT_ID/timeSeries" \
   --data-urlencode "filter=metric.type=\"run.googleapis.com/container/instance_count\" AND resource.labels.revision_name=\"$PREVIOUS\"" \
-  --data-urlencode "interval.startTime=$START" \
+  --data-urlencode "interval.startTime=${DELETED_AT:?set it to the time the delete printed}" \
   --data-urlencode "interval.endTime=$(date -u +%FT%TZ)" \
-  | jq -r '.timeSeries[]? | .metric.labels.state as $state
-    | .points[:5][] | "\(.interval.endTime) \($state) \(.value.int64Value)"'
+| jq -er '(.timeSeries // []) as $s
+  | if ($s | length) == 0 then ("no series since the delete\n" | halt_error(0))
+    elif all($s[]; (.points[0].value.int64Value | tonumber) == 0) then "\($s | length) series, newest points 0"
+    else ("a newest point is above 0\n" | halt_error(1)) end'
 ```
 
 A rollback after the delete is a redeploy of the previous image by digest.
