@@ -189,7 +189,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from common.logging import configure_logging
-from common.telemetry import flush_telemetry, init_telemetry
+from common.telemetry import flush_telemetry_before_exit, init_telemetry
 from compiler.sources import bound_rows, source_from_spec_block
 from executor.ledger import RunStatus, stored_run
 from pydantic import BaseModel, ValidationError
@@ -2254,8 +2254,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     Logging and telemetry come up as the service's do
     (`harness.server._lifespan`), so the `studio.turn` line and `turn`
     outcome of each turn `close-open-turns` closes are written as the
-    service writes them: a JSON log line in a Cloud Run job execution, and
-    an outcome exported before the job exits when telemetry is configured."""
+    service writes them: a JSON log line in a Cloud Run job execution, and,
+    when telemetry is configured, an outcome the job exports, blocking until
+    the export ends, once its event loop has finished and before it exits
+    (`flush_telemetry_before_exit`)."""
     arguments = _arguments(argv)
     configure_logging()
     init_telemetry(service_name="harness")
@@ -2268,10 +2270,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             return await _run(arguments, database.engine)
         finally:
-            try:
-                await database.aclose()
-            finally:
-                await flush_telemetry()
+            await database.aclose()
 
     try:
         report = asyncio.run(go())
@@ -2284,6 +2283,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     ) as exc:
         print(f"adk_import: {exc}", file=sys.stderr)
         return 2
+    finally:
+        flush_telemetry_before_exit()
     print(report.render())
     return 0 if report.clean else 1
 

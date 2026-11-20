@@ -696,6 +696,32 @@ async def test_flush_telemetry_is_a_noop_with_no_backend(monkeypatch):
     assert telemetry._FLUSH_THREAD_NAME not in started
 
 
+@pytest.mark.parametrize(
+    ("backend", "fails", "flushes"),
+    [(None, False, 0), ("otel", False, 1), ("otel", True, 1)],
+    ids=["off", "on", "failing"],
+)
+def test_a_flush_before_exit_blocks_on_the_export_and_never_raises(
+    monkeypatch, backend, fails, flushes
+):
+    """`flush_telemetry_before_exit` runs the backend's export on the
+    calling thread, does nothing with telemetry off, and swallows an export
+    that raises."""
+    calls = []
+
+    def flush_backend():
+        calls.append(threading.current_thread())
+        if fails:
+            raise RuntimeError("exporter unavailable")
+
+    monkeypatch.setattr(telemetry, "_backend", backend)
+    monkeypatch.setattr(telemetry, "_flush_backend", flush_backend)
+
+    telemetry.flush_telemetry_before_exit()
+
+    assert calls == [threading.current_thread()] * flushes
+
+
 async def test_flush_telemetry_flushes_the_langfuse_client(monkeypatch):
     telemetry._backend = "langfuse"
     fake_client = MagicMock()

@@ -574,10 +574,9 @@ def end_turn_segment(
     )
 
 
-# The codes of a close that ended a unit of work the user or a newer one
-# stopped rather than one that failed: `record_turn_outcome` records them at
-# `WARNING`, as the segment span's level table does
-# (`harness.studio_state.span_level`).
+# The close codes `record_turn_outcome` records at `WARNING`, defined here
+# alone: `cancelled`, a unit of work a Stop or the client's leaving ended,
+# and `abandoned`, one a newer unit of work closed. Neither is a failure.
 WARNING_TURN_ERRORS = frozenset({"cancelled", "abandoned"})
 
 
@@ -601,8 +600,9 @@ def record_turn_outcome(
     output, what an evaluator filtered on the name `turn` reads. An `error`
     (a machine-readable code such as `state_not_saved`) makes its level
     `ERROR` with `error` as its status message, and `WARNING` for a code in
-    `WARNING_TURN_ERRORS`, so a Stop is never reported as a failure. Its metadata holds `dfo.external_id`,
-    and `dfo.turn_error` holds `error` when there is one. A clean close writes
+    `WARNING_TURN_ERRORS`, so a Stop is never reported as a failure. Its
+    metadata holds `dfo.external_id`, and `dfo.turn_error` holds `error`
+    when there is one. A clean close writes
     no `dfo.turn_error`. A pause holds `dfo.turn_status` `paused`, and a close
     holds no `dfo.turn_status`. `session_id`, `user_id` and `tags` mean what
     they do for `turn_segment`. Off Langfuse the observation is a plain span
@@ -1215,6 +1215,19 @@ async def flush_telemetry(*, timeout_seconds: float = FLUSH_TIMEOUT_SECONDS) -> 
     finally:
         with _flush_lock, suppress(ValueError):  # a pass already took it
             _flush_waiters.remove(wake)
+
+
+def flush_telemetry_before_exit() -> None:
+    """Export everything queued so far, blocking until the export ends, for a
+    process about to exit, such as a job whose `flush_telemetry` may have
+    returned while its export ran on a daemon thread that exit would kill.
+    Never raises, and does nothing when telemetry is off."""
+    if _backend is None:
+        return
+    try:
+        _flush_backend()
+    except Exception:
+        logger.warning("telemetry flush before exit failed", exc_info=True)
 
 
 def start_telemetry_flush() -> None:

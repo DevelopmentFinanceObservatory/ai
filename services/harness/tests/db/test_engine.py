@@ -4,6 +4,7 @@ engine and on the Cloud SQL Connector's."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import harness.db.engine as engine_module
@@ -77,3 +78,28 @@ async def test_the_connector_dials_each_connection_with_the_command_timeout(
             "command_timeout": engine_module.COMMAND_TIMEOUT_S,
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("url", "connect_args"),
+    [
+        ("postgresql+asyncpg://u@db/ai", {"command_timeout": engine_module.COMMAND_TIMEOUT_S}),
+        ("postgresql+psycopg://u@db/ai", {}),
+    ],
+    ids=["asyncpg", "psycopg"],
+)
+def test_only_an_asyncpg_url_gets_the_command_timeout(
+    monkeypatch: pytest.MonkeyPatch, url: str, connect_args: dict[str, Any]
+) -> None:
+    """`command_timeout` is asyncpg's own argument, so a `DATABASE_URL` on
+    another driver connects without it."""
+    built: list[dict[str, Any]] = []
+
+    def create_async_engine(url: str, **kwargs: Any) -> Any:
+        built.append(kwargs)
+        return SimpleNamespace(dispose=None)
+
+    monkeypatch.setattr(engine_module, "create_async_engine", create_async_engine)
+    engine_module.build_database(settings=Settings(database_url=url))
+
+    assert [kwargs["connect_args"] for kwargs in built] == [connect_args]

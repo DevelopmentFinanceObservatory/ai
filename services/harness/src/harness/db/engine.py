@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from google.cloud.sql.connector import IPTypes, create_async_connector
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from harness.settings import Settings
@@ -42,9 +43,10 @@ _CONNECTOR_DRIVER = "asyncpg"
 # engine: the longest any statement may wait for the server, a COMMIT
 # included, before the call raises `TimeoutError`. A COMMIT that a write runs
 # to the end under cancellation (`harness.studio_store`) would otherwise wait
-# on a stalled connection until TCP gives up. It sits above the migrations'
-# `statement_timeout` (`harness.db.migrate.MIGRATION_TIMEOUT_S`, 60 s), so it
-# never cuts a migration short.
+# on a stalled connection until TCP gives up. A call that passes its own
+# `timeout` replaces it: `harness.db.migrate.apply_pending` passes
+# `MIGRATION_CALL_TIMEOUT_S` on every call, so a migration file, sent as one
+# call, is bounded by its statements' `statement_timeout` and that wait.
 COMMAND_TIMEOUT_S = 90.0
 
 
@@ -117,10 +119,13 @@ def build_database(*, settings: Settings) -> DatabaseHandle | None:
         logger.info("Using the database at DATABASE_URL")
         # `pool_pre_ping` drops a connection the server closed while it sat in
         # the pool.
+        # Only asyncpg takes `command_timeout`; another driver's connect
+        # would refuse it.
+        asyncpg = make_url(settings.database_url).get_driver_name() == _CONNECTOR_DRIVER
         engine = create_async_engine(
             settings.database_url,
             pool_pre_ping=True,
-            connect_args={"command_timeout": COMMAND_TIMEOUT_S},
+            connect_args={"command_timeout": COMMAND_TIMEOUT_S} if asyncpg else {},
         )
         return DatabaseHandle(engine=engine, aclose=engine.dispose)
     return None

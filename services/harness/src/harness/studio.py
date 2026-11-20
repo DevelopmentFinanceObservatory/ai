@@ -2010,7 +2010,12 @@ async def _release_claim(
     its save return (`claim.segment_id`), or when the live state holds the
     segment it was claiming: a save that raised once its write committed,
     cancelled during the commit say, still handed the segment to the live
-    state. Then the claim's hold lets go of the lock, and any span that
+    state. A claim save that raised with the live state not holding the
+    segment may still have committed, a COMMIT that landed and then timed
+    out say, so the lease is dropped all the same: `drop_lease` clears only
+    that segment's lease, and a failure there is logged and leaves the lease
+    to its TTL. The turn lines such a commit wrote are lost, as they are for
+    any save whose acknowledgement is lost. Then the claim's hold lets go of the lock, and any span that
     ended is exported, whatever the span end raised, and with it any turn
     line the claim save wrote, an abandoned turn's close, which no stream
     then exports. It does nothing once the hold has let go: the working
@@ -2020,14 +2025,27 @@ async def _release_claim(
         return
     ended = False
     segment_id = claim.segment_id
+    unsure: str | None = None
     if segment_id is None and claim.claiming is not None:
         held = store.current(principal, conversation_id)
         if held is not None and held.segment is not None and held.segment.id == claim.claiming:
             segment_id = claim.claiming
+        else:
+            unsure = claim.claiming
     try:
         ended = store.drop_draft(principal, conversation_id)
         if segment_id is not None:
             await store.drop_lease(principal, conversation_id, segment_id)
+        elif unsure is not None:
+            try:
+                await store.drop_lease(principal, conversation_id, unsure)
+            except Exception:
+                logger.warning(
+                    "studio: conversation %s could not drop the lease its claim save may "
+                    "have committed; it lapses by its TTL",
+                    conversation_id,
+                    exc_info=True,
+                )
     finally:
         try:
             try:
@@ -2051,9 +2069,9 @@ async def _unclaimed(claim: _Claim, response: Response) -> Response:
 @dataclass(frozen=True)
 class _Claim:
     """A request's claim on its conversation: its lock hold, the segment its
-    claim save writes (`claiming`), and that segment once the route saw the
-    save commit it (`segment_id`). What `_release_claim` lets go of when the
-    segment's stream never does."""
+    claim save may have committed once the save started (`claiming`), and
+    that segment once the route saw the save commit it (`segment_id`). What
+    `_release_claim` lets go of when the segment's stream never does."""
 
     store: StudioStore
     principal: str
@@ -2231,7 +2249,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         retry_after_seconds=exc.retry_after_seconds,
                     ),
                 )
-            claim = replace(claim, claiming=segment_id)
             edit = (
                 body.component_ref is not None
                 and body.component_ref.intent is ComponentRefIntent.EDIT
@@ -2271,11 +2288,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # claim leaves the same leftover. A crash after the claim leaves
             # the store at the new turn_index, and the segment it claimed
             # expires by its own TTL.
+            # From here the claim save may have committed `segment_id`.
+            claim = replace(claim, claiming=segment_id)
             try:
                 await studio.store.save(principal, body.conversation_id, work)
             except ConversationStale:
                 return await _unclaimed(
-                    claim,
+                    replace(claim, claiming=None),
                     _streaming_conflict_response(
                         "another request is streaming on this conversation"
                     ),
@@ -2515,7 +2534,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         retry_after_seconds=exc.retry_after_seconds,
                     ),
                 )
-            claim = replace(claim, claiming=segment_id)
             if resuming and pending.answer != requested_answer:
                 # The claim above only succeeds once the earlier resume's
                 # segment has expired (its owner died before reaching a
@@ -2584,15 +2602,17 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # Saved before the resume stream starts: a double answer to the
             # same interrupt across two instances loses cleanly here, with a
             # 409, rather than each resuming its own segment of the turn.
+            # From here the claim save may have committed `segment_id`.
+            claim = replace(claim, claiming=segment_id)
             try:
                 await studio.store.save(principal, body.conversation_id, work)
             except ConversationStale:
                 return await _unclaimed(
-                    claim,
+                    replace(claim, claiming=None),
                     _streaming_conflict_response("another request already answered this interrupt"),
                 )
-        except BaseException:
-            await _release_claim(claim)
+        except BaseException as exc:
+            await _release_claim(claim, cause=exc)
             raise
 
         # Every failure from here to the stream's start drops the lease the

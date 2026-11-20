@@ -500,8 +500,8 @@ async def test_the_close_open_turns_job_logs_each_close_as_a_json_studio_turn_li
     """`main`, run as a Cloud Run job execution runs it, brings logging and
     telemetry up as the service does, so each turn `close-open-turns` closes
     writes its `studio.turn` line as a JSON entry the analytics log model
-    reads (`jsonPayload.event`), and the job flushes its outcomes before it
-    exits."""
+    reads (`jsonPayload.event`), and the job flushes its outcomes, blocking,
+    once its event loop has finished."""
     await import_conversations(adk, apply=True)
     async with adk.connect() as conn:
         schema = (await conn.execute(text("SELECT current_schema()"))).scalar_one()
@@ -514,18 +514,27 @@ async def test_the_close_open_turns_job_logs_each_close_as_a_json_studio_turn_li
 
     telemetry: list[str] = []
 
-    async def flush() -> None:
+    def flush() -> None:
+        # Once the job's event loop has finished.
+        with pytest.raises(RuntimeError):
+            asyncio.get_running_loop()
         telemetry.append("flush")
 
     monkeypatch.setattr(adk_import, "build_database", build_database)
     monkeypatch.setattr(adk_import, "init_telemetry", lambda **_: telemetry.append("init"))
-    monkeypatch.setattr(adk_import, "flush_telemetry", flush)
+    monkeypatch.setattr(adk_import, "flush_telemetry_before_exit", flush)
     monkeypatch.setenv("CLOUD_RUN_JOB", "ai-adk-import")
     monkeypatch.delenv("LOG_FORMAT", raising=False)
     # `configure_logging` replaces the root handlers: put pytest's back after.
     monkeypatch.setattr(common_logging, "_configured", False)
     monkeypatch.setattr(logging.root, "handlers", list(logging.root.handlers))
     monkeypatch.setattr(logging.root, "level", logging.root.level)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        uvicorn_logger = logging.getLogger(name)
+        monkeypatch.setattr(uvicorn_logger, "handlers", list(uvicorn_logger.handlers))
+        monkeypatch.setattr(uvicorn_logger, "propagate", uvicorn_logger.propagate)
+    otel_context = logging.getLogger("opentelemetry.context")
+    monkeypatch.setattr(otel_context, "level", otel_context.level)
 
     status = await asyncio.to_thread(adk_import.main, ["close-open-turns", "--apply"])
 
