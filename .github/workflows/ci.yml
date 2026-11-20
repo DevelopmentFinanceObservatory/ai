@@ -73,9 +73,9 @@ jobs:
       github.event.pull_request.draft != true &&
       (github.event_name != 'pull_request' || github.event.pull_request.state == 'open')
     runs-on: ubuntu-latest
-    # The suite takes about three minutes. faulthandler_timeout in
-    # pyproject.toml ends a run whose test hangs before failing; this cap
-    # ends every other hang.
+    # The suite takes about 12 minutes here in one process; four xdist
+    # workers run it 4.5 times faster on a laptop. faulthandler_timeout in pyproject.toml ends a run
+    # whose test hangs before failing; this cap ends every other hang.
     timeout-minutes: 20
     env:
       UV_FROZEN: "1"
@@ -99,8 +99,13 @@ jobs:
       - name: Install Chromium
         run: uv run playwright install --with-deps --only-shell chromium
 
+      # `ubuntu-latest` in a public repository is a 4 vCPU runner, so `-n auto`
+      # starts four workers. It lives here rather than in addopts so a targeted
+      # local run stays in one process, where output reads in order and pdb
+      # works. `--durations` lists the slowest tests, the ones to look at when
+      # the job grows.
       - name: Test -- all packages
-        run: uv run pytest
+        run: uv run pytest -n auto --durations=25 --durations-min=1.0
 
   docker:
     # Catches a broken Dockerfile.ai before merge.

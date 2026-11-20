@@ -159,12 +159,15 @@ async def test_a_render_waiting_past_the_timeout_goes_without_its_image(
     pid = await _worker_pid(worker)
     lock = worker._lock
     assert lock is not None
-    monkeypatch.setattr(worker, "_timeout_s", 0.1)
     envelope = resolved_revision("line_chart")
 
-    async with lock:
-        with caplog.at_level(logging.WARNING, logger=chart_worker.__name__):
-            png = await worker.render(envelope, component_id="cmp_1")
+    # The short timeout covers only the render that waits on the held lock,
+    # so the render that reads the pid afterwards draws under the fixture's.
+    with monkeypatch.context() as patch:
+        patch.setattr(worker, "_timeout_s", 0.1)
+        async with lock:
+            with caplog.at_level(logging.WARNING, logger=chart_worker.__name__):
+                png = await worker.render(envelope, component_id="cmp_1")
 
     assert png is None
     (record,) = _chart_worker_records(caplog, level=logging.WARNING)
@@ -264,14 +267,15 @@ async def test_a_request_the_worker_does_not_read_ends_at_the_timeout_and_the_lo
     # timeouts, by killing the worker.
     stopped = await _worker_pid(worker)
     os.kill(stopped, signal.SIGSTOP)
-    monkeypatch.setattr(worker, "_timeout_s", 0.5)
     unblock = threading.Timer(10.0, os.kill, (stopped, signal.SIGKILL))
     unblock.start()
 
     try:
-        with caplog.at_level(logging.WARNING, logger=chart_worker.__name__):
-            async with _heartbeat() as ticks:
-                png = await worker.render(cast(Any, bytes(2**23)), component_id="cmp_1")
+        with monkeypatch.context() as patch:
+            patch.setattr(worker, "_timeout_s", 0.5)
+            with caplog.at_level(logging.WARNING, logger=chart_worker.__name__):
+                async with _heartbeat() as ticks:
+                    png = await worker.render(cast(Any, bytes(2**23)), component_id="cmp_1")
     finally:
         unblock.cancel()
         unblock.join()
