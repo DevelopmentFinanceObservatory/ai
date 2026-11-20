@@ -15,10 +15,12 @@ import pickle
 import ssl
 from collections.abc import Awaitable, Callable
 
+import compiler.surface as surface_module
 import httpx2
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common.auth import apply_gate
+from compiler.caller_clients import CallerTurn
 from compiler.surface import (
     DuplicateToolNameError,
     FixtureSurface,
@@ -46,7 +48,7 @@ from ..unreachable_surface import UNREACHABLE_URL
 
 def _held(surface: McpSurface, server: str, caller: str | None = None) -> Client | None:
     """The client `surface` holds for `server` and `caller`, or `None`."""
-    held = surface._call_clients[server]._clients.get(caller)
+    held = surface._call_clients[server]._clients.get(CallerTurn(caller))
     return held.client if held is not None else None
 
 
@@ -381,6 +383,140 @@ async def test_a_non_timeout_failure_discards_the_held_client(
     assert _held(surface, "data-mcp") is not broken
 
 
+@pytest.mark.parametrize(
+    ("raised", "outcome"),
+    [
+        (MCPError(code=REQUEST_TIMEOUT, message="Timed out"), "timeout"),
+        (MCPError(code=CONNECTION_CLOSED, message="Connection closed"), "transport_failed"),
+        (RuntimeError("transport closed"), "transport_failed"),
+    ],
+    ids=["mcp-request-timeout", "mcp-connection-closed", "transport-closed"],
+)
+async def test_a_call_with_no_result_still_leaves_one_tool_result(
+    monkeypatch: pytest.MonkeyPatch, raised: Exception, outcome: str
+) -> None:
+    """A call that times out or whose transport fails raises and adds one
+    `dfo.tool_result` observation naming how it ended."""
+    events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        surface_module,
+        "record_event",
+        lambda name, *, level, metadata: events.append((name, dict(metadata))),
+    )
+    surface = McpSurface(sources={"data-mcp": _answering_server()})
+
+    async def _fails(self: Client, *args: object, **kwargs: object) -> object:
+        raise raised
+
+    monkeypatch.setattr(Client, "call_tool", _fails)
+
+    with pytest.raises(ToolSurfaceUnavailableError):
+        await surface.call_tool(
+            tool=ToolId(server="data-mcp", name="search"), arguments={"parts": []}
+        )
+
+    assert events == [("dfo.tool_result", {"tool": "search", "outcome": outcome})]
+
+
+@pytest.mark.parametrize(("cut_by", "outcome"), [("budget", "timeout"), ("cancel", "cancelled")])
+async def test_a_cancelled_call_leaves_one_tool_result_and_still_raises(
+    monkeypatch: pytest.MonkeyPatch, cut_by: str, outcome: str
+) -> None:
+    """A call the step budget cuts off records `timeout`. One cancelled any
+    other way records `cancelled`. Both let the cancellation through."""
+    events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        surface_module,
+        "record_event",
+        lambda name, *, level, metadata: events.append((name, dict(metadata))),
+    )
+    surface = McpSurface(sources={"data-mcp": _surface_with_a_slow_tool()})
+    call = surface.call_tool(tool=ToolId(server="data-mcp", name="get_data"), arguments={})
+
+    if cut_by == "budget":
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.02) as budget:
+                token = surface_module.step_budget.set(budget)
+                try:
+                    await call
+                finally:
+                    surface_module.step_budget.reset(token)
+    else:
+        task = asyncio.ensure_future(call)
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert events == [("dfo.tool_result", {"tool": "get_data", "outcome": outcome})]
+
+
+@pytest.mark.parametrize("fails_at", ["uncovered", "connect", "release"])
+async def test_a_call_records_only_what_call_tool_did(
+    monkeypatch: pytest.MonkeyPatch, fails_at: str
+) -> None:
+    """A call to a server the surface does not cover records
+    `uncovered_server`, and one that cannot get a client records
+    `transport_failed`. A call whose release is cancelled after `call_tool`
+    answered has already recorded its result. In each case the call leaves
+    one `dfo.tool_result`."""
+    events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        surface_module,
+        "record_event",
+        lambda name, *, level, metadata: events.append((name, dict(metadata))),
+    )
+    surface = McpSurface(sources={"data-mcp": _answering_server()})
+    clients = surface._call_clients["data-mcp"]
+    server = "analysis-mcp" if fails_at == "uncovered" else "data-mcp"
+    if fails_at == "connect":
+
+        async def refuse() -> None:
+            raise RuntimeError("connection refused")
+
+        monkeypatch.setattr(clients, "get", refuse)
+    elif fails_at == "release":
+        real_release = clients.release
+
+        async def cancelled_release(client: Client) -> None:
+            await real_release(client)
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(clients, "release", cancelled_release)
+
+    with pytest.raises((ToolSurfaceUnavailableError, asyncio.CancelledError)):
+        await surface.call_tool(tool=ToolId(server=server, name="search"), arguments={"parts": []})
+
+    expected = {
+        "uncovered": "uncovered_server",
+        "connect": "transport_failed",
+        "release": "ok",
+    }[fails_at]
+    assert [(name, meta["outcome"]) for name, meta in events] == [("dfo.tool_result", expected)]
+
+
+@pytest.mark.parametrize("server", ["data-mcp", "analysis-mcp"], ids=["answers", "uncovered"])
+async def test_a_recorder_that_raises_leaves_the_call_as_it_was(
+    monkeypatch: pytest.MonkeyPatch, server: str
+) -> None:
+    """A trace recorder that raises changes nothing about the call. An
+    answered call returns its result, and a call to an uncovered server
+    raises `ToolSurfaceUnavailableError`."""
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("exporter broken")
+
+    monkeypatch.setattr(surface_module, "record_event", fail)
+    surface = McpSurface(sources={"data-mcp": _answering_server()})
+    call = surface.call_tool(tool=ToolId(server=server, name="search"), arguments={"parts": []})
+
+    if server == "data-mcp":
+        assert not (await call).is_error
+    else:
+        with pytest.raises(ToolSurfaceUnavailableError):
+            await call
+
+
 def _raised_from(outer: BaseException, cause: BaseException) -> BaseException:
     outer.__cause__ = cause
     return outer
@@ -615,7 +751,9 @@ async def test_call_tool_gives_each_source_its_own_held_client() -> None:
 
 async def test_call_tool_holds_one_client_per_caller() -> None:
     callers = iter(["conversation:a", "conversation:b", "conversation:a"])
-    surface = McpSurface(sources={"data-mcp": _answering_server()}, caller=lambda: next(callers))
+    surface = McpSurface(
+        sources={"data-mcp": _answering_server()}, caller=lambda: CallerTurn(next(callers))
+    )
 
     for _ in range(3):
         await surface.call_tool(

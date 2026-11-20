@@ -104,8 +104,11 @@ def problem(status: int, code: str, **members: object) -> httpx2.Response:
     )
 
 
-def data_mcp_client(handler: Callable[[httpx2.Request], httpx2.Response]) -> UpstreamClient:
-    """data-mcp's upstream client over `handler`.
+def data_mcp_client(
+    handler: Callable[[httpx2.Request], httpx2.Response], *, caller_principal: str | None = None
+) -> UpstreamClient:
+    """data-mcp's upstream client over `handler`, holding `caller_principal` as
+    `DFO_CALLER_PRINCIPAL` when one is given.
 
     A version's description (`GET /api/datasets/{id}/{content_version}/description`)
     answers 404 `not_found`, as apis does for a version stored without a record, so
@@ -122,7 +125,8 @@ def data_mcp_client(handler: Callable[[httpx2.Request], httpx2.Response]) -> Ups
             return problem(404, "not_found")
         return handler(request)
 
-    return UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(answer))
+    settings = DataMcpSettings(dfo_caller_principal=caller_principal)
+    return UpstreamClient(settings=settings, transport=httpx2.MockTransport(answer))
 
 
 class FakeApis:

@@ -437,7 +437,9 @@ def _plan_failed_step(failure: object) -> ActivityStep:
     return next(f for f in frames if f.event == "activity.step" and f.status is StepStatus.FAILED)
 
 
-@pytest.mark.parametrize("code", [*StopCode, *TERMINAL_PROPOSE_CODES])
+# Sorted because a frozenset's order follows the string hash, which differs
+# between xdist workers, and every worker must collect the same tests.
+@pytest.mark.parametrize("code", [*StopCode, *sorted(TERMINAL_PROPOSE_CODES)])
 def test_a_plan_the_planner_refused_shows_its_code_s_sentence_and_none_of_its_detail(code):
     """The refusal's own sentence is filled for the agent with a tool name, a
     reference, a requirement id or the declined ask. The step reads the

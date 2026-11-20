@@ -21,7 +21,7 @@ from typing import Any, Self
 
 import httpx2
 from common.apis_auth import ApisAuthError, AuthProvider
-from common.caller import ADDRESS_CALLER, CALLER_HEADER, CALLER_PRINCIPAL_HEADER, current_caller
+from common.caller import vouched_caller_headers
 from opentelemetry import trace
 
 from data_mcp.deadline import CallDeadline
@@ -263,20 +263,22 @@ class UpstreamClient:
         base = self._client.base_url if self._public_origin is None else self._public_origin
         return str(httpx2.URL(base).join(link))
 
-    def caller_headers(self) -> dict[str, str]:
-        """The headers that name the current request's caller to dfo-apis.
+    def caller_headers(self, *, caller_required: bool = False) -> dict[str, str]:
+        """The headers that name the current request's caller to dfo-apis, sent on
+        every `request` and on `stream_link`'s first hop.
 
-        The caller principal and the caller, when this process holds the principal
-        (`Settings.dfo_caller_principal`) and the website named the caller by address
-        (`x-dfo-caller: ip:<digest>`), so dfo-apis counts that client's allowance.
-        Empty otherwise, and dfo-apis counts the call against this service.
+        `common.caller.vouched_caller_headers` of `Settings.dfo_caller_principal`.
+        For an `ip:` caller the website named, they are `x-dfo-caller-principal`,
+        `x-dfo-caller`, `x-dfo-surface: mcp`, and `x-dfo-user-agent`, the whole
+        User-Agent clipped to 256 characters. For a harness `conversation:`
+        caller they are the principal, the caller, and the Studio turn's id as
+        `x-dfo-turn` when the harness names one. In shared work, such as a
+        series-statistics fetch, they are the principal and `x-dfo-surface` as
+        the surface the work serves, except on a `caller_required` call, to a
+        door that names the caller an allowance counts against, which gets
+        none. Empty otherwise, and dfo-apis counts the call against this service.
         """
-        caller = current_caller()
-        if self._caller_principal is None or caller is None:
-            return {}
-        if not ADDRESS_CALLER.fullmatch(caller):
-            return {}
-        return {CALLER_PRINCIPAL_HEADER: self._caller_principal, CALLER_HEADER: caller}
+        return vouched_caller_headers(self._caller_principal, caller_required=caller_required)
 
     @asynccontextmanager
     async def stream_link(
@@ -289,12 +291,13 @@ class UpstreamClient:
     ) -> AsyncIterator[httpx2.Response]:
         """GET `link`, a root-relative apis path, and yield the streamed response.
 
-        The first hop goes to the apis origin this client calls, with the auth
-        provider's headers, which win over a header of the same name in `headers`.
-        A 302, 303 or 307 from it is followed once, with `headers` alone. httpx
-        keeps custom headers across a redirect it follows itself, so automatic
-        following would hand the ID token to the signed-URL host. Any other answer,
-        a second redirect included, is yielded as it is.
+        The first hop goes to the apis origin this client calls, with
+        `caller_headers` and the auth provider's headers, which win over a header
+        of the same name in `headers`. A 302, 303 or 307 from it is followed once,
+        with `headers` alone. httpx keeps custom headers across a redirect it
+        follows itself, so automatic following would hand the ID token and the
+        caller principal to the signed-URL host. Any other answer, a second
+        redirect included, is yielded as it is.
 
         Args:
             link: The root-relative path, e.g. an artifact's stable link.
@@ -324,7 +327,9 @@ class UpstreamClient:
             transport=transport, timeout=httpx2.Timeout(timeout_s)
         ) as client:
             response = await client.send(
-                client.build_request("GET", url, headers={**hop_headers, **auth}),
+                client.build_request(
+                    "GET", url, headers={**hop_headers, **self.caller_headers(), **auth}
+                ),
                 stream=True,
             )
             if response.status_code in _LINK_REDIRECT_STATUSES and "Location" in response.headers:
@@ -351,6 +356,7 @@ class UpstreamClient:
         deadline: CallDeadline | None = None,
         headers: Mapping[str, str] | None = None,
         on_sent: Callable[[], None] | None = None,
+        caller_required: bool = False,
     ) -> httpx2.Response:
         """Issue one apis call, retried within a wall-clock budget.
 
@@ -373,11 +379,13 @@ class UpstreamClient:
                 leaves, and the surface probe is clipped to it, or skipped
                 once it has passed. `None` bounds the call by the retry budget
                 alone.
-            headers: Headers sent on every attempt beside the auth provider's,
-                which win over a header of the same name.
+            headers: Headers sent on every attempt beside `caller_headers` and
+                the auth provider's, which win over a header of the same name.
             on_sent: Called each time an attempt's request body has been
                 written to the connection (`httpcore`'s `send_request_body`
                 trace event), before any response is read.
+            caller_required: The door names the caller an allowance counts
+                against, as the exports prepare does (`caller_headers`).
 
         Returns:
             The 2xx `httpx2.Response`.
@@ -396,7 +404,11 @@ class UpstreamClient:
             auth = dict(await self._auth()) if self._auth else {}
         except ApisAuthError as exc:
             raise UpstreamAuthUnavailable(detail=f"no dfo-apis ID token: {exc}") from exc
-        sent_headers = {**(headers or {}), **auth}
+        sent_headers = {
+            **(headers or {}),
+            **self.caller_headers(caller_required=caller_required),
+            **auth,
+        }
         # The budget bounds retrying, not one attempt a caller asked for.
         # Mint's 125s exceeds the 120s budget and must survive it.
         call_budget_s = max(self._retry_budget_s, attempt_timeout)

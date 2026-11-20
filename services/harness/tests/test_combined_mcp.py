@@ -98,6 +98,7 @@ from harness.settings import (
 from mcp import MCPError
 from mcp import types as mt
 from mcp.client import advertise
+from mcp.server import _streamable_http_modern as streamable_http_modern
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from mcp_types import INTERNAL_ERROR, INVALID_PARAMS
 from opentelemetry import trace as otel_trace
@@ -117,6 +118,7 @@ from presentation_mcp.platform_contract import (
 from presentation_mcp.projection import ROWLESS_NOTICE, UNKNOWN_HOST_ROWLESS_NOTICE
 from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic import ValidationError as PydanticValidationError
+from sse_starlette import EventSourceResponse
 from starlette.applications import Starlette
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -704,7 +706,7 @@ async def test_the_renderer_page_reads_through_the_combined_server(
         *["combined mcp call resource outcome=ok"] * 2,
     ]
     assert " uri=" not in logged[0]
-    assert [message.split(" uri=")[1] for message in logged[1:]] == [
+    assert [message.split(" uri=")[1].rsplit(" user_agent=", 1)[0] for message in logged[1:]] == [
         json.dumps(uri) for uri in uris
     ]
 
@@ -737,7 +739,7 @@ async def test_a_resource_reads_query_and_fragment_stay_out_of_the_request_log(
         for r in caplog.records
         if r.name == "harness.combined_mcp" and r.getMessage().startswith("combined mcp call")
     ]
-    assert logged.endswith(" uri=" + json.dumps("dfo://artifact"))
+    assert logged.rsplit(" user_agent=", 1)[0].endswith(" uri=" + json.dumps("dfo://artifact"))
     assert "secret" not in logged
 
 
@@ -1820,9 +1822,8 @@ LIMIT_S = 0.5
 _CLIENT_TIMEOUT_S = 10
 
 _ARTIFACT_URI = f"dfo://artifact/spec_{'5' * 32}/cv_1/sha256:{'1' * 64}"
-# A spec the definition store does not hold, and apis' registry answer for it
-# (`GET /api/datasets/{id}/options`), which a public `get_data` reads to choose the
-# type columns it always asks for.
+# A spec the definition store does not hold, which a public `get_data` mints on the
+# registry-fallback path.
 _UNSTORED_IDENTITY = {
     "identity_version": "spec1",
     "shape": {"id": "LimitTestShape", "kind": "stat_var"},
@@ -1832,23 +1833,17 @@ _UNSTORED_IDENTITY = {
     "slots": [],
 }
 _UNSTORED_SPEC = spec_id_for(canonicalize(_UNSTORED_IDENTITY))
-_REGISTRY_DEFINITION = {
-    "definition": {"schema_version": 1, "spec_id": _UNSTORED_SPEC, "identity": _UNSTORED_IDENTITY}
-}
 
 
 class _StalledUpstream:
-    """apis holding every request but a registry read until `release` is set,
-    recording the path of each request whose wait was cancelled. Once released,
-    it answers 400."""
+    """apis holding every request until `release` is set, recording the path of each
+    request whose wait was cancelled. Once released, it answers 400."""
 
     def __init__(self) -> None:
         self.release = asyncio.Event()
         self.cancelled: list[str] = []
 
     async def handler(self, request: httpx2.Request) -> httpx2.Response:
-        if request.url.path.endswith("/options"):
-            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
         try:
             await self.release.wait()
         except asyncio.CancelledError:
@@ -2051,8 +2046,6 @@ async def test_get_data_refuses_on_its_own_deadline_before_the_limit_stops_it(
                 - poll_time_left_s
             )
             return httpx2.Response(202, json={"operation": operation})
-        if request.url.path.endswith("/options"):
-            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
         assert request.url.path == operation["poll"]
         return httpx2.Response(200, json={"operation": operation})
 
@@ -2081,6 +2074,51 @@ async def test_get_data_refuses_on_its_own_deadline_before_the_limit_stops_it(
     else:
         assert _envelope(result)["code"] == "operation_still_processing"
         assert answered_after < limit_s
+
+
+async def test_an_address_caller_reaches_dfo_apis_with_its_surface_and_user_agent(
+    running_lifespan: Callable[..., Any],
+) -> None:
+    """The caller, surface and User-Agent a client sends to `/mcp/` arrive at
+    dfo-apis beside the principal."""
+    caller = "ip:" + "ab" * 16
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        if request.url.path.endswith("/options"):
+            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
+        return httpx2.Response(400)
+
+    client_holder.set_client(
+        UpstreamClient(
+            settings=DataMcpSettings(dfo_caller_principal="principal-secret"),
+            transport=httpx2.MockTransport(handler),
+        )
+    )
+    app = _limited_app()
+    transport = StreamableHttpTransport(
+        url="http://testserver/",
+        auth=TOKEN,
+        headers={"x-dfo-caller": caller, "user-agent": "claude-user/1.0"},
+        httpx_client_factory=cast(
+            McpHttpClientFactory,
+            lambda **kwargs: httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=app), base_url="http://testserver", **kwargs
+            ),
+        ),
+    )
+    try:
+        async with running_lifespan(app), Client(transport, timeout=_CLIENT_TIMEOUT_S) as client:
+            await client.call_tool("get_data", {"spec_id": _UNSTORED_SPEC}, raise_on_error=False)
+    finally:
+        client_holder.set_client(None)
+
+    assert seen
+    for request in seen:
+        assert request.headers["x-dfo-caller"] == caller
+        assert request.headers["x-dfo-surface"] == "mcp"
+        assert request.headers["x-dfo-user-agent"] == "claude-user/1.0"
 
 
 async def _until(condition: Callable[[], bool]) -> None:
@@ -2592,7 +2630,7 @@ async def test_each_call_through_the_combined_server_is_logged(
     transport = StreamableHttpTransport(
         url=f"http://testserver{COMBINED}",
         auth=TOKEN,
-        headers={"x-dfo-caller": "ip:test"},
+        headers={"x-dfo-caller": "ip:test", "user-agent": "claude-user/1.0 (+https://claude.ai)"},
         httpx_client_factory=cast(
             McpHttpClientFactory,
             lambda **kwargs: httpx2.AsyncClient(
@@ -2620,14 +2658,19 @@ async def test_each_call_through_the_combined_server_is_logged(
     # fastmcp's own client names itself `mcp` and declares no MCP Apps extension.
     # A 2025-11-25 client says so on initialize alone.
     host = 'client="mcp" client_version="0.1.0" views=undeclared view_mime_types=None'
-    initialize = [f"combined mcp initialize outcome=ok revision={revision} caller=ip:test {host}"]
+    # Every request carries the user agent, so a 2025-11-25 client's calls, which
+    # log no client, still name it by its whole User-Agent.
+    user_agent = 'user_agent="claude-user/1.0 (+https://claude.ai)"'
+    initialize = [
+        f"combined mcp initialize outcome=ok revision={revision} caller=ip:test {host} {user_agent}"
+    ]
     unseen = "client=None client_version=None views=unknown view_mime_types=None"
     call_host = unseen if revision == "2025-11-25" else host
     assert [re.sub(r"trace_id=[0-9a-f]{32}", "trace_id=<id>", message) for message in messages] == [
         *(initialize if revision == "2025-11-25" else []),
         *(
             f"combined mcp call tool=aggregate outcome={outcome} revision={revision} "
-            f"caller=ip:test trace_id=<id> {call_host}"
+            f"caller=ip:test trace_id=<id> {call_host} {user_agent}"
             for outcome in ("ok", "rendering_not_recorded")
         ),
     ]
@@ -2662,7 +2705,11 @@ async def test_the_request_log_names_the_host_and_what_it_declared_about_views(
     transport = StreamableHttpTransport(
         url=f"http://testserver{COMBINED}",
         auth=TOKEN,
-        headers={"x-dfo-caller": "ip:test", WRITE_TOKEN_HEADER: _HEADER_WRITE_TOKEN},
+        headers={
+            "x-dfo-caller": "ip:test",
+            WRITE_TOKEN_HEADER: _HEADER_WRITE_TOKEN,
+            "user-agent": "Host/2.5",
+        },
         httpx_client_factory=cast(
             McpHttpClientFactory,
             lambda **kwargs: httpx2.AsyncClient(
@@ -2701,18 +2748,28 @@ async def test_the_request_log_names_the_host_and_what_it_declared_about_views(
     )
     unseen = "client=None client_version=None views=unknown view_mime_types=None"
     initialize = [
-        f"combined mcp initialize outcome=ok revision={revision} caller=ip:test {declared}"
+        f"combined mcp initialize outcome=ok revision={revision} caller=ip:test "
+        f'{declared} user_agent="Host/2.5"'
     ]
     call_host = unseen if revision == "2025-11-25" else declared
+    user_agent = 'user_agent="Host/2.5"'
     assert [re.sub(r" trace_id=[0-9a-f]{32}", "", message) for message in messages] == [
         *(initialize if revision == "2025-11-25" else []),
         f"combined mcp call tool=write_component outcome=not_found revision={revision} "
-        f"caller=ip:test {call_host}",
+        f"caller=ip:test {call_host} {user_agent}",
         f"combined mcp call resource outcome=ok revision={revision} caller=ip:test {call_host} "
-        f"uri={json.dumps(presentation_server._RENDERER_URI)}",
+        f"uri={json.dumps(presentation_server._RENDERER_URI)} {user_agent}",
         f"combined mcp call resource outcome=ArtifactRefusalError revision={revision} caller=ip:test "
-        f'{call_host} uri="dfo://artifact"',
+        f'{call_host} uri="dfo://artifact" {user_agent}',
     ]
+    # The dfo-infra log parser (infra/stacks/telemetry/sql/parse_mcp_line.sql, `mcp_line`)
+    # reads these lines into mcp_daily. A line it does not match counts as `unparsed`.
+    # The pattern is copied from that file, with BigQuery's `r'...'` quoting removed.
+    mcp_line = re.compile(
+        r'(?s)^combined mcp (?:call (tool=(?:[A-Za-z0-9_.-]+|"(?:[^"\\]|\\.)*")|resource|resource_list) outcome=(.*?) revision=\S* caller=(.*?) trace_id=\S*|(initialize) outcome=(.*?) revision=\S* caller=(.*?)) client=(None|"(?:[^"\\]|\\.)*") client_version=.*$'
+    )
+    assert messages
+    assert all(mcp_line.match(message) for message in messages)
     logged = "\n".join(
         f"{record.getMessage()} {record.args!r} {record.exc_text or ''}"
         for record in caplog.records
@@ -2802,7 +2859,7 @@ async def test_a_malformed_resource_uri_is_logged_and_the_read_fails_as_usual(
         if r.name == "harness.combined_mcp" and r.getMessage().startswith("combined mcp call")
     ]
     assert line.startswith("combined mcp call resource outcome=ResourceError ")
-    assert line.endswith(f" uri={logged}")
+    assert line.rsplit(" user_agent=", 1)[0].endswith(f" uri={logged}")
     assert "pw" not in line
 
 
@@ -3012,20 +3069,49 @@ def _timing_bodies(app: ASGIApp, sent: list[tuple[float, bytes]]) -> ASGIApp:
     return timed
 
 
+# The ping test's clock runs at this fraction of real time, so a 21 s call
+# takes 5.25 s. The 5 s between the 15 s ping interval and the 20 s deadline
+# scales to 1.25 s, which absorbs scheduler delay under parallel workers.
+_PING_TIME_SCALE = 0.25
+
+
 @REVISIONS
 async def test_a_slow_call_is_kept_alive_with_pings_under_20s_apart(
     mode: str,
     revision: str,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A proxy on the way cuts a response after 100 s without a byte. Both
-    revisions send an SSE ping comment every 15 s while a call runs."""
+    revisions send an SSE ping comment every 15 s while a call runs.
+
+    The deadline, the call and both revisions' ping intervals run at
+    `_PING_TIME_SCALE`: the 2025-11-25 revision's, which each sse-starlette
+    `EventSourceResponse` sets, and the 2026-07-28 revision's, which the SDK's
+    modern transport reads from its module. Each interval is recorded before it
+    is scaled and must sit under the unscaled 20 s. A ping that came from an
+    unscaled interval would arrive long after the scaled call ends."""
+    chosen = [streamable_http_modern._SSE_PING_INTERVAL]
+    monkeypatch.setattr(
+        streamable_http_modern,
+        "_SSE_PING_INTERVAL",
+        streamable_http_modern._SSE_PING_INTERVAL * _PING_TIME_SCALE,
+    )
+    init = EventSourceResponse.__init__
+
+    def scaled_init(self: EventSourceResponse, *args: Any, **kwargs: Any) -> None:
+        init(self, *args, **kwargs)
+        chosen.append(self.ping_interval)
+        self.ping_interval = self.ping_interval * _PING_TIME_SCALE
+
+    monkeypatch.setattr(EventSourceResponse, "__init__", scaled_init)
+    deadline = 20 * _PING_TIME_SCALE
     probe = FastMCP(name="probe")
 
     @probe.tool
     async def slow() -> str:
-        await asyncio.sleep(21)
+        await asyncio.sleep(21 * _PING_TIME_SCALE)
         return "done"
 
     combined = build_combined_mcp(settings=Settings(mcp_api_token=TOKEN))
@@ -3046,9 +3132,10 @@ async def test_a_slow_call_is_kept_alive_with_pings_under_20s_apart(
     pings = [at for at, body in sent if body.startswith(b": ping")]
     marks = [started, *pings, ended]
     assert result.content[0].text == "done"  # shaped: the text alone
-    assert ended - started > 20
+    assert max(chosen) < 20
+    assert ended - started > deadline
     assert pings
-    assert max(later - earlier for earlier, later in pairwise(marks)) < 20
+    assert max(later - earlier for earlier, later in pairwise(marks)) < deadline
 
 
 async def test_the_combined_server_refuses_an_unauthenticated_request(

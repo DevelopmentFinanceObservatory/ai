@@ -87,6 +87,7 @@ from analysis_mcp.identity import (
     op_spec_hash_for,
 )
 from analysis_mcp.op_spec import OpSpecAdapter
+from common.caller import shared_work_context
 from common.live_apis import FramePair, LiveApisClient, LiveApisError
 from common.materialisation import (
     FrameExpired,
@@ -386,6 +387,7 @@ class _Replay:
         apis: LiveApisClient,
         row_budget: RowBudget,
         execution_identity: ExecutionIdentity | None,
+        surface: str,
     ) -> None:
         self.tree = tree
         self.roots = roots
@@ -395,6 +397,7 @@ class _Replay:
         self.apis = apis
         self.row_budget = row_budget
         self.execution_identity = execution_identity
+        self.surface = surface
         self.root_frames: list[_Frame] = []
         # By each root's new pair: the options its mint sent, and the options the
         # stored recipe recorded for it.
@@ -622,7 +625,13 @@ class _Replay:
             return self.root_frames[node["root"]]
         key = rfc8785.dumps(node).decode()
         if key not in self._nodes:
-            self._nodes[key] = asyncio.create_task(self._derived(node))
+            # Every slot reaching the node joins this task, so it names no
+            # caller or turn, only the replay's surface: neither its in-process
+            # dfo-apis calls nor its MCP calls, whose clients read the shared
+            # surface through `harness.conversation.current_caller_turn`.
+            self._nodes[key] = asyncio.create_task(
+                self._derived(node), context=shared_work_context(surface=self.surface)
+            )
         return await self._nodes[key]
 
     async def _derived(self, node: Mapping[str, Any]) -> _Frame:
@@ -884,6 +893,7 @@ async def replay_recipe(
     apis: LiveApisClient,
     publish: PublishFrame,
     row_budget: RowBudget,
+    surface: str,
     populations: Sequence[Mapping[str, Any]] | None = None,
     mint_root: MintRoot = mint_recorded_root,
     mint_budget: CallBudget = EXTERNAL_CALL_BUDGET,
@@ -911,6 +921,11 @@ async def replay_recipe(
             `Pending`, and one larger than the whole budget is refused
             `rows_over_refresh_budget`. The tools claim from the process-wide
             budget as well.
+        surface: The surface the replay serves, one of
+            `common.caller.SHARED_SURFACES`, which its derived nodes' dfo-apis
+            calls name with no caller (`common.caller.shared_work_context`):
+            `studio` for a Studio card, `website` for a share the website
+            refreshes.
         populations: Replaces the populations every rolling op-spec carries, for a
             card whose selection counts other series. The replayed recipe then has
             another `normal_form_hash`. Refused for a recipe with no rolling period.
@@ -941,6 +956,7 @@ async def replay_recipe(
             apis=apis,
             row_budget=row_budget,
             execution_identity=await runner_execution_identity(apis),
+            surface=surface,
         )
         return await _replayed(
             recipe,

@@ -1,23 +1,44 @@
-"""One held MCP `Client` per caller, and the transport that names the caller.
+"""One held MCP `Client` per caller and turn, and the transport that names them.
 
 Every MCP call the harness makes carries its caller in the `x-dfo-caller`
 header (`common.caller`): `conversation:<digest>` for a call made inside a
-studio conversation, none outside one. A header is fixed when the transport
-is built, so a client belongs to one caller. `CallerClients` holds one
-client per caller and is the one registry both call paths use:
+studio conversation, none outside one. A call made inside a Studio turn also
+carries the turn's wire trace id in the `x-dfo-turn` header, which the MCP
+servers forward to dfo-apis (`common.caller.vouched_caller_headers`). A call
+made for shared work names no caller and carries the surface the work serves in
+the `x-dfo-surface` header, which the MCP servers forward to dfo-apis. A header
+is fixed when the transport is built, so a client belongs to one caller, one
+turn and one surface (`CallerTurn`): a client kept into the next turn would
+name the turn before it on every call. `CallerClients` holds one client per
+caller, turn and surface and is the one registry both call paths use:
 `harness.mcp_client` (`search`, `get_data`, `describe` and the presentation
 tools) and `compiler.surface.McpSurface` (the analysis verbs and the
 translator's discovery calls). This module lives in `compiler` because
 `harness` imports `compiler` and not the reverse; which caller is current is
 a function the harness passes in.
 
-A held client for a whole conversation is the reuse `fastmcp.Client` is
-built for (its docstring: "efficient session reuse in any scenario with
-nested or concurrent client usage"), and it saves the connect round trips a
-fresh client pays on every call.
+A held client for a whole turn is the reuse `fastmcp.Client` is built for
+(its docstring: "efficient session reuse in any scenario with nested or
+concurrent client usage"), and it saves the connect round trips a fresh
+client pays on every call. A turn pays one connect per registry it calls on,
+and each registry reconnects on every turn: a turn that searches, fetches and
+aggregates pays about four, since data-mcp alone has three registries
+(`harness.mcp_client.McpResolver` for `search`, `harness.mcp_client.McpExecutor`
+for `get_data`, and `McpSurface`'s data-mcp source) and analysis-mcp adds one.
 
-Nothing in this process observes a conversation ending, so the registry is
-an LRU bounded at `MAX_CALLERS` held clients, the same bound
+The registry tracks each party's latest turn, a party being a caller and a
+surface (`CallerTurn.party`): the newest turn `get()` has seen for it, among
+the last `RECENT_TURNS`. A turn id is random, so the order `get()` first sees
+turns in is the only order there is. The latest turn's connect retires the
+party's clients of older turns and disconnects them in a task of its own
+(`CallerClients._retire`), so the new turn's call neither waits on nor fails
+with that disconnect. Caller-less clients of different surfaces, such as a
+Studio replay's and a call outside any shared work, are separate parties, so
+neither retires the other. A connect for an older
+turn, such as an early mint the turn before queued and sent late, retires
+nothing, so it never cuts the latest turn's client. Nothing in this process
+observes a conversation ending, so the registry is also an LRU bounded at
+`MAX_CALLERS` held clients, the same bound
 `harness.provenance.ProvenanceStore` puts on its conversation buckets.
 
 ADK can dispatch a turn's tool calls concurrently, so two calls can be in
@@ -34,10 +55,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Callable
+from typing import Any, NamedTuple
 
-from common.caller import CALLER_HEADER
+from common.caller import CALLER_HEADER, SURFACE_HEADER, TURN_HEADER
 from common.mcp_telemetry import is_loopback_url
 from common.telemetry import turn_call_meta
 from fastmcp import Client
@@ -47,26 +69,68 @@ logger = logging.getLogger(__name__)
 
 MAX_CALLERS = 256
 
+# The turns a caller's order is kept for. A call from a turn older than these
+# counts as a new turn. An early mint is withdrawn once its card is approved or
+# replaced, so none outlives one later turn, let alone this many.
+RECENT_TURNS = 8
 
-def caller_transport(url: str, *, caller: str | None, auth: str | None) -> StreamableHttpTransport:
-    """A streamable-HTTP transport to `url` that sends `caller` on every request.
+
+class CallerTurn(NamedTuple):
+    """Whom an MCP call is made for: the caller, the Studio turn it serves, and
+    for shared work, the surface the work serves.
+
+    `caller=None` is a call outside any conversation. `turn=None` is a call
+    outside any Studio turn. `surface=None` is a call outside shared work; a
+    surface counts only beside `caller=None`.
+    """
+
+    caller: str | None
+    turn: str | None = None
+    surface: str | None = None
+
+    @property
+    def party(self) -> tuple[str | None, str | None]:
+        """Whom the call is made for apart from its turn: the caller and the
+        surface. A party's latest turn retires its clients of older turns."""
+        return self.caller, self.surface
+
+
+def caller_transport(
+    url: str,
+    *,
+    caller: str | None,
+    auth: str | None,
+    turn: str | None = None,
+    surface: str | None = None,
+) -> StreamableHttpTransport:
+    """A streamable-HTTP transport to `url` that sends `caller`, `turn` and
+    `surface` on every request.
 
     `caller=None` sends no `x-dfo-caller` header, which the server reads as
-    no caller. `auth` is the bearer token, `None` when the gate is disabled.
+    no caller, and `turn=None` no `x-dfo-turn` header. `surface` goes out as the
+    `x-dfo-surface` header only beside no caller, for shared work
+    (`common.caller.current_shared_surface`). `auth` is the bearer token,
+    `None` when the gate is disabled.
     """
-    headers = {CALLER_HEADER: caller} if caller is not None else {}
+    headers: dict[str, str] = {}
+    if caller is not None:
+        headers[CALLER_HEADER] = caller
+    elif surface is not None:
+        headers[SURFACE_HEADER] = surface
+    if turn is not None:
+        headers[TURN_HEADER] = turn
     return StreamableHttpTransport(url, headers=headers, auth=auth)
 
 
-def session_call_meta(client: Client) -> dict[str, str]:
-    """The `_meta` for a `call_tool` on `client`: the turn's Langfuse session
-    (`common.telemetry.turn_call_meta`) when `client` reaches a loopback HTTP
-    URL, `{}` otherwise.
+def session_call_meta(client: Client) -> dict[str, Any]:
+    """The `_meta` for a `call_tool` on `client`: the turn's Langfuse session,
+    user and tags (`common.telemetry.turn_call_meta`) when `client` reaches a
+    loopback HTTP URL, `{}` otherwise.
 
-    Only a mount in this process honours the session
+    Only a mount in this process honours them
     (`common.mcp_telemetry.LangfuseSessionMiddleware`). A client at another
-    host, or one with no HTTP transport (in-memory), sends none, so the
-    conversation id does not leave the process.
+    host, or one with no HTTP transport (in-memory), sends none, so none of
+    the three leaves the process.
     """
     transport = getattr(client, "transport", None)
     if isinstance(transport, StreamableHttpTransport) and is_loopback_url(transport.url):
@@ -75,7 +139,8 @@ def session_call_meta(client: Client) -> dict[str, str]:
 
 
 class _HeldClient:
-    """One caller's held client and the bookkeeping that guards its teardown.
+    """One caller and turn's held client and the bookkeeping that guards its
+    teardown.
 
     `in_flight` counts the calls between `CallerClients.get` and
     `CallerClients.release` on this client; while it is above zero nothing
@@ -85,7 +150,7 @@ class _HeldClient:
 
     __slots__ = ("caller", "client", "discarded", "in_flight")
 
-    def __init__(self, client: Client, *, caller: str | None) -> None:
+    def __init__(self, client: Client, *, caller: CallerTurn) -> None:
         self.client = client
         self.caller = caller
         self.in_flight = 0
@@ -93,32 +158,39 @@ class _HeldClient:
 
 
 class CallerClients:
-    """One connected `Client` per caller, opened on first use and held until
-    `aclose` or LRU eviction.
+    """One connected `Client` per caller and turn, opened on first use and held
+    until a later turn of the caller connects, `aclose`, or LRU eviction.
 
-    `factory` builds the client for a caller; it runs at most once per
-    caller while that caller's client is held. `caller` returns the current
-    caller, and is read on every `get()`.
+    `factory` builds the client for a `CallerTurn`; it runs at most once per
+    caller and turn while that client is held. `caller` returns the current
+    `CallerTurn`, and is read on every `get()`.
     """
 
     def __init__(
-        self, factory: Callable[[str | None], Client], *, caller: Callable[[], str | None]
+        self, factory: Callable[[CallerTurn], Client], *, caller: Callable[[], CallerTurn]
     ) -> None:
         self._factory = factory
         self._caller = caller
         # Least recently used first; `get()` moves a caller to the end.
-        self._clients: OrderedDict[str | None, _HeldClient] = OrderedDict()
-        # The connect in progress for each caller that has no held client yet.
-        self._connecting: dict[str | None, asyncio.Task[None]] = {}
+        self._clients: OrderedDict[CallerTurn, _HeldClient] = OrderedDict()
+        # The connect in progress for each caller and turn that has no held
+        # client yet.
+        self._connecting: dict[CallerTurn, asyncio.Task[None]] = {}
         # A held client stays here, keyed by `id(client)`, after `discard()`
         # or eviction removes it from `_clients`, so a straggling `release()`
         # still finds it even when its caller already holds a fresh client.
         self._by_client_id: dict[int, _HeldClient] = {}
+        # Each party's (`CallerTurn.party`) last `RECENT_TURNS` turns in the
+        # order `get()` first saw them, the latest last; least recently used
+        # party first.
+        self._turns: OrderedDict[tuple[str | None, str | None], deque[str | None]] = OrderedDict()
         self._lock = asyncio.Lock()
+        # The disconnects `_retire` runs in the background, held until each ends.
+        self._retiring: set[asyncio.Task[None]] = set()
 
     async def get(self) -> Client:
-        """The current caller's client, connecting it on the caller's first
-        call, with this call counted as one of its in-flight users.
+        """The current `CallerTurn`'s client, connecting it on that caller and
+        turn's first call, with this call counted as one of its in-flight users.
 
         Concurrent calls from one caller share the returned client;
         `fastmcp.Client` supports concurrent `call_tool`s on one connection.
@@ -126,6 +198,8 @@ class CallerClients:
         `get()` tries again.
         """
         caller = self._caller()
+        async with self._lock:
+            self._note_turn_locked(caller)
         while True:
             async with self._lock:
                 held = self._clients.get(caller)
@@ -143,11 +217,34 @@ class CallerClients:
             # discarded in between.
             await asyncio.shield(connecting)
 
-    async def _connect(self, caller: str | None) -> None:
+    def _note_turn_locked(self, caller: CallerTurn) -> None:
+        """Record `caller.turn` as its party's latest turn when it is one the
+        party's recent turns do not hold. Runs with `_lock` held."""
+        turns = self._turns.get(caller.party)
+        if turns is None:
+            turns = self._turns[caller.party] = deque(maxlen=RECENT_TURNS)
+        self._turns.move_to_end(caller.party)
+        if caller.turn not in turns:
+            turns.append(caller.turn)
+        while len(self._turns) > MAX_CALLERS:
+            self._turns.popitem(last=False)
+
+    def _is_latest_locked(self, caller: CallerTurn) -> bool:
+        """Whether `caller.turn` is its party's latest turn. A party whose turns
+        were dropped past `MAX_CALLERS` counts its turn as latest. Runs with
+        `_lock` held."""
+        turns = self._turns.get(caller.party)
+        return not turns or turns[-1] == caller.turn
+
+    async def _connect(self, caller: CallerTurn) -> None:
         """Connect `caller`'s client and hold it, evicting past `MAX_CALLERS`.
+        When `caller.turn` is its party's latest turn, the party's clients of
+        older turns are retired.
 
         The client becomes held in the same step that retires the connect,
-        so a waiter always finds one or the other.
+        so a waiter always finds one or the other. A retired client with no
+        in-flight call is disconnected in the background (`_retire`); one with
+        a call in flight is disconnected once its last call releases it.
         """
         try:
             client = self._factory(caller)
@@ -161,6 +258,15 @@ class CallerClients:
             held = _HeldClient(client, caller=caller)
             self._clients[caller] = held
             self._by_client_id[id(client)] = held
+            superseded = (
+                [key for key in self._clients if key.party == caller.party and key != caller]
+                if self._is_latest_locked(caller)
+                else []
+            )
+            for key in superseded:
+                retired = self._clients.pop(key)
+                if self._mark_discarded_locked(retired):
+                    to_disconnect.append(retired)
             while len(self._clients) > MAX_CALLERS:
                 evicted_caller, evicted = self._clients.popitem(last=False)
                 logger.warning(
@@ -170,8 +276,16 @@ class CallerClients:
                 )
                 if self._mark_discarded_locked(evicted):
                     to_disconnect.append(evicted)
-        for evicted in to_disconnect:
-            await evicted.client.__aexit__(None, None, None)
+        for retired in to_disconnect:
+            self._retire(retired.client)
+
+    def _retire(self, client: Client) -> None:
+        """Disconnect `client` in a task of its own, which logs and swallows a
+        failed disconnect. fastmcp can wait seconds on a session's end, and
+        the connect that retires `client` serves another turn's call."""
+        task = asyncio.create_task(_disconnect_quietly(client))
+        self._retiring.add(task)
+        task.add_done_callback(self._retiring.discard)
 
     async def release(self, client: Client) -> None:
         """Release one hold on `client` taken by `get()`, disconnecting it
@@ -220,7 +334,8 @@ class CallerClients:
         """Disconnect every held client, at shutdown.
 
         Does not wait for in-flight calls: shutdown expects none. A connect
-        still in progress is cancelled.
+        still in progress is cancelled, and the background disconnects of
+        retired clients are awaited.
         """
         connecting = list(self._connecting.values())
         for task in connecting:
@@ -230,3 +345,12 @@ class CallerClients:
         self._by_client_id = {}
         for held in held_clients.values():
             await held.client.__aexit__(None, None, None)
+        await asyncio.gather(*self._retiring, return_exceptions=True)
+
+
+async def _disconnect_quietly(client: Client) -> None:
+    """Disconnect `client`, logging rather than raising a failure."""
+    try:
+        await client.__aexit__(None, None, None)
+    except Exception:
+        logger.warning("caller_clients: a retired client failed to disconnect", exc_info=True)

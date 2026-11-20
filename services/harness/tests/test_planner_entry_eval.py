@@ -251,17 +251,20 @@ async def _stalled() -> Any:
     await asyncio.sleep(30)
 
 
+# The wall bounds the whole entry, so only the stalled answer meets a short one.
+# The others refuse at once, and a wall they could reach on a loaded machine
+# would report the wall instead of their refusal.
 @pytest.mark.parametrize(
-    ("answer", "refusal"),
+    ("answer", "wall_s", "refusal"),
     [
-        (_refused_for_now, "refused for now"),
-        (_cut, "ToolSurfaceUnavailableError: search timed out"),
-        (_broken, "RuntimeError: connection reset"),
-        (_stalled, "ran past 0.5 s"),
+        (_refused_for_now, 60.0, "refused for now"),
+        (_cut, 60.0, "ToolSurfaceUnavailableError: search timed out"),
+        (_broken, 60.0, "RuntimeError: connection reset"),
+        (_stalled, 0.5, "ran past 0.5 s"),
     ],
 )
 async def test_a_live_translation_that_cannot_be_replayed_is_not_recorded(
-    answer: Callable[[], Any], refusal: str
+    answer: Callable[[], Any], wall_s: float, refusal: str
 ) -> None:
     entry.quiet_logs()
     task = _task("growth-gdp-kenya")
@@ -270,7 +273,7 @@ async def test_a_live_translation_that_cannot_be_replayed_is_not_recorded(
     client = _LiveClient(answer)
 
     with pytest.raises(recorder.TranslationRecordError) as raised:
-        await recorder._translation_calls(client, task, recording, wall_s=0.5)
+        await recorder._translation_calls(client, task, recording, wall_s=wall_s)
 
     assert raised.value.args[0].startswith("reference: ")
     assert refusal in raised.value.args[0]

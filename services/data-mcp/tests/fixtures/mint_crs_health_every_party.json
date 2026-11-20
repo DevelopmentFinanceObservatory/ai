@@ -1,0 +1,1395 @@
+{
+  "kinds": {
+    "manifest": {
+      "artifacts": [
+        {
+          "artifact_digest": "sha256:4636968d8be8dd45d4f53e87391c53410ece00425c79b4352b12ea00fa47758f",
+          "bytes": 5593,
+          "created_at": "2026-11-18T15:27:44.185827+00:00",
+          "enrichment_stamp": "55887b871f7aa1c5d120cb2bee97086605351d5acfbec645ab027f562d0f65c5",
+          "media_type": "application/vnd.apache.parquet",
+          "rendering": {
+            "bundle": false,
+            "columns": [
+              "party_kind",
+              "party_class",
+              "party_whole"
+            ],
+            "format": "parquet",
+            "groupby": {
+              "by": [
+                "time_period"
+              ],
+              "op": "sum"
+            },
+            "layout": "frame",
+            "without_party_totals": true
+          },
+          "tier": "working",
+          "url": "/api/datasets/spec_6ca2aab1ab3628c60e1541f6dc9af77a/cv_c845626c14ff4630a6952c31a498db26/files/sha256:4636968d8be8dd45d4f53e87391c53410ece00425c79b4352b12ea00fa47758f"
+        },
+        {
+          "artifact_digest": "sha256:1f544ef8156b920f69129b31ac9efcb92be7f5f9aad2e561596ba9a2f754e0cc",
+          "bytes": 6718,
+          "created_at": "2026-11-17T16:07:02.165433+00:00",
+          "media_type": "application/vnd.apache.parquet",
+          "rendering": {
+            "statistics": "series"
+          },
+          "tier": "working",
+          "url": "/api/datasets/spec_6ca2aab1ab3628c60e1541f6dc9af77a/cv_c845626c14ff4630a6952c31a498db26/files/sha256:1f544ef8156b920f69129b31ac9efcb92be7f5f9aad2e561596ba9a2f754e0cc"
+        }
+      ],
+      "citation": {
+        "sources": [
+          {
+            "data_commons": {
+              "id": "dfo",
+              "label": "Development Finance Observatory"
+            },
+            "documentation": {
+              "attribution": "OECD (2026), Creditor Reporting System (CRS), OECD Data Explorer, https://webfs-dcd.oecd.org/files/dotStat/DSD_CRS/CRS.parquet (accessed on 2026-10-15)",
+              "currencies": [
+                "USD"
+              ],
+              "description": "The Creditor Reporting System (CRS) is the OECD Development Assistance Committee's activity-level database of development finance. Each record is a project, programme or contribution reported by a bilateral provider, a multilateral organisation or a private foundation, with its recipient, sector and purpose, channel of delivery, aid type, and commitment and disbursement amounts. It covers ODA, other official flows, private sector instruments and private philanthropy, and is the source for any breakdown by sector, channel or project.",
+              "granularity": "Annual, by provider and recipient",
+              "last_update": "2026-10-29",
+              "publisher": "Organisation for Economic Co-operation and Development (OECD)",
+              "source_data_url": "https://webfs-dcd.oecd.org/files/dotStat/DSD_CRS/CRS.parquet",
+              "transformation_log": [
+                {
+                  "description": "The complete CRS file is downloaded from the OECD each time the pipeline runs, and replaces the previous copy, so the data reflects the OECD's latest release.",
+                  "transformation": "Download the source data"
+                },
+                {
+                  "description": "The OECD publishes data for a year as donors report it, and its final release in December of the following year covers every donor. Until then, the year is partial. The pipeline publishes it, and the import's provenance names it in `partialObservationDate`.",
+                  "transformation": "Mark the partial year"
+                },
+                {
+                  "description": "The OECD instructs that donor core contributions to multilateral organisations, reported as ordinary CRS rows flagged `bi_multi = 2`, are excluded to compute bilateral flows. These contributions are already reported in Members' Total Use of the Multilateral System, so keeping them would double count.",
+                  "transformation": "Exclude donor core contributions to multilaterals"
+                },
+                {
+                  "description": "Provider and recipient codes are standardised to Data Commons IDs used across the platform, so data can be compared across datasets.",
+                  "transformation": "Standardise providers and recipients"
+                },
+                {
+                  "description": "Every figure is reported against the year, the provider and the recipient, and four dimensions from the CRS: type of flow, co-operation modality, type of finance and purpose code. The CRS describes each activity in far more detail than this, including project titles, descriptions, channels and policy markers, none of which is carried through.",
+                  "transformation": "Select dimensions"
+                },
+                {
+                  "description": "Activities sharing the same year, provider, recipient and dimensions are summed. Commitments, disbursements, net disbursements and grant equivalents are each aggregated as separate measures. Every figure is reported in US dollars at current prices.",
+                  "transformation": "Aggregate totals"
+                }
+              ],
+              "update_cadence": "Quarterly",
+              "version_history": [
+                {
+                  "changes": [
+                    {
+                      "kind": "changed",
+                      "note": "The partial year, which only some donors have reported ahead of the OECD's final release in December, is included, and the import's provenance marks it with `partialObservationDate`."
+                    }
+                  ],
+                  "date": "2026-10-29",
+                  "title": "Partial year published, marked as partial"
+                },
+                {
+                  "changes": [
+                    {
+                      "kind": "changed",
+                      "note": "The partial year, which only some donors have reported ahead of the OECD's final release in December, is excluded."
+                    }
+                  ],
+                  "date": "2026-10-15",
+                  "title": "Partial year excluded"
+                },
+                {
+                  "changes": [
+                    {
+                      "kind": "added",
+                      "note": "Commitments, gross and net disbursements, and grant equivalents by donor, recipient, flow type, finance type, modality and purpose, at current US dollar prices. Covers ODA, other official flows, private development finance and private sector instruments."
+                    }
+                  ],
+                  "date": "2026-10-14",
+                  "title": "First release"
+                }
+              ],
+              "years_covered": "1973-2025"
+            },
+            "label": "OECD Creditor Reporting System (CRS)",
+            "licence": "OECD Terms and Conditions",
+            "licence_type": "OECDTermsAndConditions",
+            "licence_url": "https://www.oecd.org/en/about/terms-conditions.html",
+            "license": "OECD Terms and Conditions",
+            "license_type": "OECDTermsAndConditions",
+            "license_url": "https://www.oecd.org/en/about/terms-conditions.html",
+            "ref": "provenance/OECDCreditorReportingSystem",
+            "source": {
+              "label": "Organisation for Economic Co-operation and Development (OECD)",
+              "ref": "dc/s/OrganisationForEconomicCo-operationAndDevelopmentOecd"
+            },
+            "url": "https://data-explorer.oecd.org/vis?tm=crs&pg=0&snb=30&df[ds]=dsDisseminateFinalDMZ&df[id]=DSD_CRS%40DF_CRS&df[ag]=OECD.DCD.FSD&df[vs]=1.6&isAvailabilityDisabled=false&page=0"
+          }
+        ],
+        "text": "OECD Creditor Reporting System (CRS) (2026), processed by the Development Finance Observatory"
+      },
+      "content_version": "cv_c845626c14ff4630a6952c31a498db26",
+      "coverage": {
+        "dimensions": [
+          {
+            "axis": "origin",
+            "count": 3,
+            "label": "financingProvider",
+            "noun": {
+              "plural": "providers",
+              "singular": "provider"
+            }
+          },
+          {
+            "axis": "destination",
+            "count": 43,
+            "label": "financingRecipient",
+            "noun": {
+              "plural": "recipients",
+              "singular": "recipient"
+            }
+          },
+          {
+            "count": 1,
+            "label": "years"
+          }
+        ],
+        "rows": 45,
+        "window": {
+          "end_year": 2025,
+          "kind": "range",
+          "origin": "query",
+          "start_year": 2025
+        }
+      },
+      "definition": {
+        "identity": {
+          "entities": {},
+          "identity_version": "spec1",
+          "requested_window": {
+            "end_year": 2025,
+            "kind": "range",
+            "start_year": 2025
+          },
+          "shape": {
+            "kind": "statvar_schema",
+            "measured_property": "amount",
+            "measurement_qualifier": "Nominal",
+            "population_type": "FinancialFlow",
+            "stat_type": "measuredValue"
+          },
+          "slots": [
+            {
+              "binding": {
+                "state": "unbound"
+              },
+              "property": "crsCooperationModality"
+            },
+            {
+              "binding": {
+                "refs": [
+                  "CRSPurposeCode120",
+                  "CRSPurposeCode130"
+                ],
+                "state": "set"
+              },
+              "property": "crsPurpose"
+            },
+            {
+              "binding": {
+                "state": "unbound"
+              },
+              "property": "crsTypeOfFinance"
+            },
+            {
+              "binding": {
+                "ref": "CRSTypeOfFlow10",
+                "state": "value"
+              },
+              "property": "crsTypeOfFlow"
+            },
+            {
+              "binding": {
+                "ref": "Disbursement",
+                "state": "value"
+              },
+              "property": "financialFlowType"
+            },
+            {
+              "binding": {
+                "ref": "Gross",
+                "state": "value"
+              },
+              "property": "nettingBasis"
+            }
+          ]
+        },
+        "schema_version": 1,
+        "spec_id": "spec_6ca2aab1ab3628c60e1541f6dc9af77a"
+      },
+      "diagnostics": [
+        {
+          "code": "processing_level_undeclared",
+          "message": "A source StatVar lacks a processing-level declaration; the citation credits the source and omits the processing qualifier.",
+          "severity": "info"
+        }
+      ],
+      "output_options": {
+        "bundle": {
+          "state": "available"
+        },
+        "capability_version": "dset_af2827aa39ed8c0d",
+        "columns": [
+          {
+            "distinct": 1,
+            "droppable": false,
+            "kind": "grain",
+            "name": "stat_var"
+          },
+          {
+            "distinct": 3,
+            "droppable": false,
+            "kind": "role",
+            "name": "financingProvider"
+          },
+          {
+            "distinct": 43,
+            "droppable": false,
+            "kind": "role",
+            "name": "financingRecipient"
+          },
+          {
+            "distinct": 1,
+            "droppable": false,
+            "kind": "grain",
+            "name": "time_period"
+          },
+          {
+            "droppable": true,
+            "kind": "value",
+            "name": "value"
+          },
+          {
+            "distinct": 1,
+            "droppable": false,
+            "kind": "unit",
+            "name": "unit"
+          },
+          {
+            "distinct": 1,
+            "droppable": true,
+            "kind": "facet",
+            "name": "measurementMethod"
+          },
+          {
+            "distinct": 1,
+            "droppable": false,
+            "kind": "facet",
+            "name": "provenance"
+          },
+          {
+            "droppable": true,
+            "kind": "status",
+            "name": "status"
+          }
+        ],
+        "enrichments": [
+          {
+            "column": "financingProvider",
+            "coverage": {
+              "covered": 2,
+              "entities": 3
+            },
+            "field": "iso3",
+            "in_long_layout": false,
+            "missing": [
+              {
+                "label": "Nordic Development Fund",
+                "ref": "NordicDevelopmentFund"
+              }
+            ],
+            "reason": "enrichment_unavailable",
+            "state": "partial",
+            "token": "financingProvider_iso3",
+            "truncated": false
+          },
+          {
+            "column": "financingProvider",
+            "coverage": {
+              "covered": 2,
+              "entities": 3
+            },
+            "field": "iso2",
+            "in_long_layout": false,
+            "missing": [
+              {
+                "label": "Nordic Development Fund",
+                "ref": "NordicDevelopmentFund"
+              }
+            ],
+            "reason": "enrichment_unavailable",
+            "state": "partial",
+            "token": "financingProvider_iso2",
+            "truncated": false
+          },
+          {
+            "column": "financingProvider",
+            "coverage": {
+              "covered": 3,
+              "entities": 3
+            },
+            "field": "label",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingProvider_label",
+            "truncated": false
+          },
+          {
+            "column": "financingProvider",
+            "coverage": {
+              "covered": 3,
+              "entities": 3
+            },
+            "field": "type",
+            "in_long_layout": false,
+            "missing": [],
+            "state": "available",
+            "token": "financingProvider_type",
+            "truncated": false
+          },
+          {
+            "column": "financingProvider",
+            "coverage": {
+              "covered": 3,
+              "entities": 3
+            },
+            "field": "party_kind",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingProvider_party_kind",
+            "truncated": false
+          },
+          {
+            "column": "financingProvider",
+            "coverage": {
+              "covered": 3,
+              "entities": 3
+            },
+            "field": "party_class",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingProvider_party_class",
+            "truncated": false
+          },
+          {
+            "column": "financingProvider",
+            "coverage": {
+              "covered": 3,
+              "entities": 3
+            },
+            "field": "party_whole",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingProvider_party_whole",
+            "truncated": false
+          },
+          {
+            "column": "financingRecipient",
+            "coverage": {
+              "covered": 37,
+              "entities": 43
+            },
+            "field": "iso3",
+            "in_long_layout": false,
+            "missing": [
+              {
+                "label": "Africa, unallocated by country (DAC)",
+                "ref": "DACAfricaUnallocated"
+              },
+              {
+                "label": "Bilateral, unallocated (DAC)",
+                "ref": "DACBilateralUnallocated"
+              },
+              {
+                "label": "Eastern Africa, unallocated by country (DAC)",
+                "ref": "DACEasternAfricaUnallocated"
+              },
+              {
+                "label": "Europe, unallocated by country (DAC)",
+                "ref": "DACEuropeUnallocated"
+              },
+              {
+                "label": "Middle East, unallocated by country (DAC)",
+                "ref": "DACMiddleEastUnallocated"
+              },
+              {
+                "label": "South of Sahara, unallocated by country (DAC)",
+                "ref": "DACSouthOfSaharaUnallocated"
+              }
+            ],
+            "reason": "enrichment_unavailable",
+            "state": "partial",
+            "token": "financingRecipient_iso3",
+            "truncated": false
+          },
+          {
+            "column": "financingRecipient",
+            "coverage": {
+              "covered": 36,
+              "entities": 43
+            },
+            "field": "iso2",
+            "in_long_layout": false,
+            "missing": [
+              {
+                "label": "Africa, unallocated by country (DAC)",
+                "ref": "DACAfricaUnallocated"
+              },
+              {
+                "label": "Bilateral, unallocated (DAC)",
+                "ref": "DACBilateralUnallocated"
+              },
+              {
+                "label": "Eastern Africa, unallocated by country (DAC)",
+                "ref": "DACEasternAfricaUnallocated"
+              },
+              {
+                "label": "Europe, unallocated by country (DAC)",
+                "ref": "DACEuropeUnallocated"
+              },
+              {
+                "label": "Middle East, unallocated by country (DAC)",
+                "ref": "DACMiddleEastUnallocated"
+              },
+              {
+                "label": "South of Sahara, unallocated by country (DAC)",
+                "ref": "DACSouthOfSaharaUnallocated"
+              },
+              {
+                "label": "Kosovo",
+                "ref": "country/XKS"
+              }
+            ],
+            "reason": "enrichment_unavailable",
+            "state": "partial",
+            "token": "financingRecipient_iso2",
+            "truncated": false
+          },
+          {
+            "column": "financingRecipient",
+            "coverage": {
+              "covered": 43,
+              "entities": 43
+            },
+            "field": "label",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingRecipient_label",
+            "truncated": false
+          },
+          {
+            "column": "financingRecipient",
+            "coverage": {
+              "covered": 43,
+              "entities": 43
+            },
+            "field": "type",
+            "in_long_layout": false,
+            "missing": [],
+            "state": "available",
+            "token": "financingRecipient_type",
+            "truncated": false
+          },
+          {
+            "column": "financingRecipient",
+            "coverage": {
+              "covered": 43,
+              "entities": 43
+            },
+            "field": "party_kind",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingRecipient_party_kind",
+            "truncated": false
+          },
+          {
+            "column": "financingRecipient",
+            "coverage": {
+              "covered": 43,
+              "entities": 43
+            },
+            "field": "party_class",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingRecipient_party_class",
+            "truncated": false
+          },
+          {
+            "column": "financingRecipient",
+            "coverage": {
+              "covered": 43,
+              "entities": 43
+            },
+            "field": "party_whole",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingRecipient_party_whole",
+            "truncated": false
+          }
+        ],
+        "formats": [
+          {
+            "name": "csv",
+            "state": "available"
+          },
+          {
+            "name": "xlsx",
+            "state": "available"
+          },
+          {
+            "name": "parquet",
+            "state": "available"
+          }
+        ],
+        "groupby": {
+          "axes": [
+            {
+              "name": "crsCooperationModality"
+            },
+            {
+              "name": "crsPurpose"
+            },
+            {
+              "name": "crsTypeOfFinance"
+            },
+            {
+              "name": "crsTypeOfFlow"
+            }
+          ],
+          "state": "available"
+        },
+        "long_layout_defaults": [
+          "financingProvider_label",
+          "financingProvider_kind",
+          "financingRecipient_label",
+          "financingRecipient_kind"
+        ],
+        "long_layout_totals": [],
+        "pivots": [
+          {
+            "cells": 132,
+            "columns": "financingRecipient",
+            "index": "financingProvider",
+            "state": "available",
+            "width": 44
+          },
+          {
+            "cells": 172,
+            "columns": "financingProvider",
+            "index": "financingRecipient",
+            "state": "available",
+            "width": 4
+          }
+        ]
+      },
+      "prepared_at": "2026-11-17T16:07:01Z",
+      "retention": {
+        "held_until": "2026-12-17T16:07:02.164599Z",
+        "pinned": false
+      },
+      "schema_version": 1,
+      "series_count": 45,
+      "series_coverage_stamp": "3fc663ca92067f4b0d56adce180c668c78e4ac0ba753bbd4a3282a5027b37ac9",
+      "trace": {
+        "applied_window": {
+          "end_year": 2025,
+          "kind": "range",
+          "origin": "query",
+          "start_year": 2025
+        },
+        "capability_version": "dset_af2827aa39ed8c0d",
+        "code_index_stamp": {
+          "content_hash": "67ac7cd46934db547fd7f333667503a7cec1dd0423a6085eb532c7ef57deb4c9",
+          "exported_at": "2026-11-16T09:12:54Z",
+          "graph_endpoint": "graph_release"
+        },
+        "confirmed_at": "2026-11-18T15:20:43.109775+00:00",
+        "facets": [
+          {
+            "axis": "provenance",
+            "basis": "deployment_fallback",
+            "default_policy": "dfo/facet-policy/most-observations",
+            "default_policy_version": "1",
+            "dispatch_facet_id": "3734627990144800868",
+            "ref": "provenance/OECDCreditorReportingSystem",
+            "selection_reason": "sole_candidate"
+          },
+          {
+            "axis": "unit",
+            "basis": "deployment_fallback",
+            "default_policy": "dfo/facet-policy/most-observations",
+            "default_policy_version": "1",
+            "dispatch_facet_id": "3734627990144800868",
+            "ref": "CurrencyUSD",
+            "selection_reason": "sole_candidate"
+          }
+        ],
+        "family_member_count": 377,
+        "family_member_digest": "88a41b68398c5303d2cb6976d22846ca6599adcf3cc7c1917c41f26f38beec1b",
+        "frame_grammar_version": "1.2.0",
+        "graph_revision": "dfo-dev-dc-datacommons-service-00292-njf",
+        "materialiser_build": "0a051f154eaf8563757c6237ebdd6977a4a78ca1",
+        "normalisations": [],
+        "origin_catalogue_build_id": "20261116T000018Z-367c42b6",
+        "resolved_stat_vars": [
+          {
+            "observation_count": 0,
+            "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode12110_Nominal",
+            "roles": [
+              "financingProvider",
+              "financingRecipient"
+            ]
+          },
+          {
+            "observation_count": 0,
+            "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode12181_Nominal",
+            "roles": [
+              "financingProvider",
+              "financingRecipient"
+            ]
+          }
+        ],
+        "served_from": "head",
+        "source_revisions": [
+          {
+            "revision": "2026-10-29",
+            "source": "provenance/OECDCreditorReportingSystem"
+          }
+        ]
+      },
+      "warnings": []
+    },
+    "options": {
+      "bundle": false,
+      "columns": [
+        "party_kind",
+        "party_class",
+        "party_whole"
+      ],
+      "format": "parquet",
+      "groupby": {
+        "by": [
+          "time_period"
+        ],
+        "op": "sum"
+      },
+      "layout": "frame",
+      "without_party_totals": true
+    }
+  },
+  "plain": {
+    "manifest": {
+      "artifacts": [
+        {
+          "artifact_digest": "sha256:e8b5a7d3577f1f53c004a8f1e36d34835ed1419e3ace6d3f8a3386ccd0dd4f87",
+          "bytes": 3624,
+          "created_at": "2026-11-17T16:07:02.165433+00:00",
+          "media_type": "application/vnd.apache.parquet",
+          "rendering": {
+            "bundle": false,
+            "format": "parquet",
+            "groupby": {
+              "by": [
+                "time_period"
+              ],
+              "op": "sum"
+            },
+            "layout": "frame"
+          },
+          "tier": "working",
+          "url": "/api/datasets/spec_6ca2aab1ab3628c60e1541f6dc9af77a/cv_c845626c14ff4630a6952c31a498db26/files/sha256:e8b5a7d3577f1f53c004a8f1e36d34835ed1419e3ace6d3f8a3386ccd0dd4f87"
+        },
+        {
+          "artifact_digest": "sha256:1f544ef8156b920f69129b31ac9efcb92be7f5f9aad2e561596ba9a2f754e0cc",
+          "bytes": 6718,
+          "created_at": "2026-11-17T16:07:02.165433+00:00",
+          "media_type": "application/vnd.apache.parquet",
+          "rendering": {
+            "statistics": "series"
+          },
+          "tier": "working",
+          "url": "/api/datasets/spec_6ca2aab1ab3628c60e1541f6dc9af77a/cv_c845626c14ff4630a6952c31a498db26/files/sha256:1f544ef8156b920f69129b31ac9efcb92be7f5f9aad2e561596ba9a2f754e0cc"
+        }
+      ],
+      "citation": {
+        "sources": [
+          {
+            "data_commons": {
+              "id": "dfo",
+              "label": "Development Finance Observatory"
+            },
+            "documentation": {
+              "attribution": "OECD (2026), Creditor Reporting System (CRS), OECD Data Explorer, https://webfs-dcd.oecd.org/files/dotStat/DSD_CRS/CRS.parquet (accessed on 2026-10-15)",
+              "currencies": [
+                "USD"
+              ],
+              "description": "The Creditor Reporting System (CRS) is the OECD Development Assistance Committee's activity-level database of development finance. Each record is a project, programme or contribution reported by a bilateral provider, a multilateral organisation or a private foundation, with its recipient, sector and purpose, channel of delivery, aid type, and commitment and disbursement amounts. It covers ODA, other official flows, private sector instruments and private philanthropy, and is the source for any breakdown by sector, channel or project.",
+              "granularity": "Annual, by provider and recipient",
+              "last_update": "2026-10-29",
+              "publisher": "Organisation for Economic Co-operation and Development (OECD)",
+              "source_data_url": "https://webfs-dcd.oecd.org/files/dotStat/DSD_CRS/CRS.parquet",
+              "transformation_log": [
+                {
+                  "description": "The complete CRS file is downloaded from the OECD each time the pipeline runs, and replaces the previous copy, so the data reflects the OECD's latest release.",
+                  "transformation": "Download the source data"
+                },
+                {
+                  "description": "The OECD publishes data for a year as donors report it, and its final release in December of the following year covers every donor. Until then, the year is partial. The pipeline publishes it, and the import's provenance names it in `partialObservationDate`.",
+                  "transformation": "Mark the partial year"
+                },
+                {
+                  "description": "The OECD instructs that donor core contributions to multilateral organisations, reported as ordinary CRS rows flagged `bi_multi = 2`, are excluded to compute bilateral flows. These contributions are already reported in Members' Total Use of the Multilateral System, so keeping them would double count.",
+                  "transformation": "Exclude donor core contributions to multilaterals"
+                },
+                {
+                  "description": "Provider and recipient codes are standardised to Data Commons IDs used across the platform, so data can be compared across datasets.",
+                  "transformation": "Standardise providers and recipients"
+                },
+                {
+                  "description": "Every figure is reported against the year, the provider and the recipient, and four dimensions from the CRS: type of flow, co-operation modality, type of finance and purpose code. The CRS describes each activity in far more detail than this, including project titles, descriptions, channels and policy markers, none of which is carried through.",
+                  "transformation": "Select dimensions"
+                },
+                {
+                  "description": "Activities sharing the same year, provider, recipient and dimensions are summed. Commitments, disbursements, net disbursements and grant equivalents are each aggregated as separate measures. Every figure is reported in US dollars at current prices.",
+                  "transformation": "Aggregate totals"
+                }
+              ],
+              "update_cadence": "Quarterly",
+              "version_history": [
+                {
+                  "changes": [
+                    {
+                      "kind": "changed",
+                      "note": "The partial year, which only some donors have reported ahead of the OECD's final release in December, is included, and the import's provenance marks it with `partialObservationDate`."
+                    }
+                  ],
+                  "date": "2026-10-29",
+                  "title": "Partial year published, marked as partial"
+                },
+                {
+                  "changes": [
+                    {
+                      "kind": "changed",
+                      "note": "The partial year, which only some donors have reported ahead of the OECD's final release in December, is excluded."
+                    }
+                  ],
+                  "date": "2026-10-15",
+                  "title": "Partial year excluded"
+                },
+                {
+                  "changes": [
+                    {
+                      "kind": "added",
+                      "note": "Commitments, gross and net disbursements, and grant equivalents by donor, recipient, flow type, finance type, modality and purpose, at current US dollar prices. Covers ODA, other official flows, private development finance and private sector instruments."
+                    }
+                  ],
+                  "date": "2026-10-14",
+                  "title": "First release"
+                }
+              ],
+              "years_covered": "1973-2025"
+            },
+            "label": "OECD Creditor Reporting System (CRS)",
+            "licence": "OECD Terms and Conditions",
+            "licence_type": "OECDTermsAndConditions",
+            "licence_url": "https://www.oecd.org/en/about/terms-conditions.html",
+            "license": "OECD Terms and Conditions",
+            "license_type": "OECDTermsAndConditions",
+            "license_url": "https://www.oecd.org/en/about/terms-conditions.html",
+            "ref": "provenance/OECDCreditorReportingSystem",
+            "source": {
+              "label": "Organisation for Economic Co-operation and Development (OECD)",
+              "ref": "dc/s/OrganisationForEconomicCo-operationAndDevelopmentOecd"
+            },
+            "url": "https://data-explorer.oecd.org/vis?tm=crs&pg=0&snb=30&df[ds]=dsDisseminateFinalDMZ&df[id]=DSD_CRS%40DF_CRS&df[ag]=OECD.DCD.FSD&df[vs]=1.6&isAvailabilityDisabled=false&page=0"
+          }
+        ],
+        "text": "OECD Creditor Reporting System (CRS) (2026), processed by the Development Finance Observatory"
+      },
+      "content_version": "cv_c845626c14ff4630a6952c31a498db26",
+      "coverage": {
+        "dimensions": [
+          {
+            "axis": "origin",
+            "count": 3,
+            "label": "financingProvider",
+            "noun": {
+              "plural": "providers",
+              "singular": "provider"
+            }
+          },
+          {
+            "axis": "destination",
+            "count": 43,
+            "label": "financingRecipient",
+            "noun": {
+              "plural": "recipients",
+              "singular": "recipient"
+            }
+          },
+          {
+            "count": 1,
+            "label": "years"
+          }
+        ],
+        "rows": 45,
+        "window": {
+          "end_year": 2025,
+          "kind": "range",
+          "origin": "query",
+          "start_year": 2025
+        }
+      },
+      "definition": {
+        "identity": {
+          "entities": {},
+          "identity_version": "spec1",
+          "requested_window": {
+            "end_year": 2025,
+            "kind": "range",
+            "start_year": 2025
+          },
+          "shape": {
+            "kind": "statvar_schema",
+            "measured_property": "amount",
+            "measurement_qualifier": "Nominal",
+            "population_type": "FinancialFlow",
+            "stat_type": "measuredValue"
+          },
+          "slots": [
+            {
+              "binding": {
+                "state": "unbound"
+              },
+              "property": "crsCooperationModality"
+            },
+            {
+              "binding": {
+                "refs": [
+                  "CRSPurposeCode120",
+                  "CRSPurposeCode130"
+                ],
+                "state": "set"
+              },
+              "property": "crsPurpose"
+            },
+            {
+              "binding": {
+                "state": "unbound"
+              },
+              "property": "crsTypeOfFinance"
+            },
+            {
+              "binding": {
+                "ref": "CRSTypeOfFlow10",
+                "state": "value"
+              },
+              "property": "crsTypeOfFlow"
+            },
+            {
+              "binding": {
+                "ref": "Disbursement",
+                "state": "value"
+              },
+              "property": "financialFlowType"
+            },
+            {
+              "binding": {
+                "ref": "Gross",
+                "state": "value"
+              },
+              "property": "nettingBasis"
+            }
+          ]
+        },
+        "schema_version": 1,
+        "spec_id": "spec_6ca2aab1ab3628c60e1541f6dc9af77a"
+      },
+      "diagnostics": [
+        {
+          "code": "processing_level_undeclared",
+          "message": "A source StatVar lacks a processing-level declaration; the citation credits the source and omits the processing qualifier.",
+          "severity": "info"
+        }
+      ],
+      "output_options": {
+        "bundle": {
+          "state": "available"
+        },
+        "capability_version": "dset_af2827aa39ed8c0d",
+        "columns": [
+          {
+            "distinct": 1,
+            "droppable": false,
+            "kind": "grain",
+            "name": "stat_var"
+          },
+          {
+            "distinct": 3,
+            "droppable": false,
+            "kind": "role",
+            "name": "financingProvider"
+          },
+          {
+            "distinct": 43,
+            "droppable": false,
+            "kind": "role",
+            "name": "financingRecipient"
+          },
+          {
+            "distinct": 1,
+            "droppable": false,
+            "kind": "grain",
+            "name": "time_period"
+          },
+          {
+            "droppable": true,
+            "kind": "value",
+            "name": "value"
+          },
+          {
+            "distinct": 1,
+            "droppable": false,
+            "kind": "unit",
+            "name": "unit"
+          },
+          {
+            "distinct": 1,
+            "droppable": true,
+            "kind": "facet",
+            "name": "measurementMethod"
+          },
+          {
+            "distinct": 1,
+            "droppable": false,
+            "kind": "facet",
+            "name": "provenance"
+          },
+          {
+            "droppable": true,
+            "kind": "status",
+            "name": "status"
+          }
+        ],
+        "enrichments": [
+          {
+            "column": "financingProvider",
+            "coverage": {
+              "covered": 2,
+              "entities": 3
+            },
+            "field": "iso3",
+            "in_long_layout": false,
+            "missing": [
+              {
+                "label": "Nordic Development Fund",
+                "ref": "NordicDevelopmentFund"
+              }
+            ],
+            "reason": "enrichment_unavailable",
+            "state": "partial",
+            "token": "financingProvider_iso3",
+            "truncated": false
+          },
+          {
+            "column": "financingProvider",
+            "coverage": {
+              "covered": 2,
+              "entities": 3
+            },
+            "field": "iso2",
+            "in_long_layout": false,
+            "missing": [
+              {
+                "label": "Nordic Development Fund",
+                "ref": "NordicDevelopmentFund"
+              }
+            ],
+            "reason": "enrichment_unavailable",
+            "state": "partial",
+            "token": "financingProvider_iso2",
+            "truncated": false
+          },
+          {
+            "column": "financingProvider",
+            "coverage": {
+              "covered": 3,
+              "entities": 3
+            },
+            "field": "label",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingProvider_label",
+            "truncated": false
+          },
+          {
+            "column": "financingProvider",
+            "coverage": {
+              "covered": 3,
+              "entities": 3
+            },
+            "field": "type",
+            "in_long_layout": false,
+            "missing": [],
+            "state": "available",
+            "token": "financingProvider_type",
+            "truncated": false
+          },
+          {
+            "column": "financingProvider",
+            "coverage": {
+              "covered": 3,
+              "entities": 3
+            },
+            "field": "party_kind",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingProvider_party_kind",
+            "truncated": false
+          },
+          {
+            "column": "financingProvider",
+            "coverage": {
+              "covered": 3,
+              "entities": 3
+            },
+            "field": "party_class",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingProvider_party_class",
+            "truncated": false
+          },
+          {
+            "column": "financingProvider",
+            "coverage": {
+              "covered": 3,
+              "entities": 3
+            },
+            "field": "party_whole",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingProvider_party_whole",
+            "truncated": false
+          },
+          {
+            "column": "financingRecipient",
+            "coverage": {
+              "covered": 37,
+              "entities": 43
+            },
+            "field": "iso3",
+            "in_long_layout": false,
+            "missing": [
+              {
+                "label": "Africa, unallocated by country (DAC)",
+                "ref": "DACAfricaUnallocated"
+              },
+              {
+                "label": "Bilateral, unallocated (DAC)",
+                "ref": "DACBilateralUnallocated"
+              },
+              {
+                "label": "Eastern Africa, unallocated by country (DAC)",
+                "ref": "DACEasternAfricaUnallocated"
+              },
+              {
+                "label": "Europe, unallocated by country (DAC)",
+                "ref": "DACEuropeUnallocated"
+              },
+              {
+                "label": "Middle East, unallocated by country (DAC)",
+                "ref": "DACMiddleEastUnallocated"
+              },
+              {
+                "label": "South of Sahara, unallocated by country (DAC)",
+                "ref": "DACSouthOfSaharaUnallocated"
+              }
+            ],
+            "reason": "enrichment_unavailable",
+            "state": "partial",
+            "token": "financingRecipient_iso3",
+            "truncated": false
+          },
+          {
+            "column": "financingRecipient",
+            "coverage": {
+              "covered": 36,
+              "entities": 43
+            },
+            "field": "iso2",
+            "in_long_layout": false,
+            "missing": [
+              {
+                "label": "Africa, unallocated by country (DAC)",
+                "ref": "DACAfricaUnallocated"
+              },
+              {
+                "label": "Bilateral, unallocated (DAC)",
+                "ref": "DACBilateralUnallocated"
+              },
+              {
+                "label": "Eastern Africa, unallocated by country (DAC)",
+                "ref": "DACEasternAfricaUnallocated"
+              },
+              {
+                "label": "Europe, unallocated by country (DAC)",
+                "ref": "DACEuropeUnallocated"
+              },
+              {
+                "label": "Middle East, unallocated by country (DAC)",
+                "ref": "DACMiddleEastUnallocated"
+              },
+              {
+                "label": "South of Sahara, unallocated by country (DAC)",
+                "ref": "DACSouthOfSaharaUnallocated"
+              },
+              {
+                "label": "Kosovo",
+                "ref": "country/XKS"
+              }
+            ],
+            "reason": "enrichment_unavailable",
+            "state": "partial",
+            "token": "financingRecipient_iso2",
+            "truncated": false
+          },
+          {
+            "column": "financingRecipient",
+            "coverage": {
+              "covered": 43,
+              "entities": 43
+            },
+            "field": "label",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingRecipient_label",
+            "truncated": false
+          },
+          {
+            "column": "financingRecipient",
+            "coverage": {
+              "covered": 43,
+              "entities": 43
+            },
+            "field": "type",
+            "in_long_layout": false,
+            "missing": [],
+            "state": "available",
+            "token": "financingRecipient_type",
+            "truncated": false
+          },
+          {
+            "column": "financingRecipient",
+            "coverage": {
+              "covered": 43,
+              "entities": 43
+            },
+            "field": "party_kind",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingRecipient_party_kind",
+            "truncated": false
+          },
+          {
+            "column": "financingRecipient",
+            "coverage": {
+              "covered": 43,
+              "entities": 43
+            },
+            "field": "party_class",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingRecipient_party_class",
+            "truncated": false
+          },
+          {
+            "column": "financingRecipient",
+            "coverage": {
+              "covered": 43,
+              "entities": 43
+            },
+            "field": "party_whole",
+            "in_long_layout": true,
+            "missing": [],
+            "state": "available",
+            "token": "financingRecipient_party_whole",
+            "truncated": false
+          }
+        ],
+        "formats": [
+          {
+            "name": "csv",
+            "state": "available"
+          },
+          {
+            "name": "xlsx",
+            "state": "available"
+          },
+          {
+            "name": "parquet",
+            "state": "available"
+          }
+        ],
+        "groupby": {
+          "axes": [
+            {
+              "name": "crsCooperationModality"
+            },
+            {
+              "name": "crsPurpose"
+            },
+            {
+              "name": "crsTypeOfFinance"
+            },
+            {
+              "name": "crsTypeOfFlow"
+            }
+          ],
+          "state": "available"
+        },
+        "long_layout_defaults": [
+          "financingProvider_label",
+          "financingProvider_kind",
+          "financingRecipient_label",
+          "financingRecipient_kind"
+        ],
+        "long_layout_totals": [],
+        "pivots": [
+          {
+            "cells": 132,
+            "columns": "financingRecipient",
+            "index": "financingProvider",
+            "state": "available",
+            "width": 44
+          },
+          {
+            "cells": 172,
+            "columns": "financingProvider",
+            "index": "financingRecipient",
+            "state": "available",
+            "width": 4
+          }
+        ]
+      },
+      "prepared_at": "2026-11-17T16:07:01Z",
+      "retention": {
+        "held_until": "2026-12-17T16:07:02.164599Z",
+        "pinned": false
+      },
+      "schema_version": 1,
+      "series_count": 45,
+      "series_coverage_stamp": "3fc663ca92067f4b0d56adce180c668c78e4ac0ba753bbd4a3282a5027b37ac9",
+      "trace": {
+        "applied_window": {
+          "end_year": 2025,
+          "kind": "range",
+          "origin": "query",
+          "start_year": 2025
+        },
+        "capability_version": "dset_af2827aa39ed8c0d",
+        "code_index_stamp": {
+          "content_hash": "67ac7cd46934db547fd7f333667503a7cec1dd0423a6085eb532c7ef57deb4c9",
+          "exported_at": "2026-11-16T09:12:54Z",
+          "graph_endpoint": "graph_release"
+        },
+        "confirmed_at": "2026-11-18T15:20:43.109775+00:00",
+        "facets": [
+          {
+            "axis": "provenance",
+            "basis": "deployment_fallback",
+            "default_policy": "dfo/facet-policy/most-observations",
+            "default_policy_version": "1",
+            "dispatch_facet_id": "3734627990144800868",
+            "ref": "provenance/OECDCreditorReportingSystem",
+            "selection_reason": "sole_candidate"
+          },
+          {
+            "axis": "unit",
+            "basis": "deployment_fallback",
+            "default_policy": "dfo/facet-policy/most-observations",
+            "default_policy_version": "1",
+            "dispatch_facet_id": "3734627990144800868",
+            "ref": "CurrencyUSD",
+            "selection_reason": "sole_candidate"
+          }
+        ],
+        "family_member_count": 377,
+        "family_member_digest": "88a41b68398c5303d2cb6976d22846ca6599adcf3cc7c1917c41f26f38beec1b",
+        "frame_grammar_version": "1.2.0",
+        "graph_revision": "dfo-dev-dc-datacommons-service-00292-njf",
+        "materialiser_build": "0a051f154eaf8563757c6237ebdd6977a4a78ca1",
+        "normalisations": [],
+        "origin_catalogue_build_id": "20261116T000018Z-367c42b6",
+        "resolved_stat_vars": [
+          {
+            "observation_count": 0,
+            "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode12110_Nominal",
+            "roles": [
+              "financingProvider",
+              "financingRecipient"
+            ]
+          },
+          {
+            "observation_count": 0,
+            "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode12181_Nominal",
+            "roles": [
+              "financingProvider",
+              "financingRecipient"
+            ]
+          }
+        ],
+        "served_from": "head",
+        "source_revisions": [
+          {
+            "revision": "2026-10-29",
+            "source": "provenance/OECDCreditorReportingSystem"
+          }
+        ]
+      },
+      "warnings": []
+    },
+    "options": {
+      "bundle": false,
+      "format": "parquet",
+      "groupby": {
+        "by": [
+          "time_period"
+        ],
+        "op": "sum"
+      },
+      "layout": "frame"
+    }
+  }
+}

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from compiler.surface import McpSurface
 
-from harness.conversation import current_conversation_caller
+from harness.conversation import current_caller_turn
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.settings import Settings
 
@@ -35,9 +35,9 @@ def build_tool_surface(*, settings: Settings) -> McpSurface:
     tool, `get_data` included, which only matters against a transport slower
     than an in-memory one.
 
-    Calls carry the current conversation's caller, as `harness.mcp_client`'s
-    do, so a verb the executor runs names the same conversation as the
-    `get_data` before it.
+    Calls carry the current conversation's caller and Studio turn, as
+    `harness.mcp_client`'s do, so a verb the executor runs names the same
+    conversation and turn as the `get_data` before it.
     """
     policy = McpTimeoutPolicy(settings=settings)
     return McpSurface(
@@ -46,5 +46,5 @@ def build_tool_surface(*, settings: Settings) -> McpSurface:
         default_call_timeout_s=policy.default_call_timeout_s,
         list_timeout_s=policy.list_timeout_s,
         init_timeout_s=policy.init_timeout_s,
-        caller=current_conversation_caller,
+        caller=current_caller_turn,
     )

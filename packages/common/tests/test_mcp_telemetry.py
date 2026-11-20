@@ -25,7 +25,7 @@ from common.mcp_telemetry import (
     LangfuseToolIoMiddleware,
     is_loopback_url,
 )
-from common.telemetry import SESSION_META_KEY
+from common.telemetry import SESSION_META_KEY, TAGS_META_KEY, USER_META_KEY
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import fastmcp_request_ctx
 from fastmcp.tools import ToolResult
@@ -34,15 +34,20 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from starlette.requests import Request
 
+extras: list[dict[str, Any]] = []
+
 
 @pytest.fixture
 def entered(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
-    """The session id of every `use_call_session` the middleware enters."""
+    """The session id of every `use_call_session` the middleware enters. The
+    user and tags it was given go to the module-level `extras`."""
     sessions: list[str | None] = []
+    extras.clear()
 
     @contextmanager
-    def record(session_id: str | None) -> Iterator[None]:
+    def record(session_id: str | None, **attributes: Any) -> Iterator[None]:
         sessions.append(session_id)
+        extras.append(attributes)
         yield
 
     monkeypatch.setattr(mcp_telemetry, "use_call_session", record)
@@ -79,6 +84,18 @@ async def test_a_loopback_request_with_a_session_runs_the_call_inside_that_sessi
         assert await _call(LangfuseSessionMiddleware()) == ["tool"]
 
     assert entered == ["conv-1"]
+    assert extras == [{}]
+
+
+async def test_a_loopback_request_with_a_user_and_tags_passes_them_on(
+    entered: list[str | None],
+) -> None:
+    meta = {SESSION_META_KEY: "conv-1", USER_META_KEY: "u-1", TAGS_META_KEY: ["studio"]}
+    with _request(scope={LOOPBACK_SCOPE_KEY: True}, meta=meta):
+        await _call(LangfuseSessionMiddleware())
+
+    assert entered == ["conv-1"]
+    assert extras == [{"user_id": "u-1", "tags": ["studio"]}]
 
 
 @pytest.mark.parametrize(

@@ -103,6 +103,7 @@ class Services:
                 apis=client,
                 publish=self.assembler.publish_frame,
                 row_budget=RowBudget(max_rows=100_000),
+                surface="studio",
             )
 
     def called(self, name: str) -> list[dict[str, Any]]:
