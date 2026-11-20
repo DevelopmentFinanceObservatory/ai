@@ -293,9 +293,9 @@ async def _close_on_error(
     lost, so the turn is read back (`_read_back`). A close that committed
     ends as one that returned. A turn another write closed ends on its
     stored outcome, with `error` reported all the same: the node failed,
-    whoever closed the turn, while a write that raised and finds the turn
-    closed by another reports nothing, since no node failed
-    (`_after_failed_write`, `_settle_answer`). A turn still open, or one
+    whoever closed the turn, unless a cut is pending. A write that raised
+    and finds the turn closed by another reports nothing, since no node
+    failed (`_after_failed_write`, `_settle_answer`). A turn still open, or one
     that cannot be read, is left as last written, running or paused, for a
     Stop or the conversation's next turn to close: the segment ends
     `unclosed` and `error` is reported. The close and the read are steps of
@@ -572,8 +572,13 @@ async def _after_failed_write(
     failure is reported whoever closed the turn (`_close_on_error`). A read
     back that fails, or an open turn another write moved, is left as stored:
     the segment ends `unclosed` and reports `error`, as when a close cannot
-    be written. A cut pending raises with `segment.writing` still held,
-    which the segment settles on."""
+    be written. That includes a write that landed and that another segment
+    then wrote over, under a lease that lapsed, before the read back: the
+    stored turn no longer holds the write, so its boundary is not reported.
+    A pause the store confirmed by its transaction's status
+    (`TurnStore.pause`) has written its `paused` line all the same. A cut
+    pending raises with `segment.writing` still held, which the segment
+    settles on."""
     writing = segment.writing
     assert writing is not None
 

@@ -84,7 +84,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -94,7 +94,7 @@ from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.db.best_effort import bounded_read
-from harness.db.commit import committing
+from harness.db.commit import committing, transaction_committed
 from harness.db.jsonb import json_or_none, to_json_param
 from harness.provenance import (
     CardLineageDecodeError,
@@ -391,8 +391,8 @@ def _cursor(row: Any, record_count: int, specs: _StoredSpecs) -> Cursor:
 
 
 _FENCE = text(
-    "SELECT id FROM conversations WHERE id = :conversation "
-    "AND lease_segment_id = :segment_id FOR SHARE"
+    "SELECT id, pg_current_xact_id()::text AS xact FROM conversations "
+    "WHERE id = :conversation AND lease_segment_id = :segment_id FOR SHARE"
 )
 _FENCE_BY_KEY = text(
     "SELECT id FROM conversations WHERE principal = :principal "
@@ -570,10 +570,16 @@ async def _records(conn: AsyncConnection, turn: int) -> list[AgentRecord]:
     return [AgentRecord(agent=row.agent, kind=row.kind, body=row.body) for row in rows]
 
 
-async def _fence(conn: AsyncConnection, conversation: int, segment_id: str) -> None:
-    held = await conn.execute(_FENCE, {"conversation": conversation, "segment_id": segment_id})
-    if held.first() is None:
+async def _fence(conn: AsyncConnection, conversation: int, segment_id: str) -> str:
+    """Refuse unless `segment_id` holds the conversation's lease, and return
+    the id of the transaction `conn` runs, for a read back of its COMMIT
+    (`TurnStore._read_back`)."""
+    held = (
+        await conn.execute(_FENCE, {"conversation": conversation, "segment_id": segment_id})
+    ).first()
+    if held is None:
         raise SegmentLost(f"segment {segment_id!r} does not hold the conversation's lease")
+    return held.xact
 
 
 async def _swap(
@@ -631,6 +637,12 @@ _SETTLE = text("SELECT 1 FROM turn_cursors WHERE id = :id FOR SHARE")
 # each of its statements runs. A write whose connection dropped before its
 # COMMIT reached the server can hold the lock until the server notices.
 SETTLE_TIMEOUT_S = 2.0
+
+# The longest a pause whose COMMIT raised reads its transaction's status
+# (`TurnStore.pause`), counted from when the driver let go of the COMMIT's
+# connection. A cut waits for it, so it stays well inside the lease margin a
+# lost lease leaves (`harness.studio_store.LEASE_MARGIN_S`, 10 s).
+PAUSE_READ_BACK_LIMIT_S = 2.0
 
 
 class TurnStore:
@@ -1110,7 +1122,16 @@ class TurnStore:
         The commit and it run in one task to the end
         (`harness.db.commit.committing`), so a cut of the caller during the
         commit cannot land the pause without it. A cut before the commit
-        rolls the write back, and a commit that raises runs nothing after it.
+        rolls the write back. A COMMIT that raises is confirmed by its
+        transaction's status (`_read_back`), read for up to
+        `PAUSE_READ_BACK_LIMIT_S` from when the driver let go of the
+        COMMIT's connection: one that committed runs `committed`, and
+        the COMMIT's error is raised all the same, so the caller judges the
+        pause by the turn as stored (`harness.turn.loop`), which another
+        segment may have written over since. A cut of the caller while the
+        COMMIT is awaited is passed into it, so the cut waits for the driver
+        to let go of the cancelled connection, which takes as long as the
+        server takes to answer the cancel, and then for that read.
 
         Raises:
             SegmentLost: `segment_id` does not hold the conversation's lease.
@@ -1118,9 +1139,10 @@ class TurnStore:
             WriteNotEncoded: JSON cannot hold a value of the write.
         """
         write = self._lineage_rows(cursor, state, lineage)
+        xacts: list[str] = []
 
         async def pausing(conn: AsyncConnection) -> Callable[[], Cursor]:
-            await _fence(conn, cursor.conversation, segment_id)
+            xacts.append(await _fence(conn, cursor.conversation, segment_id))
             paused = await _swap(
                 conn,
                 cursor,
@@ -1151,7 +1173,13 @@ class TurnStore:
 
             return landed
 
-        paused = await committing(self._engine.begin(), pausing)
+        paused = await committing(
+            self._engine.begin(),
+            pausing,
+            read_back=self._read_back(xacts, cursor),
+            forward_cut=True,
+            raise_confirmed=True,
+        )
         if lineage is not None:
             lineage.written.update(write.generations)
         return paused
@@ -1242,6 +1270,39 @@ class TurnStore:
                 now=datetime.fromtimestamp(self._clock(), UTC),
             )
         return closed
+
+    def _read_back(self, xacts: list[str], cursor: Cursor) -> Callable[[], Awaitable[bool]]:
+        """The read back of a pause from `cursor` whose COMMIT raised:
+        whether the write's transaction, the one `xacts` names once the
+        write fenced, committed (`harness.db.commit.transaction_committed`,
+        reading `_xact_status` for up to `PAUSE_READ_BACK_LIMIT_S`)."""
+
+        async def read_back() -> bool:
+            if not xacts:
+                return False
+            landed = await transaction_committed(
+                lambda: self._xact_status(xacts[0]),
+                what=f"turn {cursor.id}'s pause",
+                limit_s=PAUSE_READ_BACK_LIMIT_S,
+            )
+            if landed:
+                logger.warning(
+                    "turn %s: the pause committed; its acknowledgement was lost", cursor.id
+                )
+            return landed
+
+        return read_back
+
+    async def _xact_status(self, xact: str) -> str | None:
+        """The status Postgres holds for transaction `xact`: `committed`,
+        `aborted`, `in progress`, or `None` once it is too old to tell."""
+        async with self._engine.begin() as conn:
+            return (
+                await conn.execute(
+                    text("SELECT pg_xact_status(CAST(CAST(:xact AS text) AS xid8))"),
+                    {"xact": xact},
+                )
+            ).scalar_one()
 
 
 async def finish_on(

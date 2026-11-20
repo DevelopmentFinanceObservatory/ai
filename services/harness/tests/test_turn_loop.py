@@ -1860,6 +1860,116 @@ async def test_a_cut_reports_no_node_done_for_a_move_another_segment_wrote(
     assert events == []
 
 
+class _PauseLandsThenOverwritten:
+    """An engine whose first `begin` commits, then has segment B take the
+    conversation's lease, answer the pause and pause again on `int-b`, and
+    raises as a lost acknowledgement does. With `renew_now`, it then asks
+    the heartbeat to renew at once, which finds the lease taken and cuts the
+    segment, and waits up to 0.5 s for that cut, which reaches the COMMIT
+    (`harness.db.commit.committing`). Everything else is `engine`'s."""
+
+    def __init__(self, engine: AsyncEngine, *, renew_now: asyncio.Event | None) -> None:
+        self._engine = engine
+        self._renew_now = renew_now
+        self._first = True
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine, name)
+
+    def begin(self) -> Any:
+        if not self._first:
+            return self._engine.begin()
+        self._first = False
+        return self._overwritten()
+
+    @contextlib.asynccontextmanager
+    async def _overwritten(self) -> Any:
+        async with self._engine.begin() as conn:
+            yield conn
+        async with self._engine.begin() as conn:
+            await conn.execute(text("UPDATE conversations SET lease_segment_id = 'segment-b'"))
+        other = TurnStore(self._engine)
+        paused = await _open_cursor(other)
+        assert paused.pause is not None
+        running = await other.record_answer(
+            paused,
+            segment_id="segment-b",
+            interrupt_id=paused.pause.interrupt_id,
+            round=paused.pause.round,
+            answer={},
+        )
+        await other.pause(
+            running,
+            segment_id="segment-b",
+            node="work",
+            node_input=None,
+            kind="ask",
+            interrupt_id="int-b",
+            payload={},
+            state=running.state,
+            lineage=None,
+        )
+        if self._renew_now is not None:
+            self._renew_now.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(0.5)
+        raise ConnectionResetError("the pause's acknowledgement was lost")
+
+
+@pytest.mark.parametrize("cut", ["lost", "none"])
+async def test_a_pause_another_segment_wrote_over_reports_no_paused(
+    pg_engine: AsyncEngine, clock: StoreClock, cut: str
+) -> None:
+    """`work`'s pause lands with its acknowledgement lost, and segment B
+    then takes the lease, answers it and pauses on another interrupt. The
+    store confirms the pause by its transaction's status, so the `paused`
+    hook hears it once, and the turn as stored decides what the segment
+    reports. With the lease then lost, the segment settles on B's pause and
+    emits no `Paused`. With no cut, the write's error ends the segment
+    `unclosed`, as for any open turn another write moved, with no `Paused`.
+    The heartbeat renews only when asked."""
+    lease = await _instance(pg_engine, clock)
+    segment_id = await _claim(lease)
+    graph = _boundary_graph("pause", [])
+    store = TurnStore(pg_engine)
+    opened = await _open(store, segment_id, graph)
+    renew_now = asyncio.Event()
+    store._engine = _PauseLandsThenOverwritten(  # type: ignore[assignment] -- the pause goes through it
+        pg_engine, renew_now=renew_now if cut == "lost" else None
+    )
+    events: list[TurnEvent] = []
+    noted: list[Cursor] = []
+    segment = await asyncio.wait_for(
+        run_segment(
+            store,
+            lease,
+            opened,
+            principal=PRINCIPAL,
+            conversation_id=CONVERSATION,
+            segment_id=segment_id,
+            graph=graph,
+            emit=events.append,
+            heartbeat_seconds=3600,
+            renew_now=renew_now,
+            paused=noted.append,
+        ),
+        5,
+    )
+
+    [heard] = noted
+    assert heard.pause is not None and heard.pause.interrupt_id != "int-b"
+    assert not [event for event in events if isinstance(event, Paused)]
+    stored = await TurnStore(pg_engine).turn(opened.id)
+    assert stored.written_by == "segment-b"
+    assert stored.pause is not None and stored.pause.interrupt_id == "int-b"
+    if cut == "lost":
+        assert (segment.outcome, events) == (Outcome.PAUSED, [])
+        return
+    assert segment.outcome is Outcome.UNCLOSED
+    [failed] = events
+    assert isinstance(failed, TurnFailed) and isinstance(failed.error, ConnectionResetError)
+
+
 class _ReadBackFails(TurnStore):
     """A `TurnStore` whose `settled_turn` reads fail once `failing` is set,
     as a database the lease was lost to is unreachable for the read back."""
@@ -2105,10 +2215,11 @@ async def _side_engine(pg_engine: AsyncEngine) -> Any:
 class _LateFirstCommit:
     """An engine whose first `begin` hands out a transaction that raises
     as a lost acknowledgement does once its statements ran, and commits it
-    only once another statement waits on a row lock: a COMMIT the server
-    was still making when the client gave up. With `cut`, the write cuts
-    the segment through it in place of raising, and waits to be cancelled.
-    That transaction and the watch
+    only once another statement waits on a row lock or a later `begin` is
+    made, as the store's read back of the transaction's status makes one
+    (`TurnStore._xact_status`): a COMMIT the server was still making when the
+    client gave up. With `cut`, the write cuts the segment through it in
+    place of raising, and waits to be cancelled. That transaction and the watch
     for the wait run on `side`, off `engine`'s pool of two, which the read
     back and the heartbeat need. Everything else is `engine`'s."""
 
@@ -2123,6 +2234,7 @@ class _LateFirstCommit:
         self._side = side
         self._cut = cut
         self._first = True
+        self._asked = asyncio.Event()
         self.committing: asyncio.Task[None] | None = None
 
     def __getattr__(self, name: str) -> Any:
@@ -2130,6 +2242,7 @@ class _LateFirstCommit:
 
     def begin(self) -> Any:
         if not self._first:
+            self._asked.set()
             return self._engine.begin()
         self._first = False
         return self._late()
@@ -2160,7 +2273,7 @@ class _LateFirstCommit:
                         "WHERE datname = current_database() AND wait_event_type = 'Lock'"
                     )
                 )
-                if waiting.scalar():
+                if self._asked.is_set() or waiting.scalar():
                     break
                 await asyncio.sleep(0.01)
         await transaction.commit()
@@ -2172,10 +2285,10 @@ async def test_a_boundary_write_still_committing_at_the_read_back_carries_on_as_
     pg_engine: AsyncEngine, clock: StoreClock, boundary: str
 ) -> None:
     """`work`'s write raises while its transaction is still open, and the
-    transaction commits only once the read back waits on the turn's row.
-    The read back waits for it, so the segment finds the write and goes on
-    as after one that returned. A pause's `paused` hook hears it from the
-    read back, since its own commit returned nothing."""
+    transaction commits only once a read back begins: the store's read of a
+    pause's transaction status, or the segment's read of the turn. The
+    segment finds the write and goes on as after one that returned. A
+    pause's `paused` hook hears it once."""
     store, lease = TurnStore(pg_engine), await _instance(pg_engine, clock)
     segment_id = await _claim(lease)
     ran: list[str] = []
@@ -2343,7 +2456,9 @@ async def test_a_close_whose_acknowledgement_was_lost_ends_on_the_stored_close(
     `cancelled` on a Stop that cut `work` off, after it committed or after
     another segment closed the turn `abandoned`. Read back, the turn is
     closed, so the segment ends on the stored close. A failed close reports
-    `work`'s error whoever closed the turn."""
+    `work`'s error whoever closed the turn. Where another segment took the
+    lease, the heartbeat waits out the test, so no renewal finds the lease
+    taken and cuts the segment, which would settle on the cut."""
     store = _BoundaryWriteRaises(pg_engine, how=how, closes=closes)
     lease_a, lease_b = await _instance(pg_engine, clock), await _instance(pg_engine, clock)
     segment_id = await _claim(lease_a)
@@ -2356,7 +2471,17 @@ async def test_a_close_whose_acknowledgement_was_lost_ends_on_the_stored_close(
     graph = Graph(start="work", nodes={"work": work}, edges={})
     events: list[TurnEvent] = []
     running = asyncio.create_task(
-        _segment(store, lease_a, await _open(store, segment_id, graph), segment_id, graph, events)
+        run_segment(
+            store,
+            lease_a,
+            await _open(store, segment_id, graph),
+            principal=PRINCIPAL,
+            conversation_id=CONVERSATION,
+            segment_id=segment_id,
+            graph=graph,
+            emit=events.append,
+            heartbeat_seconds=3600 if how == "abandoned" else BEAT,
+        )
     )
     if closes is TurnStatus.CANCELLED:
         await _until(lambda: asyncio.sleep(0, result=ran == ["work"]))

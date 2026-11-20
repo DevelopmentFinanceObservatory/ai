@@ -1314,9 +1314,11 @@ async def _release_claim(
     state not holding its segment (`unsure`) may still have committed, a
     COMMIT that landed and then timed out say, so that lease is dropped all
     the same: `drop_lease` clears only that segment's lease, and a failure
-    there is logged and leaves the lease to its TTL. The turn lines such a
-    commit wrote are lost, as they are for any save whose acknowledgement is
-    lost. A request opens no span before its stream,
+    there is logged and leaves the lease to its TTL. A claim save that
+    closes the open turn `abandoned` confirms a COMMIT that raised by its
+    transaction's status, and returns with the turn's line once it finds it
+    committed (`StudioStore.save`), so that line is lost only when the
+    status stayed unknown for its limit. A request opens no span before its stream,
     whose owner opens one: `turn`, the working copy its claim began or
     resumed a turn on, gets a zero-length `turn.segment` span on the turn's
     trace (`record_unstreamed_span`) whose status says what let it go. `cause`,
