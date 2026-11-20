@@ -84,7 +84,8 @@ async def test_connector_backend_passes_iam_auth_and_psc_settings_through(
     """The connector path builds one connector with `refresh_strategy="lazy"`
     and `ip_type=IPTypes.PSC`, then dials with the asyncpg driver and the
     settings-provided user/database, authenticating as the runtime service
-    account over IAM rather than a password."""
+    account over IAM rather than a password, and bounds each statement by
+    `COMMAND_TIMEOUT_S` like every runtime engine."""
     settings = Settings(
         session_store_instance_connection_name="my-project:my-region:my-instance",
         session_store_database="sessions",
@@ -110,6 +111,7 @@ async def test_connector_backend_passes_iam_auth_and_psc_settings_through(
             "user": "ai-run",
             "db": "sessions",
             "enable_iam_auth": True,
+            "command_timeout": engine_module.COMMAND_TIMEOUT_S,
         }
     ]
 
