@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from contextvars import copy_context
 from typing import Any, cast
 
 import httpx2
@@ -26,6 +27,7 @@ from common.caller import (
     current_writer,
     set_supplied_caller,
     set_supplied_turn,
+    shared_work_context,
     supplied_caller,
     vouched_caller_headers,
 )
@@ -283,3 +285,67 @@ async def test_a_supplied_turn_names_an_in_process_call() -> None:
         CALLER_HEADER: _CONVERSATION,
         TURN_HEADER: _TURN,
     }
+
+
+_STUDIO_READ = {CALLER_PRINCIPAL_HEADER: "p", SURFACE_HEADER: "studio"}
+
+
+@pytest.mark.parametrize(
+    ("shared", "inbound", "principal", "method", "sent"),
+    [
+        (True, [], "p", "GET", _STUDIO_READ),
+        (True, [], "p", "head", _STUDIO_READ),
+        (True, [(CALLER_HEADER, _CONVERSATION), (TURN_HEADER, _TURN)], "p", "GET", _STUDIO_READ),
+        (True, [], "p", "POST", {}),
+        (True, [], "p", None, {}),
+        (True, [], None, "GET", {}),
+        (False, [(SURFACE_HEADER, "studio")], "p", "GET", _STUDIO_READ),
+        (False, [(SURFACE_HEADER, "studio")], "p", "POST", {}),
+        (False, [(SURFACE_HEADER, "mcp")], "p", "GET", {}),
+        (False, [(SURFACE_HEADER, "studio"), (SURFACE_HEADER, "studio")], "p", "GET", {}),
+        (
+            False,
+            [(CALLER_HEADER, _CONVERSATION), (SURFACE_HEADER, "studio")],
+            "p",
+            "GET",
+            {CALLER_PRINCIPAL_HEADER: "p", CALLER_HEADER: _CONVERSATION},
+        ),
+        (False, [], "p", "GET", {}),
+    ],
+    ids=[
+        "shared-get",
+        "shared-head",
+        "shared-inside-a-turns-request",
+        "shared-post",
+        "shared-method-unknown",
+        "shared-unset",
+        "header-get",
+        "header-post",
+        "header-unshared-surface",
+        "header-repeated",
+        "header-beside-a-caller",
+        "no-caller",
+    ],
+)
+def test_shared_work_reads_name_their_surface_and_no_caller(
+    shared: bool,
+    inbound: list[tuple[str, str]],
+    principal: str | None,
+    method: str | None,
+    sent: dict[str, str],
+) -> None:
+    """Shared work, in this process or reaching it from the harness in the
+    surface header of a caller-less request, names the principal and its surface
+    on a read and nothing on a write: dfo-apis refuses a vouched request with no
+    caller on the doors that read the caller, which take POST."""
+    scope = {"type": "http", "headers": [(k.encode(), v.encode()) for k, v in inbound]}
+    with set_http_request(Request(scope)):
+        context = shared_work_context(surface="studio") if shared else copy_context()
+        assert context.run(vouched_caller_headers, principal, method=method) == sent
+
+
+def test_shared_work_serves_only_a_first_party_surface() -> None:
+    """A shared read counts against its surface, so the surface of a public
+    client, whose reads count against that client, is refused."""
+    with pytest.raises(ValueError, match="mcp"):
+        shared_work_context(surface="mcp")

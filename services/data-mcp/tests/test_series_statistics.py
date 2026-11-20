@@ -21,6 +21,7 @@ from common.apis_auth import TOKEN_HEADER
 from common.caller import (
     CALLER_HEADER,
     CALLER_PRINCIPAL_HEADER,
+    SURFACE_HEADER,
     TURN_HEADER,
     set_supplied_caller,
     set_supplied_turn,
@@ -1437,8 +1438,10 @@ async def test_a_shared_fetch_names_neither_the_caller_nor_the_turn_that_started
 ) -> None:
     """Every read missing the table joins one fetch, so the fetch's dfo-apis calls
     name no caller and no turn, whether conversation A's request named them in its
-    headers or the process supplied them. The control: a dfo-apis call conversation
-    A's request makes itself names both."""
+    headers or the process supplied them. They carry the principal and the Studio
+    surface, the only one whose reads reach the fetch, so dfo-apis logs them as
+    Studio's with no caller. The control: a dfo-apis call conversation A's request
+    makes itself names both."""
     clear_series_statistics_cache()
     data = _parquet_bytes([_row(stat_var="dcid:VarA")])
     digest = _digest_for(data)
@@ -1463,7 +1466,6 @@ async def test_a_shared_fetch_names_neither_the_caller_nor_the_turn_that_started
         }
     )
     settings = _settings(dfo_caller_principal="caller-principal-secret")
-    identity = (CALLER_PRINCIPAL_HEADER, CALLER_HEADER, TURN_HEADER)
     async with _client(snapshot_handler, settings=settings) as upstream:
         client_holder.set_client(upstream)
 
@@ -1494,4 +1496,9 @@ async def test_a_shared_fetch_names_neither_the_caller_nor_the_turn_that_started
     )
     assert len(shared) == 2  # the link and the GET
     for request in shared:
-        assert not set(identity) & set(request.headers.keys()), request.url
+        assert request.method == "GET"
+        assert not {CALLER_HEADER, TURN_HEADER} & set(request.headers.keys()), request.url
+        assert (request.headers[CALLER_PRINCIPAL_HEADER], request.headers[SURFACE_HEADER]) == (
+            "caller-principal-secret",
+            "studio",
+        ), request.url

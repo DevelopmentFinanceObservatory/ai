@@ -199,7 +199,10 @@ class RunnerClient:
 
     async def _send(self, method: str, path: str, **request: Any) -> httpx2.Response | ToolRefusal:
         try:
-            headers = {**vouched_caller_headers(self._caller_principal), **(await self._auth())}
+            headers = {
+                **vouched_caller_headers(self._caller_principal, method=method),
+                **(await self._auth()),
+            }
             return await self._client.request(method, path, headers=headers, **request)
         except ApisAuthError as exc:
             detail = f"no dfo-apis credential: {exc}"

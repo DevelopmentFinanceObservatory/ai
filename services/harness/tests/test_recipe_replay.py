@@ -25,11 +25,14 @@ from analysis_mcp.growth_tool import growth
 from analysis_mcp.join_tool import join
 from analysis_mcp.rolling_tool import resolve_anchor
 from common.caller import (
+    CALLER_PRINCIPAL_HEADER,
+    SURFACE_HEADER,
     conversation_caller,
     current_caller,
     current_turn,
     set_supplied_caller,
     set_supplied_turn,
+    vouched_caller_headers,
 )
 from common.live_apis import DatasetVersion
 from common.materialisation import (
@@ -42,7 +45,7 @@ from common.materialisation import (
 )
 from common.recipe import build_recipe, replay_key
 from common.row_budget import RowBudget
-from compiler.caller_clients import CallerTurn
+from compiler.caller_clients import CallerTurn, caller_transport
 from data_mcp.deadline import CallDeadline
 from data_mcp.frame_materialisation import (
     KIND_COLUMNS,
@@ -418,17 +421,49 @@ async def test_a_replay_on_moved_data_publishes_the_new_frame_under_the_same_nor
     assert scene.tools.names == ["filter", "growth"]
 
 
+type Wire = tuple[frozenset[tuple[str, str]], ...]
+
+# What shared work puts on the wire (`wire_identity`): the Studio surface alone to
+# the MCP servers, the principal and the surface on an in-process read, and
+# nothing on an in-process write.
+SHARED_WIRE: Wire = (
+    frozenset({(SURFACE_HEADER, "studio")}),
+    frozenset({(CALLER_PRINCIPAL_HEADER, "p"), (SURFACE_HEADER, "studio")}),
+    frozenset(),
+)
+
+
+def wire_identity() -> Wire:
+    """The identity headers the current context sends: on the harness's MCP
+    requests (`current_caller_turn` through `caller_transport`), then on an
+    in-process dfo-apis GET and POST of a process holding principal `p`."""
+    caller = current_caller_turn()
+    mcp = caller_transport(
+        "http://mcp.test/mcp",
+        caller=caller.caller,
+        turn=caller.turn,
+        surface=caller.surface,
+        auth=None,
+    )
+    return (
+        frozenset(mcp.headers.items()),
+        frozenset(vouched_caller_headers("p", method="GET").items()),
+        frozenset(vouched_caller_headers("p", method="POST").items()),
+    )
+
+
 async def test_a_replays_verbs_name_no_caller_or_turn_of_the_request_that_started_it(
     scene: Scene,
 ) -> None:
     """Every slot reaching a node joins one task, so the verbs it calls carry no
     caller or turn, supplied or from the conversation the MCP clients read:
-    neither belongs to the shared work."""
+    neither belongs to the shared work. They name the Studio surface on the MCP
+    hop and on dfo-apis reads, and nothing on dfo-apis writes."""
     _, recipe = await scene.fixed()
     scene.dataset.move(SECOND_VALUES)
-    seen: list[tuple[str, str | None, str | None, CallerTurn]] = []
+    seen: list[tuple[str, str | None, str | None, CallerTurn, Wire]] = []
     scene.tools.after = lambda name: seen.append(
-        (name, current_caller(), current_turn(), current_caller_turn())
+        (name, current_caller(), current_turn(), current_caller_turn(), wire_identity())
     )
     set_supplied_caller(conversation_caller("user-1/conv-a"))
     set_supplied_turn("tr_" + "1" * 16)
@@ -440,8 +475,8 @@ async def test_a_replays_verbs_name_no_caller_or_turn_of_the_request_that_starte
 
     assert isinstance(replayed, Replayed), replayed
     assert seen == [
-        ("filter", None, None, CallerTurn(None, None)),
-        ("growth", None, None, CallerTurn(None, None)),
+        ("filter", None, None, CallerTurn(None, None, "studio"), SHARED_WIRE),
+        ("growth", None, None, CallerTurn(None, None, "studio"), SHARED_WIRE),
     ]
 
 

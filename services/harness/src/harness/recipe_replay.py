@@ -87,7 +87,7 @@ from analysis_mcp.identity import (
     op_spec_hash_for,
 )
 from analysis_mcp.op_spec import OpSpecAdapter
-from common.caller import shared_work_context
+from common.caller import STUDIO_SURFACE, shared_work_context
 from common.live_apis import FramePair, LiveApisClient, LiveApisError
 from common.materialisation import (
     FrameExpired,
@@ -624,11 +624,11 @@ class _Replay:
         key = rfc8785.dumps(node).decode()
         if key not in self._nodes:
             # Every slot reaching the node joins this task, so it names no
-            # caller or turn: neither its in-process dfo-apis calls nor its MCP
-            # calls, whose clients read `in_shared_work` through
-            # `harness.conversation.current_caller_turn`.
+            # caller or turn, only the Studio surface: neither its in-process
+            # dfo-apis calls nor its MCP calls, whose clients read the shared
+            # surface through `harness.conversation.current_caller_turn`.
             self._nodes[key] = asyncio.create_task(
-                self._derived(node), context=shared_work_context()
+                self._derived(node), context=shared_work_context(surface=STUDIO_SURFACE)
             )
         return await self._nodes[key]
 

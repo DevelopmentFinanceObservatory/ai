@@ -4,9 +4,11 @@ Every MCP call the harness makes carries its caller in the `x-dfo-caller`
 header (`common.caller`): `conversation:<digest>` for a call made inside a
 studio conversation, none outside one. A call made inside a Studio turn also
 carries the turn's wire trace id in the `x-dfo-turn` header, which the MCP
-servers forward to dfo-apis (`common.caller.vouched_caller_headers`). A header
-is fixed when the transport is built, so a client belongs to one caller and
-one turn (`CallerTurn`): a client kept into the next turn would name the
+servers forward to dfo-apis (`common.caller.vouched_caller_headers`). A call
+made for shared work names no caller and carries the surface the work serves in
+the `x-dfo-surface` header, which the MCP servers forward on their reads. A
+header is fixed when the transport is built, so a client belongs to one caller,
+one turn and one surface (`CallerTurn`): a client kept into the next turn would name the
 turn before it on every call. `CallerClients` holds one client per caller
 and turn and is the one registry both call paths use:
 `harness.mcp_client` (`search`, `get_data`, `describe` and the presentation
@@ -54,7 +56,7 @@ from collections import OrderedDict, deque
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
-from common.caller import CALLER_HEADER, TURN_HEADER
+from common.caller import CALLER_HEADER, SURFACE_HEADER, TURN_HEADER
 from common.mcp_telemetry import is_loopback_url
 from common.telemetry import turn_call_meta
 from fastmcp import Client
@@ -71,27 +73,41 @@ RECENT_TURNS = 8
 
 
 class CallerTurn(NamedTuple):
-    """Whom an MCP call is made for: the caller, and the Studio turn it serves.
+    """Whom an MCP call is made for: the caller, the Studio turn it serves, and
+    for shared work, the surface the work serves.
 
     `caller=None` is a call outside any conversation. `turn=None` is a call
-    outside any Studio turn.
+    outside any Studio turn. `surface=None` is a call outside shared work; a
+    surface counts only beside `caller=None`.
     """
 
     caller: str | None
     turn: str | None = None
+    surface: str | None = None
 
 
 def caller_transport(
-    url: str, *, caller: str | None, auth: str | None, turn: str | None = None
+    url: str,
+    *,
+    caller: str | None,
+    auth: str | None,
+    turn: str | None = None,
+    surface: str | None = None,
 ) -> StreamableHttpTransport:
-    """A streamable-HTTP transport to `url` that sends `caller` and `turn` on
-    every request.
+    """A streamable-HTTP transport to `url` that sends `caller`, `turn` and
+    `surface` on every request.
 
     `caller=None` sends no `x-dfo-caller` header, which the server reads as
-    no caller, and `turn=None` no `x-dfo-turn` header. `auth` is the bearer
-    token, `None` when the gate is disabled.
+    no caller, and `turn=None` no `x-dfo-turn` header. `surface` goes out as the
+    `x-dfo-surface` header only beside no caller, for shared work
+    (`common.caller.current_shared_surface`). `auth` is the bearer token,
+    `None` when the gate is disabled.
     """
-    headers = {CALLER_HEADER: caller} if caller is not None else {}
+    headers: dict[str, str] = {}
+    if caller is not None:
+        headers[CALLER_HEADER] = caller
+    elif surface is not None:
+        headers[SURFACE_HEADER] = surface
     if turn is not None:
         headers[TURN_HEADER] = turn
     return StreamableHttpTransport(url, headers=headers, auth=auth)

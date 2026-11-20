@@ -66,7 +66,7 @@ from typing import Any, NamedTuple
 import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
-from common.caller import shared_work_context
+from common.caller import STUDIO_SURFACE, shared_work_context
 from dfo_frame_grammar.columnar import array_kernel
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
@@ -218,7 +218,11 @@ class _VerifiedTables:
 
         The fetch runs in `common.caller.shared_work_context`, since every
         caller missing the table joins it: its dfo-apis calls name no caller
-        and no turn, whichever request started it.
+        and no turn, whichever request started it. They name the Studio surface,
+        since the harness's executor is the only caller of
+        `fetch_series_statistics_table`, and the cache lives in its process. A
+        public MCP tool that fetches here would need a flight of its own, keyed
+        by surface, so that its calls never log as Studio's.
 
         The fetch raises `TimeoutError` once it runs past `_FLIGHT_TIMEOUT_S`,
         and is forgotten once it ends, so the next miss after a failure
@@ -227,7 +231,8 @@ class _VerifiedTables:
         """
         if (task := self._flights.get(key)) is None:
             task = asyncio.create_task(
-                asyncio.wait_for(fetch(), _FLIGHT_TIMEOUT_S), context=shared_work_context()
+                asyncio.wait_for(fetch(), _FLIGHT_TIMEOUT_S),
+                context=shared_work_context(surface=STUDIO_SURFACE),
             )
             self._flights[key] = task
 

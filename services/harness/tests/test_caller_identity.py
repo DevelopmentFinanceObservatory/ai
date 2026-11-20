@@ -26,7 +26,14 @@ import compiler.surface as surface_module
 import httpx2
 import pytest
 from analysis_mcp.runner_client import RunnerClient, runner_holder
-from common.caller import CALLER_HEADER, TURN_HEADER, conversation_caller, current_caller
+from common.caller import (
+    CALLER_HEADER,
+    CALLER_PRINCIPAL_HEADER,
+    SURFACE_HEADER,
+    TURN_HEADER,
+    conversation_caller,
+    current_caller,
+)
 from compiler.surface import current_spec_uses
 from data_mcp import client_holder, definition_registration
 from data_mcp.client import UpstreamClient
@@ -42,7 +49,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.client.transports import http as fastmcp_http
 from fastmcp.tools import ToolResult
 from harness.agents import build_tool_surface
-from harness.conversation import current_conversation_id, current_turn_id
+from harness.conversation import current_conversation_id, current_turn_id, shared_work_context
 from harness.mcp_client import McpExecutor
 from harness.server import create_app
 from harness.settings import (
@@ -265,6 +272,9 @@ async def test_each_call_on_both_paths_leaves_one_tool_result_and_a_fetch_names_
 
 
 _TOKEN = "test-token"
+# The headers that name a dfo-apis call's caller, in the order a shared call's
+# row lists them.
+_IDENTITY = (CALLER_PRINCIPAL_HEADER, SURFACE_HEADER, CALLER_HEADER, TURN_HEADER)
 _CALLER_PRINCIPAL = "caller-principal-secret"
 _SEARCHED_IDENTITY: dict[str, Any] = {"dataset": "DAC1", "fixed": {"measure": "ODA"}}
 _SEARCHED_SPEC = spec_id_for(canonicalize(_SEARCHED_IDENTITY))
@@ -342,7 +352,9 @@ async def test_each_turn_reaches_dfo_apis_under_its_own_id_through_every_mount(
     dfo-apis call data-mcp and analysis-mcp make names the turn that caused it,
     so a client held into the next turn would fail this. presentation-mcp names
     no caller for Studio's first-party writes, so it names no turn, and the card
-    turn 1 creates is revised on turn 2 through that turn's own client."""
+    turn 1 creates is revised on turn 2 through that turn's own client. The same
+    calls made for shared work inside turn 2 name no caller and no turn, and
+    their reads reach dfo-apis as the Studio surface's."""
     apis = _Apis()
     app = create_app(settings=Settings(mcp_api_token=_TOKEN))
     connects: list[str] = []
@@ -431,6 +443,24 @@ async def test_each_turn_reaches_dfo_apis_under_its_own_id_through_every_mount(
                     tool=_AGGREGATE, arguments={"frame_ref": _FRAME, "aggregation": "sum"}
                 )
                 written.append(await executor(tool="write_component", args=write))
+
+            async def shared_calls() -> None:
+                await executor(tool="get_data", args={"spec_id": _SEARCHED_SPEC})
+                # A breakdown reads apis' capabilities first, which the stub
+                # answers with none, so the call ends at that read.
+                await executor(
+                    tool="get_data",
+                    args={
+                        "spec_id": _SEARCHED_SPEC,
+                        "breakdown": {"code_system": "crsPurpose", "level": 1},
+                    },
+                )
+                await surface.call_tool(
+                    tool=_AGGREGATE, arguments={"frame_ref": _FRAME, "aggregation": "sum"}
+                )
+
+            apis.turn = "shared"
+            await asyncio.create_task(shared_calls(), context=shared_work_context())
     finally:
         client_holder.set_client(None)
         set_store(previous_store)
@@ -451,6 +481,19 @@ async def test_each_turn_reaches_dfo_apis_under_its_own_id_through_every_mount(
         assert set(by_turn[turn]["data"]) == {(caller, turn)}
         assert set(by_turn[turn]["analysis"]) == {(caller, turn)}
         assert set(by_turn[turn]["presentation"]) == {(None, None)}
+    shared = {
+        (upstream, method, *(headers.get(name) for name in _IDENTITY))
+        for turn, upstream, method, _, headers in apis.seen
+        if turn == "shared"
+    }
+    # The reads name the principal and Studio, and a write names nothing, since
+    # dfo-apis refuses a vouched POST that names no caller on its pin and export
+    # doors.
+    assert shared == {
+        ("data", "GET", _CALLER_PRINCIPAL, "studio", None, None),
+        ("data", "POST", None, None, None, None),
+        ("analysis", "POST", None, None, None, None),
+    }
     # One canvas: turn 1 creates the card and turn 2 revises it with turn 1's
     # write token, which dfo-apis accepts.
     writes = [
