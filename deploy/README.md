@@ -289,8 +289,18 @@ Each check below stops startup at once with its own SQLSTATE and renames nothing
 - `DFA03`: a table to rename is not owned by the user the migration runs as, or that user lacks `CREATE` on its schema. Run it as the owner or grant `CREATE`.
 - `DFA04`: for a table, index or sequence to rename, `adk_archive_<name>` would pass PostgreSQL's 63-byte identifier limit, which would truncate it, or a relation or type of that name exists in the schema; or, for a table to rename, a relation named `adk_archive_<table>` resolves through `search_path` in any schema. Rename the object to a shorter name, or rename or drop the one in the way. After the migration each `adk_archive_<table>` therefore resolves to the table it archived, and `restore` gives each object its own name back.
 - `DFA05`: after the migrations, every start of this image checks that none of ADK's five tables resolves through `search_path` under its own name with ADK's columns, and refuses while one does, naming each and saying whether the archive, an `adk_archive_<name>` table with the columns of the table it archived, resolves through `search_path`. The check guards startup only and renames nothing. An instance of this image already running keeps serving whatever the tables do later. Tables of those names without ADK's columns are another service's and do not refuse. The step depends on the archive:
-  - No archive, as after a manual `restore --apply`: the message says whether `adk_ledger_imports` resolves under its own name. With it present the live tables are ADK's restored history: once no ADK-reading revision is left, run the import job of the release that added the conversation tables to clear `DFA02` (`import --apply`, `import --verify`, `gate`), run `archive --apply`, which reruns the migration's four checks and renames the tables, then deploy this image. With it absent the tables are fresh ones an ADK-reading image created after `drop-archive` removed the archive, and the import job cannot run, since `adk_ledger_imports` went with the archive: once no ADK-reading revision is left, run `drop-adk`.
-  - Archive present: an image that reads ADK's tables started after the archive and created them afresh, so they hold what it wrote since. Only `drop-adk` or a move out of `search_path` clears these rows, since the import job cannot read them. Once no revision that reads ADK's tables is left, run `drop-adk` as a dry run and read the row count of `sessions`, one per conversation, which tells a few stray conversations from the whole history, then run `drop-adk --apply`, which loses those writes, and restart. To keep the rows for a recovery by hand, move each table out of `search_path` instead with `ALTER TABLE ... SET SCHEMA`, which carries its indexes, owned sequences and the `events` foreign key.
+  - No archive, as after a manual `restore --apply`: the message says whether `adk_ledger_imports` resolves under its own name. With it present the live tables are ADK's restored history: once no ADK-reading revision is left, run the import job of the release that added the conversation tables to clear `DFA02` (`import --apply`, `import --verify`, `gate`), run `archive --apply`, which reruns the migration's four checks and renames the tables, then deploy this image. With it absent the tables are fresh ones an ADK-reading image created after `drop-archive` removed the archive, and the import job cannot run, since `adk_ledger_imports` went with the archive: once no ADK-reading revision is left, run `drop-adk` as a dry run, read the count, then `drop-adk --apply`.
+
+    If the release that added the conversation tables deleted its import job, recreate it on the image the job ran on, the digest its README says to record before the deletion, as `IMAGE`, with the service's identity, network and the three `SESSION_STORE_*` variables, which it reads into `SA` and `ENV` as that README's job-creation step does:
+
+    ```
+    gcloud run jobs deploy "$SERVICE_AI-adk-import" --image="${IMAGE:?set it to the recorded digest}" --region="$REGION" --project="$PROJECT_ID" \
+      --service-account="$SA" --network="$SERVICE_AI-psc" --subnet="$SERVICE_AI-psc-subnet" \
+      --vpc-egress=private-ranges-only --set-env-vars="$ENV" --max-retries=0 --task-timeout=1800s \
+      --command=python --args=-m,harness.adk_import,import
+    ```
+
+  - Archive present: an image that reads ADK's tables started after the archive and created them afresh, so they hold what it wrote since. Only `drop-adk` or a move out of `search_path` clears these rows, since the import job cannot read them. Once no revision that reads ADK's tables is left, run `drop-adk` as a dry run and read the count of conversations, the ledger sessions of `sessions`, which tells a few stray conversations from the whole history, then run `drop-adk --apply`, which loses those writes, and restart. To keep the rows for a recovery by hand, move each table out of `search_path` instead with `ALTER TABLE ... SET SCHEMA`, which carries its indexes, owned sequences and the `events` foreign key.
 
 ### The archive job
 
@@ -306,7 +316,7 @@ uv run --package harness python -m harness.db.adk_archive drop-archive [--apply]
 
 - `archive` runs `0005_rename_adk_tables.sql` itself, so its four checks hold, and records the migration in `harness_schema_migrations` as applied when it is not recorded yet. A second run finds nothing to rename.
 - `restore` is a manual recovery tool outside the supported rollback. It renames every `adk_archive_<name>` table back, with its indexes and owned sequences, for an image that reads ADK's tables, and must run before such an image starts so that the image finds its tables and creates none. The restored tables lack every write to the harness tables since the cutover to the release that added the conversation tables, and anything a harness-reading revision writes while serving. It leaves the migration recorded in `harness_schema_migrations`, so a start of this image beside the restored tables refuses with `DFA05` (the no-archive case below) until `archive --apply` renames them again. It prints which of ADK's five tables the archive holds and refuses when it holds anything but not all five, the import ledger alone included, since an image that reads ADK's tables would create a missing one empty; `--allow-missing` restores the rest anyway. With nothing archived it finds nothing to do, so a rerun after a restore changes nothing. It refuses before renaming anything when an `adk_archive_<name>` table lacks the columns of the table it archived, as another service's table earlier on `search_path` would, or when a name it would restore exists in the object's schema, or, for a table, resolves through `search_path`, as fresh tables an ADK-reading image created do. After renaming it checks that each restored name resolves to the restored table and rolls back otherwise.
-- `drop-adk` drops ADK's five tables, each that resolves through `search_path` and has ADK's columns, which discards ADK's copy of the conversations. It prints the row count of `sessions`, one per conversation, before the `DROP`, in a dry run too. The count is a snapshot taken before the `DROP`.
+- `drop-adk` drops ADK's five tables, each that resolves through `search_path` and has ADK's columns, which discards ADK's copy of the conversations. It prints the count of conversations, the ledger sessions of `sessions` (app `dfo_analyst_graph.ledger`), before the `DROP`, in a dry run too. The count is a snapshot taken before the `DROP`.
 - `drop-archive` drops every `adk_archive_<name>` table, once ADK's copy is no longer needed. It refuses, and drops nothing, when a table of such a name lacks the columns of the table it would archive, as another service's table earlier on `search_path` would.
 
 Both drops name every table in one `DROP TABLE` statement without `CASCADE`, so the foreign key from `events` to `sessions` resolves within the statement. When anything else depends on one of the tables, such as a view, PostgreSQL refuses the statement, the job drops nothing and exits 1 with PostgreSQL's error, which names the dependent object. Drop or change that object by hand, then run the verb again.
@@ -338,12 +348,13 @@ For each revision, one chained command deletes it, records the delete time as `D
 gcloud run revisions delete "${REVISION:?set it to a revision to delete}" \
   --region="$REGION" --project="$PROJECT_ID" --quiet \
 && DELETED_AT=$(date -u +%FT%TZ) \
-&& [ -z "$(gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
-  --filter="metadata.name=$REVISION" --format='value(metadata.name)')" ] \
+&& LEFT=$(gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
+  --filter="metadata.name=$REVISION" --format='value(metadata.name)') \
+&& [ -z "$LEFT" ] \
 && echo "deleted $REVISION at $DELETED_AT"
 ```
 
-Then list them again: the list holds only revisions of the release before this one. Confirm that each deleted revision's instance count has reached zero, from Cloud Monitoring's `run.googleapis.com/container/instance_count`, since a deleted revision is gone from `gcloud run revisions describe`. Cloud Monitoring samples the metric every 60 s and can show a point up to about 180 s after its time, so run the command below for each revision no sooner than 5 minutes after its `DELETED_AT`, in the same shell or with `DELETED_AT` set to the time that delete printed. `curl -f` fails on an HTTP error, and jq exits non-zero unless the answer is well formed and the newest point of every series reads 0; every point is dated after the delete, since the window starts there. It prints how many series it read. With no series it prints `no series since the delete` and exits 0: no instance reported after the delete. Whether a deleted revision reports zeros or nothing is a check to make on dev first:
+Then list them again: the list holds only revisions of the release before this one. Confirm that each deleted revision's instance count has reached zero, from Cloud Monitoring's `run.googleapis.com/container/instance_count`, since a deleted revision is gone from `gcloud run revisions describe`. Cloud Monitoring samples the metric every 60 s and can show a point up to about 180 s after its time, so run the command below for each revision no sooner than 5 minutes after its `DELETED_AT`, in the same shell or with `DELETED_AT` set to the time that delete printed. `curl -f` fails on an HTTP error, and jq exits non-zero when the answer carries `executionErrors` or a `nextPageToken`, since the series read may then be partial, and unless the answer is well formed and the newest point of every series reads 0; every point is dated after the delete, since the window starts there. It prints how many series it read. With no series it prints `no series since the delete` and exits 0: no instance reported after the delete. Whether a deleted revision reports zeros or nothing is a check to make on dev first:
 
 ```
 curl -fsSG -H "Authorization: Bearer $(gcloud auth print-access-token)" \
@@ -351,10 +362,12 @@ curl -fsSG -H "Authorization: Bearer $(gcloud auth print-access-token)" \
   --data-urlencode "filter=metric.type=\"run.googleapis.com/container/instance_count\" AND resource.labels.revision_name=\"$REVISION\"" \
   --data-urlencode "interval.startTime=${DELETED_AT:?set it to the time the delete printed}" \
   --data-urlencode "interval.endTime=$(date -u +%FT%TZ)" \
-| jq -er '(.timeSeries // []) as $s
-  | if ($s | length) == 0 then ("no series since the delete\n" | halt_error(0))
-    elif all($s[]; (.points[0].value.int64Value | tonumber) == 0) then "\($s | length) series, newest points 0"
-    else ("a newest point is above 0\n" | halt_error(1)) end'
+| jq -er 'if ((.executionErrors // []) | length) > 0 then ("the answer carries executionErrors\n" | halt_error(1))
+  elif (.nextPageToken // "") != "" then ("the answer has a next page\n" | halt_error(1))
+  else (.timeSeries // []) as $s
+    | if ($s | length) == 0 then ("no series since the delete\n" | halt_error(0))
+      elif all($s[]; (.points[0].value.int64Value | tonumber) == 0) then "\($s | length) series, newest points 0"
+      else ("a newest point is above 0\n" | halt_error(1)) end end'
 ```
 
 Then deploy this image as usual: its startup applies the migration. In each environment, as soon as the release has started and taken traffic, create the job and execute the `restore` dry run. Its exit status 0 and the ADK tables it lists, all five, are the evidence that the archive holds every table a manual restore would need: `restore` refuses when the archive lacks any of them. Keep the job: a manual recovery uses it.

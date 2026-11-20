@@ -30,8 +30,9 @@ commits.
   `search_path` to that table, and rolls back otherwise.
 - `drop-adk` drops each of ADK's five tables that resolves on `search_path`
   and has ADK's columns, which discards ADK's copy of the conversations. It
-  prints the row count of `sessions`, one per conversation, before the
-  `DROP`, in a dry run too. The count is a snapshot. A
+  prints the number of conversations, the ledger sessions of `sessions`
+  (app `dfo_analyst_graph.ledger`), before the `DROP`, in a dry run too. The
+  count is a snapshot. A
   table of an ADK name without ADK's columns is another service's and stays.
 - `drop-archive` drops every `adk_archive_<name>` table. It refuses, and
   drops nothing, when a table of such a name lacks the columns of the table
@@ -131,6 +132,10 @@ SELECT oid FROM (
 ) objects
 ORDER BY position, kind, member
 """
+
+# ADK's app name for a conversation's ledger session; each turn also has a
+# session of its own, under another app name.
+_LEDGER_APP = "dfo_analyst_graph.ledger"
 
 # The schema-qualified, quoted name `$1` resolves to on `search_path`.
 _RESOLVED = """
@@ -370,13 +375,16 @@ async def _drop(conn: Any, tables: Sequence[str]) -> list[str]:
 
 
 async def _drop_adk(conn: Any) -> list[str]:
-    """Print the row count of ADK's `sessions` table, one per conversation, then
-    drop ADK's tables. The count is a snapshot taken before the `DROP`."""
+    """Print the number of conversations in ADK's `sessions` table, its ledger
+    sessions, then drop ADK's tables. The count is a snapshot taken before the
+    `DROP`."""
     tables = await _adk_tables(conn)
     sessions = await conn.fetchval(_RESOLVED, "sessions")
     if sessions in tables:
-        rows = await conn.fetchval(f"SELECT count(*) FROM {sessions}")
-        print(f"adk_archive drop-adk: {sessions} holds {rows} rows")
+        conversations = await conn.fetchval(
+            f"SELECT count(*) FROM {sessions} WHERE app_name = $1", _LEDGER_APP
+        )
+        print(f"adk_archive drop-adk: {sessions} holds {conversations} conversations")
     return await _drop(conn, tables)
 
 

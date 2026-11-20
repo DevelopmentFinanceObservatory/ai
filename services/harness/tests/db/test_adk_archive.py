@@ -248,8 +248,8 @@ async def _start_refused(engine: AsyncEngine) -> server_module._MigrationRefused
 
 
 def _drop_adk_rows(printed: str) -> int:
-    """The `sessions` row count `drop-adk` printed."""
-    (rows,) = re.findall(r"^adk_archive drop-adk: \S+ holds (\d+) rows$", printed, re.M)
+    """The conversation count `drop-adk` printed."""
+    (rows,) = re.findall(r"^adk_archive drop-adk: \S+ holds (\d+) conversations$", printed, re.M)
     return int(rows)
 
 
@@ -313,12 +313,14 @@ async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive_until
     """An ADK-reading image started after the archive creates its tables and
     writes a ledger session. `archive` refuses with 0005's DFA02, since no
     `adk_ledger_imports` resolves to clear it, so the only remedy is
-    `drop-adk`, which prints the rows it discards in a dry run and with
+    `drop-adk`, which prints the conversations it discards in a dry run and with
     `--apply`. Startup proceeds once it has run."""
     await _archived_by_startup(pg_empty_engine, tmp_path)
     await _start(pg_empty_engine)
     sessions = next(statement for statement in _ADK_V1_DDL if "TABLE sessions" in statement)
-    await _execute(pg_empty_engine, sessions, _session("c3"))
+    await _execute(
+        pg_empty_engine, sessions, _session("c3"), _session("c3:turn1", app="dfo_analyst_graph")
+    )
     archived = {f"adk_archive_{table}" for table in _ARCHIVED}
 
     refusal = await _start_refused(pg_empty_engine)
