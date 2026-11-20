@@ -119,7 +119,11 @@ logger = logging.getLogger(__name__)
 
 # How long the app's lifespan shutdown waits for the owners still running:
 # inside Cloud Run's 10 s between SIGTERM and SIGKILL, with room for the rest
-# of the shutdown. An owner's closing write is bounded at 5 s.
+# of the shutdown. An owner's closing write is bounded at 5 s up to its
+# COMMIT (`StudioStore.close_segment`), and the COMMIT, which runs to its end,
+# by the connection's `command_timeout` (`harness.db.engine.COMMAND_TIMEOUT_S`,
+# 90 s). An owner still committing when SIGKILL lands leaves the lease to its
+# TTL.
 SHUTDOWN_WAIT_S = 7.0
 
 
@@ -707,9 +711,13 @@ class _Owner[E, R]:
                     final_text=conversation.turn_final_text, error=ErrorCode.CANCELLED.value
                 )
             except Exception:
-                # The closing write still runs: the Stop is live for the open
-                # turn, so it closes the record `cancelled` itself and clears
-                # the lease (`StudioStore.close_segment`).
+                # The closing write still runs and clears the lease. While
+                # the Stop is live for the open turn, it closes the record
+                # `cancelled` itself (`StudioStore.close_segment`). Once the
+                # loop has closed the cursor `cancelled`, the Stop has ended,
+                # and the turn is recorded from that cursor later, by the
+                # load that finds it closed with no lease live
+                # (`StudioStore.load`) or by the next `/turn`'s claim.
                 logger.exception(
                     "studio stream: conversation %s's cancelled close could not be built",
                     self._conversation_id,

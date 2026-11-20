@@ -255,7 +255,9 @@ async def test_a_studio_turn_names_who_asked_it_on_its_trace_and_its_log_line(
 ) -> None:
     """The account the website names, else the visitor, is the Langfuse user
     of the turn, kept through the approval's `/interrupt`, which sends no
-    identity headers. The turn's one `studio.turn` line carries the same
+    identity headers. Both of the turn's segments, the `/turn` one and the
+    `/interrupt` one, name that user and the tags in the conversation's
+    session. The turn's one `studio.turn` line carries the same
     account and visitor, the caller the turn's MCP calls name, the wire trace
     id, and the spec each `get_data` of the plan fetched."""
     init_telemetry(service_name="harness")
@@ -263,9 +265,15 @@ async def test_a_studio_turn_names_who_asked_it_on_its_trace_and_its_log_line(
     with caplog.at_level(logging.INFO, logger="harness.studio_store"):
         second = await _approve_a_planned_turn(pg_engine, headers=identity, surface=surface)
 
-    (turn,) = _closes(fake_langfuse.spans())
+    spans = fake_langfuse.spans()
+    (turn,) = _closes(spans)
     assert _attribute(turn, "user.id") == user_id
     assert _tags(turn) == ["studio"]
+    segments = [span for span in spans if span.name == "turn.segment"]
+    assert [
+        (_attribute(span, "user.id"), _tags(span), _attribute(span, "session.id"))
+        for span in segments
+    ] == [(user_id, ["studio"], CONVERSATION)] * 2
     (line,) = _turn_lines(caplog)
     assert line["account"] == account
     assert line["visitor"] == VISITOR

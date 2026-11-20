@@ -46,7 +46,7 @@ async def run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
     if cancelled is not None:
         if not task.cancelled() and (failure := task.exception()) is not None:
             logger.warning(
-                "studio store: a write ended with %r after its caller was cancelled", failure
+                "db commit: a write ended with %r after its caller was cancelled", failure
             )
         raise cancelled
     return task.result()

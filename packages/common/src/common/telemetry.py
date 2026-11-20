@@ -1204,19 +1204,6 @@ async def flush_telemetry(*, timeout_seconds: float = FLUSH_TIMEOUT_SECONDS) -> 
             _flush_waiters.remove(wake)
 
 
-def flush_telemetry_before_exit() -> None:
-    """Export everything queued so far, blocking until the export ends, for a
-    process about to exit, such as a job whose `flush_telemetry` may have
-    returned while its export ran on a daemon thread that exit would kill.
-    Never raises, and does nothing when telemetry is off."""
-    if _backend is None:
-        return
-    try:
-        _flush_backend()
-    except Exception:
-        logger.warning("telemetry flush before exit failed", exc_info=True)
-
-
 def start_telemetry_flush() -> None:
     """Start the export `flush_telemetry` runs and return without waiting for
     it, for a caller that must not await, such as a cancelled task's unwind.

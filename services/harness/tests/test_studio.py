@@ -4607,7 +4607,7 @@ def _reading(checkpoint: int) -> dict[str, Any]:
 
 @pytest.mark.parametrize("lapsed", ["finishes_the_turn", "writes_continuously"])
 async def test_a_turn_claimed_over_a_lapsed_segment_records_its_last_write(
-    monkeypatch: pytest.MonkeyPatch, lapsed: str
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, lapsed: str
 ) -> None:
     """A's turn is left running under a lease that lapsed, and A goes on
     writing while B's `/turn` runs. Either A finishes the turn `done` after
@@ -4615,7 +4615,10 @@ async def test_a_turn_claimed_over_a_lapsed_segment_records_its_last_write(
     conversation's record over and over until B's claim fences it out. B
     streams, and the turn A left is recorded from A's last write: the
     finished turn with the readings, plans and specs its cursor holds, the
-    turn left running abandoned on A's last cursor and record."""
+    turn left running abandoned on A's last cursor and record. Each turn
+    writes one closing `studio.turn` line, A's on B's claim save (the
+    finished turn's through `/turn`'s record of a closed cursor)."""
+    caplog.set_level(logging.INFO, logger="harness.studio_store")
     _, record = _top_donors()
     plan = record.model_dump(mode="json")
     used = record.sources[0].spec_id
@@ -4707,6 +4710,10 @@ async def test_a_turn_claimed_over_a_lapsed_segment_records_its_last_write(
     else:
         assert (stored.status, first["error"]) == (TurnStatus.ABANDONED, "abandoned")
         assert first["assistant"] == last["text"]
+    assert [(line["trace_id"], line["error"]) for line in _turn_log_lines(caplog)] == [
+        (first["trace_id"], first["error"]),
+        (conversation.turns[1]["trace_id"], None),
+    ]
 
 
 async def test_a_turn_that_fails_after_its_claim_leaves_the_paused_turn_s_frame_numbers(
@@ -11689,12 +11696,14 @@ async def _wait_until_armed(store: StudioStore) -> None:
 
 
 async def test_a_stop_whose_close_raises_still_releases_the_segment_and_the_lock(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A Stop's close of the turn as `cancelled` that raises in the segment's
-    owner still releases the segment and the conversation's lock, so the
-    next `/turn` is not refused, and the closing write records the turn
-    `cancelled` on the live Stop."""
+    owner (`Finish.CANCELLED`) still runs the closing write, which releases
+    the segment and the conversation's lock, so the next `/turn` is not
+    refused, and records the turn `cancelled` with its one `studio.turn`
+    line."""
+    caplog.set_level(logging.INFO, logger="harness.studio_store")
     real_close_turn = studio_state_module.ConversationState.close_turn
     raised: list[str] = []
 
@@ -11723,6 +11732,9 @@ async def test_a_stop_whose_close_raises_still_releases_the_segment_and_the_lock
     assert reloaded is not None and reloaded.segment is None
     # The closing write closed the record on the live Stop in its place.
     assert [record.get("error") for record in reloaded.turns] == ["cancelled"]
+    assert [(line["trace_id"], line["error"]) for line in _turn_log_lines(caplog)] == [
+        (reloaded.turns[0]["trace_id"], "cancelled")
+    ]
 
 
 async def test_a_stop_whose_segment_was_taken_over_writes_no_cancelled_line(
@@ -12002,7 +12014,7 @@ async def test_a_claim_save_that_raises_writes_the_abandoned_close_only_if_it_co
 
 @pytest.mark.parametrize(
     ("committed", "span"),
-    [(True, ("cancelled", "WARNING")), (False, ("not_started", "WARNING"))],
+    [(True, ("cancelled", "WARNING")), (False, ("failed", "ERROR"))],
     ids=["committed", "not-committed"],
 )
 async def test_an_interrupt_whose_claim_save_raises_releases_what_it_committed(
@@ -12017,8 +12029,8 @@ async def test_an_interrupt_whose_claim_save_raises_releases_what_it_committed(
     segment span ends `cancelled` (`harness.studio._release_claim`), a
     cancellation and no failure, so a retry of the same answer resumes at
     once instead of meeting the lease until its TTL lapses. One that did not
-    commit ends its working copy's span `not_started` and leaves the stored
-    lease empty too."""
+    commit ends its working copy's span `failed` and leaves the stored lease
+    empty too."""
     app = _app(*_plan())
     store = app.state.studio.store
     async with _client(app) as client:
@@ -12093,6 +12105,144 @@ async def test_a_claim_save_that_committed_unseen_still_frees_its_lease(route: s
         retried = await _stream(client, path, body)
 
     assert _events(retried)[-1] == "done"
+
+
+def _cut_at_commit(
+    store: StudioStore, how: str, request: asyncio.Task[Any], cut: list[str]
+) -> None:
+    """Make the next transaction `store` opens land its COMMIT and cut its
+    caller there: cancel `request` while the COMMIT runs (`cancelled`), or
+    raise as a lost acknowledgement once the COMMIT landed (`ack-lost`).
+    Each cut made is named on `cut`."""
+    real_transaction = store._transaction
+
+    @asynccontextmanager
+    async def cutting() -> Any:
+        store._transaction = real_transaction  # type: ignore[method-assign]
+        async with real_transaction() as conn:
+            yield conn
+            if how == "cancelled":
+                cut.append(how)
+                request.cancel()
+        if how == "ack-lost":
+            cut.append(how)
+            raise ConnectionResetError("the COMMIT's acknowledgement was lost")
+
+    store._transaction = cutting  # type: ignore[method-assign]
+
+
+async def _post_cut(client: httpx2.AsyncClient, path: str, body: dict[str, Any], how: str) -> None:
+    """POST `body`, which the store's cut ends: cancelled, or raising."""
+    with pytest.raises(asyncio.CancelledError if how == "cancelled" else ConnectionResetError):
+        await client.post(path, json=body, headers=AUTH)
+    task = asyncio.current_task()
+    assert task is not None
+    while task.cancelling():
+        task.uncancel()
+
+
+@pytest.mark.parametrize("how", ["cancelled", "ack-lost"])
+async def test_a_turn_whose_lease_claim_is_cut_at_its_commit_frees_the_lease(how: str) -> None:
+    """A `/turn` whose lease claim (`StudioStore.claim_turn_lease`) commits
+    and is cut there, its request cancelled during the COMMIT or the COMMIT's
+    acknowledgement lost, drops that lease before it lets go, so the next
+    `/turn` streams at once instead of meeting the lease until its TTL
+    lapses."""
+    app = _app(*_plan(), _text("Hello."))
+    store = app.state.studio.store
+    real_claim = store.claim_turn_lease
+    cuts: list[str] = []
+
+    async def claim_cut_at_commit(*args: Any, **kwargs: Any) -> Any:
+        store.claim_turn_lease = real_claim  # type: ignore[method-assign]
+        task = asyncio.current_task()
+        assert task is not None
+        _cut_at_commit(store, how, task, cuts)
+        return await real_claim(*args, **kwargs)
+
+    async with _client(app) as client:
+        paused = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        assert paused[-1]["event"] == "plan.proposed"
+        store.claim_turn_lease = claim_cut_at_commit  # type: ignore[method-assign]
+        await _post_cut(client, "/api/studio/turn", _turn_body("aid to kenya"), how)
+
+        stored = await _other_store().load(PRINCIPAL, CONVERSATION)
+        assert stored is not None and stored.segment is None
+        retried = await _stream(client, "/api/studio/turn", _turn_body("aid to kenya"))
+
+    assert cuts == [how]
+    assert _events(retried)[-1] == "done"
+
+
+@pytest.mark.parametrize("how", ["cancelled", "ack-lost"])
+async def test_a_stop_whose_claim_save_is_cut_at_its_commit_frees_the_lease(how: str) -> None:
+    """A `/cancel` on a paused turn claims a lease of its own with a save
+    (`_stop_turn_at`). Cut at that save's COMMIT, its request cancelled or
+    the acknowledgement lost, it drops that lease before it lets go, so the
+    next `/turn` is not refused until the lease's TTL lapses."""
+    app = _app(*_plan(), _text("Hello."))
+    store = app.state.studio.store
+    real_save = store.save
+    cuts: list[str] = []
+
+    async def save_cut_at_commit(*args: Any, **kwargs: Any) -> bool:
+        if kwargs.get("stopping"):
+            store.save = real_save  # type: ignore[method-assign]
+            task = asyncio.current_task()
+            assert task is not None
+            _cut_at_commit(store, how, task, cuts)
+        return await real_save(*args, **kwargs)
+
+    async with _client(app) as client:
+        paused = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        assert paused[-1]["event"] == "plan.proposed"
+        store.save = save_cut_at_commit  # type: ignore[method-assign]
+        await _post_cut(client, "/api/studio/cancel", _STOP, how)
+
+        stored = await _other_store().load(PRINCIPAL, CONVERSATION)
+        assert stored is not None and stored.segment is None
+        retried = await _stream(client, "/api/studio/turn", _turn_body("aid to kenya"))
+
+    assert cuts == [how]
+    assert _events(retried)[-1] == "done"
+
+
+async def test_an_interrupt_that_fails_before_its_claim_save_drops_no_lease(
+    otlp_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An `/interrupt` that fails after it claimed its segment on the working
+    copy and before its claim save started stored no lease, so it drops
+    none, and ends its span `failed`."""
+    app = _app(*_plan())
+    store = app.state.studio.store
+    dropped: list[str] = []
+    real_drop = store.drop_lease
+
+    async def drop(principal: str, conversation_id: str, segment_id: str, **kwargs: Any) -> None:
+        dropped.append(segment_id)
+        await real_drop(principal, conversation_id, segment_id, **kwargs)
+
+    def take_identity_raising(self: Any, **_: Any) -> None:
+        raise RuntimeError("the identity could not be read")
+
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        ended = _recording_span_ends(monkeypatch)
+        store.drop_lease = drop  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            studio_state_module.ConversationState, "take_identity", take_identity_raising
+        )
+        with pytest.raises(RuntimeError, match="identity could not be read"):
+            await client.post(
+                "/api/studio/interrupt",
+                json=_interrupt_body(plan["interrupt_id"], "reject"),
+                headers=AUTH,
+            )
+
+    assert dropped == []
+    assert ended == [("failed", "ERROR")]
+    assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
 
 
 async def test_an_interrupts_claim_save_carries_the_identity_a_turn_recorded_no_one_for(

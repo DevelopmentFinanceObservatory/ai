@@ -2593,21 +2593,26 @@ async def test_a_turn_closed_under_a_failed_closing_write_is_recorded_as_its_str
     clock,
     pg_engine,
     monkeypatch,
+    caplog,
     status: TurnStatus,
     error: dict[str, Any] | None,
     recorded: str,
     lease: str,
 ) -> None:
     """The turn's cursor closes, then the stream's closing write fails, and
-    the record stays open. Once the lease has lapsed, the next load records
-    the turn with the error the stream told the client, with no reply: a
-    Stop's `cancelled`, a failed turn's own code, and otherwise
-    `state_not_saved`. It keeps the plans and readings the cursor's state
-    holds, and the next turn claims and opens. While the lease is live its holder records the turn,
-    so a load leaves the record open."""
+    the record stays open with no line. Once the lease has lapsed, the next
+    load records the turn with the error the stream told the client, with no
+    reply: a Stop's `cancelled`, a failed turn's own code, and otherwise
+    `state_not_saved`, and writes its one `studio.turn` line. It keeps the
+    plans and readings the cursor's state holds, and the next turn claims
+    and opens with no second line. While the lease is live its holder
+    records the turn, so a load leaves the record open and writes no
+    line."""
+    caplog.set_level(logging.INFO, logger="harness.studio_store")
     store = new_store(clock=clock)
     state = await store.create("principal", CONVERSATION)
     state.begin_turn()
+    opened_trace_id = state.trace_id
     segment_id = store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
     turns = TurnStore(pg_engine)
@@ -2638,6 +2643,7 @@ async def test_a_turn_closed_under_a_failed_closing_write_is_recorded_as_its_str
     monkeypatch.setattr(store, "_write", refused)
     assert await store.close_segment("principal", CONVERSATION, segment_id) is SegmentClose.FAILED
     monkeypatch.undo()
+    assert _turn_log_lines(caplog, status=None) == []
     store.evict("principal", CONVERSATION)
     if lease == "lapsed":
         await clock.advance(studio_state.SEGMENT_TTL_S + 1)
@@ -2648,7 +2654,11 @@ async def test_a_turn_closed_under_a_failed_closing_write_is_recorded_as_its_str
     assert loaded is not None
     if lease == "live":
         assert not loaded.turn_recorded
+        assert _turn_log_lines(caplog, status=None) == []
         return
+    assert [(line["trace_id"], line["error"]) for line in _turn_log_lines(caplog, status=None)] == [
+        (opened_trace_id, recorded)
+    ]
     assert loaded.turn_recorded
     record = loaded.turns[-1]
     assert (record["error"], record["assistant"]) == (recorded, "")
@@ -2669,6 +2679,7 @@ async def test_a_turn_closed_under_a_failed_closing_write_is_recorded_as_its_str
         inputs={},
         state={},
     )
+    assert len(_turn_log_lines(caplog, status=None)) == 1
 
 
 @pytest.mark.parametrize("claim", ["next-turn", "resume"])
@@ -4454,15 +4465,16 @@ async def test_a_write_cancelled_during_its_commit_still_logs_the_record_it_comm
 
 
 @pytest.mark.parametrize("acknowledged", [False, True], ids=["before-commit", "lost-ack"])
-async def test_a_closing_write_that_meets_a_dropped_connection_logs_no_line_and_no_later_abandoned(
+async def test_a_closing_write_that_meets_a_dropped_connection_logs_its_close_once(
     new_store, clock, caplog, acknowledged
 ) -> None:
-    """A closing write that meets a dropped connection is not retried and
-    logs no line. Before its commit, the row holds the turn open, and the
-    next turn on another instance closes it `abandoned` with the one line.
-    With the commit's acknowledgement lost, the row holds the record with
-    no line logged for it, and the next turn finds it recorded and logs no
-    `abandoned` line either."""
+    """A closing write that meets a dropped connection is not retried.
+    Before its commit, it logs no line and the row holds the turn open, and
+    the next turn on another instance closes it `abandoned` with the one
+    line. With the commit's acknowledgement lost, the read back finds the
+    version the write set, so the close logs its one line then, with no
+    second write, and the next turn finds the turn recorded and logs no
+    `abandoned` line."""
     store = new_store(clock=clock)
     state = await store.create("principal", CONVERSATION)
     segment_id = store.claim_segment("principal", CONVERSATION)
@@ -4474,7 +4486,7 @@ async def test_a_closing_write_that_meets_a_dropped_connection_logs_no_line_and_
 
     with caplog.at_level(logging.INFO, logger="harness.studio_store"):
         closed = await store.close_segment("principal", CONVERSATION, segment_id)
-        assert _turn_log_lines(caplog, status=None) == []
+        at_close = [(line["trace_id"], line["error"]) for line in _turn_log_lines(caplog)]
         await clock.advance(studio_state.SEGMENT_TTL_S + 1)
         other = new_store(clock=clock)
         await other.load("principal", CONVERSATION)
@@ -4484,14 +4496,41 @@ async def test_a_closing_write_that_meets_a_dropped_connection_logs_no_line_and_
         await other.save("principal", CONVERSATION, work)
 
     assert faults == [1]
-    assert closed is SegmentClose.FAILED
+    assert closed is (SegmentClose.SAVED if acknowledged else SegmentClose.FAILED)
+    assert at_close == ([(closed_trace_id, None)] if acknowledged else [])
     stored = await new_store().load("principal", CONVERSATION)
     assert [(record["trace_id"], record.get("error")) for record in stored.turns] == [
         (closed_trace_id, None if acknowledged else "abandoned")
     ]
-    assert [(line["trace_id"], line["error"]) for line in _turn_log_lines(caplog)] == (
-        [] if acknowledged else [(closed_trace_id, "abandoned")]
-    )
+    assert [(line["trace_id"], line["error"]) for line in _turn_log_lines(caplog)] == [
+        (closed_trace_id, None if acknowledged else "abandoned")
+    ]
+
+
+async def test_a_closing_write_whose_bookkeeping_raises_after_it_landed_returns_it_saved(
+    new_store, monkeypatch, caplog
+) -> None:
+    """A closing write whose COMMIT landed and whose bookkeeping then raised
+    returns as saved, with the close's one line: the row and the line both
+    hold the close, so the stream does not end it unsaved."""
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    state.begin_turn()
+    await store.save("principal", CONVERSATION)
+    state.close_turn(final_text="done")
+
+    def assign_raising(*_args: Any) -> None:
+        raise RuntimeError("the bookkeeping failed")
+
+    monkeypatch.setattr(studio_store, "_assign_changed", assign_raising)
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        closed = await store.close_segment("principal", CONVERSATION, segment_id)
+
+    assert closed is SegmentClose.SAVED
+    assert [line["trace_id"] for line in _turn_log_lines(caplog)] == [state.trace_id]
+    stored = await new_store().load("principal", CONVERSATION)
+    assert [record["trace_id"] for record in stored.turns] == [state.trace_id]
 
 
 async def test_a_cancelled_write_that_commits_keeps_its_bookkeeping(new_store) -> None:

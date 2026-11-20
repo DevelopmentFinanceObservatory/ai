@@ -1424,11 +1424,21 @@ async def _stop_turn_at(
             over before the writes landed, or the turn moved since `cursor`
             was read.
     """
+    segment_id: str | None = None
     try:
         segment_id = studio.store.claim_segment(principal, conversation_id)
         await studio.store.save(principal, conversation_id, stopping=True)
     except (SegmentBusy, ConversationStale) as exc:
+        # Each is raised before the claim save's COMMIT.
         raise _ClaimLost from exc
+    except BaseException:
+        # Any other failure of the claim save may have committed its lease,
+        # a cancel during the COMMIT say, so the lease is dropped
+        # (`StudioStore.drop_lease` clears only this segment's).
+        if segment_id is not None:
+            await studio.store.drop_lease(principal, conversation_id, segment_id)
+        raise
+    assert segment_id is not None
     wrote = False
     try:
         try:
@@ -1789,6 +1799,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         # copy its claim began the turn on, whose trace records how it let
         # go (`_release_claim`).
         claimed: str | None = None
+        # The lease id this request's lease claim writes, from the claim's
+        # start until it returns or refuses: a claim that raised may have
+        # committed it (`_release_claim`'s `unsure`).
+        leasing: str | None = None
         begun: ConversationState | None = None
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
@@ -1866,9 +1880,14 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 turn_user_message=user_message,
                 turn_usage=usage.copy(),
             )
+            leasing = _wire_id("seg")
             try:
-                lease = await studio.store.claim_turn_lease(principal, body.conversation_id)
+                lease = await studio.store.claim_turn_lease(
+                    principal, body.conversation_id, segment_id=leasing
+                )
             except SegmentBusy as exc:
+                # Each refusal is raised before the claim's COMMIT.
+                leasing = None
                 return await _unclaimed(
                     studio.store,
                     principal,
@@ -1882,6 +1901,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 )
             except StopPending:
                 # A `ConversationStale` of its own kind, so it is caught first.
+                leasing = None
                 return await _answer_after_stop(
                     studio,
                     principal,
@@ -1893,6 +1913,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     turn=begun,
                 )
             except ConversationStale:
+                leasing = None
                 return await _unclaimed(
                     studio.store,
                     principal,
@@ -1904,6 +1925,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     turn=begun,
                 )
             claimed = segment_id = lease.segment_id
+            leasing = None
             # Under the lease, the turn begins on the conversation and the
             # turn left open as stored. A turn still open, paused on a
             # question or left running by the lapsed segment, is closed
@@ -2055,7 +2077,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # open as it stood, its pause answerable. Once that save
             # commits, the abandoned turn and the opened one stay as
             # written, and the next `/turn` closes the open one as it closes
-            # any open turn.
+            # any open turn. A lease claim that raised may have committed
+            # its lease, a COMMIT that landed and then timed out say, so
+            # that lease is dropped too (`leasing`).
             await _release_claim(
                 studio.store,
                 principal,
@@ -2064,6 +2088,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 claimed,
                 cause=exc,
                 turn=begun,
+                unsure=leasing,
             )
             raise
 
@@ -2230,9 +2255,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             return hold
         # The working copy of a claim about to be saved, whose trace records
         # how a request let go of its claim before its stream started
-        # (`_release_claim`), and the segment that save claims.
+        # (`_release_claim`), the segment that save claims, and that segment
+        # from the save's start until it returns or refuses, which a save
+        # that raised may have committed (`saving`).
         claiming: ConversationState | None = None
         segment_id: str | None = None
+        saving: str | None = None
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
@@ -2395,11 +2423,14 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # double answer to the same interrupt across two instances loses
             # cleanly here, with a 409, rather than each resuming its own
             # segment of the turn.
+            saving = segment_id
             try:
                 await studio.store.save(principal, body.conversation_id, work)
             except StopPending:
                 # A Stop that landed since the check above ends the turn
-                # first, which leaves no pause to answer.
+                # first, which leaves no pause to answer. Like the conflict
+                # below, it is raised before the save's COMMIT.
+                saving = None
                 return await _answer_after_stop(
                     studio,
                     principal,
@@ -2409,6 +2440,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     turn=claiming,
                 )
             except ConversationStale:
+                saving = None
                 return await _unclaimed(
                     studio.store,
                     principal,
@@ -2417,25 +2449,32 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     _streaming_conflict_response("another request already answered this interrupt"),
                     turn=claiming,
                 )
+            saving = None
         except BaseException as exc:
             # A claim save that raised once its write committed, cancelled
             # during the commit say, still handed its segment to the live
             # state (`StudioStore.save`), whose lease is dropped as any
-            # committed claim's, and its span ends as `exc` reads. One the
-            # live state does not hold resumed nothing, so its span ends
-            # `not_started`, and it may still have committed, so its lease is
-            # dropped too (`unsure`).
+            # committed claim's. One the live state does not hold may still
+            # have committed, a COMMIT that landed and then timed out say,
+            # so its lease is dropped too (`unsure`). A failure before the
+            # save started drops nothing. Either way the span ends as `exc`
+            # reads.
             live = studio.store.current(principal, body.conversation_id)
-            held = live is not None and live.segment is not None and live.segment.id == segment_id
+            held = (
+                segment_id is not None
+                and live is not None
+                and live.segment is not None
+                and live.segment.id == segment_id
+            )
             await _release_claim(
                 studio.store,
                 principal,
                 body.conversation_id,
                 hold,
                 segment_id if held else None,
-                cause=exc if held else None,
+                cause=exc,
                 turn=claiming,
-                unsure=None if held else segment_id,
+                unsure=None if held else saving,
             )
             raise
 
