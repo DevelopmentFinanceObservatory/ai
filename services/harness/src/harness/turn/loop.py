@@ -216,12 +216,33 @@ class _Writing:
 @dataclass
 class Segment:
     """One run of the loop under one lease: the cursor as last written, how
-    the run ended (`None` while it runs), and the boundary write the segment
-    is making and has not yet reported (`writing`)."""
+    the run ended (`None` while it runs), the boundary write the segment
+    is making and has not yet reported (`writing`), and what hears each
+    pause the segment's writes commit (`paused`, `note_pause`)."""
 
     cursor: Cursor
     outcome: Outcome | None = None
     writing: _Writing | None = None
+    paused: Callable[[Cursor], None] | None = None
+    # The round of the last pause handed to `paused`.
+    _noted: int | None = field(default=None, repr=False)
+
+    def note_pause(self, stored: Cursor) -> None:
+        """Hand `stored`, a pause this segment's write committed, to
+        `paused`, once per pause: the pause write's commit hands it over
+        (`TurnStore.pause`), and a read back that finds a pause write
+        committed whose acknowledgement was lost does (`_after_failed_write`,
+        `_settle`). A cursor that is not paused is ignored. A failure is
+        logged."""
+        if self.paused is None or stored.status is not TurnStatus.PAUSED or stored.pause is None:
+            return
+        if self._noted == stored.pause.round:
+            return
+        self._noted = stored.pause.round
+        try:
+            self.paused(stored)
+        except Exception:
+            logger.exception("turn %s: the pause's own work failed", stored.turn_index)
 
 
 # The attributes an exception sets to name the MCP call whose pinned timeout
@@ -514,6 +535,7 @@ async def _commit_boundary(
         interrupt_id=interrupt_id,
         ctx=ctx,
         lineage=lineage,
+        paused=segment.note_pause,
     )
     segment.cursor = written
     assert segment.writing is not None
@@ -575,6 +597,7 @@ async def _after_failed_write(
 
     async def committed(stored: Cursor) -> None:
         segment.cursor = stored
+        segment.note_pause(stored)
         await writing.owed.run()
 
     landed, stored = await _read_back(
@@ -636,12 +659,13 @@ async def _write_boundary(
     interrupt_id: str,
     ctx: NodeCtx[Any],
     lineage: SegmentLineage | None,
+    paused: Callable[[Cursor], None],
 ) -> Cursor:
     """The write that records `node`'s `result`: a pause under
     `interrupt_id`, the turn's end, or the move to `following`. A pause
     records the Stop the turn's `StopScope` took (`StopScope.taken`), which
-    ends that Stop. A pause or move writes the frame lineage of the
-    segment's `lineage`."""
+    ends that Stop, and hands the paused cursor to `paused` once it commits.
+    A pause or move writes the frame lineage of the segment's `lineage`."""
     if isinstance(result, Pause):
         ctx.transcript.append(
             entries.pause(
@@ -664,6 +688,7 @@ async def _write_boundary(
             records=ctx.transcript.take(),
             stop_taken_id=ctx.stop.taken,
             lineage=lineage,
+            committed=paused,
         )
     if following == END:
         return await store.finish(
@@ -1228,6 +1253,9 @@ async def _settle(
         stored = segment.cursor
     writing, segment.writing = segment.writing, None
     reported = writing.reports if writing is not None and writing.committed(stored) else None
+    if isinstance(reported, Paused):
+        # The pause committed, whatever cut came after it.
+        segment.note_pause(stored)
     # A Stop closes a pause it cut, so the pause's owed work (early mints)
     # would be for a question no one can answer.
     if reported is not None and not (isinstance(reported, Paused) and cut_by is Outcome.CANCELLED):
@@ -1288,6 +1316,7 @@ async def run_segment[E](
     answer: Answer | None = None,
     heartbeat_seconds: float = HEARTBEAT_INTERVAL_S,
     renew_now: asyncio.Event | None = None,
+    paused: Callable[[Cursor], None] | None = None,
 ) -> Segment:
     """`drive` the turn at `cursor` under `segment_id`, the conversation
     lease the caller claimed, renewing it every `heartbeat_seconds`, or at
@@ -1320,6 +1349,12 @@ async def run_segment[E](
     `cursor` must be read after the caller claimed the lease. `drive`
     refuses one another write has moved since (`CursorStale`).
 
+    `paused`, when given, hears each pause the segment's writes commit, once
+    per pause, with the paused cursor (`Segment.note_pause`): from the pause
+    write's own commit (`TurnStore.pause`), or from the read back that finds
+    a pause committed whose acknowledgement was lost, whatever cut followed
+    it. It must not await.
+
     The node's work tells the two cuts apart through the scope. A Stop marks
     it (`StopScope.mark_turn_stopped`) before cancelling the node, so the
     work ends what it started (an executor run is recorded failed), and a
@@ -1336,7 +1371,7 @@ async def run_segment[E](
         What `drive` raises, except `SegmentLost`, which ends the segment
         `lost`.
     """
-    segment = Segment(cursor=cursor)
+    segment = Segment(cursor=cursor, paused=paused)
     stop = StopScope()
     key = TurnKey(principal, conversation_id, cursor.turn_index)
     task = asyncio.create_task(

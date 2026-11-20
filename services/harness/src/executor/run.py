@@ -226,6 +226,8 @@ from compiler.surface import (
     ToolSurfaceUnavailableError,
     UnhashableSchemaError,
     deliver_progress,
+    note_spec_use,
+    step_budget,
     transient,
 )
 from data_mcp.artifact_resource import ArtifactRefusalError
@@ -430,12 +432,6 @@ current_step_id: ContextVar[str | None] = ContextVar("executor_current_step_id",
 current_step_deadline: ContextVar[CallDeadline | None] = ContextVar(
     "executor_current_step_deadline", default=None
 )
-
-# The running step's budget (`_Run._run_step`), which `_Run._call` stops
-# while it records an attempt, so the budget covers the step's tool calls and
-# the waits between them and a slow ledger write is never read as a call that
-# ran past its time. `None` outside a step, or for a step with no budget.
-_step_budget: ContextVar[asyncio.Timeout | None] = ContextVar("executor_step_budget", default=None)
 
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -2396,7 +2392,7 @@ class _Run:
         try:
             async with budget:
                 deadline_token = current_step_deadline.set(step_deadline)
-                budget_token = _step_budget.set(budget if budget_s is not None else None)
+                budget_token = step_budget.set(budget if budget_s is not None else None)
                 try:
                     token = current_step_id.set(step.id)
                     try:
@@ -2440,9 +2436,14 @@ class _Run:
                         if step.id in self.evidence_bindings
                         else None
                     )
+                    # Only an accepted result counts as the step's fetch. A
+                    # step the budget or the evidence check stops tells the
+                    # turn of no fetched spec, as `McpExecutor._get_data` does.
+                    if self._retrieves(step):
+                        note_spec_use("fetched", self.inputs[step.id].spec_id)
                     return record, evidence
                 finally:
-                    _step_budget.reset(budget_token)
+                    step_budget.reset(budget_token)
                     current_step_deadline.reset(deadline_token)
         except TimeoutError as exc:
             if not budget.expired():
@@ -2749,7 +2750,7 @@ class _Run:
         """Record an attempt of `tool` for step `step_id`, with the step's
         budget, and the deadline `current_step_deadline` carries, stopped
         while the ledger writes."""
-        budget = _step_budget.get()
+        budget = step_budget.get()
         if budget is None or (expires := budget.when()) is None:
             await self._record(Attempt(step_id, tool.name), step_id=step_id)
             return

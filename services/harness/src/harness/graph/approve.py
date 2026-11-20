@@ -112,8 +112,9 @@ def decide(
     `planner` node replans holding the pick.
 
     Once the approval commits (`NodeCtx.after_commit`), it records a
-    `plan.approved` span (nesting under the turn span) and a log line with
-    the same facts, `plan_version` and `amended`, and withdraws the card's
+    `plan.approved` span (nesting under the segment's `turn.segment` span)
+    and a log line with the same facts, `plan_version` and `amended`, and
+    withdraws the card's
     early calls still waiting for a slot (`EarlyMints.withdraw`). A crash
     before the commit decides the answer again; one after it records
     neither.

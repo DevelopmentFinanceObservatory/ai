@@ -18,8 +18,12 @@ transaction however the run ends. Each statement is bounded by
 advisory lock and the locks a migration's own statements take, by
 `lock_timeout` (`MIGRATION_LOCK_TIMEOUT_S`). PostgreSQL applies
 `statement_timeout` to each statement of a multi-statement file
-separately, so this module puts no bound on a run as a whole. At startup
-Cloud Run's 240 s startup probe bounds it. Past the probe the instance is
+separately. The client waits on each call it makes up to
+`MIGRATION_CALL_TIMEOUT_S`, which replaces the engine's per-call
+`command_timeout` (`harness.db.engine.COMMAND_TIMEOUT_S`), so a file whose
+statements each pass `statement_timeout` is never cut short by the
+engine's bound. Nothing bounds a run as a whole. At startup Cloud Run's
+240 s startup probe bounds it. Past the probe the instance is
 killed and the transaction rolls back, so a run that needs longer goes out
 of band.
 
@@ -45,6 +49,11 @@ MIGRATION_TIMEOUT_S = 60.0
 # for a table lock holds up every query on that table queued behind it, so
 # it gives up well before the statement bound and the run is retried.
 MIGRATION_LOCK_TIMEOUT_S = 10.0
+# The longest the client waits on one call of a run, a whole migration file
+# sent as one call included, in place of the engine's `command_timeout`.
+# It is the startup database budget (`harness.server._STARTUP_DB_RETRY_BUDGET_S`,
+# 120 s): a call the startup could not wait for anyway.
+MIGRATION_CALL_TIMEOUT_S = 120.0
 # A fixed 64-bit number that names the lock in `pg_locks`.
 _ADVISORY_LOCK_KEY = 0x6861726E657373  # "harness"
 _BOOKKEEPING = """
@@ -76,9 +85,12 @@ async def bound_and_lock(
     open transaction, then take the migrations' advisory lock until it ends."""
     await conn.execute(
         f"SET LOCAL statement_timeout = {round(timeout_s * 1000)}; "
-        f"SET LOCAL lock_timeout = {round(lock_timeout_s * 1000)}"
+        f"SET LOCAL lock_timeout = {round(lock_timeout_s * 1000)}",
+        timeout=MIGRATION_CALL_TIMEOUT_S,
     )
-    await conn.execute("SELECT pg_advisory_xact_lock($1)", _ADVISORY_LOCK_KEY)
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock($1)", _ADVISORY_LOCK_KEY, timeout=MIGRATION_CALL_TIMEOUT_S
+    )
 
 
 async def record_applied(conn: Any, path: Path) -> None:
@@ -88,6 +100,7 @@ async def record_applied(conn: Any, path: Path) -> None:
         "INSERT INTO harness_schema_migrations (version, content_sha256) VALUES ($1, $2)",
         path.name,
         sha256(path),
+        timeout=MIGRATION_CALL_TIMEOUT_S,
     )
 
 
@@ -101,7 +114,9 @@ async def apply_pending(
     """Apply every file in `directory` not yet recorded, in filename order, in
     one transaction, and return their names. `timeout_s` bounds each
     statement (`statement_timeout`) and `lock_timeout_s` each wait for a
-    lock (`lock_timeout`). Nothing here bounds the run as a whole. At
+    lock (`lock_timeout`). The client waits on each call up to
+    `MIGRATION_CALL_TIMEOUT_S`, whatever the engine's `command_timeout`.
+    Nothing here bounds the run as a whole. At
     startup Cloud Run's startup probe does (module docstring).
 
     Raises:
@@ -114,12 +129,15 @@ async def apply_pending(
         raw = await sa_conn.get_raw_connection()
         conn = raw.driver_connection
         assert conn is not None
+        wait = MIGRATION_CALL_TIMEOUT_S
         async with conn.transaction():
             await bound_and_lock(conn, timeout_s=timeout_s, lock_timeout_s=lock_timeout_s)
-            await conn.execute(_BOOKKEEPING)
+            await conn.execute(_BOOKKEEPING, timeout=wait)
         async with conn.transaction():
             await bound_and_lock(conn, timeout_s=timeout_s, lock_timeout_s=lock_timeout_s)
-            rows = await conn.fetch("SELECT version, content_sha256 FROM harness_schema_migrations")
+            rows = await conn.fetch(
+                "SELECT version, content_sha256 FROM harness_schema_migrations", timeout=wait
+            )
             applied = {row["version"]: row["content_sha256"] for row in rows}
             missing = sorted(set(applied) - {path.name for path in files})
             if refused := [name for name in missing if name <= newest]:
@@ -133,7 +151,7 @@ async def apply_pending(
                     if applied[path.name] != digest:
                         raise MigrationChecksumError(f"{path.name} changed since it was applied")
                     continue
-                await conn.execute(path.read_text())
+                await conn.execute(path.read_text(), timeout=wait)
                 await record_applied(conn, path)
                 ran.append(path.name)
         for name in ran:

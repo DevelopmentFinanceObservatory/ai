@@ -27,18 +27,19 @@ is digest-sized. The resolver maps the search envelope down to its digest
 dozens of unbound definition slots, never leaves this module. The executor
 returns frame REFERENCES; rows stay in the materialisation store.
 
-Clients: every mount gets one client per conversation, held in a
+Clients: every mount gets one client per conversation turn, held in a
 `compiler.caller_clients.CallerClients` registry keyed by the conversation's
-caller (`harness.conversation.current_conversation_caller`). The client
-names that caller in its `x-dfo-caller` header on every request, since
-under the 2026-07-28 protocol revision the MCP transport session lasts one
-request and cannot identify a conversation. data-mcp and analysis-mcp
-record the caller as a stored frame's `writer`. presentation-mcp ignores
-it: a component id grants reads, and the `write_token` a create returns
+caller and the Studio turn (`harness.conversation.current_caller_turn`). The
+client names that caller in its `x-dfo-caller` header and the turn in its
+`x-dfo-turn` header on every request, since under the 2026-07-28 protocol
+revision the MCP transport session lasts one request and cannot identify a
+conversation. data-mcp and analysis-mcp record the caller as a stored frame's
+`writer`, and forward caller and turn to dfo-apis. presentation-mcp ignores
+both: a component id grants reads, and the `write_token` a create returns
 grants revises (`common.mcp_telemetry.WRITE_TOKEN_KEY`).
 
-Holding a client for a whole conversation means a client that breaks mid-
-conversation would otherwise keep failing every later call the same way,
+Holding a client for a whole turn means a client that breaks mid-turn would
+otherwise keep failing every later call of the turn the same way,
 with nothing to reconnect it. `_call_held` is where every call site draws
 the line: a read timeout says only that one call ran past its own deadline, not that the
 client is broken, so the client stays cached; anything else discards it, so
@@ -89,6 +90,7 @@ import re
 import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from functools import partial
 from http import HTTPStatus
@@ -110,6 +112,7 @@ from common.mcp_telemetry import WRITE_TOKEN_KEY
 from common.period_note import period_note
 from common.recipe import RecipeAnchorError, RecipeError, build_recipe
 from common.refusal import REFUSAL_META_KEY, refusal_code
+from common.telemetry import root_if_span_ended, start_telemetry_flush
 from compiler.caller_clients import CallerClients, session_call_meta
 from compiler.surface import (
     ProgressCallback,
@@ -117,7 +120,11 @@ from compiler.surface import (
     ToolSurfaceUnavailableError,
     deliver_progress,
     mcp_progress_handler,
+    note_spec_use,
+    record_tool_failure,
+    record_tool_result,
     retryable_failure,
+    stated_spec_id,
 )
 from data_mcp.mint_admission import (
     BACKGROUND_ADMISSION,
@@ -150,7 +157,7 @@ from presentation_mcp.platform_contract import (
 )
 
 from harness.conversation import (
-    current_conversation_caller,
+    current_caller_turn,
     current_conversation_id,
     current_conversation_key,
 )
@@ -195,6 +202,22 @@ from harness.wire import RetryMode as WireRetryMode
 from harness.wire import log_unreadable_card, stored_card_fault
 
 logger = logging.getLogger(__name__)
+
+# Whether the `get_data` attempt `_retried` is running under its deadline has
+# left its `dfo.tool_result` observation; `_recorded_get_data` sets it once it
+# has. An attempt the deadline cancels before then is recorded as `timeout` by
+# `_retried`.
+_attempt_recorded: ContextVar[bool] = ContextVar("_attempt_recorded", default=False)
+
+# The deadline budget `_retried` runs a retried attempt under, or `None` for a
+# first attempt. A cancel that budget made is the attempt's `timeout`, which
+# `_retried` records; `_recorded_get_data` records any other cancel as
+# `cancelled`.
+_attempt_budget: ContextVar[asyncio.Timeout | None] = ContextVar("_attempt_budget", default=None)
+
+# The root an early mint's `dfo.tool_result` goes into when the mint ends after
+# the segment of the stream that offered it (`_record_get_data`).
+EARLY_MINT_SPAN_NAME = "turn.early_mint"
 
 
 # A `describe_frame` whose frame's recipe could not be read just now.
@@ -294,6 +317,24 @@ async def _call_tool(
         ) from exc
 
 
+def _record_get_data(record: Callable[..., None], *, background: bool) -> None:
+    """Add a `get_data` call's `dfo.tool_result` with `record`. A background
+    call (an early mint) can finish after the stream that offered it ended
+    its segment, so its observation goes into a short-lived root on the
+    turn's trace (`common.telemetry.root_if_span_ended`), and no flush of
+    that stream is left to export it. The call starts a flush and does not
+    wait for it (`start_telemetry_flush`). A mint that ends while its
+    response waits for it (`harness.early_mint.EarlyMints.settle`) then
+    finishes inside that wait, whose own flush exports it."""
+    if not background:
+        record()
+        return
+    with root_if_span_ended(EARLY_MINT_SPAN_NAME) as rooted:
+        record(background=True)
+    if rooted:
+        start_telemetry_flush()
+
+
 async def _call_held(
     clients: CallerClients,
     client: Client,
@@ -304,7 +345,7 @@ async def _call_held(
     meta: Mapping[str, Any] | None = None,
 ) -> Any:
     """`_call_tool` against `client` -- `clients`' held client for the
-    current conversation -- evicting it from `clients` when the call fails
+    current conversation turn (`current_caller_turn`) -- evicting it from `clients` when the call fails
     for any reason but its own read timeout.
 
     A timeout says only that this one call ran past its deadline
@@ -317,7 +358,7 @@ async def _call_held(
     it is evicted and the next `get()` reconnects instead.
 
     This is not the same as `client` being disconnected here: `discard` only
-    marks it, since a sibling call sharing this conversation's client may
+    marks it, since a sibling call sharing this turn's client may
     still be in flight on it. Whichever call is holding `client` -- this one
     included -- releases it back to `clients` with `release`; the caller of
     `_call_held` owns that pairing, since it is the one that called `get()`
@@ -351,17 +392,17 @@ class McpResolver:
         # policy is settled (`None` when the gate is disabled).
         self._token = bearer_token()
         self._policy = McpTimeoutPolicy(settings=settings)
-        # One held client per conversation -- see the module docstring's
-        # "Clients" note.
+        # One held client per conversation turn (`current_caller_turn`) -- see
+        # the module docstring's "Clients" note.
         self._clients = CallerClients(
             lambda caller: self._policy.client(
                 self._url, auth=self._token, caller=caller, tool="search"
             ),
-            caller=current_conversation_caller,
+            caller=current_caller_turn,
         )
 
     async def aclose(self) -> None:
-        """Release every conversation's held `search` client.
+        """Release every held `search` client, of every conversation turn.
 
         Unlike `McpExecutor.aclose` -- routed to from `_lifespan` shutdown
         through `StudioRunner.aclose` -- no caller on the served path holds
@@ -632,8 +673,8 @@ class McpExecutor:
     ProvenanceStore`), keyed by frame reference, so a later `write_component`
     on that frame can assemble wire provenance without re-fetching. That
     store is shared with `harness.studio_translate._RecordingSurface`, the
-    approved-plan path's own writer -- `_assemble_component` below reads
-    from it regardless of which path retrieved the frame.
+    approved-plan path's own writer, and `_assemble_component` below reads
+    from it whichever path retrieved the frame.
 
     A `write_component` on a frame the store does not hold first puts back
     the lineage stored with the conversation's cards (`card_lineages`,
@@ -702,30 +743,30 @@ class McpExecutor:
         # The rules for a card whose period follows the latest data, with the
         # frames and replays they have found, shared by every conversation.
         self._rolling_cards = RollingCards(replay=card_replay, clock=clock)
-        # One held client per conversation per mount/tool -- see the module
-        # docstring's "Clients" note. `get_data`
+        # One held client per conversation turn (`current_caller_turn`) per
+        # mount/tool -- see the module docstring's "Clients" note. `get_data`
         # gets its own held client because it carries a pinned call deadline
         # (`McpTimeoutPolicy.client`'s per-tool row): 180s for its mint
         # budget.
         self._presentation_clients = CallerClients(
-            # No single tool: this client is long-lived, serving
-            # `describe_frame` / `write_component` / `describe_component`
-            # across a whole conversation, so it gets the general default
+            # No single tool: this client serves `describe_frame` /
+            # `write_component` / `describe_component` across a whole turn,
+            # so it gets the general default
             # (`McpTimeoutPolicy.client`'s `tool=None` case).
             lambda caller: self._policy.client(
                 self._presentation_url, auth=self._token, caller=caller
             ),
-            caller=current_conversation_caller,
+            caller=current_caller_turn,
         )
         self._get_data_clients = CallerClients(
             lambda caller: self._policy.client(
                 self._data_url, auth=self._token, caller=caller, tool="get_data"
             ),
-            caller=current_conversation_caller,
+            caller=current_caller_turn,
         )
 
     async def aclose(self) -> None:
-        """Release every conversation's held clients, across both.
+        """Release every held client, of every conversation turn, across both.
 
         Called once, from `harness.server._lifespan`'s shutdown, through
         `StudioRunner.aclose` -> `_RecordingExecutor.aclose` -> here.
@@ -902,12 +943,22 @@ class McpExecutor:
             await self._sleep(delay_s)
             # The client's own timeout restarts on every request, so the
             # retry runs under what is left of the call's deadline.
+            _attempt_recorded.set(False)
             try:
                 async with asyncio.timeout(deadline_s - (self._clock() - started)) as budget:
-                    outcome = await call(tool, args, on_progress=on_progress)
+                    token = _attempt_budget.set(budget)
+                    try:
+                        outcome = await call(tool, args, on_progress=on_progress)
+                    finally:
+                        _attempt_budget.reset(token)
             except TimeoutError as exc:
                 if not budget.expired():
                     raise
+                if tool == "get_data" and not _attempt_recorded.get():
+                    # The budget's cancel passes through `_recorded_get_data`
+                    # without reaching its own recording, so the attempt is
+                    # recorded here, unless it already left an observation.
+                    record_tool_failure("get_data", outcome="timeout")
                 if tool == "write_component":
                     raise _McpTimeoutError(
                         ErrorData(
@@ -935,20 +986,13 @@ class McpExecutor:
         out, keeping the POST itself open until apis answers. Sent
         once, without `_retried`, and nothing is
         written to the provenance store: the call only warms the frame
-        execution will ask for (`harness.early_mint`). A failed call raises, as
-        `_call_held` does.
+        execution will ask for (`harness.early_mint`). It adds one
+        `dfo.tool_result` marked background, inside a `turn.early_mint` root
+        on the turn's trace when it ends after the segment that offered it
+        (`_record_get_data`), and the turn hears no fetched spec from it. A
+        failed call raises, as `_call_held` does.
         """
-        client = await self._get_data_clients.get()
-        try:
-            result = await _call_held(
-                self._get_data_clients,
-                client,
-                "get_data",
-                args,
-                meta={MINT_ADMISSION_META_KEY: BACKGROUND_ADMISSION},
-            )
-        finally:
-            await self._get_data_clients.release(client)
+        result = await self._recorded_get_data(args, background=True)
         return background_outcome(result.structured_content)
 
     async def _restore_card_lineage(
@@ -1060,6 +1104,8 @@ class McpExecutor:
         if (withheld := _withheld_card(component, written.args)) is not None:
             return withheld
         assert assembled is not None and component is not None
+        for spec_id in _served_spec_ids(assembled.lineage):
+            note_spec_use("drawn", spec_id)
         title = (written.args.get("intent") or {}).get("title") or _envelope_title(envelope)
         summary = f"{component['type']}: {title}" if title else None
         outcome = {"outcome": "ok", "frame_refs": [], "component": component, "summary": summary}
@@ -1161,16 +1207,73 @@ class McpExecutor:
             ),
         }
 
+    async def _recorded_get_data(
+        self,
+        args: dict[str, Any],
+        *,
+        on_progress: ProgressCallback | None = None,
+        background: bool = False,
+    ) -> Any:
+        """One `get_data` call on the conversation's held client, which adds
+        one `dfo.tool_result` observation however it ends: its result,
+        `timeout`, `cancelled`, or `transport_failed`. A cancel by
+        `_retried`'s budget is left for `_retried` to record as `timeout`.
+        A `background` call is marked so (`McpExecutor.get_data_in_background`)."""
+        meta = {MINT_ADMISSION_META_KEY: BACKGROUND_ADMISSION} if background else None
+        client: Client | None = None
+        try:
+            try:
+                client = await self._get_data_clients.get()
+                result = await _call_held(
+                    self._get_data_clients,
+                    client,
+                    "get_data",
+                    args,
+                    on_progress=on_progress,
+                    meta=meta,
+                )
+            except _McpTimeoutError:
+                _record_get_data(
+                    partial(record_tool_failure, "get_data", outcome="timeout"),
+                    background=background,
+                )
+                _attempt_recorded.set(True)
+                raise
+            except asyncio.CancelledError:
+                budget = _attempt_budget.get()
+                if budget is None or not budget.expired():
+                    _record_get_data(
+                        partial(record_tool_failure, "get_data", outcome="cancelled"),
+                        background=background,
+                    )
+                    _attempt_recorded.set(True)
+                raise
+            except Exception:
+                _record_get_data(
+                    partial(record_tool_failure, "get_data", outcome="transport_failed"),
+                    background=background,
+                )
+                _attempt_recorded.set(True)
+                raise
+            _record_get_data(
+                partial(
+                    record_tool_result,
+                    "get_data",
+                    is_error=result.is_error,
+                    structured_content=result.structured_content,
+                ),
+                background=background,
+            )
+            _attempt_recorded.set(True)
+        finally:
+            if client is not None:
+                await self._get_data_clients.release(client)
+        return result
+
     async def _get_data(
         self, args: dict[str, Any], *, on_progress: ProgressCallback | None = None
     ) -> dict[str, Any]:
-        client = await self._get_data_clients.get()
-        try:
-            result = await _call_held(
-                self._get_data_clients, client, "get_data", args, on_progress=on_progress
-            )
-        finally:
-            await self._get_data_clients.release(client)
+        result = await self._recorded_get_data(args, on_progress=on_progress)
         if result.is_error:
             return _refusal_outcome(result.structured_content, fallback_text=_result_text(result))
         manifest = await manifest_with_stat_vars(result.structured_content or {})
@@ -1190,7 +1293,7 @@ class McpExecutor:
             )
         # `served` is how the frame was counted (`served_facts`), which the
         # `fetch` tool keeps on the readings of the spec_id; no model reads it.
-        return {
+        outcome = {
             "outcome": "ok",
             "frame_refs": [ref],
             "store_refs": [store_ref],
@@ -1200,6 +1303,10 @@ class McpExecutor:
             **({"period_note": note} if (note := period_note(coverage)) else {}),
             **({"served": served} if (served := served_facts(manifest)) is not None else {}),
         }
+        # Only a built outcome counts as the attempt's result: a retry the
+        # budget cancels before this tells the turn of no fetched spec.
+        note_spec_use("fetched", stated_spec_id(manifest))
+        return outcome
 
     async def _described_frame(
         self, args: Mapping[str, Any], body: dict[str, Any]
@@ -1429,6 +1536,14 @@ def _complete_frame(intent: Any) -> tuple[str, str] | None:
     ):
         return (spec_id, content_version)
     return None
+
+
+def _served_spec_ids(lineage: Lineage | None) -> list[str]:
+    """The spec_id the datasets door serves each retrieval in `lineage`
+    under (`ProvenanceInput.served_ref`), once each, so a card drawn from a
+    derived frame names the retrievals behind it."""
+    served = (member.served_ref["spec_id"] for member in lineage or ())
+    return list(dict.fromkeys(spec_id for spec_id in served if spec_id))
 
 
 def _withheld_card(component: dict[str, Any] | None, args: dict[str, Any]) -> dict[str, Any] | None:

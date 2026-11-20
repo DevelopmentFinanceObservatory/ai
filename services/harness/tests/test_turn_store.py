@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import shutil
 from dataclasses import replace
@@ -1478,3 +1479,80 @@ async def test_a_database_refusal_of_the_lineage_fails_the_cursor_write_and_comm
 
     assert await store.open_cursor(PRINCIPAL, CONVERSATION) == advanced
     assert await _row_versions(pg_engine) == stored
+
+
+class _SlowCommit:
+    """An engine whose next `begin` waits, once its statements ran, until
+    `proceed` is set before it commits, and sets `committing` as it starts
+    waiting. Everything else is `engine`'s."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+        self.committing, self.proceed = asyncio.Event(), asyncio.Event()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine, name)
+
+    def begin(self) -> Any:
+        return self._slow()
+
+    @contextlib.asynccontextmanager
+    async def _slow(self) -> Any:
+        async with self._engine.begin() as conn:
+            yield conn
+            if not self.committing.is_set():
+                self.committing.set()
+                await self.proceed.wait()
+
+
+@pytest.mark.parametrize("how", ["returns", "caller-cancelled-at-commit", "fenced-out"])
+async def test_a_pause_hands_its_cursor_to_committed_once_its_write_commits(
+    pg_engine: AsyncEngine, how: str
+) -> None:
+    """`committed` runs once, with the paused cursor, once the pause's write
+    commits: in the task that commits it when the caller is cancelled during
+    the commit, which then ends in the cancellation. A pause fenced out by a
+    moved lease commits nothing and runs nothing."""
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    cursor = await _open(store)
+    noted: list[Cursor] = []
+
+    def pause() -> Any:
+        return store.pause(
+            cursor,
+            segment_id=SEGMENT,
+            node="ask",
+            node_input={"question": "which donor?"},
+            kind="ask",
+            interrupt_id="int_1",
+            payload={"question": "which donor?"},
+            state=cursor.state,
+            lineage=None,
+            committed=noted.append,
+        )
+
+    if how == "returns":
+        paused = await pause()
+        assert noted == [paused]
+    elif how == "fenced-out":
+        await _move_lease(pg_engine, "segment-b")
+        with pytest.raises(SegmentLost):
+            await pause()
+        assert noted == []
+        return
+    else:
+        slow = _SlowCommit(pg_engine)
+        store._engine = slow  # type: ignore[assignment]
+        task = asyncio.ensure_future(pause())
+        await asyncio.wait_for(slow.committing.wait(), timeout=5)
+        task.cancel()
+        await asyncio.sleep(0)
+        slow.proceed.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        store._engine = pg_engine  # type: ignore[assignment]
+    [stored] = noted
+    assert stored.status is TurnStatus.PAUSED
+    assert stored.pause is not None and stored.pause.interrupt_id == "int_1"
+    assert (await store.turn(cursor.id)).status is TurnStatus.PAUSED

@@ -94,6 +94,7 @@ from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.db.best_effort import bounded_read
+from harness.db.commit import committing
 from harness.db.jsonb import json_or_none, to_json_param
 from harness.provenance import (
     CardLineageDecodeError,
@@ -1093,6 +1094,7 @@ class TurnStore:
         records: Sequence[AgentRecord] = (),
         stop_taken_id: str | None = None,
         lineage: SegmentLineage | None,
+        committed: Callable[[Cursor], None] | None = None,
     ) -> Cursor:
         """Pause the running turn at `node` on a question of `kind` under the
         wire id `interrupt_id`, as the turn's next round, writing `state`,
@@ -1102,13 +1104,22 @@ class TurnStore:
         answered, recorded in the same update; a pause without one keeps
         the Stop recorded before. `lineage` is as `advance` takes it.
 
+        `committed`, when given, runs with the paused cursor once the write
+        commits, and must not await or raise: the caller writes the pause's
+        `studio.turn` line there (`harness.studio_store.write_pause_line`).
+        The commit and it run in one task to the end
+        (`harness.db.commit.committing`), so a cut of the caller during the
+        commit cannot land the pause without it. A cut before the commit
+        rolls the write back, and a commit that raises runs nothing after it.
+
         Raises:
             SegmentLost: `segment_id` does not hold the conversation's lease.
             CursorStale: the cursor moved, or the turn is not running.
             WriteNotEncoded: JSON cannot hold a value of the write.
         """
         write = self._lineage_rows(cursor, state, lineage)
-        async with self._engine.begin() as conn:
+
+        async def pausing(conn: AsyncConnection) -> Callable[[], Cursor]:
             await _fence(conn, cursor.conversation, segment_id)
             paused = await _swap(
                 conn,
@@ -1132,6 +1143,15 @@ class TurnStore:
                 records=records,
             )
             await _write_lineage(conn, write)
+
+            def landed() -> Cursor:
+                if committed is not None:
+                    committed(paused)
+                return paused
+
+            return landed
+
+        paused = await committing(self._engine.begin(), pausing)
         if lineage is not None:
             lineage.written.update(write.generations)
         return paused

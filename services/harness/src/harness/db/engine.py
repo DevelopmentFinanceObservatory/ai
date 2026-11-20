@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from google.cloud.sql.connector import IPTypes, create_async_connector
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from harness.settings import Settings
@@ -37,6 +38,16 @@ logger = logging.getLogger(__name__)
 # connector also supports pg8000 and psycopg, and only asyncpg gives
 # SQLAlchemy an async engine.
 _CONNECTOR_DRIVER = "asyncpg"
+
+# asyncpg's `command_timeout`, in seconds, on every connection of the runtime
+# engine (`DatabaseHandle.engine`): the longest any statement may wait for the
+# server, a COMMIT included, before the call raises `TimeoutError`. A COMMIT that a write runs
+# to the end under cancellation (`harness.studio_store`) would otherwise wait
+# on a stalled connection until TCP gives up. A call that passes its own
+# `timeout` replaces it: `harness.db.migrate.apply_pending` passes
+# `MIGRATION_CALL_TIMEOUT_S` on every call, so a migration file, sent as one
+# call, is bounded by its statements' `statement_timeout` and that wait.
+COMMAND_TIMEOUT_S = 90.0
 
 # The pool of `DatabaseHandle.lineage_engine`: three connections and no
 # overflow, for the card lineage reads and the turn frame lineage restores of
@@ -90,11 +101,13 @@ class _ConnectorSource:
     database: str
     runtime_db_user: str
     connect_timeout_s: float
+    command_timeout_s: float
     _connector: Any = field(default=None, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
     async def connect(self, **driver_kwargs: Any) -> Any:
-        """A new connection, with `driver_kwargs` passed on to asyncpg."""
+        """A new connection, with `driver_kwargs` passed on to asyncpg over
+        its `command_timeout` of `command_timeout_s`."""
         if self._connector is None:
             async with self._lock:
                 if self._connector is None:
@@ -109,7 +122,7 @@ class _ConnectorSource:
             user=self.runtime_db_user,
             db=self.database,
             enable_iam_auth=True,
-            **driver_kwargs,
+            **{"command_timeout": self.command_timeout_s, **driver_kwargs},
         )
 
     async def aclose(self) -> None:
@@ -132,7 +145,10 @@ def build_database(*, settings: Settings) -> DatabaseHandle | None:
         # the pool. `hide_parameters` keeps bound values (a turn's transcript)
         # out of the errors a failed statement raises, and so out of the logs.
         engine = create_async_engine(
-            settings.database_url, pool_pre_ping=True, hide_parameters=True
+            settings.database_url,
+            pool_pre_ping=True,
+            hide_parameters=True,
+            connect_args=_command_timeout(settings.database_url, COMMAND_TIMEOUT_S),
         )
         lineage_engine = build_lineage_engine(settings.database_url)
 
@@ -163,9 +179,18 @@ def build_lineage_engine(
         url,
         pool_pre_ping=True,
         hide_parameters=True,
-        connect_args={"command_timeout": _LINEAGE_COMMAND_TIMEOUT_S},
+        connect_args=_command_timeout(url, _LINEAGE_COMMAND_TIMEOUT_S),
         **_LINEAGE_POOL,
     )
+
+
+def _command_timeout(url: str, seconds: float) -> dict[str, float]:
+    """The `connect_args` that bound each statement on `url` at `seconds`:
+    asyncpg's `command_timeout`, which only asyncpg takes, so a URL on
+    another driver connects without it. The connector always dials asyncpg
+    (`_ConnectorSource`)."""
+    asyncpg = make_url(url).get_driver_name() == _CONNECTOR_DRIVER
+    return {"command_timeout": seconds} if asyncpg else {}
 
 
 def _build_connector_backed_database(*, settings: Settings) -> DatabaseHandle:
@@ -184,6 +209,7 @@ def _build_connector_backed_database(*, settings: Settings) -> DatabaseHandle:
         database=database,
         runtime_db_user=runtime_db_user,
         connect_timeout_s=settings.session_store_connect_timeout_s,
+        command_timeout_s=COMMAND_TIMEOUT_S,
     )
     # The URL carries only the dialect+driver. `async_creator` supplies the
     # actual connection, and SQLAlchemy ignores the URL's parameters when it

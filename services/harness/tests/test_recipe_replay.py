@@ -24,6 +24,13 @@ from analysis_mcp.filter_tool import filter_verb
 from analysis_mcp.growth_tool import growth
 from analysis_mcp.join_tool import join
 from analysis_mcp.rolling_tool import resolve_anchor
+from common.caller import (
+    conversation_caller,
+    current_caller,
+    current_turn,
+    set_supplied_caller,
+    set_supplied_turn,
+)
 from common.live_apis import DatasetVersion
 from common.materialisation import (
     FrameRef,
@@ -35,6 +42,7 @@ from common.materialisation import (
 )
 from common.recipe import build_recipe, replay_key
 from common.row_budget import RowBudget
+from compiler.caller_clients import CallerTurn
 from data_mcp.deadline import CallDeadline
 from data_mcp.frame_materialisation import (
     KIND_COLUMNS,
@@ -47,6 +55,7 @@ from data_mcp.mint_recovery import recover_mint_record
 from data_mcp.operations import QueuedOperation
 from dfo_frame_grammar import Frame
 from fastmcp.tools import ToolResult
+from harness.conversation import current_caller_turn, current_conversation_id, current_turn_id
 from harness.recipe_replay import Pending, Refused, Replayed, replay_recipe
 
 from .replay_support import (
@@ -407,6 +416,33 @@ async def test_a_replay_on_moved_data_publishes_the_new_frame_under_the_same_nor
     # The root is minted as recorded, and a tree of fixed periods resolves no anchor.
     assert scene.dataset.minted == [MintRecord.model_validate(recipe["roots"][0])]
     assert scene.tools.names == ["filter", "growth"]
+
+
+async def test_a_replays_verbs_name_no_caller_or_turn_of_the_request_that_started_it(
+    scene: Scene,
+) -> None:
+    """Every slot reaching a node joins one task, so the verbs it calls carry no
+    caller or turn, supplied or from the conversation the MCP clients read:
+    neither belongs to the shared work."""
+    _, recipe = await scene.fixed()
+    scene.dataset.move(SECOND_VALUES)
+    seen: list[tuple[str, str | None, str | None, CallerTurn]] = []
+    scene.tools.after = lambda name: seen.append(
+        (name, current_caller(), current_turn(), current_caller_turn())
+    )
+    set_supplied_caller(conversation_caller("user-1/conv-a"))
+    set_supplied_turn("tr_" + "1" * 16)
+    current_conversation_id.set("user-1/conv-a")
+    current_turn_id.set("tr_" + "1" * 16)
+    assert current_caller_turn().caller is not None  # the control: the request names it
+
+    replayed = await scene.replay(recipe)
+
+    assert isinstance(replayed, Replayed), replayed
+    assert seen == [
+        ("filter", None, None, CallerTurn(None, None)),
+        ("growth", None, None, CallerTurn(None, None)),
+    ]
 
 
 @pytest.mark.parametrize(

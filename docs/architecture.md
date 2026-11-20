@@ -222,26 +222,39 @@ appears as one output message per chunk, and a thought summary appears as
 unlabelled text. Everything above is sent unmasked. `LANGFUSE_SAMPLE_RATE`
 and a Langfuse `mask` function limit it.
 
-One studio turn is one trace, and each segment of the turn adds a `turn` span
-to it. The trace id is derived from the turn's wire `trace_id`. A segment's
-owner (`harness.studio_stream.own_segment`) opens the span when it starts and
-ends it once, when the stream ends. The `/turn` stream and the `/interrupt`
-stream that resumes the turn are separate requests, so a turn that pauses has
-one span per segment, and each segment's agent, MCP and `record_event` spans
-nest under its own `turn` span on the shared trace. The span's status is the
-way the stream ended (`done`, `paused`, `failed`, `unclosed`, `cancelled`,
-`left` for a client that went while the turn ran, `lost`, or `unsaved`), with
-`dfo.saved` and `dfo.client_gone` as attributes. A turn the client leaves
-stays open for the next request to carry on. The span takes the turn's user
-message as its input and the reply as its output, which Langfuse shows as the
-trace's input and output. `done` and `paused` end at the default level,
-`failed`, `unclosed` and `unsaved` at `ERROR`, and `cancelled`, `left` and
-`lost` at `WARNING`.
+One studio turn is one trace, and each segment of the turn adds a `turn.segment`
+span to it. The trace id is derived from the turn's wire `trace_id`. A
+segment's owner (`harness.studio_stream.own_segment`) opens the span when it
+starts and ends it once, when the stream ends. The `/turn` stream and the
+`/interrupt` stream that resumes the turn are separate requests, so a turn
+that pauses has one span per segment, and each segment's agent, MCP and
+`record_event` spans nest under its own `turn.segment` span on the shared
+trace. The span's status is the way the stream ended (`done`, `paused`,
+`failed`, `unclosed`, `cancelled`, `left` for a client that went while the
+turn ran, `lost`, or `unsaved`), with `dfo.saved` and `dfo.client_gone` as
+attributes, and it carries no input or output. A turn the client leaves stays
+open for the next request to carry on. `done` and `paused` end at the default
+level, `failed`, `unclosed` and `unsaved` at `ERROR`, and `cancelled`, `left`
+and `lost` at `WARNING`.
 
-Every studio stream calls `common.telemetry.flush_telemetry` before its
-response ends, so queued spans export while the request still has CPU.
-`POST /api/studio/cancel` calls it when it ends a paused turn's span, since no
-stream runs then.
+A zero-duration observation on the same trace
+(`common.telemetry.record_turn_outcome`) is written beside each `studio.turn`
+log line: a `turn` for each turn close a `StudioStore` write commits, and a
+`turn.pause` for each pause the turn's cursor write commits
+(`harness.turn.store.TurnStore.pause`), so the line, the observation and the
+stored record agree, and a reader that sees only names, as the Langfuse
+BigQuery export does, never reads a pause as a close. It carries the user's
+message as its input, the closing text as its output (on a pause, the text
+streamed so far), and, for a turn closed with an error code, that code as its
+status message, at level `WARNING` for a Stop's `cancelled` and a newer
+turn's `abandoned` and `ERROR` for any other code. Its metadata holds
+`dfo.external_id`, the error as `dfo.turn_error` when there is one, and
+`dfo.turn_status` `paused` on a pause. A turn that paused holds a
+`turn.pause` observation for each pause beside its `turn`, which a reader
+resolves by the rule the log line's dbt model uses: the latest close that is
+not `abandoned`, else the latest close, else the latest pause.
+
+Every studio stream calls `common.telemetry.flush_telemetry` after its segment span ends and before its response ends, so queued spans export while the request still has CPU. `POST /api/studio/cancel` calls it when it closes a paused turn, since no stream runs then.
 
 **Evals.** `evals/` holds the planner's eval (`planner_entry`, which runs the planner one entry at a time against recorded data-mcp answers), the studio's eval (`studio`, which drives the studio's HTTP surface), the translator's fixtures (`agents/harness_translator_v1`) and the rolling-anchor counts (`rolling_anchor`). Runs that drive a real model need a live credential, and the judged cases need a judge model on top of that, so they are not run in CI. Each service's `tests/` directory holds the CI gates, which use no model, and `evals/README.md` says which part of each eval set CI runs.
 

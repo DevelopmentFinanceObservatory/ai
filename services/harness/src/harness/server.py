@@ -315,8 +315,10 @@ async def _apply_migrations_with_retries(
 ) -> None:
     """Retry `apply_pending` under `_retry_startup_step`'s budget. An
     attempt has no bound of its own. `apply_pending` bounds each statement
-    with `statement_timeout` and each lock wait with `lock_timeout`, so a
-    migration of several statements runs as long as its statements take.
+    with `statement_timeout`, each lock wait with `lock_timeout` and each
+    call it makes with `MIGRATION_CALL_TIMEOUT_S`, this budget, so a
+    migration of several statements runs as long as its statements take
+    within it.
     A failed attempt leaves no lock behind, because `apply_pending` holds
     a transaction-level lock. Each attempt then runs
     `_refuse_beside_adk_tables`. A `MigrationChecksumError` is a fault in the

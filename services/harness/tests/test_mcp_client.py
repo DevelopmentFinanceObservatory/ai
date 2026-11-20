@@ -15,20 +15,22 @@ import json
 import logging
 import random
 import time
-from collections.abc import Callable
-from contextlib import suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import compiler.surface as surface_module
+import harness.mcp_client as mcp_client_module
 import httpx2
 import pytest
 from analysis_mcp.runner_client import DerivedUnread
 from common.auth import apply_gate
 from common.caller import conversation_caller
 from common.period_note import period_note
-from compiler.caller_clients import CallerClients
-from compiler.surface import ProgressReport, ToolSurfaceUnavailableError
+from compiler.caller_clients import CallerClients, CallerTurn
+from compiler.surface import ProgressReport, ToolSurfaceUnavailableError, current_spec_uses
 from data_mcp import client_holder, mint_admission, stat_var_list
 from data_mcp.client import UpstreamClient
 from data_mcp.digest import render_answer
@@ -42,7 +44,7 @@ from executor.classify import MAX_ATTEMPTS_PER_STEP
 from fastmcp import Client, Context, FastMCP
 from fastmcp.tools import ToolResult
 from harness import mcp_client
-from harness.conversation import current_conversation_id, current_conversation_key
+from harness.conversation import current_conversation_id, current_conversation_key, current_turn_id
 from harness.mcp_client import (
     McpExecutor,
     McpResolver,
@@ -676,7 +678,8 @@ async def test_a_card_on_a_fetched_place_types_retrieval_is_drawn_on_the_pair_df
 ) -> None:
     """`get_data` names a retrieval read with place types by its manifest's own pair,
     beside the pair the store holds it under, and a card drawn on the manifest's
-    pair finds the retrieval's lineage."""
+    pair finds the retrieval's lineage. The turn hears the spec fetched, then
+    drawn."""
     minted = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "1" * 32}
     typed = {"spec_id": minted["spec_id"], "content_version": "cv_" + "2" * 32}
     manifest = {
@@ -689,10 +692,16 @@ async def test_a_card_on_a_fetched_place_types_retrieval_is_drawn_on_the_pair_df
     scripted_presentation_client([_tool_result(manifest), _write_result(envelope)])
     store = ProvenanceStore()
     executor = McpExecutor(settings=Settings(), provenance=store)
+    uses: list[tuple[str, str]] = []
+    token = current_spec_uses.set(lambda use, spec_id: uses.append((use, spec_id)))
 
-    fetched = await executor(tool="get_data", args={"spec_id": minted["spec_id"]})
-    drawn = await executor(tool="write_component", args={"component_id": "cmp_1", "intent": {}})
+    try:
+        fetched = await executor(tool="get_data", args={"spec_id": minted["spec_id"]})
+        drawn = await executor(tool="write_component", args={"component_id": "cmp_1", "intent": {}})
+    finally:
+        current_spec_uses.reset(token)
 
+    assert uses == [("fetched", minted["spec_id"]), ("drawn", minted["spec_id"])]
     assert fetched["frame_refs"] == [minted]
     assert fetched["store_refs"] == [typed]
     assert drawn["outcome"] == "ok", drawn
@@ -1691,7 +1700,7 @@ def fake_policy_clients(monkeypatch: pytest.MonkeyPatch) -> list[_FakeMcpClient]
         url: str,
         *,
         auth: str | None,
-        caller: str | None,
+        caller: CallerTurn,
         tool: str | None = None,
     ) -> Any:
         client = _FakeMcpClient(caller)
@@ -1732,33 +1741,40 @@ async def test_the_executor_reuses_one_get_data_client_across_calls(
 async def test_two_conversations_get_two_separate_get_data_clients(
     fake_policy_clients: list[_FakeMcpClient],
 ) -> None:
-    """Client reuse is per conversation, not process-wide: two conversations
-    calling `get_data` must not share one client, and each client names its
-    own conversation as the caller."""
+    """Client reuse is per conversation turn, not process-wide: two
+    conversations calling `get_data` must not share one client, nor two turns
+    of one conversation, and each client names its own conversation as the
+    caller and its own turn."""
     executor = McpExecutor(settings=Settings())
+    first, second = "tr_" + "1" * 16, "tr_" + "2" * 16
 
     current_conversation_id.set("conv-a")
+    current_turn_id.set(first)
     await executor(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
     current_conversation_id.set("conv-b")
     await executor(tool="get_data", args={"spec_id": "spec_" + "2" * 32})
+    current_conversation_id.set("conv-a")
+    current_turn_id.set(second)
+    await executor(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
 
-    assert len(fake_policy_clients) == 2
-    assert fake_policy_clients[0] is not fake_policy_clients[1]
-    assert fake_policy_clients[0].calls == ["get_data"]
-    assert fake_policy_clients[1].calls == ["get_data"]
+    assert len(fake_policy_clients) == 3
+    assert [client.calls for client in fake_policy_clients] == [["get_data"]] * 3
     assert [client.caller for client in fake_policy_clients] == [
-        conversation_caller("conv-a"),
-        conversation_caller("conv-b"),
+        CallerTurn(conversation_caller("conv-a"), first),
+        CallerTurn(conversation_caller("conv-b"), first),
+        CallerTurn(conversation_caller("conv-a"), second),
     ]
 
 
 async def test_a_call_outside_any_conversation_names_no_caller(
     fake_policy_clients: list[_FakeMcpClient],
 ) -> None:
+    """Nor a turn: a turn id names nothing without its conversation."""
+    current_turn_id.set("tr_" + "1" * 16)
     await McpExecutor(settings=Settings())(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
 
     (client,) = fake_policy_clients
-    assert client.caller is None
+    assert client.caller == CallerTurn(None, None)
 
 
 # --- `_call_held`: a broken session is discarded, a slow call is not -------
@@ -1802,7 +1818,7 @@ class _ScriptedMcpClient:
 
 def _held_clients(factory: Callable[[], Any]) -> CallerClients:
     """A registry over `factory`'s stand-in clients, for a caller that never changes."""
-    return CallerClients(lambda _caller: factory(), caller=lambda: None)
+    return CallerClients(lambda _caller: factory(), caller=lambda: CallerTurn(None))
 
 
 async def test_call_held_keeps_a_timed_out_client_cached() -> None:
@@ -1847,6 +1863,131 @@ async def test_call_held_discards_a_client_that_failed_for_another_reason() -> N
     assert second is not first
     assert first.exited == 1
     assert len(built) == 2
+
+
+@pytest.mark.parametrize("background", [False, True], ids=["foreground", "background"])
+@pytest.mark.parametrize(
+    ("raised", "on_connect", "outcome"),
+    [
+        (MCPError(code=REQUEST_TIMEOUT, message="slow"), False, "timeout"),
+        (RuntimeError("transport closed"), False, "transport_failed"),
+        (RuntimeError("connection refused"), True, "transport_failed"),
+        (asyncio.CancelledError(), False, "cancelled"),
+    ],
+    ids=["timeout", "transport", "connect", "cancelled"],
+)
+async def test_a_get_data_call_with_no_result_still_leaves_one_tool_result(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
+    raised: BaseException,
+    on_connect: bool,
+    outcome: str,
+    background: bool,
+) -> None:
+    """A `get_data` that times out, whose transport fails, or that is
+    cancelled raises and adds one `dfo.tool_result` observation naming how it
+    ended. That holds for a run's call and an early mint's
+    (`get_data_in_background`, marked background) alike, and for one that
+    cannot connect at all (`transport_failed`). An early mint whose segment
+    has ended starts a flush of its root and does not wait for it."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        surface_module,
+        "record_event",
+        lambda name, *, level, metadata: events.append((name, dict(metadata))),
+    )
+    flushes: list[str] = []
+
+    @contextmanager
+    def rooted(_name: str) -> Iterator[bool]:
+        yield True
+
+    monkeypatch.setattr(mcp_client_module, "root_if_span_ended", rooted)
+    monkeypatch.setattr(
+        mcp_client_module, "start_telemetry_flush", lambda: flushes.append("started")
+    )
+    scripted_presentation_client([] if on_connect else [raised])
+    executor = McpExecutor(settings=Settings())
+    if on_connect:
+
+        async def refuse() -> None:
+            raise raised
+
+        monkeypatch.setattr(executor._get_data_clients, "get", refuse)
+
+    call = executor.get_data_in_background if background else executor._get_data
+    with pytest.raises((_McpTimeoutError, RuntimeError, asyncio.CancelledError)):
+        await call({"spec_id": "spec_" + "1" * 32})
+
+    marked = {"mint": "background"} if background else {}
+    assert events == [("dfo.tool_result", {"tool": "get_data", "outcome": outcome, **marked})]
+    flushed = ["started"] if background else []
+    assert flushes == flushed
+
+
+async def test_a_get_data_whose_release_is_cancelled_has_recorded_its_result(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The result is recorded before the held client is released, so a
+    cancel that lands in the release still leaves the answered call's
+    `dfo.tool_result`."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        surface_module,
+        "record_event",
+        lambda name, *, level, metadata: events.append((name, dict(metadata))),
+    )
+    scripted_presentation_client([_tool_result({"spec_id": "spec_" + "1" * 32})])
+    executor = McpExecutor(settings=Settings())
+    real_release = executor._get_data_clients.release
+
+    async def cancelled_release(client: Any) -> None:
+        await real_release(client)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(executor._get_data_clients, "release", cancelled_release)
+
+    with pytest.raises(asyncio.CancelledError):
+        await executor.get_data_in_background({"spec_id": "spec_" + "1" * 32})
+
+    assert [metadata["outcome"] for _, metadata in events] == ["ok"]
+
+
+async def test_an_early_mint_answer_leaves_one_tool_result_and_no_fetched_spec(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An early mint's answer adds one `dfo.tool_result` marked background,
+    naming its spec, and the turn hears no fetched spec from it. The call
+    only warms the frame its run fetches later."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        surface_module,
+        "record_event",
+        lambda name, *, level, metadata: events.append((name, dict(metadata))),
+    )
+    spec_id = "spec_" + "1" * 32
+    scripted_presentation_client(
+        [_tool_result({"spec_id": spec_id, mint_admission.BACKGROUND_OUTCOME_KEY: "posted"})]
+    )
+    uses: list[tuple[str, str]] = []
+    token = current_spec_uses.set(lambda use, spec: uses.append((use, spec)))
+    try:
+        outcome = await McpExecutor(settings=Settings()).get_data_in_background(
+            {"spec_id": spec_id}
+        )
+    finally:
+        current_spec_uses.reset(token)
+
+    assert outcome == "posted"
+    assert events == [
+        (
+            "dfo.tool_result",
+            {"tool": "get_data", "outcome": "ok", "spec_id": spec_id, "mint": "background"},
+        )
+    ]
+    assert uses == []
 
 
 async def test_a_non_timeout_failure_does_not_tear_down_a_concurrent_call_on_the_same_client() -> (
@@ -2080,6 +2221,42 @@ async def test_a_cut_series_list_states_how_many_of_the_series_it_shows() -> Non
     assert cut["fact_summary"]["series_truncated"] == {"showing": 20, "total": 60}
     FactSummary.model_validate(cut["fact_summary"])
     assert "series_truncated" not in whole["fact_summary"]
+
+
+async def test_a_card_drawn_from_a_derived_frame_names_the_retrieval_behind_it(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """A card over a frame an analysis verb derived from one retrieval tells
+    the turn it drew the retrieval's spec, the one the datasets door serves,
+    and not the derived frame's own."""
+    retrieval = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "1" * 32}
+    derived = {"spec_id": "ops_" + "2" * 32, "content_version": "ocv_" + "2" * 32}
+    store = ProvenanceStore()
+    conversation = current_conversation_id.get()
+    store.put(
+        conversation=conversation,
+        manifest={"definition": {"spec_id": retrieval["spec_id"]}, **retrieval},
+        **retrieval,
+    )
+    assert store.alias(
+        conversation=conversation,
+        sources=[(retrieval["spec_id"], retrieval["content_version"])],
+        stat_var_count=1,
+        **derived,
+    )
+    envelope = resolved_revision("line_chart", component_id="cmp_1", revision=1, frame_ref=derived)
+    scripted_presentation_client([_write_result(envelope)])
+    executor = McpExecutor(settings=Settings(), provenance=store)
+    uses: list[tuple[str, str]] = []
+    token = current_spec_uses.set(lambda use, spec_id: uses.append((use, spec_id)))
+
+    try:
+        drawn = await executor(tool="write_component", args={"component_id": "cmp_1", "intent": {}})
+    finally:
+        current_spec_uses.reset(token)
+
+    assert drawn["outcome"] == "ok", drawn
+    assert uses == [("drawn", retrieval["spec_id"])]
 
 
 async def test_a_card_over_a_derived_frame_counts_that_frames_stat_vars() -> None:
@@ -2906,6 +3083,14 @@ class _HangingRetryClient(_ScriptedMcpClient):
 async def test_a_retry_still_running_at_the_call_deadline_is_cut_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The cut-off attempt leaves a `timeout` `dfo.tool_result` beside the
+    first attempt's refusal, so every `get_data` attempt is recorded."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        surface_module,
+        "record_event",
+        lambda name, *, level, metadata: events.append((name, dict(metadata))),
+    )
     clock = _Clock()
     client = _HangingRetryClient([_data_refusal("retry_after_delay")])
     monkeypatch.setattr(
@@ -2927,6 +3112,56 @@ async def test_a_retry_still_running_at_the_call_deadline_is_cut_off(
     assert client.calls == ["get_data", "get_data"]
     assert result["outcome"] == "refusal"
     assert result["refusal"]["code"] == "service_unavailable"
+    assert [metadata["outcome"] for _, metadata in events] == ["refusal", "timeout"]
+    assert events[-1] == ("dfo.tool_result", {"tool": "get_data", "outcome": "timeout"})
+
+
+async def test_a_retry_cut_off_after_its_result_is_recorded_adds_no_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retry's `ok` is recorded when its result arrives. A deadline that
+    expires while the manifest is still being read discards the outcome but
+    leaves that one observation, so the call adds no `timeout` and the turn
+    hears no fetched spec from it."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        surface_module,
+        "record_event",
+        lambda name, *, level, metadata: events.append((name, dict(metadata))),
+    )
+
+    async def hang(_content: Any) -> Any:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(mcp_client_module, "manifest_with_stat_vars", hang)
+    clock = _Clock()
+    spec_id = "spec_" + "1" * 32
+    ok = SimpleNamespace(
+        is_error=False, structured_content={"spec_id": spec_id}, content=[], meta=None
+    )
+    client = _ScriptedMcpClient([_data_refusal("retry_after_delay"), ok])
+    monkeypatch.setattr(
+        McpTimeoutPolicy, "client", lambda self, url, *, auth, caller, tool=None: client
+    )
+
+    async def wait(seconds: float) -> None:
+        clock.now = 180.0 - 0.05
+
+    executor = McpExecutor(
+        settings=Settings(), sleep=wait, jitter=random.Random(7).uniform, clock=clock
+    )
+    uses: list[tuple[str, str]] = []
+    token = current_spec_uses.set(lambda use, spec: uses.append((use, spec)))
+    try:
+        result = await asyncio.wait_for(
+            executor(tool="get_data", args={"spec_id": spec_id}), timeout=5
+        )
+    finally:
+        current_spec_uses.reset(token)
+
+    assert result["outcome"] == "refusal"
+    assert [metadata["outcome"] for _, metadata in events] == ["refusal", "ok"]
+    assert uses == []
 
 
 async def test_a_write_retry_cut_off_at_the_call_deadline_raises_the_timeout_not_the_refusal(
