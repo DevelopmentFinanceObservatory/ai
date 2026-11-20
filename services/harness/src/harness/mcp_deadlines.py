@@ -26,7 +26,7 @@ off a real constraint.
 
 from __future__ import annotations
 
-from compiler.caller_clients import caller_transport
+from compiler.caller_clients import CallerTurn, caller_transport
 from compiler.capabilities import call_timeouts
 from fastmcp import Client
 from planner.workflow import ToolId
@@ -55,22 +55,29 @@ class McpTimeoutPolicy:
         return self._by_name.get(tool, self.default_call_timeout_s)
 
     def client(
-        self, url: str, *, auth: str | None, caller: str | None, tool: str | None = None
+        self,
+        url: str,
+        *,
+        auth: str | None,
+        caller: CallerTurn,
+        tool: str | None = None,
     ) -> Client:
         """A `Client` for `caller`, bound by this policy's call and init deadlines.
 
-        `caller` goes out as the `x-dfo-caller` header on every request
-        (`compiler.caller_clients.caller_transport`); `None` sends none.
+        `caller.caller` goes out as the `x-dfo-caller` header and `caller.turn`
+        as the `x-dfo-turn` header on every request
+        (`compiler.caller_clients.caller_transport`). `caller.caller=None` sends
+        no `x-dfo-caller` header, and `caller.turn=None` no `x-dfo-turn` header.
 
         `tool=None` is for a client not scoped to one tool ahead of time --
-        the long-lived presentation client (`harness.mcp_client.McpExecutor.
-        _presentation_client`), which serves several tools across a
-        conversation -- and gets the general default, same as any tool
+        the presentation client (`harness.mcp_client.McpExecutor.
+        _presentation_client`), which serves several tools across a turn --
+        and gets the general default, same as any tool
         absent from the pinned table.
         """
         timeout = self.default_call_timeout_s if tool is None else self.call_timeout_s(tool)
         return Client(
-            caller_transport(url, caller=caller, auth=auth),
+            caller_transport(url, caller=caller.caller, turn=caller.turn, auth=auth),
             timeout=timeout,
             init_timeout=self.init_timeout_s,
         )

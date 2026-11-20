@@ -112,6 +112,7 @@ from compiler.surface import ToolSurfaceUnavailableError
 from data_mcp.deadline import CallDeadline
 from pydantic import ValidationError
 
+from harness.conversation import shared_work_context
 from harness.derived_frames import derived_recipe
 from harness.recipe_replay import Pending, Refused, Replayed
 from harness.tool_contracts import HarnessCode, harness_refusal
@@ -723,7 +724,10 @@ class RollingCards:
             del self._withheld[key]
         running = self._running.get(key)
         if running is None:
-            running = asyncio.create_task(self._replay_once(frame, populations))
+            # Other conversations may join this replay, so it names none.
+            running = asyncio.create_task(
+                self._replay_once(frame, populations), context=shared_work_context()
+            )
             self._running[key] = running
             running.add_done_callback(lambda _: self._running.pop(key, None))
         try:
