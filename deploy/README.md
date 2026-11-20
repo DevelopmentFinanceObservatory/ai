@@ -375,30 +375,33 @@ For production, the same with `--env production`.
 
    A rollback to the previous revision after this step loses what the release wrote, and rolling forward again turns every conversation both revisions served into a conflict: the post-drain `--apply` marks each one diverged and the release refuses it. Take the conflict list from that `--apply` report and pass every name to one `--prefer-adk` run (`--prefer-adk` takes a list), which takes ADK's copy of each.
 
-1. Before the release that removes ADK from the turn path merges, execute `--apply` and then `--verify` (the two commands of the previous step), rerunning both until each exits 0 with no conflict. That release serves a diverged conversation from the tables and loses the previous revision's turns, and `--apply` copies any conversation ADK moved since the last copy. Then run the gate, delete the previous revision (the name step 1 printed), confirm it is gone, and run the gate again. The gate, the delete and the second gate complete before that release merges, in each environment: merging it deploys it, and its first migration runs the gate's predicate at startup. While the predicate fails, that release's startup refuses and this release's revision keeps serving. The gate also fails while a stream of the previous revision holds a live lease on an ADK ledger session, and lists those sessions, so the delete cuts no running stream: wait for the streams to end and rerun the first gate until it exits 0 before the delete. Such a lease lapses 45 seconds after its stream last renewed it. The delete fences that revision's last writes, such as a request Cloud Run cut at its timeout; the second gate's exit 0 is the evidence that every ledger session is imported or kept as ADK holds it and no stream of the previous revision runs. Resolve each name the gate prints with the command it names, and rerun it until it exits 0. After the delete, a rollback to that revision is a redeploy of its image by digest. In a shell other than step 1's, set `SERVING` to the name step 1 printed first; the delete refuses an empty value:
+1. Before the release that removes ADK from the turn path merges, execute `--apply` and then `--verify` (the two commands of the previous step), rerunning both until each exits 0 with no conflict. That release serves a diverged conversation from the tables and loses the previous revision's turns, and `--apply` copies any conversation ADK moved since the last copy. Then run the gate, delete the previous revision (the name step 1 printed), confirm it is gone, check that it drained, and run the gate again. The gate, the delete and the second gate complete before that release merges, in each environment: merging it deploys it, and its first migration runs the gate's predicate at startup. While the predicate fails, that release's startup refuses and this release's revision keeps serving. The gate also fails while a stream of the previous revision holds a live lease on an ADK ledger session, and lists those sessions, so the delete cuts no running stream: wait for the streams to end and rerun the first gate until it exits 0. Its exit 0 is required before the delete, and the first command below chains the two so that a failed gate stops the delete. Such a lease lapses 45 seconds after its stream last renewed it. The delete fences that revision's last writes, such as a request Cloud Run cut at its timeout; the second gate runs after the drain check below, and its exit 0 is the evidence that every ledger session is imported or kept as ADK holds it and no stream of the previous revision runs. Resolve each name the gate prints with the command it names, and rerun it until it exits 0. After the delete, a rollback to that revision is a redeploy of its image by digest. In a shell other than step 1's, set `SERVING` to the name step 1 printed first; the delete refuses an empty value:
 
    ```
    gcloud run jobs execute "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --wait \
-     --args=-m,harness.adk_import,gate
-   gcloud run revisions delete "${SERVING:?set it to the revision step 1 printed}" \
-     --region="$REGION" --project="$PROJECT_ID" --quiet
-   gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
-     --filter="metadata.name=$SERVING" --format='value(metadata.name)'                  # prints nothing
-   gcloud run jobs execute "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --wait \
-     --args=-m,harness.adk_import,gate
+     --args=-m,harness.adk_import,gate \
+   && gcloud run revisions delete "${SERVING:?set it to the revision step 1 printed}" \
+     --region="$REGION" --project="$PROJECT_ID" --quiet \
+   && DELETED_AT=$(date -u +%FT%TZ) \
+   && [ -z "$(gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
+     --filter="metadata.name=$SERVING" --format='value(metadata.name)')" ] \
+   && echo "deleted $SERVING at $DELETED_AT"
    ```
 
-   Check on dev first that the deleted revision's instance count reaches zero, since Cloud Run's documentation does not say what a delete does to requests in flight. A deleted revision is gone from `gcloud run revisions describe`, so the count comes from Cloud Monitoring's `run.googleapis.com/container/instance_count`. Cloud Monitoring samples the count every 60 seconds and can show a point up to about 180 seconds late, so a missing point soon after the delete shows nothing. Note the time of the delete, and run the command no sooner than 5 minutes after it. The command prints each series' newest points, newest first, by instance state. The revision has drained when, for every instance state, a point dated after the delete reads 0, or when no series has any point in the full 5 minutes after the delete:
+   Check on dev first that the deleted revision's instance count reaches zero, since Cloud Run's documentation does not say what a delete does to requests in flight. A deleted revision is gone from `gcloud run revisions describe`, so the count comes from Cloud Monitoring's `run.googleapis.com/container/instance_count`. Cloud Monitoring samples the count every 60 seconds and can show a point up to about 180 seconds late, so a missing point soon after the delete shows nothing. The first command prints `DELETED_AT`. Run the second command no sooner than 5 minutes after it, in the same shell or with `DELETED_AT` set to the time the first command printed. `curl -f` fails on an HTTP error, and jq exits non-zero unless the answer is well formed and the newest point of every series reads 0; every point is dated after the delete, since the window starts there. It prints how many series it read. With no series it prints `no series since the delete` and exits 0: no instance reported after the delete. Whether a deleted revision reports zeros or nothing is the dev check above, so read the first dev run's output before relying on the no-series case in production. The gate on its last line runs only after the drain check passes, and its exit 0 is the evidence:
 
    ```
-   START=$(date -u -d '-30 min' +%FT%TZ 2>/dev/null || date -u -v-30M +%FT%TZ)
-   curl -sG -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+   curl -fsSG -H "Authorization: Bearer $(gcloud auth print-access-token)" \
      "https://monitoring.googleapis.com/v3/projects/$PROJECT_ID/timeSeries" \
      --data-urlencode "filter=metric.type=\"run.googleapis.com/container/instance_count\" AND resource.labels.revision_name=\"$SERVING\"" \
-     --data-urlencode "interval.startTime=$START" \
+     --data-urlencode "interval.startTime=${DELETED_AT:?set it to the time the delete printed}" \
      --data-urlencode "interval.endTime=$(date -u +%FT%TZ)" \
-     | jq -r '.timeSeries[]? | .metric.labels.state as $state
-       | .points[:5][] | "\(.interval.endTime) \($state) \(.value.int64Value)"'
+   | jq -er '(.timeSeries // []) as $s
+     | if ($s | length) == 0 then ("no series since the delete\n" | halt_error(0))
+       elif all($s[]; (.points[0].value.int64Value | tonumber) == 0) then "\($s | length) series, newest points 0"
+       else ("a newest point is above 0\n" | halt_error(1)) end' \
+   && gcloud run jobs execute "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --wait \
+     --args=-m,harness.adk_import,gate
    ```
 
    Then execute `close-open-turns` from this release's image, as a dry run and then with `--apply`. The first `--apply` exits 1 while streams of this release run on ADK turn sessions, which is expected while this release serves traffic. After the next release takes traffic, run it with `--apply` again, and rerun until it exits 0:
