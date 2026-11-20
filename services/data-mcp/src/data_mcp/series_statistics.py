@@ -66,7 +66,7 @@ from typing import Any, NamedTuple
 import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
-from common.caller import shared_work_context
+from common.caller import current_surface, shared_work_context
 from dfo_frame_grammar.columnar import array_kernel
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
@@ -163,13 +163,15 @@ class _TableKey(NamedTuple):
 
 
 class _FlightKey(NamedTuple):
-    """What one fetch reads: the table it verifies, and the pair and transport it
-    reads the link and the bytes through."""
+    """What one fetch reads: the table it verifies, the pair and transport it
+    reads the link and the bytes through, and the surface its dfo-apis calls
+    name (`common.caller.current_surface` of the request that started it)."""
 
     table: _TableKey
     subject_id: str
     content_version: str
     transport: httpx2.AsyncBaseTransport | None
+    surface: str | None
 
 
 class _VerifiedTables:
@@ -218,7 +220,11 @@ class _VerifiedTables:
 
         The fetch runs in `common.caller.shared_work_context`, since every
         caller missing the table joins it: its dfo-apis calls name no caller
-        and no turn, whichever request started it.
+        and no turn, whichever request started it. They name `key.surface`,
+        and only requests of that surface join it: the harness's executor and
+        Studio's `get_data` reads (`studio`) and the public `get_data` tool
+        (`mcp`) each fetch through a flight of their own, so one surface's
+        reads never log as another's.
 
         The fetch raises `TimeoutError` once it runs past `_FLIGHT_TIMEOUT_S`,
         and is forgotten once it ends, so the next miss after a failure
@@ -227,7 +233,8 @@ class _VerifiedTables:
         """
         if (task := self._flights.get(key)) is None:
             task = asyncio.create_task(
-                asyncio.wait_for(fetch(), _FLIGHT_TIMEOUT_S), context=shared_work_context()
+                asyncio.wait_for(fetch(), _FLIGHT_TIMEOUT_S),
+                context=shared_work_context(surface=key.surface),
             )
             self._flights[key] = task
 
@@ -442,7 +449,9 @@ async def fetch_series_statistics_table(
     # A miss joins the fetch in flight for its table through its own link, which
     # `_FLIGHT_TIMEOUT_S` bounds, and waits for it until its own deadline. Shielded,
     # so a caller giving up leaves the fetch to the others.
-    flight = _TABLES.flight(_FlightKey(key, subject_id, content_version, transport), fetch)
+    flight = _TABLES.flight(
+        _FlightKey(key, subject_id, content_version, transport, current_surface()), fetch
+    )
     async with asyncio.timeout(deadline.remaining() if deadline is not None else None):
         return await asyncio.shield(flight)
 

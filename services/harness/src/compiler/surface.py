@@ -617,13 +617,18 @@ def _call_client(source: Source, caller: CallerTurn, *, init_timeout_s: float) -
     """The `call_tool` client for `source` on behalf of `caller`.
 
     A URL source is the mount over streamable HTTP, so its client names the
-    caller in the `x-dfo-caller` header and the turn in the `x-dfo-turn`
-    header, and carries the bearer token. An in-memory `FastMCP` or a
+    caller in the `x-dfo-caller` header, the turn in the `x-dfo-turn` header
+    and a shared surface in the `x-dfo-surface` header
+    (`compiler.caller_clients.caller_transport`), and carries the bearer token. An in-memory `FastMCP` or a
     test-built transport has no header to set, and its calls carry neither.
     """
     if isinstance(source, str):
         transport = caller_transport(
-            source, caller=caller.caller, turn=caller.turn, auth=_auth_for(source)
+            source,
+            caller=caller.caller,
+            turn=caller.turn,
+            surface=caller.surface,
+            auth=_auth_for(source),
         )
         return Client(transport, init_timeout=init_timeout_s)
     return Client(source, init_timeout=init_timeout_s)
