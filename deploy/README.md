@@ -287,7 +287,7 @@ gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="
   --format='value(metadata.name)'
 ```
 
-Then confirm the deleted revision's instance count reaches zero with the command of the previous image's step 7. A deleted revision is gone from `gcloud run revisions describe`, so the count comes from Cloud Monitoring's `run.googleapis.com/container/instance_count`, newest points first by instance state; the revision has drained when the newest points read 0, or when no point is newer than the delete:
+Then confirm the deleted revision's instance count reaches zero with the command of the previous image's step 7. A deleted revision is gone from `gcloud run revisions describe`, so the count comes from Cloud Monitoring's `run.googleapis.com/container/instance_count`, newest points first by instance state; Cloud Monitoring samples `instance_count` every 60 s and can show a point up to about 180 s late, so wait at least 5 minutes after the delete before reading. The revision has drained when a point dated after the delete reads 0 for every instance state, or when the series is absent for a full 5-minute window after the delete:
 
 ```
 START=$(date -u -d '-30 min' +%FT%TZ 2>/dev/null || date -u -v-30M +%FT%TZ)
