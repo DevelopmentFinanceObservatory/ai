@@ -302,10 +302,22 @@ def _mcp_client_server(seen: list[str | None]) -> FastMCP:
         (_ADDRESS, "Anthropic/ClaudeAI", "Anthropic/ClaudeAI"),
         (_ADDRESS, " claude-code ", "claude-code"),
         (_CONVERSATION, "Anthropic/ClaudeAI", None),
-        (_ADDRESS, "a" * 65, None),
-        (_ADDRESS, 'host" views=declared', None),
+        (_ADDRESS, "openai-mcp (Codex)", "openai-mcp (Codex)"),
+        (_ADDRESS, "a" * 128, "a" * 128),
+        (_ADDRESS, "a" * 129, "invalid"),
+        (_ADDRESS, 'host" views=declared', "invalid"),
+        (_ADDRESS, "a\\b", "invalid"),
     ],
-    ids=["chat-host", "stripped", "conversation", "too-long", "outside-pattern"],
+    ids=[
+        "chat-host",
+        "stripped",
+        "conversation",
+        "parenthesised",
+        "longest",
+        "too-long",
+        "quote",
+        "backslash",
+    ],
 )
 async def test_the_vouched_headers_name_an_address_callers_mcp_client(
     caller: str, client_name: str, sent: str | None

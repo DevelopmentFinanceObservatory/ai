@@ -84,12 +84,24 @@ USER_AGENT_HEADER = "x-dfo-user-agent"
 # Sent beside `USER_AGENT_HEADER` for an `ADDRESS_CALLER`: the name the MCP client
 # gave in its `clientInfo` (`current_mcp_client`), such as `Anthropic/ClaudeAI` or
 # `claude-code`. Distinct from x-dfo-client, which dfo-apis parses as a dfo SDK
-# client's `<name>/<version>` label.
+# client's `<name>/<version>` label. A call carries it only when the client's
+# `clientInfo` reaches the stateless server with the call (see
+# `current_mcp_client`); without it analytics reads `x-dfo-user-agent`.
 MCP_CLIENT_HEADER = "x-dfo-mcp-client"
 
-# The `clientInfo` names `current_mcp_client` keeps, the pattern dfo-apis and the
-# analytics parse of the combined server's log apply.
-MCP_CLIENT_NAME = re.compile(r"[A-Za-z0-9 ._/-]{1,64}")
+# The longest client-supplied name a combined MCP log line carries, and the
+# longest `MCP_CLIENT_NAME` keeps (`harness.combined_mcp._CLIENT_TEXT_LIMIT`).
+MCP_CLIENT_NAME_LIMIT = 128
+
+# The `clientInfo` names `current_mcp_client` keeps: printable ASCII with no
+# quote or backslash, at most `MCP_CLIENT_NAME_LIMIT` characters. The same rule
+# as dfo-apis's `dfo_platform.caller._MCP_CLIENT_NAME`. It keeps every client
+# name in the combined log since 2026-10-24, such as `openai-mcp (Codex)`.
+MCP_CLIENT_NAME = re.compile(rf"[ !#-\[\]-~]{{1,{MCP_CLIENT_NAME_LIMIT}}}")
+
+# What `current_mcp_client` returns for a name that fails `MCP_CLIENT_NAME`, so
+# a rejected name reads differently from a call that sent none.
+MCP_CLIENT_INVALID = "invalid"
 
 # The longest `User-Agent` `current_user_agent` keeps.
 MAX_USER_AGENT_CHARS = 256
@@ -196,12 +208,13 @@ def current_mcp_client() -> str | None:
     """The name the current MCP request's client gave in its `clientInfo`, or `None`.
 
     Read from the request's MCP session, the source the combined server's log line
-    names the client from: a 2026-07-28 client's per-request `_meta` envelope, or
-    the initialize of a session that holds one. A 2025-11-25 client's tool call
-    reaches the stateless server with no `clientInfo`, so it names none. The name
-    counts only when, stripped, it fully matches `MCP_CLIENT_NAME`, so the value is
-    always a valid header value. `None` outside an MCP request and inside
-    `shared_work_context`.
+    names the client from. On the stateless deployed server that is a 2026-07-28
+    client's per-request `_meta` envelope, and only when it carries `clientInfo`
+    with its capabilities; a 2025-11-25 client's tool calls arrive with no
+    `clientInfo`, so they name none, and analytics reads `x-dfo-user-agent` for them.
+    The stripped name is returned when it fully matches `MCP_CLIENT_NAME`, so the
+    value is always a valid header value, and `MCP_CLIENT_INVALID` when it does not.
+    `None` for a blank name, outside an MCP request and inside `shared_work_context`.
     """
     if _shared_work.get():
         return None
@@ -216,7 +229,9 @@ def current_mcp_client() -> str | None:
     if params is None:
         return None
     name = params.client_info.name.strip()
-    return name if MCP_CLIENT_NAME.fullmatch(name) else None
+    if not name:
+        return None
+    return name if MCP_CLIENT_NAME.fullmatch(name) else MCP_CLIENT_INVALID
 
 
 def current_shared_surface() -> str | None:
@@ -271,7 +286,8 @@ def vouched_caller_headers(
     it. For an `ADDRESS_CALLER`, an MCP client the website named by address:
     `CALLER_PRINCIPAL_HEADER`, `CALLER_HEADER`, `SURFACE_HEADER` as
     `MCP_SURFACE`, `USER_AGENT_HEADER` when `current_user_agent` finds one, and
-    `MCP_CLIENT_HEADER` when `current_mcp_client` finds the client's name.
+    `MCP_CLIENT_HEADER` when `current_mcp_client` finds the client's name (or
+    `invalid`), which only a call whose `clientInfo` reached the server carries.
     dfo-apis counts that client's allowance. For a `CONVERSATION_CALLER` from the
     harness: `CALLER_PRINCIPAL_HEADER` and `CALLER_HEADER`, and `TURN_HEADER`
     when `current_turn` names the turn, with no surface, user agent or MCP client, since
