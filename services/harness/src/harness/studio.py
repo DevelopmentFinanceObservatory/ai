@@ -25,6 +25,12 @@ state: the canvas digest (block titles + fact summaries) and the
 conversation digest (the newest turn records); anything past their bounds
 is served on demand by the recall function (`make_recall_part`). Interrupts resume
 the current turn's session.
+
+Who asks (`studio_identity`): the website's proxy names a signed-in account in
+`x-dfo-account` and the visitor's address in `x-dfo-caller`. The harness reads
+both only on a request the bearer check admitted with `STUDIO_API_TOKEN` set,
+keeps them on the turn (`harness.studio_state.TurnUsage`), and writes them on
+the turn's spans and its `studio.turn` log line.
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
 from contextlib import (
@@ -46,8 +53,9 @@ from datetime import UTC, datetime
 from typing import Any, Literal, override
 
 import anyio
+from common.caller import ADDRESS_CALLER, set_supplied_caller, set_supplied_turn
 from common.telemetry import flush_telemetry
-from compiler.surface import ToolSurface
+from compiler.surface import SpecUse, ToolSurface, current_spec_uses
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
@@ -56,6 +64,7 @@ from google.adk.apps import App
 from google.adk.errors.already_exists_error import AlreadyExistsError
 from google.adk.events import Event
 from google.adk.runners import Runner
+from google.adk.sessions.base_session_service import GetSessionConfig
 from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_response,
 )
@@ -67,8 +76,10 @@ from starlette.types import Receive, Scope, Send
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
 from harness.conversation import (
+    current_conversation_caller,
     current_conversation_id,
     current_conversation_key,
+    current_turn_id,
     current_user_message,
 )
 from harness.decision_pick import is_decision_choice
@@ -92,19 +103,18 @@ from harness.studio_edit import edit_frames
 from harness.studio_state import (
     HEARTBEAT_INTERVAL_S,
     STREAM_LOSSES,
-    ClosedTurn,
     ConversationState,
     DatabaseUnavailable,
     SegmentBusy,
     SegmentLost,
     StreamLoss,
+    TurnUsage,
     _apply_operations,
     _end_stream,
     _next_manifest,
     _PendingInterrupt,
     _PendingQuestion,
     _tool_error_response,
-    record_closed_turn_span,
     stream_loss,
 )
 from harness.studio_store import (
@@ -159,6 +169,54 @@ SSE_MEDIA_TYPE = "text/event-stream"
 # How long a stream a Stop reached while a plan-card switch ran waits for the
 # `switch` node to offer the plan again before it ends as any Stop does.
 SWITCH_REOFFER_SECONDS = 10.0
+
+# The form of the account digest the website sends in `x-dfo-account`: the
+# hex HMAC-SHA256 of the account id, as its event export writes it.
+_ACCOUNT_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+def studio_identity(
+    *, account: str | None, caller: str | None, settings: Settings
+) -> tuple[str | None, str | None]:
+    """The account and visitor a Studio request names: `account` when it is
+    an account digest, `caller` when it is an address caller
+    (`common.caller.ADDRESS_CALLER`), `None` for each otherwise. Call it only
+    once `principal_for` admitted the request, since the proxy that holds the
+    bearer token vouches for both headers. With no
+    `settings.studio_api_token` the route is open, nothing vouches, and both
+    are `None`."""
+    if settings.studio_api_token is None:
+        return None, None
+    account = (account or "").strip().lower()
+    caller = (caller or "").strip().lower()
+    return (
+        account if _ACCOUNT_DIGEST.fullmatch(account) else None,
+        caller if ADDRESS_CALLER.fullmatch(caller) else None,
+    )
+
+
+def _spec_use_sink(
+    store: StudioStore, principal: str, conversation_id: str, trace_id: str
+) -> Callable[[SpecUse, str], None]:
+    """Where the turn `trace_id` of `(principal, conversation_id)` hears each
+    spec it used (`compiler.surface.current_spec_uses`). It goes to the
+    conversation the store holds live when the use is heard, so a state the
+    store reloads meanwhile still gets it. A use heard once that conversation
+    holds another turn, or once the turn is recorded
+    (`ConversationState.turn_recorded`), is dropped, since the turn's record,
+    which its log line and outcome are written from, was built without it."""
+
+    def note(use: SpecUse, spec_id: str) -> None:
+        conversation = store.current(principal, conversation_id)
+        if (
+            conversation is not None
+            and conversation.trace_id == trace_id
+            and not conversation.turn_recorded
+        ):
+            conversation.note_spec_use(use, spec_id)
+
+    return note
+
 
 # The wire decision on a plan interrupt, as the record `/interrupt` keeps of it.
 _APPROVAL_DECISION = {
@@ -584,8 +642,9 @@ async def _sse_stream(
     a wait or at any `yield`, records that the client left, and unwinds the
     segment.
 
-    A stream that has a `conversation` runs inside its segment's telemetry
-    span (`ConversationState.in_turn_span`), on the turn's trace, so a turn
+    A stream that has a `conversation` runs inside its segment's
+    `turn.segment` span (`ConversationState.in_turn_span`), on the turn's
+    trace, so a turn
     resumed by a second request exports on the same trace, and the task
     that produces each frame is created inside that scope. The scope is
     left on the task that iterates the response. When that task is
@@ -593,7 +652,7 @@ async def _sse_stream(
     closes the generator as the response ends, in the request task. Under
     ASGI spec 2.3 Starlette iterates the body in a task of its own, so the
     close runs in another context, where leaving the scope detaches nothing
-    (`common.telemetry.use_turn_span`). On either path the finished spans
+    (`common.telemetry.use_turn_segment`). On either path the finished spans
     are exported (`flush_telemetry`) as the
     stream ends, while the request still has CPU. Each frame is recorded
     on `ending` as it goes out (`_StreamEnding.sent`), which names the
@@ -906,6 +965,20 @@ class StudioRunner:
                 raise ConversationStale from None
             return False
         return True
+
+    async def _turn_surface(self, *, user_id: str, session_id: str) -> str | None:
+        """The surface the turn of per-turn session `session_id` was asked
+        from, as `/turn` wrote it into that session's state
+        (`_turn_session_state`). `None` when the session or the key is
+        missing."""
+        session = await self.runner.session_service.get_session(
+            app_name=self.runner.app_name,
+            user_id=user_id,
+            session_id=session_id,
+            config=GetSessionConfig(num_recent_events=0),
+        )
+        surface = session.state.get("surface") if session is not None else None
+        return surface if isinstance(surface, str) else None
 
     async def _replace_leftover_session(
         self, *, user_id: str, session_id: str, state: dict[str, Any]
@@ -1927,7 +2000,9 @@ async def _release_claim(
     (`StudioStore.drop_lease`, which runs to the end under cancellation),
     and the segment's span, if one opened, ends as `_ending_status` reads
     `cause` on the route's path, or with `response` on the response's. Then the claim's hold lets go of the lock, and any span that
-    ended is exported, whatever the span end raised. It does nothing once
+    ended is exported, whatever the span end raised, and with it any turn
+    line the claim save wrote, an abandoned turn's close, which no stream
+    then exports. It does nothing once
     the hold has let go: the working copy and the lease are then another
     request's."""
     store, principal, conversation_id = claim.store, claim.principal, claim.conversation_id
@@ -2013,9 +2088,15 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
     router = APIRouter(prefix="/api/studio", route_class=_StudioRoute)
 
     async def turn(  # noqa: PLR0911 -- one distinct refusal per claim guard the route enforces
-        body: TurnRequest, authorization: str | None = Header(default=None)
+        body: TurnRequest,
+        authorization: str | None = Header(default=None),
+        x_dfo_account: str | None = Header(default=None),
+        x_dfo_caller: str | None = Header(default=None),
     ) -> Response:
         principal = principal_for(authorization, settings=settings)
+        account, visitor = studio_identity(
+            account=x_dfo_account, caller=x_dfo_caller, settings=settings
+        )
         hold = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
         if isinstance(hold, JSONResponse):
             return hold
@@ -2068,11 +2149,42 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     hold.release()
                     return label
                 chip_label = label
+            # Set in the request task's context (each request gets a fresh
+            # one, so nothing leaks across requests); the streamed generator
+            # and every task spawned under it inherit the value, which is
+            # what routes the executor's presentation client, and with it
+            # the platform canvas session. Scoped by PRINCIPAL as well as
+            # conversation: two principals minting the same conversation_id
+            # must not share a canvas. Set before the turn begins, so the
+            # turn records the caller its MCP clients send.
+            current_conversation_id.set(f"{principal}/{body.conversation_id}")
+            current_conversation_key.set((principal, body.conversation_id))
+            # The graph's in-process dfo-apis calls (the executor's statistics
+            # and labels, the translator's lookups) run outside any MCP request,
+            # so they name the conversation and turn through the supplied ones.
+            set_supplied_caller(current_conversation_caller())
             # Every change up to the claim save is made on a working copy,
             # which the save swaps into the live state once it commits. A
             # request that claims nothing leaves the live state as loaded.
+            # An unrecorded previous turn this closes as `abandoned` rides the
+            # claim save, which writes its line once it commits
+            # (`StudioStore.save`).
             work = studio.store.draft(principal, body.conversation_id)
-            abandoned = work.begin_turn()
+            work.begin_turn(
+                TurnUsage(
+                    caller=current_conversation_caller(),
+                    account=account,
+                    visitor=visitor,
+                    surface=body.surface.value,
+                )
+            )
+            # `begin_turn` mints the turn id. The turn's MCP clients name it
+            # (`current_caller_turn`), and so do the in-process dfo-apis calls.
+            current_turn_id.set(work.trace_id)
+            set_supplied_turn(work.trace_id)
+            current_spec_uses.set(
+                _spec_use_sink(studio.store, principal, body.conversation_id, work.trace_id)
+            )
             work.auto_add = body.auto_add
             if pick is None:
                 work.turn_user_message = body.message
@@ -2150,23 +2262,17 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         "another request is streaming on this conversation"
                     ),
                 )
+            except BaseException:
+                # A save that raised once its write committed (cancelled
+                # during the commit, say) still handed the claimed segment to
+                # the live state, so the claim is released as a committed one.
+                live = studio.store.current(principal, body.conversation_id)
+                if live is not None and live.segment is not None and live.segment.id == segment_id:
+                    claim = replace(claim, segment_id=segment_id)
+                raise
             claim = replace(claim, segment_id=segment_id)
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
-            if abandoned is not None:
-                # The unrecorded turn this one closed as `abandoned` ends its
-                # trace as its record does. The stream's end exports the
-                # span.
-                record_closed_turn_span(body.conversation_id, abandoned)
-            # Set in the request task's context (each request gets a fresh
-            # one, so nothing leaks across requests); the streamed generator
-            # and every task spawned under it inherit the value, which is
-            # what routes the executor's presentation client, and with it
-            # the platform canvas session. Scoped by PRINCIPAL as well as
-            # conversation: two principals minting the same conversation_id
-            # must not share a canvas.
-            current_conversation_id.set(f"{principal}/{body.conversation_id}")
-            current_conversation_key.set((principal, body.conversation_id))
             current_user_message.set(conversation.turn_user_words)
             current_earlier_block.set(conversation.earlier_block)
             current_recorded_identity.set(conversation.recorded_identity)
@@ -2257,15 +2363,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         if hold is None:
             # A request holds the lock: a claim on its way, or a stream.
             return Response(status_code=204)
-        closed: ClosedTurn | None = None
+        # Whether the save wrote a line: the close of a paused turn.
+        wrote = False
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
                 return Response(status_code=204)
             if conversation.awaiting_answer:
-                closed = ClosedTurn(
-                    conversation.trace_id, conversation.turn_user_message, ErrorCode.CANCELLED.value
-                )
                 conversation.close_turn(
                     final_text=conversation.turn_final_text, error=ErrorCode.CANCELLED.value
                 )
@@ -2288,27 +2392,31 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # claiming stream's own release still checkpoints whatever it
             # leaves behind.
             try:
-                await studio.store.save(principal, body.conversation_id)
+                wrote = await studio.store.save(principal, body.conversation_id)
             except ConversationStale:
                 logger.warning(
                     "studio cancel: conversation %s changed underneath this save; nothing "
                     "persisted",
                     body.conversation_id,
                 )
-                closed = None
         finally:
             hold.release()
-        if closed is not None:
-            # The paused turn's trace ends as its record does.
-            record_closed_turn_span(body.conversation_id, closed)
+        if wrote:
+            # No stream is left to export the close's outcome.
             await flush_telemetry()
         return Response(status_code=204)
 
     @router.post("/interrupt")
     async def interrupt(  # noqa: PLR0911 -- one distinct refusal per claim guard the route enforces
-        body: InterruptResponse, authorization: str | None = Header(default=None)
+        body: InterruptResponse,
+        authorization: str | None = Header(default=None),
+        x_dfo_account: str | None = Header(default=None),
+        x_dfo_caller: str | None = Header(default=None),
     ) -> Response:
         principal = principal_for(authorization, settings=settings)
+        account, visitor = studio_identity(
+            account=x_dfo_account, caller=x_dfo_caller, settings=settings
+        )
         hold = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
         if isinstance(hold, JSONResponse):
             return hold
@@ -2437,6 +2545,27 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     **held_labels(pending.card),
                     **work.turn_choice_baseline,
                 }
+            # The turn keeps who asked it from `/turn`. A turn that recorded
+            # no one takes this request's account, visitor and caller, so the
+            # resumed segment's spans and the turn's line name them, and the
+            # claim save below persists them with the segment. The caller is
+            # read once the conversation it names is set.
+            current_conversation_id.set(f"{principal}/{body.conversation_id}")
+            current_conversation_key.set((principal, body.conversation_id))
+            # The resume continues the paused turn, so it names that turn's id.
+            current_turn_id.set(work.trace_id)
+            set_supplied_caller(current_conversation_caller())
+            set_supplied_turn(work.trace_id)
+            work.take_identity(
+                account=account,
+                visitor=visitor,
+                caller=current_conversation_caller(),
+                surface=(
+                    await studio._turn_surface(user_id=principal, session_id=work.session_id)
+                    if work.turn_usage.surface is None
+                    else None
+                ),
+            )
             # The resumed segment opens its own telemetry span on the turn's
             # trace, whichever instance runs it; the save hands it to the
             # live state.
@@ -2468,8 +2597,12 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             pending = conversation.pending[body.interrupt_id]
             # A workflow's own steps run as concurrent waves, whose recording
             # order `_RecordingSurface` needs the plan's own step order to
-            # undo (`_PendingInterrupt.step_order`'s docstring). It is set
-            # before anything below can run the graph or close the turn.
+            # undo (`_PendingInterrupt.step_order`'s docstring). It and the
+            # spec-use sink are set before anything below can run the graph
+            # or close the turn.
+            current_spec_uses.set(
+                _spec_use_sink(studio.store, principal, body.conversation_id, conversation.trace_id)
+            )
             if studio.surface_recorder is not None:
                 studio.surface_recorder.set_step_order(
                     f"{principal}/{body.conversation_id}", pending.step_order, pending.step_labels
@@ -2547,8 +2680,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # An amendment refines the question, so the turn's history record
                 # carries it.
                 conversation.add_to_turn(str(body.payload), user_words=True)
-            current_conversation_id.set(f"{principal}/{body.conversation_id}")
-            current_conversation_key.set((principal, body.conversation_id))
             # The user's words as amended, so a search after the resume reads the
             # refined ask and no switch's label.
             current_user_message.set(conversation.turn_user_words)

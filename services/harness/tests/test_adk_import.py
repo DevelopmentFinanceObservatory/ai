@@ -521,8 +521,15 @@ async def test_close_open_turns_closes_each_paused_adk_turn_as_abandoned_with_it
     for conversation_id in (FULL, PLAN_PAUSED):
         state = await _load(adk, conversation_id)
         assert state is not None
+        # The close names its turn's trace and usage on its record
+        # (`ConversationState.close_turn`), which the recorded view predates.
+        view = _view(state)
+        view["turns"] = [*view["turns"][:-1], dict(view["turns"][-1])]
+        abandoned = view["turns"][-1]
+        assert abandoned.pop("trace_id") == state.trace_id, conversation_id
+        assert abandoned.pop("usage")["trace_id"] == state.trace_id, conversation_id
         want = {**EXPECTED[conversation_id]["closed_view"], "turn_specs": {}}
-        assert _strip(_view(state)) == _strip(want), conversation_id
+        assert _strip(view) == _strip(want), conversation_id
     closed = await _load(adk, FULL)
     assert closed is not None
     assert closed.turns[-1]["error"] == "abandoned"

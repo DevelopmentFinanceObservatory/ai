@@ -4,7 +4,7 @@ A frame's *lineage* is the ordered tuple of `ProvenanceInput`s it rests on:
 one for a retrieval's own frame, and one per upstream retrieval for a
 derived frame (a join, a compare, a share of two datasets, and whatever is
 built on top of them). Component assembly
-(`harness.mcp_client.McpExecutor._assemble_component`) reads the lineage of
+(`harness.mcp_client.McpExecutor._component_from_lineage`) reads the lineage of
 the frame a component was written from to build its citation, sources,
 warnings and freshness, and withholds the card when the frame has none.
 

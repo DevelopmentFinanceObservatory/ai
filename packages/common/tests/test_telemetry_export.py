@@ -20,22 +20,28 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import mcp.shared._otel as mcp_otel
 import pytest
 from common import telemetry
 from common.telemetry import (
     SESSION_META_KEY,
+    TAGS_META_KEY,
+    USER_META_KEY,
     backend,
-    end_turn_span,
+    end_turn_segment,
     flush_telemetry,
     init_telemetry,
     record_event,
-    start_turn_span,
+    record_turn_outcome,
+    root_if_span_ended,
+    start_turn_segment,
     turn_call_meta,
+    turn_segment,
     use_call_session,
     use_request_span,
-    use_turn_span,
 )
 from common.uri_redaction import UriRedactingExporter
+from fastmcp import Client, FastMCP
 from langfuse import Langfuse, get_client
 from langfuse import __version__ as langfuse_version
 from langfuse._client.resource_manager import LangfuseResourceManager
@@ -48,6 +54,7 @@ from opentelemetry.proto.trace.v1.trace_pb2 import Span
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.sdk.trace.sampling import ALWAYS_OFF
 
 _PROJECTS_BODY = {
     "data": [
@@ -151,6 +158,13 @@ def _attribute(span: Span, key: str) -> str | int | float | bool | None:
     return None
 
 
+def _array_attribute(span: Span, key: str) -> list[str] | None:
+    for attribute in span.attributes:
+        if attribute.key == key:
+            return [value.string_value for value in attribute.value.array_value.values]
+    return None
+
+
 def _child_span(name: str) -> None:
     """Open and close a span with a `gen_ai` attribute, the kind ADK and
     fastmcp emit, which Langfuse's default filter exports."""
@@ -159,27 +173,28 @@ def _child_span(name: str) -> None:
 
 
 def _one_turn(external_id: str) -> None:
-    """Open a `turn` span, a child span inside it, and close the turn."""
-    handle = start_turn_span(external_id)
-    with use_turn_span(handle):
+    """Run a child span inside one `turn.segment`, then write the turn's
+    `turn` outcome."""
+    with turn_segment(external_id):
         _child_span("generate_content gemini-x")
-    end_turn_span(handle)
+    record_turn_outcome(external_id, request="q", response="a")
     get_client().flush()
 
 
 def _assert_turn_root_exported(fake: FakeLangfuse, external_id: str) -> None:
     spans = fake.spans()
+    (segment,) = [span for span in spans if span.name == "turn.segment"]
     (turn,) = [span for span in spans if span.name == "turn"]
     (child,) = [span for span in spans if span.name == "generate_content gemini-x"]
 
     expected_trace_id = Langfuse.create_trace_id(seed=external_id)
-    assert turn.trace_id.hex() == expected_trace_id
-    assert _attribute(turn, "langfuse.observation.metadata.dfo.external_id") == external_id
-    assert child.trace_id == turn.trace_id
-    assert child.parent_span_id == turn.span_id
-    # The seeded trace id comes from a synthetic remote parent that is never
-    # exported, so the root is identified by Langfuse's own marker.
-    assert _attribute(turn, "langfuse.internal.is_app_root") is True
+    assert {span.trace_id.hex() for span in spans} == {expected_trace_id}
+    for root in (segment, turn):
+        assert _attribute(root, "langfuse.observation.metadata.dfo.external_id") == external_id
+        # The seeded trace id comes from a synthetic remote parent that is
+        # never exported, so each root is identified by Langfuse's own marker.
+        assert _attribute(root, "langfuse.internal.is_app_root") is True
+    assert child.parent_span_id == segment.span_id
 
 
 def test_turn_root_span_is_exported_with_the_trace_id_derived_from_the_wire_id(
@@ -213,20 +228,18 @@ def test_turn_root_span_is_exported_when_the_credentials_check_returns_503(
     _assert_turn_root_exported(fake_langfuse, "tr_export0002")
 
 
-def test_record_event_exports_a_langfuse_event_under_the_turn_span(
+def test_record_event_exports_a_langfuse_event_under_the_turn_segment(
     fake_langfuse: FakeLangfuse,
 ) -> None:
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
-    handle = start_turn_span("tr_export0003")
-    with use_turn_span(handle):
+    with turn_segment("tr_export0003"):
         record_event("compose.refused", metadata={"reason": "no_rows", "count": 3, "ok": False})
-    end_turn_span(handle)
     get_client().flush()
 
     spans = fake_langfuse.spans()
-    (turn,) = [span for span in spans if span.name == "turn"]
+    (turn,) = [span for span in spans if span.name == "turn.segment"]
     (event,) = [span for span in spans if span.name == "compose.refused"]
     assert event.trace_id == turn.trace_id
     assert event.parent_span_id == turn.span_id
@@ -243,19 +256,17 @@ def test_record_event_adds_a_span_event_on_the_otlp_backend(isolated_telemetry) 
     trace.set_tracer_provider(provider)
     telemetry._backend = "otel"
 
-    handle = start_turn_span("tr_export0004")
-    with use_turn_span(handle):
+    with turn_segment("tr_export0004"):
         record_event("compose.refused", metadata={"reason": "no_rows", "count": 3})
-    end_turn_span(handle)
 
     (span,) = exporter.get_finished_spans()
     (event,) = span.events
-    assert span.name == "turn"
+    assert span.name == "turn.segment"
     assert event.name == "compose.refused"
     assert dict(event.attributes or {}) == {"reason": "no_rows", "count": 3, "level": "WARNING"}
 
 
-def test_a_turn_span_ended_with_attributes_exports_them_on_the_otlp_backend(
+def test_a_turn_segment_ended_with_attributes_exports_them_on_the_otlp_backend(
     isolated_telemetry,
 ) -> None:
     exporter = InMemorySpanExporter()
@@ -264,82 +275,222 @@ def test_a_turn_span_ended_with_attributes_exports_them_on_the_otlp_backend(
     trace.set_tracer_provider(provider)
     telemetry._backend = "otel"
 
-    end_turn_span(start_turn_span("tr_export0005"), attributes={"dfo.stored": "paused"})
+    end_turn_segment(
+        start_turn_segment("tr_export0005"), status="paused", attributes={"dfo.stored": "paused"}
+    )
 
     (span,) = exporter.get_finished_spans()
+    assert span.name == "turn.segment"
     assert (span.attributes or {}).get("dfo.stored") == "paused"
 
 
-def test_a_turn_span_ended_with_attributes_exports_them_on_langfuse(
+def test_a_turn_segment_ended_with_attributes_exports_them_on_langfuse(
     fake_langfuse: FakeLangfuse,
 ) -> None:
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
-    end_turn_span(start_turn_span("tr_export0006"), error="done", attributes={"dfo.stored": "done"})
+    end_turn_segment(
+        start_turn_segment("tr_export0006"),
+        status="done",
+        level="DEFAULT",
+        attributes={"dfo.stored": "done"},
+    )
     get_client().flush()
 
-    (turn,) = [span for span in fake_langfuse.spans() if span.name == "turn"]
-    assert _attribute(turn, "dfo.stored") == "done"
+    (segment,) = [span for span in fake_langfuse.spans() if span.name == "turn.segment"]
+    assert _attribute(segment, "dfo.stored") == "done"
+    assert _attribute(segment, "langfuse.observation.level") == "DEFAULT"
+    assert _attribute(segment, "langfuse.observation.status_message") == "done"
+    assert not [span for span in fake_langfuse.spans() if span.name == "turn"]
+
+
+async def test_a_turns_otlp_spans_share_one_synthetic_parent(isolated_telemetry) -> None:
+    """On the OTLP backend two segments of one turn, its outcome, and an
+    early-mint root opened after its segment ended are children of one
+    remote parent span, so a trace viewer shows them as siblings under one
+    missing root and not as four roots."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    telemetry._backend = "otel"
+    segment_ended = asyncio.Event()
+
+    async def late_mint() -> None:
+        await segment_ended.wait()
+        with root_if_span_ended("turn.early_mint") as rooted:
+            assert rooted
+
+    with turn_segment("tr_export0023"):
+        mint = asyncio.ensure_future(late_mint())
+    segment_ended.set()
+    await mint
+    with turn_segment("tr_export0023"):
+        pass
+    record_turn_outcome("tr_export0023", request="q", response="a")
+
+    spans = exporter.get_finished_spans()
+    assert sorted(span.name for span in spans) == [
+        "turn",
+        "turn.early_mint",
+        "turn.segment",
+        "turn.segment",
+    ]
+    parents = {(span.parent.trace_id, span.parent.span_id) for span in spans if span.parent}
+    assert len(parents) == 1
+    assert all(span.parent is not None and span.parent.is_remote for span in spans)
+    assert {span.context.trace_id for span in spans} == {next(iter(parents))[0]}
+
+
+async def test_an_early_mint_under_an_ended_inner_span_roots_only_once_its_segment_ends(
+    isolated_telemetry,
+) -> None:
+    """A mint offered under an inner span of the segment records under the
+    live segment while the segment runs, though the inner span has ended,
+    and opens its own root only once the segment has ended."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    telemetry._backend = "otel"
+    inner_ended, segment_ended = asyncio.Event(), asyncio.Event()
+    rooted: list[bool] = []
+
+    async def mint() -> None:
+        for ended in (inner_ended, segment_ended):
+            await ended.wait()
+            with root_if_span_ended("turn.early_mint") as opened:
+                rooted.append(opened)
+
+    with turn_segment("tr_export0024"):
+        with trace.get_tracer("test").start_as_current_span("tool"):
+            task = asyncio.ensure_future(mint())
+        inner_ended.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    segment_ended.set()
+    await task
+
+    assert rooted == [False, True]
+    assert sorted(span.name for span in exporter.get_finished_spans()) == [
+        "tool",
+        "turn.early_mint",
+        "turn.segment",
+    ]
+
+
+async def test_an_early_mint_after_a_segment_the_sampler_dropped_opens_no_root(
+    isolated_telemetry,
+) -> None:
+    """A segment the sampler dropped records nothing and counts as live, so a
+    mint that ends after it opens no root, which would be dropped too."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider(sampler=ALWAYS_OFF)
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    telemetry._backend = "otel"
+    segment_ended = asyncio.Event()
+    rooted: list[bool] = []
+
+    async def late_mint() -> None:
+        await segment_ended.wait()
+        with root_if_span_ended("turn.early_mint") as opened:
+            rooted.append(opened)
+
+    with turn_segment("tr_export0025"):
+        mint = asyncio.ensure_future(late_mint())
+    segment_ended.set()
+    await mint
+
+    assert rooted == [False]
+    assert exporter.get_finished_spans() == ()
 
 
 async def test_a_turn_continued_in_a_second_task_exports_as_one_trace(
     fake_langfuse: FakeLangfuse, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A turn opened in one task, continued by the requests that follow it in
-    two more tasks, and closed in a fourth (a turn paused for approval and
-    resumed by a separate request) is one trace with one `turn` span, and
-    spans and events from every task nest under it. The turn's Langfuse session
-    id reaches the spans of both continuing tasks and stops with each task's
-    block."""
+    """A turn whose segments run in two tasks and whose outcome is written in
+    a third (a turn paused for approval and resumed by a separate request) is
+    one trace: each segment is a root, the spans and events of each task nest
+    under that task's segment, and the `turn` outcome is a root of its own.
+    The turn's Langfuse session id reaches the spans of both segments and
+    stops with each segment's block."""
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
-    async def open_turn() -> object:
-        return start_turn_span("tr_export0005", session_id="conv-1")
-
-    async def first_segment(handle: object) -> None:
-        with use_turn_span(handle):
+    async def first_segment() -> None:
+        with turn_segment("tr_export0005", session_id="conv-1"):
             _child_span("plan_call")
         _child_span("plan_call_after_block")
 
-    async def resumed_segment(handle: object) -> None:
-        with use_turn_span(handle):
+    async def resumed_segment() -> None:
+        with turn_segment("tr_export0005", session_id="conv-1"):
             _child_span("execute_call")
             record_event("compose.write_refused", metadata={"code": "missing_field"})
         _child_span("execute_call_after_block")
 
-    async def close_turn(handle: object) -> None:
-        end_turn_span(handle)
+    async def close_turn() -> None:
+        record_turn_outcome("tr_export0005", session_id="conv-1", request="q", response="a")
 
     with caplog.at_level(logging.WARNING):
-        handle = await asyncio.create_task(open_turn())
-        await asyncio.create_task(first_segment(handle))
-        await asyncio.create_task(resumed_segment(handle))
-        await asyncio.create_task(close_turn(handle))
+        await asyncio.create_task(first_segment())
+        await asyncio.create_task(resumed_segment())
+        await asyncio.create_task(close_turn())
     get_client().flush()
 
     exported = fake_langfuse.spans()
     spans = [span for span in exported if not span.name.endswith("_after_block")]
     after_block = [span for span in exported if span.name.endswith("_after_block")]
-    (turn,) = [span for span in spans if span.name == "turn"]
-    assert turn.trace_id.hex() == Langfuse.create_trace_id(seed="tr_export0005")
-    assert {span.trace_id for span in spans} == {turn.trace_id}
-    for name in ("plan_call", "execute_call", "compose.write_refused"):
+    assert {span.trace_id.hex() for span in spans} == {
+        Langfuse.create_trace_id(seed="tr_export0005")
+    }
+    by_id = {span.span_id: span for span in spans}
+    for name, parent in (
+        ("plan_call", "turn.segment"),
+        ("execute_call", "turn.segment"),
+        ("compose.write_refused", "turn.segment"),
+    ):
         (span,) = [span for span in spans if span.name == name]
-        assert span.parent_span_id == turn.span_id, name
-    # Every span but the root has a parent inside the trace.
-    assert _attribute(turn, "langfuse.internal.is_app_root") is True
-    assert [
+        assert by_id[span.parent_span_id].name == parent, name
+    (plan_call,) = [span for span in spans if span.name == "plan_call"]
+    (execute_call,) = [span for span in spans if span.name == "execute_call"]
+    assert plan_call.parent_span_id != execute_call.parent_span_id
+    # Every span but the roots has a parent inside the trace.
+    assert sorted(
         span.name for span in spans if _attribute(span, "langfuse.internal.is_app_root") is True
-    ] == ["turn"]
+    ) == ["turn", "turn.segment", "turn.segment"]
+    assert _spans_with_an_unexported_parent(spans) == [
+        span for span in spans if span.name in {"turn", "turn.segment"}
+    ]
     assert not [r for r in caplog.records if r.name == "opentelemetry.context"]
-    for name in ("turn", "plan_call", "execute_call", "compose.write_refused"):
-        (span,) = [span for span in spans if span.name == name]
-        assert _attribute(span, "session.id") == "conv-1", name
+    for span in spans:
+        assert _attribute(span, "session.id") == "conv-1", span.name
     assert len(after_block) == 2
     for span in after_block:
         assert _attribute(span, "session.id") is None, span.name
+
+
+def test_a_segment_whose_block_raises_still_ends_and_exports_at_level_error(
+    fake_langfuse: FakeLangfuse,
+) -> None:
+    init_telemetry(service_name="harness")
+    _join_auth_check_thread()
+
+    with pytest.raises(RuntimeError), turn_segment("tr_export0020"):
+        _child_span("generate_content gemini-x")
+        raise RuntimeError("boom")
+    get_client().flush()
+
+    assert sorted(span.name for span in fake_langfuse.spans()) == [
+        "generate_content gemini-x",
+        "turn.segment",
+    ]
+    (segment,) = [span for span in fake_langfuse.spans() if span.name == "turn.segment"]
+    # Only the class name is exported, since exception text may carry what the
+    # trace must not.
+    assert _attribute(segment, "langfuse.observation.level") == "ERROR"
+    assert _attribute(segment, "langfuse.observation.status_message") == "RuntimeError"
 
 
 async def test_flush_telemetry_exports_queued_spans_without_waiting_for_the_interval(
@@ -351,15 +502,16 @@ async def test_flush_telemetry_exports_queued_spans_without_waiting_for_the_inte
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
-    handle = start_turn_span("tr_export0006")
-    with use_turn_span(handle):
+    with turn_segment("tr_export0006"):
         _child_span("generate_content gemini-x")
-    end_turn_span(handle)
     assert fake_langfuse.spans() == []
 
     await flush_telemetry()
 
-    assert {span.name for span in fake_langfuse.spans()} == {"turn", "generate_content gemini-x"}
+    assert {span.name for span in fake_langfuse.spans()} == {
+        "turn.segment",
+        "generate_content gemini-x",
+    }
 
 
 async def test_flush_telemetry_returns_at_its_bound_when_the_server_hangs(
@@ -368,10 +520,8 @@ async def test_flush_telemetry_returns_at_its_bound_when_the_server_hangs(
     monkeypatch.setenv("LANGFUSE_FLUSH_INTERVAL", "300")
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
-    handle = start_turn_span("tr_export0007")
-    with use_turn_span(handle):
+    with turn_segment("tr_export0007"):
         _child_span("generate_content gemini-x")
-    end_turn_span(handle)
     fake_langfuse.hang_exports = True
 
     started = time.monotonic()
@@ -387,7 +537,10 @@ async def test_flush_telemetry_returns_at_its_bound_when_the_server_hangs(
         if thread.name == telemetry._FLUSH_THREAD_NAME:
             thread.join(timeout=30)
             assert not thread.is_alive()
-    assert {span.name for span in fake_langfuse.spans()} == {"turn", "generate_content gemini-x"}
+    assert {span.name for span in fake_langfuse.spans()} == {
+        "turn.segment",
+        "generate_content gemini-x",
+    }
 
 
 async def test_a_flush_requested_during_a_running_one_is_served_before_it_finishes(
@@ -415,23 +568,25 @@ async def test_a_flush_requested_during_a_running_one_is_served_before_it_finish
 
     monkeypatch.setattr(telemetry, "_flush_backend", flush_then_wait_once)
 
-    first = start_turn_span("tr_export0008")
-    with use_turn_span(first):
+    with turn_segment("tr_export0008"):
         _child_span("first_call")
-    end_turn_span(first)
     running = asyncio.create_task(flush_telemetry())
     assert await asyncio.to_thread(in_window.wait, 30)
-    assert {span.name for span in fake_langfuse.spans()} == {"turn", "first_call"}
+    assert {span.name for span in fake_langfuse.spans()} == {"turn.segment", "first_call"}
 
-    second = start_turn_span("tr_export0009")
-    with use_turn_span(second):
+    with turn_segment("tr_export0009"):
         _child_span("second_call")
-    end_turn_span(second)
-    await asyncio.wait_for(flush_telemetry(), timeout=2)  # returns at once: one is running
+    # Waits for the running flush, parked here, until its own bound.
+    await asyncio.wait_for(flush_telemetry(timeout_seconds=0.1), timeout=2)
     assert "second_call" not in {span.name for span in fake_langfuse.spans()}
 
     leave_window.set()
+    # The first caller wakes when its pass ends; the second pass, which the
+    # withdrawn second caller asked for, still runs before the thread ends.
     await asyncio.wait_for(running, timeout=30)
+    for thread in threading.enumerate():
+        if thread.name == telemetry._FLUSH_THREAD_NAME:
+            await asyncio.to_thread(thread.join, 30)
 
     assert "second_call" in {span.name for span in fake_langfuse.spans()}
     assert len(passes) == 2
@@ -448,13 +603,13 @@ async def test_adks_spans_export_under_the_turn_and_bare_spans_do_not(
     fake_langfuse: FakeLangfuse,
 ) -> None:
     """ADK's schema v2 spans carry `gen_ai.*` attributes, so the Langfuse
-    default filter exports them, `invoke_workflow` as a child of `turn`. A span
-    with no such attribute, from ADK's scope or any other, is dropped."""
+    default filter exports them, `invoke_workflow` as a child of the segment.
+    A span with no such attribute, from ADK's scope or any other, is
+    dropped."""
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
-    handle = start_turn_span("tr_export0010")
-    with use_turn_span(handle):
+    with turn_segment("tr_export0010"):
         adk = trace.get_tracer("gcp.vertex.agent")
         with adk.start_as_current_span("invoke_workflow wf") as workflow:
             workflow.set_attribute("gen_ai.operation.name", "invoke_workflow")
@@ -462,15 +617,15 @@ async def test_adks_spans_export_under_the_turn_and_bare_spans_do_not(
             pass
         with trace.get_tracer("some.other.library").start_as_current_span("bare"):
             pass
-    end_turn_span(handle)
     get_client().flush()
 
     spans = fake_langfuse.spans()
-    assert sorted(span.name for span in spans) == ["invoke_workflow wf", "turn"]
-    (turn,) = [span for span in spans if span.name == "turn"]
+    assert sorted(span.name for span in spans) == ["invoke_workflow wf", "turn.segment"]
+    (turn,) = [span for span in spans if span.name == "turn.segment"]
     (workflow,) = [span for span in spans if span.name == "invoke_workflow wf"]
     assert workflow.parent_span_id == turn.span_id
-    # The only parent that was never exported is the SDK's synthetic one for `turn`.
+    # The only parent that was never exported is the SDK's synthetic one for
+    # the segment.
     assert _spans_with_an_unexported_parent(spans) == [turn]
 
 
@@ -676,20 +831,46 @@ def _adk_child_span(name: str) -> None:
 def test_a_turn_with_a_session_id_exports_it_on_the_turn_and_on_spans_a_library_opens(
     fake_langfuse: FakeLangfuse,
 ) -> None:
+    """The session, user and tags a turn's segment and outcome are given reach
+    both and every span a library opens under the segment."""
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
-    handle = start_turn_span("tr_export0013", session_id="conv-1")
-    with use_turn_span(handle):
+    with turn_segment("tr_export0013", session_id="conv-1", user_id="a" * 64, tags=["studio"]):
         _adk_child_span("generate_content gemini-x")
-    end_turn_span(handle)
+    record_turn_outcome("tr_export0013", session_id="conv-1", user_id="a" * 64, tags=["studio"])
     get_client().flush()
 
     spans = fake_langfuse.spans()
-    assert {span.name for span in spans} == {"turn", "generate_content gemini-x"}
+    assert sorted(span.name for span in spans) == [
+        "generate_content gemini-x",
+        "turn",
+        "turn.segment",
+    ]
     for span in spans:
         assert _attribute(span, "session.id") == "conv-1", span.name
         assert _attribute(span, "langfuse.trace.name") == "turn", span.name
+        assert _attribute(span, "user.id") == "a" * 64, span.name
+        assert _array_attribute(span, "langfuse.trace.tags") == ["studio"], span.name
+
+
+def test_the_exported_spans_name_the_cloud_run_revision_as_their_release(
+    fake_langfuse: FakeLangfuse, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("K_REVISION", "dfo-dev-ai-00042-abc")
+    init_telemetry(service_name="harness")
+    _join_auth_check_thread()
+
+    _one_turn("tr_export0016")
+
+    releases = {
+        attribute.value.string_value
+        for request in fake_langfuse.exports
+        for resource_spans in request.resource_spans
+        for attribute in resource_spans.resource.attributes
+        if attribute.key == "langfuse.release"
+    }
+    assert releases == {"dfo-dev-ai-00042-abc"}
 
 
 def test_a_turn_without_a_session_id_exports_no_langfuse_session(
@@ -698,31 +879,37 @@ def test_a_turn_without_a_session_id_exports_no_langfuse_session(
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
-    handle = start_turn_span("tr_export0014")
-    with use_turn_span(handle):
+    with turn_segment("tr_export0014"):
         _child_span("generate_content gemini-x")
-    end_turn_span(handle)
+    record_turn_outcome("tr_export0014")
     get_client().flush()
 
     spans = fake_langfuse.spans()
-    assert {span.name for span in spans} == {"turn", "generate_content gemini-x"}
+    assert {span.name for span in spans} == {"turn", "turn.segment", "generate_content gemini-x"}
     for span in spans:
         assert _attribute(span, "session.id") is None, span.name
         assert _attribute(span, "langfuse.trace.name") == "turn", span.name
+        assert _attribute(span, "user.id") is None, span.name
+        assert _array_attribute(span, "langfuse.trace.tags") is None, span.name
 
 
-def test_a_turn_exports_its_request_and_response_on_the_root_observation_alone(
+def test_a_turn_exports_its_request_and_response_on_the_outcome_observation_alone(
     fake_langfuse: FakeLangfuse,
 ) -> None:
-    """The turn's request and response are the trace's overall input and
-    output, so they go on `turn`, the root observation, and on no child."""
+    """The turn's request and response go on `turn`, the outcome observation,
+    and on neither the segment nor its children. The outcome sets the trace's
+    input and output to them too, for trace-level views and evaluators."""
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
-    handle = start_turn_span("tr_export0018", session_id="conv-1")
-    with use_turn_span(handle):
+    with turn_segment("tr_export0018", session_id="conv-1"):
         _adk_child_span("generate_content gemini-x")
-    end_turn_span(handle, request="life expectancy in Kenya", response="It rose to 66.")
+    record_turn_outcome(
+        "tr_export0018",
+        session_id="conv-1",
+        request="life expectancy in Kenya",
+        response="It rose to 66.",
+    )
     get_client().flush()
 
     io = {
@@ -734,37 +921,78 @@ def test_a_turn_exports_its_request_and_response_on_the_root_observation_alone(
     }
     assert io == {
         "turn": ("life expectancy in Kenya", "It rose to 66."),
+        "turn.segment": (None, None),
         "generate_content gemini-x": (None, None),
     }
+    (turn,) = [span for span in fake_langfuse.spans() if span.name == "turn"]
+    assert turn.end_time_unix_nano - turn.start_time_unix_nano < 50_000_000
 
 
 @pytest.mark.parametrize(
-    ("error", "level", "status_message"),
-    [(None, None, None), ("cancelled", "ERROR", "cancelled")],
-    ids=["clean", "error"],
+    ("error", "paused", "level", "status_message", "status"),
+    [
+        (None, False, None, None, None),
+        ("cancelled", False, "ERROR", "cancelled", None),
+        (None, True, None, None, "paused"),
+    ],
+    ids=["clean", "error", "paused"],
 )
-def test_a_turn_closed_with_an_error_exports_its_root_at_level_error(
-    fake_langfuse: FakeLangfuse, error: str | None, level: str | None, status_message: str | None
+def test_a_turn_closed_with_an_error_exports_its_outcome_at_level_error(
+    fake_langfuse: FakeLangfuse,
+    error: str | None,
+    paused: bool,
+    level: str | None,
+    status_message: str | None,
+    status: str | None,
 ) -> None:
-    """A turn ended with an error code marks the root observation `ERROR`,
-    naming the code; a clean turn leaves the root at the default level."""
+    """A turn ended with an error code marks the outcome observation `ERROR`,
+    naming the code in its status message and its `dfo.turn_error` metadata.
+    A clean turn leaves it at the default level with no `dfo.turn_error`. A
+    pause is a `turn.pause` observation, never a `turn`, and says so in
+    `dfo.turn_status` too, which a close leaves out."""
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
-    handle = start_turn_span("tr_export0019")
-    with use_turn_span(handle):
+    with turn_segment("tr_export0019"):
         _child_span("generate_content gemini-x")
-    end_turn_span(handle, request="q", response="a", error=error)
+    record_turn_outcome("tr_export0019", request="q", response="a", error=error, paused=paused)
     get_client().flush()
 
     marks = {
         span.name: (
             _attribute(span, "langfuse.observation.level"),
             _attribute(span, "langfuse.observation.status_message"),
+            _attribute(span, "langfuse.observation.metadata.dfo.turn_error"),
+            _attribute(span, "langfuse.observation.metadata.dfo.turn_status"),
         )
         for span in fake_langfuse.spans()
     }
-    assert marks == {"turn": (level, status_message), "generate_content gemini-x": (None, None)}
+    assert marks == {
+        "turn.pause" if paused else "turn": (level, status_message, error, status),
+        "turn.segment": (None, None, None, None),
+        "generate_content gemini-x": (None, None, None, None),
+    }
+
+
+def test_a_turn_closed_twice_exports_two_outcomes(fake_langfuse: FakeLangfuse) -> None:
+    """Each close writes its own `turn` observation on the one trace, and
+    nothing merges them."""
+    init_telemetry(service_name="harness")
+    _join_auth_check_thread()
+
+    record_turn_outcome("tr_export0021", request="q", response="a")
+    record_turn_outcome("tr_export0021", request="q", response="", error="abandoned")
+    get_client().flush()
+
+    turns = [span for span in fake_langfuse.spans() if span.name == "turn"]
+    assert [_attribute(span, "langfuse.observation.metadata.dfo.turn_error") for span in turns] == [
+        None,
+        "abandoned",
+    ]
+    assert {span.trace_id.hex() for span in turns} == {
+        Langfuse.create_trace_id(seed="tr_export0021")
+    }
+    assert turns[0].span_id != turns[1].span_id
 
 
 # --- the session across an MCP call ------------------------------------------
@@ -774,30 +1002,40 @@ def test_turn_call_meta_carries_the_session_the_turn_exports(fake_langfuse: Fake
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
-    handle = start_turn_span("tr_export0015", session_id="conv-1")
-    with use_turn_span(handle):
+    with turn_segment("tr_export0015", session_id="conv-1"):
         inside = turn_call_meta()
-    end_turn_span(handle)
     get_client().flush()
 
-    (turn,) = [span for span in fake_langfuse.spans() if span.name == "turn"]
+    (turn,) = [span for span in fake_langfuse.spans() if span.name == "turn.segment"]
     assert inside == {SESSION_META_KEY: _attribute(turn, "session.id")}
     assert inside[SESSION_META_KEY] == "conv-1"
+
+
+def test_turn_call_meta_carries_the_user_and_tags_the_turn_exports(
+    fake_langfuse: FakeLangfuse,
+) -> None:
+    init_telemetry(service_name="harness")
+    _join_auth_check_thread()
+
+    with turn_segment("tr_export0018", session_id="conv-1", user_id="u-1", tags=["studio"]):
+        inside = turn_call_meta()
+
+    assert inside == {
+        SESSION_META_KEY: "conv-1",
+        USER_META_KEY: "u-1",
+        TAGS_META_KEY: ["studio"],
+    }
 
 
 def test_turn_call_meta_is_empty_outside_a_turn_session(fake_langfuse: FakeLangfuse) -> None:
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
-    without_session = start_turn_span("tr_export0016")
-    with use_turn_span(without_session):
+    with turn_segment("tr_export0016"):
         in_turn_without_session = turn_call_meta()
-    end_turn_span(without_session)
-    with_session = start_turn_span("tr_export0017", session_id="conv-1")
-    with use_turn_span(with_session):
+    with turn_segment("tr_export0017", session_id="conv-1"):
         pass
     after_block = turn_call_meta()
-    end_turn_span(with_session)
 
     assert turn_call_meta() == {}
     assert in_turn_without_session == {}
@@ -811,20 +1049,25 @@ def test_use_call_session_exports_the_session_on_the_current_span_and_its_childr
     _join_auth_check_thread()
 
     with get_client().start_as_current_observation(name="server", as_type="span"):
-        with use_call_session("conv-1"):
+        with use_call_session("conv-1", user_id="u-1", tags=["studio"]):
             _child_span("tool_body")
             assert "langfuse_session_id" not in baggage.get_all()
         _child_span("after_call")
     get_client().flush()
 
     marks = {
-        span.name: (_attribute(span, "session.id"), _attribute(span, "langfuse.trace.name"))
+        span.name: (
+            _attribute(span, "session.id"),
+            _attribute(span, "langfuse.trace.name"),
+            _attribute(span, "user.id"),
+            _array_attribute(span, "langfuse.trace.tags"),
+        )
         for span in fake_langfuse.spans()
     }
     assert marks == {
-        "server": ("conv-1", "turn"),
-        "tool_body": ("conv-1", "turn"),
-        "after_call": (None, None),
+        "server": ("conv-1", "turn", "u-1", ["studio"]),
+        "tool_body": ("conv-1", "turn", "u-1", ["studio"]),
+        "after_call": (None, None, None, None),
     }
 
 
@@ -846,3 +1089,64 @@ def test_use_call_session_without_a_session_leaves_spans_unmarked(
     assert {span.name for span in spans} == {"server", "tool_body"}
     assert all(_attribute(span, "session.id") is None for span in spans)
     assert all(_attribute(span, "langfuse.trace.name") is None for span in spans)
+
+
+# --- MCP calls through a real fastmcp client ---------------------------------
+
+
+@pytest.fixture
+def fresh_mcp_tracer() -> Iterator[None]:
+    """Clear the `mcp` SDK's import-time tracer, a `ProxyTracer` that keeps the
+    first provider it resolved, so its spans reach this test's provider."""
+    proxy = mcp_otel._tracer
+    assert isinstance(proxy, trace.ProxyTracer)
+    proxy._real_tracer = None
+    try:
+        yield
+    finally:
+        proxy._real_tracer = None
+
+
+async def test_mcp_calls_through_fastmcp_export_no_span_whose_parent_is_missing(
+    fake_langfuse: FakeLangfuse, fresh_mcp_tracer: None
+) -> None:
+    """A real fastmcp `Client` lists and calls a tool on an in-process server,
+    once outside a turn and once inside a segment. Every exported span's
+    parent is exported, except for two roots. One is the segment, whose parent
+    is the SDK's synthetic one. The other is the client span of the call
+    outside the turn, which has none. The listings export nothing."""
+    init_telemetry(service_name="harness")
+    _join_auth_check_thread()
+    server = FastMCP("probe")
+
+    @server.tool
+    def echo(text: str) -> str:
+        return text
+
+    async with Client(server) as client:
+        await client.list_tools()
+        await client.call_tool("echo", {"text": "outside"})
+        with turn_segment("tr_export0022"):
+            await client.list_tools()
+            await client.call_tool("echo", {"text": "inside"})
+    get_client().flush()
+
+    spans = fake_langfuse.spans()
+    by_id = {span.span_id: span for span in spans}
+    (segment,) = [span for span in spans if span.name == "turn.segment"]
+    # Control: each call's client, `mcp` SDK and server spans all arrived.
+    for trace_id in {span.trace_id for span in spans}:
+        names = sorted(span.name for span in spans if span.trace_id == trace_id)
+        expected = ["MCP send tools/call echo", "tools/call echo", "tools/call echo"]
+        if trace_id == segment.trace_id:
+            expected = sorted([*expected, "turn.segment"])
+        assert names == expected
+    assert len({span.trace_id for span in spans}) == 2
+    orphans = [
+        span.name
+        for span in spans
+        if span.parent_span_id
+        and span.parent_span_id not in by_id
+        and span.span_id != segment.span_id
+    ]
+    assert orphans == []

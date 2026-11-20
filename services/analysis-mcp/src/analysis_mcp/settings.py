@@ -45,9 +45,11 @@ class Settings(FrameServiceSettings):
     which computes nothing, so a stalled dfo-apis fails a read in seconds.
 
     `dfo_caller_principal` (`DFO_CALLER_PRINCIPAL`) is the secret dfo-apis shares
-    with the website. A call whose caller the website named as `ip:<digest>`
-    carries it beside that caller (`x-dfo-caller-principal`, `x-dfo-caller`), so
-    dfo-apis counts the website's client. Unset or blank, no caller is sent.
+    with the website. Every call carries it beside an `ip:<digest>` caller the
+    website named, or a harness `conversation:` caller
+    (`common.caller.vouched_caller_headers`). dfo-apis counts an `ip:` caller. A
+    `conversation:` caller is logged as Studio and counted against this service's
+    address. Unset or blank, no caller is sent.
     """
 
     seed_fixture_frames: bool = False

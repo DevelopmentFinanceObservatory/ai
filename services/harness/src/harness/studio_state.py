@@ -20,6 +20,7 @@ mid-stream (and at end of segment, through `release`), and
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import re
@@ -30,8 +31,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
-from common.telemetry import EventLevel, end_turn_span, start_turn_span, use_turn_span
+from common.telemetry import (
+    EventLevel,
+    end_turn_segment,
+    start_turn_segment,
+    use_turn_segment,
+)
 from compiler.sources import alternative_definitions, source_from_spec_block
+from compiler.surface import SpecUse
 from data_mcp.definition_store.identity import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
 from executor.ledger import RunStatus
@@ -440,6 +447,56 @@ class Segment:
     cancel: bool = False
 
 
+# The message, and the `event` field, of the log line `StudioStore` writes
+# for each turn close and each pause one of its writes commits.
+TURN_LOG_EVENT = "studio.turn"
+
+
+@dataclass
+class TurnUsage:
+    """Who asked the current turn and which specs it used, for its
+    `TURN_LOG_EVENT` line and its telemetry spans.
+
+    `caller` is the `conversation:` caller the harness's MCP clients send for
+    the conversation (`harness.conversation.current_conversation_caller`).
+    `account` is the website's digest of a signed-in account, `visitor` the
+    website's `ip:` caller, and `surface` the turn's `harness.wire.Surface`
+    value; each is `None` when the request named none. `fetched_specs` holds
+    each spec a foreground `get_data` call retrieved and `drawn_specs` each
+    spec a card drawn this turn rests on, once each, in the order first used
+    (`compiler.surface.current_spec_uses`). `trace_id` is the turn's
+    `ConversationState.trace_id`, so a stored usage naming another turn's
+    reads as unset (`harness.studio_store._turn_usage`). `started_at` is when
+    `begin_turn` began the turn, as an ISO 8601 UTC timestamp, so a turn
+    closed days later still counts on the day it ran.
+    """
+
+    trace_id: str | None = None
+    started_at: str | None = None
+    caller: str | None = None
+    account: str | None = None
+    visitor: str | None = None
+    surface: str | None = None
+    fetched_specs: list[str] = field(default_factory=list)
+    drawn_specs: list[str] = field(default_factory=list)
+
+    @property
+    def user_id(self) -> str | None:
+        """The Langfuse user of the turn: the account, else the visitor."""
+        return self.account or self.visitor
+
+    @property
+    def tags(self) -> list[str]:
+        """The Langfuse tags of the turn: its surface, when it names one."""
+        return [self.surface] if self.surface else []
+
+    def copy(self) -> TurnUsage:
+        """A copy whose spec lists are lists of their own."""
+        return dataclasses.replace(
+            self, fetched_specs=list(self.fetched_specs), drawn_specs=list(self.drawn_specs)
+        )
+
+
 @dataclass
 class ConversationState:
     """Wire bookkeeping for one (principal, conversation_id) pair."""
@@ -499,9 +556,10 @@ class ConversationState:
     # JSON, `specs` the spec block `search` returned for each source those
     # plans used, and `identities` the `RecordedIdentity` of every source the
     # turn's searches returned or its plans used, as JSON, by spec_id
-    # (`recorded_identity`). Every key but `user` and `assistant` is
-    # optional, and a record without `plans`, `readings`, `specs` or
-    # `identities` holds none. Feeds the conversation digest (newest
+    # (`recorded_identity`). A record this release closed also names the
+    # turn's `trace_id` and its `TurnUsage` as `usage`. Every key but `user`
+    # and `assistant` is optional, and a record without `plans`, `readings`,
+    # `specs` or `identities` holds none. Feeds the conversation digest (newest
     # window), the recall function (everything older) and the planner's ledger
     # (`prior_ledger_state`). None of them reads `identities`.
     turns: list[dict[str, Any]] = field(default_factory=list)
@@ -557,6 +615,8 @@ class ConversationState:
     # segment's own ending is then decided, and a Stop read after it changes
     # nothing (`harness.studio._StreamEnding.stop_applies`). Not durable.
     segment_closed_turn: bool = field(default=False, compare=False)
+    # Who asked the current turn and the specs it used; set by `begin_turn`.
+    turn_usage: TurnUsage = field(default_factory=TurnUsage)
     # This instance's telemetry span for the turn's current segment, on the
     # turn's `trace_id`. `begin_turn` or `open_segment_span` opens it, and
     # `end_segment_span` ends it once when the segment ends on this instance,
@@ -851,9 +911,13 @@ class ConversationState:
         from more than one code path), and mark the running segment as the
         one that recorded it (`segment_closed_turn`). A turn recorded
         with an `error` drops its pending interrupts: no pause is left to
-        answer, so `/interrupt` answers 404. The segment's telemetry span ends
-        when the segment does (`end_segment_span`), with the record's
-        message and reply as its input and output.
+        answer, so `/interrupt` answers 404. The record names the turn's `trace_id` and its `usage` as they
+        stand at the close, so the store, which writes the turn's
+        `TURN_LOG_EVENT` line and `turn` outcome once the write that commits
+        the record lands (`harness.studio_store.StudioStore`), names this turn
+        even after `begin_turn` has moved on. A record that cannot be built is
+        replaced by a minimal one (`turn`, `user`, `assistant`, the close's
+        own `error` code when it has one, `trace_id` and `usage`).
 
         `match_notes` (`harness.turn_records.loose_match_notes`) and
         `basis_line` (`harness.turn_records.basis_line`) are the text the code
@@ -863,10 +927,52 @@ class ConversationState:
         answer alone, and that model has no text of the code's own to copy."""
         if self.turn_recorded:
             return
+        record: dict[str, Any]
+        try:
+            record = self._turn_record(
+                final_text=final_text, error=error, match_notes=match_notes, basis_line=basis_line
+            )
+        except Exception as exc:
+            # A record that cannot be built must not leave the turn open, since
+            # every later turn would try to close it again and fail the same
+            # way. The minimal record names no sources and keeps the close's
+            # own code, so a turn that ended cleanly is not marked abandoned.
+            logger.warning(
+                "studio turn: the record of turn %d of conversation %s could not be built "
+                "(%s); a minimal record with error=%s is kept",
+                len(self.turns) + 1,
+                self.conversation_id,
+                type(exc).__name__,
+                error,
+                exc_info=True,
+            )
+            record = {
+                # The turn's number as the digest counts turns.
+                "turn": len(self.turns) + 1,
+                "user": self.turn_user_message,
+                "assistant": final_text,
+            }
+            if error:
+                record["error"] = error
+        record["trace_id"] = self.trace_id
+        record["usage"] = dataclasses.asdict(self.turn_usage)
+        self.turns.append(record)
+        # Only once a record is appended, the minimal one included.
         self.turn_recorded = True
         self.segment_closed_turn = True
         if error:
             self.pending.clear()
+
+    def _turn_record(
+        self,
+        *,
+        final_text: str,
+        error: str | None,
+        match_notes: str | None,
+        basis_line: str | None,
+    ) -> dict[str, Any]:
+        """The turn's full record, which `close_turn` appends. May raise, on a
+        stored plan record that no longer validates, say."""
         record: dict[str, Any] = {
             "user": self.turn_user_message,
             "assistant": final_text,
@@ -919,7 +1025,35 @@ class ConversationState:
                 spec_id: recorded.model_dump(mode="json")
                 for spec_id, recorded in identities.items()
             }
-        self.turns.append(record)
+        return record
+
+    def take_identity(
+        self,
+        *,
+        account: str | None,
+        visitor: str | None,
+        caller: str | None,
+        surface: str | None = None,
+    ) -> None:
+        """Fill in who asks the turn where it recorded no one: `caller` for a
+        turn with no caller, `surface` for a turn with no surface, and
+        `account` and `visitor` for a turn that names neither, which the
+        turn's later segments and its outcome observation then name as their
+        user (`TurnUsage.user_id`)."""
+        usage = self.turn_usage
+        if usage.caller is None:
+            usage.caller = caller
+        if usage.surface is None:
+            usage.surface = surface
+        if usage.account is not None or usage.visitor is not None:
+            return
+        usage.account, usage.visitor = account, visitor
+
+    def note_spec_use(self, use: SpecUse, spec_id: str) -> None:
+        """Add `spec_id` to the turn's `fetched_specs` or `drawn_specs`, once."""
+        specs = self.turn_usage.fetched_specs if use == "fetched" else self.turn_usage.drawn_specs
+        if spec_id not in specs:
+            specs.append(spec_id)
 
     def recorded_identity(self, spec_id: str) -> RecordedIdentity | None:
         """The identity `spec_id` hashes from, as this turn or an earlier one
@@ -1058,27 +1192,27 @@ class ConversationState:
         self.latest_plan_version = None
         self.turn_choice_baseline = {}
 
-    def begin_turn(self) -> ClosedTurn | None:
-        """Reset per-turn wire state. Abandons any pending interrupt: a fresh
+    def begin_turn(self, usage: TurnUsage | None = None) -> None:
+        """Reset per-turn wire state and open the span of the turn's first
+        segment (`open_segment_span`). Abandons any pending interrupt: a fresh
         turn.request on a paused conversation ends the pause, and the paused
-        ADK invocation stays parked in its own per-turn session. Returns the
-        previous turn when this closed it as `abandoned`, whatever state it
-        was left in, for the caller to record its closing span once the new
-        turn's claim commits (`record_closed_turn_span`)."""
-        previous = ClosedTurn(self.trace_id, self.turn_user_message, "abandoned")
-        abandoned = None
+        ADK invocation stays parked in its own per-turn session. `usage`
+        names who asks the new turn. A previous turn this closes as
+        `abandoned` keeps its own trace id and usage, and its record rides
+        the new turn's claim save, whose commit writes its line
+        (`harness.studio_store.StudioStore.save`)."""
         self.turn_index += 1
         self.seq = 0
-        self.trace_id = _wire_id("tr")
         self.pending.clear()
         self.start_plan_lineage()
         self._removal_unreported = False
         if self.turn_index > 1 and not self.turn_recorded:
             # The previous turn never reached a terminal frame (an abandoned
             # pause, or a death no code path recorded). Its record keeps
-            # what was asked, with the error marked as abandoned.
+            # what was asked, with the error marked as abandoned. It closes
+            # before the new trace id is minted, so it names its own.
             self.close_turn(final_text=self.turn_final_text, error="abandoned")
-            abandoned = previous
+        self.trace_id = _wire_id("tr")
         self.turn_user_message = ""
         self.turn_user_words = ""
         self.turn_final_text = ""
@@ -1089,27 +1223,27 @@ class ConversationState:
         self.turn_specs_settled = True
         self.turn_applied_choice = None
         self.turn_recorded = False
-        self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
-        return abandoned
+        self.turn_usage = usage if usage is not None else TurnUsage()
+        self.turn_usage.trace_id = self.trace_id
+        self.turn_usage.started_at = datetime.now(UTC).isoformat()
+        self.open_segment_span()
 
     def end_segment_span(self, status: str, *, stored: str | None = None) -> bool:
-        """End this instance's span for the turn's segment, once, with
-        `status` at the level `span_level` gives it, and the turn's message
-        and, once the turn is recorded, its reply as the span's input and
-        output. `stored`, the turn as this instance last saved it
+        """End this instance's `turn.segment` span for the turn's segment,
+        once, with `status` at the level `span_level` gives it. `stored`, the
+        turn as this instance last saved it
         (`harness.studio_store.StudioStore.stored_turn`), goes on the span as
-        `dfo.stored`. Returns whether a span was open to end, for the caller
-        to flush.
+        `dfo.stored`. The span carries no input or output: the turn's
+        outcome observations hold those (`harness.studio_store`). Returns
+        whether a span was open to end, for the caller to flush.
         """
         span = self._telemetry_span
         if span is None:
             return False
         self._telemetry_span = None
-        end_turn_span(
+        end_turn_segment(
             span,
-            request=self.turn_user_message,
-            response=_recorded_reply(self.turns[-1]) if self.turn_recorded and self.turns else None,
-            error=status,
+            status=status,
             level=span_level(status),
             attributes={"dfo.stored": stored} if stored is not None else None,
         )
@@ -1131,15 +1265,22 @@ class ConversationState:
         self.end_segment_span("orphaned")
 
     def open_segment_span(self) -> None:
-        """Open a span for the segment about to run, on this conversation's
-        `trace_id`, ending any span still held first (`end_leftover_span`).
-        `begin_turn` opens the first segment's; each later segment of the
-        turn, the `/interrupt` that resumes a pause on any instance, opens
-        its own here, on the same trace. Both run on the request's working
-        copy (`StudioStore.draft`), and its save hands the span to the live
-        state (`StudioStore._take_draft`)."""
+        """Open a `turn.segment` span for the segment about to run, on this
+        conversation's `trace_id` (`common.telemetry.start_turn_segment`),
+        ending any span still held first (`end_leftover_span`). Its spans
+        carry the turn's user and tags (`TurnUsage`). `begin_turn` opens the
+        first segment's; each later segment of the turn, the `/interrupt`
+        that resumes a pause on any instance, opens its own here, on the
+        same trace. Both run on the request's working copy
+        (`StudioStore.draft`), and its save hands the span to the live state
+        (`StudioStore._take_draft`)."""
         self.end_leftover_span()
-        self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
+        self._telemetry_span = start_turn_segment(
+            self.trace_id,
+            session_id=self.conversation_id,
+            user_id=self.turn_usage.user_id,
+            tags=self.turn_usage.tags,
+        )
 
     def in_turn_span(self) -> AbstractContextManager[None]:
         """Make this segment's telemetry span current for a `with` block.
@@ -1147,7 +1288,7 @@ class ConversationState:
         `/turn` stream and the `/interrupt` stream that resumes it) enters
         its own segment's span, and every segment's span is on the turn's
         trace. A no-op when telemetry is off or the span has ended."""
-        return use_turn_span(self._telemetry_span)
+        return use_turn_segment(self._telemetry_span)
 
     def next_seq(self) -> int:
         value = self.seq
@@ -1235,8 +1376,8 @@ def span_level(status: str) -> EventLevel:
     `_SPAN_STATUS_LEVELS` gives, and `ERROR` for any other status, which is
     a failure.
 
-    Every span on a turn's trace carries its status, level and `stored`
-    (`ConversationState.end_segment_span`). A segment's status is the cause
+    Every `turn.segment` span on a turn's trace carries its status, level
+    and `stored` (`ConversationState.end_segment_span`). A segment's status is the cause
     of the last ending frame its stream chose to send, in the turn record's
     vocabulary (`harness.studio.StudioRunner._locked`). `stored` is the turn
     as this instance last saved it (`StudioStore.stored_turn`), read after
@@ -1313,12 +1454,13 @@ def span_level(status: str) -> EventLevel:
     | the turn left open           |             |                        |         |             |
     | Span still open when a new   | none        | `orphaned`             | WARNING |             |
     | segment's span moves in      |             |                        |         |             |
-    | Paused turn closed by        | none        | `cancelled`            | WARNING |             |
-    | `/cancel`                    |             |                        |         |             |
-    | (`record_closed_turn_span`)  |             |                        |         |             |
-    | Unrecorded turn closed by    | none        | `abandoned`            | WARNING |             |
-    | the next `/turn`             |             |                        |         |             |
-    | (`record_closed_turn_span`)  |             |                        |         |             |
+
+    A turn's close and each of its pauses are not segment spans. The store
+    writes each as an outcome observation, a `turn` for a close and a
+    `turn.pause` for a pause, beside its `TURN_LOG_EVENT` line, once the
+    write that stores it commits (`harness.studio_store`), so a `/cancel`
+    of a paused turn and the next `/turn`'s close of an unrecorded one
+    write a `turn` with no segment of their own.
     """
     return _SPAN_STATUS_LEVELS.get(status, "ERROR")
 
@@ -1345,36 +1487,6 @@ def turn_status(*, recorded: bool, record: Mapping[str, Any] | None, awaiting: b
     if recorded and record is not None:
         return record.get("error") or "done"
     return "paused" if awaiting else "open"
-
-
-@dataclass(frozen=True)
-class ClosedTurn:
-    """A turn closed with no segment of it running: its trace id, the
-    user's message, and the status it closed with (`cancelled` by `/cancel`
-    of a paused turn, `abandoned` by the next turn's `begin_turn`)."""
-
-    trace_id: str
-    user_message: str
-    status: Literal["cancelled", "abandoned"]
-
-
-def record_closed_turn_span(conversation_id: str, turn: ClosedTurn) -> None:
-    """Record a zero-length span on `turn`'s trace id, at level `WARNING`,
-    whose status is the one `turn` closed with and whose input is its
-    message. It is the last span on that trace."""
-    end_turn_span(
-        start_turn_span(turn.trace_id, session_id=conversation_id),
-        request=turn.user_message,
-        error=turn.status,
-        level="WARNING",
-    )
-
-
-def _recorded_reply(record: dict[str, Any]) -> str:
-    """The reply a turn record holds: the model's answer and the text the
-    code appended to it, in that order (`ConversationState.close_turn`)."""
-    parts = [record.get("assistant") or "", record.get("match_notes"), record.get("basis_line")]
-    return "\n\n".join(part for part in parts if part)
 
 
 def _end_stream(conversation: ConversationState, reason: Literal["cancelled"] | StreamLoss) -> None:

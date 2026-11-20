@@ -12,6 +12,7 @@ import pytest
 from common.caller import (
     CALLER_HEADER,
     CALLER_PRINCIPAL_HEADER,
+    SURFACE_HEADER,
     conversation_caller,
     supplied_caller,
 )
@@ -275,13 +276,21 @@ async def test_a_bare_derived_id_refuses_frame_ref_incomplete_without_a_call() -
 @pytest.mark.parametrize(
     ("caller", "principal", "sent"),
     [
-        (ADDRESS, PRINCIPAL, {CALLER_PRINCIPAL_HEADER: PRINCIPAL, CALLER_HEADER: ADDRESS}),
+        (
+            ADDRESS,
+            PRINCIPAL,
+            {CALLER_PRINCIPAL_HEADER: PRINCIPAL, CALLER_HEADER: ADDRESS, SURFACE_HEADER: "mcp"},
+        ),
         (ADDRESS, None, {}),
-        (conversation_caller("c1"), PRINCIPAL, {}),
+        (
+            conversation_caller("c1"),
+            PRINCIPAL,
+            {CALLER_PRINCIPAL_HEADER: PRINCIPAL, CALLER_HEADER: conversation_caller("c1")},
+        ),
     ],
     ids=["website-caller", "no-principal", "harness-caller"],
 )
-async def test_the_prepare_names_the_caller_the_website_named(
+async def test_the_prepare_names_its_caller_beside_the_principal(
     caller: str, principal: str | None, sent: dict[str, str]
 ) -> None:
     requests: list[httpx2.Request] = []
@@ -292,7 +301,7 @@ async def test_the_prepare_names_the_caller_the_website_named(
     (request,) = requests
     named = {
         name: request.headers[name]
-        for name in (CALLER_PRINCIPAL_HEADER, CALLER_HEADER)
+        for name in (CALLER_PRINCIPAL_HEADER, CALLER_HEADER, SURFACE_HEADER)
         if name in request.headers
     }
     assert named == sent

@@ -88,6 +88,7 @@ import httpx2
 import pytest
 from analysis_mcp.runner_client import runner_holder
 from common import auth as mcp_auth
+from common.caller import set_supplied_caller, set_supplied_turn
 from compiler.sources import member_digest
 from data_mcp import node_lookup, resolution
 from data_mcp.graph_wire import NotHeldEntry
@@ -102,6 +103,7 @@ from harness.conversation import (
     NO_CONVERSATION,
     current_conversation_id,
     current_conversation_key,
+    current_turn_id,
 )
 from harness.db.migrate import apply_pending
 from mcp.shared._httpx_utils import McpHttpClientFactory
@@ -232,7 +234,7 @@ def _reset_mcp_auth_gate() -> Any:
 
 @pytest.fixture(autouse=True)
 def _reset_conversation_identity() -> Any:
-    """Leave no conversation set after a test.
+    """Leave no conversation, turn, or supplied caller or turn set after a test.
 
     A test function that is not a coroutine runs in the session's own context,
     so a `current_conversation_id.set(...)` it makes would name that
@@ -241,6 +243,9 @@ def _reset_conversation_identity() -> Any:
     yield
     current_conversation_id.set(NO_CONVERSATION)
     current_conversation_key.set(None)
+    current_turn_id.set(None)
+    set_supplied_caller(None)
+    set_supplied_turn(None)
 
 
 @pytest.fixture

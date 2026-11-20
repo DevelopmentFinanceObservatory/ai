@@ -479,10 +479,10 @@ def approve(
     switch of a planner decision's row (`harness.decision_pick.decision_pick`)
     routes `"amend"` with the plan, the `pick` and the `switch`, and the
     `planner` node replans holding the pick. It
-    records a `plan.approved` span (nesting under the turn span
-    `harness.studio_state.begin_turn` opens) and a matching log line with
-    the same facts, `plan_version` and `amended`, off the `Plan` just
-    approved.
+    records a `plan.approved` span (nesting under the stream's `turn.segment`
+    span, `harness.studio_state.ConversationState.segment_span`) and a
+    matching log line with the same facts, `plan_version` and `amended`, off
+    the `Plan` just approved.
 
     Offering a card pending approval hands its plan to `early_mints`
     (`harness.early_mint`), which starts the card's retrievals unless it

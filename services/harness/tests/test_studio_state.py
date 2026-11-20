@@ -1,10 +1,12 @@
-"""`ConversationState`'s telemetry span lifecycle: `begin_turn` opens the
-turn's root span on the freshly minted `trace_id`, and `close_turn` closes
-it, exactly once, however the turn ends. `harness.studio_state` only calls
-through to `common.telemetry`'s `start_turn_span`/`end_turn_span`; those
+"""`ConversationState`'s telemetry segment lifecycle: `begin_turn` and
+`open_segment_span` open a segment span on the turn's `trace_id`, and
+`end_segment_span` ends it once. `harness.studio_state` only calls through
+to `common.telemetry`'s `start_turn_segment`/`end_turn_segment`; those
 functions' own backend selection and error handling are covered by
 `packages/common/tests/test_telemetry.py`, so here they are faked to prove
-the wiring, not the telemetry backend itself.
+the wiring, not the telemetry backend itself. The turn's `studio.turn` line
+and outcome observation, which the store writes once a write commits a
+close or a pause, are pinned against Postgres near the bottom of the file.
 
 The canvas and conversation digests the models read carry a stated maximum
 size (`CANVAS_DIGEST_MAX_BYTES`, `CONVERSATION_DIGEST_MAX_BYTES`); the tests
@@ -38,6 +40,7 @@ from unittest.mock import MagicMock
 
 import asyncpg
 import pytest
+from common.logging import JSON_FIELDS
 from compiler.sources import source_from_spec_block
 from fastapi.responses import JSONResponse
 from google.adk.sessions import InMemorySessionService
@@ -54,6 +57,7 @@ from harness.studio_state import (
     Segment,
     SegmentBusy,
     SegmentLost,
+    TurnUsage,
     _digest_entry,
     _next_manifest,
     _PendingInterrupt,
@@ -89,37 +93,66 @@ from .test_turn_records import _scoped_part, _top_donors
 CONVERSATION = "conv_01test0000"
 
 
-@pytest.mark.parametrize("method", ["begin_turn", "open_segment_span"])
-def test_a_turn_span_opens_on_the_new_trace_id_in_the_conversations_session(monkeypatch, method):
-    fake_span = MagicMock()
-    started_with = []
+_ACCOUNT = "a" * 64
+_VISITOR = "ip:" + "b" * 32
+
+
+def _spy_segments(monkeypatch) -> list[tuple[str, str | None, str | None, list[str]]]:
+    """Fake `start_turn_segment` in `harness.studio_state` and return the
+    `(trace_id, session_id, user_id, tags)` of every segment opened."""
+    opened: list[tuple[str, str | None, str | None, list[str]]] = []
+
+    def start(trace_id, *, session_id=None, user_id=None, tags=()):
+        opened.append((trace_id, session_id, user_id, list(tags)))
+        return MagicMock()
+
+    monkeypatch.setattr(studio_state, "start_turn_segment", start)
+    return opened
+
+
+def _spy_outcomes(monkeypatch) -> list[dict[str, Any]]:
+    """Fake `record_turn_outcome` in `harness.studio_store` and return the
+    arguments of every outcome written."""
+    written: list[dict[str, Any]] = []
     monkeypatch.setattr(
-        studio_state,
-        "start_turn_span",
-        lambda trace_id, *, session_id=None: (
-            started_with.append((trace_id, session_id)),
-            fake_span,
-        )[1],
+        studio_store,
+        "record_turn_outcome",
+        lambda trace_id, **kwargs: written.append({"trace_id": trace_id, **kwargs}),
     )
+    return written
+
+
+@pytest.mark.parametrize(
+    ("account", "user_id"), [(_ACCOUNT, _ACCOUNT), (None, _VISITOR)], ids=["signed-in", "visitor"]
+)
+def test_a_segment_opens_on_the_turns_trace_id_in_the_conversations_session(
+    monkeypatch, account, user_id
+):
+    """`begin_turn` opens the first segment's span and `open_segment_span`
+    each later one, on the turn's trace id in the conversation's session, as
+    the account that asks the turn, else as its visitor, tagged with the
+    turn's surface."""
+    opened = _spy_segments(monkeypatch)
+    usage = TurnUsage(account=account, visitor=_VISITOR, surface="studio")
 
     state = ConversationState(conversation_id=CONVERSATION)
-    getattr(state, method)()
+    state.begin_turn(usage)
+    state.end_segment_span("paused")
+    state.open_segment_span()
 
-    assert started_with == [(state.trace_id, CONVERSATION)]
-    assert state._telemetry_span is fake_span
+    assert opened == [(state.trace_id, CONVERSATION, user_id, ["studio"])] * 2
 
 
 def test_a_segment_s_span_ends_once_when_the_segment_ends(monkeypatch):
     """Closing the turn records it and leaves the span to the segment's end,
-    which ends it once with the turn's question and reply."""
+    which ends it once with its status, its level and the stored turn, and
+    with no input or output."""
     fake_span = MagicMock()
     ended = []
-    monkeypatch.setattr(
-        studio_state, "start_turn_span", lambda trace_id, *, session_id=None: fake_span
-    )
+    monkeypatch.setattr(studio_state, "start_turn_segment", lambda *_, **__: fake_span)
     monkeypatch.setattr(
         studio_state,
-        "end_turn_span",
+        "end_turn_segment",
         lambda handle, **kwargs: ended.append((handle, kwargs)),
     )
 
@@ -135,15 +168,28 @@ def test_a_segment_s_span_ends_once_when_the_segment_ends(monkeypatch):
     assert ended == [
         (
             fake_span,
-            {
-                "request": "life expectancy in Kenya",
-                "response": "done\n\nSource: WDI.",
-                "error": "done",
-                "level": "DEFAULT",
-                "attributes": {"dfo.stored": "done"},
-            },
+            {"status": "done", "level": "DEFAULT", "attributes": {"dfo.stored": "done"}},
         )
     ]
+
+
+@pytest.mark.parametrize("recorded", [None, _VISITOR], ids=["no-one", "visitor"])
+def test_a_turn_that_recorded_no_one_names_the_resuming_user_on_its_later_segments(
+    monkeypatch, recorded
+) -> None:
+    """`take_identity` fills in a turn that recorded no one, and the segment a
+    resuming stream opens after it names that user. A turn that recorded a
+    visitor keeps it."""
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.begin_turn(TurnUsage(visitor=recorded))
+    state.end_segment_span("paused")
+    opened = _spy_segments(monkeypatch)
+
+    state.take_identity(account=_ACCOUNT, visitor=None, caller="conversation:" + "c" * 32)
+    state.open_segment_span()
+
+    assert [user_id for _, _, user_id, _ in opened] == [recorded or _ACCOUNT]
+    assert state.turn_usage.caller == "conversation:" + "c" * 32
 
 
 # --- land_component: the one place a card lands on the canvas -------------
@@ -3522,6 +3568,557 @@ async def test_a_release_past_its_timeout_cancels_the_checkpoint_once(new_store)
 
     assert cleanup_cancels == 0
     assert cleaned_up
+
+
+# --- the turn line: one per close and per pause a write commits -----------
+
+
+def _turn_log_lines(caplog, status: str | None = "closed") -> list[dict[str, Any]]:
+    """The JSON fields of every `studio.turn` line logged with `status`, a
+    close's by default and every line with `None`."""
+    return [
+        fields
+        for record in caplog.records
+        if isinstance(fields := getattr(record, JSON_FIELDS, None), dict)
+        and fields.get("event") == "studio.turn"
+        and status in (None, fields.get("status"))
+    ]
+
+
+def _slow_commit(store: StudioStore) -> tuple[asyncio.Event, asyncio.Event]:
+    """Make the next transaction `store` opens wait, once its statements
+    ran, until the second event is set before it commits. The first event is
+    set when it starts waiting."""
+    real_transaction = store._transaction
+    committing, proceed = asyncio.Event(), asyncio.Event()
+
+    @asynccontextmanager
+    async def slow() -> Any:
+        async with real_transaction() as conn:
+            yield conn
+            if not committing.is_set():
+                committing.set()
+                await proceed.wait()
+
+    store._transaction = slow
+    return committing, proceed
+
+
+async def test_a_closed_turn_writes_its_outcome_once_its_save_commits(
+    new_store, monkeypatch
+) -> None:
+    """`close_turn` writes nothing. The save that commits the record writes
+    one outcome, however many paths closed the turn and however many saves
+    follow, carrying the turn's question and answer and no error."""
+    written = _spy_outcomes(monkeypatch)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn(TurnUsage(account=_ACCOUNT, surface="studio"))
+    state.turn_user_message = "life expectancy in Kenya"
+    state.close_turn(final_text="done")
+    state.close_turn(final_text="done again")  # the resume protocol can call this twice
+    assert written == []
+
+    assert await store.save("principal", CONVERSATION) is True
+    assert await store.save("principal", CONVERSATION) is False
+
+    assert written == [
+        {
+            "trace_id": state.trace_id,
+            "session_id": CONVERSATION,
+            "user_id": _ACCOUNT,
+            "tags": ["studio"],
+            "request": "life expectancy in Kenya",
+            "response": "done",
+            "error": None,
+            "paused": False,
+        }
+    ]
+
+
+async def test_an_abandoned_turn_writes_its_outcome_on_its_own_trace(
+    new_store, monkeypatch
+) -> None:
+    """A turn that never reached a terminal frame is closed by the NEXT turn's
+    `begin_turn`, whose claim save writes its outcome on the old turn's trace
+    id although it mints the new one."""
+    written = _spy_outcomes(monkeypatch)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn()  # turn 1, never closed
+    turn_1_trace_id = state.trace_id
+    await store.save("principal", CONVERSATION)
+    work = store.draft("principal", CONVERSATION)
+    work.begin_turn()  # turn 2: closes turn 1 as abandoned
+    await store.save("principal", CONVERSATION, work)
+
+    assert [(w["trace_id"], w["error"]) for w in written] == [(turn_1_trace_id, "abandoned")]
+    assert state.trace_id != turn_1_trace_id
+
+
+@pytest.mark.parametrize("closed_by", ["close_turn", "begin_turn"])
+async def test_a_turn_whose_record_build_raises_keeps_a_minimal_record(
+    new_store, monkeypatch, caplog, closed_by
+):
+    """A record build that raises, in `close_turn` or in the next
+    `begin_turn`'s abandoned close, keeps a minimal record naming no sources
+    and the turn's trace id, whose save writes its line and outcome, and
+    leaves nothing open, so the turn is built once and the conversation goes
+    on. The record keeps the close's own code: none for a clean close,
+    `abandoned` for the abandoned one."""
+    written = _spy_outcomes(monkeypatch)
+    builds: list[str] = []
+
+    def fail(*_args, **_kwargs):
+        builds.append("built")
+        raise RuntimeError("bad plan record")
+
+    monkeypatch.setattr(studio_state, "_turn_identities", fail)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn()
+    state.turn_user_message = "aid to kenya"
+    turn_1_trace_id = state.trace_id
+
+    with caplog.at_level(logging.INFO):
+        if closed_by == "close_turn":
+            state.close_turn(final_text="done")
+        state.begin_turn()
+        await store.save("principal", CONVERSATION)
+
+    error = None if closed_by == "close_turn" else "abandoned"
+    assistant = "done" if closed_by == "close_turn" else ""
+    stored = await new_store().load("principal", CONVERSATION)
+    record = stored.turns[0]
+    assert {key: record.get(key) for key in ("turn", "user", "assistant", "error", "trace_id")} == {
+        "turn": 1,
+        "user": "aid to kenya",
+        "assistant": assistant,
+        "error": error,
+        "trace_id": turn_1_trace_id,
+    }
+    assert set(record) == {"turn", "user", "assistant", "trace_id", "usage"} | (
+        {"error"} if error else set()
+    )
+    assert builds == ["built"]
+    assert [(w["trace_id"], w["error"]) for w in written] == [(turn_1_trace_id, error)]
+    assert [(line["trace_id"], line["error"]) for line in _turn_log_lines(caplog)] == [
+        (turn_1_trace_id, error)
+    ]
+    (warning,) = [r for r in caplog.records if "could not be built" in r.getMessage()]
+    assert warning.exc_info is not None
+    assert warning.exc_info[0] is RuntimeError
+
+
+async def test_a_closed_turn_logs_one_studio_turn_line_once_its_save_commits(
+    new_store, monkeypatch, caplog
+) -> None:
+    """Closing a turn logs nothing. The checkpoint that commits its record
+    writes one `studio.turn` line, however many paths close the turn and
+    however many saves follow, a save rewriting the stored record included,
+    naming who asked, when the turn began, the
+    deployed revision and each spec used once."""
+    monkeypatch.setenv("K_REVISION", "dfo-dev-ai-00042-abc")
+    caller = "conversation:" + "c" * 32
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    state.begin_turn(TurnUsage(caller=caller, account=_ACCOUNT, visitor=_VISITOR))
+    await store.save("principal", CONVERSATION)
+    for use, spec_id in [("fetched", "spec_a"), ("fetched", "spec_a"), ("drawn", "spec_b")]:
+        state.note_spec_use(use, spec_id)
+
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        state.close_turn(final_text="done", error="cancelled")
+        state.close_turn(final_text="done again")
+        assert _turn_log_lines(caplog, status=None) == []
+        await store.checkpoint("principal", CONVERSATION, segment_id)
+        await store.release("principal", CONVERSATION, segment_id)
+        await store.save("principal", CONVERSATION)
+        # A write that rewrites a record the row already holds closes nothing.
+        state.turns[-1] = {**state.turns[-1], "assistant": "rewritten"}
+        assert await store.save("principal", CONVERSATION) is False
+
+    [line] = _turn_log_lines(caplog, status=None)
+    started_at = datetime.fromisoformat(line.pop("started_at"))
+    assert started_at.tzinfo is not None
+    assert line == {
+        "event": "studio.turn",
+        "trace_id": state.trace_id,
+        "status": "closed",
+        "caller": caller,
+        "account": _ACCOUNT,
+        "visitor": _VISITOR,
+        "surface": None,
+        "release": "dfo-dev-ai-00042-abc",
+        "error": "cancelled",
+        "fetched_specs": ["spec_a"],
+        "drawn_specs": ["spec_b"],
+    }
+
+
+async def test_each_pause_a_checkpoint_commits_logs_one_paused_line_and_the_close_its_own(
+    new_store, monkeypatch, caplog
+) -> None:
+    """A checkpoint that adds an interrupt the turn waits on writes one
+    `paused` line and a `turn.pause` outcome. A checkpoint that adds none
+    writes nothing, a second pause writes its own line, and the close writes
+    one `closed` line and one `turn` outcome."""
+    written = _spy_outcomes(monkeypatch)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    state.begin_turn()
+    state.turn_user_message = "aid to kenya"
+    await store.save("principal", CONVERSATION)
+
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        state.turn_final_text = "Here is a plan."
+        state.pending["int_1"] = _pending()
+        await store.checkpoint("principal", CONVERSATION, segment_id)
+        state.turn_final_text = "Still working."
+        await store.checkpoint("principal", CONVERSATION, segment_id)
+        state.pending["int_2"] = _pending()
+        await store.checkpoint("principal", CONVERSATION, segment_id)
+        state.pending.clear()
+        state.close_turn(final_text="done")
+        await store.release("principal", CONVERSATION, segment_id)
+
+    lines = _turn_log_lines(caplog, status=None)
+    assert [(line["status"], line["trace_id"], line["error"]) for line in lines] == [
+        ("paused", state.trace_id, None),
+        ("paused", state.trace_id, None),
+        ("closed", state.trace_id, None),
+    ]
+    assert [(w["paused"], w["response"]) for w in written] == [
+        (True, "Here is a plan."),
+        (True, "Still working."),
+        (False, "done"),
+    ]
+
+
+async def test_a_close_in_the_same_write_as_its_pause_writes_the_close_alone(
+    new_store, caplog
+) -> None:
+    """A write that commits a turn's close together with an interrupt it
+    adds writes the close's line alone."""
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    state.begin_turn()
+    await store.save("principal", CONVERSATION)
+
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        state.pending["int_1"] = _pending()
+        state.close_turn(final_text="done")
+        await store.checkpoint("principal", CONVERSATION, segment_id)
+
+    assert [line["status"] for line in _turn_log_lines(caplog, status=None)] == ["closed"]
+
+
+async def test_a_save_whose_write_raises_logs_no_line(new_store, monkeypatch, caplog) -> None:
+    """A save whose write raises before it commits commits nothing, so the
+    turn it closes logs no line and writes no outcome."""
+    written = _spy_outcomes(monkeypatch)
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn()
+    await store.save("principal", CONVERSATION)
+
+    async def unavailable(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("database unavailable")
+
+    store._write = unavailable
+    state.close_turn(final_text="done")
+    with (
+        caplog.at_level(logging.INFO, logger="harness.studio_store"),
+        pytest.raises(RuntimeError, match="database unavailable"),
+    ):
+        await store.save("principal", CONVERSATION)
+
+    assert _turn_log_lines(caplog, status=None) == []
+    assert written == []
+
+
+@pytest.mark.parametrize("cancelled_by", ["caller", "release-timeout"])
+async def test_a_write_cancelled_during_its_commit_still_logs_the_record_it_commits(
+    new_store, caplog, cancelled_by
+) -> None:
+    """A request cancelled while its save commits, and a release whose
+    timeout fires while its checkpoint commits, still land the record and
+    write its one line in the task that commits it, then end in the
+    cancellation (the request) or give up (the release). The row holds the
+    record the line names."""
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    state.begin_turn()
+    await store.save("principal", CONVERSATION)
+    committing, proceed = _slow_commit(store)
+    state.close_turn(final_text="done")
+
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        if cancelled_by == "caller":
+            state.segment = None
+            task = asyncio.ensure_future(store.save("principal", CONVERSATION))
+            await asyncio.wait_for(committing.wait(), timeout=5)
+            task.cancel()
+            await asyncio.sleep(0)
+            proceed.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=5)
+        else:
+            releasing = asyncio.ensure_future(
+                store.release("principal", CONVERSATION, segment_id, timeout=0.05)
+            )
+            await asyncio.wait_for(committing.wait(), timeout=5)
+            await asyncio.sleep(0.1)  # the timeout fires while the commit waits
+            proceed.set()
+            await asyncio.wait_for(releasing, timeout=5)
+
+    stored = await new_store().load("principal", CONVERSATION)
+    assert stored is not None
+    assert [(record["trace_id"], record.get("error")) for record in stored.turns] == [
+        (state.trace_id, None)
+    ]
+    assert [(line["trace_id"], line["error"]) for line in _turn_log_lines(caplog)] == [
+        (state.trace_id, None)
+    ]
+
+
+@pytest.mark.parametrize("method", ["checkpoint", "release"])
+async def test_a_write_whose_commit_lost_its_acknowledgement_logs_its_line_once(
+    new_store, caplog, method
+) -> None:
+    """A fenced write whose commit landed but whose acknowledgement was lost
+    writes no line at the commit. Its retry, which rewrites the same record
+    (`checkpoint`) or finds it saved (`release`), writes the one line."""
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    state.begin_turn()
+    await store.save("principal", CONVERSATION)
+    faults = _dropping_connection(store, acknowledged=True)
+    state.close_turn(final_text="done")
+
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        await getattr(store, method)("principal", CONVERSATION, segment_id)
+
+    assert faults == [1]
+    assert [(line["trace_id"], line["error"]) for line in _turn_log_lines(caplog)] == [
+        (state.trace_id, None)
+    ]
+
+
+async def test_a_cancelled_write_that_commits_keeps_its_bookkeeping(new_store) -> None:
+    """A Stop that cancels a checkpoint while it commits lets the commit land
+    with the bookkeeping of what it committed, so the next checkpoint writes
+    nothing it already wrote."""
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    state.begin_turn()
+    await store.save("principal", CONVERSATION)
+    state.turn_final_text = "streamed so far"
+    committing, proceed = _slow_commit(store)
+
+    writing = asyncio.ensure_future(store.checkpoint("principal", CONVERSATION, segment_id))
+    await asyncio.wait_for(committing.wait(), timeout=5)
+    writing.cancel()
+    await asyncio.sleep(0)
+    proceed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await writing
+
+    real_write = store._write
+    deltas: list[set[str]] = []
+
+    async def spying(conn: Any, pk: int, delta: dict[str, Any], **kwargs: Any) -> Any:
+        deltas.append(set(delta))
+        return await real_write(conn, pk, delta, **kwargs)
+
+    store._write = spying
+    await store.checkpoint("principal", CONVERSATION, segment_id)
+
+    assert deltas == []
+    stored = await new_store().load("principal", CONVERSATION)
+    assert stored.turn_final_text == "streamed so far"
+
+
+@pytest.mark.parametrize("failure", ["write-error", "taken-over"])
+async def test_a_turn_the_store_never_saw_closed_logs_once_as_abandoned_under_its_trace_id(
+    new_store, clock, monkeypatch, caplog, failure
+) -> None:
+    """A close whose checkpoint fails, on a write error or because another
+    instance took the segment over, logs no line, and the row still holds
+    the turn open. The next turn, on another instance, closes it as
+    abandoned, writing the one line under the turn's trace id and caller."""
+    store_a = new_store(clock=clock)
+    store_b = new_store(clock=clock)
+    first, second = "conversation:" + "1" * 32, "conversation:" + "2" * 32
+    state = await store_a.create("principal", CONVERSATION)
+    segment_id = store_a.claim_segment("principal", CONVERSATION)
+    state.begin_turn(TurnUsage(caller=first))
+    closed_trace_id = state.trace_id
+    await store_a.save("principal", CONVERSATION)
+
+    async def unavailable(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("database unavailable")
+
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        if failure == "taken-over":
+            await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+            await store_b.load("principal", CONVERSATION)
+            store_b.claim_segment("principal", CONVERSATION)
+            await store_b.save("principal", CONVERSATION)
+        else:
+            store_a._write = unavailable
+        state.close_turn(final_text="done")
+        with pytest.raises(SegmentLost if failure == "taken-over" else RuntimeError):
+            await store_a.checkpoint("principal", CONVERSATION, segment_id)
+        assert _turn_log_lines(caplog, status=None) == []
+
+        await clock.advance(studio_state.SEGMENT_TTL_S + 1)
+        later = await store_b.load("principal", CONVERSATION)
+        assert later is not None
+        work = store_b.draft("principal", CONVERSATION)
+        store_b.claim_segment("principal", CONVERSATION, work)
+        work.begin_turn(TurnUsage(caller=second))
+        await store_b.save("principal", CONVERSATION, work)
+
+    assert [
+        (line["trace_id"], line["caller"], line["error"]) for line in _turn_log_lines(caplog)
+    ] == [(closed_trace_id, first, "abandoned")]
+    assert later.trace_id != closed_trace_id
+
+
+async def test_two_claims_over_an_open_turn_log_one_abandoned_line(new_store, caplog) -> None:
+    """Two instances load a conversation whose turn is open and both claim
+    the next turn, each closing the open one as abandoned. The claim whose
+    save lands writes the one line. The stale one commits nothing and writes
+    none."""
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn()
+    open_trace_id = state.trace_id
+    await store.save("principal", CONVERSATION)
+    store_a, store_b = new_store(), new_store()
+    await store_a.load("principal", CONVERSATION)
+    await store_b.load("principal", CONVERSATION)
+
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        claim_a = store_a.draft("principal", CONVERSATION)
+        claim_b = store_b.draft("principal", CONVERSATION)
+        claim_a.begin_turn()
+        claim_b.begin_turn()
+        await store_a.save("principal", CONVERSATION, claim_a)
+        with pytest.raises(ConversationStale):
+            await store_b.save("principal", CONVERSATION, claim_b)
+
+    assert [(line["trace_id"], line["error"]) for line in _turn_log_lines(caplog)] == [
+        (open_trace_id, "abandoned")
+    ]
+
+
+async def test_a_turn_loaded_from_a_row_with_no_usage_keeps_the_identity_it_takes(
+    new_store, pg_engine, caplog
+) -> None:
+    """A turn paused by a release that stored no `turn_usage` holds a usage
+    of its own once loaded, so the account `take_identity` fills in survives
+    the next checkpoint and reaches the turn's line."""
+    store = new_store()
+    paused = await store.create("principal", CONVERSATION)
+    paused.begin_turn()
+    await store.save("principal", CONVERSATION)
+    async with pg_engine.begin() as conn:
+        await conn.execute(text("UPDATE conversations SET turn_state = turn_state - 'turn_usage'"))
+    other = new_store()
+    state = await other.load("principal", CONVERSATION)
+    assert state.turn_usage == TurnUsage(trace_id=paused.trace_id)
+    segment_id = other.claim_segment("principal", CONVERSATION)
+    await other.save("principal", CONVERSATION)
+
+    state.take_identity(account=_ACCOUNT, visitor=None, caller="conversation:" + "c" * 32)
+    await other.checkpoint("principal", CONVERSATION, segment_id)
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        state.close_turn(final_text="done")
+        await other.checkpoint("principal", CONVERSATION, segment_id)
+
+    assert [(line["trace_id"], line["account"]) for line in _turn_log_lines(caplog)] == [
+        (paused.trace_id, _ACCOUNT)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("stored_trace_id", "caller", "started_at"),
+    [
+        ("tr_current", "conversation:" + "c" * 32, "2026-11-19T10:00:00+00:00"),
+        ("tr_earlier", None, None),
+    ],
+    ids=["this-turn", "another-turn"],
+)
+def test_a_stored_usage_reads_only_for_the_turn_it_names(
+    stored_trace_id, caller, started_at
+) -> None:
+    """A row whose usage names another turn's trace id, as one a release
+    that writes no usage leaves behind, reads as unset."""
+    stored = {
+        "trace_id": "tr_current",
+        "turn_usage": {
+            "trace_id": stored_trace_id,
+            "started_at": "2026-11-19T10:00:00+00:00",
+            "caller": "conversation:" + "c" * 32,
+        },
+    }
+    state = ConversationState(conversation_id=CONVERSATION)
+
+    studio_store._apply_delta(state, stored)
+
+    assert state.turn_usage == TurnUsage(
+        trace_id="tr_current", caller=caller, started_at=started_at
+    )
+
+
+async def test_a_reload_keeps_the_specs_a_turn_this_instance_holds_noted_since_its_save(
+    new_store,
+) -> None:
+    """Specs the open turn noted after its last save, during a pause, survive
+    a reload of the same turn, after the ones the row holds."""
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn(TurnUsage(fetched_specs=["spec_a"]))
+    await store.save("principal", CONVERSATION)
+    state.note_spec_use("fetched", "spec_b")
+    state.note_spec_use("drawn", "spec_b")
+
+    reloaded = await store.load("principal", CONVERSATION)
+
+    assert reloaded is state
+    assert reloaded.turn_usage.fetched_specs == ["spec_a", "spec_b"]
+    assert reloaded.turn_usage.drawn_specs == ["spec_b"]
+
+
+async def test_a_spec_noted_on_a_working_copy_reaches_the_live_turn_only_once_its_save_commits(
+    new_store,
+) -> None:
+    """A working copy (`draft`) holds a usage of its own, so what a request
+    notes on it before its claim save leaves the live state as loaded until
+    the save commits."""
+    store = new_store()
+    state = await store.create("principal", CONVERSATION)
+    state.begin_turn()
+    await store.save("principal", CONVERSATION)
+
+    work = store.draft("principal", CONVERSATION)
+    work.take_identity(account=_ACCOUNT, visitor=None, caller=None)
+    work.note_spec_use("fetched", "spec_a")
+    assert state.turn_usage.account is None
+    assert state.turn_usage.fetched_specs == []
+
+    await store.save("principal", CONVERSATION, work)
+
+    assert state.turn_usage.account == _ACCOUNT
+    assert state.turn_usage.fetched_specs == ["spec_a"]
 
 
 def test_a_pending_plan_saved_before_step_labels_were_kept_loads_with_none() -> None:
