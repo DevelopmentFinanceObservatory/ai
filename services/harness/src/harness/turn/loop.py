@@ -185,21 +185,30 @@ class _Owed:
 class _Writing:
     """A boundary write the segment `segment_id` is making from the cursor
     at `version`, the event that reports it (a pause's `Paused`, or a move to
-    `following` or the end, `END`, reported by a `NodeDone`), and the node's
-    work its commit is owed (`owed`)."""
+    `following` or the end, `END`, reported by a `NodeDone`), the node's
+    work its commit is owed (`owed`), and the cursor it wrote once its commit
+    landed (`landed`), which the commit's own task records, a COMMIT whose
+    acknowledgement was lost and whose transaction the store read back as
+    committed included (`TurnStore.pause`)."""
 
     reports: Paused | NodeDone
     version: int
     following: str | None
     segment_id: str
     owed: _Owed = field(compare=False, hash=False)
+    landed: list[Cursor] = field(default_factory=list, compare=False, hash=False)
 
     def committed(self, stored: Cursor) -> bool:
-        """Whether `stored`, the turn as read back, holds this write: the
-        one write after `version`, by this segment (`Cursor.written_by`),
-        paused on this pause's `interrupt_id`, at `following`, or closed
-        `done`. A write another segment made at the same version, after a
-        lost lease, is not this one."""
+        """Whether this write landed: its commit's task recorded it
+        (`landed`), or, for a write whose COMMIT raised and whose
+        transaction's status the store could not read in time, `stored`, the
+        turn as read back, holds it: the one write after `version`, by this
+        segment (`Cursor.written_by`), paused on this pause's
+        `interrupt_id`, at `following`, or closed `done`. A write another
+        segment made at the same version, after a lost lease, is not this
+        one."""
+        if self.landed:
+            return True
         if stored.version != self.version + 1 or stored.written_by != self.segment_id:
             return False
         if isinstance(self.reports, Paused):
@@ -523,7 +532,16 @@ async def _commit_boundary(
     before the cut is raised again, and a cut during that work leaves
     `segment` holding the cursor the write committed. A cut that ends the
     write before every work started leaves them to `_settle`, which starts
-    those not yet started once it finds the write committed."""
+    those not yet started once it finds the write committed. The write's
+    commit records the cursor it wrote on `segment.writing` and hands a
+    pause to `segment.note_pause`, in the commit's own task."""
+    writing = segment.writing
+    assert writing is not None
+
+    def landed(written: Cursor) -> None:
+        writing.landed.append(written)
+        segment.note_pause(written)
+
     written = await _write_boundary(
         store,
         cursor,
@@ -535,7 +553,7 @@ async def _commit_boundary(
         interrupt_id=interrupt_id,
         ctx=ctx,
         lineage=lineage,
-        paused=segment.note_pause,
+        landed=landed,
     )
     segment.cursor = written
     assert segment.writing is not None
@@ -557,8 +575,12 @@ async def _after_failed_write(
     (`segment.writing`) raised `error`, for any reason but those
     `_NOT_THE_TURNS` names. A write that could not encode its values
     (`WriteNotEncoded`) never committed, and closes the turn `failed` at
-    once (`_close_on_error`). Any other write may have committed and lost
-    its acknowledgement, so the turn is read back (`_read_back`). A turn
+    once (`_close_on_error`). A write whose COMMIT lost its acknowledgement
+    and whose transaction committed returned already, since the store reads
+    the transaction's status back (`TurnStore.pause`), so a write that
+    raised here either did not commit or its status could not be read in
+    time (`harness.db.commit.READ_BACK_LIMIT_S`). The turn is read back
+    (`_read_back`). A turn
     that holds the write (`_Writing.committed`) takes the stored cursor and
     runs the node's work after the commit (`_Writing.owed`) in the same step
     as the read, as a write that returned does (`_commit_boundary`), and
@@ -572,10 +594,10 @@ async def _after_failed_write(
     failure is reported whoever closed the turn (`_close_on_error`). A read
     back that fails, or an open turn another write moved, is left as stored:
     the segment ends `unclosed` and reports `error`, as when a close cannot
-    be written. That includes a write that landed and that another segment
-    then wrote over, under a lease that lapsed, before the read back: the
-    stored turn no longer holds the write, so a pause it made writes no
-    `paused` line. A cut pending raises with `segment.writing` still held,
+    be written. That includes a write whose status could not be read, that
+    landed, and that another segment then wrote over under a lease that
+    lapsed: the stored turn no longer holds the write, so a pause it made
+    writes no `paused` line. A cut pending raises with `segment.writing` still held,
     which the segment settles on."""
     writing = segment.writing
     assert writing is not None
@@ -662,13 +684,14 @@ async def _write_boundary(
     interrupt_id: str,
     ctx: NodeCtx[Any],
     lineage: SegmentLineage | None,
-    paused: Callable[[Cursor], None],
+    landed: Callable[[Cursor], None],
 ) -> Cursor:
     """The write that records `node`'s `result`: a pause under
     `interrupt_id`, the turn's end, or the move to `following`. A pause
     records the Stop the turn's `StopScope` took (`StopScope.taken`), which
-    ends that Stop, and hands the paused cursor to `paused` once it commits.
-    A pause or move writes the frame lineage of the segment's `lineage`."""
+    ends that Stop. Each hands the cursor it wrote to `landed` once it
+    commits. A pause or move writes the frame lineage of the segment's
+    `lineage`."""
     if isinstance(result, Pause):
         ctx.transcript.append(
             entries.pause(
@@ -691,7 +714,7 @@ async def _write_boundary(
             records=ctx.transcript.take(),
             stop_taken_id=ctx.stop.taken,
             lineage=lineage,
-            committed=paused,
+            committed=landed,
         )
     if following == END:
         return await store.finish(
@@ -700,6 +723,7 @@ async def _write_boundary(
             status=TurnStatus.DONE,
             state=ctx.state,
             records=ctx.transcript.take(),
+            committed=landed,
         )
     assert following is not None
     return await store.advance(
@@ -710,6 +734,7 @@ async def _write_boundary(
         state=ctx.state,
         records=ctx.transcript.take(),
         lineage=lineage,
+        committed=landed,
     )
 
 
@@ -1238,10 +1263,14 @@ async def _settle(
     owed (`_Writing.owed`) that had not started when the cut came started
     here in a task of their own (`_start_owed`), bounded at
     `OWED_WORK_TIMEOUT_S`, without waiting for them, so a Stop's close goes
-    on at once. A write another segment's later write moved past before the
-    read back is not found committed, so its owed work is dropped; the
-    conversation's next turn lists the hand-back it would have acknowledged
-    again."""
+    on at once. Whether the write committed is what its commit's task
+    recorded (`_Writing.landed`), its transaction's status read back when
+    the COMMIT raised (`TurnStore.pause`), so a write another segment's
+    later write moved past still counts. Only a COMMIT whose status could
+    not be read in time is judged on the turn as stored
+    (`_Writing.committed`); such a write that another segment moved past is
+    not found committed, so its owed work is dropped and the conversation's
+    next turn lists the hand-back it would have acknowledged again."""
     try:
         stored = await store.settled_turn(segment.cursor.id)
     except Exception:
@@ -1253,12 +1282,14 @@ async def _settle(
             "the write acknowledged",
             key,
         )
-        stored = segment.cursor
+        stored = segment.writing.landed[-1] if segment.writing.landed else segment.cursor
     writing, segment.writing = segment.writing, None
     reported = writing.reports if writing is not None and writing.committed(stored) else None
     if isinstance(reported, Paused):
-        # The pause committed, whatever cut came after it.
-        segment.note_pause(stored)
+        # The pause committed, whatever cut came after it. Its commit's task
+        # handed it over already unless it was read back here.
+        assert writing is not None
+        segment.note_pause(writing.landed[-1] if writing.landed else stored)
     # A Stop closes a pause it cut, so the pause's owed work (early mints)
     # would be for a question no one can answer.
     if reported is not None and not (isinstance(reported, Paused) and cut_by is Outcome.CANCELLED):

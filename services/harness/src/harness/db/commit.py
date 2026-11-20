@@ -8,7 +8,9 @@ whose COMMIT, and the work that must follow every commit that lands (the
 during the commit cannot land the write without that work. Every runtime
 connection bounds each statement, the COMMIT included, with asyncpg's
 `command_timeout` (`harness.db.engine.COMMAND_TIMEOUT_S`), so a COMMIT run to
-its end on a stalled connection still ends.
+its end on a stalled connection still ends. A COMMIT that raises is read back
+in the same task by its transaction's status (`transaction_committed`), so a
+write that landed with its acknowledgement lost still runs that work.
 """
 
 from __future__ import annotations
@@ -22,6 +24,14 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 logger = logging.getLogger(__name__)
+
+# How long the read back of a COMMIT that raised reads its transaction's
+# status, and how often (`transaction_committed`). The Studio stream's
+# closing write runs for up to 5 s before its COMMIT, and the app's shutdown
+# waits 7 s for it (`harness.studio_stream.SHUTDOWN_WAIT_S`), so the read back
+# fits beside a COMMIT that takes under 0.5 s.
+READ_BACK_LIMIT_S = 1.5
+READ_BACK_POLL_S = 0.05
 
 
 async def run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
@@ -50,6 +60,38 @@ async def run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
             )
         raise cancelled
     return task.result()
+
+
+async def transaction_committed(status: Callable[[], Awaitable[str | None]], *, what: str) -> bool:
+    """Whether the transaction whose COMMIT raised committed, by its status
+    as `status` reads it on a fresh connection (`pg_xact_status`:
+    `committed`, `aborted`, `in progress`, or `None` once too old to tell).
+    A status still `in progress`, a COMMIT the server has not finished, and
+    a read that fails, as one in the outage that broke the COMMIT does, are
+    read again every `READ_BACK_POLL_S` for up to `READ_BACK_LIMIT_S`.
+    `False` for `aborted` or `None`, and when the limit passes unsettled,
+    which is logged with `what`: such a COMMIT that lands later runs none of
+    the work owed to it."""
+    failure: Exception | None = None
+    try:
+        async with asyncio.timeout(READ_BACK_LIMIT_S):
+            while True:
+                try:
+                    read = await status()
+                except Exception as exc:
+                    failure = exc
+                else:
+                    if read != "in progress":
+                        return read == "committed"
+                await asyncio.sleep(READ_BACK_POLL_S)
+    except TimeoutError:
+        logger.error(
+            "db commit: %s's COMMIT raised and its transaction did not settle within %ss",
+            what,
+            READ_BACK_LIMIT_S,
+            exc_info=failure,
+        )
+        return False
 
 
 async def committing[T](

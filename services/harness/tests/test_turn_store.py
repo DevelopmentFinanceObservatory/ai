@@ -1499,14 +1499,51 @@ class _SlowCommit:
                 await self.proceed.wait()
 
 
-@pytest.mark.parametrize("how", ["returns", "caller-cancelled-at-commit", "fenced-out"])
+class _LostAckThenOverwritten:
+    """An engine whose next `begin` commits, then has segment B take the
+    lease and write the turn's cursor over, then raises as a lost
+    acknowledgement does. Everything else is `engine`'s."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+        self._first = True
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine, name)
+
+    def begin(self) -> Any:
+        if not self._first:
+            return self._engine.begin()
+        self._first = False
+        return self._lost()
+
+    @contextlib.asynccontextmanager
+    async def _lost(self) -> Any:
+        async with self._engine.begin() as conn:
+            yield conn
+        await _move_lease(self._engine, "segment-b")
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE turn_cursors SET version = version + 1, written_by = 'segment-b', "
+                    "status = 'running', interrupt_id = NULL"
+                )
+            )
+        raise ConnectionResetError("the pause's acknowledgement was lost")
+
+
+@pytest.mark.parametrize(
+    "how", ["returns", "caller-cancelled-at-commit", "fenced-out", "lost-ack-overwritten"]
+)
 async def test_a_pause_hands_its_cursor_to_committed_once_its_write_commits(
     pg_engine: AsyncEngine, how: str
 ) -> None:
     """`committed` runs once, with the paused cursor, once the pause's write
     commits: in the task that commits it when the caller is cancelled during
-    the commit, which then ends in the cancellation. A pause fenced out by a
-    moved lease commits nothing and runs nothing."""
+    the commit, which then ends in the cancellation, and when the commit's
+    acknowledgement is lost, since the store reads the write's transaction
+    back as committed, even after another segment wrote the turn over. A
+    pause fenced out by a moved lease commits nothing and runs nothing."""
     await _conversation(pg_engine)
     store = TurnStore(pg_engine)
     cursor = await _open(store)
@@ -1529,6 +1566,15 @@ async def test_a_pause_hands_its_cursor_to_committed_once_its_write_commits(
     if how == "returns":
         paused = await pause()
         assert noted == [paused]
+    elif how == "lost-ack-overwritten":
+        store._engine = _LostAckThenOverwritten(pg_engine)  # type: ignore[assignment]
+        paused = await pause()
+        store._engine = pg_engine  # type: ignore[assignment]
+        assert noted == [paused]
+        [stored] = noted
+        assert stored.status is TurnStatus.PAUSED
+        assert (await store.turn(cursor.id)).written_by == "segment-b"
+        return
     elif how == "fenced-out":
         await _move_lease(pg_engine, "segment-b")
         with pytest.raises(SegmentLost):

@@ -84,7 +84,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -94,7 +94,7 @@ from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.db.best_effort import bounded_read
-from harness.db.commit import committing
+from harness.db.commit import committing, transaction_committed
 from harness.db.jsonb import json_or_none, to_json_param
 from harness.provenance import (
     CardLineageDecodeError,
@@ -391,8 +391,8 @@ def _cursor(row: Any, record_count: int, specs: _StoredSpecs) -> Cursor:
 
 
 _FENCE = text(
-    "SELECT id FROM conversations WHERE id = :conversation "
-    "AND lease_segment_id = :segment_id FOR SHARE"
+    "SELECT id, pg_current_xact_id()::text AS xact FROM conversations "
+    "WHERE id = :conversation AND lease_segment_id = :segment_id FOR SHARE"
 )
 _FENCE_BY_KEY = text(
     "SELECT id FROM conversations WHERE principal = :principal "
@@ -570,10 +570,28 @@ async def _records(conn: AsyncConnection, turn: int) -> list[AgentRecord]:
     return [AgentRecord(agent=row.agent, kind=row.kind, body=row.body) for row in rows]
 
 
-async def _fence(conn: AsyncConnection, conversation: int, segment_id: str) -> None:
-    held = await conn.execute(_FENCE, {"conversation": conversation, "segment_id": segment_id})
-    if held.first() is None:
+def _landing(written: Cursor, committed: Callable[[Cursor], None] | None) -> Callable[[], Cursor]:
+    """What follows a cursor write's commit: `committed` with the cursor
+    written, then the cursor."""
+
+    def landed() -> Cursor:
+        if committed is not None:
+            committed(written)
+        return written
+
+    return landed
+
+
+async def _fence(conn: AsyncConnection, conversation: int, segment_id: str) -> str:
+    """Refuse unless `segment_id` holds the conversation's lease, and return
+    the id of the transaction `conn` runs, for a read back of its COMMIT
+    (`TurnStore._read_back`)."""
+    held = (
+        await conn.execute(_FENCE, {"conversation": conversation, "segment_id": segment_id})
+    ).first()
+    if held is None:
         raise SegmentLost(f"segment {segment_id!r} does not hold the conversation's lease")
+    return held.xact
 
 
 async def _swap(
@@ -1050,11 +1068,13 @@ class TurnStore:
         state: dict[str, Any],
         records: Sequence[AgentRecord] = (),
         lineage: SegmentLineage | None,
+        committed: Callable[[Cursor], None] | None = None,
     ) -> Cursor:
         """Move the running turn to `node` with `node_input`, writing `state`,
         its spec blocks included, and appending `records`, with it.
         `lineage` is the segment's, which `start_segment` made and
         `restore_frame_lineage` filled; with `None` no lineage is written.
+        `committed` is as `pause` takes it, with the moved cursor.
 
         Raises:
             SegmentLost: `segment_id` does not hold the conversation's lease.
@@ -1062,8 +1082,10 @@ class TurnStore:
             WriteNotEncoded: JSON cannot hold a value of the write.
         """
         write = self._lineage_rows(cursor, state, lineage)
-        async with self._engine.begin() as conn:
-            await _fence(conn, cursor.conversation, segment_id)
+        xacts: list[str] = []
+
+        async def advancing(conn: AsyncConnection) -> Callable[[], Cursor]:
+            xacts.append(await _fence(conn, cursor.conversation, segment_id))
             advanced = await _swap(
                 conn,
                 cursor,
@@ -1076,6 +1098,11 @@ class TurnStore:
                 records=records,
             )
             await _write_lineage(conn, write)
+            return _landing(advanced, committed)
+
+        advanced = await committing(
+            self._engine.begin(), advancing, read_back=self._read_back(xacts, cursor, "move")
+        )
         if lineage is not None:
             lineage.written.update(write.generations)
         return advanced
@@ -1110,7 +1137,10 @@ class TurnStore:
         The commit and it run in one task to the end
         (`harness.db.commit.committing`), so a cut of the caller during the
         commit cannot land the pause without it. A cut before the commit
-        rolls the write back, and a commit that raises runs nothing after it.
+        rolls the write back. A commit that raises is read back by its
+        transaction's status (`_read_back`): one that committed runs
+        `committed` and returns as a commit that returned does, whatever
+        another writer did to the turn since, and any other raises.
 
         Raises:
             SegmentLost: `segment_id` does not hold the conversation's lease.
@@ -1118,9 +1148,10 @@ class TurnStore:
             WriteNotEncoded: JSON cannot hold a value of the write.
         """
         write = self._lineage_rows(cursor, state, lineage)
+        xacts: list[str] = []
 
         async def pausing(conn: AsyncConnection) -> Callable[[], Cursor]:
-            await _fence(conn, cursor.conversation, segment_id)
+            xacts.append(await _fence(conn, cursor.conversation, segment_id))
             paused = await _swap(
                 conn,
                 cursor,
@@ -1143,15 +1174,11 @@ class TurnStore:
                 records=records,
             )
             await _write_lineage(conn, write)
+            return _landing(paused, committed)
 
-            def landed() -> Cursor:
-                if committed is not None:
-                    committed(paused)
-                return paused
-
-            return landed
-
-        paused = await committing(self._engine.begin(), pausing)
+        paused = await committing(
+            self._engine.begin(), pausing, read_back=self._read_back(xacts, cursor, "pause")
+        )
         if lineage is not None:
             lineage.written.update(write.generations)
         return paused
@@ -1218,10 +1245,12 @@ class TurnStore:
         error: dict[str, Any] | None = None,
         state: dict[str, Any] | None = None,
         records: Sequence[AgentRecord] = (),
+        committed: Callable[[Cursor], None] | None = None,
     ) -> Cursor:
         """Close the open turn with `status` in a transaction of its own
         (`finish_on`), stamping the runs a close `CANCELLED` ends with this
-        store's clock.
+        store's clock. `committed` and a COMMIT that raises are as `pause`
+        takes them, with the closed cursor.
 
         Raises:
             ValueError: `status` is not a closing status, or `error` is
@@ -1230,7 +1259,9 @@ class TurnStore:
             CursorStale: the cursor moved, or the turn is closed.
             WriteNotEncoded: JSON cannot hold a value of the write.
         """
-        async with self._engine.begin() as conn:
+        xacts: list[str] = []
+
+        async def finishing(conn: AsyncConnection) -> Callable[[], Cursor]:
             closed = await finish_on(
                 conn,
                 cursor,
@@ -1240,8 +1271,49 @@ class TurnStore:
                 state=state,
                 records=records,
                 now=datetime.fromtimestamp(self._clock(), UTC),
+                xacts=xacts,
             )
-        return closed
+            return _landing(closed, committed)
+
+        return await committing(
+            self._engine.begin(),
+            finishing,
+            read_back=self._read_back(xacts, cursor, f"close {status.value}"),
+        )
+
+    def _read_back(
+        self, xacts: list[str], cursor: Cursor, what: str
+    ) -> Callable[[], Awaitable[bool]]:
+        """The read back of a cursor write from `cursor` whose COMMIT raised:
+        whether the write's transaction, the one `xacts` names once the
+        write fenced, committed (`harness.db.commit.transaction_committed`,
+        reading `_xact_status`)."""
+
+        async def read_back() -> bool:
+            if not xacts:
+                return False
+            landed = await transaction_committed(
+                lambda: self._xact_status(xacts[0]),
+                what=f"turn {cursor.id}'s {what}",
+            )
+            if landed:
+                logger.warning(
+                    "turn %s: the %s committed; its acknowledgement was lost", cursor.id, what
+                )
+            return landed
+
+        return read_back
+
+    async def _xact_status(self, xact: str) -> str | None:
+        """The status Postgres holds for transaction `xact`: `committed`,
+        `aborted`, `in progress`, or `None` once it is too old to tell."""
+        async with self._engine.begin() as conn:
+            return (
+                await conn.execute(
+                    text("SELECT pg_xact_status(CAST(CAST(:xact AS text) AS xid8))"),
+                    {"xact": xact},
+                )
+            ).scalar_one()
 
 
 async def finish_on(
@@ -1254,6 +1326,7 @@ async def finish_on(
     error: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
     records: Sequence[AgentRecord] = (),
+    xacts: list[str] | None = None,
 ) -> Cursor:
     """Close the open turn with `status`, one of `CLOSED`, on `conn`, in the
     caller's transaction, appending `records`, and delete the turn's frame
@@ -1267,6 +1340,9 @@ async def finish_on(
     transaction of its own; `harness.studio_store.StudioStore.close_segment`
     runs it in the transaction that saves the conversation's record.
 
+    `xacts`, when given, takes the id of the transaction `conn` runs, for a
+    read back of its COMMIT (`TurnStore.finish`).
+
     Raises:
         ValueError: `status` is not a closing status, or `error` is
             missing for `FAILED` or `ABANDONED` or given for another.
@@ -1277,7 +1353,9 @@ async def finish_on(
         raise ValueError(f"{status!r} does not close a turn")
     if (status in _ERRORED) != (error is not None):
         raise ValueError(f"a turn closed {status.value} takes an error only when it failed")
-    await _fence(conn, cursor.conversation, segment_id)
+    xact = await _fence(conn, cursor.conversation, segment_id)
+    if xacts is not None:
+        xacts.append(xact)
     closed = await _swap(
         conn,
         cursor,

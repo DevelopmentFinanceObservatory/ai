@@ -1677,8 +1677,8 @@ async def test_a_cut_after_a_boundary_committed_reports_its_node_done_once(
     while the write's acknowledgement is awaited, during `work`'s work
     after the commit, or once that work caught the cancellation and
     returned. At `commit_in_flight` the cut lands while the write's
-    transaction is still open, and it commits only once the segment's read
-    back waits on the turn's row. At `read_back` and `absorbed_read_back`
+    transaction is still open, and it commits only once the store's read
+    back asks for its status. At `read_back` and `absorbed_read_back`
     the write's acknowledgement is lost and the cut lands during the read
     back, which ends on it or catches it and returns. Wherever the cut lands
     before one of `work`'s works after the commit starts, that work runs
@@ -1822,7 +1822,9 @@ class _TakenOverAtTheWrite(TurnStore):
     async def advance(self, cursor: Cursor, **kwargs: Any) -> Cursor:
         async with self._engine.begin() as conn:
             await conn.execute(text("UPDATE conversations SET lease_segment_id = 'segment-b'"))
-        await TurnStore(self._engine).advance(cursor, **{**kwargs, "segment_id": "segment-b"})
+        await TurnStore(self._engine).advance(
+            cursor, **{**kwargs, "segment_id": "segment-b", "committed": None}
+        )
         await asyncio.sleep(3600)
         raise AssertionError("unreachable")
 
@@ -1958,7 +1960,7 @@ class _BoundaryWriteRaises(TurnStore):
         if self._how == "taken_over":
             async with self._engine.begin() as conn:
                 await conn.execute(text("UPDATE conversations SET lease_segment_id = 'segment-b'"))
-            await write(cursor, **{**kwargs, "segment_id": "segment-b"})
+            await write(cursor, **{**kwargs, "segment_id": "segment-b", "committed": None})
         elif self._how == "abandoned":
             async with self._engine.begin() as conn:
                 await conn.execute(text("UPDATE conversations SET lease_segment_id = 'segment-b'"))
@@ -2105,10 +2107,11 @@ async def _side_engine(pg_engine: AsyncEngine) -> Any:
 class _LateFirstCommit:
     """An engine whose first `begin` hands out a transaction that raises
     as a lost acknowledgement does once its statements ran, and commits it
-    only once another statement waits on a row lock: a COMMIT the server
-    was still making when the client gave up. With `cut`, the write cuts
-    the segment through it in place of raising, and waits to be cancelled.
-    That transaction and the watch
+    only once another statement waits on a row lock or a later `begin` is
+    made, as the store's read back of the transaction's status makes one
+    (`TurnStore._xact_status`): a COMMIT the server was still making when the
+    client gave up. With `cut`, the write cuts the segment through it before
+    it raises. That transaction and the watch
     for the wait run on `side`, off `engine`'s pool of two, which the read
     back and the heartbeat need. Everything else is `engine`'s."""
 
@@ -2123,6 +2126,7 @@ class _LateFirstCommit:
         self._side = side
         self._cut = cut
         self._first = True
+        self._asked = asyncio.Event()
         self.committing: asyncio.Task[None] | None = None
 
     def __getattr__(self, name: str) -> Any:
@@ -2130,6 +2134,7 @@ class _LateFirstCommit:
 
     def begin(self) -> Any:
         if not self._first:
+            self._asked.set()
             return self._engine.begin()
         self._first = False
         return self._late()
@@ -2148,8 +2153,7 @@ class _LateFirstCommit:
         if self._cut is None:
             raise ConnectionResetError("the commit's acknowledgement was lost")
         await self._cut()
-        await asyncio.sleep(3600)
-        raise AssertionError("unreachable")
+        raise ConnectionResetError("the commit's acknowledgement was lost")
 
     async def _commit_once_waited(self, conn: Any, transaction: Any) -> None:
         async with self._side.connect() as watch:
@@ -2160,7 +2164,7 @@ class _LateFirstCommit:
                         "WHERE datname = current_database() AND wait_event_type = 'Lock'"
                     )
                 )
-                if waiting.scalar():
+                if self._asked.is_set() or waiting.scalar():
                     break
                 await asyncio.sleep(0.01)
         await transaction.commit()
@@ -2172,7 +2176,7 @@ async def test_a_boundary_write_still_committing_at_the_read_back_carries_on_as_
     pg_engine: AsyncEngine, clock: StoreClock, boundary: str
 ) -> None:
     """`work`'s write raises while its transaction is still open, and the
-    transaction commits only once the read back waits on the turn's row.
+    transaction commits only once the store's read back asks for its status.
     The read back waits for it, so the segment finds the write and goes on
     as after one that returned. A pause's `paused` hook hears it from the
     read back, since its own commit returned nothing."""

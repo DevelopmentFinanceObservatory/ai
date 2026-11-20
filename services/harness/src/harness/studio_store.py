@@ -63,7 +63,9 @@ closing write, a `/turn` claim save that closes the turn left open as
 `load`'s record of a turn whose cursor closed. A close is a turn record the
 row did not hold before the write, read against this instance's baseline,
 the row as its last read or write left it, so a turn writes one close line.
-A write whose commit raises writes no line, and a canvas write's retry that
+A write whose commit raises writes no line, with two exceptions: a closing
+write whose transaction the read back finds committed writes them
+(`StudioStore._transaction_committed`), and a canvas write's retry that
 finds it landed writes them (`_resolve_canvas_writes`). A pause is the
 turn's cursor write, so its line comes from that commit
 (`harness.turn.store.TurnStore.pause`).
@@ -105,7 +107,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.approval import ApprovalRecord
 from harness.db.best_effort import execute_in_savepoint
-from harness.db.commit import committing, run_to_completion
+from harness.db.commit import (
+    committing,
+    run_to_completion,
+    transaction_committed,
+)
 from harness.db.jsonb import json_or_none, to_json_param
 from harness.fatal_codes import recorded_code
 from harness.graph.state import (
@@ -226,12 +232,6 @@ SEQ_BLOCK = 2**20
 # delay to the last.
 _RETRY_FIRST_DELAY_S = 0.25
 _RETRY_MAX_DELAY_S = 4.0
-# How often a closing write's read back reads again the status of a
-# transaction whose COMMIT the server has not finished, and how long it reads
-# for (`_transaction_committed`). The read back runs in the COMMIT's own task
-# (`harness.db.commit.committing`), whatever the caller's timeout.
-_READ_BACK_POLL_S = 0.05
-_READ_BACK_LIMIT_S = 5.0
 # How long before its lease lapses an instance stops trusting it holds the
 # conversation. The heartbeat gives up renewing and writes stop retrying then
 # (`StudioStore.lease_deadline`).
@@ -789,7 +789,9 @@ class SegmentClose(StrEnum):
     """How a segment's closing write (`StudioStore.close_segment`) ended.
 
     - `SAVED`: the live state is stored and the lease cleared. The turn
-      stands as the live state holds it.
+      stands as the live state holds it, unless the bookkeeping after the
+      commit failed: the store then dropped its live state, and the turn
+      stands as the row holds it, the canvas the write committed included.
     - `STOPPED`: as `SAVED`, and a Stop live for the open turn closed it
       `cancelled`, record and cursor, in the same transaction.
     - `LOST`: the stored lease is not the segment's, so nothing was
@@ -1303,7 +1305,8 @@ class StudioStore:
             "WHERE principal = :principal AND conversation_id = :conversation_id"
         )
         self._lock_conversation = text(
-            f"SELECT {_CONVERSATION_COLUMNS}, {time_sql} AS db_now FROM conversations "
+            f"SELECT {_CONVERSATION_COLUMNS}, {time_sql} AS db_now, "
+            "pg_current_xact_id()::text AS xact FROM conversations "
             "WHERE id = :pk FOR UPDATE"
         )
 
@@ -1498,8 +1501,19 @@ class StudioStore:
         `harness.studio_stream.ending` sends for a failed close, or the
         instance died and the client was told nothing. Without the repair
         the next turn would record the turn `abandoned`. While a lease is
-        live its holder records the turn."""
+        live its holder records the turn.
+
+        The read and the copy into the live state run under this instance's
+        write lock, so no write of this instance, a lease claim say, commits
+        between them and is then overwritten by the row as read before it."""
         entry = self._entry(principal, conversation_id)
+        async with entry.write_lock:
+            return await self._load(entry, principal, conversation_id)
+
+    async def _load(
+        self, entry: _RuntimeEntry, principal: str, conversation_id: str
+    ) -> ConversationState | None:
+        """`load`'s read and copy. The caller holds the write lock."""
         stamp = self._clock()
         stored = await self._read(principal, conversation_id)
         if stored is None:
@@ -2344,7 +2358,8 @@ class StudioStore:
         (`harness.db.engine.COMMAND_TIMEOUT_S`, 90 s), so a COMMIT that lands
         after the timeout returns as committed. A COMMIT that raises is read
         back in the same task, whatever the timeout, for up to
-        `_READ_BACK_LIMIT_S` (`_transaction_committed`): when its transaction
+        `harness.db.commit.READ_BACK_LIMIT_S` (1.5 s, `_transaction_committed`):
+        when its transaction
         committed, the write landed with its acknowledgement lost, and its
         lines and bookkeeping run then, with no second write. The caller
         waits for that task, so its wait is `timeout` up to the COMMIT, then
@@ -2427,9 +2442,10 @@ class StudioStore:
         commit. A COMMIT that raises is read back in the same task, by the
         write's own transaction id (`_transaction_committed`), and one that
         landed runs the work owed to its commit as one that returned does.
-        Bookkeeping that raises after the
-        commit is logged and drops the live state, as `evict` does, so the
-        next request loads the row the commit wrote."""
+        Bookkeeping that raises after the commit is logged and drops the
+        live state, as `evict` does, so the next request loads the row the
+        commit wrote; the dropped state keeps the canvas the write committed,
+        for the stream's ending frame."""
 
         async def write(conn: AsyncConnection) -> Callable[[], SegmentClose]:
             assert entry.pk is not None
@@ -2486,7 +2502,6 @@ class StudioStore:
                     )
             changed = _changed_since(_serialize_durable(work), entry.baseline)
             lines = _committed_lines(changed, stored=entry.baseline)
-            xact = (await conn.execute(text("SELECT pg_current_xact_id()::text"))).scalar_one()
             version = (
                 (await self._write(conn, entry.pk, changed)).version if changed else row.version
             )
@@ -2508,12 +2523,15 @@ class StudioStore:
                         conversation_id,
                         segment_id,
                     )
+                    # The stream's ending frame shows the canvas the write
+                    # committed (`harness.studio_stream`).
+                    state.composition = work.composition
                     entry.state = None
                     entry.draft = None
                     entry.baseline = {}
                 return closed
 
-            xacts.append(xact)
+            xacts.append(row.xact)
             return committed
 
         xacts: list[str] = []
@@ -2529,33 +2547,23 @@ class StudioStore:
         self, xact: str, conversation_id: str, segment_id: str
     ) -> bool:
         """Whether the closing write's transaction `xact`, whose COMMIT
-        raised, committed, read on a fresh connection (`pg_xact_status`). A
-        status still `in progress`, a COMMIT the server has not finished, is
-        read again every `_READ_BACK_POLL_S` for up to `_READ_BACK_LIMIT_S`.
-        `False` when it aborted, is unknown, or is still unsettled or
-        unreadable at the limit: that last case, a COMMIT that lands later,
-        leaves its record in the row with no line written and the live state
-        evicted."""
-        try:
-            async with asyncio.timeout(_READ_BACK_LIMIT_S):
-                while (status := await self._xact_status(xact)) == "in progress":
-                    await asyncio.sleep(_READ_BACK_POLL_S)
-        except Exception:
-            logger.exception(
-                "studio store: conversation %s segment %s's closing write could not be read back",
+        raised, committed (`harness.db.commit.transaction_committed`, reading
+        `_xact_status`). `False` when it aborted, is unknown, or is still
+        unsettled or unreadable after `READ_BACK_LIMIT_S`: that last case, a
+        COMMIT that lands later, leaves its record in the row with no line
+        written and the live state evicted."""
+        landed = await transaction_committed(
+            lambda: self._xact_status(xact),
+            what=f"conversation {conversation_id} segment {segment_id}'s closing write",
+        )
+        if landed:
+            logger.warning(
+                "studio store: conversation %s segment %s's closing write landed with its "
+                "acknowledgement lost",
                 conversation_id,
                 segment_id,
             )
-            return False
-        if status != "committed":
-            return False
-        logger.warning(
-            "studio store: conversation %s segment %s's closing write landed with its "
-            "acknowledgement lost",
-            conversation_id,
-            segment_id,
-        )
-        return True
+        return landed
 
     async def _xact_status(self, xact: str) -> str | None:
         """The status Postgres holds for transaction `xact`: `committed`,
