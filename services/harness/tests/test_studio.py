@@ -175,6 +175,7 @@ from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
+from starlette.requests import ClientDisconnect
 from translator.referral import REFERRAL_STATE_KEY, Referral, ReferralKind
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
@@ -2567,6 +2568,42 @@ async def test_a_failure_before_a_resume_streams_keeps_the_answer_for_a_same_ans
 
     assert _events(frames)[-1] == "done"
     assert _frame(frames, "message.complete")["text"] == "You meant reading B."
+
+
+@pytest.mark.parametrize(
+    ("decision", "target"),
+    [
+        ("approve", "harness.studio._spec_use_sink"),
+        ("reject", "harness.studio.StudioRunner._segment_stream"),
+    ],
+)
+async def test_a_raise_after_the_interrupt_save_releases_the_conversation_lock(
+    monkeypatch: pytest.MonkeyPatch, decision: str, target: str
+) -> None:
+    """`/interrupt` raises after its save has claimed the segment, before it
+    returns the stream. The lock is released and the lease dropped, so the
+    next turn on the conversation streams at once."""
+    app = _app(*_plan(), _text("Again."))
+    store = app.state.studio.store
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("raised before the stream")
+
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        with monkeypatch.context() as patch:
+            patch.setattr(target, _boom)
+            with pytest.raises(RuntimeError, match="raised before the stream"):
+                await _stream(
+                    client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], decision)
+                )
+
+        assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
+        stored = await _other_store().load(PRINCIPAL, CONVERSATION)
+        assert stored is not None and stored.segment is None
+        again = await _stream(client, "/api/studio/turn", _turn_body("again"))
+    assert _events(again)[-1] == "done"
 
 
 # --- asks the agent puts to the user ---------------------------------------------
@@ -5466,11 +5503,9 @@ async def test_a_client_that_leaves_a_running_turn_records_it_as_cancelled(how: 
     assert conversation.cancel_event is None
 
 
-# NOTE: the transport half of a disconnect cannot be driven in-process --
-# httpx2's ASGITransport runs the app to completion and never delivers
-# http.disconnect, so a route-level test would hang (verified). The process
-# half -- uvicorn cancelling the response task -- is the test above. The
-# RELIABLE cancellation path either way is POST /api/studio/cancel (delta 14).
+# httpx2's ASGITransport never delivers `http.disconnect`, so the tests below
+# that lose the client call the ASGI app directly with a `receive` that
+# answers it. The reliable way to stop a turn is POST /api/studio/cancel.
 
 
 async def test_a_client_that_leaves_at_the_pause_frame_still_releases_the_segment() -> None:
@@ -5560,6 +5595,55 @@ async def test_a_client_that_leaves_at_the_pause_frame_still_releases_the_segmen
             client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
         )
     assert _events(second)[-1] == "done"
+
+
+@pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+@pytest.mark.parametrize("request_kind", ["turn", "edit", "reject", "approve"])
+async def test_a_client_gone_before_the_first_chunk_leaves_the_conversation_free(
+    request_kind: str, spec_version: str
+) -> None:
+    """The client is gone before the response sends its first body chunk, so
+    the stream's generators never start: below spec 2.4 Starlette cancels
+    the response on `http.disconnect`, and at 2.4 the failed send raises
+    `ClientDisconnect`. On every route that streams a segment the lock is
+    released, the lease dropped and the turn left open, and the next turn
+    on the conversation streams and records it `abandoned`."""
+    if request_kind == "edit":
+        app = _app(
+            *_card(),
+            _text("Again."),
+            resolver=_search(turns=2),
+            executor=ScriptedExecutor(_card_results(write_token=WRITE_TOKEN)),
+            edit_model=ScriptedEditModel({"text": "Renamed.", "patch": None, "recreate": None}),
+        )
+    elif request_kind == "turn":
+        app = _app(_text("Hello."), _text("Again."))
+    else:
+        app = _app(*_plan(), _text("Again."))
+    store = app.state.studio.store
+    async with _client(app) as client:
+        if request_kind == "edit":
+            await _conversation_with_component(client)
+            path, body = "/api/studio/turn", _edit_body("rename it")
+        elif request_kind == "turn":
+            path, body = "/api/studio/turn", _turn_body("hi")
+        else:
+            first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+            plan = _frame(first, "plan.proposed")
+            path, body = (
+                "/api/studio/interrupt",
+                _interrupt_body(plan["interrupt_id"], request_kind),
+            )
+
+        await _post_with_the_body_unstarted(app, path, body, spec_version=spec_version)
+
+        assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
+        stored = await _other_store().load(PRINCIPAL, CONVERSATION)
+        assert stored is not None and stored.segment is None and not stored.turn_recorded
+        again = await _stream(client, "/api/studio/turn", _turn_body("again"))
+    assert _events(again)[-1] == "done"
+    closed = await _other_store().load(PRINCIPAL, CONVERSATION)
+    assert closed is not None and closed.turns[-2].get("error") == "abandoned"
 
 
 # --- the Edit Card route (component_ref intent=edit) ----------------------------
@@ -9422,11 +9506,16 @@ async def _post_with_the_body_unstarted(
     payload: dict[str, Any],
     *,
     send_error: Exception | None = None,
+    spec_version: str = "2.3",
 ) -> None:
     """POST `payload` to `path` through the app's ASGI callable under spec
     2.3, as uvicorn serves it, with a client that leaves at once, or, with
-    `send_error`, stays while the response's first send raises it. Either
-    way the response ends before its body is pulled."""
+    `send_error`, stays while the response's first send raises it. Under
+    spec 2.4 the client is gone: the first send raises `OSError`, which
+    Starlette raises as `ClientDisconnect`. Either way the response ends
+    before its body is pulled."""
+    if spec_version == "2.4" and send_error is None:
+        send_error = OSError("the client has gone")
     body = json.dumps(payload).encode()
     received = 0
 
@@ -9451,7 +9540,7 @@ async def _post_with_the_body_unstarted(
 
     scope = {
         "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "asgi": {"version": "3.0", "spec_version": spec_version},
         "http_version": "1.1",
         "method": "POST",
         "scheme": "http",
@@ -9468,7 +9557,8 @@ async def _post_with_the_body_unstarted(
         "server": ("test", 80),
     }
     if send_error is not None:
-        with pytest.raises(type(send_error)):
+        expected = ClientDisconnect if spec_version == "2.4" else type(send_error)
+        with pytest.raises(expected):
             await asyncio.wait_for(app(scope, receive, send), timeout=10)
     else:
         await asyncio.wait_for(app(scope, receive, send), timeout=10)

@@ -281,6 +281,7 @@ async def export_data(
             route=_PREPARE_ROUTE,
             json=body,
             deadline=current_call_deadline() or CallDeadline.after(_PREPARE_DEADLINE_S),
+            caller_required=True,
         )
     except UpstreamError as exc:
         return to_tool_result(_refusal(exc, frame=frame_ref, export_format=format))

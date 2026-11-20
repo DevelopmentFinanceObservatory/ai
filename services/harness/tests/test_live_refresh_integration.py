@@ -19,6 +19,7 @@ from typing import Any
 
 import httpx2
 import pytest
+from common.caller import CALLER_HEADER, CALLER_PRINCIPAL_HEADER, SURFACE_HEADER, TURN_HEADER
 from common.materialisation import FrameRef
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, row_budget
 from compiler.surface import McpSurface, ToolCallResult
@@ -35,6 +36,8 @@ from .replay_support import FIRST, SECOND, SECOND_VALUES, SPEC, Upstream, data_m
 from .runner_frames import result_table
 
 _KEPT = ["dcid:FRA", "dcid:GBR"]
+# The headers that name a dfo-apis call's caller.
+_IDENTITY = (CALLER_PRINCIPAL_HEADER, SURFACE_HEADER, CALLER_HEADER, TURN_HEADER)
 _REDRAWN = {"status": "redrawn", "render": RECORDED_RENDER}
 
 
@@ -240,6 +243,31 @@ async def test_a_moved_card_is_replayed_once_and_later_requests_render_the_store
     assert (harness.upstream.mints, len(harness.apis.published())) == (mints, publishes)
     # The runner stored the replayed frame as it computed it, so nothing is published.
     assert publishes == 0
+
+
+async def test_a_refresh_names_the_website_on_its_root_mint(harness: Harness) -> None:
+    """A refresh's run is shared by every request for the card, so its root mint
+    names no caller and reaches dfo-apis under the website, where the share is
+    viewed. The mint door only logs the caller, so it takes the principal with
+    no caller."""
+    await harness.draw_card()
+    harness.move_dataset()
+    seen: list[httpx2.Request] = []
+
+    def recording(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return harness.upstream.handler(request)
+
+    client_holder.set_client(data_mcp_client(recording, caller_principal="caller-principal"))
+
+    response = await harness.refresh(harness.service())
+
+    assert response.json() == _REDRAWN
+    mints = [request for request in seen if request.method == "POST"]
+    assert mints
+    assert {tuple(request.headers.get(name) for name in _IDENTITY) for request in mints} == {
+        ("caller-principal", "website", None, None)
+    }
 
 
 async def test_concurrent_requests_for_a_moved_card_replay_it_once(harness: Harness) -> None:

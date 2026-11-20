@@ -15,7 +15,8 @@ same clients send in their `x-dfo-turn` header (`current_caller_turn`), so a
 dfo-apis call names the turn that caused it. A header is fixed when a client
 is built, so each turn gets clients of its own
 (`compiler.caller_clients.CallerClients`). `shared_work_context` clears both
-for a task several requests join, and detaches it from the turn's trace.
+for a task several requests join, names the Studio surface in their place,
+and detaches it from the turn's trace.
 
 `current_user_message` holds the user's own message for the turn, which the
 orchestrator's `search` sends Search to read intent and explicit scope from.
@@ -78,25 +79,31 @@ def current_conversation_caller() -> str | None:
 def current_caller_turn() -> CallerTurn:
     """The caller and turn the harness names in its MCP calls: the current
     conversation's caller (`current_conversation_caller`) and, inside one, the
-    current Studio turn. Outside any conversation it names neither."""
+    current Studio turn. Outside any conversation it names neither, and inside
+    shared work it names the surface the work serves
+    (`common.caller.current_shared_surface`)."""
     caller = current_conversation_caller()
-    return CallerTurn(caller, current_turn_id.get() if caller is not None else None)
+    if caller is None:
+        return CallerTurn(None, surface=common_caller.current_shared_surface())
+    return CallerTurn(caller, current_turn_id.get())
 
 
 def shared_work_context() -> Context:
-    """A copy of the current context that names no conversation and no turn.
+    """A copy of the current context that names no conversation and no turn,
+    and serves the Studio surface.
 
     For a task several requests join, such as a card's replay two conversations
     both wait on (`harness.rolling_cards`). The task's MCP clients name no
-    caller and no turn (`current_caller_turn`), and its in-process dfo-apis
-    calls none either (`common.caller.shared_work_context`), so no
-    conversation's identity is attached to the shared work. The copy holds an
+    caller and no turn, only the Studio surface (`current_caller_turn`), and its
+    in-process dfo-apis calls none either (`common.caller.shared_work_context`),
+    so no conversation's identity is attached to the shared work, and its
+    dfo-apis calls still count as Studio's. The copy holds an
     empty OpenTelemetry context too, so the task records on no turn's trace
     and its MCP calls carry no turn's Langfuse session, user or tags
     (`common.telemetry.turn_call_meta`), as work outside any turn does. It
     reports its fetches to no turn's spec-use sink (`current_spec_uses`).
     """
-    context = common_caller.shared_work_context()
+    context = common_caller.shared_work_context(surface=common_caller.STUDIO_SURFACE)
     context.run(current_conversation_id.set, NO_CONVERSATION)
     context.run(current_conversation_key.set, None)
     context.run(current_turn_id.set, None)
