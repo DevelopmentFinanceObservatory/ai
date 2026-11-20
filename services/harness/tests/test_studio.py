@@ -11898,8 +11898,11 @@ async def test_a_turn_refused_because_another_instance_holds_the_conversation_wr
         await other.save(PRINCIPAL, CONVERSATION)
 
     async with _client(app) as client:
-        paused = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+            paused = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         assert paused[-1]["event"] == "plan.proposed"
+        assert [line["status"] for line in _turn_log_lines(caplog, status=None)] == ["paused"]
+        caplog.clear()
         if refusal == "segment-busy":
             await other_instance_claims()
         elif refusal == "stale-claim":

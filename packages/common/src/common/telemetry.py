@@ -141,7 +141,8 @@ _event_failure_warned = False
 # holds the wake-up of each call no export pass has yet started for. Each pass
 # takes the waiters registered before it starts and wakes them when it ends.
 # The thread checks `_flush_pending` and clears `_flush_running` in one locked
-# step, so a call is either seen by the running thread or starts its own flush.
+# step, so a call is either seen by the running thread or starts its own flush,
+# and takes that step before it wakes the pass's waiters.
 _flush_lock = threading.Lock()
 _flush_running = False
 _flush_pending = False
@@ -1240,13 +1241,16 @@ def _start_flush(on_done: Callable[[], None] | None) -> bool:
                 _flush_backend()
             except Exception:
                 logger.warning("telemetry flush failed", exc_info=True)
-            finally:
-                for waiter in waiters:
-                    waiter()
+            # Settle the state before waking anyone, so a woken caller finds
+            # this thread finished unless another pass was asked for.
             with _flush_lock:
-                if not _flush_pending:
+                done = not _flush_pending
+                if done:
                     _flush_running = False
-                    return
+            for waiter in waiters:
+                waiter()
+            if done:
+                return
 
     try:
         threading.Thread(target=flush_off_the_loop, name=_FLUSH_THREAD_NAME, daemon=True).start()
