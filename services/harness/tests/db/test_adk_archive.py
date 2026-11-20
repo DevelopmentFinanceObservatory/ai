@@ -247,14 +247,10 @@ async def _start_refused(engine: AsyncEngine) -> server_module._MigrationRefused
     return refusal.value
 
 
-def _drop_adk_rows(printed: str) -> dict[str, int]:
-    """The row count `drop-adk` printed for each table, by unqualified name."""
-    return {
-        table.rsplit(".", 1)[1]: int(rows)
-        for table, rows in re.findall(
-            r"^adk_archive drop-adk: (\S+) holds (\d+) rows$", printed, re.M
-        )
-    }
+def _drop_adk_rows(printed: str) -> int:
+    """The `sessions` row count `drop-adk` printed."""
+    (rows,) = re.findall(r"^adk_archive drop-adk: \S+ holds (\d+) rows$", printed, re.M)
+    return int(rows)
 
 
 def _names(tables: tuple[str, ...]) -> set[str]:
@@ -282,6 +278,7 @@ async def test_after_restore_startup_refuses_until_archive_reruns_0005s_checks(
 
     assert _names(refusal.tables) == set(_ADK_TABLES)
     assert refusal.archive_present is False
+    assert refusal.ledger_present is True
     assert await _tables(pg_empty_engine) == tables
     assert await _verb(pg_empty_engine, "archive") == 1
     assert "SQLSTATE DFA02" in capsys.readouterr().err
@@ -307,7 +304,7 @@ async def test_startup_reports_no_archive_beside_a_foreign_table_of_an_archive_n
     assert _names(refusal.tables) == set(_ADK_TABLES)
     assert refusal.archive_present is False
     assert _names(refusal.foreign_archive_names) == {"adk_archive_adk_ledger_imports"}
-    assert "resolves but is not the archive" in str(refusal)
+    assert refusal.ledger_present is True
 
 
 async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive_until_drop_adk(
@@ -328,13 +325,14 @@ async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive_until
 
     assert _names(refusal.tables) == {"sessions"}
     assert refusal.archive_present is True
+    assert refusal.ledger_present is False
     capsys.readouterr()
     assert await _verb(pg_empty_engine, "archive") == 1
     assert "SQLSTATE DFA02" in capsys.readouterr().err
     assert await _verb(pg_empty_engine, "drop-adk", apply=False) == 0
-    assert _drop_adk_rows(capsys.readouterr().out) == {"sessions": 1}
+    assert _drop_adk_rows(capsys.readouterr().out) == 1
     assert await _verb(pg_empty_engine, "drop-adk") == 0
-    assert _drop_adk_rows(capsys.readouterr().out) == {"sessions": 1}
+    assert _drop_adk_rows(capsys.readouterr().out) == 1
     await _start(pg_empty_engine)
     tables = await _tables(pg_empty_engine)
     assert archived <= tables

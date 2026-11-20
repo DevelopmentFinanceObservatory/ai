@@ -44,7 +44,7 @@ from starlette.websockets import WebSocketClose
 from harness import __version__
 from harness.agents import build_tool_surface
 from harness.combined_mcp import build_combined_mcp, children_start_once, combined_http_app
-from harness.db.adk_archive import archive_state, live_adk_tables
+from harness.db.adk_archive import archive_state, ledger_resolves, live_adk_tables
 from harness.db.engine import DatabaseHandle, build_database
 from harness.db.migrate import MigrationChecksumError, apply_pending
 from harness.early_mint import EarlyMints
@@ -251,7 +251,8 @@ class _MigrationRefusedError(RuntimeError):
     refusal also carries the `tables` it names and `archive_present`,
     whether an `adk_archive_<name>` table resolves, which decides the step, and
     `foreign_archive_names`, the tables of an archive name that resolve
-    without the archive's columns."""
+    without the archive's columns, and `ledger_present`, whether
+    `adk_ledger_imports` resolves under its own name."""
 
     def __init__(
         self,
@@ -261,12 +262,14 @@ class _MigrationRefusedError(RuntimeError):
         tables: tuple[str, ...] = (),
         archive_present: bool = False,
         foreign_archive_names: tuple[str, ...] = (),
+        ledger_present: bool = False,
     ) -> None:
         super().__init__(f"{sqlstate}: {message}")
         self.sqlstate = sqlstate
         self.tables = tables
         self.archive_present = archive_present
         self.foreign_archive_names = foreign_archive_names
+        self.ledger_present = ledger_present
 
 
 async def _refuse_beside_adk_tables(engine: AsyncEngine) -> None:
@@ -285,6 +288,12 @@ async def _refuse_beside_adk_tables(engine: AsyncEngine) -> None:
     archived = f"The archive resolves: {', '.join(archive)}." if archive else "No archive resolves."
     for qualified in foreign:
         archived += f" {qualified} resolves but is not the archive."
+    ledger = await ledger_resolves(engine)
+    archived += (
+        " adk_ledger_imports resolves under its own name."
+        if ledger
+        else " adk_ledger_imports does not resolve under its own name."
+    )
     raise _MigrationRefusedError(
         "DFA05",
         f"ADK's tables resolve on search_path under their own names: {', '.join(tables)}. "
@@ -293,6 +302,7 @@ async def _refuse_beside_adk_tables(engine: AsyncEngine) -> None:
         tables=tuple(tables),
         archive_present=bool(archive),
         foreign_archive_names=tuple(foreign),
+        ledger_present=ledger,
     )
 
 

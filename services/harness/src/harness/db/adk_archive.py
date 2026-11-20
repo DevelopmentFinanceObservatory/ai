@@ -30,8 +30,8 @@ commits.
   `search_path` to that table, and rolls back otherwise.
 - `drop-adk` drops each of ADK's five tables that resolves on `search_path`
   and has ADK's columns, which discards ADK's copy of the conversations. It
-  locks the tables, then prints each table's row count before the `DROP`,
-  in a dry run too, so the counts are the rows it drops. A
+  prints the row count of `sessions`, one per conversation, before the
+  `DROP`, in a dry run too. The count is a snapshot. A
   table of an ADK name without ADK's columns is another service's and stays.
 - `drop-archive` drops every `adk_archive_<name>` table. It refuses, and
   drops nothing, when a table of such a name lacks the columns of the table
@@ -70,13 +70,7 @@ import pydantic
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from harness.db.engine import build_database
-from harness.db.migrate import (
-    MIGRATION_TIMEOUT_S,
-    MIGRATIONS_DIR,
-    bound_and_lock,
-    record_applied,
-    sha256,
-)
+from harness.db.migrate import MIGRATIONS_DIR, bound_and_lock, record_applied, sha256
 from harness.settings import Settings
 
 ARCHIVE_MIGRATION = MIGRATIONS_DIR / "0005_rename_adk_tables.sql"
@@ -235,6 +229,18 @@ async def archive_state(engine: AsyncEngine) -> tuple[list[str], list[str]]:
         return archived, foreign
 
 
+async def ledger_resolves(engine: AsyncEngine) -> bool:
+    """Whether `adk_ledger_imports` resolves on `search_path` under its own
+    name with the ledger's columns, as the import job needs it."""
+    async with engine.connect() as sa_conn:
+        raw = await sa_conn.get_raw_connection()
+        conn = raw.driver_connection
+        assert conn is not None
+        return await conn.fetchval(_RESOLVED, "adk_ledger_imports") is not None and not (
+            await conn.fetchval(_MISSING_COLUMNS, "adk_ledger_imports", list(_LEDGER_COLUMNS))
+        )
+
+
 async def _quoted(conn: Any, name: str) -> str:
     return await conn.fetchval("SELECT quote_ident($1)", name)
 
@@ -364,20 +370,13 @@ async def _drop(conn: Any, tables: Sequence[str]) -> list[str]:
 
 
 async def _drop_adk(conn: Any) -> list[str]:
-    """Lock each of ADK's tables, print its row count, then drop them. The
-    lock keeps a draining revision from writing between the count and the
-    `DROP`, so the counts are the rows dropped. The counts run without a
-    statement timeout, since a large `events` table outlasts the bound, and
-    the bound returns before the `DROP`."""
+    """Print the row count of ADK's `sessions` table, one per conversation, then
+    drop ADK's tables. The count is a snapshot taken before the `DROP`."""
     tables = await _adk_tables(conn)
-    if not tables:
-        return []
-    await conn.execute(f"LOCK TABLE {', '.join(tables)} IN ACCESS EXCLUSIVE MODE")
-    await conn.execute("SET LOCAL statement_timeout = 0")
-    for table in tables:
-        rows = await conn.fetchval(f"SELECT count(*) FROM {table}")
-        print(f"adk_archive drop-adk: {table} holds {rows} rows")
-    await conn.execute(f"SET LOCAL statement_timeout = {round(MIGRATION_TIMEOUT_S * 1000)}")
+    sessions = await conn.fetchval(_RESOLVED, "sessions")
+    if sessions in tables:
+        rows = await conn.fetchval(f"SELECT count(*) FROM {sessions}")
+        print(f"adk_archive drop-adk: {sessions} holds {rows} rows")
     return await _drop(conn, tables)
 
 
