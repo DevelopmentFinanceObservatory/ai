@@ -162,6 +162,7 @@ from planner.plan import (
 from planner.plan import Plan as PlannerPlan
 from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
+from starlette.requests import ClientDisconnect
 from translator.referral import REFERRAL_STATE_KEY, Referral, ReferralKind
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
@@ -2375,6 +2376,43 @@ async def test_a_raise_before_the_turn_streams_releases_the_conversation_lock() 
     assert not store.current(PRINCIPAL, CONVERSATION).lock.locked()
 
 
+@pytest.mark.parametrize(
+    ("decision", "target"),
+    [
+        ("approve", "harness.studio._spec_use_sink"),
+        ("reject", "harness.studio.ConversationState.close_turn"),
+    ],
+)
+async def test_a_raise_after_the_interrupt_save_releases_the_conversation_lock(
+    monkeypatch: pytest.MonkeyPatch, decision: str, target: str
+) -> None:
+    """`/interrupt` raises after its save has claimed the segment, before it
+    returns the stream. The lock is released, so once the segment's lease
+    expires the next turn on the conversation streams."""
+    clock = [1_000_000.0]
+    session_service = _new_session_service()
+    store = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
+    app = _app(*_plan(), session_service=session_service, store=store)
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("raised before the stream")
+
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        with monkeypatch.context() as patch:
+            patch.setattr(target, _boom)
+            with pytest.raises(RuntimeError, match="raised before the stream"):
+                await _stream(
+                    client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], decision)
+                )
+
+        assert not store.current(PRINCIPAL, CONVERSATION).lock.locked()
+        clock[0] += studio_state_module.SEGMENT_TTL_S + 1  # the claimed segment has expired
+        response = await client.post("/api/studio/turn", json=_turn_body("again"), headers=AUTH)
+    assert response.status_code == 200
+
+
 # --- asks the agent puts to the user ---------------------------------------------
 
 
@@ -3981,11 +4019,9 @@ async def test_a_client_that_leaves_a_running_turn_records_it_as_cancelled(how: 
     assert conversation.cancel_event is None
 
 
-# NOTE: the transport half of a disconnect cannot be driven in-process --
-# httpx2's ASGITransport runs the app to completion and never delivers
-# http.disconnect, so a route-level test would hang (verified). The process
-# half -- uvicorn cancelling the response task -- is the test above. The
-# RELIABLE cancellation path either way is POST /api/studio/cancel (delta 14).
+# httpx2's ASGITransport never delivers `http.disconnect`, so the tests below
+# that lose the client call the ASGI app directly with a `receive` that
+# answers it. The reliable way to stop a turn is POST /api/studio/cancel.
 
 
 async def test_a_disconnect_mid_turn_leaves_the_turn_cancelled_in_the_ledger() -> None:
@@ -4117,6 +4153,119 @@ async def test_a_client_that_leaves_at_the_pause_frame_still_releases_the_segmen
             client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
         )
     assert _events(second)[-1] == "done"
+
+
+async def _post_and_leave(
+    app: FastAPI, path: str, body: dict[str, Any], *, spec_version: str
+) -> list[dict[str, Any]]:
+    """POST `body` to `path` straight through the ASGI app with a client that
+    has already left. At ASGI spec 2.3, as uvicorn serves it, every `receive`
+    after the request body answers `http.disconnect` at once. At 2.4 the send
+    of `http.response.start` raises `OSError`, which Starlette turns into
+    `ClientDisconnect`. Returns what the app sent."""
+    raw = json.dumps(body).encode()
+    request_sent = False
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": raw, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        if spec_version == "2.4":
+            raise OSError("the client has gone")
+        sent.append(message)
+        # A socket write yields, so the disconnect cancels the response while
+        # it sends `http.response.start`, before its body takes a step.
+        await asyncio.sleep(0)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": spec_version},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(raw)).encode()),
+            (b"authorization", AUTH["Authorization"].encode()),
+        ],
+        "client": ("127.0.0.1", 50000),
+        "server": ("studio.test", 80),
+    }
+    if spec_version == "2.4":
+        with pytest.raises(ClientDisconnect):
+            await asyncio.wait_for(app(scope, receive, send), timeout=10)
+    else:
+        await asyncio.wait_for(app(scope, receive, send), timeout=10)
+    return sent
+
+
+@pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+@pytest.mark.parametrize(
+    ("request_kind", "recorded_error"),
+    [("turn", "cancelled"), ("edit", "cancelled"), ("reject", None), ("approve", "cancelled")],
+)
+async def test_a_client_gone_before_the_first_chunk_leaves_the_conversation_free(
+    request_kind: str, recorded_error: str | None, spec_version: str
+) -> None:
+    """The client is gone before the response sends its first body chunk, so
+    the stream's generators never start. The response closes the turn as a
+    disconnect does (a rejection keeps its own close), releases the
+    segment, whose save commits that record and drops the resumed interrupt,
+    and releases the conversation's lock. The next turn on the conversation
+    streams."""
+    session_service = _new_session_service()
+    if request_kind == "edit":
+        app = _app(
+            *_card(),
+            resolver=_search(),
+            executor=ScriptedExecutor(_card_results(write_token=WRITE_TOKEN)),
+            edit_model=ScriptedEditModel({"text": "Renamed.", "patch": None, "recreate": None}),
+            session_service=session_service,
+        )
+    else:
+        app = _app(
+            *(_plan() if request_kind in {"reject", "approve"} else (_text("Hello."),)),
+            session_service=session_service,
+        )
+    store = app.state.studio.store
+    async with _client(app) as client:
+        if request_kind == "edit":
+            await _conversation_with_component(client)
+            path, body = "/api/studio/turn", _edit_body("rename it")
+        elif request_kind == "turn":
+            path, body = "/api/studio/turn", _turn_body("hi")
+        else:
+            first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+            plan = _frame(first, "plan.proposed")
+            path, body = (
+                "/api/studio/interrupt",
+                _interrupt_body(plan["interrupt_id"], request_kind),
+            )
+
+        sent = await _post_and_leave(app, path, body, spec_version=spec_version)
+        assert not [m for m in sent if m["type"] == "http.response.body" and m.get("body")]
+
+        state = store.current(PRINCIPAL, CONVERSATION)
+        assert not state.lock.locked()
+        assert state.segment is None
+        ledger = await StudioStore(session_service, app_name=AGENT_NAME).load(
+            PRINCIPAL, CONVERSATION
+        )
+        assert ledger is not None
+        assert ledger.segment is None
+        assert ledger.pending == {}
+        assert ledger.turns[-1].get("error") == recorded_error
+        response = await client.post("/api/studio/turn", json=_turn_body("again"), headers=AUTH)
+    assert response.status_code == 200
 
 
 # --- the Edit Card route (component_ref intent=edit) ----------------------------
