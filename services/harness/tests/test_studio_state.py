@@ -4619,25 +4619,35 @@ class _StatusReadEscaped(BaseException):
     """A status read that no bound reached."""
 
 
-async def test_a_status_read_that_turns_its_cancellation_into_another_error_ends_at_its_limit() -> (
-    None
-):
-    """A status read cancelled at its bound that raises another error in
-    place of the cancellation, as a driver rolling back a broken connection
-    does, counts as unknown, and the read back still ends at its limit,
-    with `False`. Every read is bounded, so none runs past the limit."""
+@pytest.mark.parametrize("read", ["cancellation-turned-into-error", "too-old"])
+async def test_a_status_read_back_that_cannot_tell_returns_false_and_logs_it(
+    caplog, read: str
+) -> None:
+    """A status read back returns `False`, with one ERROR record naming the
+    write, when it cannot tell whether the COMMIT landed. A read cancelled
+    at its bound that raises another error in place of the cancellation, as
+    a driver rolling back a broken connection does, counts as unknown, and
+    the read back still ends at its limit: every read is bounded, so none
+    runs past it. A status too old to read (`None`) ends it at once."""
     loop = asyncio.get_running_loop()
     started = loop.time()
 
     async def status() -> str | None:
+        if read == "too-old":
+            return None
         try:
             await asyncio.sleep(max(started + 2 - loop.time(), 0))
         except asyncio.CancelledError:
             raise asyncpg.InterfaceError("cannot perform operation") from None
         raise _StatusReadEscaped
 
-    assert not await transaction_committed(status, what="a write", limit_s=0.3)
+    with caplog.at_level(logging.ERROR, logger="harness.db.commit"):
+        assert not await transaction_committed(status, what="a write", limit_s=0.3)
+
     assert loop.time() - started < 1
+    [record] = [r for r in caplog.records if r.name == "harness.db.commit"]
+    assert record.levelno == logging.ERROR
+    assert "a write" in record.getMessage()
 
 
 class _LostAck:

@@ -2557,14 +2557,17 @@ class StudioStore:
         """Run `write` in a transaction of its own through
         `harness.db.commit.committing`, and return what the function it
         returns gives once the transaction commits. `write` also returns the
-        id of its transaction (`_lock_conversation`'s `xact`) when what it
-        commits carries a turn line, and `None` otherwise. A COMMIT that
+        id of its transaction (`_lock_conversation`'s `xact`) when it is to
+        be confirmed, and `None` otherwise: a save or a record of a closed
+        turn returns it when what it commits carries a turn line, and the
+        closing write (`_close_segment`) always does, since its
+        `SegmentClose` tells the stream whether its state was saved. A COMMIT that
         raises is then confirmed by that transaction's status, read for up
         to `COMMIT_READ_BACK_LIMIT_S` (`_transaction_committed`): one that
         committed runs the function and returns as a COMMIT that returned
-        does, so its lines are written once; any other raises. A write with
-        no line, or a status still unknown at the limit, raises the COMMIT's
-        error and writes nothing."""
+        does, so its lines are written once; any other raises. A write that
+        returned `None`, or a status still unknown at the limit, raises the
+        COMMIT's error and writes nothing."""
         xacts: list[str] = []
 
         async def run(conn: AsyncConnection) -> Callable[[], T]:

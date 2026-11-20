@@ -1546,6 +1546,7 @@ class _LostAckThenOverwritten:
         "returns",
         "caller-cancelled-landed-held-open",
         "caller-cancelled-held-open-before-landing",
+        "caller-cancelled-as-its-commit-starts",
         "fenced-out",
         "lost-ack-overwritten",
     ],
@@ -1558,7 +1559,8 @@ async def test_a_pause_hands_its_cursor_to_committed_once_its_write_commits(
     into the COMMIT, so the caller ends in the cancellation within the read
     back's limit, here 0.5 s (`PAUSE_READ_BACK_LIMIT_S`): a COMMIT that
     landed runs `committed` once, and one that had not stores nothing and
-    runs nothing. A COMMIT whose acknowledgement is lost and whose
+    runs nothing. That holds for a cut queued as the write ends, before the
+    commit's task first runs. A COMMIT whose acknowledgement is lost and whose
     transaction committed runs `committed` and raises its error, even after
     another segment wrote the turn over. A pause fenced out by a moved lease
     commits nothing and runs nothing."""
@@ -1604,9 +1606,20 @@ async def test_a_pause_hands_its_cursor_to_committed_once_its_write_commits(
         landed = how == "caller-cancelled-landed-held-open"
         held = _HeldCommit(pg_engine, landed=landed)
         store._engine = held  # type: ignore[assignment]
+        task: asyncio.Future[Any] | None = None
+        if how == "caller-cancelled-as-its-commit-starts":
+            write_lineage = turn_store._write_lineage
+
+            async def cut_as_the_write_ends(*args: Any) -> None:
+                await write_lineage(*args)
+                assert task is not None
+                asyncio.get_running_loop().call_soon(task.cancel)
+
+            monkeypatch.setattr(turn_store, "_write_lineage", cut_as_the_write_ends)
         task = asyncio.ensure_future(pause())
         await asyncio.wait_for(held.holding.wait(), timeout=5)
-        task.cancel()
+        if how != "caller-cancelled-as-its-commit-starts":
+            task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=2)
         store._engine = pg_engine  # type: ignore[assignment]

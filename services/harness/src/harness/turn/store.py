@@ -639,8 +639,9 @@ _SETTLE = text("SELECT 1 FROM turn_cursors WHERE id = :id FOR SHARE")
 SETTLE_TIMEOUT_S = 2.0
 
 # The longest a pause whose COMMIT raised reads its transaction's status
-# (`TurnStore.pause`). A cut waits for it, so it stays well inside the lease
-# margin a lost lease leaves (`harness.studio_store.LEASE_MARGIN_S`, 10 s).
+# (`TurnStore.pause`), counted from when the driver let go of the COMMIT's
+# connection. A cut waits for it, so it stays well inside the lease margin a
+# lost lease leaves (`harness.studio_store.LEASE_MARGIN_S`, 10 s).
 PAUSE_READ_BACK_LIMIT_S = 2.0
 
 
@@ -1123,12 +1124,14 @@ class TurnStore:
         commit cannot land the pause without it. A cut before the commit
         rolls the write back. A COMMIT that raises is confirmed by its
         transaction's status (`_read_back`), read for up to
-        `PAUSE_READ_BACK_LIMIT_S`: one that committed runs `committed`, and
+        `PAUSE_READ_BACK_LIMIT_S` from when the driver let go of the
+        COMMIT's connection: one that committed runs `committed`, and
         the COMMIT's error is raised all the same, so the caller judges the
         pause by the turn as stored (`harness.turn.loop`), which another
         segment may have written over since. A cut of the caller while the
-        COMMIT is awaited is passed into it, so the cut waits only for that
-        read.
+        COMMIT is awaited is passed into it, so the cut waits for the driver
+        to let go of the cancelled connection, which takes as long as the
+        server takes to answer the cancel, and then for that read.
 
         Raises:
             SegmentLost: `segment_id` does not hold the conversation's lease.

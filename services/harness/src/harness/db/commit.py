@@ -76,9 +76,14 @@ async def transaction_committed(
     read again every `READ_BACK_POLL_S` until `limit_s` has passed. Each read
     is bounded by the time left, and any exception it ends on, the
     cancellation of that bound turned into another error included, counts
-    as unknown. `False` for `aborted` or `None`, and when the limit passes
-    unsettled, which is logged at ERROR with `what`: such a COMMIT that lands
-    later runs none of the work owed to it."""
+    as unknown. The limit counts from the call, which a caller makes once
+    the driver has let go of the connection whose COMMIT raised; a read
+    cancelled at its bound overruns it while the driver lets go of that
+    read's connection, which takes as long as the server takes to answer
+    the cancel. `False` for `aborted`; for `None`, which is logged at ERROR
+    with `what`, since a COMMIT that landed may read so; and when the limit
+    passes unsettled, logged the same way: such a COMMIT that lands later
+    runs none of the work owed to it."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + limit_s
     failure: Exception | None = None
@@ -89,6 +94,12 @@ async def transaction_committed(
         except Exception as exc:
             failure = exc
         else:
+            if read is None:
+                logger.error(
+                    "db commit: %s's COMMIT raised and its transaction is too old to read",
+                    what,
+                )
+                return False
             if read != "in progress":
                 return read == "committed"
         await asyncio.sleep(min(READ_BACK_POLL_S, max(deadline - loop.time(), 0)))
@@ -126,8 +137,11 @@ async def committing[T](
     caller that arrives while the COMMIT statement is awaited is passed into
     the commit task. The COMMIT then raises, which drops its connection, and
     `read_back` confirms it as for any COMMIT that raised, so the caller's
-    cancellation is raised once that read ends, within its limit. A cancel
-    that arrives at any other time waits for the task, as without it."""
+    cancellation is raised once that read ends. `read_back`'s limit starts
+    only once the driver has let go of the cancelled connection, which
+    waits for the server to answer the cancel, so a cut is prompt only while
+    the server answers. A cancel that arrives at any other time waits for
+    the task, as without it."""
     conn = await transaction.__aenter__()
     try:
         committed = await write(conn)
