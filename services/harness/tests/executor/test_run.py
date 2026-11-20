@@ -30,6 +30,7 @@ from compiler.surface import (
     ToolCallResult,
     ToolSchema,
     ToolSurfaceUnavailableError,
+    current_spec_uses,
 )
 from data_mcp import stat_var_list
 from data_mcp.client import UpstreamClient
@@ -706,18 +707,25 @@ async def test_a_slow_attempt_record_spends_none_of_the_step_budget(
     real_schemas: list[ToolSchema],
     short_budget: tuple[ToolCapability, ...],
 ) -> None:
-    outcome = await asyncio.wait_for(
-        _run(
-            approved_plan(),
-            surface=_surface(real_schemas, manifest()),
-            sleep=_Sleeps(),
-            capabilities=short_budget,
-            ledger=_SlowAttempts(),
-        ),
-        timeout=5,
-    )
+    """The step is accepted, and the turn hears its `get_data` spec fetched."""
+    uses: list[tuple[str, str]] = []
+    token = current_spec_uses.set(lambda use, spec_id: uses.append((use, spec_id)))
+    try:
+        outcome = await asyncio.wait_for(
+            _run(
+                approved_plan(),
+                surface=_surface(real_schemas, manifest()),
+                sleep=_Sleeps(),
+                capabilities=short_budget,
+                ledger=_SlowAttempts(),
+            ),
+            timeout=5,
+        )
+    finally:
+        current_spec_uses.reset(token)
 
     assert isinstance(outcome, Accepted), outcome
+    assert uses == [("fetched", manifest()["definition"]["spec_id"])]
 
 
 async def test_a_statistics_fetch_that_never_answers_stops_at_its_step_budget(
@@ -729,21 +737,29 @@ async def test_a_statistics_fetch_that_never_answers_stops_at_its_step_budget(
     async def never_answers(_manifest: Any) -> None:
         await asyncio.Event().wait()
 
-    outcome = await asyncio.wait_for(
-        _run(
-            approved_plan(),
-            surface=_surface(real_schemas, manifest()),
-            sleep=_Sleeps(),
-            capabilities=short_budget,
-            fetch_series_stats=never_answers,
-        ),
-        timeout=5,
-    )
+    uses: list[tuple[str, str]] = []
+    token = current_spec_uses.set(lambda use, spec_id: uses.append((use, spec_id)))
+    try:
+        outcome = await asyncio.wait_for(
+            _run(
+                approved_plan(),
+                surface=_surface(real_schemas, manifest()),
+                sleep=_Sleeps(),
+                capabilities=short_budget,
+                fetch_series_stats=never_answers,
+            ),
+            timeout=5,
+        )
+    finally:
+        current_spec_uses.reset(token)
 
     assert isinstance(outcome, Refused), outcome
     assert outcome.refusal is RefusalKind.TRANSPORT_FAILED
     assert outcome.step_id == "debt"
     assert outcome.completed == ()
+    # The budget ran out in the evidence check, so the step's result was
+    # never accepted and the turn hears no fetched spec.
+    assert uses == []
 
 
 async def test_a_slow_statistics_fetch_stops_the_step_as_transient_before_its_budget_runs_out(

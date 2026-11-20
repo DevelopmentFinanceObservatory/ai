@@ -8,7 +8,7 @@ copies the file to its pinned tier and answers the file's facts with the link's 
 minutes. The tool never calls the link, so no signed URL reaches its result.
 
 The prepare spends one unit of the caller's daily pin allowance for a new file, and
-nothing for a repeat. The caller the website named rides on the call
+nothing for a repeat. The caller rides on the call, as on every dfo-apis call
 (`UpstreamClient.caller_headers`).
 
 A fetched frame (`spec_`) exports its long layout, with a `_label` column beside each
@@ -280,7 +280,6 @@ async def export_data(
             _PREPARE_ROUTE,
             route=_PREPARE_ROUTE,
             json=body,
-            headers=client.caller_headers(),
             deadline=current_call_deadline() or CallDeadline.after(_PREPARE_DEADLINE_S),
         )
     except UpstreamError as exc:

@@ -1,10 +1,11 @@
 import json
 import logging
 import sys
+from datetime import UTC, datetime
 
 import common.logging as common_logging
 import pytest
-from common.logging import _CloudRunFormatter, configure_logging
+from common.logging import JSON_FIELDS, _CloudRunFormatter, configure_logging
 
 
 @pytest.fixture(autouse=True)
@@ -71,3 +72,73 @@ def test_cloud_run_formatter_embeds_traceback():
     assert payload["severity"] == "ERROR"
     assert "stack_trace" in payload
     assert "ValueError: boom" in payload["stack_trace"]
+
+
+def test_cloud_run_formatter_writes_json_fields_beside_its_own_keys():
+    started = datetime(2026, 11, 19, 12, 0, tzinfo=UTC)
+    formatter = _CloudRunFormatter()
+    logger = logging.getLogger("test.cloud_run_formatter")
+    record = logger.makeRecord(
+        logger.name,
+        logging.INFO,
+        __file__,
+        0,
+        "studio.turn",
+        (),
+        None,
+        extra={
+            JSON_FIELDS: {
+                "event": "studio.turn",
+                "drawn_specs": ["spec_a"],
+                "message": "x",
+                "started_at": started,
+                "fetched_specs": {"spec_b"},
+                ("spec_c", 1): "tuple key",
+                "nested": {("spec_d", 2): [{("spec_e", 3): "deep"}]},
+            }
+        },
+    )
+
+    payload = json.loads(formatter.format(record))
+
+    assert payload["event"] == "studio.turn"
+    assert payload["drawn_specs"] == ["spec_a"]
+    assert payload["started_at"] == str(started)
+    assert payload["fetched_specs"] == str({"spec_b"})
+    assert payload[str(("spec_c", 1))] == "tuple key"
+    assert payload["nested"] == {str(("spec_d", 2)): [{str(("spec_e", 3)): "deep"}]}
+    assert payload["message"] == "studio.turn"
+    assert payload["severity"] == "INFO"
+
+
+def _cyclic_dict() -> dict[str, object]:
+    value: dict[str, object] = {}
+    value["self"] = value
+    return value
+
+
+def _cyclic_list() -> list[object]:
+    value: list[object] = []
+    value.append(value)
+    return value
+
+
+@pytest.mark.parametrize("cycle", [_cyclic_dict, _cyclic_list], ids=["dict", "list"])
+def test_cloud_run_formatter_logs_a_record_whose_fields_hold_a_cycle(cycle):
+    """Fields that refer to themselves are left out. The record still logs its
+    own keys."""
+    logger = logging.getLogger("test.cloud_run_formatter")
+    record = logger.makeRecord(
+        logger.name,
+        logging.INFO,
+        __file__,
+        0,
+        "studio.turn",
+        (),
+        None,
+        extra={JSON_FIELDS: {"event": "studio.turn", "loop": cycle()}},
+    )
+
+    payload = json.loads(_CloudRunFormatter().format(record))
+
+    assert payload == {"severity": "INFO", "message": "studio.turn", "logger": logger.name}

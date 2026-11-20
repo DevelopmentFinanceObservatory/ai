@@ -13,11 +13,21 @@ import pytest
 from common.caller import (
     ANONYMOUS_WRITER,
     CALLER_HEADER,
+    CALLER_PRINCIPAL_HEADER,
     MAX_CALLER_CHARS,
+    MAX_USER_AGENT_CHARS,
+    SURFACE_HEADER,
+    TURN_HEADER,
+    USER_AGENT_HEADER,
     conversation_caller,
     current_caller,
+    current_turn,
+    current_user_agent,
     current_writer,
+    set_supplied_caller,
+    set_supplied_turn,
     supplied_caller,
+    vouched_caller_headers,
 )
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
@@ -147,3 +157,129 @@ def test_a_conversation_caller_is_a_fixed_length_digest_of_the_key() -> None:
     assert "u_0123456789abcdef" not in caller
     assert conversation_caller(key) == caller
     assert conversation_caller("u/a") != conversation_caller("u/b")
+
+
+def _user_agent_of(user_agent: str) -> str | None:
+    scope = {"type": "http", "headers": [(b"user-agent", user_agent.encode("latin-1"))]}
+    with set_http_request(Request(scope)):
+        return current_user_agent()
+
+
+@pytest.mark.parametrize(
+    ("user_agent", "expected"),
+    [
+        ("claude-user/1.0 (+https://claude.ai)", "claude-user/1.0 (+https://claude.ai)"),
+        ("  openai-mcp/1.0.0 ", "openai-mcp/1.0.0"),
+        ("a/" + "x" * 300, ("a/" + "x" * 300)[:MAX_USER_AGENT_CHARS]),
+        ("caf\xe9/1.0", "caf/1.0"),  # codespell:ignore caf
+        ("a/1.0\t(x)", "a/1.0(x)"),
+        ("   ", None),
+    ],
+    ids=["whole", "stripped", "clipped", "non-ascii", "tab", "blank"],
+)
+def test_the_user_agent_is_kept_whole_and_clipped(user_agent: str, expected: str | None) -> None:
+    assert _user_agent_of(user_agent) == expected
+
+
+def test_no_user_agent_outside_a_request() -> None:
+    assert current_user_agent() is None
+
+
+_ADDRESS = "ip:" + "0" * 32
+_CONVERSATION = conversation_caller("u/c1")
+
+
+@pytest.mark.parametrize(
+    ("caller", "user_agent", "principal", "sent"),
+    [
+        (
+            _ADDRESS,
+            "claude-user/1.0 (+https://claude.ai)",
+            "p",
+            {
+                CALLER_PRINCIPAL_HEADER: "p",
+                CALLER_HEADER: _ADDRESS,
+                SURFACE_HEADER: "mcp",
+                USER_AGENT_HEADER: "claude-user/1.0 (+https://claude.ai)",
+            },
+        ),
+        (
+            _CONVERSATION,
+            "python-httpx/0.28",
+            "p",
+            {CALLER_PRINCIPAL_HEADER: "p", CALLER_HEADER: _CONVERSATION},
+        ),
+        (
+            _ADDRESS,
+            None,
+            "p",
+            {CALLER_PRINCIPAL_HEADER: "p", CALLER_HEADER: _ADDRESS, SURFACE_HEADER: "mcp"},
+        ),
+        (_ADDRESS, "claude-user/1.0", None, {}),
+        (_CONVERSATION, "claude-user/1.0", None, {}),
+        ("conversation:u/c1", "claude-user/1.0", "p", {}),
+        ("user:edge", "claude-user/1.0", "p", {}),
+        (None, "claude-user/1.0", "p", {}),
+    ],
+    ids=[
+        "mcp-client",
+        "studio",
+        "no-user-agent",
+        "address-unset",
+        "conversation-unset",
+        "malformed-conversation",
+        "other-kind",
+        "no-caller",
+    ],
+)
+def test_the_vouched_headers_name_an_address_or_conversation_caller(
+    caller: str | None, user_agent: str | None, principal: str | None, sent: dict[str, str]
+) -> None:
+    """dfo-apis reads Studio from a `conversation:` prefix, so that caller sends
+    no surface, and it refuses any other caller form beside the principal."""
+    headers = [(CALLER_HEADER, caller), ("user-agent", user_agent)]
+    scope = {
+        "type": "http",
+        "headers": [(k.encode(), v.encode()) for k, v in headers if v is not None],
+    }
+    with set_http_request(Request(scope)):
+        assert vouched_caller_headers(principal) == sent
+
+
+_TURN = "tr_" + "0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    ("caller", "turns", "sent_turn"),
+    [
+        (_CONVERSATION, [_TURN], _TURN),
+        (_ADDRESS, [_TURN], None),
+        (_CONVERSATION, [], None),
+        (_CONVERSATION, ["tr_" + "0123456789ABCDEF"], None),
+        (_CONVERSATION, [_TURN, _TURN], None),
+    ],
+    ids=["studio-turn", "address-caller", "no-turn", "malformed", "repeated"],
+)
+def test_the_vouched_headers_name_a_conversations_turn(
+    caller: str, turns: list[str], sent_turn: str | None
+) -> None:
+    """A Studio turn reaches dfo-apis beside its `conversation:` caller only,
+    and only in the form the harness mints."""
+    headers = [(CALLER_HEADER, caller), *((TURN_HEADER, turn) for turn in turns)]
+    scope = {"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers]}
+    with set_http_request(Request(scope)):
+        assert vouched_caller_headers("p").get(TURN_HEADER) == sent_turn
+
+
+async def test_a_supplied_turn_names_an_in_process_call() -> None:
+    """Outside any MCP request the supplied caller and turn stand in for the
+    headers, as the harness's graph calls dfo-apis in process."""
+    assert current_turn() is None
+    set_supplied_caller(_CONVERSATION)
+    set_supplied_turn(_TURN)
+
+    assert vouched_caller_headers("p") == {
+        CALLER_PRINCIPAL_HEADER: "p",
+        CALLER_HEADER: _CONVERSATION,
+        TURN_HEADER: _TURN,
+    }

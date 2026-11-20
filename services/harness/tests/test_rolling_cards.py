@@ -19,12 +19,24 @@ import pytest
 from analysis_mcp.growth_tool import growth
 from analysis_mcp.rolling_tool import resolve_anchor
 from analysis_mcp.runner_client import DerivedUnread
+from common import telemetry
+from common.caller import (
+    conversation_caller,
+    current_caller,
+    current_turn,
+    set_supplied_caller,
+    set_supplied_turn,
+)
 from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_store
 from common.recipe import RecipeAnchorError, build_recipe
+from common.telemetry import record_event, turn_segment
+from compiler.caller_clients import CallerTurn
+from compiler.surface import current_spec_uses
 from data_mcp.deadline import CallDeadline
 from data_mcp.operations import QueuedOperation
 from dfo_frame_grammar import Frame
 from harness import rolling_cards
+from harness.conversation import current_caller_turn, current_conversation_id, current_turn_id
 from harness.recipe_replay import RESUME_RETRY_AFTER_S, Pending, Refused, Replayed
 from harness.rolling_cards import (
     WITHHELD_FOR_S,
@@ -36,6 +48,10 @@ from harness.rolling_cards import (
     written_title_refusal,
 )
 from harness.tool_contracts import HarnessCode
+from opentelemetry import trace as otel_trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from .replay_support import REPORTERS, SPEC, STAT_VAR, reporter_frame, reporter_rows, yearly
 from .test_recipe_replay import Scene
@@ -284,6 +300,79 @@ async def test_cards_drawing_the_same_other_series_share_one_replay(scene: Scene
         moved, select={"reporter": FRANCE}
     )
     assert len(replays.populations) == 1
+
+
+async def test_a_replay_a_conversation_starts_names_neither_its_caller_nor_its_turn(
+    scene: Scene,
+) -> None:
+    """Another conversation's card may join the replay, so its dfo-apis calls,
+    in process and through the harness's MCP clients alike, name no conversation
+    and no turn."""
+    ref, _ = await scene.rolling()
+    replays = Replays(scene)
+    seen: list[tuple[str | None, str | None, CallerTurn]] = []
+    scene.tools.after = lambda _name: seen.append(
+        (current_caller(), current_turn(), current_caller_turn())
+    )
+    caller, turn = conversation_caller("user-1/conv-a"), "tr_" + "1" * 16
+    current_conversation_id.set("user-1/conv-a")
+    current_turn_id.set(turn)
+    set_supplied_caller(caller)
+    set_supplied_turn(turn)
+    # Control: the card is admitted inside conversation A's turn.
+    assert (current_caller(), current_turn(), current_caller_turn()) == (
+        caller,
+        turn,
+        CallerTurn(caller, turn),
+    )
+
+    await _admit(
+        RollingCards(replay=replays), _card(ref.model_dump(), select={"reporter": [FRANCE]})
+    )
+
+    assert len(replays.populations) == 1
+    assert seen
+    assert set(seen) == {(None, None, CallerTurn(None, None))}
+
+
+async def test_a_replay_a_conversation_starts_records_nothing_on_its_turns_trace(
+    scene: Scene, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another conversation's card may join the replay, so the replay runs
+    outside the starting turn's trace: no span is current in it, an event it
+    records lands on no span of that turn, and its fetches reach no turn's
+    spec-use sink."""
+    ref, _ = await scene.rolling()
+    replays = Replays(scene)
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(otel_trace, "_TRACER_PROVIDER", provider)
+    monkeypatch.setattr(telemetry, "_backend", "otel")
+    current: list[bool] = []
+    sinks: list[object] = []
+
+    def probe(_name: str) -> None:
+        current.append(otel_trace.get_current_span().get_span_context().is_valid)
+        sinks.append(current_spec_uses.get())
+        record_event("replay.probe", level="DEFAULT")
+
+    scene.tools.after = probe
+    token = current_spec_uses.set(lambda use, spec_id: None)
+    with turn_segment("tr_" + "1" * 16):
+        # Control: inside conversation A's turn an event lands on its segment.
+        record_event("turn.probe", level="DEFAULT")
+        assert current_spec_uses.get() is not None
+        await _admit(
+            RollingCards(replay=replays), _card(ref.model_dump(), select={"reporter": [FRANCE]})
+        )
+
+    current_spec_uses.reset(token)
+    assert current
+    assert set(current) == {False}
+    assert set(sinks) == {None}
+    (segment,) = exporter.get_finished_spans()
+    assert [event.name for event in segment.events] == ["turn.probe"]
 
 
 _LATEST = {"anchor": "latest", "offset": 0}
