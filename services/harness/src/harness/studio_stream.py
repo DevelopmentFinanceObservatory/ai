@@ -119,11 +119,12 @@ logger = logging.getLogger(__name__)
 
 # How long the app's lifespan shutdown waits for the owners still running:
 # inside Cloud Run's 10 s between SIGTERM and SIGKILL, with room for the rest
-# of the shutdown. An owner's closing write is bounded at 5 s up to its
-# COMMIT (`StudioStore.close_segment`), and the COMMIT, which runs to its end,
-# by the connection's `command_timeout` (`harness.db.engine.COMMAND_TIMEOUT_S`,
-# 90 s). An owner still committing when SIGKILL lands leaves the lease to its
-# TTL.
+# of the shutdown. An owner's closing write (`StudioStore.close_segment`) is
+# bounded at 5 s up to its COMMIT. The COMMIT runs to its end, bounded by the
+# connection's `command_timeout` (`harness.db.engine.COMMAND_TIMEOUT_S`,
+# 90 s), and a COMMIT that raises is then read back for up to 5 s more
+# (`harness.studio_store._READ_BACK_LIMIT_S`). An owner still committing or
+# reading back when SIGKILL lands leaves the lease to its TTL.
 SHUTDOWN_WAIT_S = 7.0
 
 

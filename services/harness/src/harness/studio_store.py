@@ -226,6 +226,12 @@ SEQ_BLOCK = 2**20
 # delay to the last.
 _RETRY_FIRST_DELAY_S = 0.25
 _RETRY_MAX_DELAY_S = 4.0
+# How often a closing write's read back reads again the status of a
+# transaction whose COMMIT the server has not finished, and how long it reads
+# for (`_transaction_committed`). The read back runs in the COMMIT's own task
+# (`harness.db.commit.committing`), whatever the caller's timeout.
+_READ_BACK_POLL_S = 0.05
+_READ_BACK_LIMIT_S = 5.0
 # How long before its lease lapses an instance stops trusting it holds the
 # conversation. The heartbeat gives up renewing and writes stop retrying then
 # (`StudioStore.lease_deadline`).
@@ -1662,7 +1668,6 @@ class StudioStore:
             raise SegmentBusy(retry_after_seconds=math.ceil(live.expires_at - entry.read_at))
         lease_id = segment_id if segment_id is not None else _wire_id("seg")
         stamp = self._clock()
-        state = entry.state
 
         async def write(conn: AsyncConnection) -> Callable[[], TurnLease]:
             row = (await conn.execute(self._lock_conversation, {"pk": entry.pk})).first()
@@ -1694,7 +1699,10 @@ class StudioStore:
 
             def committed() -> TurnLease:
                 segment = Segment(id=lease_id, owner=_OWNER_ID, expires_at=claimed.lease_expires_at)
-                state.segment = segment
+                # Read now: the live state may have been evicted and loaded
+                # afresh while the claim waited for the write lock.
+                if entry.state is not None:
+                    entry.state.segment = segment
                 self._note_segment(entry, segment)
                 entry.lease_stamp = stamp
                 entry.held = lease_id
@@ -2335,11 +2343,15 @@ class StudioStore:
         bounded by the connection's `command_timeout`
         (`harness.db.engine.COMMAND_TIMEOUT_S`, 90 s), so a COMMIT that lands
         after the timeout returns as committed. A COMMIT that raises is read
-        back (`_read_back_close`): when the row holds the version the write
-        set, the write landed with its acknowledgement lost, and its lines
-        and bookkeeping run then, with no second write. Any other failure is
-        logged and returned as `FAILED`, and the lease then lapses by its
-        TTL. The write settles the
+        back in the same task, whatever the timeout, for up to
+        `_READ_BACK_LIMIT_S` (`_transaction_committed`): when its transaction
+        committed, the write landed with its acknowledgement lost, and its
+        lines and bookkeeping run then, with no second write. The caller
+        waits for that task, so its wait is `timeout` up to the COMMIT, then
+        the COMMIT and any read back. Any other failure is logged and
+        returned as `FAILED`, and the lease then lapses by its TTL. A COMMIT
+        the server finishes after the read back gave up leaves its record in
+        the row with no line written. The write settles the
         pending canvas writes under the row lock and rebuilds the record's
         cards from the row's items. A fault reading those items fails the
         closing write. After `LOST` or `FAILED` the live state may hold what
@@ -2356,17 +2368,11 @@ class StudioStore:
             )
             return SegmentClose.FAILED
         landed: list[SegmentClose] = []
-        written: list[tuple[int, Callable[[], SegmentClose]]] = []
         try:
             try:
                 async with asyncio.timeout(timeout), entry.write_lock:
                     return await self._close_segment(
-                        entry,
-                        entry.state,
-                        conversation_id,
-                        segment_id,
-                        landed=landed,
-                        written=written,
+                        entry, entry.state, conversation_id, segment_id, landed=landed
                     )
             except TimeoutError:
                 if not landed:
@@ -2384,20 +2390,16 @@ class StudioStore:
                     segment_id,
                 )
             if landed:
-                # The commit landed, after the timeout or before bookkeeping
-                # that raised: the write stands, and so do its lines.
+                # The commit landed after the timeout: the write stands, and
+                # so do its lines.
                 logger.warning(
-                    "studio store: conversation %s segment %s's closing write committed, "
-                    "though the call did not return",
+                    "studio store: conversation %s segment %s's closing write committed "
+                    "after its %ss timeout",
                     conversation_id,
                     segment_id,
+                    timeout,
                 )
                 return landed[0]
-            closed = await self._read_back_close(
-                entry, conversation_id, segment_id, written, landed=landed, timeout=timeout
-            )
-            if closed is not None:
-                return closed
             logger.warning(
                 "studio store: conversation %s segment %s's closing write saved nothing; the "
                 "lease lapses by its TTL",
@@ -2417,15 +2419,17 @@ class StudioStore:
         segment_id: str,
         *,
         landed: list[SegmentClose],
-        written: list[tuple[int, Callable[[], SegmentClose]]],
     ) -> SegmentClose:
         """`close_segment`'s transaction. The caller holds the write lock.
         The commit and what follows it run to the end
         (`harness.db.commit.committing`), and once it commits the result is
-        put on `landed` first, before any bookkeeping that can raise, for a
-        caller whose timeout cut in during the commit. Once the write ran,
-        the version it set and the work owed to its commit go on `written`,
-        for a caller whose COMMIT raised to read back (`_read_back_close`)."""
+        put on `landed` first, for a caller whose timeout cut in during the
+        commit. A COMMIT that raises is read back in the same task, by the
+        write's own transaction id (`_transaction_committed`), and one that
+        landed runs the work owed to its commit as one that returned does.
+        Bookkeeping that raises after the
+        commit is logged and drops the live state, as `evict` does, so the
+        next request loads the row the commit wrote."""
 
         async def write(conn: AsyncConnection) -> Callable[[], SegmentClose]:
             assert entry.pk is not None
@@ -2482,6 +2486,7 @@ class StudioStore:
                     )
             changed = _changed_since(_serialize_durable(work), entry.baseline)
             lines = _committed_lines(changed, stored=entry.baseline)
+            xact = (await conn.execute(text("SELECT pg_current_xact_id()::text"))).scalar_one()
             version = (
                 (await self._write(conn, entry.pk, changed)).version if changed else row.version
             )
@@ -2492,71 +2497,75 @@ class StudioStore:
                 closed = SegmentClose.STOPPED if stopped else SegmentClose.SAVED
                 landed.append(closed)
                 _write_turn_lines(conversation_id, lines)
-                entry.version = version
-                entry.baseline.update(changed)
-                _assign_changed(state, work, base)
-                return closed
-
-            if changed:
-                written.append((version, committed))
-            return committed
-
-        return await committing(self._transaction(), write)
-
-    async def _read_back_close(
-        self,
-        entry: _RuntimeEntry,
-        conversation_id: str,
-        segment_id: str,
-        written: list[tuple[int, Callable[[], SegmentClose]]],
-        *,
-        landed: list[SegmentClose],
-        timeout: float,
-    ) -> SegmentClose | None:
-        """After a closing write whose COMMIT raised, read the row's version
-        in a fresh transaction. When it is the version the write set, the
-        write landed with its acknowledgement lost: run the work owed to its
-        commit (`committed`, the turn's lines and the bookkeeping) under the
-        write lock and return how it closed. Writes nothing. `timeout` bounds
-        the wait for the lock and the read. Returns `None` when the write
-        never ran, did not land, or the read fails."""
-        if not written:
-            return None
-        version, committed = written[0]
-        try:
-            async with asyncio.timeout(timeout), entry.write_lock:
-                async with self._transaction() as conn:
-                    stored = (
-                        await conn.execute(
-                            text("SELECT version FROM conversations WHERE id = :pk"),
-                            {"pk": entry.pk},
-                        )
-                    ).scalar_one_or_none()
-                if stored != version:
-                    return None
-                logger.warning(
-                    "studio store: conversation %s segment %s's closing write landed with its "
-                    "acknowledgement lost",
-                    conversation_id,
-                    segment_id,
-                )
                 try:
-                    return committed()
+                    _assign_changed(state, work, base)
+                    entry.version = version
+                    entry.baseline.update(changed)
                 except Exception:
                     logger.exception(
-                        "studio store: conversation %s segment %s's closing write landed and "
-                        "its bookkeeping failed",
+                        "studio store: conversation %s segment %s's closing write committed "
+                        "and its bookkeeping failed; the live state is dropped",
                         conversation_id,
                         segment_id,
                     )
-                    return landed[0] if landed else SegmentClose.SAVED
+                    entry.state = None
+                    entry.draft = None
+                    entry.baseline = {}
+                return closed
+
+            xacts.append(xact)
+            return committed
+
+        xacts: list[str] = []
+
+        async def read_back() -> bool:
+            return bool(xacts) and await self._transaction_committed(
+                xacts[0], conversation_id, segment_id
+            )
+
+        return await committing(self._transaction(), write, read_back=read_back)
+
+    async def _transaction_committed(
+        self, xact: str, conversation_id: str, segment_id: str
+    ) -> bool:
+        """Whether the closing write's transaction `xact`, whose COMMIT
+        raised, committed, read on a fresh connection (`pg_xact_status`). A
+        status still `in progress`, a COMMIT the server has not finished, is
+        read again every `_READ_BACK_POLL_S` for up to `_READ_BACK_LIMIT_S`.
+        `False` when it aborted, is unknown, or is still unsettled or
+        unreadable at the limit: that last case, a COMMIT that lands later,
+        leaves its record in the row with no line written and the live state
+        evicted."""
+        try:
+            async with asyncio.timeout(_READ_BACK_LIMIT_S):
+                while (status := await self._xact_status(xact)) == "in progress":
+                    await asyncio.sleep(_READ_BACK_POLL_S)
         except Exception:
             logger.exception(
                 "studio store: conversation %s segment %s's closing write could not be read back",
                 conversation_id,
                 segment_id,
             )
-            return None
+            return False
+        if status != "committed":
+            return False
+        logger.warning(
+            "studio store: conversation %s segment %s's closing write landed with its "
+            "acknowledgement lost",
+            conversation_id,
+            segment_id,
+        )
+        return True
+
+    async def _xact_status(self, xact: str) -> str | None:
+        """The status Postgres holds for transaction `xact`: `committed`,
+        `aborted`, `in progress`, or `None` once it is too old to tell."""
+        async with self._transaction() as conn:
+            return (
+                await conn.execute(
+                    text("SELECT pg_xact_status(CAST(CAST(:xact AS text) AS xid8))"), {"xact": xact}
+                )
+            ).scalar_one()
 
     def evict(self, principal: str, conversation_id: str) -> None:
         """Forget this instance's live state for the conversation, so the

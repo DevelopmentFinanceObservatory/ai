@@ -572,7 +572,10 @@ async def _after_failed_write(
     failure is reported whoever closed the turn (`_close_on_error`). A read
     back that fails, or an open turn another write moved, is left as stored:
     the segment ends `unclosed` and reports `error`, as when a close cannot
-    be written. A cut pending raises with `segment.writing` still held,
+    be written. That includes a write that landed and that another segment
+    then wrote over, under a lease that lapsed, before the read back: the
+    stored turn no longer holds the write, so a pause it made writes no
+    `paused` line. A cut pending raises with `segment.writing` still held,
     which the segment settles on."""
     writing = segment.writing
     assert writing is not None

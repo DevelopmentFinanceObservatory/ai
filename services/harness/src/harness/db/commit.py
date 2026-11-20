@@ -55,6 +55,8 @@ async def run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
 async def committing[T](
     transaction: AbstractAsyncContextManager[AsyncConnection],
     write: Callable[[AsyncConnection], Awaitable[Callable[[], T]]],
+    *,
+    read_back: Callable[[], Awaitable[bool]] | None = None,
 ) -> T:
     """Run `write` in `transaction` and return what the function it returns
     gives once the transaction commits. That function is what follows the
@@ -62,7 +64,10 @@ async def committing[T](
     committed) and must not await. The commit and it run in one task to the
     end (`run_to_completion`), so a cancel of the caller cannot land the
     commit without them. A cancel or a fault before the commit rolls the
-    transaction back, and a commit that raises runs nothing after it."""
+    transaction back. A commit that raises runs nothing after it, unless
+    `read_back`, awaited in the same task, finds that the commit landed with
+    its acknowledgement lost: the function then runs as for a commit that
+    returned."""
     conn = await transaction.__aenter__()
     try:
         committed = await write(conn)
@@ -71,7 +76,11 @@ async def committing[T](
         raise
 
     async def commit() -> T:
-        await transaction.__aexit__(None, None, None)
+        try:
+            await transaction.__aexit__(None, None, None)
+        except Exception:
+            if read_back is None or not await read_back():
+                raise
         return committed()
 
     return await run_to_completion(commit())
