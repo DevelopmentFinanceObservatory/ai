@@ -67,8 +67,10 @@ this process has the caller principal. For an `ip:` caller the website named,
 they are `x-dfo-caller-principal`, `x-dfo-caller`, `x-dfo-surface: mcp`, and
 `x-dfo-user-agent`, the whole User-Agent clipped to 256 characters. For a
 harness `conversation:` caller they are the principal, the caller, and the
-Studio turn's id as `x-dfo-turn` when the harness names one. dfo-apis resolves
-them as it does the website's own calls (`dfo_platform.caller.resolve_caller`).
+Studio turn's id as `x-dfo-turn` when the harness names one. For shared work
+they are the principal and `x-dfo-surface` as the surface the work serves.
+dfo-apis resolves them as it does the website's own calls
+(`dfo_platform.caller.resolve_caller`).
 """
 
 from __future__ import annotations
@@ -199,10 +201,7 @@ class RunnerClient:
 
     async def _send(self, method: str, path: str, **request: Any) -> httpx2.Response | ToolRefusal:
         try:
-            headers = {
-                **vouched_caller_headers(self._caller_principal, method=method),
-                **(await self._auth()),
-            }
+            headers = {**vouched_caller_headers(self._caller_principal), **(await self._auth())}
             return await self._client.request(method, path, headers=headers, **request)
         except ApisAuthError as exc:
             detail = f"no dfo-apis credential: {exc}"

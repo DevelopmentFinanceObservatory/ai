@@ -107,7 +107,7 @@ class Replayer:
     `outcomes`, the last one repeating. A `Replayed` stores its own recipe on `apis`
     under its frame, as the real replayer's publish does; one that carries none stores
     `recipe_of(REPLAYED)`, which has the stored recipe's normal form. `gate`, when set,
-    holds every entry until it is released."""
+    holds every entry until it is released. `surfaces` keeps each entry's surface."""
 
     def __init__(self, apis: RecordedApis, *outcomes: Replayed | Pending | Refused | Exception):
         self.apis = apis
@@ -119,10 +119,14 @@ class Replayer:
             )
         ]
         self.entered = 0
+        self.surfaces: list[str] = []
         self.gate: asyncio.Event | None = None
 
-    async def __call__(self, recipe: Mapping[str, Any], **_: Any) -> Replayed | Pending | Refused:
+    async def __call__(
+        self, recipe: Mapping[str, Any], *, surface: str, **_: Any
+    ) -> Replayed | Pending | Refused:
         self.entered += 1
+        self.surfaces.append(surface)
         if self.gate is not None:
             await self.gate.wait()
         outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
@@ -867,6 +871,7 @@ async def test_a_replay_published_under_another_key_is_logged(
 
 
 async def test_a_replayed_card_is_rendered_on_the_new_frame(apis: RecordedApis) -> None:
+    """The website shows the share, so the replay serves the website surface."""
     replayer = Replayer(apis)
     async with client_of(service_over(apis, replayer)) as client:
         response = await refresh(client)
@@ -876,7 +881,7 @@ async def test_a_replayed_card_is_rendered_on_the_new_frame(apis: RecordedApis) 
         {"status": "redrawn", "render": RECORDED_RENDER},
     )
     assert apis.rendered_on() == [REPLAYED]
-    assert replayer.entered == 1
+    assert replayer.surfaces == ["website"]
 
 
 @pytest.mark.parametrize("reason", ["mint_queued", "deadline", "row_budget", "busy"])

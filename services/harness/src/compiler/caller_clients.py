@@ -6,11 +6,11 @@ studio conversation, none outside one. A call made inside a Studio turn also
 carries the turn's wire trace id in the `x-dfo-turn` header, which the MCP
 servers forward to dfo-apis (`common.caller.vouched_caller_headers`). A call
 made for shared work names no caller and carries the surface the work serves in
-the `x-dfo-surface` header, which the MCP servers forward on their reads. A
-header is fixed when the transport is built, so a client belongs to one caller,
-one turn and one surface (`CallerTurn`): a client kept into the next turn would name the
-turn before it on every call. `CallerClients` holds one client per caller
-and turn and is the one registry both call paths use:
+the `x-dfo-surface` header, which the MCP servers forward to dfo-apis. A header
+is fixed when the transport is built, so a client belongs to one caller, one
+turn and one surface (`CallerTurn`): a client kept into the next turn would
+name the turn before it on every call. `CallerClients` holds one client per
+caller, turn and surface and is the one registry both call paths use:
 `harness.mcp_client` (`search`, `get_data`, `describe` and the presentation
 tools) and `compiler.surface.McpSurface` (the analysis verbs and the
 translator's discovery calls). This module lives in `compiler` because
@@ -26,12 +26,15 @@ aggregates pays about four, since data-mcp alone has three registries
 (`harness.mcp_client.McpResolver` for `search`, `harness.mcp_client.McpExecutor`
 for `get_data`, and `McpSurface`'s data-mcp source) and analysis-mcp adds one.
 
-The registry tracks each caller's latest turn: the newest turn `get()` has
-seen for it, among the last `RECENT_TURNS`. A turn id is random, so the order
-`get()` first sees turns in is the only order there is. The latest turn's
-connect retires the caller's clients of older turns and disconnects them in a
-task of its own (`CallerClients._retire`), so the new turn's call neither
-waits on nor fails with that disconnect. A connect for an older
+The registry tracks each party's latest turn, a party being a caller and a
+surface (`CallerTurn.party`): the newest turn `get()` has seen for it, among
+the last `RECENT_TURNS`. A turn id is random, so the order `get()` first sees
+turns in is the only order there is. The latest turn's connect retires the
+party's clients of older turns and disconnects them in a task of its own
+(`CallerClients._retire`), so the new turn's call neither waits on nor fails
+with that disconnect. Caller-less clients of different surfaces, such as a
+Studio replay's and a call outside any shared work, are separate parties, so
+neither retires the other. A connect for an older
 turn, such as an early mint the turn before queued and sent late, retires
 nothing, so it never cuts the latest turn's client. Nothing in this process
 observes a conversation ending, so the registry is also an LRU bounded at
@@ -84,6 +87,12 @@ class CallerTurn(NamedTuple):
     caller: str | None
     turn: str | None = None
     surface: str | None = None
+
+    @property
+    def party(self) -> tuple[str | None, str | None]:
+        """Whom the call is made for apart from its turn: the caller and the
+        surface. A party's latest turn retires its clients of older turns."""
+        return self.caller, self.surface
 
 
 def caller_transport(
@@ -171,9 +180,10 @@ class CallerClients:
         # or eviction removes it from `_clients`, so a straggling `release()`
         # still finds it even when its caller already holds a fresh client.
         self._by_client_id: dict[int, _HeldClient] = {}
-        # Each caller's last `RECENT_TURNS` turns in the order `get()` first saw
-        # them, the latest last; least recently used caller first.
-        self._turns: OrderedDict[str | None, deque[str | None]] = OrderedDict()
+        # Each party's (`CallerTurn.party`) last `RECENT_TURNS` turns in the
+        # order `get()` first saw them, the latest last; least recently used
+        # party first.
+        self._turns: OrderedDict[tuple[str | None, str | None], deque[str | None]] = OrderedDict()
         self._lock = asyncio.Lock()
         # The disconnects `_retire` runs in the background, held until each ends.
         self._retiring: set[asyncio.Task[None]] = set()
@@ -208,27 +218,27 @@ class CallerClients:
             await asyncio.shield(connecting)
 
     def _note_turn_locked(self, caller: CallerTurn) -> None:
-        """Record `caller.turn` as its caller's latest turn when it is one the
-        caller's recent turns do not hold. Runs with `_lock` held."""
-        turns = self._turns.get(caller.caller)
+        """Record `caller.turn` as its party's latest turn when it is one the
+        party's recent turns do not hold. Runs with `_lock` held."""
+        turns = self._turns.get(caller.party)
         if turns is None:
-            turns = self._turns[caller.caller] = deque(maxlen=RECENT_TURNS)
-        self._turns.move_to_end(caller.caller)
+            turns = self._turns[caller.party] = deque(maxlen=RECENT_TURNS)
+        self._turns.move_to_end(caller.party)
         if caller.turn not in turns:
             turns.append(caller.turn)
         while len(self._turns) > MAX_CALLERS:
             self._turns.popitem(last=False)
 
     def _is_latest_locked(self, caller: CallerTurn) -> bool:
-        """Whether `caller.turn` is its caller's latest turn. A caller whose turns
+        """Whether `caller.turn` is its party's latest turn. A party whose turns
         were dropped past `MAX_CALLERS` counts its turn as latest. Runs with
         `_lock` held."""
-        turns = self._turns.get(caller.caller)
+        turns = self._turns.get(caller.party)
         return not turns or turns[-1] == caller.turn
 
     async def _connect(self, caller: CallerTurn) -> None:
         """Connect `caller`'s client and hold it, evicting past `MAX_CALLERS`.
-        When `caller.turn` is its caller's latest turn, the caller's clients of
+        When `caller.turn` is its party's latest turn, the party's clients of
         older turns are retired.
 
         The client becomes held in the same step that retires the connect,
@@ -249,7 +259,7 @@ class CallerClients:
             self._clients[caller] = held
             self._by_client_id[id(client)] = held
             superseded = (
-                [key for key in self._clients if key.caller == caller.caller and key != caller]
+                [key for key in self._clients if key.party == caller.party and key != caller]
                 if self._is_latest_locked(caller)
                 else []
             )

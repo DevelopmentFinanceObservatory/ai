@@ -96,8 +96,8 @@ def shared_work_context() -> Context:
     both wait on (`harness.rolling_cards`). The task's MCP clients name no
     caller and no turn, only the Studio surface (`current_caller_turn`), and its
     in-process dfo-apis calls none either (`common.caller.shared_work_context`),
-    so no conversation's identity is attached to the shared work, and its reads
-    still count as Studio's. The copy holds an
+    so no conversation's identity is attached to the shared work, and its
+    dfo-apis calls still count as Studio's. The copy holds an
     empty OpenTelemetry context too, so the task records on no turn's trace
     and its MCP calls carry no turn's Langfuse session, user or tags
     (`common.telemetry.turn_call_meta`), as work outside any turn does. It

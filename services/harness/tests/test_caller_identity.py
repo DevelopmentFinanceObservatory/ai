@@ -354,7 +354,7 @@ async def test_each_turn_reaches_dfo_apis_under_its_own_id_through_every_mount(
     no caller for Studio's first-party writes, so it names no turn, and the card
     turn 1 creates is revised on turn 2 through that turn's own client. The same
     calls made for shared work inside turn 2 name no caller and no turn, and
-    their reads reach dfo-apis as the Studio surface's."""
+    their dfo-apis calls reach it as the Studio surface's."""
     apis = _Apis()
     app = create_app(settings=Settings(mcp_api_token=_TOKEN))
     connects: list[str] = []
@@ -486,13 +486,12 @@ async def test_each_turn_reaches_dfo_apis_under_its_own_id_through_every_mount(
         for turn, upstream, method, _, headers in apis.seen
         if turn == "shared"
     }
-    # The reads name the principal and Studio, and a write names nothing, since
-    # dfo-apis refuses a vouched POST that names no caller on its pin and export
-    # doors.
+    # Every call names the principal and Studio: the mint and analysis doors
+    # only log the caller, so they take a vouched request that names none.
     assert shared == {
         ("data", "GET", _CALLER_PRINCIPAL, "studio", None, None),
-        ("data", "POST", None, None, None, None),
-        ("analysis", "POST", None, None, None, None),
+        ("data", "POST", _CALLER_PRINCIPAL, "studio", None, None),
+        ("analysis", "POST", _CALLER_PRINCIPAL, "studio", None, None),
     }
     # One canvas: turn 1 creates the card and turn 2 revises it with turn 1's
     # write token, which dfo-apis accepts.

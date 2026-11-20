@@ -353,6 +353,7 @@ class Scene:
                     "publish": self.assembler.publish_frame,
                     "row_budget": self.budget,
                     "mint_root": self.dataset,
+                    "surface": "studio",
                     **arguments,
                 },
             )
@@ -423,20 +424,27 @@ async def test_a_replay_on_moved_data_publishes_the_new_frame_under_the_same_nor
 
 type Wire = tuple[frozenset[tuple[str, str]], ...]
 
-# What shared work puts on the wire (`wire_identity`): the Studio surface alone to
-# the MCP servers, the principal and the surface on an in-process read, and
-# nothing on an in-process write.
-SHARED_WIRE: Wire = (
-    frozenset({(SURFACE_HEADER, "studio")}),
-    frozenset({(CALLER_PRINCIPAL_HEADER, "p"), (SURFACE_HEADER, "studio")}),
-    frozenset(),
-)
+
+def shared_wire(surface: str) -> Wire:
+    """What shared work serving `surface` puts on the wire (`wire_identity`): the
+    surface alone to the MCP servers, the principal and the surface on an
+    in-process dfo-apis call, and nothing on one to a door that names the caller
+    an allowance counts against."""
+    return (
+        frozenset({(SURFACE_HEADER, surface)}),
+        frozenset({(CALLER_PRINCIPAL_HEADER, "p"), (SURFACE_HEADER, surface)}),
+        frozenset(),
+    )
+
+
+SHARED_WIRE: Wire = shared_wire("studio")
 
 
 def wire_identity() -> Wire:
     """The identity headers the current context sends: on the harness's MCP
     requests (`current_caller_turn` through `caller_transport`), then on an
-    in-process dfo-apis GET and POST of a process holding principal `p`."""
+    in-process dfo-apis call of a process holding principal `p`, to a door that
+    only logs the caller and to one that names it."""
     caller = current_caller_turn()
     mcp = caller_transport(
         "http://mcp.test/mcp",
@@ -447,18 +455,20 @@ def wire_identity() -> Wire:
     )
     return (
         frozenset(mcp.headers.items()),
-        frozenset(vouched_caller_headers("p", method="GET").items()),
-        frozenset(vouched_caller_headers("p", method="POST").items()),
+        frozenset(vouched_caller_headers("p").items()),
+        frozenset(vouched_caller_headers("p", caller_required=True).items()),
     )
 
 
+@pytest.mark.parametrize("surface", ["studio", "website"])
 async def test_a_replays_verbs_name_no_caller_or_turn_of_the_request_that_started_it(
-    scene: Scene,
+    scene: Scene, surface: str
 ) -> None:
     """Every slot reaching a node joins one task, so the verbs it calls carry no
     caller or turn, supplied or from the conversation the MCP clients read:
-    neither belongs to the shared work. They name the Studio surface on the MCP
-    hop and on dfo-apis reads, and nothing on dfo-apis writes."""
+    neither belongs to the shared work. They name the surface the replay serves
+    on the MCP hop and to dfo-apis, `website` for a share the website refreshes,
+    and nothing to a door that names the caller."""
     _, recipe = await scene.fixed()
     scene.dataset.move(SECOND_VALUES)
     seen: list[tuple[str, str | None, str | None, CallerTurn, Wire]] = []
@@ -471,12 +481,12 @@ async def test_a_replays_verbs_name_no_caller_or_turn_of_the_request_that_starte
     current_turn_id.set("tr_" + "1" * 16)
     assert current_caller_turn().caller is not None  # the control: the request names it
 
-    replayed = await scene.replay(recipe)
+    replayed = await scene.replay(recipe, surface=surface)
 
     assert isinstance(replayed, Replayed), replayed
     assert seen == [
-        ("filter", None, None, CallerTurn(None, None, "studio"), SHARED_WIRE),
-        ("growth", None, None, CallerTurn(None, None, "studio"), SHARED_WIRE),
+        ("filter", None, None, CallerTurn(None, None, surface), shared_wire(surface)),
+        ("growth", None, None, CallerTurn(None, None, surface), shared_wire(surface)),
     ]
 
 

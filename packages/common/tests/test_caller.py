@@ -22,6 +22,7 @@ from common.caller import (
     USER_AGENT_HEADER,
     conversation_caller,
     current_caller,
+    current_surface,
     current_turn,
     current_user_agent,
     current_writer,
@@ -31,6 +32,7 @@ from common.caller import (
     supplied_caller,
     vouched_caller_headers,
 )
+from common.mcp_telemetry import LOOPBACK_SCOPE_KEY
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.server.http import set_http_request
@@ -287,65 +289,132 @@ async def test_a_supplied_turn_names_an_in_process_call() -> None:
     }
 
 
-_STUDIO_READ = {CALLER_PRINCIPAL_HEADER: "p", SURFACE_HEADER: "studio"}
+_STUDIO = {CALLER_PRINCIPAL_HEADER: "p", SURFACE_HEADER: "studio"}
+_LOOPBACK = {LOOPBACK_SCOPE_KEY: True}
 
 
 @pytest.mark.parametrize(
-    ("shared", "inbound", "principal", "method", "sent"),
+    ("shared", "loopback", "inbound", "principal", "caller_required", "sent"),
     [
-        (True, [], "p", "GET", _STUDIO_READ),
-        (True, [], "p", "head", _STUDIO_READ),
-        (True, [(CALLER_HEADER, _CONVERSATION), (TURN_HEADER, _TURN)], "p", "GET", _STUDIO_READ),
-        (True, [], "p", "POST", {}),
-        (True, [], "p", None, {}),
-        (True, [], None, "GET", {}),
-        (False, [(SURFACE_HEADER, "studio")], "p", "GET", _STUDIO_READ),
-        (False, [(SURFACE_HEADER, "studio")], "p", "POST", {}),
-        (False, [(SURFACE_HEADER, "mcp")], "p", "GET", {}),
-        (False, [(SURFACE_HEADER, "studio"), (SURFACE_HEADER, "studio")], "p", "GET", {}),
+        ("studio", False, [], "p", False, _STUDIO),
+        (
+            "website",
+            False,
+            [],
+            "p",
+            False,
+            {CALLER_PRINCIPAL_HEADER: "p", SURFACE_HEADER: "website"},
+        ),
+        (
+            "studio",
+            True,
+            [(CALLER_HEADER, _CONVERSATION), (TURN_HEADER, _TURN)],
+            "p",
+            False,
+            _STUDIO,
+        ),
+        ("studio", False, [], "p", True, {}),
+        ("studio", False, [], None, False, {}),
+        (None, False, [], "p", False, {}),
+        (None, True, [(SURFACE_HEADER, "website")], "p", False, {}),
+        (False, True, [(SURFACE_HEADER, "studio")], "p", False, _STUDIO),
+        (False, True, [(SURFACE_HEADER, "studio")], "p", True, {}),
+        (False, False, [(SURFACE_HEADER, "studio")], "p", False, {}),
+        (False, True, [(SURFACE_HEADER, "api")], "p", False, {}),
+        (False, True, [(SURFACE_HEADER, "studio"), (SURFACE_HEADER, "studio")], "p", False, {}),
         (
             False,
+            True,
             [(CALLER_HEADER, _CONVERSATION), (SURFACE_HEADER, "studio")],
             "p",
-            "GET",
+            False,
             {CALLER_PRINCIPAL_HEADER: "p", CALLER_HEADER: _CONVERSATION},
         ),
-        (False, [], "p", "GET", {}),
+        (False, True, [], "p", False, {}),
     ],
     ids=[
-        "shared-get",
-        "shared-head",
+        "shared-studio",
+        "shared-website",
         "shared-inside-a-turns-request",
-        "shared-post",
-        "shared-method-unknown",
+        "shared-caller-required",
         "shared-unset",
-        "header-get",
-        "header-post",
-        "header-unshared-surface",
-        "header-repeated",
-        "header-beside-a-caller",
+        "shared-no-surface",
+        "shared-no-surface-ignores-the-header",
+        "loopback-header",
+        "loopback-header-caller-required",
+        "header-off-loopback-ignored",
+        "loopback-header-unshared-surface",
+        "loopback-header-repeated",
+        "loopback-header-beside-a-caller",
         "no-caller",
     ],
 )
-def test_shared_work_reads_name_their_surface_and_no_caller(
-    shared: bool,
+def test_shared_work_names_its_surface_and_no_caller(
+    shared: str | None | bool,
+    loopback: bool,
     inbound: list[tuple[str, str]],
     principal: str | None,
-    method: str | None,
+    caller_required: bool,
     sent: dict[str, str],
 ) -> None:
     """Shared work, in this process or reaching it from the harness in the
-    surface header of a caller-less request, names the principal and its surface
-    on a read and nothing on a write: dfo-apis refuses a vouched request with no
-    caller on the doors that read the caller, which take POST."""
-    scope = {"type": "http", "headers": [(k.encode(), v.encode()) for k, v in inbound]}
+    surface header of a caller-less loopback request, names the principal and
+    its surface, except to a door that names the caller an allowance counts
+    against, which refuses a vouched request with no caller. A request through
+    the public server carries no loopback mark, so its surface header is
+    ignored and it cannot claim Studio. `shared=False` runs outside shared
+    work."""
+    scope = {
+        "type": "http",
+        "headers": [(k.encode(), v.encode()) for k, v in inbound],
+        **(_LOOPBACK if loopback else {}),
+    }
     with set_http_request(Request(scope)):
-        context = shared_work_context(surface="studio") if shared else copy_context()
-        assert context.run(vouched_caller_headers, principal, method=method) == sent
+        context = copy_context() if shared is False else shared_work_context(surface=shared)
+        assert (
+            context.run(vouched_caller_headers, principal, caller_required=caller_required) == sent
+        )
 
 
-def test_shared_work_serves_only_a_first_party_surface() -> None:
-    """A shared read counts against its surface, so the surface of a public
-    client, whose reads count against that client, is refused."""
-    with pytest.raises(ValueError, match="mcp"):
-        shared_work_context(surface="mcp")
+@pytest.mark.parametrize(
+    ("caller", "loopback", "surface_header", "surface"),
+    [
+        (_CONVERSATION, False, None, "studio"),
+        (_ADDRESS, False, None, "mcp"),
+        (_ADDRESS, True, "studio", "mcp"),
+        ("user:edge", False, None, None),
+        (None, False, None, None),
+        (None, False, "studio", None),
+        (None, True, "website", "website"),
+    ],
+    ids=[
+        "conversation",
+        "address",
+        "address-beside-a-surface-header",
+        "other-kind",
+        "no-caller",
+        "header-off-loopback",
+        "harness-shared-work",
+    ],
+)
+def test_the_current_surface_follows_the_caller(
+    caller: str | None, loopback: bool, surface_header: str | None, surface: str | None
+) -> None:
+    """Work a request starts for others to join names the request's surface:
+    Studio for a conversation, MCP for a public client the website named, and
+    the harness's shared surface over loopback."""
+    headers = [(CALLER_HEADER, caller), (SURFACE_HEADER, surface_header)]
+    scope = {
+        "type": "http",
+        "headers": [(k.encode(), v.encode()) for k, v in headers if v is not None],
+        **(_LOOPBACK if loopback else {}),
+    }
+    with set_http_request(Request(scope)):
+        assert current_surface() == surface
+
+
+def test_shared_work_serves_only_a_surface_dfo_apis_accepts() -> None:
+    """dfo-apis logs a surface it does not know as `unknown`, so shared work
+    refuses one."""
+    with pytest.raises(ValueError, match="direct"):
+        shared_work_context(surface="direct")

@@ -263,7 +263,7 @@ class UpstreamClient:
         base = self._client.base_url if self._public_origin is None else self._public_origin
         return str(httpx2.URL(base).join(link))
 
-    def caller_headers(self, *, method: str) -> dict[str, str]:
+    def caller_headers(self, *, caller_required: bool = False) -> dict[str, str]:
         """The headers that name the current request's caller to dfo-apis, sent on
         every `request` and on `stream_link`'s first hop.
 
@@ -272,12 +272,13 @@ class UpstreamClient:
         `x-dfo-caller`, `x-dfo-surface: mcp`, and `x-dfo-user-agent`, the whole
         User-Agent clipped to 256 characters. For a harness `conversation:`
         caller they are the principal, the caller, and the Studio turn's id as
-        `x-dfo-turn` when the harness names one. For a GET or HEAD `method` in
-        shared work, such as a series-statistics fetch, they are the principal
-        and `x-dfo-surface` as the surface the work serves. Empty otherwise, and
-        dfo-apis counts the call against this service.
+        `x-dfo-turn` when the harness names one. In shared work, such as a
+        series-statistics fetch, they are the principal and `x-dfo-surface` as
+        the surface the work serves, except on a `caller_required` call, to a
+        door that names the caller an allowance counts against, which gets
+        none. Empty otherwise, and dfo-apis counts the call against this service.
         """
-        return vouched_caller_headers(self._caller_principal, method=method)
+        return vouched_caller_headers(self._caller_principal, caller_required=caller_required)
 
     @asynccontextmanager
     async def stream_link(
@@ -327,7 +328,7 @@ class UpstreamClient:
         ) as client:
             response = await client.send(
                 client.build_request(
-                    "GET", url, headers={**hop_headers, **self.caller_headers(method="GET"), **auth}
+                    "GET", url, headers={**hop_headers, **self.caller_headers(), **auth}
                 ),
                 stream=True,
             )
@@ -355,6 +356,7 @@ class UpstreamClient:
         deadline: CallDeadline | None = None,
         headers: Mapping[str, str] | None = None,
         on_sent: Callable[[], None] | None = None,
+        caller_required: bool = False,
     ) -> httpx2.Response:
         """Issue one apis call, retried within a wall-clock budget.
 
@@ -382,6 +384,8 @@ class UpstreamClient:
             on_sent: Called each time an attempt's request body has been
                 written to the connection (`httpcore`'s `send_request_body`
                 trace event), before any response is read.
+            caller_required: The door names the caller an allowance counts
+                against, as the exports prepare does (`caller_headers`).
 
         Returns:
             The 2xx `httpx2.Response`.
@@ -400,7 +404,11 @@ class UpstreamClient:
             auth = dict(await self._auth()) if self._auth else {}
         except ApisAuthError as exc:
             raise UpstreamAuthUnavailable(detail=f"no dfo-apis ID token: {exc}") from exc
-        sent_headers = {**(headers or {}), **self.caller_headers(method=method), **auth}
+        sent_headers = {
+            **(headers or {}),
+            **self.caller_headers(caller_required=caller_required),
+            **auth,
+        }
         # The budget bounds retrying, not one attempt a caller asked for.
         # Mint's 125s exceeds the 120s budget and must survive it.
         call_budget_s = max(self._retry_budget_s, attempt_timeout)

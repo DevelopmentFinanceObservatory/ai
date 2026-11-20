@@ -129,21 +129,27 @@ async def scene() -> AsyncIterator[Scene]:
 
 
 class Replays:
-    """`RollingCards`' replay interface over the scene, keeping each call's populations."""
+    """`RollingCards`' replay interface over the scene, keeping each call's populations
+    and surface."""
 
     def __init__(self, scene: Scene) -> None:
         self._scene = scene
         self.populations: list[Sequence[Mapping[str, Any]]] = []
+        self.surfaces: list[str] = []
 
     async def __call__(
         self,
         recipe: Mapping[str, Any],
         *,
         deadline: CallDeadline,
+        surface: str,
         populations: Sequence[Mapping[str, Any]],
     ) -> Replayed | Pending | Refused:
         self.populations.append(populations)
-        return await self._scene.replay(recipe, deadline=deadline, populations=populations)
+        self.surfaces.append(surface)
+        return await self._scene.replay(
+            recipe, deadline=deadline, surface=surface, populations=populations
+        )
 
 
 class Platform:
@@ -332,6 +338,7 @@ async def test_a_replay_a_conversation_starts_names_neither_its_caller_nor_its_t
     )
 
     assert len(replays.populations) == 1
+    assert replays.surfaces == ["studio"]
     assert seen
     assert set(seen) == {(None, None, CallerTurn(None, None, "studio"), SHARED_WIRE)}
 
@@ -628,11 +635,14 @@ async def test_a_replay_cut_at_its_deadline_is_tried_again_from_the_steps_in_the
     ran_out = Clock()
 
     class CutAfterTheVerb(Replays):
-        async def __call__(self, recipe: Any, *, deadline: Any, populations: Any) -> Any:
+        async def __call__(
+            self, recipe: Any, *, deadline: Any, surface: str, populations: Any
+        ) -> Any:
             del deadline
             return await super().__call__(
                 recipe,
                 deadline=CallDeadline(expires_at=50.0, clock=ran_out),
+                surface=surface,
                 populations=populations,
             )
 
