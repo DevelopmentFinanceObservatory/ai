@@ -33,7 +33,7 @@ from harness.turn.store import (
 )
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 PRINCIPAL = "user-1"
 CONVERSATION = "conv-1"
@@ -1475,28 +1475,36 @@ async def test_a_database_refusal_of_the_lineage_fails_the_cursor_write_and_comm
     assert await _row_versions(pg_engine) == stored
 
 
-class _SlowCommit:
-    """An engine whose next `begin` waits, once its statements ran, until
-    `proceed` is set before it commits, and sets `committing` as it starts
-    waiting. Everything else is `engine`'s."""
+class _HeldCommit:
+    """An engine whose next `begin` holds its COMMIT open until cancelled:
+    before the COMMIT reaches the server (`landed=False`), or once the
+    COMMIT landed, with its acknowledgement never arriving (`landed=True`).
+    `holding` is set once it holds. Everything else is `engine`'s."""
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, *, landed: bool) -> None:
         self._engine = engine
-        self.committing, self.proceed = asyncio.Event(), asyncio.Event()
+        self._landed = landed
+        self._first = True
+        self.holding = asyncio.Event()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._engine, name)
 
     def begin(self) -> Any:
-        return self._slow()
+        if not self._first:
+            return self._engine.begin()
+        self._first = False
+        return self._held()
 
     @contextlib.asynccontextmanager
-    async def _slow(self) -> Any:
+    async def _held(self) -> Any:
         async with self._engine.begin() as conn:
             yield conn
-            if not self.committing.is_set():
-                self.committing.set()
-                await self.proceed.wait()
+            if not self._landed:
+                self.holding.set()
+                await asyncio.sleep(3600)
+        self.holding.set()
+        await asyncio.sleep(3600)
 
 
 class _LostAckThenOverwritten:
@@ -1533,17 +1541,28 @@ class _LostAckThenOverwritten:
 
 
 @pytest.mark.parametrize(
-    "how", ["returns", "caller-cancelled-at-commit", "fenced-out", "lost-ack-overwritten"]
+    "how",
+    [
+        "returns",
+        "caller-cancelled-landed-held-open",
+        "caller-cancelled-held-open-before-landing",
+        "fenced-out",
+        "lost-ack-overwritten",
+    ],
 )
 async def test_a_pause_hands_its_cursor_to_committed_once_its_write_commits(
-    pg_engine: AsyncEngine, how: str
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, how: str
 ) -> None:
     """`committed` runs once, with the paused cursor, once the pause's write
-    commits: in the task that commits it when the caller is cancelled during
-    the commit, which then ends in the cancellation, and when the commit's
-    acknowledgement is lost, since the store reads the write's transaction
-    back as committed, even after another segment wrote the turn over. A
-    pause fenced out by a moved lease commits nothing and runs nothing."""
+    commits. A cut of the caller while the COMMIT is held open is passed
+    into the COMMIT, so the caller ends in the cancellation within the read
+    back's limit, here 0.5 s (`PAUSE_READ_BACK_LIMIT_S`): a COMMIT that
+    landed runs `committed` once, and one that had not stores nothing and
+    runs nothing. A COMMIT whose acknowledgement is lost and whose
+    transaction committed runs `committed` and raises its error, even after
+    another segment wrote the turn over. A pause fenced out by a moved lease
+    commits nothing and runs nothing."""
+    monkeypatch.setattr(turn_store, "PAUSE_READ_BACK_LIMIT_S", 0.5)
     await _conversation(pg_engine)
     store = TurnStore(pg_engine)
     cursor = await _open(store)
@@ -1568,9 +1587,9 @@ async def test_a_pause_hands_its_cursor_to_committed_once_its_write_commits(
         assert noted == [paused]
     elif how == "lost-ack-overwritten":
         store._engine = _LostAckThenOverwritten(pg_engine)  # type: ignore[assignment]
-        paused = await pause()
+        with pytest.raises(ConnectionResetError):
+            await pause()
         store._engine = pg_engine  # type: ignore[assignment]
-        assert noted == [paused]
         [stored] = noted
         assert stored.status is TurnStatus.PAUSED
         assert (await store.turn(cursor.id)).written_by == "segment-b"
@@ -1582,17 +1601,92 @@ async def test_a_pause_hands_its_cursor_to_committed_once_its_write_commits(
         assert noted == []
         return
     else:
-        slow = _SlowCommit(pg_engine)
-        store._engine = slow  # type: ignore[assignment]
+        landed = how == "caller-cancelled-landed-held-open"
+        held = _HeldCommit(pg_engine, landed=landed)
+        store._engine = held  # type: ignore[assignment]
         task = asyncio.ensure_future(pause())
-        await asyncio.wait_for(slow.committing.wait(), timeout=5)
+        await asyncio.wait_for(held.holding.wait(), timeout=5)
         task.cancel()
-        await asyncio.sleep(0)
-        slow.proceed.set()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, timeout=5)
+            await asyncio.wait_for(task, timeout=2)
         store._engine = pg_engine  # type: ignore[assignment]
+        if not landed:
+            assert noted == []
+            assert (await store.turn(cursor.id)).status is TurnStatus.RUNNING
+            return
     [stored] = noted
     assert stored.status is TurnStatus.PAUSED
     assert stored.pause is not None and stored.pause.interrupt_id == "int_1"
     assert (await store.turn(cursor.id)).status is TurnStatus.PAUSED
+
+
+async def test_a_cut_of_a_pause_whose_commit_stalls_frees_its_connection(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A real COMMIT held up by a deferred constraint trigger that sleeps is
+    cancelled when the caller is cut: the cut is passed into the COMMIT,
+    whose transaction aborts, so the caller ends in the cancellation within
+    the read back's limit, `committed` never runs, and the pool has every
+    connection back."""
+    await _conversation(pg_engine)
+    store = TurnStore(pg_engine)
+    cursor = await _open(store)
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE FUNCTION stall_commit() RETURNS trigger LANGUAGE plpgsql AS "
+                "$$ BEGIN PERFORM pg_sleep(30); RETURN NULL; END $$"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE CONSTRAINT TRIGGER stall_commit AFTER UPDATE ON turn_cursors "
+                "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION stall_commit()"
+            )
+        )
+    noted: list[Cursor] = []
+    task = asyncio.ensure_future(
+        store.pause(
+            cursor,
+            segment_id=SEGMENT,
+            node="ask",
+            node_input={},
+            kind="ask",
+            interrupt_id="int_1",
+            payload={},
+            state=cursor.state,
+            lineage=None,
+            committed=noted.append,
+        )
+    )
+    watch = create_async_engine(pg_engine.url)
+    try:
+        for _ in range(500):
+            async with watch.connect() as conn:
+                stalled = (
+                    await conn.execute(
+                        text(
+                            "SELECT count(*) FROM pg_stat_activity WHERE datname = "
+                            "current_database() AND query ILIKE 'COMMIT%' AND state = 'active'"
+                        )
+                    )
+                ).scalar()
+            if stalled:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("the COMMIT never stalled")
+    finally:
+        await watch.dispose()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=turn_store.PAUSE_READ_BACK_LIMIT_S + 1)
+
+    assert loop.time() - started < turn_store.PAUSE_READ_BACK_LIMIT_S + 1
+    assert noted == []
+    assert pg_engine.pool.checkedout() == 0  # type: ignore[attr-defined]
+    async with pg_engine.begin() as conn:
+        await conn.execute(text("DROP TRIGGER stall_commit ON turn_cursors"))
+    assert (await store.turn(cursor.id)).status is TurnStatus.RUNNING

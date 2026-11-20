@@ -570,18 +570,6 @@ async def _records(conn: AsyncConnection, turn: int) -> list[AgentRecord]:
     return [AgentRecord(agent=row.agent, kind=row.kind, body=row.body) for row in rows]
 
 
-def _landing(written: Cursor, committed: Callable[[Cursor], None] | None) -> Callable[[], Cursor]:
-    """What follows a cursor write's commit: `committed` with the cursor
-    written, then the cursor."""
-
-    def landed() -> Cursor:
-        if committed is not None:
-            committed(written)
-        return written
-
-    return landed
-
-
 async def _fence(conn: AsyncConnection, conversation: int, segment_id: str) -> str:
     """Refuse unless `segment_id` holds the conversation's lease, and return
     the id of the transaction `conn` runs, for a read back of its COMMIT
@@ -649,6 +637,11 @@ _SETTLE = text("SELECT 1 FROM turn_cursors WHERE id = :id FOR SHARE")
 # each of its statements runs. A write whose connection dropped before its
 # COMMIT reached the server can hold the lock until the server notices.
 SETTLE_TIMEOUT_S = 2.0
+
+# The longest a pause whose COMMIT raised reads its transaction's status
+# (`TurnStore.pause`). A cut waits for it, so it stays well inside the lease
+# margin a lost lease leaves (`harness.studio_store.LEASE_MARGIN_S`, 10 s).
+PAUSE_READ_BACK_LIMIT_S = 2.0
 
 
 class TurnStore:
@@ -1068,13 +1061,11 @@ class TurnStore:
         state: dict[str, Any],
         records: Sequence[AgentRecord] = (),
         lineage: SegmentLineage | None,
-        committed: Callable[[Cursor], None] | None = None,
     ) -> Cursor:
         """Move the running turn to `node` with `node_input`, writing `state`,
         its spec blocks included, and appending `records`, with it.
         `lineage` is the segment's, which `start_segment` made and
         `restore_frame_lineage` filled; with `None` no lineage is written.
-        `committed` is as `pause` takes it, with the moved cursor.
 
         Raises:
             SegmentLost: `segment_id` does not hold the conversation's lease.
@@ -1082,10 +1073,8 @@ class TurnStore:
             WriteNotEncoded: JSON cannot hold a value of the write.
         """
         write = self._lineage_rows(cursor, state, lineage)
-        xacts: list[str] = []
-
-        async def advancing(conn: AsyncConnection) -> Callable[[], Cursor]:
-            xacts.append(await _fence(conn, cursor.conversation, segment_id))
+        async with self._engine.begin() as conn:
+            await _fence(conn, cursor.conversation, segment_id)
             advanced = await _swap(
                 conn,
                 cursor,
@@ -1098,11 +1087,6 @@ class TurnStore:
                 records=records,
             )
             await _write_lineage(conn, write)
-            return _landing(advanced, committed)
-
-        advanced = await committing(
-            self._engine.begin(), advancing, read_back=self._read_back(xacts, cursor, "move")
-        )
         if lineage is not None:
             lineage.written.update(write.generations)
         return advanced
@@ -1137,10 +1121,14 @@ class TurnStore:
         The commit and it run in one task to the end
         (`harness.db.commit.committing`), so a cut of the caller during the
         commit cannot land the pause without it. A cut before the commit
-        rolls the write back. A commit that raises is read back by its
-        transaction's status (`_read_back`): one that committed runs
-        `committed` and returns as a commit that returned does, whatever
-        another writer did to the turn since, and any other raises.
+        rolls the write back. A COMMIT that raises is confirmed by its
+        transaction's status (`_read_back`), read for up to
+        `PAUSE_READ_BACK_LIMIT_S`: one that committed runs `committed`, and
+        the COMMIT's error is raised all the same, so the caller judges the
+        pause by the turn as stored (`harness.turn.loop`), which another
+        segment may have written over since. A cut of the caller while the
+        COMMIT is awaited is passed into it, so the cut waits only for that
+        read.
 
         Raises:
             SegmentLost: `segment_id` does not hold the conversation's lease.
@@ -1174,10 +1162,20 @@ class TurnStore:
                 records=records,
             )
             await _write_lineage(conn, write)
-            return _landing(paused, committed)
+
+            def landed() -> Cursor:
+                if committed is not None:
+                    committed(paused)
+                return paused
+
+            return landed
 
         paused = await committing(
-            self._engine.begin(), pausing, read_back=self._read_back(xacts, cursor, "pause")
+            self._engine.begin(),
+            pausing,
+            read_back=self._read_back(xacts, cursor),
+            forward_cut=True,
+            raise_confirmed=True,
         )
         if lineage is not None:
             lineage.written.update(write.generations)
@@ -1245,12 +1243,10 @@ class TurnStore:
         error: dict[str, Any] | None = None,
         state: dict[str, Any] | None = None,
         records: Sequence[AgentRecord] = (),
-        committed: Callable[[Cursor], None] | None = None,
     ) -> Cursor:
         """Close the open turn with `status` in a transaction of its own
         (`finish_on`), stamping the runs a close `CANCELLED` ends with this
-        store's clock. `committed` and a COMMIT that raises are as `pause`
-        takes them, with the closed cursor.
+        store's clock.
 
         Raises:
             ValueError: `status` is not a closing status, or `error` is
@@ -1259,9 +1255,7 @@ class TurnStore:
             CursorStale: the cursor moved, or the turn is closed.
             WriteNotEncoded: JSON cannot hold a value of the write.
         """
-        xacts: list[str] = []
-
-        async def finishing(conn: AsyncConnection) -> Callable[[], Cursor]:
+        async with self._engine.begin() as conn:
             closed = await finish_on(
                 conn,
                 cursor,
@@ -1271,34 +1265,26 @@ class TurnStore:
                 state=state,
                 records=records,
                 now=datetime.fromtimestamp(self._clock(), UTC),
-                xacts=xacts,
             )
-            return _landing(closed, committed)
+        return closed
 
-        return await committing(
-            self._engine.begin(),
-            finishing,
-            read_back=self._read_back(xacts, cursor, f"close {status.value}"),
-        )
-
-    def _read_back(
-        self, xacts: list[str], cursor: Cursor, what: str
-    ) -> Callable[[], Awaitable[bool]]:
-        """The read back of a cursor write from `cursor` whose COMMIT raised:
+    def _read_back(self, xacts: list[str], cursor: Cursor) -> Callable[[], Awaitable[bool]]:
+        """The read back of a pause from `cursor` whose COMMIT raised:
         whether the write's transaction, the one `xacts` names once the
         write fenced, committed (`harness.db.commit.transaction_committed`,
-        reading `_xact_status`)."""
+        reading `_xact_status` for up to `PAUSE_READ_BACK_LIMIT_S`)."""
 
         async def read_back() -> bool:
             if not xacts:
                 return False
             landed = await transaction_committed(
                 lambda: self._xact_status(xacts[0]),
-                what=f"turn {cursor.id}'s {what}",
+                what=f"turn {cursor.id}'s pause",
+                limit_s=PAUSE_READ_BACK_LIMIT_S,
             )
             if landed:
                 logger.warning(
-                    "turn %s: the %s committed; its acknowledgement was lost", cursor.id, what
+                    "turn %s: the pause committed; its acknowledgement was lost", cursor.id
                 )
             return landed
 
@@ -1326,7 +1312,6 @@ async def finish_on(
     error: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
     records: Sequence[AgentRecord] = (),
-    xacts: list[str] | None = None,
 ) -> Cursor:
     """Close the open turn with `status`, one of `CLOSED`, on `conn`, in the
     caller's transaction, appending `records`, and delete the turn's frame
@@ -1340,9 +1325,6 @@ async def finish_on(
     transaction of its own; `harness.studio_store.StudioStore.close_segment`
     runs it in the transaction that saves the conversation's record.
 
-    `xacts`, when given, takes the id of the transaction `conn` runs, for a
-    read back of its COMMIT (`TurnStore.finish`).
-
     Raises:
         ValueError: `status` is not a closing status, or `error` is
             missing for `FAILED` or `ABANDONED` or given for another.
@@ -1353,9 +1335,7 @@ async def finish_on(
         raise ValueError(f"{status!r} does not close a turn")
     if (status in _ERRORED) != (error is not None):
         raise ValueError(f"a turn closed {status.value} takes an error only when it failed")
-    xact = await _fence(conn, cursor.conversation, segment_id)
-    if xacts is not None:
-        xacts.append(xact)
+    await _fence(conn, cursor.conversation, segment_id)
     closed = await _swap(
         conn,
         cursor,
