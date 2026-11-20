@@ -1709,6 +1709,18 @@ def test_a_series_lookup_asks_only_for_dcids_before_its_cap_and_strips_the_marke
     assert [entity.label for entity in labelled.entities if entity.ref.endswith("B")] == ["Beta"]
 
 
+def test_a_fetched_label_does_not_reach_a_sector_that_shares_its_bare_id() -> None:
+    """A recipient `dcid:110` is looked up and labelled; the sector `110` is its own label."""
+    findings = [_short_of("dcid:110", size=1.0, breakdown=("110",))]
+
+    (labelled,) = with_series_labels(findings, {"110": "Recipient"})
+
+    assert [(entity.role, entity.label) for entity in labelled.entities] == [
+        ("stat_var_crsPurpose", None),
+        ("donor", "Recipient"),
+    ]
+
+
 def test_a_short_series_lookup_labels_only_the_entities_it_named() -> None:
     finding = _short_of("donor/A", "donor/B", "donor/K", size=1.0, labelled="donor/K")
 

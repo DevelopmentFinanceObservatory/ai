@@ -2443,7 +2443,9 @@ def with_series_labels(
             update={
                 "entities": tuple(
                     entity
-                    if entity.label is not None or bare_dcid(entity.ref) not in labels
+                    if entity.label is not None
+                    or _names_itself(entity)
+                    or bare_dcid(entity.ref) not in labels
                     else entity.model_copy(update={"label": labels[bare_dcid(entity.ref)]})
                     for entity in finding.entities
                 )
