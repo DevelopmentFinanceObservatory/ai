@@ -239,12 +239,17 @@ async def _start(engine: AsyncEngine) -> None:
     await server_module._apply_migrations_with_retries(engine, budget_s=60.0, sleep=no_retry)
 
 
-async def _start_refused(engine: AsyncEngine) -> str:
-    """Startup refuses with DFA05 at its first attempt. Returns the message."""
+async def _start_refused(engine: AsyncEngine) -> server_module._MigrationRefusedError:
+    """Startup refuses with DFA05 at its first attempt. Returns the refusal."""
     with pytest.raises(server_module._MigrationRefusedError) as refusal:
         await _start(engine)
     assert refusal.value.sqlstate == "DFA05"
-    return str(refusal.value)
+    return refusal.value
+
+
+def _names(tables: tuple[str, ...]) -> set[str]:
+    """The unqualified names of the schema-qualified `tables`."""
+    return {table.rsplit(".", 1)[1] for table in tables}
 
 
 async def test_after_restore_startup_refuses_until_archive_reruns_0005s_checks(
@@ -263,10 +268,10 @@ async def test_after_restore_startup_refuses_until_archive_reruns_0005s_checks(
     await _execute(pg_empty_engine, _session("c2"))
     tables = await _tables(pg_empty_engine)
 
-    message = await _start_refused(pg_empty_engine)
+    refusal = await _start_refused(pg_empty_engine)
 
-    assert all(f".{table}" in message for table in _ADK_TABLES)
-    assert "adk_archive archive --apply" in message
+    assert _names(refusal.tables) == set(_ADK_TABLES)
+    assert refusal.remedy == "archive"
     assert await _tables(pg_empty_engine) == tables
     assert await _verb(pg_empty_engine, "archive") == 1
     assert "SQLSTATE DFA02" in capsys.readouterr().err
@@ -278,19 +283,28 @@ async def test_after_restore_startup_refuses_until_archive_reruns_0005s_checks(
     assert {f"adk_archive_{table}" for table in _ARCHIVED} <= await _tables(pg_empty_engine)
 
 
-async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive(
+async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive_until_drop_adk(
     pg_empty_engine: AsyncEngine, tmp_path: Path
 ) -> None:
-    """An ADK-reading image started after the archive creates its tables."""
+    """An ADK-reading image started after the archive creates its tables,
+    which `archive` cannot rename past the archive, so the remedy is
+    `drop-adk`, and startup proceeds once it has run."""
     await _archived_by_startup(pg_empty_engine, tmp_path)
     await _start(pg_empty_engine)
     sessions = next(statement for statement in _ADK_V1_DDL if "TABLE sessions" in statement)
     await _execute(pg_empty_engine, sessions)
+    archived = {f"adk_archive_{table}" for table in _ARCHIVED}
 
-    message = await _start_refused(pg_empty_engine)
+    refusal = await _start_refused(pg_empty_engine)
 
-    assert ".sessions" in message
-    assert ".events" not in message
+    assert _names(refusal.tables) == {"sessions"}
+    assert refusal.remedy == "drop-adk"
+    assert await _verb(pg_empty_engine, "archive") == 1
+    assert await _verb(pg_empty_engine, "drop-adk") == 0
+    await _start(pg_empty_engine)
+    tables = await _tables(pg_empty_engine)
+    assert archived <= tables
+    assert "sessions" not in tables
 
 
 async def test_startup_leaves_foreign_tables_of_adks_names_alone(
@@ -356,7 +370,7 @@ async def test_restore_and_drop_archive_refuse_a_foreign_table_of_an_archive_nam
 
         assert await _verb(split, verb) == 1
 
-        assert "lacks the columns of `sessions`" in capsys.readouterr().err
+        assert f"{schema}.adk_archive_sessions" in capsys.readouterr().err
         assert await _archive_relations(split, schema, adk_schema) == _archived_split(
             schema, adk_schema
         ) | {f"{schema}.adk_archive_sessions"}

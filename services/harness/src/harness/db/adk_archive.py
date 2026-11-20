@@ -15,8 +15,9 @@ commits.
 - `restore` renames every `adk_archive_<name>` table back, with its indexes
   and owned sequences, for an image that reads ADK's tables. It leaves 0005
   recorded in `harness_schema_migrations`, so an image that holds 0005
-  refuses to start beside the restored tables (`refuse_beside_adk_tables`)
-  until `archive` renames them again. It prints which of ADK's five tables
+  refuses to start beside the restored tables
+  (`harness.server._refuse_beside_adk_tables`) until `archive` renames them
+  again. It prints which of ADK's five tables
   it restores and refuses when anything is archived but not all five, the
   import ledger alone included, unless `--allow-missing` is given. With
   nothing archived it finds nothing to do, so a rerun after a restore
@@ -203,6 +204,17 @@ async def live_adk_tables(engine: AsyncEngine) -> list[str]:
         conn = raw.driver_connection
         assert conn is not None
         return await _adk_tables(conn)
+
+
+async def archived_tables(engine: AsyncEngine) -> list[str]:
+    """The schema-qualified name of each `adk_archive_<name>` table that
+    resolves on `search_path`, the archive 0005 or `archive` left."""
+    async with engine.connect() as sa_conn:
+        raw = await sa_conn.get_raw_connection()
+        conn = raw.driver_connection
+        assert conn is not None
+        tables = [await conn.fetchval(_RESOLVED, PREFIX + name) for name in ARCHIVED]
+        return [table for table in tables if table is not None]
 
 
 async def _quoted(conn: Any, name: str) -> str:

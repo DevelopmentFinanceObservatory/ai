@@ -44,7 +44,7 @@ from starlette.websockets import WebSocketClose
 from harness import __version__
 from harness.agents import build_tool_surface
 from harness.combined_mcp import build_combined_mcp, children_start_once, combined_http_app
-from harness.db.adk_archive import live_adk_tables
+from harness.db.adk_archive import archived_tables, live_adk_tables
 from harness.db.engine import DatabaseHandle, build_database
 from harness.db.migrate import MigrationChecksumError, apply_pending
 from harness.early_mint import EarlyMints
@@ -247,29 +247,64 @@ class _MigrationRefusedError(RuntimeError):
     against this database (`0003_turns.sql` and `0005_rename_adk_tables.sql`),
     or `_refuse_beside_adk_tables` refused with `DFA05`. The database does
     not change by waiting. The message leads with the SQLSTATE, which
-    deploy/README.md lists with each refusal's manual step."""
+    deploy/README.md lists with each refusal's manual step. A `DFA05`
+    refusal also carries the `tables` it names and the `remedy`, the
+    `harness.db.adk_archive` verb to run with `--apply` before a restart."""
 
-    def __init__(self, sqlstate: str, message: str) -> None:
+    def __init__(
+        self,
+        sqlstate: str,
+        message: str,
+        *,
+        tables: tuple[str, ...] = (),
+        remedy: str | None = None,
+    ) -> None:
         super().__init__(f"{sqlstate}: {message}")
         self.sqlstate = sqlstate
+        self.tables = tables
+        self.remedy = remedy
 
 
 async def _refuse_beside_adk_tables(engine: AsyncEngine) -> None:
     """Raise `_MigrationRefusedError` with `DFA05` while any of ADK's tables
     resolves on `search_path` under its own name with ADK's columns
-    (`harness.db.adk_archive.live_adk_tables`). This image never serves
-    beside them: an image that reads them may be serving, as after a
-    rollback and `restore --apply`, and only the `archive` verb, which
-    reruns 0005's checks, renames them."""
-    if tables := await live_adk_tables(engine):
+    (`harness.db.adk_archive.live_adk_tables`). This image does not start
+    beside them, since an image that reads them may be serving, as after a
+    rollback and `restore --apply`.
+
+    With an `adk_archive_<name>` table resolving
+    (`harness.db.adk_archive.archived_tables`), the live tables are fresh
+    ones an ADK-reading image created after the archive, holding only what
+    it wrote since. `archive` cannot rename them past the archive (0005's
+    `DFA04`), so the remedy is `drop-adk`, which discards them. Without an
+    archive, as after a restore, the remedy is `archive`."""
+    tables = await live_adk_tables(engine)
+    if not tables:
+        return
+    archive = await archived_tables(engine)
+    named = ", ".join(tables)
+    if archive:
         raise _MigrationRefusedError(
             "DFA05",
-            f"ADK's tables resolve on search_path under their own names: {', '.join(tables)}. "
-            "This image does not start beside them, since an image that reads them may be "
-            "serving. Once no revision that reads ADK's tables is left, run "
-            "`python -m harness.db.adk_archive archive --apply`, which reruns "
-            "0005_rename_adk_tables.sql's checks and renames them, then restart.",
+            f"ADK's tables resolve on search_path under their own names: {named}, beside "
+            f"the archive {', '.join(archive)}. An image that reads ADK's tables created them "
+            "after the archive, so they hold only what it wrote since. This image does not "
+            "start beside them. Once no revision that reads ADK's tables is left, run "
+            "`python -m harness.db.adk_archive drop-adk --apply`, which discards them, "
+            "then restart.",
+            tables=tuple(tables),
+            remedy="drop-adk",
         )
+    raise _MigrationRefusedError(
+        "DFA05",
+        f"ADK's tables resolve on search_path under their own names: {named}. "
+        "This image does not start beside them, since an image that reads them may be "
+        "serving. Once no revision that reads ADK's tables is left, run "
+        "`python -m harness.db.adk_archive archive --apply`, which reruns "
+        "0005_rename_adk_tables.sql's checks and renames them, then restart.",
+        tables=tuple(tables),
+        remedy="archive",
+    )
 
 
 async def _apply_migrations_with_retries(
