@@ -383,12 +383,13 @@ For production, the same with `--env production`.
    && gcloud run revisions delete "${SERVING:?set it to the revision step 1 printed}" \
      --region="$REGION" --project="$PROJECT_ID" --quiet \
    && DELETED_AT=$(date -u +%FT%TZ) \
-   && [ -z "$(gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
-     --filter="metadata.name=$SERVING" --format='value(metadata.name)')" ] \
+   && LEFT=$(gcloud run revisions list --service="$SERVICE_AI" --region="$REGION" --project="$PROJECT_ID" \
+     --filter="metadata.name=$SERVING" --format='value(metadata.name)') \
+   && [ -z "$LEFT" ] \
    && echo "deleted $SERVING at $DELETED_AT"
    ```
 
-   Check on dev first that the deleted revision's instance count reaches zero, since Cloud Run's documentation does not say what a delete does to requests in flight. A deleted revision is gone from `gcloud run revisions describe`, so the count comes from Cloud Monitoring's `run.googleapis.com/container/instance_count`. Cloud Monitoring samples the count every 60 seconds and can show a point up to about 180 seconds late, so a missing point soon after the delete shows nothing. The first command prints `DELETED_AT`. Run the second command no sooner than 5 minutes after it, in the same shell or with `DELETED_AT` set to the time the first command printed. `curl -f` fails on an HTTP error, and jq exits non-zero unless the answer is well formed and the newest point of every series reads 0; every point is dated after the delete, since the window starts there. It prints how many series it read. With no series it prints `no series since the delete` and exits 0: no instance reported after the delete. Whether a deleted revision reports zeros or nothing is the dev check above, so read the first dev run's output before relying on the no-series case in production. The gate on its last line runs only after the drain check passes, and its exit 0 is the evidence:
+   Check on dev first that the deleted revision's instance count reaches zero, since Cloud Run's documentation does not say what a delete does to requests in flight. A deleted revision is gone from `gcloud run revisions describe`, so the count comes from Cloud Monitoring's `run.googleapis.com/container/instance_count`. Cloud Monitoring samples the count every 60 seconds and can show a point up to about 180 seconds late, so a missing point soon after the delete shows nothing. The first command prints `DELETED_AT`. Run the second command no sooner than 5 minutes after it, in the same shell or with `DELETED_AT` set to the time the first command printed. `curl -f` fails on an HTTP error, and jq exits non-zero when the answer carries `executionErrors` or a `nextPageToken`, since the series read may then be partial, and unless the answer is well formed and the newest point of every series reads 0; every point is dated after the delete, since the window starts there. It prints how many series it read. With no series it prints `no series since the delete` and exits 0: no instance reported after the delete. Whether a deleted revision reports zeros or nothing is the dev check above, so read the first dev run's output before relying on the no-series case in production. The gate on its last line runs only after the drain check passes, and its exit 0 is the evidence:
 
    ```
    curl -fsSG -H "Authorization: Bearer $(gcloud auth print-access-token)" \
@@ -396,10 +397,12 @@ For production, the same with `--env production`.
      --data-urlencode "filter=metric.type=\"run.googleapis.com/container/instance_count\" AND resource.labels.revision_name=\"$SERVING\"" \
      --data-urlencode "interval.startTime=${DELETED_AT:?set it to the time the delete printed}" \
      --data-urlencode "interval.endTime=$(date -u +%FT%TZ)" \
-   | jq -er '(.timeSeries // []) as $s
-     | if ($s | length) == 0 then ("no series since the delete\n" | halt_error(0))
-       elif all($s[]; (.points[0].value.int64Value | tonumber) == 0) then "\($s | length) series, newest points 0"
-       else ("a newest point is above 0\n" | halt_error(1)) end' \
+   | jq -er 'if ((.executionErrors // []) | length) > 0 then ("the answer carries executionErrors\n" | halt_error(1))
+     elif (.nextPageToken // "") != "" then ("the answer has a next page\n" | halt_error(1))
+     else (.timeSeries // []) as $s
+       | if ($s | length) == 0 then ("no series since the delete\n" | halt_error(0))
+         elif all($s[]; (.points[0].value.int64Value | tonumber) == 0) then "\($s | length) series, newest points 0"
+         else ("a newest point is above 0\n" | halt_error(1)) end end' \
    && gcloud run jobs execute "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --wait \
      --args=-m,harness.adk_import,gate
    ```
@@ -415,7 +418,7 @@ For production, the same with `--env production`.
 
    It closes every turn left open on a pause, with no stream holding its lease, as `abandoned`, the way the next turn would have closed it, keeping the blocks of the sources its plans used from the turn's ADK session, converted as the import converts them. A turn a stream still holds is left open and listed in one of two groups: live on ADK, when its ADK turn session exists and `turn_cursors` holds no row for it (a stream of this release), and live elsewhere (a turn of the next release). A turn live on ADK fails the run, so its exit 0 after the next release takes traffic shows that every stream of this release has ended. A stream of the previous release writes its lease only to ADK's ledger session, so a conversation whose ledger session holds a live `studio:segment` lease is also left open and listed as live on ADK, whatever the tables hold, and fails the run. A conversation whose import record is not current, because ADK wrote its ledger session after the import, is left open and listed as imported before ADK's last write, and fails the run too: run `import --apply`, then `close-open-turns` again. A conversation with no ADK ledger session is judged on the tables alone. A turn with no ADK turn session (started by a release that runs turns without ADK) is listed and left open. So is a turn the `turn_cursors` table holds a row for, by conversation and `turn_index`, opened there under the number of an ADK turn session left behind. A turn opens in `turn_cursors` only under the conversation's lease: its writer first commits the lease and the turn index on the conversation's row, then inserts the turn's row under `FOR SHARE` on the conversation's row where `lease_segment_id` is its lease. The job's closing write refuses a live lease it does not hold and a row whose turn index moved since its load, listing each conversation as changed, reads `turn_cursors` under its `FOR UPDATE` on the same row, and writes the lease columns null. A turn whose row committed, or waits to commit, before that lock is left open, and an insert that waits behind the lock finds the lease gone and opens no turn. The job reads whether `turn_cursors` exists under the same lock, on every closing write. A diverged conversation is listed and left alone, and the run exits 1. Run `--prefer-adk` or `--keep-tables` on it first. A block that does not convert is kept as stored, as the import keeps one, and listed.
 
-1. Keep the job until the release that archives ADK's tables has started, since `gate`, `--prefer-adk` and `--keep-tables` are the repairs for what its migration refuses. Then delete it: `gcloud run jobs delete "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --quiet`.
+1. Keep the job until the release that archives ADK's tables has started, since `gate`, `--prefer-adk` and `--keep-tables` are the repairs for what its migration refuses. Before deleting it, record the image it ran on with `gcloud run jobs describe "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --format='value(spec.template.spec.template.spec.containers[0].image)'`, since a later release recreates the job from it. Then delete it: `gcloud run jobs delete "$SERVICE_AI-adk-import" --region="$REGION" --project="$PROJECT_ID" --quiet`.
 
 The person running these needs to change the service's traffic, create and execute Cloud Run jobs in the project (`roles/run.developer`), and act as the runtime service account (`roles/iam.serviceAccountUser` on it). The job's own identity needs nothing the service does not already hold.
 
