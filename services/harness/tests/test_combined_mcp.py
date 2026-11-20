@@ -2086,8 +2086,6 @@ async def test_an_address_caller_reaches_dfo_apis_with_its_surface_and_user_agen
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        if request.url.path.endswith("/options"):
-            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
         return httpx2.Response(400)
 
     client_holder.set_client(
