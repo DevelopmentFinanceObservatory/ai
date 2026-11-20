@@ -16,8 +16,8 @@ commits.
   and owned sequences, for an image that reads ADK's tables. It leaves 0005
   recorded in `harness_schema_migrations`, so an image that holds 0005
   refuses to start beside the restored tables
-  (`harness.server._refuse_beside_adk_tables`) until `archive` renames them
-  again. It prints which of ADK's five tables
+  (`harness.server._refuse_beside_adk_tables`); deploy/README.md's `DFA05`
+  entry gives the step for each case. It prints which of ADK's five tables
   it restores and refuses when anything is archived but not all five, the
   import ledger alone included, unless `--allow-missing` is given. With
   nothing archived it finds nothing to do, so a rerun after a restore
@@ -29,7 +29,8 @@ commits.
   same transaction, that each restored table's name resolves on
   `search_path` to that table, and rolls back otherwise.
 - `drop-adk` drops each of ADK's five tables that resolves on `search_path`
-  and has ADK's columns, which discards ADK's copy of the conversations. A
+  and has ADK's columns, which discards ADK's copy of the conversations. It
+  prints each table's row count before the `DROP`, in a dry run too. A
   table of an ADK name without ADK's columns is another service's and stays.
 - `drop-archive` drops every `adk_archive_<name>` table. It refuses, and
   drops nothing, when a table of such a name lacks the columns of the table
@@ -208,13 +209,21 @@ async def live_adk_tables(engine: AsyncEngine) -> list[str]:
 
 async def archived_tables(engine: AsyncEngine) -> list[str]:
     """The schema-qualified name of each `adk_archive_<name>` table that
-    resolves on `search_path`, the archive 0005 or `archive` left."""
+    resolves on `search_path` and has the columns of the table it archived,
+    the archive 0005 or `archive` left. A table of such a name without those
+    columns is another service's, as `drop-archive` tells them apart."""
     async with engine.connect() as sa_conn:
         raw = await sa_conn.get_raw_connection()
         conn = raw.driver_connection
         assert conn is not None
-        tables = [await conn.fetchval(_RESOLVED, PREFIX + name) for name in ARCHIVED]
-        return [table for table in tables if table is not None]
+        tables = []
+        for name in ARCHIVED:
+            qualified = await conn.fetchval(_RESOLVED, PREFIX + name)
+            if qualified is not None and not await conn.fetchval(
+                _MISSING_COLUMNS, PREFIX + name, list(_columns(name))
+            ):
+                tables.append(qualified)
+        return tables
 
 
 async def _quoted(conn: Any, name: str) -> str:
@@ -346,7 +355,12 @@ async def _drop(conn: Any, tables: Sequence[str]) -> list[str]:
 
 
 async def _drop_adk(conn: Any) -> list[str]:
-    return await _drop(conn, await _adk_tables(conn))
+    """Print the row count of each of ADK's tables, then drop them."""
+    tables = await _adk_tables(conn)
+    for table in tables:
+        rows = await conn.fetchval(f"SELECT count(*) FROM {table}")
+        print(f"adk_archive drop-adk: {table} holds {rows} rows")
+    return await _drop(conn, tables)
 
 
 async def _drop_archive(conn: Any) -> list[str]:

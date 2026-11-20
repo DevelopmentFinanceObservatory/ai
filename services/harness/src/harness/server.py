@@ -248,8 +248,8 @@ class _MigrationRefusedError(RuntimeError):
     or `_refuse_beside_adk_tables` refused with `DFA05`. The database does
     not change by waiting. The message leads with the SQLSTATE, which
     deploy/README.md lists with each refusal's manual step. A `DFA05`
-    refusal also carries the `tables` it names and the `remedy`, the
-    `harness.db.adk_archive` verb to run with `--apply` before a restart."""
+    refusal also carries the `tables` it names and `archive_present`,
+    whether an `adk_archive_<name>` table resolves, which decides the step."""
 
     def __init__(
         self,
@@ -257,12 +257,12 @@ class _MigrationRefusedError(RuntimeError):
         message: str,
         *,
         tables: tuple[str, ...] = (),
-        remedy: str | None = None,
+        archive_present: bool = False,
     ) -> None:
         super().__init__(f"{sqlstate}: {message}")
         self.sqlstate = sqlstate
         self.tables = tables
-        self.remedy = remedy
+        self.archive_present = archive_present
 
 
 async def _refuse_beside_adk_tables(engine: AsyncEngine) -> None:
@@ -270,40 +270,25 @@ async def _refuse_beside_adk_tables(engine: AsyncEngine) -> None:
     resolves on `search_path` under its own name with ADK's columns
     (`harness.db.adk_archive.live_adk_tables`). This image does not start
     beside them, since an image that reads them may be serving, as after a
-    rollback and `restore --apply`.
-
-    With an `adk_archive_<name>` table resolving
-    (`harness.db.adk_archive.archived_tables`), the live tables are fresh
-    ones an ADK-reading image created after the archive, holding only what
-    it wrote since. `archive` cannot rename them past the archive (0005's
-    `DFA04`), so the remedy is `drop-adk`, which discards them. Without an
-    archive, as after a restore, the remedy is `archive`."""
+    rollback and `restore --apply`. The message says whether the archive
+    resolves (`harness.db.adk_archive.archived_tables`), and
+    deploy/README.md's `DFA05` entry gives the step for each case."""
     tables = await live_adk_tables(engine)
     if not tables:
         return
     archive = await archived_tables(engine)
-    named = ", ".join(tables)
-    if archive:
-        raise _MigrationRefusedError(
-            "DFA05",
-            f"ADK's tables resolve on search_path under their own names: {named}, beside "
-            f"the archive {', '.join(archive)}. An image that reads ADK's tables created them "
-            "after the archive, so they hold only what it wrote since. This image does not "
-            "start beside them. Once no revision that reads ADK's tables is left, run "
-            "`python -m harness.db.adk_archive drop-adk --apply`, which discards them, "
-            "then restart.",
-            tables=tuple(tables),
-            remedy="drop-adk",
-        )
+    archived = (
+        f"The archive resolves: {', '.join(archive)}."
+        if archive
+        else "No adk_archive_<name> table resolves."
+    )
     raise _MigrationRefusedError(
         "DFA05",
-        f"ADK's tables resolve on search_path under their own names: {named}. "
-        "This image does not start beside them, since an image that reads them may be "
-        "serving. Once no revision that reads ADK's tables is left, run "
-        "`python -m harness.db.adk_archive archive --apply`, which reruns "
-        "0005_rename_adk_tables.sql's checks and renames them, then restart.",
+        f"ADK's tables resolve on search_path under their own names: {', '.join(tables)}. "
+        f"{archived} This image does not start beside them, since an image that reads them "
+        "may be serving. deploy/README.md's DFA05 entry gives the step for each case.",
         tables=tuple(tables),
-        remedy="archive",
+        archive_present=bool(archive),
     )
 
 

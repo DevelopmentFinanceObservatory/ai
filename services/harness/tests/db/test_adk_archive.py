@@ -247,6 +247,16 @@ async def _start_refused(engine: AsyncEngine) -> server_module._MigrationRefused
     return refusal.value
 
 
+def _drop_adk_rows(printed: str) -> dict[str, int]:
+    """The row count `drop-adk` printed for each table, by unqualified name."""
+    return {
+        table.rsplit(".", 1)[1]: int(rows)
+        for table, rows in re.findall(
+            r"^adk_archive drop-adk: (\S+) holds (\d+) rows$", printed, re.M
+        )
+    }
+
+
 def _names(tables: tuple[str, ...]) -> set[str]:
     """The unqualified names of the schema-qualified `tables`."""
     return {table.rsplit(".", 1)[1] for table in tables}
@@ -271,7 +281,7 @@ async def test_after_restore_startup_refuses_until_archive_reruns_0005s_checks(
     refusal = await _start_refused(pg_empty_engine)
 
     assert _names(refusal.tables) == set(_ADK_TABLES)
-    assert refusal.remedy == "archive"
+    assert refusal.archive_present is False
     assert await _tables(pg_empty_engine) == tables
     assert await _verb(pg_empty_engine, "archive") == 1
     assert "SQLSTATE DFA02" in capsys.readouterr().err
@@ -283,24 +293,46 @@ async def test_after_restore_startup_refuses_until_archive_reruns_0005s_checks(
     assert {f"adk_archive_{table}" for table in _ARCHIVED} <= await _tables(pg_empty_engine)
 
 
-async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive_until_drop_adk(
+async def test_startup_reports_no_archive_beside_a_foreign_table_of_an_archive_name(
     pg_empty_engine: AsyncEngine, tmp_path: Path
 ) -> None:
-    """An ADK-reading image started after the archive creates its tables,
-    which `archive` cannot rename past the archive, so the remedy is
-    `drop-adk`, and startup proceeds once it has run."""
+    """A table of an `adk_archive_<name>` name without the archive's columns is
+    another service's, so beside restored tables startup reports no archive."""
+    await _archived_by_startup(pg_empty_engine, tmp_path)
+    assert await _verb(pg_empty_engine, "restore") == 0
+    await _execute(pg_empty_engine, "CREATE TABLE adk_archive_adk_ledger_imports (x int)")
+
+    refusal = await _start_refused(pg_empty_engine)
+
+    assert _names(refusal.tables) == set(_ADK_TABLES)
+    assert refusal.archive_present is False
+
+
+async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive_until_drop_adk(
+    pg_empty_engine: AsyncEngine, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An ADK-reading image started after the archive creates its tables and
+    writes a ledger session. `archive` refuses with 0005's DFA02, since no
+    `adk_ledger_imports` resolves to clear it, so the only remedy is
+    `drop-adk`, which prints the rows it discards in a dry run and with
+    `--apply`. Startup proceeds once it has run."""
     await _archived_by_startup(pg_empty_engine, tmp_path)
     await _start(pg_empty_engine)
     sessions = next(statement for statement in _ADK_V1_DDL if "TABLE sessions" in statement)
-    await _execute(pg_empty_engine, sessions)
+    await _execute(pg_empty_engine, sessions, _session("c3"))
     archived = {f"adk_archive_{table}" for table in _ARCHIVED}
 
     refusal = await _start_refused(pg_empty_engine)
 
     assert _names(refusal.tables) == {"sessions"}
-    assert refusal.remedy == "drop-adk"
+    assert refusal.archive_present is True
+    capsys.readouterr()
     assert await _verb(pg_empty_engine, "archive") == 1
+    assert "SQLSTATE DFA02" in capsys.readouterr().err
+    assert await _verb(pg_empty_engine, "drop-adk", apply=False) == 0
+    assert _drop_adk_rows(capsys.readouterr().out) == {"sessions": 1}
     assert await _verb(pg_empty_engine, "drop-adk") == 0
+    assert _drop_adk_rows(capsys.readouterr().out) == {"sessions": 1}
     await _start(pg_empty_engine)
     tables = await _tables(pg_empty_engine)
     assert archived <= tables
