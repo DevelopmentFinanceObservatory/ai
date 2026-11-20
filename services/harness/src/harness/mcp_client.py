@@ -27,18 +27,19 @@ is digest-sized. The resolver maps the search envelope down to its digest
 dozens of unbound definition slots, never leaves this module. The executor
 returns frame REFERENCES; rows stay in the materialisation store.
 
-Clients: every mount gets one client per conversation, held in a
+Clients: every mount gets one client per conversation turn, held in a
 `compiler.caller_clients.CallerClients` registry keyed by the conversation's
-caller (`harness.conversation.current_conversation_caller`). The client
-names that caller in its `x-dfo-caller` header on every request, since
-under the 2026-07-28 protocol revision the MCP transport session lasts one
-request and cannot identify a conversation. data-mcp and analysis-mcp
-record the caller as a stored frame's `writer`. presentation-mcp ignores
-it: a component id grants reads, and the `write_token` a create returns
+caller and the Studio turn (`harness.conversation.current_caller_turn`). The
+client names that caller in its `x-dfo-caller` header and the turn in its
+`x-dfo-turn` header on every request, since under the 2026-07-28 protocol
+revision the MCP transport session lasts one request and cannot identify a
+conversation. data-mcp and analysis-mcp record the caller as a stored frame's
+`writer`, and forward caller and turn to dfo-apis. presentation-mcp ignores
+both: a component id grants reads, and the `write_token` a create returns
 grants revises (`common.mcp_telemetry.WRITE_TOKEN_KEY`).
 
-Holding a client for a whole conversation means a client that breaks mid-
-conversation would otherwise keep failing every later call the same way,
+Holding a client for a whole turn means a client that breaks mid-turn would
+otherwise keep failing every later call of the turn the same way,
 with nothing to reconnect it. `_call_held` is where every call site draws
 the line: a read timeout says only that one call ran past its own deadline, not that the
 client is broken, so the client stays cached; anything else discards it, so
@@ -148,7 +149,7 @@ from presentation_mcp.platform_contract import (
     RetryMode,
 )
 
-from harness.conversation import current_conversation_caller, current_conversation_id
+from harness.conversation import current_caller_turn, current_conversation_id
 from harness.derived_frames import derived_recipe
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import (
@@ -289,7 +290,7 @@ async def _call_held(
     meta: Mapping[str, Any] | None = None,
 ) -> Any:
     """`_call_tool` against `client` -- `clients`' held client for the
-    current conversation -- evicting it from `clients` when the call fails
+    current conversation turn (`current_caller_turn`) -- evicting it from `clients` when the call fails
     for any reason but its own read timeout.
 
     A timeout says only that this one call ran past its deadline
@@ -302,7 +303,7 @@ async def _call_held(
     it is evicted and the next `get()` reconnects instead.
 
     This is not the same as `client` being disconnected here: `discard` only
-    marks it, since a sibling call sharing this conversation's client may
+    marks it, since a sibling call sharing this turn's client may
     still be in flight on it. Whichever call is holding `client` -- this one
     included -- releases it back to `clients` with `release`; the caller of
     `_call_held` owns that pairing, since it is the one that called `get()`
@@ -336,17 +337,17 @@ class McpResolver:
         # policy is settled (`None` when the gate is disabled).
         self._token = bearer_token()
         self._policy = McpTimeoutPolicy(settings=settings)
-        # One held client per conversation -- see the module docstring's
-        # "Clients" note.
+        # One held client per conversation turn (`current_caller_turn`) -- see
+        # the module docstring's "Clients" note.
         self._clients = CallerClients(
             lambda caller: self._policy.client(
                 self._url, auth=self._token, caller=caller, tool="search"
             ),
-            caller=current_conversation_caller,
+            caller=current_caller_turn,
         )
 
     async def aclose(self) -> None:
-        """Release every conversation's held `search` client.
+        """Release every held `search` client, of every conversation turn.
 
         Unlike `McpExecutor.aclose` -- routed to from `_lifespan` shutdown
         through `StudioRunner.aclose` -- no caller on the served path holds
@@ -633,30 +634,30 @@ class McpExecutor:
         # The rules for a card whose period follows the latest data, with the
         # frames and replays they have found, shared by every conversation.
         self._rolling_cards = RollingCards(replay=card_replay, clock=clock)
-        # One held client per conversation per mount/tool -- see the module
-        # docstring's "Clients" note. `get_data`
+        # One held client per conversation turn (`current_caller_turn`) per
+        # mount/tool -- see the module docstring's "Clients" note. `get_data`
         # gets its own held client because it carries a pinned call deadline
         # (`McpTimeoutPolicy.client`'s per-tool row): 180s for its mint
         # budget.
         self._presentation_clients = CallerClients(
-            # No single tool: this client is long-lived, serving
-            # `describe_frame` / `write_component` / `describe_component`
-            # across a whole conversation, so it gets the general default
+            # No single tool: this client serves `describe_frame` /
+            # `write_component` / `describe_component` across a whole turn,
+            # so it gets the general default
             # (`McpTimeoutPolicy.client`'s `tool=None` case).
             lambda caller: self._policy.client(
                 self._presentation_url, auth=self._token, caller=caller
             ),
-            caller=current_conversation_caller,
+            caller=current_caller_turn,
         )
         self._get_data_clients = CallerClients(
             lambda caller: self._policy.client(
                 self._data_url, auth=self._token, caller=caller, tool="get_data"
             ),
-            caller=current_conversation_caller,
+            caller=current_caller_turn,
         )
 
     async def aclose(self) -> None:
-        """Release every conversation's held clients, across both.
+        """Release every held client, of every conversation turn, across both.
 
         Called once, from `harness.server._lifespan`'s shutdown, through
         `StudioRunner.aclose` -> `_RecordingExecutor.aclose` -> here.

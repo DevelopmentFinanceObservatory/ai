@@ -101,7 +101,7 @@ from analysis_mcp.server import PUBLIC_SHAPES as ANALYSIS_PUBLIC_SHAPES
 from analysis_mcp.server import healthz as analysis_healthz
 from analysis_mcp.server import mcp as analysis_mcp
 from common.auth import BearerTokenVerifier
-from common.caller import current_caller
+from common.caller import current_caller, current_user_agent
 from common.echoed_text import truncate_value
 from common.materialisation import get_store as get_frame_store
 from common.public_shape import PublicShape
@@ -364,9 +364,17 @@ class _ExternalCallBudget(Middleware):
 
 class _RequestLog(Middleware):
     """Runs each tool call, resource read and resource listing in a recorded span,
-    and logs one line for it: the tool, the outcome, the protocol revision, the caller, the trace
-    id, and the host fields. Logs one line for each initialize request too, with
-    the same fields.
+    and logs one line for it: the tool, the outcome, the protocol revision, the
+    caller, the trace id, the user agent, and the host fields. Logs one line for
+    each initialize request too, with the same fields.
+
+    `user_agent` is the request's whole `User-Agent`
+    (`common.caller.current_user_agent`, cut to 256 characters), as a JSON
+    string, or `None`. Every request carries it, so it names the client on the
+    calls of a stateless session that log no `clientInfo`. The initialize line
+    pairs it with `clientInfo`. It is the last field on both lines, because the
+    log parser in dfo-infra matches `client=` straight after the caller and
+    absorbs everything after `client_version=` as a tail.
 
     The host fields name the client (`clientInfo`'s name and version) and say
     what it declared about drawing MCP Apps views. `views` is
@@ -395,8 +403,8 @@ class _RequestLog(Middleware):
     call raised. A refusal's code is the one every mounted service writes in
     the result's `_meta` under `REFUSAL_META_KEY` (`common.refusal.refusal_meta`),
     since presentation-mcp's `structuredContent` names it `error`, or holds a
-    view in its place for an MCP Apps host. No line carries a header, a tool's
-    arguments or its result.
+    view in its place for an MCP Apps host. No line carries a header other than
+    the caller and the user agent, a tool's arguments or its result.
     The span records a refusal at the level `_refusal_level` gives its code,
     and `use_request_span` records a raised exception as an `ERROR`. A call
     that succeeds keeps the default level.
@@ -552,7 +560,7 @@ def _log_request(
         client_info = session.client_params.client_info if session.client_params else None
         capabilities = session.client_capabilities
     logger.info(
-        "combined mcp call %s outcome=%s revision=%s caller=%s trace_id=%s %s%s",
+        "combined mcp call %s outcome=%s revision=%s caller=%s trace_id=%s %s%s user_agent=%s",
         subject,
         outcome,
         request_context.protocol_version if request_context else None,
@@ -560,6 +568,7 @@ def _log_request(
         current_trace_id(),
         _host_fields(client_info=client_info, capabilities=capabilities),
         f" uri={_client_text(uri)}" if uri is not None else "",
+        _user_agent(),
     )
 
 
@@ -569,7 +578,7 @@ def _log_initialize(
     """Log an initialize request, whose `params` carry a 2025-11-25 client's
     `clientInfo` and capabilities. `revision` is the one the server answered with."""
     logger.info(
-        "combined mcp initialize outcome=%s revision=%s caller=%s %s",
+        "combined mcp initialize outcome=%s revision=%s caller=%s %s user_agent=%s",
         outcome,
         revision,
         current_caller(),
@@ -577,6 +586,7 @@ def _log_initialize(
             client_info=params.client_info if params else None,
             capabilities=params.capabilities if params else None,
         ),
+        _user_agent(),
     )
 
 
@@ -604,6 +614,12 @@ def _host_fields(
         f"client={name} client_version={version} views={view_support(capabilities)} "
         f"view_mime_types={listed}"
     )
+
+
+def _user_agent() -> str | None:
+    """The `user_agent` field: `current_user_agent` as a JSON string, or `None`."""
+    user_agent = current_user_agent()
+    return None if user_agent is None else json.dumps(user_agent)
 
 
 def _client_text(text: str) -> str:

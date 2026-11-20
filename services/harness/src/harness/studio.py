@@ -39,6 +39,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import anyio
+from common.caller import set_supplied_caller, set_supplied_turn
 from common.telemetry import flush_telemetry
 from compiler.surface import ToolSurface
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -59,8 +60,10 @@ from planner.plan import SEEDS_STATE_KEY, current_earlier_block, current_recorde
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
 from harness.conversation import (
+    current_conversation_caller,
     current_conversation_id,
     current_conversation_key,
+    current_turn_id,
     current_user_message,
 )
 from harness.decision_pick import is_decision_choice
@@ -1341,6 +1344,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # must not share a canvas.
             current_conversation_id.set(f"{principal}/{body.conversation_id}")
             current_conversation_key.set((principal, body.conversation_id))
+            # The turn's MCP clients name this turn (`current_caller_turn`).
+            # The graph's in-process dfo-apis calls (the executor's statistics
+            # and labels, the translator's lookups) run outside any MCP request,
+            # so they name the conversation and turn through the supplied ones.
+            current_turn_id.set(conversation.trace_id)
+            set_supplied_caller(current_conversation_caller())
+            set_supplied_turn(conversation.trace_id)
             current_user_message.set(conversation.turn_user_words)
             current_earlier_block.set(conversation.earlier_block)
             current_recorded_identity.set(conversation.recorded_identity)
@@ -1789,6 +1799,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             conversation.add_to_turn(str(body.payload), user_words=True)
         current_conversation_id.set(f"{principal}/{body.conversation_id}")
         current_conversation_key.set((principal, body.conversation_id))
+        # The resume continues the paused turn, so it names that turn's id.
+        current_turn_id.set(conversation.trace_id)
+        set_supplied_caller(current_conversation_caller())
+        set_supplied_turn(conversation.trace_id)
         # The user's words as amended, so a search after the resume reads the
         # refined ask and no switch's label.
         current_user_message.set(conversation.turn_user_words)

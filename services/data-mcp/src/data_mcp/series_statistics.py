@@ -66,6 +66,7 @@ from typing import Any, NamedTuple
 import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
+from common.caller import shared_work_context
 from dfo_frame_grammar.columnar import array_kernel
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
@@ -215,13 +216,19 @@ class _VerifiedTables:
     ) -> asyncio.Task[pa.Table]:
         """The fetch of `key` in flight, started as `fetch()` when none is.
 
+        The fetch runs in `common.caller.shared_work_context`, since every
+        caller missing the table joins it: its dfo-apis calls name no caller
+        and no turn, whichever request started it.
+
         The fetch raises `TimeoutError` once it runs past `_FLIGHT_TIMEOUT_S`,
         and is forgotten once it ends, so the next miss after a failure
         fetches again. A failure is logged as it ends, since every caller
         may have given up on it by then.
         """
         if (task := self._flights.get(key)) is None:
-            task = asyncio.create_task(asyncio.wait_for(fetch(), _FLIGHT_TIMEOUT_S))
+            task = asyncio.create_task(
+                asyncio.wait_for(fetch(), _FLIGHT_TIMEOUT_S), context=shared_work_context()
+            )
             self._flights[key] = task
 
             def forget(done: asyncio.Task[pa.Table]) -> None:
