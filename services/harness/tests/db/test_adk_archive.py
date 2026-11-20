@@ -306,6 +306,8 @@ async def test_startup_reports_no_archive_beside_a_foreign_table_of_an_archive_n
 
     assert _names(refusal.tables) == set(_ADK_TABLES)
     assert refusal.archive_present is False
+    assert _names(refusal.foreign_archive_names) == {"adk_archive_adk_ledger_imports"}
+    assert "resolves but is not the archive" in str(refusal)
 
 
 async def test_startup_refuses_a_fresh_adk_table_created_after_the_archive_until_drop_adk(

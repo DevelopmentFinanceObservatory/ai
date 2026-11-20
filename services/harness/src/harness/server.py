@@ -44,7 +44,7 @@ from starlette.websockets import WebSocketClose
 from harness import __version__
 from harness.agents import build_tool_surface
 from harness.combined_mcp import build_combined_mcp, children_start_once, combined_http_app
-from harness.db.adk_archive import archived_tables, live_adk_tables
+from harness.db.adk_archive import archive_state, live_adk_tables
 from harness.db.engine import DatabaseHandle, build_database
 from harness.db.migrate import MigrationChecksumError, apply_pending
 from harness.early_mint import EarlyMints
@@ -249,7 +249,9 @@ class _MigrationRefusedError(RuntimeError):
     not change by waiting. The message leads with the SQLSTATE, which
     deploy/README.md lists with each refusal's manual step. A `DFA05`
     refusal also carries the `tables` it names and `archive_present`,
-    whether an `adk_archive_<name>` table resolves, which decides the step."""
+    whether an `adk_archive_<name>` table resolves, which decides the step, and
+    `foreign_archive_names`, the tables of an archive name that resolve
+    without the archive's columns."""
 
     def __init__(
         self,
@@ -258,11 +260,13 @@ class _MigrationRefusedError(RuntimeError):
         *,
         tables: tuple[str, ...] = (),
         archive_present: bool = False,
+        foreign_archive_names: tuple[str, ...] = (),
     ) -> None:
         super().__init__(f"{sqlstate}: {message}")
         self.sqlstate = sqlstate
         self.tables = tables
         self.archive_present = archive_present
+        self.foreign_archive_names = foreign_archive_names
 
 
 async def _refuse_beside_adk_tables(engine: AsyncEngine) -> None:
@@ -271,17 +275,16 @@ async def _refuse_beside_adk_tables(engine: AsyncEngine) -> None:
     (`harness.db.adk_archive.live_adk_tables`). This image does not start
     beside them, since an image that reads them may be serving, as after a
     rollback and `restore --apply`. The message says whether the archive
-    resolves (`harness.db.adk_archive.archived_tables`), and
+    resolves and names each table of an archive name that resolves without the
+    archive's columns (`harness.db.adk_archive.archive_state`), and
     deploy/README.md's `DFA05` entry gives the step for each case."""
     tables = await live_adk_tables(engine)
     if not tables:
         return
-    archive = await archived_tables(engine)
-    archived = (
-        f"The archive resolves: {', '.join(archive)}."
-        if archive
-        else "No adk_archive_<name> table resolves."
-    )
+    archive, foreign = await archive_state(engine)
+    archived = f"The archive resolves: {', '.join(archive)}." if archive else "No archive resolves."
+    for qualified in foreign:
+        archived += f" {qualified} resolves but is not the archive."
     raise _MigrationRefusedError(
         "DFA05",
         f"ADK's tables resolve on search_path under their own names: {', '.join(tables)}. "
@@ -289,6 +292,7 @@ async def _refuse_beside_adk_tables(engine: AsyncEngine) -> None:
         "may be serving. deploy/README.md's DFA05 entry gives the step for each case.",
         tables=tuple(tables),
         archive_present=bool(archive),
+        foreign_archive_names=tuple(foreign),
     )
 
 

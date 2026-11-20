@@ -30,7 +30,8 @@ commits.
   `search_path` to that table, and rolls back otherwise.
 - `drop-adk` drops each of ADK's five tables that resolves on `search_path`
   and has ADK's columns, which discards ADK's copy of the conversations. It
-  prints each table's row count before the `DROP`, in a dry run too. A
+  locks the tables, then prints each table's row count before the `DROP`,
+  in a dry run too, so the counts are the rows it drops. A
   table of an ADK name without ADK's columns is another service's and stays.
 - `drop-archive` drops every `adk_archive_<name>` table. It refuses, and
   drops nothing, when a table of such a name lacks the columns of the table
@@ -69,7 +70,13 @@ import pydantic
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from harness.db.engine import build_database
-from harness.db.migrate import MIGRATIONS_DIR, bound_and_lock, record_applied, sha256
+from harness.db.migrate import (
+    MIGRATION_TIMEOUT_S,
+    MIGRATIONS_DIR,
+    bound_and_lock,
+    record_applied,
+    sha256,
+)
 from harness.settings import Settings
 
 ARCHIVE_MIGRATION = MIGRATIONS_DIR / "0005_rename_adk_tables.sql"
@@ -207,23 +214,25 @@ async def live_adk_tables(engine: AsyncEngine) -> list[str]:
         return await _adk_tables(conn)
 
 
-async def archived_tables(engine: AsyncEngine) -> list[str]:
-    """The schema-qualified name of each `adk_archive_<name>` table that
-    resolves on `search_path` and has the columns of the table it archived,
-    the archive 0005 or `archive` left. A table of such a name without those
-    columns is another service's, as `drop-archive` tells them apart."""
+async def archive_state(engine: AsyncEngine) -> tuple[list[str], list[str]]:
+    """The `adk_archive_<name>` tables that resolve on `search_path`, as
+    `(archived, foreign)`, each schema-qualified. `archived` holds those with
+    the columns of the table they archived, the archive 0005 or `archive`
+    left. `foreign` holds those without, tables of another service that
+    `restore` and `drop-archive` refuse."""
     async with engine.connect() as sa_conn:
         raw = await sa_conn.get_raw_connection()
         conn = raw.driver_connection
         assert conn is not None
-        tables = []
+        archived: list[str] = []
+        foreign: list[str] = []
         for name in ARCHIVED:
             qualified = await conn.fetchval(_RESOLVED, PREFIX + name)
-            if qualified is not None and not await conn.fetchval(
-                _MISSING_COLUMNS, PREFIX + name, list(_columns(name))
-            ):
-                tables.append(qualified)
-        return tables
+            if qualified is None:
+                continue
+            missing = await conn.fetchval(_MISSING_COLUMNS, PREFIX + name, list(_columns(name)))
+            (foreign if missing else archived).append(qualified)
+        return archived, foreign
 
 
 async def _quoted(conn: Any, name: str) -> str:
@@ -355,11 +364,20 @@ async def _drop(conn: Any, tables: Sequence[str]) -> list[str]:
 
 
 async def _drop_adk(conn: Any) -> list[str]:
-    """Print the row count of each of ADK's tables, then drop them."""
+    """Lock each of ADK's tables, print its row count, then drop them. The
+    lock keeps a draining revision from writing between the count and the
+    `DROP`, so the counts are the rows dropped. The counts run without a
+    statement timeout, since a large `events` table outlasts the bound, and
+    the bound returns before the `DROP`."""
     tables = await _adk_tables(conn)
+    if not tables:
+        return []
+    await conn.execute(f"LOCK TABLE {', '.join(tables)} IN ACCESS EXCLUSIVE MODE")
+    await conn.execute("SET LOCAL statement_timeout = 0")
     for table in tables:
         rows = await conn.fetchval(f"SELECT count(*) FROM {table}")
         print(f"adk_archive drop-adk: {table} holds {rows} rows")
+    await conn.execute(f"SET LOCAL statement_timeout = {round(MIGRATION_TIMEOUT_S * 1000)}")
     return await _drop(conn, tables)
 
 
