@@ -2819,7 +2819,9 @@ def _series_off_period(
                 SeriesEntity(
                     role=entity["role"],
                     ref=entity["ref"],
-                    label=labels.get(bare_dcid(entity["ref"])),
+                    label=None
+                    if entity["role"].startswith(_LABEL_ROLE_PREFIX)
+                    else labels.get(bare_dcid(entity["ref"])),
                 )
                 for entity in row["entities"]
             ),

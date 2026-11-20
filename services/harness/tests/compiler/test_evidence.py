@@ -1721,6 +1721,36 @@ def test_a_fetched_label_does_not_reach_a_sector_that_shares_its_bare_id() -> No
     ]
 
 
+def test_an_approved_label_does_not_reach_a_sector_that_shares_its_bare_id(
+    requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    """The approved recipient `dcid:110` is labelled "Recipient"; a series' sector `110`
+    names itself and keeps no label."""
+    evidence = evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(
+            _stat(
+                "DebtServicePaid",
+                entities=[
+                    {"role": "stat_var_crsPurpose", "ref": "110"},
+                    {"role": "recipient", "ref": "dcid:110"},
+                ],
+                observations=6,
+                latest={"value": 2.0, "period": "2021"},
+            )
+        ),
+    )
+    approved = source(entities=(ResolvedEntity(role="recipient", ref="110", label="Recipient"),))
+
+    issues = check_evidence(requirement(), evidence, approved=approved)
+
+    (short,) = (issue for issue in issues if issue.code is EvidenceIssueCode.WINDOW_SHORT)
+    assert [(entity.role, entity.label) for entity in short.entities] == [
+        ("stat_var_crsPurpose", None),
+        ("recipient", "Recipient"),
+    ]
+
+
 def test_a_short_series_lookup_labels_only_the_entities_it_named() -> None:
     finding = _short_of("donor/A", "donor/B", "donor/K", size=1.0, labelled="donor/K")
 
