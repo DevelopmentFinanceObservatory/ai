@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from google.cloud.sql.connector import IPTypes, create_async_connector
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from harness.settings import Settings
@@ -42,9 +43,10 @@ _CONNECTOR_DRIVER = "asyncpg"
 # engine (`DatabaseHandle.engine`): the longest any statement may wait for the
 # server, a COMMIT included, before the call raises `TimeoutError`. A COMMIT that a write runs
 # to the end under cancellation (`harness.studio_store`) would otherwise wait
-# on a stalled connection until TCP gives up. It sits above the migrations'
-# `statement_timeout` (`harness.db.migrate.MIGRATION_TIMEOUT_S`, 60 s), so it
-# never cuts a migration short.
+# on a stalled connection until TCP gives up. A call that passes its own
+# `timeout` replaces it: `harness.db.migrate.apply_pending` passes
+# `MIGRATION_CALL_TIMEOUT_S` on every call, so a migration file, sent as one
+# call, is bounded by its statements' `statement_timeout` and that wait.
 COMMAND_TIMEOUT_S = 90.0
 
 # The pool of `DatabaseHandle.lineage_engine`: three connections and no
@@ -146,7 +148,7 @@ def build_database(*, settings: Settings) -> DatabaseHandle | None:
             settings.database_url,
             pool_pre_ping=True,
             hide_parameters=True,
-            connect_args={"command_timeout": COMMAND_TIMEOUT_S},
+            connect_args=_command_timeout(settings.database_url, COMMAND_TIMEOUT_S),
         )
         lineage_engine = build_lineage_engine(settings.database_url)
 
@@ -177,9 +179,18 @@ def build_lineage_engine(
         url,
         pool_pre_ping=True,
         hide_parameters=True,
-        connect_args={"command_timeout": _LINEAGE_COMMAND_TIMEOUT_S},
+        connect_args=_command_timeout(url, _LINEAGE_COMMAND_TIMEOUT_S),
         **_LINEAGE_POOL,
     )
+
+
+def _command_timeout(url: str, seconds: float) -> dict[str, float]:
+    """The `connect_args` that bound each statement on `url` at `seconds`:
+    asyncpg's `command_timeout`, which only asyncpg takes, so a URL on
+    another driver connects without it. The connector always dials asyncpg
+    (`_ConnectorSource`)."""
+    asyncpg = make_url(url).get_driver_name() == _CONNECTOR_DRIVER
+    return {"command_timeout": seconds} if asyncpg else {}
 
 
 def _build_connector_backed_database(*, settings: Settings) -> DatabaseHandle:

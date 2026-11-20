@@ -12000,39 +12000,97 @@ async def test_a_claim_save_that_raises_writes_the_abandoned_close_only_if_it_co
         assert stored is not None and stored.segment is None
 
 
-@pytest.mark.parametrize("committed", [True, False], ids=["committed", "not-committed"])
+@pytest.mark.parametrize(
+    ("committed", "span"),
+    [(True, ("cancelled", "WARNING")), (False, ("not_started", "WARNING"))],
+    ids=["committed", "not-committed"],
+)
 async def test_an_interrupt_whose_claim_save_raises_releases_what_it_committed(
+    otlp_spans: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
     committed: bool,
+    span: tuple[str, str],
 ) -> None:
-    """An `/interrupt` whose claim save raises, cancelled once its write
-    committed or failing before it. A claim that committed is released as
-    one: its lease is dropped and its zero-length segment span ended
-    (`harness.studio._release_claim`), so a retry of the same answer resumes at once instead of meeting the lease
-    until its TTL lapses. One that did not commit leaves the stored lease
-    empty too."""
+    """An `/interrupt` whose claim save raises, its request cancelled once
+    the write committed or the save failing before it. A claim that
+    committed is released as one: its lease is dropped and its zero-length
+    segment span ends `cancelled` (`harness.studio._release_claim`), a
+    cancellation and no failure, so a retry of the same answer resumes at
+    once instead of meeting the lease until its TTL lapses. One that did not
+    commit ends its working copy's span `not_started` and leaves the stored
+    lease empty too."""
     app = _app(*_plan())
     store = app.state.studio.store
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
         real_save = store.save
+        ended = _recording_span_ends(monkeypatch)
 
         async def save_then_fail(*args: Any, **kwargs: Any) -> bool:
             store.save = real_save  # type: ignore[method-assign]
             if committed:
                 await real_save(*args, **kwargs)
-                raise asyncio.CancelledError  # a cancel once the write landed
+                # The request is cancelled once the write landed.
+                task = asyncio.current_task()
+                assert task is not None
+                task.cancel()
+                await asyncio.sleep(0)
             raise RuntimeError("store unavailable")
 
         store.save = save_then_fail  # type: ignore[method-assign]
         body = _interrupt_body(plan["interrupt_id"], "reject")
         with pytest.raises(asyncio.CancelledError if committed else RuntimeError):
             await client.post("/api/studio/interrupt", json=body, headers=AUTH)
+        task = asyncio.current_task()
+        assert task is not None
+        while task.cancelling():
+            task.uncancel()
 
+        assert ended == [span]
         stored = await _other_store().load(PRINCIPAL, CONVERSATION)
         assert stored is not None and stored.segment is None
         assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
         retried = await _stream(client, "/api/studio/interrupt", body)
+
+    assert _events(retried)[-1] == "done"
+
+
+@pytest.mark.parametrize("route", ["turn", "interrupt"])
+async def test_a_claim_save_that_committed_unseen_still_frees_its_lease(route: str) -> None:
+    """A claim save whose write committed but whose bookkeeping never
+    reached the live state, as a COMMIT that lands and then times out leaves
+    it, raises with the live state not holding the claimed segment. The
+    route drops that segment's lease all the same, so the next request is
+    not refused until the lease's TTL lapses: a `/turn` claims anew, and an
+    `/interrupt` retried with the same answer resumes."""
+    app = _app(*_plan(), _text("Hello."))
+    store = app.state.studio.store
+    real_take_draft = store._take_draft
+    raised: list[str] = []
+
+    def take_draft_raising_once(*args: Any) -> None:
+        if not raised:
+            raised.append("bookkeeping")
+            raise RuntimeError("the commit's acknowledgement was lost")
+        real_take_draft(*args)
+
+    async with _client(app) as client:
+        paused = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(paused, "plan.proposed")
+        store._take_draft = take_draft_raising_once  # type: ignore[method-assign]
+        if route == "turn":
+            path, body = "/api/studio/turn", _turn_body("aid to kenya")
+        else:
+            path, body = "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
+        with pytest.raises(RuntimeError, match="acknowledgement was lost"):
+            await client.post(path, json=body, headers=AUTH)
+
+        stored = await _other_store().load(PRINCIPAL, CONVERSATION)
+        assert stored is not None and stored.segment is None
+        assert stored.turn_index == (2 if route == "turn" else 1)
+        assert raised == ["bookkeeping"]
+        retried = await _stream(client, path, body)
 
     assert _events(retried)[-1] == "done"
 

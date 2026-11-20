@@ -1304,12 +1304,19 @@ async def _release_claim(
     *,
     cause: BaseException | None = None,
     turn: ConversationState | None = None,
+    unsure: str | None = None,
 ) -> None:
     """Let go of a request whose stream never started, on every path,
     cancellation included. A claim that never committed gives up its
     working copy (`StudioStore.drop_draft`). A claim that committed
     (`segment_id`) drops its lease (`StudioStore.drop_lease`, which runs to
-    the end under cancellation). A request opens no span before its stream,
+    the end under cancellation). A claim save that raised with the live
+    state not holding its segment (`unsure`) may still have committed, a
+    COMMIT that landed and then timed out say, so that lease is dropped all
+    the same: `drop_lease` clears only that segment's lease, and a failure
+    there is logged and leaves the lease to its TTL. The turn lines such a
+    commit wrote are lost, as they are for any save whose acknowledgement is
+    lost. A request opens no span before its stream,
     whose owner opens one: `turn`, the working copy its claim began or
     resumed a turn on, gets a zero-length `turn.segment` span on the turn's
     trace (`record_unstreamed_span`) whose status says what let it go. `cause`,
@@ -1336,6 +1343,16 @@ async def _release_claim(
         store.drop_draft(principal, conversation_id)
         if segment_id is not None:
             await store.drop_lease(principal, conversation_id, segment_id)
+        elif unsure is not None:
+            try:
+                await store.drop_lease(principal, conversation_id, unsure)
+            except Exception:
+                logger.warning(
+                    "studio: conversation %s could not drop the lease its claim save may "
+                    "have committed; it lapses by its TTL",
+                    conversation_id,
+                    exc_info=True,
+                )
     finally:
         try:
             if turn is not None:
@@ -2400,19 +2417,25 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     _streaming_conflict_response("another request already answered this interrupt"),
                     turn=claiming,
                 )
-        except BaseException:
+        except BaseException as exc:
             # A claim save that raised once its write committed, cancelled
             # during the commit say, still handed its segment to the live
             # state (`StudioStore.save`), whose lease is dropped as any
-            # committed claim's.
+            # committed claim's, and its span ends as `exc` reads. One the
+            # live state does not hold resumed nothing, so its span ends
+            # `not_started`, and it may still have committed, so its lease is
+            # dropped too (`unsure`).
             live = studio.store.current(principal, body.conversation_id)
-            committed = (
-                segment_id
-                if live is not None and live.segment is not None and live.segment.id == segment_id
-                else None
-            )
+            held = live is not None and live.segment is not None and live.segment.id == segment_id
             await _release_claim(
-                studio.store, principal, body.conversation_id, hold, committed, turn=claiming
+                studio.store,
+                principal,
+                body.conversation_id,
+                hold,
+                segment_id if held else None,
+                cause=exc if held else None,
+                turn=claiming,
+                unsure=None if held else segment_id,
             )
             raise
 

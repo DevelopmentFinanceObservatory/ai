@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import harness.db.engine as engine_module
 import pytest
 from harness.db.migrate import MIGRATIONS_DIR, MigrationChecksumError, apply_pending
+from harness.settings import Settings
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -158,3 +160,30 @@ async def test_two_concurrent_appliers_apply_each_file_once(
     )
 
     assert sorted(results, key=len) == [[], ["0001_first.sql", "0002_second.sql"]]
+
+
+async def test_a_file_that_outlasts_the_engines_command_timeout_still_applies(
+    pg_database_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A migration file whose statements each pass `statement_timeout`, but
+    together take longer than the runtime engine's `command_timeout`, applies:
+    the file goes as one call, which waits `MIGRATION_CALL_TIMEOUT_S` in
+    place of the engine's bound. The engine's bound is shrunk below the
+    file's two sleeps, and the shipped files, which the database already
+    holds, are copied beside the new one."""
+    monkeypatch.setattr(engine_module, "COMMAND_TIMEOUT_S", 0.3)
+    for path in MIGRATIONS_DIR.glob("*.sql"):
+        _write(tmp_path, path.name, path.read_text())
+    _write(tmp_path, "9999_two_sleeps.sql", "SELECT pg_sleep(0.2); SELECT pg_sleep(0.2);")
+    database = engine_module.build_database(settings=Settings(database_url=pg_database_url))
+    assert database is not None
+    try:
+        # The control: the same file sent with the engine's own bound times out.
+        async with database.engine.connect() as conn:
+            driver = (await conn.get_raw_connection()).driver_connection
+            assert driver is not None
+            with pytest.raises(TimeoutError):
+                await driver.execute((tmp_path / "9999_two_sleeps.sql").read_text())
+        assert await apply_pending(database.engine, directory=tmp_path) == ["9999_two_sleeps.sql"]
+    finally:
+        await database.aclose()
