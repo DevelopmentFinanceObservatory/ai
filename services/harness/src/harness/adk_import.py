@@ -188,6 +188,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
+from common.logging import configure_logging
+from common.telemetry import flush_telemetry, init_telemetry
 from compiler.sources import bound_rows, source_from_spec_block
 from executor.ledger import RunStatus, stored_run
 from pydantic import BaseModel, ValidationError
@@ -2247,8 +2249,16 @@ async def _run(arguments: argparse.Namespace, engine: AsyncEngine) -> _Report:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the verb and print its report. Returns the exit status."""
+    """Run the verb and print its report. Returns the exit status.
+
+    Logging and telemetry come up as the service's do
+    (`harness.server._lifespan`), so the `studio.turn` line and `turn`
+    outcome of each turn `close-open-turns` closes are written as the
+    service writes them: a JSON log line in a Cloud Run job execution, and
+    an outcome exported before the job exits when telemetry is configured."""
     arguments = _arguments(argv)
+    configure_logging()
+    init_telemetry(service_name="harness")
     database = build_database(settings=Settings())
     if database is None:
         print("adk_import: set DATABASE_URL or the SESSION_STORE_* variables", file=sys.stderr)
@@ -2258,7 +2268,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             return await _run(arguments, database.engine)
         finally:
-            await database.aclose()
+            try:
+                await database.aclose()
+            finally:
+                await flush_telemetry()
 
     try:
         report = asyncio.run(go())

@@ -3604,23 +3604,35 @@ def _slow_commit(store: StudioStore) -> tuple[asyncio.Event, asyncio.Event]:
     return committing, proceed
 
 
+@pytest.mark.parametrize("write", ["save", "checkpoint"])
 async def test_a_closed_turn_writes_its_outcome_once_its_save_commits(
-    new_store, monkeypatch
+    new_store, monkeypatch, write
 ) -> None:
-    """`close_turn` writes nothing. The save that commits the record writes
-    one outcome, however many paths closed the turn and however many saves
+    """`close_turn` writes nothing. The write that commits the record, a
+    save or a segment's fenced checkpoint, writes one outcome and starts its
+    export, however many paths closed the turn and however many saves
     follow, carrying the turn's question and answer and no error."""
     written = _spy_outcomes(monkeypatch)
+    flushes: list[str] = []
+    monkeypatch.setattr(studio_store, "start_telemetry_flush", lambda: flushes.append("flush"))
     store = new_store()
     state = await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION) if write == "checkpoint" else None
     state.begin_turn(TurnUsage(account=_ACCOUNT, surface="studio"))
     state.turn_user_message = "life expectancy in Kenya"
+    if segment_id is not None:
+        await store.save("principal", CONVERSATION)
     state.close_turn(final_text="done")
     state.close_turn(final_text="done again")  # the resume protocol can call this twice
     assert written == []
 
-    assert await store.save("principal", CONVERSATION) is True
+    if segment_id is None:
+        assert await store.save("principal", CONVERSATION) is True
+    else:
+        await store.checkpoint("principal", CONVERSATION, segment_id)
+        await store.release("principal", CONVERSATION, segment_id)
     assert await store.save("principal", CONVERSATION) is False
+    assert flushes == ["flush"]
 
     assert written == [
         {
@@ -3634,6 +3646,21 @@ async def test_a_closed_turn_writes_its_outcome_once_its_save_commits(
             "paused": False,
         }
     ]
+
+
+def test_a_closed_line_s_reply_joins_only_the_parts_its_record_holds() -> None:
+    """A record with no answer gives the code's notes alone as the reply,
+    with no blank paragraph before them."""
+    line = studio_store._closed_line(
+        {
+            "trace_id": "tr_1",
+            "user": "q",
+            "assistant": "",
+            "match_notes": "notes",
+            "basis_line": "b",
+        }
+    )
+    assert line.response == "notes\n\nb"
 
 
 async def test_an_abandoned_turn_writes_its_outcome_on_its_own_trace(

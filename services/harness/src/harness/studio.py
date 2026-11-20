@@ -970,13 +970,20 @@ class StudioRunner:
         """The surface the turn of per-turn session `session_id` was asked
         from, as `/turn` wrote it into that session's state
         (`_turn_session_state`). `None` when the session or the key is
-        missing."""
-        session = await self.runner.session_service.get_session(
-            app_name=self.runner.app_name,
-            user_id=user_id,
-            session_id=session_id,
-            config=GetSessionConfig(num_recent_events=0),
-        )
+        missing, and when the read fails, which is logged: the surface only
+        tags the turn's telemetry, so it never fails the answer."""
+        try:
+            session = await self.runner.session_service.get_session(
+                app_name=self.runner.app_name,
+                user_id=user_id,
+                session_id=session_id,
+                config=GetSessionConfig(num_recent_events=0),
+            )
+        except Exception:
+            logger.warning(
+                "studio: could not read the surface of turn session %s", session_id, exc_info=True
+            )
+            return None
         surface = session.state.get("surface") if session is not None else None
         return surface if isinstance(surface, str) else None
 
@@ -1996,28 +2003,36 @@ async def _release_claim(
     """Let go of a request whose stream never started, on every path,
     cancellation included. A claim that never committed gives up its
     working copy (`StudioStore.drop_draft`), whose span ends `not_started`.
-    A claim that committed (`claim.segment_id`) drops its lease
-    (`StudioStore.drop_lease`, which runs to the end under cancellation),
-    and the segment's span, if one opened, ends as `_ending_status` reads
-    `cause` on the route's path, or with `response` on the response's. Then the claim's hold lets go of the lock, and any span that
+    A claim that committed drops its lease (`StudioStore.drop_lease`, which
+    runs to the end under cancellation), and the segment's span, if one
+    opened, ends as `_ending_status` reads `cause` on the route's path, or
+    with `response` on the response's. A claim committed when the route saw
+    its save return (`claim.segment_id`), or when the live state holds the
+    segment it was claiming: a save that raised once its write committed,
+    cancelled during the commit say, still handed the segment to the live
+    state. Then the claim's hold lets go of the lock, and any span that
     ended is exported, whatever the span end raised, and with it any turn
     line the claim save wrote, an abandoned turn's close, which no stream
-    then exports. It does nothing once
-    the hold has let go: the working copy and the lease are then another
-    request's."""
+    then exports. It does nothing once the hold has let go: the working
+    copy and the lease are then another request's."""
     store, principal, conversation_id = claim.store, claim.principal, claim.conversation_id
     if not claim.hold.held:
         return
     ended = False
+    segment_id = claim.segment_id
+    if segment_id is None and claim.claiming is not None:
+        held = store.current(principal, conversation_id)
+        if held is not None and held.segment is not None and held.segment.id == claim.claiming:
+            segment_id = claim.claiming
     try:
         ended = store.drop_draft(principal, conversation_id)
-        if claim.segment_id is not None:
-            await store.drop_lease(principal, conversation_id, claim.segment_id)
+        if segment_id is not None:
+            await store.drop_lease(principal, conversation_id, segment_id)
     finally:
         try:
             try:
                 live = store.current(principal, conversation_id)
-                if claim.segment_id is not None and live is not None:
+                if segment_id is not None and live is not None:
                     ended = live.end_segment_span(_ending_status(cause, response=response)) or ended
             finally:
                 claim.hold.release()
@@ -2035,14 +2050,16 @@ async def _unclaimed(claim: _Claim, response: Response) -> Response:
 
 @dataclass(frozen=True)
 class _Claim:
-    """A request's claim on its conversation: its lock hold, and the
-    segment once the claim save committed it (`segment_id`). What
-    `_release_claim` lets go of when the segment's stream never does."""
+    """A request's claim on its conversation: its lock hold, the segment its
+    claim save writes (`claiming`), and that segment once the route saw the
+    save commit it (`segment_id`). What `_release_claim` lets go of when the
+    segment's stream never does."""
 
     store: StudioStore
     principal: str
     conversation_id: str
     hold: _LockHold
+    claiming: str | None = None
     segment_id: str | None = None
 
 
@@ -2214,6 +2231,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         retry_after_seconds=exc.retry_after_seconds,
                     ),
                 )
+            claim = replace(claim, claiming=segment_id)
             edit = (
                 body.component_ref is not None
                 and body.component_ref.intent is ComponentRefIntent.EDIT
@@ -2262,14 +2280,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         "another request is streaming on this conversation"
                     ),
                 )
-            except BaseException:
-                # A save that raised once its write committed (cancelled
-                # during the commit, say) still handed the claimed segment to
-                # the live state, so the claim is released as a committed one.
-                live = studio.store.current(principal, body.conversation_id)
-                if live is not None and live.segment is not None and live.segment.id == segment_id:
-                    claim = replace(claim, segment_id=segment_id)
-                raise
             claim = replace(claim, segment_id=segment_id)
             conversation = studio.store.current(principal, body.conversation_id)
             assert conversation is not None
@@ -2505,6 +2515,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         retry_after_seconds=exc.retry_after_seconds,
                     ),
                 )
+            claim = replace(claim, claiming=segment_id)
             if resuming and pending.answer != requested_answer:
                 # The claim above only succeeds once the earlier resume's
                 # segment has expired (its owner died before reaching a

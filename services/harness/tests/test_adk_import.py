@@ -22,10 +22,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
 
+import common.logging as common_logging
 import pytest
 from compiler.sources import source_from_spec_block
 from google.adk.events import Event, EventActions
@@ -48,6 +50,7 @@ from harness.adk_import import (
     verify,
 )
 from harness.conversation import current_conversation_key
+from harness.db.engine import DatabaseHandle
 from harness.db.migrate import apply_pending
 from harness.graph.state import AGENT_NAME, ORCHESTRATOR_SPECS_KEY, store_search
 from harness.run_ledger import StudioRunLedger
@@ -489,6 +492,53 @@ async def test_records_the_turn_loader_skips_are_reported_and_copied_as_stored(
     state = await _load(pg_empty_engine, FULL)
     assert state is not None and state.turns[1]["plans"][-1] == {"not": "a plan record"}
     assert (await verify(pg_empty_engine)).clean
+
+
+async def test_the_close_open_turns_job_logs_each_close_as_a_json_studio_turn_line(
+    adk: AsyncEngine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`main`, run as a Cloud Run job execution runs it, brings logging and
+    telemetry up as the service does, so each turn `close-open-turns` closes
+    writes its `studio.turn` line as a JSON entry the analytics log model
+    reads (`jsonPayload.event`), and the job flushes its outcomes before it
+    exits."""
+    await import_conversations(adk, apply=True)
+    async with adk.connect() as conn:
+        schema = (await conn.execute(text("SELECT current_schema()"))).scalar_one()
+    url = adk.url
+
+    def build_database(*, settings: Any) -> DatabaseHandle:
+        # A fresh engine, built on the job's own event loop.
+        engine = create_async_engine(url, connect_args={"server_settings": {"search_path": schema}})
+        return DatabaseHandle(engine=engine, aclose=engine.dispose)
+
+    telemetry: list[str] = []
+
+    async def flush() -> None:
+        telemetry.append("flush")
+
+    monkeypatch.setattr(adk_import, "build_database", build_database)
+    monkeypatch.setattr(adk_import, "init_telemetry", lambda **_: telemetry.append("init"))
+    monkeypatch.setattr(adk_import, "flush_telemetry", flush)
+    monkeypatch.setenv("CLOUD_RUN_JOB", "ai-adk-import")
+    monkeypatch.delenv("LOG_FORMAT", raising=False)
+    # `configure_logging` replaces the root handlers: put pytest's back after.
+    monkeypatch.setattr(common_logging, "_configured", False)
+    monkeypatch.setattr(logging.root, "handlers", list(logging.root.handlers))
+    monkeypatch.setattr(logging.root, "level", logging.root.level)
+
+    status = await asyncio.to_thread(adk_import.main, ["close-open-turns", "--apply"])
+
+    assert status == 0
+    entries = [
+        json.loads(line) for line in capsys.readouterr().err.splitlines() if line.startswith("{")
+    ]
+    lines = [entry for entry in entries if entry.get("event") == "studio.turn"]
+    assert sorted((entry["status"], entry["error"]) for entry in lines) == [
+        ("closed", "abandoned"),
+        ("closed", "abandoned"),
+    ]
+    assert telemetry == ["init", "flush"]
 
 
 async def test_close_open_turns_closes_each_paused_adk_turn_as_abandoned_with_its_blocks(

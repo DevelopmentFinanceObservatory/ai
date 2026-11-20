@@ -932,10 +932,12 @@ def test_a_turn_exports_its_request_and_response_on_the_outcome_observation_alon
     ("error", "paused", "level", "status_message", "status"),
     [
         (None, False, None, None, None),
-        ("cancelled", False, "ERROR", "cancelled", None),
+        ("state_not_saved", False, "ERROR", "state_not_saved", None),
+        ("cancelled", False, "WARNING", "cancelled", None),
+        ("abandoned", False, "WARNING", "abandoned", None),
         (None, True, None, None, "paused"),
     ],
-    ids=["clean", "error", "paused"],
+    ids=["clean", "error", "cancelled", "abandoned", "paused"],
 )
 def test_a_turn_closed_with_an_error_exports_its_outcome_at_level_error(
     fake_langfuse: FakeLangfuse,
@@ -946,8 +948,9 @@ def test_a_turn_closed_with_an_error_exports_its_outcome_at_level_error(
     status: str | None,
 ) -> None:
     """A turn ended with an error code marks the outcome observation `ERROR`,
-    naming the code in its status message and its `dfo.turn_error` metadata.
-    A clean turn leaves it at the default level with no `dfo.turn_error`. A
+    naming the code in its status message and its `dfo.turn_error` metadata,
+    and `WARNING` for a Stop's `cancelled` and a newer turn's `abandoned`,
+    which no failure ended. A clean turn leaves it at the default level with no `dfo.turn_error`. A
     pause is a `turn.pause` observation, never a `turn`, and says so in
     `dfo.turn_status` too, which a close leaves out."""
     init_telemetry(service_name="harness")

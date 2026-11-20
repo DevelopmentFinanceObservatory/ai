@@ -574,6 +574,13 @@ def end_turn_segment(
     )
 
 
+# The codes of a close that ended a unit of work the user or a newer one
+# stopped rather than one that failed: `record_turn_outcome` records them at
+# `WARNING`, as the segment span's level table does
+# (`harness.studio_state.span_level`).
+WARNING_TURN_ERRORS = frozenset({"cancelled", "abandoned"})
+
+
 def record_turn_outcome(
     external_id: str,
     *,
@@ -592,8 +599,9 @@ def record_turn_outcome(
 
     On Langfuse `request` and `response` are the observation's input and
     output, what an evaluator filtered on the name `turn` reads. An `error`
-    (a machine-readable code such as `cancelled`) makes its level `ERROR`
-    with `error` as its status message. Its metadata holds `dfo.external_id`,
+    (a machine-readable code such as `state_not_saved`) makes its level
+    `ERROR` with `error` as its status message, and `WARNING` for a code in
+    `WARNING_TURN_ERRORS`, so a Stop is never reported as a failure. Its metadata holds `dfo.external_id`,
     and `dfo.turn_error` holds `error` when there is one. A clean close writes
     no `dfo.turn_error`. A pause holds `dfo.turn_status` `paused`, and a close
     holds no `dfo.turn_status`. `session_id`, `user_id` and `tags` mean what
@@ -618,7 +626,13 @@ def record_turn_outcome(
         tags=tags,
         metadata=metadata,
     )
-    _end_turn_span(handle, request=request, response=response, error=error)
+    _end_turn_span(
+        handle,
+        request=request,
+        response=response,
+        error=error,
+        level="WARNING" if error in WARNING_TURN_ERRORS else "ERROR",
+    )
 
 
 @contextmanager

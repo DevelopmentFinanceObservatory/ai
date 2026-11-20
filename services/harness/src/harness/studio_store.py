@@ -77,6 +77,7 @@ from collections.abc import (
     Coroutine,
     Iterable,
     Mapping,
+    Sequence,
 )
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
@@ -636,16 +637,18 @@ class _TurnLine:
 def _closed_line(record: Mapping[str, Any]) -> _TurnLine:
     """The line of the turn whose record is `record`
     (`ConversationState.close_turn`): its reply is the answer with the code's
-    match notes and basis line after it."""
+    match notes and basis line after it, each part present."""
     stored = record.get("usage")
     stored = stored if isinstance(stored, dict) else {}
-    appended = [record[key] for key in ("match_notes", "basis_line") if record.get(key)]
+    parts = [
+        str(record[key]) for key in ("assistant", "match_notes", "basis_line") if record.get(key)
+    ]
     return _TurnLine(
         status="closed",
         trace_id=str(record.get("trace_id")),
         usage=_turn_usage(stored, trace_id=stored.get("trace_id")),
         request=str(record.get("user") or ""),
-        response="\n\n".join([str(record.get("assistant") or ""), *appended]),
+        response="\n\n".join(parts),
         error=record.get("error"),
     )
 
@@ -686,14 +689,17 @@ def _committed_lines(
     return lines
 
 
-def _write_turn_lines(conversation_id: str, lines: Iterable[_TurnLine]) -> None:
+def _write_turn_lines(conversation_id: str, lines: Sequence[_TurnLine]) -> bool:
     """Write each of `lines`: its `TURN_LOG_EVENT` log line, with the turn's
     identity, status, when it began, the deployed revision, its error code,
     and the specs it fetched and drew, as JSON fields
     (`common.logging.JSON_FIELDS`) and in the message, then its outcome
     observation, a `turn` for a close and a `turn.pause` for a pause
-    (`common.telemetry.record_turn_outcome`). Never raises: a line that
-    fails is logged and the rest are written."""
+    (`common.telemetry.record_turn_outcome`). Then start their export
+    without waiting for it (`start_telemetry_flush`), so a write outside any
+    stream, whose last flush would carry them, still sends them. Returns
+    whether there were lines. Never raises: a line that fails is logged and
+    the rest are written."""
     for line in lines:
         try:
             _write_turn_line(conversation_id, line)
@@ -703,6 +709,9 @@ def _write_turn_lines(conversation_id: str, lines: Iterable[_TurnLine]) -> None:
                 line.status,
                 line.trace_id,
             )
+    if lines:
+        start_telemetry_flush()
+    return bool(lines)
 
 
 def _write_turn_line(conversation_id: str, line: _TurnLine) -> None:
@@ -1503,6 +1512,9 @@ class StudioStore:
 
                 def committed() -> bool:
                     nonlocal claimed
+                    # The lines first: they hold for the committed write
+                    # whatever the bookkeeping below does.
+                    wrote_lines = _write_turn_lines(conversation_id, lines)
                     entry.version = written.version
                     entry.baseline.update(changed)
                     if claimed is not None and claiming:
@@ -1517,10 +1529,7 @@ class StudioStore:
                     if reserved is not None:
                         entry.seq_reserved = reserved
                         entry.claimed_reserved = None
-                    _write_turn_lines(conversation_id, lines)
-                    if lines:
-                        start_telemetry_flush()
-                    return bool(lines)
+                    return wrote_lines
 
                 return committed
 
@@ -1876,6 +1885,9 @@ class StudioStore:
                         entry.canvas_pending.append(write)
 
                 def committed() -> T:
+                    # The lines first: they hold for the committed write
+                    # whatever the bookkeeping below does.
+                    _write_turn_lines(conversation_id, lines)
                     if write is not None and write in entry.canvas_pending:
                         entry.canvas_pending.remove(write)
                     entry.version = version
@@ -1883,7 +1895,6 @@ class StudioStore:
                     if work.segment is None:
                         entry.held = None
                     _assign_changed(state, work, base)
-                    _write_turn_lines(conversation_id, lines)
                     return result
 
                 return committed

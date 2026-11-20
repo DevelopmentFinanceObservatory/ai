@@ -451,8 +451,8 @@ async def test_a_resumed_turn_that_recorded_no_usage_takes_it_from_the_interrupt
     monkeypatch: pytest.MonkeyPatch,
     pg_engine: AsyncEngine,
 ) -> None:
-    """A paused turn whose stored usage names no one, as one an older
-    revision paused, takes the `/interrupt` request's account and visitor,
+    """A paused turn whose stored usage names no one, as one paused before
+    `TurnUsage` was stored, takes the `/interrupt` request's account and visitor,
     the caller its MCP calls name, and the surface, and still hears the spec
     each `get_data` of the resumed plan fetched."""
     monkeypatch.setattr(studio_module, "TurnUsage", lambda **_: TurnUsage())
@@ -720,7 +720,7 @@ async def test_a_client_that_leaves_while_the_turn_runs_writes_its_outcome_as_ca
 ) -> None:
     """A turn that has not paused is closed by the disconnect: the segment
     ends once, parenting the segment's own spans, the release save that
-    commits the close writes one `turn` outcome at `ERROR` naming the
+    commits the close writes one `turn` outcome at `WARNING` naming the
     cancellation and one `studio.turn` line, and the record carries it. The
     stream records that the client left on its `_StreamEnding`, and the
     segment closes the turn, releases it and ends its span as
@@ -772,7 +772,7 @@ async def test_a_client_that_leaves_while_the_turn_runs_writes_its_outcome_as_ca
     (call,) = [span for span in spans if span.name == MODEL_CALL]
     assert segment_span.end_time_unix_nano > 0
     assert call.parent_span_id == segment_span.span_id
-    assert _attribute(turn, "langfuse.observation.level") == "ERROR"
+    assert _attribute(turn, "langfuse.observation.level") == "WARNING"
     assert _attribute(turn, "langfuse.observation.status_message") == "cancelled"
     assert conversation.turn_recorded
     (record,) = conversation.turns
@@ -910,7 +910,7 @@ async def test_a_close_the_store_never_saw_writes_one_outcome_as_abandoned(
     """A turn closes, but the close never reaches the store, so it writes no
     line and no outcome. Reloaded from the store, the next turn's
     `begin_turn` closes it as `abandoned`, and its save writes the one `turn`
-    outcome, at `ERROR`, and the one line the stored record agrees with."""
+    outcome, at `WARNING`, and the one line the stored record agrees with."""
     store = StudioStore(pg_engine, adk=NO_ADK, turn_specs=no_turn_specs)
     conversation = await store.create("principal", CONVERSATION)
     conversation.begin_turn()
@@ -940,7 +940,7 @@ async def test_a_close_the_store_never_saw_writes_one_outcome_as_abandoned(
         pg_engine, principal="principal", conversation_id=CONVERSATION
     )
     (turn,) = _closes(quiescence.fake.spans())
-    assert _attribute(turn, "langfuse.observation.level") == "ERROR"
+    assert _attribute(turn, "langfuse.observation.level") == "WARNING"
 
 
 async def test_a_streams_last_flush_already_holds_its_segment(
@@ -974,7 +974,7 @@ async def test_a_cancel_on_an_instance_that_never_ran_the_paused_turn_writes_its
 ) -> None:
     """`/cancel` reaches a paused turn on an instance that loads it fresh from
     the store. That instance never held anything for the turn, and still
-    writes its one `turn` outcome at `ERROR` naming the cancellation."""
+    writes its one `turn` outcome at `WARNING` naming the cancellation."""
     app_a = _instance(pg_engine, plan_call(QUESTION))
     app_b = _instance(pg_engine)
 
@@ -998,7 +998,7 @@ async def test_a_cancel_on_an_instance_that_never_ran_the_paused_turn_writes_its
         pg_engine, principal=PRINCIPAL, conversation_id=CONVERSATION
     )
     (turn,) = _closes(quiescence.fake.spans())
-    assert _attribute(turn, "langfuse.observation.level") == "ERROR"
+    assert _attribute(turn, "langfuse.observation.level") == "WARNING"
     assert _attribute(turn, "langfuse.observation.input") == QUESTION
 
 

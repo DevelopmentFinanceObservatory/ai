@@ -11242,7 +11242,7 @@ def test_the_turn_keeps_the_plan_records_readings_and_spec_blocks_its_events_wri
 
 # The `studio.turn` line and `turn` outcome each committed turn writes, the
 # caller each turn's in-process dfo-apis calls name, and the specs a turn
-# hears, driven through the routes on this release's store.
+# hears, driven through the Studio routes on `StudioStore`.
 
 
 def _other_store(session_service: BaseSessionService | None = None) -> StudioStore:
@@ -11581,43 +11581,59 @@ async def test_a_stop_whose_close_raises_still_releases_the_segment_and_the_lock
 async def test_a_stop_whose_segment_was_taken_over_writes_no_cancelled_line(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Another instance takes the segment over while a Stop's frames unwind,
-    so the Stop's `cancelled` close reaches no commit: the frame
-    reservation and the release both find the segment lost. The close
-    writes no `studio.turn` line and no `turn` outcome, and the stored turn
-    stays open for the instance that took it over."""
+    """Another instance takes the segment over in the database while a
+    Stop's frames unwind: the segment's lease has lapsed, and the other
+    instance claims the turn. The Stop's `cancelled` close then reaches no
+    commit, since the frame reservation and the release are both fenced on
+    the lost segment. The stream still ends on the Stop's `cancelled` frame,
+    the close writes no `studio.turn` line and no `turn` outcome, and the
+    stored turn stays open under the other instance's segment."""
     outcomes = _spy_outcomes(monkeypatch)
-    stores: list[StudioStore] = []
+    clock = await StoreClock.start(_engine())
+    session_service = _new_session_service()
+    store = StudioStore(
+        _engine(),
+        adk=NO_ADK,
+        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        **clock.store_kwargs,
+    )
+    other = StudioStore(
+        _engine(),
+        adk=NO_ADK,
+        turn_specs=session_turn_specs(session_service, app_name=AGENT_NAME),
+        **clock.store_kwargs,
+    )
+    taken: list[str] = []
 
-    async def taken_over(*args: Any, **kwargs: Any) -> None:
-        raise SegmentLost("taken over")
-
-    class _LostOnUnwindResolver(_HangingResolver):
+    class _TakenOverOnUnwindResolver(_HangingResolver):
         async def __call__(self, **kwargs: Any) -> dict[str, Any]:
             try:
                 return await super().__call__(**kwargs)
             except asyncio.CancelledError:
-                stores[0].reserve_frames = taken_over  # type: ignore[method-assign]
-                stores[0].release = taken_over  # type: ignore[method-assign]
+                await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)
+                await other.load(PRINCIPAL, CONVERSATION)
+                taken.append(other.claim_segment(PRINCIPAL, CONVERSATION))
+                await other.save(PRINCIPAL, CONVERSATION)
                 raise
 
-    resolver = _LostOnUnwindResolver()
-    app = _app(*_card(), resolver=resolver)
-    stores.append(app.state.studio.store)
+    resolver = _TakenOverOnUnwindResolver()
+    app = _app(*_card(), resolver=resolver, session_service=session_service, store=store)
 
     with caplog.at_level(logging.INFO, logger="harness.studio_store"):
         async with _client(app) as client:
             stream_task = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
             await asyncio.wait_for(resolver.entered.wait(), timeout=5)
             await client.post("/api/studio/cancel", json=_cancel_body(), headers=AUTH)
-            with suppress(Exception):
-                await asyncio.wait_for(stream_task, timeout=5)
+            frames = await asyncio.wait_for(stream_task, timeout=5)
 
+    assert _frame(frames, "error")["error"]["error"] == "cancelled"
+    assert _events(frames)[-1] == "error"
     assert _turn_log_lines(caplog, status=None) == []
     assert outcomes == []
-    stored = await _other_store().load(PRINCIPAL, CONVERSATION)
+    stored = await _other_store(session_service).load(PRINCIPAL, CONVERSATION)
     assert stored is not None
     assert (stored.turns, stored.turn_recorded) == ([], False)
+    assert stored.segment is not None and [stored.segment.id] == taken
 
 
 async def test_a_disconnect_mid_turn_leaves_the_turn_cancelled_in_the_store() -> None:
@@ -11751,8 +11767,8 @@ async def test_a_rejection_whose_client_drops_before_the_first_frame_closes_once
 async def test_a_rejected_turn_that_recorded_no_caller_logs_the_conversations_caller(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A paused turn whose stored usage names no one, as one an older
-    instance paused does, takes its caller from the `/interrupt` that rejects
+    """A paused turn whose stored usage names no one, as one paused before
+    `TurnUsage` was stored does, takes its caller from the `/interrupt` that rejects
     it, and its `studio.turn` line names it."""
     app = _app(*_plan())
     store = app.state.studio.store
@@ -11776,6 +11792,43 @@ async def test_a_rejected_turn_that_recorded_no_caller_logs_the_conversations_ca
     assert [(line["trace_id"], line["caller"]) for line in _turn_log_lines(caplog)] == [
         (conversation.trace_id, conversation_caller(f"{PRINCIPAL}/{CONVERSATION}"))
     ]
+
+
+async def test_a_failed_read_of_a_turns_surface_leaves_the_answer_running(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A paused turn whose stored usage names no surface reads it from its
+    own turn session on `/interrupt`. A read that fails leaves the surface
+    unset, and the answer runs to `done`."""
+    app = _app(*_plan())
+    store = app.state.studio.store
+    session_service = app.state.studio.runner.session_service
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(frames, "plan.proposed")
+        conversation = store.current(PRINCIPAL, CONVERSATION)
+        assert conversation is not None
+        conversation.turn_usage = TurnUsage(trace_id=conversation.trace_id)
+        await store.save(PRINCIPAL, CONVERSATION)
+        real_get = session_service.get_session
+        reads: list[str] = []
+
+        async def failing_once(**kwargs: Any) -> Any:
+            # The load's read of the turn's spec blocks, then the surface's.
+            reads.append(kwargs["session_id"])
+            if len(reads) == 2:
+                raise OSError("session store unavailable")
+            return await real_get(**kwargs)
+
+        session_service.get_session = failing_once
+        with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+            resumed = await _stream(
+                client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
+            )
+
+    assert reads[:2] == [conversation.session_id] * 2
+    assert resumed[-1]["event"] == "done"
+    assert [line["surface"] for line in _turn_log_lines(caplog)] == [None]
 
 
 @pytest.mark.parametrize(
@@ -11934,6 +11987,45 @@ async def test_a_claim_save_that_raises_writes_the_abandoned_close_only_if_it_co
         # The route released the claim its save committed, lease included.
         stored = await _other_store().load(PRINCIPAL, CONVERSATION)
         assert stored is not None and stored.segment is None
+
+
+@pytest.mark.parametrize("committed", [True, False], ids=["committed", "not-committed"])
+async def test_an_interrupt_whose_claim_save_raises_releases_what_it_committed(
+    committed: bool,
+) -> None:
+    """An `/interrupt` whose claim save raises, cancelled once its write
+    committed or failing before it. A claim that committed is released as
+    one: its lease is dropped and the resumed segment's span ended, so a
+    retry of the same answer resumes at once instead of meeting the lease
+    until its TTL lapses. One that did not commit leaves the stored lease
+    empty too."""
+    app = _app(*_plan())
+    store = app.state.studio.store
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        real_save = store.save
+
+        async def save_then_fail(*args: Any, **kwargs: Any) -> bool:
+            store.save = real_save  # type: ignore[method-assign]
+            if committed:
+                await real_save(*args, **kwargs)
+                raise asyncio.CancelledError  # a cancel once the write landed
+            raise RuntimeError("store unavailable")
+
+        store.save = save_then_fail  # type: ignore[method-assign]
+        body = _interrupt_body(plan["interrupt_id"], "reject")
+        with pytest.raises(asyncio.CancelledError if committed else RuntimeError):
+            await client.post("/api/studio/interrupt", json=body, headers=AUTH)
+
+        stored = await _other_store().load(PRINCIPAL, CONVERSATION)
+        assert stored is not None and stored.segment is None
+        live = store.current(PRINCIPAL, CONVERSATION)
+        assert live is not None and live._telemetry_span is None
+        assert not store.lock_for(PRINCIPAL, CONVERSATION).locked()
+        retried = await _stream(client, "/api/studio/interrupt", body)
+
+    assert _events(retried)[-1] == "done"
 
 
 async def test_an_interrupts_claim_save_carries_the_identity_a_turn_recorded_no_one_for(

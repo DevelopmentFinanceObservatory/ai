@@ -38,6 +38,15 @@ logger = logging.getLogger(__name__)
 # SQLAlchemy an async engine.
 _CONNECTOR_DRIVER = "asyncpg"
 
+# asyncpg's `command_timeout`, in seconds, on every connection of the runtime
+# engine: the longest any statement may wait for the server, a COMMIT
+# included, before the call raises `TimeoutError`. A COMMIT that a write runs
+# to the end under cancellation (`harness.studio_store`) would otherwise wait
+# on a stalled connection until TCP gives up. It sits above the migrations'
+# `statement_timeout` (`harness.db.migrate.MIGRATION_TIMEOUT_S`, 60 s), so it
+# never cuts a migration short.
+COMMAND_TIMEOUT_S = 90.0
+
 
 @dataclass
 class DatabaseHandle:
@@ -68,6 +77,7 @@ class _ConnectorSource:
     database: str
     runtime_db_user: str
     connect_timeout_s: float
+    command_timeout_s: float
     _connector: Any = field(default=None, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
@@ -86,6 +96,7 @@ class _ConnectorSource:
             user=self.runtime_db_user,
             db=self.database,
             enable_iam_auth=True,
+            command_timeout=self.command_timeout_s,
         )
 
     async def aclose(self) -> None:
@@ -106,7 +117,11 @@ def build_database(*, settings: Settings) -> DatabaseHandle | None:
         logger.info("Using the database at DATABASE_URL")
         # `pool_pre_ping` drops a connection the server closed while it sat in
         # the pool.
-        engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+        engine = create_async_engine(
+            settings.database_url,
+            pool_pre_ping=True,
+            connect_args={"command_timeout": COMMAND_TIMEOUT_S},
+        )
         return DatabaseHandle(engine=engine, aclose=engine.dispose)
     return None
 
@@ -127,6 +142,7 @@ def _build_connector_backed_database(*, settings: Settings) -> DatabaseHandle:
         database=database,
         runtime_db_user=runtime_db_user,
         connect_timeout_s=settings.session_store_connect_timeout_s,
+        command_timeout_s=COMMAND_TIMEOUT_S,
     )
     # The URL carries only the dialect+driver. `async_creator` supplies the
     # actual connection, and SQLAlchemy ignores the URL's parameters when it

@@ -556,8 +556,9 @@ class ConversationState:
     # JSON, `specs` the spec block `search` returned for each source those
     # plans used, and `identities` the `RecordedIdentity` of every source the
     # turn's searches returned or its plans used, as JSON, by spec_id
-    # (`recorded_identity`). A record this release closed also names the
-    # turn's `trace_id` and its `TurnUsage` as `usage`. Every key but `user`
+    # (`recorded_identity`). A record `close_turn` builds also names the
+    # turn's `trace_id` and its `TurnUsage` as `usage`; a record stored
+    # without them holds neither. Every key but `user`
     # and `assistant` is optional, and a record without `plans`, `readings`,
     # `specs` or `identities` holds none. Feeds the conversation digest (newest
     # window), the recall function (everything older) and the planner's ledger
