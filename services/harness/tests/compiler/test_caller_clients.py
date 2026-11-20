@@ -62,10 +62,13 @@ class _Registry:
     def __init__(self) -> None:
         self.caller: str | None = None
         self.turn: str | None = None
+        self.surface: str | None = None
         self.built: list[_CountingClient] = []
         self.gates: dict[str | None, asyncio.Event] = {}
         self.failing: set[str | None] = set()
-        self.clients = CallerClients(self._build, caller=lambda: CallerTurn(self.caller, self.turn))
+        self.clients = CallerClients(
+            self._build, caller=lambda: CallerTurn(self.caller, self.turn, self.surface)
+        )
 
     def _build(self, who: CallerTurn) -> Any:
         caller = who.caller
@@ -138,6 +141,23 @@ async def test_a_callers_next_turn_gets_a_client_built_for_it() -> None:
     await registry.clients.release(first)
     assert registry.built[0].exited == 1
     assert registry.built[1].exited == 0
+
+
+async def test_caller_less_clients_of_two_surfaces_never_retire_each_other() -> None:
+    """A Studio replay's client and a caller-less client outside shared work
+    name no caller and no turn, and differ in their surface header alone. Each
+    is its own party's latest turn, so neither connect retires the other."""
+    registry = _Registry()
+    clients = []
+    for surface in ["studio", None, "studio", None]:
+        registry.surface = surface
+        clients.append(await registry.clients.get())
+        await registry.clients.release(clients[-1])
+
+    assert clients[0] is clients[2]
+    assert clients[1] is clients[3]
+    assert len(registry.built) == 2
+    assert [client.exited for client in registry.built] == [0, 0]
 
 
 class _StuckExitClient(_CountingClient):

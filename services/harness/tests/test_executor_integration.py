@@ -1624,6 +1624,7 @@ async def studio(
             recipe: Mapping[str, Any],
             *,
             deadline: CallDeadline,
+            surface: str,
             populations: Sequence[Mapping[str, Any]],
         ) -> Replayed | Pending | ReplayRefused:
             replays.append(populations)
@@ -1638,6 +1639,7 @@ async def studio(
                     apis=client,
                     publish=assembler.publish_frame,
                     row_budget=RowBudget(max_rows=100_000),
+                    surface=surface,
                     populations=populations,
                 )
 
