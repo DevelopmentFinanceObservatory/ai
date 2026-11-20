@@ -1243,11 +1243,10 @@ class StudioRunner:
 async def _noting_start(locked: AsyncGenerator[Any], began: asyncio.Event) -> AsyncGenerator[Any]:
     """`locked`, setting `began` as it starts. The set and `locked`'s first
     step run with no suspension point between them, so a cancellation lands
-    either before both or after `locked` has entered its `try`. A function
-    rather than a `_SegmentResponse` method: the generator then holds no
-    reference to the response, so a stream the response abandons is not in
-    a reference cycle and the event loop closes it as soon as it is
-    dropped."""
+    either before both or after `locked` has entered its `try`. The
+    generator holds no reference to the response, so a stream the response
+    abandons sits in no reference cycle and the event loop closes it as soon
+    as it is dropped."""
     began.set()
     async with aclosing(locked):
         async for frame in locked:
@@ -1265,9 +1264,12 @@ class _SegmentResponse(StreamingResponse):
     when the client leaves before the first body chunk. Below ASGI spec 2.4
     Starlette cancels the response on `http.disconnect`, and at 2.4 a failed
     send raises `ClientDisconnect`, either way possibly before the body is
-    iterated. So the response's own `finally` releases the segment and the
-    lock when `_locked` never began, then flushes the line the release save
-    may have written. A `_locked` that began releases them itself on every
+    iterated. So when `_locked` never began, the response's own `finally`
+    ends the segment as `_sse_stream`'s disconnect path does: a turn that is
+    not paused for an answer, a resume included, closes as `cancelled`. It
+    then releases the segment, whose save commits that record and drops the
+    resume's pending entry, releases the lock, and flushes the lines the save
+    wrote. A `_locked` that began releases them itself on every
     ending, including a stream the event loop finalises after the response
     is gone.
 
@@ -1291,6 +1293,7 @@ class _SegmentResponse(StreamingResponse):
         self._principal = principal
         self._conversation_id = conversation_id
         self._segment_id = segment_id
+        self._conversation = conversation
         self._lock = conversation.lock
         self._began = asyncio.Event()
         stream = _sse_stream(
@@ -1310,10 +1313,18 @@ class _SegmentResponse(StreamingResponse):
             await super().__call__(scope, receive, send)
         finally:
             if not self._began.is_set():
+                conversation = self._conversation
                 try:
-                    await self._store.release(
-                        self._principal, self._conversation_id, self._segment_id
-                    )
+                    try:
+                        if not conversation.awaiting_answer:
+                            conversation.close_turn(
+                                final_text=conversation.turn_final_text,
+                                error=ErrorCode.CANCELLED.value,
+                            )
+                    finally:
+                        await self._store.release(
+                            self._principal, self._conversation_id, self._segment_id
+                        )
                 finally:
                     self._lock.release()
                 await flush_telemetry()
@@ -1774,6 +1785,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         lock = await _acquire_or_conflict(studio.store, principal, body.conversation_id)
         if isinstance(lock, JSONResponse):
             return lock
+        # Whether the save below may have written a line, for a raise after
+        # it to export, as `/turn` does for its claim save.
+        save_wrote_line = False
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
@@ -1911,7 +1925,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # same interrupt across two instances loses cleanly here, with a
             # 409, rather than each resuming its own segment of the turn.
             try:
-                await studio.store.save(principal, body.conversation_id)
+                # Unknown until the save returns, so a save that raises counts.
+                save_wrote_line = True
+                save_wrote_line = await studio.store.save(principal, body.conversation_id)
             except StaleSessionError:
                 lock.release()
                 return _streaming_conflict_response(
@@ -2058,6 +2074,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # it on a raise; once returned, `_SegmentResponse` owns it.
             if lock.locked():
                 lock.release()
+            if save_wrote_line:
+                await flush_telemetry()
             raise
 
     @router.post("/composition")

@@ -162,6 +162,7 @@ from planner.plan import (
 from planner.plan import Plan as PlannerPlan
 from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
+from starlette.requests import ClientDisconnect
 from translator.referral import REFERRAL_STATE_KEY, Referral, ReferralKind
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
@@ -4020,7 +4021,7 @@ async def test_a_client_that_leaves_a_running_turn_records_it_as_cancelled(how: 
 
 # httpx2's ASGITransport never delivers `http.disconnect`, so the tests below
 # that lose the client call the ASGI app directly with a `receive` that
-# answers it. The reliable way to stop a turn is still POST /api/studio/cancel.
+# answers it. The reliable way to stop a turn is POST /api/studio/cancel.
 
 
 async def test_a_disconnect_mid_turn_leaves_the_turn_cancelled_in_the_ledger() -> None:
@@ -4154,10 +4155,14 @@ async def test_a_client_that_leaves_at_the_pause_frame_still_releases_the_segmen
     assert _events(second)[-1] == "done"
 
 
-async def _post_and_leave(app: FastAPI, path: str, body: dict[str, Any]) -> list[dict[str, Any]]:
+async def _post_and_leave(
+    app: FastAPI, path: str, body: dict[str, Any], *, spec_version: str
+) -> list[dict[str, Any]]:
     """POST `body` to `path` straight through the ASGI app with a client that
-    has already left: every `receive` after the request body answers
-    `http.disconnect` at once. Returns what the app sent."""
+    has already left. At ASGI spec 2.3, as uvicorn serves it, every `receive`
+    after the request body answers `http.disconnect` at once. At 2.4 the send
+    of `http.response.start` raises `OSError`, which Starlette turns into
+    `ClientDisconnect`. Returns what the app sent."""
     raw = json.dumps(body).encode()
     request_sent = False
     sent: list[dict[str, Any]] = []
@@ -4170,6 +4175,8 @@ async def _post_and_leave(app: FastAPI, path: str, body: dict[str, Any]) -> list
         return {"type": "http.disconnect"}
 
     async def send(message: dict[str, Any]) -> None:
+        if spec_version == "2.4":
+            raise OSError("the client has gone")
         sent.append(message)
         # A socket write yields, so the disconnect cancels the response while
         # it sends `http.response.start`, before its body takes a step.
@@ -4177,7 +4184,7 @@ async def _post_and_leave(app: FastAPI, path: str, body: dict[str, Any]) -> list
 
     scope = {
         "type": "http",
-        "asgi": {"version": "3.0"},
+        "asgi": {"version": "3.0", "spec_version": spec_version},
         "http_version": "1.1",
         "method": "POST",
         "scheme": "http",
@@ -4193,27 +4200,42 @@ async def _post_and_leave(app: FastAPI, path: str, body: dict[str, Any]) -> list
         "client": ("127.0.0.1", 50000),
         "server": ("studio.test", 80),
     }
-    await asyncio.wait_for(app(scope, receive, send), timeout=10)
+    if spec_version == "2.4":
+        with pytest.raises(ClientDisconnect):
+            await asyncio.wait_for(app(scope, receive, send), timeout=10)
+    else:
+        await asyncio.wait_for(app(scope, receive, send), timeout=10)
     return sent
 
 
-@pytest.mark.parametrize("request_kind", ["turn", "edit", "reject", "approve"])
+@pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+@pytest.mark.parametrize(
+    ("request_kind", "recorded_error"),
+    [("turn", "cancelled"), ("edit", "cancelled"), ("reject", None), ("approve", "cancelled")],
+)
 async def test_a_client_gone_before_the_first_chunk_leaves_the_conversation_free(
-    request_kind: str,
+    request_kind: str, recorded_error: str | None, spec_version: str
 ) -> None:
     """The client is gone before the response sends its first body chunk, so
-    the stream's generators never start. The response still releases the
-    conversation's lock and the segment its route claimed, and the next turn
-    on the conversation streams."""
+    the stream's generators never start. The response closes the turn as a
+    disconnect does (a rejection keeps its own close), releases the
+    segment, whose save commits that record and drops the resumed interrupt,
+    and releases the conversation's lock. The next turn on the conversation
+    streams."""
+    session_service = _new_session_service()
     if request_kind == "edit":
         app = _app(
             *_card(),
             resolver=_search(),
             executor=ScriptedExecutor(_card_results(write_token=WRITE_TOKEN)),
             edit_model=ScriptedEditModel({"text": "Renamed.", "patch": None, "recreate": None}),
+            session_service=session_service,
         )
     else:
-        app = _app(*(_plan() if request_kind in {"reject", "approve"} else (_text("Hello."),)))
+        app = _app(
+            *(_plan() if request_kind in {"reject", "approve"} else (_text("Hello."),)),
+            session_service=session_service,
+        )
     store = app.state.studio.store
     async with _client(app) as client:
         if request_kind == "edit":
@@ -4229,12 +4251,19 @@ async def test_a_client_gone_before_the_first_chunk_leaves_the_conversation_free
                 _interrupt_body(plan["interrupt_id"], request_kind),
             )
 
-        sent = await _post_and_leave(app, path, body)
+        sent = await _post_and_leave(app, path, body, spec_version=spec_version)
         assert not [m for m in sent if m["type"] == "http.response.body" and m.get("body")]
 
         state = store.current(PRINCIPAL, CONVERSATION)
         assert not state.lock.locked()
         assert state.segment is None
+        ledger = await StudioStore(session_service, app_name=AGENT_NAME).load(
+            PRINCIPAL, CONVERSATION
+        )
+        assert ledger is not None
+        assert ledger.segment is None
+        assert ledger.pending == {}
+        assert ledger.turns[-1].get("error") == recorded_error
         response = await client.post("/api/studio/turn", json=_turn_body("again"), headers=AUTH)
     assert response.status_code == 200
 
