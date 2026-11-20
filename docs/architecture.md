@@ -224,23 +224,9 @@ and a Langfuse `mask` function limit it.
 span layout, under which Langfuse prices each model call twice and shows each
 `invoke_workflow` span without its parent.
 
-One studio turn is one trace. `ConversationState.begin_turn` opens a `turn`
-span whose trace id is derived from the turn's wire `trace_id`, and
-`close_turn` ends it, so it stays open across a pause for approval, including
-when the client disconnects at the pause (a disconnect while the turn runs ends
-it as cancelled). The `/turn` stream and the `/interrupt` stream that resumes
-the turn are separate requests, and each runs inside that span
-(`ConversationState.in_turn_span`), so the
-resumed segment's ADK, MCP and `record_event` spans nest under the same `turn`
-span. `close_turn` gives the `turn` span the user's message as its input and
-the closing text as its output, which Langfuse shows as the trace's input and
-output. A turn closed with an error code (`cancelled`, `abandoned`, and the
-like) ends at level `ERROR` with that code as its status message.
+One studio turn is one trace, whose id is derived from the turn's wire `trace_id`. No span outlives the request that opened it. Each stream that runs work for the turn, the `/turn` stream and every `/interrupt` stream that resumes it on any instance, opens a `turn.segment` span as it starts and ends it as it ends (`ConversationState.segment_span`). The segment parents that stream's ADK, MCP and `record_event` spans and carries no input or output. `StudioStore` writes a zero-duration observation on the same trace (`common.telemetry.record_turn_outcome`) beside each `studio.turn` log line, a `turn` for each turn close and a `turn.pause` for each pause one of its ledger appends commits, so the line, the observation and the ledger's record agree, and a reader that sees only names, as the Langfuse BigQuery export does, never reads a pause as a close. It carries the user's message as its input, the closing text as its output (on a pause, the text streamed so far), and, for a turn closed with an error code (`cancelled`, `abandoned`, and the like), level `ERROR` with that code as its status message. Its metadata holds `dfo.external_id`, the error as `dfo.turn_error` when there is one, and `dfo.turn_status` `paused` on a pause. A turn that paused holds a `turn.pause` observation for each pause beside its `turn`, which a reader resolves by the rule the log line's dbt model uses: the latest close that is not `abandoned`, else the latest close, else the latest pause.
 
-Every studio stream calls `common.telemetry.flush_telemetry` before its
-response ends, so queued spans export while the request still has CPU.
-`POST /api/studio/cancel` calls it when it ends a paused turn's span, since no
-stream runs then.
+Every studio stream calls `common.telemetry.flush_telemetry` after its segment span ends and before its response ends, so queued spans export while the request still has CPU. `POST /api/studio/cancel` calls it when it closes a paused turn, since no stream runs then.
 
 **Evals.** `evals/` holds the planner's eval (`planner_entry`, which runs the planner one entry at a time against recorded data-mcp answers), the studio's eval (`studio`, which drives the studio's HTTP surface), the translator's fixtures (`agents/harness_translator_v1`) and the rolling-anchor counts (`rolling_anchor`). Runs that drive a real model need a live credential, and the judged cases need a judge model on top of that, so they are not run in CI. Each service's `tests/` directory holds the CI gates, which use no model, and `evals/README.md` says which part of each eval set CI runs.
 

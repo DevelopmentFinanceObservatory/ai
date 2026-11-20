@@ -52,7 +52,7 @@ import asyncio
 import logging
 from collections import OrderedDict, deque
 from collections.abc import Callable
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from common.caller import CALLER_HEADER, TURN_HEADER
 from common.mcp_telemetry import is_loopback_url
@@ -97,15 +97,15 @@ def caller_transport(
     return StreamableHttpTransport(url, headers=headers, auth=auth)
 
 
-def session_call_meta(client: Client) -> dict[str, str]:
-    """The `_meta` for a `call_tool` on `client`: the turn's Langfuse session
-    (`common.telemetry.turn_call_meta`) when `client` reaches a loopback HTTP
-    URL, `{}` otherwise.
+def session_call_meta(client: Client) -> dict[str, Any]:
+    """The `_meta` for a `call_tool` on `client`: the turn's Langfuse session,
+    user and tags (`common.telemetry.turn_call_meta`) when `client` reaches a
+    loopback HTTP URL, `{}` otherwise.
 
-    Only a mount in this process honours the session
+    Only a mount in this process honours them
     (`common.mcp_telemetry.LangfuseSessionMiddleware`). A client at another
-    host, or one with no HTTP transport (in-memory), sends none, so the
-    conversation id does not leave the process.
+    host, or one with no HTTP transport (in-memory), sends none, so none of
+    the three leaves the process.
     """
     transport = getattr(client, "transport", None)
     if isinstance(transport, StreamableHttpTransport) and is_loopback_url(transport.url):

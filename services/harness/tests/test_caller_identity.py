@@ -22,10 +22,12 @@ from collections.abc import Callable
 from contextlib import AsyncExitStack
 from typing import Any
 
+import compiler.surface as surface_module
 import httpx2
 import pytest
 from analysis_mcp.runner_client import RunnerClient, runner_holder
 from common.caller import CALLER_HEADER, TURN_HEADER, conversation_caller, current_caller
+from compiler.surface import current_spec_uses
 from data_mcp import client_holder, definition_registration
 from data_mcp.client import UpstreamClient
 from data_mcp.definition_store import (
@@ -169,6 +171,97 @@ async def test_each_conversation_names_itself_on_every_call_on_both_paths(
         ("get_data", b, _MODERN),
         ("aggregate", b, _MODERN),
     ]
+
+
+async def test_each_call_on_both_paths_leaves_one_tool_result_and_a_fetch_names_its_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The direct `get_data` and a verb on the surface each add one
+    `dfo.tool_result` observation naming what the call produced, and only
+    the `get_data` tells the turn it fetched a spec."""
+    data = FastMCP(name="data-mcp")
+    analysis = FastMCP(name="analysis-mcp")
+
+    @data.tool(name="get_data")
+    async def get_data(spec_id: str) -> ToolResult:
+        return ToolResult(
+            content="fetched",
+            structured_content={
+                "definition": {"spec_id": spec_id},
+                "content_version": "cv_1",
+                "coverage": {"rows": 16},
+                "stat_var_count": 2,
+            },
+        )
+
+    @analysis.tool(name="aggregate")
+    async def aggregate() -> ToolResult:
+        return ToolResult(
+            content="aggregated",
+            structured_content={
+                "spec_id": "ops_1",
+                "content_version": "ocv_1",
+                "frame_content_version": "cv_2",
+                "rows": 9,
+                "stat_var_count": 1,
+            },
+        )
+
+    data_app = data.http_app(path="/mcp")
+    analysis_app = analysis.http_app(path="/mcp")
+    app = Starlette(routes=[Mount("/data", app=data_app), Mount("/analysis", app=analysis_app)])
+    monkeypatch.setattr(fastmcp_http, "create_mcp_http_client", _asgi_http_client(app))
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        surface_module,
+        "record_event",
+        lambda name, *, level, metadata: events.append((name, dict(metadata))),
+    )
+    uses: list[tuple[str, str]] = []
+    settings = Settings(
+        data_mcp_url="http://127.0.0.1/data/mcp",
+        analysis_mcp_url="http://127.0.0.1/analysis/mcp",
+    )
+    executor = McpExecutor(settings=settings)
+    surface = build_tool_surface(settings=settings)
+
+    async with AsyncExitStack() as stack:
+        await stack.enter_async_context(data_app.lifespan(data_app))
+        await stack.enter_async_context(analysis_app.lifespan(analysis_app))
+        stack.push_async_callback(surface.aclose)
+        stack.push_async_callback(executor.aclose)
+        token = current_spec_uses.set(lambda use, spec_id: uses.append((use, spec_id)))
+        stack.callback(current_spec_uses.reset, token)
+
+        assert (await executor(tool="get_data", args={"spec_id": _SPEC_ID}))["outcome"] == "ok"
+        assert (await surface.call_tool(tool=_AGGREGATE, arguments={})).is_error is False
+
+    assert events == [
+        (
+            "dfo.tool_result",
+            {
+                "tool": "get_data",
+                "outcome": "ok",
+                "spec_id": _SPEC_ID,
+                "content_version": "cv_1",
+                "stat_var_count": 2,
+                "rows": 16,
+            },
+        ),
+        (
+            "dfo.tool_result",
+            {
+                "tool": "aggregate",
+                "outcome": "ok",
+                "spec_id": "ops_1",
+                "content_version": "ocv_1",
+                "frame_content_version": "cv_2",
+                "stat_var_count": 1,
+                "rows": 9,
+            },
+        ),
+    ]
+    assert uses == [("fetched", _SPEC_ID)]
 
 
 _TOKEN = "test-token"

@@ -24,9 +24,10 @@ import logging
 import socket
 import ssl
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
-from typing import Protocol, Self
+from typing import Literal, Protocol, Self
 
 import aiohttp
 import anyio
@@ -34,6 +35,8 @@ import asyncpg
 import httpx2
 import rfc8785
 from common.auth import bearer_token
+from common.refusal import refusal_code
+from common.telemetry import record_event
 from fastmcp import Client, FastMCP
 from fastmcp.client.progress import ProgressHandler
 from fastmcp.client.transports import ClientTransport
@@ -183,6 +186,160 @@ def mcp_progress_handler(on_progress: ProgressCallback | None) -> ProgressHandle
         )
 
     return handle
+
+
+# Where a turn hears each spec it used: `"fetched"` for a spec a foreground
+# `get_data` call retrieved and its caller accepted (`executor.run` once an
+# approved plan's step passes its evidence check, `McpExecutor._get_data` on
+# the direct-fetch path), `"drawn"` for a spec a card drawn on the canvas rests
+# on. `harness.studio` sets it for each Studio request that runs a turn;
+# outside one it is `None` and nothing is heard.
+type SpecUse = Literal["fetched", "drawn"]
+current_spec_uses: ContextVar[Callable[[SpecUse, str], None] | None] = ContextVar(
+    "current_spec_uses", default=None
+)
+
+# The running step's budget (`executor.run._Run._run_step`), which `_Run._call`
+# stops while it records an attempt, so the budget covers the step's tool calls
+# and the waits between them and a slow ledger write is never read as a call
+# that ran past its time. `McpSurface.call_tool` reads it to tell a call the
+# budget cut off from one cancelled for another reason. `None` outside a step,
+# or for a step with no budget.
+step_budget: ContextVar[asyncio.Timeout | None] = ContextVar("executor_step_budget", default=None)
+
+# The name of the observation `record_tool_result` adds to the current trace.
+TOOL_RESULT_EVENT = "dfo.tool_result"
+
+
+def note_spec_use(use: SpecUse, spec_id: object) -> None:
+    """Tell the current turn it used `spec_id` (`current_spec_uses`). A no-op
+    outside a turn and for an id that is not a non-empty string. Never raises,
+    so a turn's record of what it used cannot fail the call that used it."""
+    sink = current_spec_uses.get()
+    if sink is None or not isinstance(spec_id, str) or not spec_id:
+        return
+    try:
+        sink(use, spec_id)
+    except Exception:
+        logger.warning("recording a %s spec failed; the turn will not list it", use, exc_info=True)
+
+
+def stated_spec_id(body: Mapping[str, object]) -> object:
+    """The spec a tool result states, at the top level for an analysis verb
+    and under `definition` for a `get_data` manifest. `None` when it states
+    none."""
+    spec_id = body.get("spec_id")
+    definition = body.get("definition")
+    if spec_id is None and isinstance(definition, Mapping):
+        spec_id = definition.get("spec_id")
+    return spec_id
+
+
+def record_tool_result(
+    tool: str,
+    *,
+    is_error: bool,
+    structured_content: Mapping[str, object] | None,
+    background: bool = False,
+) -> None:
+    """Add one `TOOL_RESULT_EVENT` observation for a finished tool call to the
+    current trace. A `background` call (an early mint, `harness.early_mint`)
+    only warms a frame, so its observation carries `mint: background`. The
+    turn hears a fetched spec from whoever accepts the result
+    (`note_spec_use`): `executor.run` once a plan step's evidence check
+    passes, `harness.mcp_client.McpExecutor._get_data` once it has built its
+    outcome.
+
+    The observation's metadata names the call and what it produced, read off
+    the result's structured content: `tool`, `outcome` (`ok` or `refusal`),
+    `code` for a refusal, and the `spec_id`, `content_version`,
+    `frame_content_version`, `stat_var_count` and `rows` the result states. A
+    `get_data` manifest states its spec under `definition` and its rows under
+    `coverage`; an analysis verb states each at the top level. A value the
+    result does not state is left out. The output the model read stays on
+    the tool's own spans, which carry it whole.
+
+    Never raises. A failure logs at DEBUG, so the trace's record of a call
+    cannot fail the call.
+    """
+    try:
+        _record_tool_result(
+            tool, is_error=is_error, body=structured_content or {}, background=background
+        )
+    except Exception:
+        logger.debug(
+            "recording the %s result failed; the trace will not show it", tool, exc_info=True
+        )
+
+
+def _record_tool_result(
+    tool: str, *, is_error: bool, body: Mapping[str, object], background: bool
+) -> None:
+    """`record_tool_result`'s work, which may raise."""
+    coverage = body.get("coverage")
+    spec_id = stated_spec_id(body)
+    rows = body.get("rows")
+    if rows is None and isinstance(coverage, Mapping):
+        rows = coverage.get("rows")
+    metadata: dict[str, object] = {
+        "tool": tool,
+        "outcome": "refusal" if is_error else "ok",
+        "code": refusal_code(body) if is_error else None,
+        "spec_id": spec_id,
+        "content_version": body.get("content_version"),
+        "frame_content_version": body.get("frame_content_version"),
+        "stat_var_count": body.get("stat_var_count"),
+        "rows": rows,
+        "mint": "background" if background else None,
+    }
+    record_event(
+        TOOL_RESULT_EVENT,
+        level="DEFAULT",
+        metadata={
+            key: value
+            for key, value in metadata.items()
+            if isinstance(value, str | int) and not isinstance(value, bool)
+        },
+    )
+
+
+def _record_call_failure(tool: str, exc: BaseException) -> None:
+    """Record the `TOOL_RESULT_EVENT` failure of a `call_tool` that raised
+    `exc`: `timeout` for a server timeout or a cancel by the step's expired
+    budget (`step_budget`), `cancelled` for any other cancel, and
+    `transport_failed` otherwise."""
+    if isinstance(exc, asyncio.CancelledError):
+        budget = step_budget.get()
+        expired = budget is not None and budget.expired()
+        record_tool_failure(tool, outcome="timeout" if expired else "cancelled")
+    elif isinstance(exc, MCPError) and exc.error.code == REQUEST_TIMEOUT:
+        record_tool_failure(tool, outcome="timeout")
+    else:
+        record_tool_failure(tool, outcome="transport_failed")
+
+
+def record_tool_failure(
+    tool: str,
+    *,
+    outcome: Literal["timeout", "cancelled", "transport_failed", "uncovered_server"],
+    background: bool = False,
+) -> None:
+    """Add one `TOOL_RESULT_EVENT` observation for a tool call that produced
+    no result: `outcome` is `timeout` for a call that ran past its deadline,
+    `cancelled` for one cancelled before either, `transport_failed` for one
+    the connection or protocol failed, and `uncovered_server` for one whose
+    server the surface does not cover. A `background` call's carries
+    `mint: background`, as `record_tool_result`'s does. Never raises, as
+    `record_tool_result` never does."""
+    try:
+        metadata = {"tool": tool, "outcome": outcome}
+        if background:
+            metadata["mint"] = "background"
+        record_event(TOOL_RESULT_EVENT, level="WARNING", metadata=metadata)
+    except Exception:
+        logger.debug(
+            "recording the %s failure failed; the trace will not show it", tool, exc_info=True
+        )
 
 
 class ToolSurface(Protocol):
@@ -612,6 +769,8 @@ class McpSurface:
         """
         source = self._sources.get(tool.server)
         if source is None:
+            # Recorded too, so every call leaves one `TOOL_RESULT_EVENT`.
+            record_tool_failure(tool.name, outcome="uncovered_server")
             raise ToolSurfaceUnavailableError(
                 f"no server named {tool.server!r} is covered; covered: {sorted(self._sources)!r}",
                 retryable=False,
@@ -619,21 +778,31 @@ class McpSurface:
         timeout = self._call_timeouts.get(tool, self._default_call_timeout_s)
         clients = self._call_clients[tool.server]
         # `client` stays `None` when `get()` itself fails to connect: nothing
-        # was acquired, so there is nothing to discard or release below. The
-        # outer `except` still reports it the same way.
+        # was acquired, so there is nothing to discard or release below. That
+        # failure is recorded (`transport_failed`), so every call leaves one
+        # `TOOL_RESULT_EVENT`. It is recorded around `get()` and `call_tool`,
+        # before the client is released.
         client: Client | None = None
         try:
-            client = await clients.get()
-            result = await client.call_tool(
-                tool.name,
-                dict(arguments),
-                timeout=timeout,
-                meta=session_call_meta(client),
-                progress_handler=mcp_progress_handler(on_progress),
-                raise_on_error=False,
-            )
+            try:
+                client = await clients.get()
+                result = await client.call_tool(
+                    tool.name,
+                    dict(arguments),
+                    timeout=timeout,
+                    meta=session_call_meta(client),
+                    progress_handler=mcp_progress_handler(on_progress),
+                    raise_on_error=False,
+                )
+            except (asyncio.CancelledError, Exception) as exc:
+                _record_call_failure(tool.name, exc)
+                raise
+            structured = result.structured_content
+            content = dict(structured) if isinstance(structured, Mapping) else None
+            record_tool_result(tool.name, is_error=result.is_error, structured_content=content)
         except MCPError as exc:
-            if client is not None and exc.error.code != REQUEST_TIMEOUT:
+            timed_out = exc.error.code == REQUEST_TIMEOUT
+            if client is not None and not timed_out:
                 logger.warning(
                     "%r on %r failed for a reason other than its own timeout; "
                     "discarding %r's held client so the next call reconnects",
@@ -664,10 +833,9 @@ class McpSurface:
         finally:
             if client is not None:
                 await clients.release(client)
-        structured = result.structured_content
         return ToolCallResult(
             is_error=result.is_error,
-            structured_content=dict(structured) if isinstance(structured, Mapping) else None,
+            structured_content=content,
             meta=dict(result.meta) if result.meta else None,
             text="\n".join(
                 block.text for block in result.content if isinstance(block, TextContent)

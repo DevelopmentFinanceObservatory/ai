@@ -3,6 +3,8 @@ import contextvars
 import logging
 import os
 import threading
+import time
+from typing import Any
 from unittest.mock import MagicMock, call
 
 import langfuse
@@ -11,16 +13,15 @@ from common import telemetry
 from common.telemetry import (
     backend,
     current_trace_id,
-    end_turn_span,
     flush_telemetry,
     init_telemetry,
     record_event,
     record_span,
-    start_turn_span,
+    start_telemetry_flush,
     turn_call_meta,
+    turn_segment,
     use_call_session,
     use_request_span,
-    use_turn_span,
 )
 from common.uri_redaction import UriRedactingExporter
 from langfuse._client.resource_manager import LangfuseResourceManager
@@ -147,7 +148,7 @@ def test_langfuse_env_vars_resolve_to_the_langfuse_backend(langfuse_env, langfus
 def test_a_failing_auth_check_warns_and_leaves_langfuse_active(
     langfuse_env, langfuse_client, caplog, failure
 ):
-    """`start_turn_span` and `record_event` read `_backend` alone, and the
+    """`_start_turn_span` and `record_event` read `_backend` alone, and the
     exporter is attached as soon as `get_client()` returns, so a rejected or
     unreachable credentials check only logs a WARNING and the backend stays
     `langfuse`."""
@@ -288,15 +289,54 @@ def test_otel_sdk_disabled_leaves_the_backend_on_unless_it_is_true(
     assert backend() == "langfuse"
 
 
-def test_the_langfuse_client_is_built_with_a_redacting_exporter_and_the_default_filter(
-    langfuse_env, langfuse_client
+@pytest.mark.parametrize(
+    ("langfuse_release", "revision", "release"),
+    [
+        (None, "dfo-dev-ai-00042-abc", "dfo-dev-ai-00042-abc"),
+        ("v1.2.3", "dfo-dev-ai-00042-abc", "v1.2.3"),
+        (None, None, None),
+    ],
+    ids=["revision", "langfuse-release-wins", "neither"],
+)
+def test_the_langfuse_client_is_built_with_a_redacting_exporter_and_the_widened_filter(
+    langfuse_env, langfuse_client, monkeypatch, langfuse_release, revision, release
 ):
+    """The client is built with the redacting exporter, a span filter that
+    keeps the `mcp` SDK's spans beside the SDK's default ones, and
+    `LANGFUSE_RELEASE`, else the Cloud Run revision, as its release."""
+    for name, value in [("LANGFUSE_RELEASE", langfuse_release), ("K_REVISION", revision)]:
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
     (kwargs,) = langfuse_client.built_with
-    assert kwargs.keys() == {"span_exporter"}
+    assert kwargs.keys() == {"span_exporter", "release", "should_export_span"}
     assert isinstance(kwargs["span_exporter"], UriRedactingExporter)
+    assert kwargs["release"] == release
+    keep = kwargs["should_export_span"]
+    parent = _span("langfuse-sdk", "turn.segment")
+
+    def mcp_send(method: str, *, parented: bool) -> Any:
+        return (
+            TracerProvider()
+            .get_tracer("mcp-python-sdk")
+            .start_span(
+                f"MCP send {method}",
+                context=otel_trace.set_span_in_context(parent) if parented else None,
+                attributes={"mcp.method.name": method},
+            )
+        )
+
+    assert keep(mcp_send("tools/call", parented=True))
+    assert keep(mcp_send("tools/call", parented=False))
+    # Its server span fails the default filter, so it would export alone.
+    assert not keep(mcp_send("server/discover", parented=True))
+    assert keep(_span("langfuse-sdk", "turn"))
+    assert not keep(_span("some.other.library", "bare"))
 
 
 @pytest.mark.parametrize("backend_env", ["langfuse", "otel"])
@@ -390,55 +430,54 @@ def test_a_failed_auth_check_thread_start_warns_and_leaves_langfuse_active(
     assert record.exc_info is not None
 
 
-# --- start_turn_span / end_turn_span ---------------------------------------
+# --- _start_turn_span / _end_turn_span ---------------------------------------
 
 
 def test_start_turn_span_is_a_noop_with_no_backend():
-    assert start_turn_span("tr_abc123") is None
+    assert telemetry._start_turn_span("tr_abc123", name="turn") is None
 
 
 def test_start_turn_span_langfuse_uses_a_seeded_trace_id(monkeypatch):
-    """The Langfuse path must derive the real trace id from the wire id via
-    `Langfuse.create_trace_id` -- the SDK's documented external-id
-    correlation pattern -- and pass it through `trace_context`, so a person
-    holding only the wire id can recompute the same trace id later."""
+    """The Langfuse path passes `trace_context` the trace id
+    `Langfuse.create_trace_id` seeds on the wire id, the SDK's documented
+    pattern for correlating an external id, so a person holding only the wire
+    id can recompute the same trace id later."""
     telemetry._backend = "langfuse"
-    seeds_seen = []
-
-    def fake_create_trace_id(*, seed):
-        seeds_seen.append(seed)
-        return "d" * 32
-
     fake_span_cm = MagicMock()
     fake_client = MagicMock()
     fake_client.start_as_current_observation.return_value = fake_span_cm
-    monkeypatch.setattr(langfuse.Langfuse, "create_trace_id", staticmethod(fake_create_trace_id))
     monkeypatch.setattr(langfuse, "get_client", lambda: fake_client)
 
-    handle = start_turn_span("tr_abc123")
+    handle = telemetry._start_turn_span("tr_abc123", name="turn")
 
-    assert seeds_seen == ["tr_abc123"]
     _, kwargs = fake_client.start_as_current_observation.call_args
-    assert kwargs["trace_context"] == {"trace_id": "d" * 32}
+    assert kwargs["trace_context"] == {
+        "trace_id": langfuse.Langfuse.create_trace_id(seed="tr_abc123")
+    }
     assert kwargs["metadata"] == {"dfo.external_id": "tr_abc123"}
     fake_span_cm.__enter__.assert_called_once()
     handle.context.run(handle.scope.__exit__, None, None, None)
     fake_span_cm.__exit__.assert_called_once()
 
 
-def test_start_turn_span_otel_sets_the_id_as_an_attribute(monkeypatch):
-    """Without Langfuse there is no `create_trace_id`, so the wire id goes on
-    the span as a plain attribute."""
+def test_start_turn_span_otel_seeds_the_trace_and_sets_the_id_as_an_attribute(monkeypatch):
+    """Without Langfuse the wire id goes on the span as a plain attribute, and
+    the span sits on the trace id `Langfuse.create_trace_id` derives."""
     telemetry._backend = "otel"
     fake_span_cm = MagicMock()
     fake_tracer = MagicMock()
     fake_tracer.start_as_current_span.return_value = fake_span_cm
     monkeypatch.setattr(otel_trace, "get_tracer", lambda name: fake_tracer)
 
-    handle = start_turn_span("tr_abc123")
+    handle = telemetry._start_turn_span("tr_abc123", name="turn")
 
     _, kwargs = fake_tracer.start_as_current_span.call_args
     assert kwargs["attributes"] == {"dfo.external_id": "tr_abc123"}
+    # The parent is a synthetic remote span on the trace id Langfuse would
+    # seed, so every request's spans of one turn share a trace.
+    parent = otel_trace.get_current_span(kwargs["context"]).get_span_context()
+    assert parent.is_remote
+    assert parent.trace_id == int(langfuse.Langfuse.create_trace_id(seed="tr_abc123"), 16)
     fake_span_cm.__enter__.assert_called_once()
     assert handle.scope is fake_span_cm
 
@@ -446,17 +485,17 @@ def test_start_turn_span_otel_sets_the_id_as_an_attribute(monkeypatch):
 def test_start_turn_span_swallows_errors(monkeypatch):
     """Telemetry opening a span must never be the reason a turn fails."""
 
-    def _boom(*, seed):
+    def _boom():
         raise RuntimeError("boom")
 
     telemetry._backend = "langfuse"
-    monkeypatch.setattr(langfuse.Langfuse, "create_trace_id", staticmethod(_boom))
+    monkeypatch.setattr(langfuse, "get_client", _boom)
 
-    assert start_turn_span("tr_abc123") is None
+    assert telemetry._start_turn_span("tr_abc123", name="turn") is None
 
 
 def test_end_turn_span_is_a_noop_for_none():
-    end_turn_span(None)  # must not raise
+    telemetry._end_turn_span(None)  # must not raise
 
 
 def test_end_turn_span_swallows_errors(monkeypatch):
@@ -467,9 +506,9 @@ def test_end_turn_span_swallows_errors(monkeypatch):
     fake_tracer = MagicMock()
     fake_tracer.start_as_current_span.return_value = fake_span_cm
     monkeypatch.setattr(otel_trace, "get_tracer", lambda name: fake_tracer)
-    handle = start_turn_span("tr_abc123")
+    handle = telemetry._start_turn_span("tr_abc123", name="turn")
 
-    end_turn_span(handle)  # must not raise
+    telemetry._end_turn_span(handle)  # must not raise
 
     fake_span_cm.__exit__.assert_called_once_with(None, None, None)
 
@@ -482,9 +521,9 @@ def test_end_turn_span_closes_the_span_when_recording_its_input_and_output_fails
     fake_client = MagicMock()
     fake_client.start_as_current_observation.return_value = fake_span_cm
     monkeypatch.setattr(langfuse, "get_client", lambda: fake_client)
-    handle = start_turn_span("tr_abc123")
+    handle = telemetry._start_turn_span("tr_abc123", name="turn")
 
-    end_turn_span(handle, request="q", response="a")  # must not raise
+    telemetry._end_turn_span(handle, request="q", response="a")  # must not raise
 
     fake_span_cm.__enter__.return_value.update.assert_called_once_with(
         input="q", output="a", level=None, status_message=None
@@ -519,29 +558,29 @@ async def test_end_turn_span_runs_in_the_context_the_span_was_opened_in(monkeypa
 
 
 async def _start(external_id):
-    return start_turn_span(external_id)
+    return telemetry._start_turn_span(external_id, name="turn")
 
 
 async def _end(handle):
-    end_turn_span(handle)
+    telemetry._end_turn_span(handle)
 
 
-# --- use_turn_span ------------------------------------------------------------
+# --- _use_turn_span ------------------------------------------------------------
 
 
 def test_use_turn_span_is_a_noop_for_none():
-    with use_turn_span(None):
+    with telemetry._use_turn_span(None):
         pass  # must not raise
 
 
 def test_use_turn_span_never_raises_on_a_handle_that_is_not_a_turn_span():
-    with use_turn_span(object()):
+    with telemetry._use_turn_span(object()):
         pass  # must not raise
 
 
 def _turn_handle() -> telemetry._TurnSpan:
     """A handle whose OpenTelemetry context holds a live span, as
-    `start_turn_span` builds one, without any backend."""
+    `_start_turn_span` builds one, without any backend."""
     span = _span("test.turn", "turn")
     return telemetry._TurnSpan(
         scope=None,
@@ -555,7 +594,7 @@ def test_use_turn_span_makes_the_span_current_and_restores_the_context_after():
     handle = _turn_handle()
     before = otel_context.get_current()
 
-    with use_turn_span(handle):
+    with telemetry._use_turn_span(handle):
         assert otel_trace.get_current_span(
             otel_context.get_current()
         ) is otel_trace.get_current_span(handle.otel_context)
@@ -575,7 +614,7 @@ def test_use_turn_span_never_raises_when_attaching_fails(monkeypatch):
     monkeypatch.setattr(otel_context, "detach", detached.append)
     ran = []
 
-    with use_turn_span(_turn_handle()):
+    with telemetry._use_turn_span(_turn_handle()):
         ran.append(True)
 
     assert ran == [True]
@@ -592,7 +631,7 @@ def test_use_turn_span_never_raises_when_detaching_fails(monkeypatch):
     monkeypatch.setattr(otel_context, "detach", _boom)
     ran = []
 
-    with use_turn_span(_turn_handle()):
+    with telemetry._use_turn_span(_turn_handle()):
         ran.append(True)
 
     assert ran == [True]
@@ -601,8 +640,8 @@ def test_use_turn_span_never_raises_when_detaching_fails(monkeypatch):
 def test_use_turn_span_left_in_another_context_detaches_nothing_and_logs_nothing(caplog):
     """An async generator abandoned at a `yield` is closed by the event loop in
     a context of its own. Detaching there makes OpenTelemetry log a ValueError
-    at ERROR; `use_turn_span` recognises the foreign context and leaves it."""
-    scope = use_turn_span(_turn_handle())
+    at ERROR; `_use_turn_span` recognises the foreign context and leaves it."""
+    scope = telemetry._use_turn_span(_turn_handle())
     contextvars.copy_context().run(scope.__enter__)
 
     with caplog.at_level(logging.ERROR, logger="opentelemetry.context"):
@@ -688,6 +727,92 @@ async def test_flush_telemetry_returns_at_the_bound_and_skips_while_one_is_runni
     assert not telemetry._flush_pending
 
 
+async def test_flush_telemetry_waits_for_a_flush_already_running(monkeypatch):
+    """A flush the caller did not start, as one a save started, holds the
+    queue, and `flush_telemetry` waits for it and its second pass to finish."""
+    telemetry._backend = "langfuse"
+    release = threading.Event()
+    started = threading.Event()
+    fake_client = MagicMock()
+
+    def _hang_once():
+        started.set()
+        if fake_client.flush.call_count == 1:
+            release.wait(timeout=10)
+
+    fake_client.flush.side_effect = _hang_once
+    monkeypatch.setattr(langfuse, "get_client", lambda: fake_client)
+
+    start_telemetry_flush()
+    assert started.wait(timeout=5)
+    waiting = asyncio.ensure_future(flush_telemetry(timeout_seconds=5))
+    await asyncio.sleep(0.05)
+    assert not waiting.done()
+    release.set()
+    await asyncio.wait_for(waiting, timeout=5)
+
+    assert fake_client.flush.call_count == 2
+    assert not telemetry._flush_running
+
+
+async def test_flush_telemetry_wakes_each_caller_within_two_passes_under_steady_load(
+    monkeypatch,
+):
+    """Under a flush request every half pass, each caller wakes once the first
+    pass that started after it ends, well inside two pass lengths, whatever
+    arrives later, and no wake-up is left behind. Passes are 0.1 s, so the
+    test takes about a second."""
+    telemetry._backend = "langfuse"
+    pass_seconds = 0.1
+    monkeypatch.setattr(telemetry, "_flush_backend", lambda: time.sleep(pass_seconds))
+
+    async def timed_flush() -> float:
+        started = time.monotonic()
+        await flush_telemetry(timeout_seconds=3)
+        return time.monotonic() - started
+
+    calls = []
+    for _ in range(16):
+        calls.append(asyncio.ensure_future(timed_flush()))
+        await asyncio.sleep(pass_seconds / 2)
+    waits = await asyncio.gather(*calls)
+
+    assert max(waits) < 2.5 * pass_seconds, waits
+    for thread in threading.enumerate():
+        if thread.name == telemetry._FLUSH_THREAD_NAME:
+            thread.join(timeout=5)
+    assert telemetry._flush_waiters == []
+    assert not telemetry._flush_running
+
+
+def test_start_telemetry_flush_returns_while_the_flush_runs(monkeypatch):
+    """`start_telemetry_flush` starts the flush thread and returns at once,
+    the flush still hanging, and needs no event loop."""
+    telemetry._backend = "langfuse"
+    release = threading.Event()
+    started = threading.Event()
+    fake_client = MagicMock()
+
+    def _hang():
+        started.set()
+        release.wait(timeout=10)
+
+    fake_client.flush.side_effect = _hang
+    monkeypatch.setattr(langfuse, "get_client", lambda: fake_client)
+
+    try:
+        start_telemetry_flush()
+        assert started.wait(timeout=5)
+        assert telemetry._flush_running
+    finally:
+        release.set()
+        for thread in threading.enumerate():
+            if thread.name == telemetry._FLUSH_THREAD_NAME:
+                thread.join(timeout=10)
+    assert not telemetry._flush_running
+    assert fake_client.flush.call_count == 1
+
+
 # --- record_event -----------------------------------------------------------
 
 
@@ -738,6 +863,21 @@ def test_record_event_otel_adds_a_span_event_to_the_current_span(monkeypatch):
     span.add_event.assert_called_once_with(
         "compose.refused", attributes={"reason": "no_rows", "level": "ERROR"}
     )
+
+
+def test_record_event_otel_under_an_ended_span_lands_on_the_live_segment(otel_exporter):
+    """An event recorded while the current span has ended, as an early mint
+    offered under an inner span that ended while its segment runs, goes on
+    the live `turn.segment`, which the stream's flush exports."""
+    with turn_segment("tr_event0001"):
+        inner = otel_trace.get_tracer(__name__).start_span("inner")
+        inner.end()
+        with otel_trace.use_span(inner, end_on_exit=False):
+            record_event("dfo.tool_result", level="DEFAULT", metadata={"tool": "get_data"})
+
+    spans = {span.name: span for span in otel_exporter.get_finished_spans()}
+    assert [event.name for event in spans["turn.segment"].events] == ["dfo.tool_result"]
+    assert list(spans["inner"].events) == []
 
 
 def test_record_event_keeps_only_scalar_values_and_truncates_strings(monkeypatch, live_span):
@@ -847,22 +987,20 @@ def test_record_span_otel_lands_on_the_exporter():
     assert dict(spans[0].attributes) == {"dfo.depth": "standard", "dfo.parts": 2}
 
 
-def test_record_span_nests_under_the_turn_span_made_current_by_use_turn_span():
+def test_record_span_nests_under_the_turn_segment():
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     otel_trace.set_tracer_provider(provider)
     telemetry._backend = "otel"
 
-    handle = start_turn_span("tr_marker0001")
-    with use_turn_span(handle):
+    with turn_segment("tr_marker0001"):
         record_span("plan.approved", {"dfo.parts": 2})
-    end_turn_span(handle)
 
     spans = {span.name: span for span in exporter.get_finished_spans()}
     assert spans["plan.approved"].parent is not None
-    assert spans["plan.approved"].parent.span_id == spans["turn"].context.span_id
-    assert spans["plan.approved"].context.trace_id == spans["turn"].context.trace_id
+    assert spans["plan.approved"].parent.span_id == spans["turn.segment"].context.span_id
+    assert spans["plan.approved"].context.trace_id == spans["turn.segment"].context.trace_id
 
 
 # --- use_request_span and current_trace_id -------------------------------------
@@ -995,22 +1133,15 @@ def test_current_trace_id_without_a_span_is_fresh_each_call():
 
 
 def test_turn_call_meta_is_empty_with_no_backend():
-    handle = start_turn_span("tr_meta0001", session_id="conv-1")
-
-    with use_turn_span(handle):
+    with turn_segment("tr_meta0001", session_id="conv-1"):
         assert turn_call_meta() == {}
 
 
 def test_turn_call_meta_is_empty_on_the_otlp_backend(monkeypatch):
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
     init_telemetry(service_name="svc")
-    handle = start_turn_span("tr_meta0002", session_id="conv-1")
-
-    try:
-        with use_turn_span(handle):
-            assert turn_call_meta() == {}
-    finally:
-        end_turn_span(handle)
+    with turn_segment("tr_meta0002", session_id="conv-1"):
+        assert turn_call_meta() == {}
 
 
 def test_turn_call_meta_never_raises(monkeypatch):
