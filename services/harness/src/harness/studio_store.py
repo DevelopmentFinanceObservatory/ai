@@ -1885,8 +1885,11 @@ class StudioStore:
         """Settle each write on `entry.canvas_pending` against `row`, the
         conversation's row as locked by the caller (`_fenced_save`,
         `_close_segment`), and take it off the list once settled. A fault
-        while reading the row's items leaves every write pending, to be
-        settled by the next fenced write. Returns whether any write landed.
+        while reading the row's items raises before any write is settled or
+        the live state touched, and the fault fails the calling write: a
+        fenced write raises, and the closing write ends `FAILED`, whose
+        owner evicts the entry so the next claim reloads from the row.
+        Returns whether any write landed.
 
         A write whose id the row's `canvas_writes` holds committed. The row
         holds that commit and every later one, so the live state reloads
@@ -2050,11 +2053,13 @@ class StudioStore:
         Returns how the write ended (`SegmentClose`). It makes one attempt,
         bounded by `timeout` with the wait for this instance's write lock
         included, and raises nothing. A failure is logged and returned as
-        `FAILED`, and the lease then lapses by its TTL. The live state takes
-        what the write stored only once it commits, so after `LOST` or
-        `FAILED` it holds what was not stored, and the caller evicts it
-        (`evict`). Either way this instance stops counting `segment_id` as
-        held.
+        `FAILED`, and the lease then lapses by its TTL. The write settles the
+        pending canvas writes under the row lock and rebuilds the record's
+        cards from the row's items; a fault reading those items fails the
+        closing write. After `LOST` or `FAILED` the live state may hold what
+        was not stored, so the caller evicts it (`evict`) and the next claim
+        reloads from the row. Either way this instance stops counting
+        `segment_id` as held.
         """
         entry = self._runtime.get((principal, conversation_id))
         if entry is None or entry.state is None or entry.pk is None:
