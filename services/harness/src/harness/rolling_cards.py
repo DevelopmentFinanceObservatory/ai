@@ -90,6 +90,7 @@ from typing import Any, Final, Protocol
 
 import rfc8785
 from analysis_mcp.runner_client import DerivedUnread
+from common.caller import STUDIO_SURFACE
 from common.live_apis import LiveApisError, LiveApisNotConfigured
 from common.materialisation import (
     FrameExpired,
@@ -362,7 +363,7 @@ def card_selection(
 
 
 class CardReplay(Protocol):
-    """Replays a rolling recipe over other populations, as
+    """Replays a rolling recipe over other populations for `surface`, as
     `harness.recipe_replay.replay_recipe` does with `populations` given.
     `harness.live_refresh.LiveRefresh.replay` is one."""
 
@@ -371,6 +372,7 @@ class CardReplay(Protocol):
         recipe: Mapping[str, Any],
         *,
         deadline: CallDeadline,
+        surface: str,
         populations: Sequence[Mapping[str, Any]],
     ) -> Replayed | Pending | Refused: ...
 
@@ -823,6 +825,7 @@ class RollingCards:
                 outcome = await self._replay(
                     frame.recipe,
                     deadline=CallDeadline.after(self._deadline_s),
+                    surface=STUDIO_SURFACE,
                     populations=populations,
                 )
         except TimeoutError as exc:
