@@ -1822,9 +1822,8 @@ LIMIT_S = 0.5
 _CLIENT_TIMEOUT_S = 10
 
 _ARTIFACT_URI = f"dfo://artifact/spec_{'5' * 32}/cv_1/sha256:{'1' * 64}"
-# A spec the definition store does not hold, and apis' registry answer for it
-# (`GET /api/datasets/{id}/options`), which a public `get_data` reads to choose the
-# type columns it always asks for.
+# A spec the definition store does not hold, which a public `get_data` mints on the
+# registry-fallback path.
 _UNSTORED_IDENTITY = {
     "identity_version": "spec1",
     "shape": {"id": "LimitTestShape", "kind": "stat_var"},
@@ -1834,23 +1833,17 @@ _UNSTORED_IDENTITY = {
     "slots": [],
 }
 _UNSTORED_SPEC = spec_id_for(canonicalize(_UNSTORED_IDENTITY))
-_REGISTRY_DEFINITION = {
-    "definition": {"schema_version": 1, "spec_id": _UNSTORED_SPEC, "identity": _UNSTORED_IDENTITY}
-}
 
 
 class _StalledUpstream:
-    """apis holding every request but a registry read until `release` is set,
-    recording the path of each request whose wait was cancelled. Once released,
-    it answers 400."""
+    """apis holding every request until `release` is set, recording the path of each
+    request whose wait was cancelled. Once released, it answers 400."""
 
     def __init__(self) -> None:
         self.release = asyncio.Event()
         self.cancelled: list[str] = []
 
     async def handler(self, request: httpx2.Request) -> httpx2.Response:
-        if request.url.path.endswith("/options"):
-            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
         try:
             await self.release.wait()
         except asyncio.CancelledError:
@@ -2053,8 +2046,6 @@ async def test_get_data_refuses_on_its_own_deadline_before_the_limit_stops_it(
                 - poll_time_left_s
             )
             return httpx2.Response(202, json={"operation": operation})
-        if request.url.path.endswith("/options"):
-            return httpx2.Response(200, json=_REGISTRY_DEFINITION)
         assert request.url.path == operation["poll"]
         return httpx2.Response(200, json={"operation": operation})
 
