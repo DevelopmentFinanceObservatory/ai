@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 import httpx2
@@ -21,11 +22,21 @@ from compiler.surface import ProgressCallback, ToolCallResult
 from fastapi import FastAPI
 from google.genai import types
 from harness.scripted import ScriptedSurface
-from harness.studio import _conversation_read
+from harness.studio import _conversation_read, _read_status, _resume_refusal
 from harness.studio_state import SEGMENT_TTL_S, ConversationState, _PendingInterrupt
-from harness.studio_store import SegmentClose, StoredConversation, StudioStore
-from harness.turn.store import TurnStatus
+from harness.studio_store import (
+    SegmentClose,
+    Standing,
+    StoredConversation,
+    StudioStore,
+    TurnStanding,
+    record_status,
+    turn_standing,
+)
+from harness.turn.store import TurnStatus, TurnStore
+from harness.wire import TURN_INDEX_HEADER
 from planner.workflow import ToolId
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .scripted_tools import (
@@ -297,29 +308,40 @@ async def test_closed_since_returns_the_turns_after_the_one_the_client_holds(
     pg_engine: AsyncEngine,
 ) -> None:
     """Each closed turn after `since` comes back with its message and reply,
-    oldest first, at most three."""
-    app, _ = orchestrator_app(
-        _text("One."), _text("Two."), _text("Three."), _text("Four."), engine=pg_engine
-    )
+    oldest first, at most three, beside `closed_total`. A page that reads
+    again from the last turn it got until it holds `closed_total` gets every
+    turn once, in order."""
+    replies = ("One.", "Two.", "Three.", "Four.", "Five.", "Six.", "Seven.")
+    messages = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh")
+    app, _ = orchestrator_app(*(_text(reply) for reply in replies), engine=pg_engine)
     async with studio_client(app) as client:
-        for message in ("first", "second", "third", "fourth"):
+        for message in messages:
             await stream(client, "/api/studio/turn", turn_body(message))
         since_one = (await _state(client, since=1)).json()
-        since_three = (await _state(client, since=3)).json()
+        since_six = (await _state(client, since=6)).json()
         unnamed = (await _state(client)).json()
+        paged: list[dict[str, Any]] = []
+        reads = 0
+        while True:
+            read = (await _state(client, since=len(paged))).json()
+            reads += 1
+            paged.extend(read["closed_since"])
+            if len(paged) >= read["closed_total"]:
+                break
 
     assert [
         (turn["turn_index"], turn["user_message"], turn["reply"])
         for turn in since_one["closed_since"]
     ] == [(2, "second", "Two."), (3, "third", "Three."), (4, "fourth", "Four.")]
-    assert [turn["turn_index"] for turn in since_three["closed_since"]] == [4]
+    assert [turn["turn_index"] for turn in since_six["closed_since"]] == [7]
     assert since_one["turn"]["status"] == "done"
-    assert since_one["turn"]["index"] == 4
+    assert since_one["turn"]["index"] == 7
     assert unnamed["closed_since"] == []
-
-    async with studio_client(app) as client:
-        capped = (await _state(client, since=0)).json()
-    assert [turn["turn_index"] for turn in capped["closed_since"]] == [1, 2, 3]
+    assert unnamed["closed_total"] == since_one["closed_total"] == 7
+    assert [(turn["turn_index"], turn["reply"]) for turn in paged] == list(
+        zip(range(1, 8), replies, strict=True)
+    )
+    assert reads == 3
 
 
 @pytest.mark.parametrize("route", ["state", "resume"])
@@ -645,3 +667,386 @@ async def test_a_closed_turn_carries_the_cards_it_made(pg_engine: AsyncEngine) -
         "revision": created["revision"],
         "fact_summary": created["fact_summary"],
     }
+
+
+@pytest.mark.parametrize(
+    ("record", "status"),
+    [
+        pytest.param({"error": None}, TurnStatus.DONE, id="clean"),
+        pytest.param({"error": "cancelled"}, TurnStatus.CANCELLED, id="stopped"),
+        pytest.param({"error": "abandoned"}, TurnStatus.ABANDONED, id="abandoned"),
+        pytest.param({"error": "state_not_saved"}, TurnStatus.FAILED, id="unsaved"),
+        pytest.param({"error": "capability_unavailable"}, TurnStatus.FAILED, id="failed"),
+    ],
+)
+def test_a_closed_turn_reads_the_status_its_record_states(
+    record: dict[str, Any], status: TurnStatus
+) -> None:
+    assert record_status(record) is status
+
+
+# The pause's entry, by how it stands against the cursor's pause `int_1`.
+_ENTRIES: dict[str, tuple[_PendingInterrupt, ...]] = {
+    "no-entry": (),
+    "awaiting": (_entry("int_1"),),
+    "answer-left": (_entry("int_1", answered=True),),
+    "other-pause": (_entry("int_0", answered=True),),
+}
+
+_CLOSED_DONE = TurnStanding(Standing.CLOSED, TurnStatus.DONE)
+
+# Where an unrecorded turn with no live lease stands, by its cursor and the
+# pause's entry. A recorded turn with no live lease stands closed as its
+# record states, and a live lease holds any turn.
+_UNRECORDED_UNHELD: dict[tuple[TurnStatus | None, str], TurnStanding] = {
+    **{(None, entry): TurnStanding(Standing.CLOSED, TurnStatus.ABANDONED) for entry in _ENTRIES},
+    **{(TurnStatus.RUNNING, entry): TurnStanding(Standing.RESUMABLE) for entry in _ENTRIES},
+    (TurnStatus.PAUSED, "no-entry"): TurnStanding(Standing.REPLAY),
+    (TurnStatus.PAUSED, "awaiting"): TurnStanding(Standing.AWAITING_ANSWER),
+    (TurnStatus.PAUSED, "answer-left"): TurnStanding(Standing.CARRY),
+    (TurnStatus.PAUSED, "other-pause"): TurnStanding(Standing.REPLAY),
+    **{(TurnStatus.DONE, entry): _CLOSED_DONE for entry in _ENTRIES},
+    **{
+        (TurnStatus.FAILED, entry): TurnStanding(Standing.CLOSED, TurnStatus.FAILED)
+        for entry in _ENTRIES
+    },
+    **{
+        (TurnStatus.CANCELLED, entry): TurnStanding(Standing.CLOSED, TurnStatus.CANCELLED)
+        for entry in _ENTRIES
+    },
+    **{
+        (TurnStatus.ABANDONED, entry): TurnStanding(Standing.CLOSED, TurnStatus.ABANDONED)
+        for entry in _ENTRIES
+    },
+}
+
+
+def _standing_cells() -> list[Any]:
+    cells = []
+    for cursor, recorded, lease, entry in itertools.product(
+        [None, *TurnStatus], [False, True], [False, True], _ENTRIES
+    ):
+        if lease:
+            expected = TurnStanding(Standing.HELD)
+        elif recorded:
+            # The record states the turn failed, whatever the cursor says.
+            expected = TurnStanding(Standing.CLOSED, TurnStatus.FAILED)
+        else:
+            expected = _UNRECORDED_UNHELD[cursor, entry]
+        label = cursor.value if cursor is not None else "no-cursor"
+        cells.append(
+            pytest.param(
+                cursor,
+                recorded,
+                lease,
+                entry,
+                expected,
+                id=f"{label}-{'recorded' if recorded else 'open'}-"
+                f"{'lease' if lease else 'unheld'}-{entry}",
+            )
+        )
+    return cells
+
+
+_STANDING_CELLS = _standing_cells()
+
+
+def test_the_standing_table_covers_every_cell() -> None:
+    assert len(_STANDING_CELLS) == 7 * 2 * 2 * 4
+
+
+@pytest.mark.parametrize(("cursor", "recorded", "lease", "entry", "expected"), _STANDING_CELLS)
+def test_every_turn_the_store_can_hold_has_one_standing(
+    cursor: TurnStatus | None,
+    recorded: bool,
+    lease: bool,
+    entry: str,
+    expected: TurnStanding,
+) -> None:
+    """`turn_standing` over the product of the cursor's status, whether the
+    turn is recorded, whether a lease is live, and the pause's entry. The
+    state read and `/resume` both map the standing, so the read's status and
+    the resume's answer agree on every cell: `running` is resumed or waited
+    out, and `paused` or a closed status refuses the resume."""
+    state = ConversationState(conversation_id=CONVERSATION, turn_index=1, trace_id="tr_1")
+    if recorded:
+        state.close_turn(final_text="", error="capability_unavailable")
+    state.pending = {pending.adk_id: pending for pending in _ENTRIES[entry]}
+
+    standing = turn_standing(
+        cursor_status=cursor,
+        pause_id="int_1" if cursor is TurnStatus.PAUSED else None,
+        lease_live=lease,
+        state=state,
+    )
+
+    assert standing == expected
+    refused = _resume_refusal(standing, 1) is not None
+    assert refused == (
+        _read_status(standing).value != "running" or standing.standing is Standing.CARRY
+    )
+
+
+class _BrokenSurface(ScriptedSurface):
+    """A tool surface whose every call fails, as a lost analysis mount does."""
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Mapping[str, Any],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        raise RuntimeError("analysis mount went away")
+
+
+def _approve(interrupt_id: str) -> dict[str, Any]:
+    return {
+        "kind": "interrupt.response",
+        "schema_version": 1,
+        "conversation_id": CONVERSATION,
+        "interrupt_id": interrupt_id,
+        "decision": "approve",
+    }
+
+
+async def _nothing() -> None:
+    return None
+
+
+type _Setup = Callable[[AsyncEngine], Awaitable[tuple[FastAPI, Callable[[], Awaitable[None]]]]]
+
+
+async def _closed_done(engine: AsyncEngine) -> tuple[FastAPI, Callable[[], Awaitable[None]]]:
+    app, _ = orchestrator_app(_text("Done."), engine=engine)
+    async with studio_client(app) as client:
+        await stream(client, "/api/studio/turn", turn_body("hi"))
+    return app, _nothing
+
+
+async def _recorded_over_an_open_cursor(
+    engine: AsyncEngine,
+) -> tuple[FastAPI, Callable[[], Awaitable[None]]]:
+    """A row stored before the closing write closed the cursor with the
+    record: the turn recorded `failed`, its cursor left running."""
+    app, _ = orchestrator_app(
+        plan_call("q with forks"), tool_surface=_BrokenSurface(), engine=engine
+    )
+    async with studio_client(app) as client:
+        plan = (await stream(client, "/api/studio/turn", turn_body("q with forks")))[-1]
+        failed = await stream(client, "/api/studio/interrupt", _approve(plan["interrupt_id"]))
+    assert failed[-1]["event"] == "error"
+    async with engine.begin() as conn:
+        await conn.execute(text("UPDATE turn_cursors SET status = 'running', error = NULL"))
+    return app, _nothing
+
+
+async def _held(engine: AsyncEngine) -> tuple[FastAPI, Callable[[], Awaitable[None]]]:
+    searching = _HangOnce()
+    app, _ = orchestrator_app(search_call("aid to Kenya"), resolver=searching, engine=engine)
+    leave = asyncio.Event()
+    posting = asyncio.ensure_future(
+        _post_then_leave(app, "/api/studio/turn", turn_body("aid to Kenya"), leave)
+    )
+    await asyncio.wait_for(searching.entered.wait(), timeout=_DEADLINE_S)
+
+    async def release() -> None:
+        leave.set()
+        await posting
+
+    return app, release
+
+
+async def _left_running(engine: AsyncEngine) -> tuple[FastAPI, Callable[[], Awaitable[None]]]:
+    searching = _HangOnce()
+    app, _ = orchestrator_app(
+        search_call("aid to Kenya"), plan_call("q with forks"), resolver=searching, engine=engine
+    )
+    await _leave_once(app, "/api/studio/turn", turn_body("q with forks"), searching.entered)
+    return app, _nothing
+
+
+async def _awaiting_answer(engine: AsyncEngine) -> tuple[FastAPI, Callable[[], Awaitable[None]]]:
+    app, _ = orchestrator_app(plan_call("q with forks"), engine=engine)
+    async with studio_client(app) as client:
+        await stream(client, "/api/studio/turn", turn_body("q with forks"))
+    return app, _nothing
+
+
+async def _answer_left(engine: AsyncEngine) -> tuple[FastAPI, Callable[[], Awaitable[None]]]:
+    app, _ = orchestrator_app(
+        plan_call("q with forks"),
+        _text("Planned and run."),
+        tool_surface=ScriptedSurface(),
+        engine=engine,
+    )
+    async with studio_client(app) as client:
+        plan = (await stream(client, "/api/studio/turn", turn_body("q with forks")))[-1]
+    turns = app.state.studio.turns
+    reached = asyncio.Event()
+    record_answer = turns.record_answer
+
+    async def hang_before_accepting(*args: Any, **kwargs: Any) -> Any:
+        reached.set()
+        await asyncio.Event().wait()
+        return await record_answer(*args, **kwargs)
+
+    turns.record_answer = hang_before_accepting
+    await _leave_once(app, "/api/studio/interrupt", _approve(plan["interrupt_id"]), reached)
+    turns.record_answer = record_answer
+    return app, _nothing
+
+
+async def _pause_never_stored(engine: AsyncEngine) -> tuple[FastAPI, Callable[[], Awaitable[None]]]:
+    clock = await StoreClock.start(engine)
+    store = StudioStore(engine, **clock.store_kwargs)
+    app, _ = orchestrator_app(plan_call("q with forks"), store=store)
+    close_segment = store.close_segment
+    failed = False
+
+    async def fail_once(*args: Any, **kwargs: Any) -> SegmentClose:
+        nonlocal failed
+        if not failed:
+            failed = True
+            return SegmentClose.FAILED
+        return await close_segment(*args, **kwargs)
+
+    store.close_segment = fail_once  # type: ignore[method-assign]
+    async with studio_client(app) as client:
+        await stream(client, "/api/studio/turn", turn_body("q with forks"))
+    await clock.advance(SEGMENT_TTL_S + 1)
+    return app, _nothing
+
+
+@pytest.mark.parametrize(
+    ("setup", "standing", "status", "lease_live", "resumed"),
+    [
+        pytest.param(_closed_done, Standing.CLOSED, "done", False, "edit_conflict", id="closed"),
+        pytest.param(
+            _recorded_over_an_open_cursor,
+            Standing.CLOSED,
+            "failed",
+            False,
+            "edit_conflict",
+            id="closed-by-record-over-an-open-cursor",
+        ),
+        pytest.param(_held, Standing.HELD, "running", True, "transient_unavailable", id="held"),
+        pytest.param(
+            _left_running, Standing.RESUMABLE, "running", False, "plan.proposed", id="resumable"
+        ),
+        pytest.param(
+            _awaiting_answer,
+            Standing.AWAITING_ANSWER,
+            "paused",
+            False,
+            "edit_conflict",
+            id="awaiting-answer",
+        ),
+        pytest.param(_answer_left, Standing.CARRY, "running", False, "done", id="carry"),
+        pytest.param(
+            _pause_never_stored, Standing.REPLAY, "running", False, "plan.proposed", id="replay"
+        ),
+    ],
+)
+async def test_the_state_read_and_resume_agree_on_each_standing(
+    pg_engine: AsyncEngine,
+    setup: _Setup,
+    standing: Standing,
+    status: str,
+    lease_live: bool,
+    resumed: str,
+) -> None:
+    """Through the real store and routes, a turn of each standing reads the
+    status the contract's table gives it, and `/resume` answers what that
+    status tells the page to expect: a stream for `running` with no live
+    lease, a retry for a live lease, and `edit_conflict` for `paused` or a
+    closed turn. A turn recorded with its cursor left open reads closed as
+    its record states, and the resume's load closes the cursor so."""
+    app, release = await setup(pg_engine)
+    try:
+        stored = await app.state.studio.store.peek(PRINCIPAL, CONVERSATION)
+        assert stored is not None
+        found = turn_standing(
+            cursor_status=stored.turn_status,
+            pause_id=stored.pause_id,
+            lease_live=stored.lease_seconds is not None,
+            state=stored.state,
+        )
+        async with studio_client(app) as client:
+            read = (await _state(client)).json()
+            response = await client.post("/api/studio/resume", json=_resume_body(1), headers=AUTH)
+    finally:
+        await release()
+
+    assert found.standing is standing
+    assert read["turn"]["status"] == status
+    assert read["turn"]["lease_live"] is lease_live
+    if response.status_code == 200:
+        assert _events(_frames([response.content]))[-1] == resumed
+    else:
+        assert response.status_code == 409
+        assert response.json()["error"] == resumed
+    if standing is Standing.CLOSED:
+        assert await TurnStore(pg_engine).open_cursor(PRINCIPAL, CONVERSATION) is None
+
+
+async def test_a_closing_write_that_records_a_failed_turn_closes_its_cursor(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A segment records its turn failed with the turn's cursor still open,
+    as a node whose own close could not be written leaves it. The closing
+    write that commits the record closes the cursor `failed` in the same
+    transaction, with the record's code as its error."""
+    app, _ = orchestrator_app(plan_call("q with forks"), engine=pg_engine)
+    async with studio_client(app) as client:
+        await stream(client, "/api/studio/turn", turn_body("q with forks"))
+    store = StudioStore(pg_engine)
+    conversation = await store.load(PRINCIPAL, CONVERSATION)
+    assert conversation is not None
+    segment_id = store.claim_segment(PRINCIPAL, CONVERSATION)
+    await store.save(PRINCIPAL, CONVERSATION)
+    conversation.close_turn(final_text="", error="capability_unavailable")
+
+    closed = await store.close_segment(PRINCIPAL, CONVERSATION, segment_id)
+
+    assert closed is SegmentClose.SAVED
+    async with pg_engine.connect() as conn:
+        rows = (await conn.execute(text("SELECT status, error FROM turn_cursors"))).all()
+    assert [tuple(row) for row in rows] == [("failed", {"code": "capability_unavailable"})]
+
+
+async def test_every_stream_names_the_turn_it_carries(pg_engine: AsyncEngine) -> None:
+    """`/turn`, `/interrupt` and `/resume` each answer with the index of the
+    turn the stream carries in the turn index header, the `turn.index` a
+    state read gives that turn."""
+    searching = _HangOnce()
+    app, _ = orchestrator_app(
+        _text("One."),
+        plan_call("q with forks"),
+        _text("Planned and run."),
+        search_call("aid to Kenya"),
+        plan_call("q with forks"),
+        resolver=searching,
+        tool_surface=ScriptedSurface(),
+        engine=pg_engine,
+    )
+
+    async def posted(client: httpx2.AsyncClient, path: str, body: Mapping[str, Any]) -> Any:
+        response = await client.post(path, json=body, headers=AUTH)
+        assert response.status_code == 200
+        return response.headers[TURN_INDEX_HEADER], _frames([response.content])
+
+    async with studio_client(app) as client:
+        first, _ = await posted(client, "/api/studio/turn", turn_body("first"))
+        second, plan = await posted(client, "/api/studio/turn", turn_body("q with forks"))
+        answered, _ = await posted(
+            client, "/api/studio/interrupt", _approve(plan[-1]["interrupt_id"])
+        )
+    await _leave_once(app, "/api/studio/turn", turn_body("q with forks"), searching.entered)
+    async with studio_client(app) as client:
+        resumed, frames = await posted(client, "/api/studio/resume", _resume_body(3))
+        read = (await _state(client)).json()
+
+    assert (first, second, answered, resumed) == ("1", "2", "2", "3")
+    assert _events(frames)[-1] == "plan.proposed"
+    assert read["turn"]["index"] == 3

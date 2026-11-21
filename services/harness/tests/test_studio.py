@@ -1132,7 +1132,9 @@ async def test_a_plan_pause_whose_turn_cannot_be_read_back_ends_transient_and_st
 ) -> None:
     """The plan's pause commits, its write raises, and the read of the turn
     after it fails. The stream ends on a retryable `transient_unavailable`
-    error and the turn stays paused on the pause as stored, unclosed."""
+    error, whose record the closing write commits with the turn's cursor
+    closed `failed` in the same transaction, so the turn the client was told
+    failed is not left paused."""
     failing = _plan_pause_acknowledgement_lost(monkeypatch, read_back_fails=True)
     app = _app(
         *_plan("q with forks", *_charts_the_plan()),
@@ -1146,9 +1148,8 @@ async def test_a_plan_pause_whose_turn_cannot_be_read_back_ends_transient_and_st
     error = _frame(first, "error")["error"]
     assert (error["error"], error["retry"]) == ("transient_unavailable", "retry_after_delay")
     failing.clear()
-    stored = await TurnStore(_engine()).open_cursor(PRINCIPAL, CONVERSATION)
-    assert stored is not None
-    assert stored.status is TurnStatus.PAUSED and stored.pause is not None
+    assert await TurnStore(_engine()).open_cursor(PRINCIPAL, CONVERSATION) is None
+    assert await _turn_statuses() == ["failed"]
 
 
 @pytest.fixture
@@ -2312,7 +2313,7 @@ _ENDINGS_BY_FINISH = {
         (_FAILED, "cancelled", "cancelled", None),
     ],
     Finish.UNCLOSED: [
-        (_SAVED, _CAP, "running", _CAP),
+        (_SAVED, _CAP, "failed", _CAP),
         (_STOPPED, "cancelled", "cancelled", "cancelled"),
         (_LOST, _TRANSIENT, "running", None),
         (_FAILED, _CAP, "running", None),
@@ -3554,7 +3555,8 @@ async def test_a_set_aside_turn_whose_closing_write_failed_keeps_its_question(
     closing write saves nothing. Once the lease lapses, the state read and the
     next load find the cursor closed with no record, and record the turn as
     the stream told the client, `state_not_saved` with no reply, keeping the
-    typed question for the page to send as the next turn."""
+    typed question for the page to send as the next turn. The read states
+    the turn `failed`, as its record does, over the cursor's `done`."""
     clock = await StoreClock.start(_engine())
     store = StudioStore(_engine(), **clock.store_kwargs)
     app = _app(
@@ -3582,7 +3584,7 @@ async def test_a_set_aside_turn_whose_closing_write_failed_keeps_its_question(
             )
         ).json()
 
-    assert read["turn"]["status"] == "done"
+    assert read["turn"]["status"] == "failed"
     (closed,) = read["closed_since"]
     assert closed["new_question"] == typed
     assert closed["reply"] == ""
@@ -7966,13 +7968,23 @@ class _StopReaders:
     `StopScope` took it; the end of the segment, counted as `release` (the
     stream's closing write closing the turn, `StudioStore.close_segment`);
     a claimant that found the Stop live and closed its turn
-    (`_act_on_stop`); or `/cancel` under the lock (`_stop_open_turn`)."""
+    (`_act_on_stop`); a load that found the turn recorded `cancelled` with
+    its cursor open and closed the cursor (`load`,
+    `StudioStore._close_recorded_cursor`); or `/cancel` under the lock
+    (`_stop_open_turn`)."""
 
     def __init__(self, app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
         store = app.state.studio.store
         self.heartbeat = _StopsTaken(store)
-        self.counts = {"release": 0, "claim": 0, "cancel": 0}
+        self.counts = {"release": 0, "claim": 0, "load": 0, "cancel": 0}
         close_segment = store.close_segment
+        close_recorded_cursor = store._close_recorded_cursor
+
+        async def counted_close_recorded_cursor(*args: Any, **kwargs: Any) -> None:
+            live = await _stop_live()
+            await close_recorded_cursor(*args, **kwargs)
+            self.counts["load"] += live and not await _stop_live()
+
         act_on_stop = studio_module._act_on_stop
         stop_open = studio_module._stop_open_turn
 
@@ -7992,6 +8004,7 @@ class _StopReaders:
             return await stop_open(*args, **kwargs)
 
         monkeypatch.setattr(store, "close_segment", counted_close_segment)
+        monkeypatch.setattr(store, "_close_recorded_cursor", counted_close_recorded_cursor)
         monkeypatch.setattr(studio_module, "_act_on_stop", counted_claim)
         monkeypatch.setattr(studio_module, "_stop_open_turn", counted_cancel)
 
@@ -8208,9 +8221,11 @@ async def _stop_after_the_claim_before_the_abandon(row: _Row):
 
 async def _stop_whose_claimant_cannot_close_the_turn(row: _Row):
     """A Stop left live on a paused turn whose lease lapsed. The next
-    `/turn` acts on it first, but its close is refused (another writer moved
-    the cursor), so that `/turn` answers a retryable 409 and starts nothing;
-    its retry acts on the Stop and runs the new turn."""
+    `/turn` acts on it first and saves the turn's record `cancelled`, but
+    its close of the cursor is refused (another writer moved the cursor), so
+    that `/turn` answers a retryable 409 and starts nothing. Its retry's
+    load finds the record closed over an open cursor and closes the cursor
+    as the record states, which ends the Stop, and runs the new turn."""
     app = await row.build(*_plan(), _text("Hello."), clock=True)
     store = app.state.studio.store
     sent: list[httpx2.Response] = []
@@ -8611,8 +8626,8 @@ async def _stop_whose_claim_is_abandoned(row: _Row):
             _stop_whose_claimant_cannot_close_the_turn,
             ["cancelled", "done"],
             "done",
-            {"claim": 1},
-            id="claimant-close-refused-turn-refused-retry-acts",
+            {"load": 1},
+            id="claimant-close-refused-turn-refused-retry-loads-it-closed",
         ),
         pytest.param(
             _stop_with_no_lease(running=False),
@@ -9682,15 +9697,15 @@ async def test_a_failed_turn_is_recorded_with_its_error() -> None:
     assert record["error"] == "capability_unavailable"
 
 
-@pytest.mark.parametrize(("then", "closed_as"), [("cancel", "cancelled"), ("turn", "abandoned")])
-async def test_a_failed_turn_whose_close_was_not_written_is_closed_by_what_comes_next(
-    then: str, closed_as: str
+@pytest.mark.parametrize("then", ["cancel", "turn"])
+async def test_a_failed_turn_whose_close_was_not_written_is_closed_by_its_closing_write(
+    then: str,
 ) -> None:
     """A node fails and its close cannot be written: the client gets the
     node's error frame, and the conversation's record of the turn holds
-    that error. The turn stays running until a later Stop closes it
-    `cancelled` or a later turn `abandoned`, which leave the record as it
-    is."""
+    that error. The stream's closing write commits that record and closes
+    the cursor `failed` in the same transaction, so a later Stop or turn
+    finds no open turn and leaves record and cursor as they are."""
 
     class BrokenSurface(ScriptedSurface):
         async def call_tool(self, **kwargs: Any) -> ToolCallResult:
@@ -9716,8 +9731,8 @@ async def test_a_failed_turn_whose_close_was_not_written_is_closed_by_what_comes
         assert frames[-1]["event"] == "error"
         assert frames[-1]["error"]["error"] == "capability_unavailable"
         (shown,) = store.current(PRINCIPAL, CONVERSATION).turns
-        left = await turns.open_cursor(PRINCIPAL, CONVERSATION)
-        assert left is not None and left.status is TurnStatus.RUNNING
+        assert await turns.open_cursor(PRINCIPAL, CONVERSATION) is None
+        assert await _turn_statuses() == ["failed"]
 
         if then == "cancel":
             cancel = await client.post(
@@ -9736,13 +9751,7 @@ async def test_a_failed_turn_whose_close_was_not_written_is_closed_by_what_comes
     assert record["user"] == "q that dies"
     assert record["error"] == "capability_unavailable"
     assert record["assistant"] == frames[-1]["error"]["detail"]
-    async with _engine().connect() as conn:
-        status = (
-            await conn.execute(
-                text("SELECT status FROM turn_cursors WHERE id = :id"), {"id": left.id}
-            )
-        ).scalar_one()
-    assert status == closed_as
+    assert (await _turn_statuses())[0] == "failed"
 
 
 def test_the_conversation_digest_is_bounded() -> None:

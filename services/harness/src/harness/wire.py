@@ -1802,17 +1802,27 @@ class PendingPause(_WireModel):
 class ConversationRead(_WireModel):
     """GET /api/studio/state -- the conversation as stored. `turn` is absent
     before the first turn. `closed_since` lists the closed turns after the
-    request's `since`, oldest first, at most `MAX_CLOSED_SINCE`. `pause` is
-    the open pause when the turn is paused, and absent otherwise.
-    `manifest` is the canvas, absent when the conversation has none."""
+    request's `since`, oldest first, at most `MAX_CLOSED_SINCE`, and
+    `closed_total` is how many closed turns the conversation holds, the
+    index of its last: a client reads again with `since` set to the last
+    turn it got until it holds `closed_total`. `pause` is the open pause
+    when the turn is paused, and absent otherwise. `manifest` is the
+    canvas, absent when the conversation has none."""
 
     conversation_id: str
     turn: TurnState | None = None
     closed_since: list[ClosedTurn]
+    closed_total: int = Field(ge=0)
     pause: PendingPause | None = None
     manifest: CompositionManifest | None = None
 
 
 # The most closed turns one state read returns; a client that needs more
-# reads again from the last one it got.
+# reads again from the last one it got, up to `ConversationRead.closed_total`.
+# Each closed turn carries its cards, so the cap bounds the body.
 MAX_CLOSED_SINCE = 3
+
+# The response header on every Studio stream (`/turn`, `/interrupt`,
+# `/resume`) naming the index of the turn the stream carries, the
+# `turn.index` a state read reports for it.
+TURN_INDEX_HEADER = "x-dfo-turn-index"

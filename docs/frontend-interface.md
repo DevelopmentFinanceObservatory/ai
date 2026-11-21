@@ -78,8 +78,7 @@ the list of blocks on the canvas.
 
 ## 3. The stream
 
-The server answers `/turn`, `/interrupt` and `/resume` with Server-Sent
-Events.
+The server answers `/turn`, `/interrupt` and `/resume` with Server-Sent Events. Each stream's response carries the `x-dfo-turn-index` header, the index of the turn it carries: the `turn.index` a state read gives that turn (§4.6). Key each prompt and reply on it.
 
 - Each frame is one `data: <json>` line. Parse the JSON. Read the `event`
   field to know the frame type.
@@ -101,7 +100,8 @@ Events.
   seconds and good for 45, enforces it. A second `/turn` or `/interrupt`
   during a stream gets HTTP 409 with `retry_after_seconds` set to the
   lease's remaining time. `/cancel`, `/composition` and `GET /state` are
-  not blocked by a stream. To stop a stream, use `/cancel` or close the connection;
+  not blocked by a stream. To stop a stream, use `/cancel` or close the
+  connection;
   `/cancel` reaches a stream running on another instance within about 5
   seconds.
 
@@ -396,64 +396,43 @@ connection. Use `/cancel` for the Stop button.
 
 ### 4.5 `turn.resume` → POST `/api/studio/resume`
 
-Fields: `kind: "turn.resume"`, `schema_version: 1`, `conversation_id`,
-`turn_index` (the `turn.index` a state read returned, §4.6).
+Fields: `kind: "turn.resume"`, `schema_version: 1`, `conversation_id`, `turn_index` (the `turn.index` a state read returned, §4.6).
 
-The server carries on the turn on a new stream, which you read as any
-other. Send it when the state read shows `status: "running"` and
-`lease_live: false`: the turn's last stream lost its client, a reload say,
-and the turn makes no progress until a client resumes it. The turn runs
-the step it stopped in again from its start, so the new stream carries no
-`activity.step` lines for earlier steps. A `plan.approved` the turn never
-sent goes out once. The stream ends with `done`, a pause or an `error`
-frame.
+The server carries on the turn on a new stream, which you read as any other. Send it when the state read shows `status: "running"` and `lease_live: false`: the turn's last stream lost its client, a reload say, and the turn makes no progress until a client resumes it. The turn runs the step it stopped in again from its start, so the new stream carries no `activity.step` lines for earlier steps. A `plan.approved` the turn never sent goes out once. The stream ends with `done`, a pause or an `error` frame.
 
-| Case                                                       | Answer                                                          |
-| ---------------------------------------------------------- | --------------------------------------------------------------- |
-| the turn is open, running, and no stream holds it          | a new SSE stream                                                |
-| `turn_index` is not the open turn, or none is              | 409 `edit_conflict`, `pointer: "/turn_index"`: read state again |
-| the turn is paused on a question with no answer recorded   | 409 `edit_conflict`: answer it on `/interrupt`                  |
-| the turn is paused on an answer recorded and not yet taken | a new SSE stream carrying that answer on                        |
-| a stream holds the turn                                    | 409 `transient_unavailable` with `retry_after_seconds`          |
-| unknown `conversation_id`                                  | 404 `not_found`                                                 |
+| Case                                                          | Answer                                                                                    |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| the turn is open, running, and no stream holds it             | a new SSE stream                                                                          |
+| the turn is paused on an answer recorded and not yet taken    | a new SSE stream carrying that answer on                                                  |
+| the turn is paused on a question whose entry was never stored | a new SSE stream sending the pause again                                                  |
+| `turn_index` is not the latest turn, or the turn is closed    | 409 `edit_conflict`, `pointer: "/turn_index"`: read state again                           |
+| the turn is paused on a question with no answer recorded      | 409 `edit_conflict`: answer it on `/interrupt`                                            |
+| a stream holds the turn                                       | 409 `transient_unavailable` with `retry_after_seconds`                                    |
+| a Stop is live for the turn                                   | the turn closes `cancelled`, and the resume answers 409 `edit_conflict`: read state again |
+| unknown `conversation_id`                                     | 404 `not_found`                                                                           |
 
 ### 4.6 GET `/api/studio/state`
 
-Query: `conversation_id`, and `since`, the number of the last turn the
-page holds (0 for none). The answer is JSON. The call takes no lease, so
-it answers while a turn streams, and it changes nothing. An unknown
-`conversation_id` answers 404 `not_found`. A member with no value is left
-out.
+Query: `conversation_id`, and `since`, the number of the last turn the page holds (0 for none). The answer is JSON. The call takes no lease, so it answers while a turn streams, and it changes nothing. An unknown `conversation_id` answers 404 `not_found`. A member with no value is left out.
 
-- `turn`: `{index, status, trace_id, user_message, lease_live, retry_after_seconds?}`. `user_message` is the turn's prompt, to show above a resumed reply when the page lacks it.
-  `status` is `running`, `paused`, `done`, `failed`, `cancelled` or
-  `abandoned`. `retry_after_seconds` is set while `lease_live` is true.
-  Absent before the first turn. A turn reads `running` until its closed
-  record exists, so a closed status always comes with the turn in
-  `closed_since`. A turn whose answer was recorded and not yet taken, a
-  page left right after sending it, also reads `running`, with no `pause`,
-  as does a pause whose entry the server never stored; `turn.resume`
-  carries on or sends the pause again.
-- `closed_since`: the closed turns after `since`, oldest first, at most 3,
-  each `{turn_index, user_message, reply, component_ids, cards, error?, new_question?}`. `cards` holds each card the turn made, in `component_ids` order: `{component_id, type, title, revision, fact_summary?}`, the same `fact_summary` its `component.created` carried. It holds no `payload` or `provenance`; read the resolved revision from the presentation platform by `component_id`. `reply` is the text `message.complete` sent, empty when
-  the turn closed with none; `error` is the code of a turn that did not
-  end cleanly; `new_question` is set on a turn ended by a new question
-  (§6), which the page sends as the next turn when it holds none after it. When more
-  turns are missing, read again with `since` set to the last one returned.
-- `pause`: on a paused turn, `{interrupt_id, kind, frames}`. `kind` is
-  `plan` or `elicitation`. `frames` are the frames the pause was sent as,
-  its `plan.proposed` or `elicitation.request` last; feed them to the same
-  handlers as live frames.
+- `turn`: `{index, status, trace_id, user_message, lease_live, retry_after_seconds?}`, absent before the first turn. `user_message` is the turn's prompt: show it above a resumed reply when the page lacks the prompt. `status` is `running`, `paused`, `done`, `failed`, `cancelled` or `abandoned`. `retry_after_seconds` is set while `lease_live` is true.
+- `closed_since`: the closed turns after `since`, oldest first, at most 3, each `{turn_index, user_message, reply, component_ids, cards, error?, new_question?}`. `cards` holds each card the turn made, in `component_ids` order, at its current revision: `{component_id, type, title, revision, fact_summary?}`, so a card a later turn revised shows that revision. It holds no `payload` or `provenance`; read the resolved revision from the presentation platform by `component_id`. `reply` is the text `message.complete` sent, empty when the turn closed with none; `error` is the code of a turn that did not end cleanly; `new_question` is set on a turn ended by a new question (§6), which the page sends as the next turn when it holds none after it.
+- `closed_total`: how many closed turns the conversation holds, the index of the last one. While the page holds fewer, read again with `since` set to the last `turn_index` returned.
+- `pause`: on a paused turn, `{interrupt_id, kind, frames}`. `kind` is `plan` or `elicitation`. `frames` are the frames the pause was sent as, its `plan.proposed` or `elicitation.request` last; feed them to the same handlers as live frames.
 - `manifest`: the composition manifest, absent when there is no canvas.
 
-On page load, after drawing what the page kept, read the state and act on
-`turn`:
+On page load, after drawing what the page kept, read the state, page through `closed_since` to `closed_total`, and act on `turn`:
 
-- `running`, `lease_live: false`: send `turn.resume` with `turn.index`.
-- `running`, `lease_live: true`: another stream holds the turn. Read the
-  state again after `retry_after_seconds` until it changes.
-- `paused`: show `pause` and answer it on `/interrupt`.
-- closed: append the turns of `closed_since` the page does not hold.
+| `turn.status`     | `lease_live` | What the page does                                                                                                                                    |
+| ----------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `running`         | `false`      | send `turn.resume` with `turn.index`                                                                                                                  |
+| `running`         | `true`       | another stream holds the turn: read the state again after `retry_after_seconds`, until it changes                                                     |
+| `paused`          | `false`      | show `pause` and answer it on `/interrupt`                                                                                                            |
+| any closed status | `false`      | append the turns of `closed_since` the page does not hold, and send a closed turn's `new_question` as the next turn when the page holds none after it |
+
+A turn reads `running` while a stream still writes its pause or its close, and also when its answer was recorded and not yet taken or its pause's entry was never stored; `turn.resume` carries those on or sends the pause again. A closed turn's status is the one its record states: `failed` for any `error` code but `cancelled` and `abandoned`.
+
+A turn whose stream ended on an `error` frame can still read `running` with `lease_live: false`: its error was sent and the write that stores its record failed, which the server cannot tell from an instance that died mid-turn. Follow the read and send `turn.resume`; the new stream runs the turn on.
 
 ## 5. Frames
 
@@ -687,12 +666,7 @@ a loop:
    `switch_cancelled`.
 1. `reject` ends the turn. The stream sends `message.complete` and `done`.
    Nothing was computed.
-1. When the planner reads the `amend` text as a new question, the turn
-   ends with the plan set aside unapproved. The stream sends a
-   `message.complete` saying so, then `done` with `new_question`, the text
-   as sent, and no new card. Close the card as "Taken as a new question"
-   and send `new_question` as a new `turn.request`. An answer to the closed
-   card's `interrupt_id` gets 404.
+1. When the planner reads the `amend` text as a new question, the turn ends with the plan set aside unapproved. The stream sends a `message.complete` saying so, then `done` with `new_question`, the text as sent, and no new card. Close the card as "Taken as a new question" and send `new_question` as a new `turn.request`. An answer to the closed card's `interrupt_id` gets 404.
 
 A new `turn.request` on a paused conversation abandons the pause.
 

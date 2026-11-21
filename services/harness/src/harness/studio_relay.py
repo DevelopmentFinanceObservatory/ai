@@ -12,7 +12,7 @@ and imports neither the conversation nor the store.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import override
 
 from fastapi.responses import StreamingResponse
@@ -39,9 +39,10 @@ class StudioStream(StreamingResponse):
         channel: Channel,
         owner: asyncio.Task[None],
         gone: asyncio.Event,
+        headers: Mapping[str, str] | None = None,
         keepalive_s: float = KEEPALIVE_S,
     ) -> None:
-        super().__init__(self._serialised(), media_type=SSE_MEDIA_TYPE)
+        super().__init__(self._serialised(), headers=headers, media_type=SSE_MEDIA_TYPE)
         self._channel = channel
         self._owner = owner
         self._gone = gone
