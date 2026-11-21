@@ -852,6 +852,61 @@ def test_a_rank_writes_only_the_axis_column(
     assert step.args == {"rank_by": ["creditor"], "ascending": False, "aggregation": "sum"}
 
 
+def test_a_rank_per_another_role_writes_it_as_partition_by(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    # The top creditor per debtor: the debtor column partitions the ranking,
+    # so `limit` keeps one creditor in each debtor, and no reduction is
+    # needed to collapse the debtor's rows into one value per creditor.
+    rank_req = RankRequirement(
+        id="ranked",
+        decision_ids=["measure", "population"],
+        input_id="annual_debt_service",
+        direction=RankDirection.HIGHEST_FIRST,
+        among=RankAmong.POPULATION,
+        axis="creditor",
+        per="debtor",
+        window_start=2024,
+        window_end=2024,
+        limit=1,
+    )
+    population = decision(slot="population", fixes=DecisionFixes(among=RankAmong.POPULATION))
+    plan = _draft([decision(), population], [_two_role_requirement(), rank_req])
+    ranked = RankOperation(
+        id="ranked",
+        requirement_id="ranked",
+        input="debt",
+        direction=RankDirection.HIGHEST_FIRST,
+        among=RankAmong.POPULATION,
+        axis="creditor",
+        per="debtor",
+        window_start=2024,
+        window_end=2024,
+        limit=1,
+    )
+
+    result = build(
+        plan,
+        _translation(_retrieve(), ranked, terminal=["ranked"]),
+        discovered={"annual_debt_service": _two_role_creditor_source(source)},
+    )
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    step = result.workflow.steps[-1]
+    assert step.args == {
+        "rank_by": ["creditor"],
+        "partition_by": ["debtor"],
+        "ascending": False,
+        "window_start": "2024",
+        "window_end": "2024",
+        "limit": 1,
+    }
+    assert step.expected_role_keys == ("creditor", "debtor")
+
+
 def test_a_named_rank_over_a_wider_source_is_refused(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,

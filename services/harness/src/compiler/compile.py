@@ -2430,6 +2430,13 @@ class _Build:
             "rank_by": [axis_column.column],
             "ascending": operation.direction is RankDirection.LOWEST_FIRST,
         }
+        if operation.per is not None:
+            per_column = _axis_column(upstream.columns, operation.per)
+            if per_column is None:
+                # Already reported: `INPUT_SHAPE_UNSUPPORTED`, from the
+                # `per` naming no role the input carries.
+                return None
+            args["partition_by"] = [per_column.column]
         if operation.reduction is not None:
             args["aggregation"] = operation.reduction.value
         if operation.window_start is not None:

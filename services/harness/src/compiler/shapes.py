@@ -689,6 +689,7 @@ def _rank_resolved(operation: RankOperation, upstream: ResolvedShape) -> Resolve
         per_period=operation.per_period,
         reduction=operation.reduction,
         rolling=operation.rolling,
+        per=operation.per,
     )
     if reason is not None:
         return reason
@@ -700,6 +701,7 @@ def _rank_resolved(operation: RankOperation, upstream: ResolvedShape) -> Resolve
         limit=operation.limit,
         rolling=operation.rolling,
         step_id=operation.id,
+        per=operation.per,
     )
     return ResolvedShape(shape=shape, columns=_carry_columns(upstream.columns, shape.roles))
 

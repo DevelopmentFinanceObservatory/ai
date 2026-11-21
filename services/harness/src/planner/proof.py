@@ -140,6 +140,8 @@ def mismatches(
             found.append("among")
         if requirement.axis != operation.axis:
             found.append("axis")
+        if requirement.per != operation.per:
+            found.append("per")
         if requirement.reduction != operation.reduction:
             found.append("reduction")
         if requirement.window_start != operation.window_start:

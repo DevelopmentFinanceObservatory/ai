@@ -33,7 +33,7 @@ it to, e.g. "Fetch external debt service paid for Kenya" or "Rank debtors by
 external debt service paid", never a bare tool name. `requirement_rows`
 and `operation_rows` each carry a longer `sentence`, read off the same
 requirement a step's label is read off; a rank or a keyed share_of sentence
-states `among`, `axis`, `per_period`, `limit` and `denominator_scope` in
+states `among`, `axis`, `per`, `per_period`, `limit` and `denominator_scope` in
 words, using `planner.phrasing` for the words themselves, so the card states
 those claims the way the rest of the package does. A keyed quotient_of
 sentence states `axis` and whether each entity divides by its own
@@ -1466,12 +1466,7 @@ def _card_label(
         case SumOfRequirement():
             label = f"Add {side(requirement.left)} and {side(requirement.right)}"
         case RankRequirement():
-            ranked = (
-                _axis_word(requirement, plan)
-                if requirement.limit is None
-                else _kept_phrase(requirement, requirement.limit, plan)
-            )
-            label = f"Rank {ranked} by {of(requirement.input_id)}"
+            label = f"Rank {_rank_subject(requirement, plan)} by {of(requirement.input_id)}"
         case ShareOfRequirement() | QuotientRequirement():
             label = _concept_of(requirement, plan, concepts)
             if requirement.axis is not None:
@@ -2496,13 +2491,18 @@ def _label_sum_of(requirement: SumOfRequirement, plan: Plan) -> str:
     return f"Add {left} and {_side_measure(requirement.right, plan)}"
 
 
-def _label_rank(requirement: RankRequirement, plan: Plan) -> str:
+def _rank_subject(requirement: RankRequirement, plan: Plan) -> str:
+    """What a rank's label ranks: "donors", "the top 6 donors", or "the top 6 donors per recipient"."""
     ranked = (
         _axis_word(requirement, plan)
         if requirement.limit is None
         else _kept_phrase(requirement, requirement.limit, plan)
     )
-    return f"Rank {ranked} by {_ranked_value(requirement, plan)}"
+    return ranked if requirement.per is None else f"{ranked} per {singular(requirement.per)}"
+
+
+def _label_rank(requirement: RankRequirement, plan: Plan) -> str:
+    return f"Rank {_rank_subject(requirement, plan)} by {_ranked_value(requirement, plan)}"
 
 
 def _label_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
@@ -2807,6 +2807,8 @@ def _sentence_rank(requirement: RankRequirement, plan: Plan) -> str:
         if one_year and not requirement.per_period
         else per_period_phrase(requirement.per_period, limited=requirement.limit is not None)
     )
+    if requirement.per is not None:
+        among_text += f" within each {singular(requirement.per)}"
     sentence = f"Ranks by {_ranked_value(requirement, plan)}: {among_text}; {per_period_text}"
     if requirement.limit is None:
         return f"{sentence}."
@@ -2906,7 +2908,7 @@ _SENTENCE_BUILDERS: dict[type, typing.Callable[[typing.Any, Plan], str]] = {
 def _sentence(requirement: EvidenceRequirement, plan: Plan) -> str:
     """One prose sentence stating what approving `requirement` approves.
 
-    A rank sentence states `among`, `per_period` and any `limit`. A keyed share_of
+    A rank sentence states `among`, any `per`, `per_period` and any `limit`. A keyed share_of
     sentence states `axis` and `denominator_scope`, and a keyed quotient_of sentence
     `axis` and whose denominator each entity divides by. These are population and
     series-shape claims a person reads in words rather than inferring from a

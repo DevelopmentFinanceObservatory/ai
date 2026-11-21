@@ -1438,6 +1438,15 @@ class RankRequirement(TaggedModel):
         max_length=MAX_ENTITY_ROLE_CHARS,
         description="Which role dimension of the input this rank keeps; required once the input carries more than one.",
     )
+    per: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_ENTITY_ROLE_CHARS,
+        description=(
+            "Another role of the input to rank `axis` within: each of its entities gets its "
+            "own ranking and `limit`. Top 5 donors per recipient: axis 'donor', per 'recipient'."
+        ),
+    )
     reduction: Reduction | None = Field(
         default=None,
         description=(
@@ -3576,6 +3585,7 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
         per_period=requirement.per_period,
         reduction=requirement.reduction,
         rolling=requirement.rolling,
+        per=requirement.per,
     )
     if reason is not None:
         raise ValueError(f"{requirement.id!r}: {reason}")
@@ -3597,6 +3607,7 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
         limit=requirement.limit,
         rolling=requirement.rolling,
         step_id=requirement.id,
+        per=requirement.per,
     )
 
 
@@ -3619,11 +3630,12 @@ def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape
     """
     if requirement.reduction is not None:
         return None
-    if len(input_shape.roles) > 1:
+    if len(input_shape.roles) > _roles_ranked(requirement):
         return (
             f"{requirement.id!r} ranks by axis {requirement.axis!r} over an input carrying more "
             "than one role, which needs a reduction to collapse the other role's rows to one "
-            "value per axis entity"
+            "value per axis entity, or `per` naming that role to rank the axis within each of "
+            "its entities"
         )
     if requirement.per_period or input_shape.one_row_per_entity:
         return None
@@ -3644,6 +3656,15 @@ def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape
         "one offset for a year that follows the newest data, or, only for an ask marked "
         "(across years), state a reduction to combine the years"
     )
+
+
+def _roles_ranked(requirement: RankRequirement) -> int:
+    """How many roles of its input `requirement` keeps: its axis, and the role `per` names.
+
+    A rank within `per` orders each of that role's entities' axis entities
+    apart, so neither role's rows need collapsing. Any other role does.
+    """
+    return 1 if requirement.per is None else 2
 
 
 def stated_under(entity: Entity, role: str | None) -> bool:

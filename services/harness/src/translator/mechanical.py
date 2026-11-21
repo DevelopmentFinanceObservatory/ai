@@ -243,6 +243,7 @@ def _rank(requirement: RankRequirement, discovered: Mapping[str, str]) -> Operat
         direction=requirement.direction,
         among=requirement.among,
         axis=requirement.axis,
+        per=requirement.per,
         reduction=requirement.reduction,
         window_start=requirement.window_start,
         window_end=requirement.window_end,

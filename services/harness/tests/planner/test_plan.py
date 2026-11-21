@@ -2445,6 +2445,35 @@ def test_a_rank_over_across_beside_a_named_entity_states_a_reduction(
     assert plan.requirement("ranked").reduction == Reduction.SUM
 
 
+def test_a_rank_per_another_role_ranks_within_it_with_no_reduction(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    # "Top 6 donors per recipient": each recipient holds its own ranking of
+    # donors, so the recipient rows need no collapsing and the result keeps
+    # both roles.
+    dataset = requirement(
+        entities=[], across=("donor", "recipient"), period=Period(start=2022, end=2022)
+    )
+
+    plan = _plan(
+        _population_decision(decision),
+        evidence_requirements=[dataset, _rank(dataset.id, axis="donor", per="recipient", limit=6)],
+    )
+
+    roles = frame_shapes(plan)["ranked"].roles
+    assert sorted(role.role or "" for role in roles) == ["donor", "recipient"]
+    with pytest.raises(ValidationError, match="names the role the rank orders"):
+        _plan(
+            _population_decision(decision),
+            evidence_requirements=[dataset, _rank(dataset.id, axis="donor", per="donor")],
+        )
+    with pytest.raises(ValidationError, match=r"per 'sector' does not name a role"):
+        _plan(
+            _population_decision(decision),
+            evidence_requirements=[dataset, _rank(dataset.id, axis="donor", per="sector")],
+        )
+
+
 def test_a_requirement_reading_a_join_is_rejected(
     decision: DecisionFactory,
     requirement: RequirementFactory,

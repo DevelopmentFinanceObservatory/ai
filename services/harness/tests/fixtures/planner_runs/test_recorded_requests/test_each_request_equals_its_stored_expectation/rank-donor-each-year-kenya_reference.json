@@ -105,6 +105,7 @@
         "direction": "highest_first",
         "among": "population",
         "axis": "donor",
+        "per": null,
         "reduction": "sum",
         "window_start": null,
         "window_end": null,

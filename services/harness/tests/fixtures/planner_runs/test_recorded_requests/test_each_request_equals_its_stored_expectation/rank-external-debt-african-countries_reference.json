@@ -118,6 +118,7 @@
         "direction": "highest_first",
         "among": "population",
         "axis": null,
+        "per": null,
         "reduction": null,
         "window_start": null,
         "window_end": null,

@@ -229,6 +229,11 @@ class RankOperation(TaggedModel):
         min_length=1,
         description="Which role dimension of the input this rank keeps; required once the input carries more than one.",
     )
+    per: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        min_length=1,
+        description="Another role of the input whose entities each hold their own ranking of `axis`.",
+    )
     reduction: Reduction | None = Field(
         default=None,
         description="How to collapse an entity's rows to one value first, when its window leaves more than one.",
