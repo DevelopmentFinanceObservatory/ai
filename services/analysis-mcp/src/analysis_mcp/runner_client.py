@@ -43,7 +43,12 @@ takes the latest period over the anchor roots and checks the literals against
 it, so a call over data the record never saw would otherwise compute a window
 that ends at another dataset's latest period. The ref's roots are the roots
 the runner read, those behind a derived input and the anchor roots included,
-so the check covers a derived input as it covers a fetched frame.
+so the check covers a derived input as it covers a fetched frame. A root the
+runner read as a rendering of its own version, such as the sum of a dataset of
+several StatVars, names that rendering, and the answer's `derived_roots` names
+the dataset version it derives from: the root is covered when that version is
+one the record was resolved over, and a rendering of another version refuses
+as other data does.
 
 `replay_derived` asks the runner to compute a derived frame again from its stored
 recipe with `latest: true`, which reads its roots at their datasets' current
@@ -501,13 +506,42 @@ def _ref_roots(body: Mapping[str, Any]) -> frozenset[Pair] | None:
     return frozenset(pairs)
 
 
+def _derived_bases(body: Mapping[str, Any]) -> dict[Pair, str] | None:
+    """The dataset version each root of the ready answer `body` read as a rendering of
+    its own derives from, by the pair the root names (`derived_roots`), or `None` when
+    the answer states them outside the contract. An answer with none states an empty
+    list or, from a dfo-apis that predates it, no field."""
+    derived = body.get("derived_roots", [])
+    if not isinstance(derived, list):
+        return None
+    bases: dict[Pair, str] = {}
+    for root in derived:
+        if not isinstance(root, Mapping):
+            return None
+        fields = (root.get(key) for key in ("spec_id", "content_version", "base_content_version"))
+        spec_id, content_version, base = fields
+        if not all(isinstance(field, str) for field in (spec_id, content_version, base)):
+            return None
+        bases[spec_id, content_version] = base
+    return bases
+
+
 def _uncovered(body: Mapping[str, Any], anchor: Anchor) -> ToolRefusal | None:
     """The refusal for a ready answer `body` that read a root `anchor`'s record was
-    not resolved over. See the module docstring."""
+    not resolved over. A root read as a rendering of its own version, a groupby sum
+    or a party-totals cut, is covered when the version it derives from is one the
+    record was resolved over. See the module docstring."""
     roots = _ref_roots(body)
     if roots is None:
         return _unusable("the analysis answer names no roots")
-    uncovered = sorted(roots - anchor.pairs)
+    bases = _derived_bases(body)
+    if bases is None:
+        return _unusable("the analysis answer's derived_roots do not fit this service")
+    uncovered = sorted(
+        (spec_id, content_version)
+        for spec_id, content_version in roots - anchor.pairs
+        if (spec_id, bases.get((spec_id, content_version))) not in anchor.pairs
+    )
     if not uncovered:
         return None
     spec_id, content_version = uncovered[0]

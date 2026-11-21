@@ -311,6 +311,43 @@ async def test_a_rolling_call_that_read_data_outside_its_anchor_record_refuses(
     }
 
 
+# The version the runner rendered by summing `_FRAME`'s dataset over its StatVars.
+_SUMMED = {"spec_id": _SPEC, "content_version": "cv_" + "a" * 32}
+
+
+@pytest.mark.parametrize(
+    ("base", "covered"),
+    [(_CV, True), ("cv_" + "b" * 32, False)],
+    ids=["rendering-of-the-anchored-version", "rendering-of-another-version"],
+)
+async def test_a_rolling_call_that_read_a_rendering_is_checked_by_its_base_version(
+    store: InMemoryMaterialisationStore, base: str, covered: bool
+) -> None:
+    # The record holds `_FRAME`'s dataset version; the runner read it summed, a
+    # version of its own, and names the version that sum derives from.
+    record = await _anchor_over_both(store)
+    ready = _reading(_recorded_ready("growth"), _SUMMED, _OTHER_DATASET)
+    _install(
+        httpx2.Response(
+            200, json={**ready, "derived_roots": [{**_SUMMED, "base_content_version": base}]}
+        )
+    )
+
+    result = await _rolling_growth(_FRAME, record.anchor_key)
+
+    structured = result.structured_content
+    assert structured is not None
+    if covered:
+        assert result.is_error is False, result.content
+        return
+    assert structured["code"] == "rolling_anchor_unresolved"
+    assert structured["fix"] == {
+        "detail": "root_not_in_record",
+        "anchor_key": record.anchor_key,
+        "root": _SUMMED,
+    }
+
+
 async def test_a_rolling_call_over_other_populations_than_its_record_refuses_before_any_call(
     store: InMemoryMaterialisationStore,
 ) -> None:
