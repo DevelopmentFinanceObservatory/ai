@@ -901,6 +901,18 @@ class _Build:
             )
         if operation.reduction is not None or upstream is None:
             return
+        several = _roles_several(operation, upstream)
+        if several:
+            self._issue(
+                CompileIssueCode.RANK_REDUCTION_REQUIRED,
+                f"operation {operation.id!r} ranks {operation.input!r}, whose "
+                f"{', '.join(map(repr, several))} also holds several parties; each entity holds "
+                "one row per party there in each period, so it has no single value to rank on "
+                "without a reduction",
+                operation_id=operation.id,
+                requirement_id=operation.requirement_id,
+            )
+            return
         unkept = self._open_axes_unkept(operation.input, upstream)
         if unkept:
             columns = ", ".join(repr(axis.column) for axis in unkept)
@@ -2940,6 +2952,24 @@ class _Build:
                 i for i in operation_inputs(self.operations[op_id]) if i in self.operations
             )
         return reachable
+
+
+def _roles_several(operation: RankOperation, read: ResolvedShape) -> list[str]:
+    """The columns of `read` other than the one `operation` ranks by that hold several parties.
+
+    Empty for a frame of one role. A rank naming no axis over several roles
+    is `RANK_AXIS_REQUIRED`'s, so it gives none here.
+    """
+    if len(read.shape.roles) < 2 or operation.axis is None:
+        return []
+    axis = role_named(read.shape.roles, operation.axis)
+    if axis is None:
+        return []
+    return [
+        column.column
+        for role, column in zip(read.shape.roles, read.columns, strict=True)
+        if role is not axis and not role.single
+    ]
 
 
 def _axis_phrases(columns: Sequence[ResolvedRole]) -> list[str]:

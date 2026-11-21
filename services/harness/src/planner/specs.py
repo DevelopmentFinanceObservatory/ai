@@ -62,8 +62,7 @@ _PROPOSE_PLAN_ARGUMENTS = {
         "dataset requirement has to feed a calculation, since one left unread "
         "would leave the plan without the figure the question asked for. "
         "Either way, `answered` may name a dataset requirement a calculation "
-        "reads. "
-        "Required on a first draft and with `starts_new_plan`. A patch that "
+        "reads. A patch that "
         "states one switches the plan's mode and re-validates its requirements "
         "under it; one that omits it keeps the recorded mode."
     ),

@@ -44,6 +44,7 @@ import itertools
 import json
 import logging
 import re
+from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, MutableMapping, Sequence
 from contextvars import ContextVar
 from datetime import datetime
@@ -1760,6 +1761,18 @@ def is_dataset(requirement: EvidenceRequirement) -> bool:
     return isinstance(requirement, DatasetRequirement)
 
 
+def answer_mode_of(requirements: Sequence[EvidenceRequirement]) -> AnswerMode:
+    """The one `AnswerMode` `requirements` validate under as its definition reads.
+
+    `series` where a dataset requirement is unread by every other one, which
+    is then the answer and which `computed` refuses; `computed` where every
+    dataset requirement feeds a calculation, whose result is the answer.
+    """
+    read = {input_id for requirement in requirements for input_id in inputs_of(requirement)}
+    unread = any(is_dataset(r) and r.id not in read for r in requirements)
+    return AnswerMode.SERIES if unread else AnswerMode.COMPUTED
+
+
 def inputs_of(requirement: EvidenceRequirement) -> tuple[Identifier, ...]:
     """Return the requirement ids `requirement` reads.
 
@@ -3411,6 +3424,10 @@ def _dataset_shape(requirement: DatasetRequirement, *, first_year: int | None) -
     """The shape a fresh retrieval carries: one role dimension per role phrase the entities
     state, then one open dimension per `across` word, then the breakdown's.
 
+    A role phrase one entity states alone, not as a set's members, is
+    `single`: the plan cannot tell whether Search binds the name to one party,
+    so `submission.service._rank_roles_expand` and the compiler check it.
+
     Its years run on past `period` with `period_end_open`, and start at
     `first_year` for a read of its dataset's whole history, the first year
     the dataset holds on record (`_build_shapes`).
@@ -3426,8 +3443,15 @@ def _dataset_shape(requirement: DatasetRequirement, *, first_year: int | None) -
     role_names = sorted(
         {entity.role for entity in requirement.entities}, key=lambda role: (role is None, role)
     )
+    stating = Counter(entity.role for entity in requirement.entities)
     roles = tuple(
-        RoleDimension(role=name, requirement_id=requirement.id, place=place_role(name))
+        RoleDimension(
+            role=name,
+            requirement_id=requirement.id,
+            place=place_role(name),
+            single=stating[name] == 1
+            and not any(entity.members for entity in requirement.entities if entity.role == name),
+        )
         for name in role_names
     )
     roles = (
@@ -3677,13 +3701,50 @@ def _among_of_input(
     return None if axis_role is None else _admitted_among(axis_role)
 
 
+def _other_roles_single(requirement: RankRequirement, input_shape: FrameShape) -> bool:
+    """Whether every role of `input_shape` but the one `requirement` ranks by is `single`."""
+    axis_role = (
+        None if requirement.axis is None else role_named(input_shape.roles, requirement.axis)
+    )
+    return axis_role is not None and all(
+        role.single for role in input_shape.roles if role is not axis_role
+    )
+
+
+def rank_single_roles(plan: Plan) -> list[tuple[RankRequirement, RoleDimension]]:
+    """Each rank of `plan` stating no `reduction` over an input of several roles, with each other role it rests on.
+
+    Plan validation admits such a rank only where every other role is
+    `single` (`_rank_reduction_reason`); whether each name binds one party
+    is a fact of the source (`submission.service._rank_roles_expand`).
+    """
+    shapes = _build_shapes(
+        {requirement.id: requirement for requirement in plan.evidence_requirements},
+        whole_history={},
+        origins={},
+    )
+    found: list[tuple[RankRequirement, RoleDimension]] = []
+    for requirement in plan.evidence_requirements:
+        if not isinstance(requirement, RankRequirement) or requirement.reduction is not None:
+            continue
+        shape = shapes.get(requirement.input_id)
+        if shape is None or len(shape.roles) < 2 or requirement.axis is None:
+            continue
+        axis_role = role_named(shape.roles, requirement.axis)
+        found.extend(
+            (requirement, role) for role in shape.roles if role is not axis_role and role.single
+        )
+    return found
+
+
 def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape) -> str | None:
     """Return why `requirement` needs a reduction it does not state, or `None` when it has enough.
 
     A rank orders entities by one value each. An axis over an input carrying
-    more than one role always needs a reduction, in either mode, to collapse
-    the other role's rows to one value per axis entity per (period, in
-    per-period mode). Short of that, `per_period=True` ranks each period on
+    more than one role needs a reduction, in either mode, to collapse the
+    other roles' rows to one value per axis entity per (period, in
+    per-period mode), unless each other role is `single` and so holds one
+    row per axis entity already. Short of that, `per_period=True` ranks each period on
     its own and never needs a reduction just to collapse years together;
     `per_period=False` needs one unless its input holds one row per entity,
     or the years of its input its window keeps (`_years_read`) are one and
@@ -3696,7 +3757,7 @@ def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape
     """
     if requirement.reduction is not None:
         return None
-    if len(input_shape.roles) > 1:
+    if len(input_shape.roles) > 1 and not _other_roles_single(requirement, input_shape):
         return (
             f"{requirement.id!r} ranks by axis {requirement.axis!r} over an input carrying more "
             "than one role, which needs a reduction to collapse the other role's rows to one "
@@ -4402,10 +4463,10 @@ class Plan(StrictModel):
             "Whether the answer is a computed figure or the series itself. `series` (the "
             "default, and what a plan persisted before this field existed means) leaves an "
             "unread dataset requirement as the answer in its own right; `computed` requires "
-            "every dataset requirement to feed a calculation. The planner's proposal tool requires the "
-            "model to pass this explicitly on a first draft, so the default "
-            "only governs a plan built another way, such as a legacy record deserialising "
-            "without the field."
+            "every dataset requirement to feed a calculation. The planner's proposal tool reads "
+            "a first draft stating none from its requirements (`answer_mode_of`), so the "
+            "default only governs a plan built another way, such as a legacy record "
+            "deserialising without the field."
         ),
     )
     # Past `MAX_PLAN_DECISIONS`, a plan carries the decisions qualifying its answer

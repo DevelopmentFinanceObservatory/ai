@@ -166,6 +166,7 @@ from planner.plan import (
     aligned_pins,
     alignments,
     amendment_entry,
+    answer_mode_of,
     authored,
     bound_fixes,
     check_acyclic,
@@ -205,6 +206,7 @@ from planner.plan import (
     pin_slot_moves,
     pin_sources,
     predicate_key,
+    rank_single_roles,
     ranks_among_settled,
     reached,
     read_fixes,
@@ -805,20 +807,13 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 first_years=_first_years_on_record(requirements_after, shown=on_record, read=read),
                 dropped=sorted(set(patch.removed_asks)),
             )
-        elif question is None or answer_mode is None:
-            missing = " and ".join(
-                clause
-                for clause, absent in (
-                    ("the `question` it answers", question is None),
-                    ("the `answer_mode` it answers under", answer_mode is None),
-                )
-                if absent
-            )
-            raise ValueError(f"a first draft states {missing}")
+        elif question is None:
+            raise ValueError("a first draft states the `question` it answers")
         else:
+            # A first draft stating no mode takes the one its requirements define.
             plan = Plan(
                 question=question,
-                answer_mode=answer_mode,
+                answer_mode=answer_mode or answer_mode_of(evidence_requirements),
                 decisions=settled,
                 evidence_requirements=evidence_requirements,
                 declined=patch.declined,
@@ -872,8 +867,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         # a decision, every decision cited, the length and count limits on
         # each field, a non-blank question, and the size limit on the whole. A removal naming an item
         # the plan does not state is a `ValueError` from `Plan.amend` itself,
-        # and a first draft with no `question`/`answer_mode` is one raised
-        # above.
+        # and a first draft with no `question` is one raised above.
         cause = _unsupported_cause(exc)
         if cause is not None:
             view.record_unsupported(cause.operation)
@@ -2763,7 +2757,9 @@ def _unrecordable(
     turn holds open (`_breakdown_decline_unearned`, against `statement`), for a decline every `unsupported`
     answer this turn requires (`_decline_missing`), for a result given
     per member of a party nobody named that no decision states
-    (`_result_scope_unstated`), and for a step reducing across years for a
+    (`_result_scope_unstated`), for a rank with no reduction whose other role
+    binds several parties or whose source leaves another axis open
+    (`_rank_roles_expand`, against `stated`), and for a step reducing across years for a
     result no ask across years asks for (`_period_reduction_unstated`,
     against `stated`).
     """
@@ -2788,8 +2784,63 @@ def _unrecordable(
         or _breakdown_decline_unearned(statement, view)
         or _decline_missing(plan, view, proposer)
         or _result_scope_unstated(plan)
+        or _rank_roles_expand(stated, sources)
         or _period_reduction_unstated(stated, view)
     )
+
+
+def _rank_roles_expand(plan: Plan, sources: SourceReadings) -> dict[str, object] | None:
+    """Return the refusal of a rank with no reduction whose other role holds several values, or `None`.
+
+    Plan validation admits a rank with no `reduction` over an input of
+    several roles where each other role names one entity
+    (`planner.plan.rank_single_roles`). Each such name has to bind one party
+    alone on its column of the requirement's pinned source
+    (`compiler.evidence.named_members`), and the source has to leave open no
+    axis the requirement's `across` does not cover (`compiler.evidence.open_axes_for`).
+    A group read as its members, a source binding other parties beside the
+    one named, an open axis left over, or a pin whose source cannot be read
+    gives each ranked entity several rows, so the rank needs a reduction.
+    """
+    by_id = {requirement.id: requirement for requirement in plan.evidence_requirements}
+    for rank, role in rank_single_roles(plan):
+        requirement = by_id.get(role.requirement_id)
+        if not isinstance(requirement, DatasetRequirement):
+            continue
+        entity = next(entity for entity in requirement.entities if entity.role == role.role)
+        spec_id = requirement.source_spec_id
+        source = sources.get(spec_id) if spec_id is not None else None
+        reason = _role_expansion(entity, requirement, source)
+        if reason is not None:
+            return _invalid_plan(
+                f"{rank.id!r} ranks by axis {rank.axis!r} with no reduction over "
+                f"{requirement.id!r}, which reads one value per {rank.axis!r} only while "
+                f"{entity.name!r} is one party and no other axis is open, but {reason}; state "
+                "the reduction that collapses each entity's rows to one value"
+            )
+    return None
+
+
+def _role_expansion(
+    entity: Entity, requirement: DatasetRequirement, source: SelectedSource | None
+) -> str | None:
+    """Why `entity` of `requirement` holds several values on `source`, or `None` when it holds one."""
+    if source is None:
+        return "its pinned source cannot be read"
+    members = named_members(entity, source)
+    if len(members) != 1:
+        return f"the source binds {len(members)} parties to that name"
+    bound = {one.ref for one in source.entities if one.role == members[0].role}
+    if len(bound) != 1:
+        return f"the source binds {len(bound)} parties on its column"
+    covered = (
+        open_axes_for(requirement.across, source.open_entity_axes) if requirement.across else ()
+    )
+    if source.open_entity_axes is None or isinstance(covered, str):
+        return "the source's open axes cannot be matched to `across`"
+    if any(axis not in covered and axis.member_count != 1 for axis in source.open_entity_axes):
+        return "the source also leaves an axis open that `across` does not cover"
+    return None
 
 
 def _result_scope_unstated(plan: Plan) -> dict[str, object] | None:

@@ -158,7 +158,7 @@ columns as `rank_by`. A rank stating no `reduction` over a retrieval, read
 directly or through filters, whose source leaves open an axis the rank's input
 keeps no column of, holding several members or an uncounted number, is
 `rank_reduction_required`: each entity holds one row per member of that axis in
-each period, which `rank` refuses at run time without an `aggregation`. `sum_of`, `share_of`, `quotient_of` and `join` are two-sided
+each period, which `rank` refuses at run time without an `aggregation`. So is one over an input of several roles where a role other than the axis holds several parties on the source: only a role whose name binds one party alone (`RoleDimension.single`) leaves one row per ranked entity. `sum_of`, `share_of`, `quotient_of` and `join` are two-sided
 like a comparison, writing
 `{role_column: ref}` entity bindings the same way and, for `join`, every key
 explicitly: `join_keys` in the left frame's names and `right_keys` mapping each

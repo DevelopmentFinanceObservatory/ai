@@ -2404,19 +2404,37 @@ def test_a_series_of_every_place_needs_no_level(
 def test_a_rank_over_across_beside_a_named_entity_states_a_reduction(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
-    # "Top donors to Kenya": Kenya's recipient role and every donor are two
-    # role dimensions, so ranking donors collapses the recipient rows first.
-    dataset = requirement(
+    # "Top donors to Kenya and Uganda": the two recipients and every donor are
+    # two role dimensions, so ranking donors collapses the recipient rows first.
+    # Kenya alone leaves one row per donor in 2022, which needs none.
+    kenya = requirement(
         entities=[Entity(name="Kenya", role="recipient")],
         across=("donor",),
         period=Period(start=2022, end=2022),
     )
+    dataset = kenya.model_copy(
+        update={
+            "entities": (
+                Entity(name="Kenya", role="recipient"),
+                Entity(name="Uganda", role="recipient"),
+            )
+        }
+    )
+    africa = kenya.model_copy(
+        update={"entities": (Entity(name="Africa", role="recipient", members=True),)}
+    )
 
-    with pytest.raises(ValidationError, match="more than one role, which needs a reduction"):
-        _plan(
-            _population_decision(decision),
-            evidence_requirements=[dataset, _rank(dataset.id, axis="donor")],
-        )
+    for several in (dataset, africa):
+        with pytest.raises(ValidationError, match="more than one role, which needs a reduction"):
+            _plan(
+                _population_decision(decision),
+                evidence_requirements=[several, _rank(several.id, axis="donor")],
+            )
+    one = _plan(
+        _population_decision(decision),
+        evidence_requirements=[kenya, _rank(kenya.id, axis="donor")],
+    )
+    assert one.requirement("ranked").reduction is None
     with pytest.raises(ValidationError, match=r"roles are \['donor', 'recipient'\]"):
         _plan(
             _population_decision(decision),

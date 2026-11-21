@@ -6253,6 +6253,77 @@ def test_humanitarian_aid_by_dac_donor_ranks_only_with_a_reduction(
     assert _codes(result) == codes
 
 
+_IDA_RECORDING = (
+    Path(__file__).parents[4]
+    / "evals"
+    / "planner_entry"
+    / "recordings"
+    / "rank-top-ida-recipients-2022.json"
+)
+
+
+@pytest.mark.parametrize(
+    ("donor", "codes"),
+    [
+        pytest.param("International Development Association", [], id="ida-one-party"),
+        pytest.param(
+            "Development Assistance Committee",
+            [Code.RANK_REDUCTION_REQUIRED],
+            id="dac-read-as-its-members",
+        ),
+    ],
+)
+def test_a_rank_of_recipients_beside_one_named_donor_needs_no_reduction_only_for_one_party(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    donor: str,
+    codes: list[Code],
+) -> None:
+    # "The top ten recipients of IDA's disbursements in 2022" over `search`'s own
+    # block: IDA binds `origin` alone, so each recipient holds one row. The DAC
+    # block binds the group's 32 members there, so each recipient holds 32.
+    if donor.startswith("International"):
+        (search,) = json.loads(_IDA_RECORDING.read_text())["searches"]
+        block = search["envelope"]["parts"][0]["spec"]
+        year = 2022
+    else:
+        block = json.loads(_DAC_HUMANITARIAN_BLOCK.read_text())["spec"]
+        year = 2023
+    flows = source_from_spec_block(block)
+    aid = DatasetRequirement(
+        id="aid",
+        decision_ids=["measure"],
+        measure="gross disbursements",
+        entities=[Entity(name=donor, role="donor")],
+        across=("recipient",),
+        period=Period(start=year, end=year),
+        stat_vars=StatVarReading.SUM,
+    )
+    fields: dict[str, Any] = {
+        "id": "ranked",
+        "direction": RankDirection.HIGHEST_FIRST,
+        "among": RankAmong.POPULATION,
+        "axis": "recipient",
+        "limit": 10,
+    }
+    plan = _draft(
+        [decision(), _population_decision(decision)],
+        [aid, RankRequirement(decision_ids=["measure", "population"], input_id="aid", **fields)],
+    )
+
+    result = build(
+        plan,
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=flows.spec_id),
+            RankOperation(requirement_id="ranked", input="fetch", **fields),
+            terminal=["ranked"],
+        ),
+        discovered={"aid": flows},
+    )
+
+    assert _codes(result) == codes
+
+
 def test_a_whole_side_over_an_open_axis_beside_a_named_entity_is_refused(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:

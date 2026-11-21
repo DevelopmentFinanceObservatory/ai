@@ -45,7 +45,7 @@
             "response": {
               "outcome": "invalid_input",
               "code": "invalid_plan",
-              "message": "Invalid plan data: a first draft states the `answer_mode` it answers under"
+              "message": "A plan states at least one evidence requirement: what data the answer rests on, citing the decisions that fixed it. State the requirements this question needs, or name the ones a patch removes in `removed_evidence_requirements`."
             }
           }
         }
@@ -83,7 +83,7 @@
         {
           "outcome": "invalid_input",
           "code": "invalid_plan",
-          "message": "Invalid plan data: a first draft states the `answer_mode` it answers under"
+          "message": "A plan states at least one evidence requirement: what data the answer rests on, citing the decisions that fixed it. State the requirements this question needs, or name the ones a patch removes in `removed_evidence_requirements`."
         }
       ],
       [

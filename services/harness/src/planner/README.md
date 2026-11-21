@@ -86,6 +86,10 @@ A `Plan` states the question, its `answer_mode` (`series`, the default, or
 `computed`), every `Decision` the plan makes, the `EvidenceRequirement`s those
 decisions fix, and, once translated, the `Translation` and `Workflow` that
 carry them out (`planner.operations`, `planner.workflow`).
+`propose_plan` gives a first draft stating no `answer_mode` the one its
+requirements define (`planner.plan.answer_mode_of`): `series` where a dataset
+requirement nothing reads is the answer, and `computed` where every dataset
+requirement feeds a calculation.
 
 A `Decision` carries the alternatives considered, the choice, a one-line
 rationale, and whether the user or the planner settled it. Its `slot` names it,
@@ -344,6 +348,7 @@ The anchor a run reads is the newest year the plan states or a later one. Transl
 
 - A step that turns more than one year into one figure per entity, unless every ask its result answers is marked `(across years)`: `period_reduction_unstated`, from `planner.plan.unstated_period_reductions`. Such a step is an `AggregateRequirement` whose `group_by` leaves out `period`, an empty one included, or a `RankRequirement` with a `reduction` and `per_period` unset whose window keeps more than one year. An aggregate that keeps `period` in its `group_by`, a rank stating `per_period`, and a rank whose `window_start` and `window_end` state the same year reduce no years. Every answering result computed from the step, the step included, answers at least one ask, and each ask it answers carries the mark. The orchestrator sets the mark on an ask from the user's words, the plan holds the marked asks' numbers as `asks_across_years`, and the planner reads the mark beside the ask in its message.
 - A rank with no `reduction` whose window does not stay one year, with both ends fixed on it or both following the newest data at one offset: `invalid_plan`, from `planner.plan._rank_reduction_reason`.
+- A rank with no `reduction` over an input of several roles, unless every role but its axis names one entity, not as a set's members: `invalid_plan`, from the same function. Where each does, `propose_plan` reads the pinned source and refuses the rank `invalid_plan` when a name binds several parties, the source binds others beside it on that column, or the source leaves open an axis `across` does not cover (`submission.service._rank_roles_expand`). The compiler refuses the same rank `rank_reduction_required` when its source changes under it.
 - A first year that follows the newest data, in a filter, a rank window or a growth window, below a fixed last year, whichever step states either: a fixed `lte` or `eq` in the same filter, an earlier filter, or the other side of a two-sided verb. Each new year moves the first year toward that last year until no year is left. A rolling bound behind a later fixed first year passes it once the newest year has moved far enough, and is refused the same way: `rolling_years_run_out`, from `planner.shapes.years_run_out`.
 - A growth window year that newer data takes out of its input. A growth reads each entity's values in exactly its window's first and last years, so a window year that follows the newest data needs an input whose last year no fixed bound caps, and a fixed window year needs an input whose first year does not follow the newest data: `rolling_years_run_out`, from `planner.shapes.growth_endpoint_leaves`.
 - A growth window whose first or last year is one an `ne` removed, which leaves no entity both endpoints: `invalid_plan`, from `planner.shapes._rejects_growth_window`.

@@ -1214,24 +1214,32 @@ def test_an_entity_role_outside_the_party_words_is_refused_and_records_nothing(
     assert PLAN_STATE_KEY not in ctx.state
 
 
-def test_a_first_draft_without_an_answer_mode_is_refused_and_records_nothing(
-    decision: DecisionFactory, requirements: RequirementPair
+@pytest.mark.parametrize(
+    ("lone", "mode"),
+    [
+        pytest.param(False, AnswerMode.COMPUTED, id="computed"),
+        pytest.param(True, AnswerMode.SERIES, id="series"),
+    ],
+)
+def test_a_first_draft_stating_no_answer_mode_takes_the_one_its_requirements_define(
+    decision: DecisionFactory, requirements: RequirementPair, lone: bool, mode: AnswerMode
 ) -> None:
+    """A dataset nothing reads is the answer, a series; a calculation reading
+    every dataset gives a computed answer."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
 
-    refused = call_planner_tool(
+    result = call_planner_tool(
         tools["propose_plan"],
         question="q",
         decisions=drafts([decision()]),
-        evidence_requirements=list(requirements),
+        evidence_requirements=list(requirements[:1] if lone else requirements),
         tool_context=ctx,
     )
 
-    assert refused["code"] == ProblemCode.INVALID_PLAN.value
-    assert refused["outcome"] == Outcome.INVALID_INPUT.value
-    assert "answer_mode" in str(refused["message"])
-    assert PLAN_STATE_KEY not in ctx.state
+    assert result["outcome"] == Outcome.OK.value, result
+    recorded = load_plan(ctx.state)
+    assert recorded is not None and recorded.answer_mode is mode
 
 
 def test_propose_plan_counts_the_rounds_a_question_has_been_through(
