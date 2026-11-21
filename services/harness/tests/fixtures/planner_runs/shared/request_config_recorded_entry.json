@@ -1079,7 +1079,7 @@
                     "description": "Which role dimension of the input this rank keeps; required once the input carries more than one."
                   },
                   "reduction": {
-                    "description": "How to collapse an entity's rows to one value first. Required when the input carries more than one role, to collapse the other role's rows, and required when the window leaves an entity more than one row. A dataset requirement naming an entity on one side of a flow and stating `across` for the other carries both roles.",
+                    "description": "How to collapse an entity's rows to one value first. Required when a role other than the axis holds several parties, to collapse that role's rows, and when the window leaves an entity more than one row.",
                     "enum": [
                       "sum",
                       "mean",

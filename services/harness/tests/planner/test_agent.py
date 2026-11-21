@@ -16407,12 +16407,24 @@ def test_a_period_rolling_at_its_end_is_pinned_from_its_own_start_with_no_end_ye
 
 
 @pytest.mark.usefixtures("gdp_on_record")
+@pytest.mark.parametrize(
+    ("start", "rolling"),
+    [
+        pytest.param(2019, _ROLLS_AT_BOTH_ENDS, id="from-the-stated-start"),
+        pytest.param(
+            2010,
+            {"window_start": {"anchor": "latest", "offset": -14}, **_ROLLS_AT_ITS_END},
+            id="from-before-the-stated-start",
+        ),
+    ],
+)
 def test_a_period_rolling_from_its_start_is_pinned_from_the_first_year_the_dataset_holds(
-    requirement: Callable[..., DatasetRequirement],
+    requirement: Callable[..., DatasetRequirement], start: int, rolling: dict[str, Any]
 ) -> None:
     """ "The last five years": the newest year the data holds can sit behind the
     one the plan read, so the retrieval starts where the dataset does, 1960, and
-    not at the plan's 2019. The copy survives the state round trip."""
+    not at the plan's 2019. The copy survives the state round trip. A window
+    starting before 2019 reads years only the whole history holds."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     pin = _GDP_ALL["spec_id"]
@@ -16430,7 +16442,7 @@ def test_a_period_rolling_from_its_start_is_pinned_from_the_first_year_the_datas
         answer_mode=AnswerMode.COMPUTED,
         evidence_requirements=[
             dataset.model_dump(mode="json"),
-            _growth_as_written(dataset, start=2019, rolling=_ROLLS_AT_BOTH_ENDS),
+            _growth_as_written(dataset, start=start, rolling=rolling),
         ],
         tool_context=ctx,
     )
@@ -16839,14 +16851,50 @@ def test_only_a_reader_rolling_from_its_start_retrieves_every_year_the_dataset_h
     assert stored_plan(ctx.state[PLAN_STATE_KEY], state_key=PLAN_STATE_KEY) == plan
 
 
-def test_a_rank_proposed_without_among_records_the_population_its_axis_admits() -> None:
+_GROWTH_SINCE_2010 = GrowthRequirement(
+    id="growth",
+    decision_ids=["by_donor"],
+    input_id="aid",
+    window_start=2010,
+    window_end=2024,
+    rolling=RollingWindow(
+        window_start=RelativePeriod(offset=-14), window_end=RelativePeriod(offset=0)
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "requirements",
+    [
+        pytest.param([_aid_to_kenya(), _top_donor(among=None)], id="the-newest-year"),
+        pytest.param(
+            [
+                _aid_to_kenya(),
+                _GROWTH_SINCE_2010,
+                _top_donor(
+                    "growth",
+                    among=None,
+                    window_start=None,
+                    window_end=None,
+                    rolling=None,
+                ),
+            ],
+            id="growth-from-before-the-stated-start",
+        ),
+    ],
+)
+def test_a_rank_proposed_without_among_records_the_population_its_axis_admits(
+    requirements: list[EvidenceRequirement],
+) -> None:
     """No filter narrows the donors, so the rank is over every donor, and the
-    decision fixing `among` reads that value off it."""
+    decision fixing `among` reads that value off it. A growth rolling from
+    before the dataset's stated 2015 reads years only its whole history holds,
+    which the rank's input is built with."""
     ctx = _FakeToolContext()
 
     result = _propose_split(
         ctx,
-        [_aid_to_kenya(), _top_donor(among=None)],
+        requirements,
         asks=_SERIES_AND_TOP[1:],
         answered=[AskAnswer(ask=0, outputs=("top",))],
     )

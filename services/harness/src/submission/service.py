@@ -565,8 +565,15 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     except ValueError as exc:
         return _invalid_data(exc, proposer)
     # A rank stating no `among` takes the one its input admits, before any
-    # decision reads its value off it.
-    evidence_requirements = ranks_among_settled(evidence_requirements, graph=written)
+    # decision reads its value off it, each whole-history read from its first
+    # year on record as the plan will read it.
+    evidence_requirements = ranks_among_settled(
+        evidence_requirements,
+        graph=written,
+        first_years=_first_years_on_record(
+            written, shown=on_record, read=full_histories(view.state)
+        ),
+    )
     written = _requirements_after(previous, evidence_requirements, removed_evidence_requirements)
     # The refusals that hold whatever the requirements pin come before the
     # Search reads alignment asks for, so a plan they refuse costs none, and

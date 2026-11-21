@@ -47,6 +47,7 @@ import re
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, MutableMapping, Sequence
 from contextvars import ContextVar
+from dataclasses import replace
 from datetime import datetime
 from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args, overload
 
@@ -1445,11 +1446,9 @@ class RankRequirement(TaggedModel):
     reduction: Reduction | None = Field(
         default=None,
         description=(
-            "How to collapse an entity's rows to one value first. Required when the input "
-            "carries more than one role, to collapse the other role's rows, and required "
-            "when the window leaves an entity more than one row. A dataset requirement "
-            "naming an entity on one side of a flow and stating `across` for the other "
-            "carries both roles."
+            "How to collapse an entity's rows to one value first. Required when a role "
+            "other than the axis holds several parties, to collapse that role's rows, and "
+            "when the window leaves an entity more than one row."
         ),
     )
     window_start: Year | None = Field(
@@ -3650,22 +3649,28 @@ def _admitted_among(axis_role: RoleDimension) -> RankAmong:
 
 
 def ranks_among_settled(
-    requirements: Sequence[EvidenceRequirement], *, graph: Sequence[EvidenceRequirement]
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    graph: Sequence[EvidenceRequirement],
+    first_years: Sequence[FirstYear] = (),
 ) -> list[EvidenceRequirement]:
     """`requirements`, each rank stating no `among` given the one its input admits.
 
     `graph` is every requirement the plan will state, which a rank's input
     chain is read from. The input's shape is built from the requirements
-    that chain reads alone (`_build_shapes`) and gives `_admitted_among` the
+    that chain reads alone (`_build_shapes`), each dataset requirement
+    `first_years` names starting at its first year on record, as the split
+    can read it (`whole_history_split`), and gives `_admitted_among` the
     axis the rank keeps. A rank whose input shape cannot be built, or whose
     axis names no role of it, keeps `among` unset, and `Plan` validation
     refuses the fault that stops it.
     """
     by_id = {requirement.id: requirement for requirement in graph}
+    whole_history = {first.requirement_id: first.year for first in first_years}
     settled: list[EvidenceRequirement] = []
     for requirement in requirements:
         among = (
-            _among_of_input(requirement, by_id)
+            _among_of_input(requirement, by_id, whole_history)
             if isinstance(requirement, RankRequirement) and requirement.among is None
             else None
         )
@@ -3676,7 +3681,9 @@ def ranks_among_settled(
 
 
 def _among_of_input(
-    rank: RankRequirement, by_id: Mapping[str, EvidenceRequirement]
+    rank: RankRequirement,
+    by_id: Mapping[str, EvidenceRequirement],
+    whole_history: Mapping[str, int],
 ) -> RankAmong | None:
     """The `among` `rank`'s input admits, or `None` when its shape or axis cannot be read."""
     chain: dict[str, EvidenceRequirement] = {}
@@ -3688,7 +3695,11 @@ def _among_of_input(
         chain[requirement_id] = by_id[requirement_id]
         pending.extend(inputs_of(by_id[requirement_id]))
     try:
-        shapes = _build_shapes(chain, whole_history={}, origins={})
+        shapes = _build_shapes(
+            chain,
+            whole_history={key: year for key, year in whole_history.items() if key in chain},
+            origins={},
+        )
     except ValueError:
         return None
     shape = shapes.get(rank.input_id)
@@ -3716,25 +3727,29 @@ def rank_single_roles(plan: Plan) -> list[tuple[RankRequirement, RoleDimension]]
 
     Plan validation admits such a rank only where every other role is
     `single` (`_rank_reduction_reason`); whether each name binds one party
-    is a fact of the source (`submission.service._rank_roles_expand`).
+    is a fact of the source (`submission.service._rank_roles_expand`). The
+    shapes are those of the plan as it runs (`split_of`), which validation
+    built, and each rank and role is named by the model's requirement
+    (`origin_of`), once.
     """
-    shapes = _build_shapes(
-        {requirement.id: requirement for requirement in plan.evidence_requirements},
-        whole_history={},
-        origins={},
-    )
-    found: list[tuple[RankRequirement, RoleDimension]] = []
-    for requirement in plan.evidence_requirements:
+    split = split_of(plan)
+    shapes = _split_shapes(split)
+    found: dict[tuple[str, str | None, str], tuple[RankRequirement, RoleDimension]] = {}
+    for requirement in split.requirements:
         if not isinstance(requirement, RankRequirement) or requirement.reduction is not None:
             continue
         shape = shapes.get(requirement.input_id)
         if shape is None or len(shape.roles) < 2 or requirement.axis is None:
             continue
+        rank = plan.requirement(origin_of(split, requirement.id))
+        assert isinstance(rank, RankRequirement)
         axis_role = role_named(shape.roles, requirement.axis)
-        found.extend(
-            (requirement, role) for role in shape.roles if role is not axis_role and role.single
-        )
-    return found
+        for role in shape.roles:
+            if role is axis_role or not role.single:
+                continue
+            origin = replace(role, requirement_id=origin_of(split, role.requirement_id))
+            found.setdefault((rank.id, origin.role, origin.requirement_id), (rank, origin))
+    return list(found.values())
 
 
 def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape) -> str | None:
