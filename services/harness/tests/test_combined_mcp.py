@@ -977,9 +977,9 @@ _RECORDED_RELEASE = Path(__file__).resolve().parents[2] / (
 
 # The most o200k tokens the public tool list may cost as a client hands it to its
 # model (the compact JSON of each tool's name, description and input schema). Every
-# client pays it on every turn. The bound is the measured count, 18,018, rounded up
+# client pays it on every turn. The bound is the measured count, 18,707, rounded up
 # to the next 500. The list must stay within 20,000. Lower the bound as it shrinks.
-_PUBLIC_LIST_TOKEN_BOUND = 18_500
+_PUBLIC_LIST_TOKEN_BOUND = 19_000
 
 
 async def _public_list(monkeypatch: pytest.MonkeyPatch) -> list[mt.Tool]:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from analysis_mcp.rolling_tool import coordinate_text
+from analysis_mcp.coordinates import coordinate_text
 from analysis_mcp.units import converted_unit_label, unit_name
 from dfo_frame_grammar.grammar import ComposedUnit, DeflationBasis, StatVarPart, UnitRequest
 

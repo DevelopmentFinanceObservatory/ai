@@ -16,11 +16,8 @@ class Settings(FrameServiceSettings):
     local development or an eval run against a live analysis-mcp instance.
 
     `max_frame_rows` (`common.FrameServiceSettings`, shared with data-mcp and
-    presentation-mcp) is the row-count ceiling every verb checks on each input
-    before it decodes it, not just `aggregate`. The store's row/column/size ceilings
-    (`common.materialisation.GcsMaterialisationStore`) are fixed,
-    store-side constants a caller cannot configure, since more than one
-    service can build a store over the same bucket.
+    presentation-mcp) is unused in analysis-mcp, since dfo-apis' analysis runner
+    computes every verb.
 
     `frame_store_bucket` names the GCS bucket the materialisation store
     persists to; `None` (the default) keeps the in-process, restart-losing

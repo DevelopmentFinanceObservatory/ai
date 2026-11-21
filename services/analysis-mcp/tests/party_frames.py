@@ -31,6 +31,15 @@ def provider_frame(
 ) -> Frame:
     """ODA to Ethiopia from `donors`, each a `(cells, value)` pair, in every year of `years`.
     `classes=False` leaves out the class column, as a frame minted before it."""
+    return provider_frame_by_year(dict.fromkeys(years, donors), classes=classes)
+
+
+def provider_frame_by_year(
+    donors: Mapping[str, Mapping[str, tuple[tuple[str, str, str], float]]],
+    *,
+    classes: bool = True,
+) -> Frame:
+    """ODA to Ethiopia from each year's `donors`, each a `(cells, value)` pair."""
     enrichment = [PROVIDER_KINDS, *([PROVIDER_CLASSES] if classes else []), PROVIDER_WHOLE]
     return Frame.build(
         role_keys=[PROVIDER, "financingRecipient", *enrichment],
@@ -46,7 +55,7 @@ def provider_frame(
                 "value": value,
                 "unit": "USD",
             }
-            for year in years
-            for donor, ((kind, party_class, whole), value) in donors.items()
+            for year, held in donors.items()
+            for donor, ((kind, party_class, whole), value) in held.items()
         ],
     )

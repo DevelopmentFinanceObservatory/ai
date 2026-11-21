@@ -11,17 +11,14 @@ its real tools over a scripted Gemini client, on Postgres
 
 from __future__ import annotations
 
-import dataclasses
 import json
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from analysis_mcp.digest import render_rank_digest
-from analysis_mcp.engine.rank import run_rank
-from analysis_mcp.execution_identity import current_execution_identity
+from analysis_mcp.summary import EntityRank, RankFacts
 from compiler.surface import ToolCallResult
-from dfo_frame_grammar import Frame
 from executor.ledger import (
     Attempt,
     InMemoryRunLedger,
@@ -62,6 +59,7 @@ from .graph_turns import agent_read, opening_graph, visited
 from .plan_turns import approve_answer, approve_turn, plan_nodes
 from .scripted_genai import reply, text_part
 from .scripted_tools import plan_call, scripted_orchestrator
+from .stored_verbs import EXECUTION_IDENTITY
 from .turn_driver import CONVERSATION, PRINCIPAL, ScriptedModels, TurnDriver, scripted_models
 
 # The spec_id `harness.scripted_plan.scripted_plan` retrieves when no search pinned one.
@@ -568,39 +566,37 @@ def _ranking(
     their number, as `analysis_mcp` renders its digest, with the row count of
     the frame it keeps and, under a `limit`, the entries it ranked. Several
     `years` rank each year on its own. `warnings` are the run's."""
-    frame = Frame.build(
-        role_keys=["observationAbout"],
-        rows=[
-            {
-                "stat_var": "dcid:LifeExpectancy",
-                "observationAbout": f"country/C{number:02d}{label}",
-                "time_period": year,
-                "value": 80.0 - number,
-                "unit": "dcid:Years",
-            }
-            for number in range(entities)
-            for year in years
-        ],
+    per_period = len(years) > 1
+    ranks = tuple(
+        EntityRank(
+            entity_key=(("observationAbout", f"country/C{number:02d}{label}"),),
+            value=80.0 - number,
+            rank=number + 1,
+            row_count=1,
+            coverage_fraction=1.0,
+            time_period=year,
+        )
+        for year in years
+        for number in range(entities)
     )
-    result = run_rank(
-        frame,
-        rank_by=("observationAbout",),
-        aggregation=None,
-        window_start=None,
-        window_end=None,
-        ascending=False,
-        per_period=len(years) > 1,
+    result = RankFacts(
+        resolved_unit="dcid:Years",
+        warnings=warnings,
+        periods_in_window=years,
+        overall_coverage_fraction=1.0,
+        entity_ranks=ranks,
+        per_period=per_period,
         limit=limit,
     )
     digest = render_rank_digest(
         rank_by=("observationAbout",),
-        result=dataclasses.replace(result, warnings=warnings),
+        result=result,
         op_spec_hash="ops_" + "1" * 32,
         content_version="ocv_" + "1" * 32,
-        execution_identity=current_execution_identity(),
+        execution_identity=EXECUTION_IDENTITY,
     )
-    ranked = len(result.entity_ranks) if limit is not None else None
-    return StepSummary(digest, "rank", result.frame.num_rows, ranked)
+    ranked = len(ranks) if limit is not None else None
+    return StepSummary(digest, "rank", len(result.kept_ranks), ranked)
 
 
 def _handed_back(

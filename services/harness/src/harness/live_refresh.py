@@ -804,17 +804,16 @@ def build_live_refresh(*, settings: Settings) -> LiveRefresh:
     refresh's own over the loopback mounts.
 
     Raises:
-        ValueError: `live_refresh_rows_in_flight_max` is below twice
-            `max_frame_rows`, so a two-input verb on two full frames could never
-            be replayed.
+        ValueError: `live_refresh_rows_in_flight_max` is below
+            `max_frame_rows`, so a replay publishing a full frame, the one claim
+            a replay makes, could never run.
     """
     presentation = PresentationSettings()
-    if settings.live_refresh_rows_in_flight_max < 2 * presentation.max_frame_rows:
+    if settings.live_refresh_rows_in_flight_max < presentation.max_frame_rows:
         raise ValueError(
             f"live_refresh_rows_in_flight_max ({settings.live_refresh_rows_in_flight_max}) is "
-            f"below twice max_frame_rows ({presentation.max_frame_rows}), so a two-input verb "
-            "on two max_frame_rows inputs could never be replayed; raise "
-            "LIVE_REFRESH_ROWS_IN_FLIGHT_MAX"
+            f"below max_frame_rows ({presentation.max_frame_rows}), so a replay publishing a "
+            "max_frame_rows frame could never run; raise LIVE_REFRESH_ROWS_IN_FLIGHT_MAX"
         )
     auth = apis_auth_provider(base_url=presentation.dfo_apis_url)
     apis = LiveApisClient(

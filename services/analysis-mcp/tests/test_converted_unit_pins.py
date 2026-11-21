@@ -13,7 +13,6 @@ from typing import Any
 
 import pytest
 from analysis_mcp import server as server_module
-from analysis_mcp.execution_identity import current_execution_identity
 from analysis_mcp.identity import op_spec_hash_for
 from analysis_mcp.op_spec import AggregateOpSpec
 from analysis_mcp.runner_client import ANALYSIS_PATH
@@ -23,6 +22,7 @@ from analysis_mcp.units import unit_name
 from common.materialisation import FrameRef, InMemoryMaterialisationStore
 from dfo_frame_grammar import Frame
 from dfo_frame_grammar.grammar import unit_cell_from_json
+from engine_identity import EXECUTION_IDENTITY
 from fastmcp import Client
 from runner_replay import ReplayedRunner, frame_digest, request_key
 
@@ -52,7 +52,7 @@ def _minimal_trace() -> Trace:
         applied_policy=AppliedPolicy(),
         content_version="ocv_" + "c" * 32,
         input_content_versions=["cv_" + "b" * 32],
-        execution_identity=current_execution_identity(),
+        execution_identity=EXECUTION_IDENTITY,
     )
 
 

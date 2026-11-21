@@ -176,7 +176,7 @@ def _register(fn: Callable[..., Awaitable[ToolResult]], wire_name: str) -> None:
     """Register one verb under its wire name, behind the internal-error
     backstop, declaring its `_TITLES` and `IMPLEMENTATION_VERSIONS` entries and
     `VERB_OUTPUT_SCHEMA` -- the schema `result.VerbResult` derives and
-    `tool_pipeline.store_result_and_render` builds every successful payload
+    `tool_pipeline.run_on_runner` builds every successful payload
     from. `-> ToolResult` on the wrapped function suppresses fastmcp's own
     schema derivation, so `output_schema` is passed explicitly here rather
     than left to be derived. The input schema is `common.declaration`'s.
